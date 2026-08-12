@@ -29,11 +29,16 @@ from loom.pipeline.control_bindings import (
 )
 from loom.pipeline.keys import canonical_digest
 from loom.pipeline.public_api import (
+    PipelineExecutionAttemptListV1,
     PipelineRunCancelRequestV1,
+    PipelineRunDetailV1,
     PipelineRunEventsQueryV1,
+    PipelineRunEventsResponseV1,
     PipelineRunListQueryV1,
+    PipelineRunListResponseV1,
     PipelineRunRetryRequestV1,
     PipelineRunSubmitRequestV1,
+    PipelineStageRunDetailV1,
     validate_idempotency_key,
 )
 from loom.pipeline.recipes import OfficialRecipeRegistry
@@ -311,7 +316,7 @@ async def submit_pipeline_run(
     return body
 
 
-@router.get("/pipeline-runs")
+@router.get("/pipeline-runs", response_model=PipelineRunListResponseV1)
 async def list_pipeline_runs(
     request: Request,
     sc: SessionAndCtx,
@@ -386,10 +391,44 @@ async def list_pipeline_runs(
             filter_digest=filter_digest,
             signing_key=_cursor_key(request),
         )
-    return {"items": [run_projection(item) for item in rows], "next_cursor": next_cursor}
+    stages_by_run: dict[UUID, list[PipelineStageRun]] = {item.id: [] for item in rows}
+    ledgers_by_run: dict[UUID, PipelineBudgetLedger] = {}
+    if rows:
+        stage_rows = list(
+            (
+                await sc[0].execute(
+                    select(PipelineStageRun).where(
+                        PipelineStageRun.pipeline_run_id.in_([item.id for item in rows])
+                    )
+                )
+            ).scalars()
+        )
+        for stage in stage_rows:
+            stages_by_run.setdefault(stage.pipeline_run_id, []).append(stage)
+        ledger_rows = list(
+            (
+                await sc[0].execute(
+                    select(PipelineBudgetLedger).where(
+                        PipelineBudgetLedger.pipeline_run_id.in_([item.id for item in rows])
+                    )
+                )
+            ).scalars()
+        )
+        ledgers_by_run = {item.pipeline_run_id: item for item in ledger_rows}
+    return {
+        "items": [
+            _run_list_projection(
+                item,
+                stages_by_run.get(item.id, []),
+                ledgers_by_run.get(item.id),
+            )
+            for item in rows
+        ],
+        "next_cursor": next_cursor,
+    }
 
 
-@router.get("/pipeline-runs/{run_id}")
+@router.get("/pipeline-runs/{run_id}", response_model=PipelineRunDetailV1)
 async def get_pipeline_run(sc: SessionAndCtx, run_id: UUID) -> dict[str, Any]:
     run = await _run_for_team(sc, run_id)
     stages = list(
@@ -412,9 +451,20 @@ async def get_pipeline_run(sc: SessionAndCtx, run_id: UUID) -> dict[str, Any]:
     )
     ledger = await sc[0].get(PipelineBudgetLedger, run.id)
     body = run_projection(run)
-    body["stages"] = [_stage_projection(item) for item in stages]
+    topology = _graph_topology(run.graph_spec_json)
+    stage_projections = [
+        _stage_summary_projection(item, topology=topology, run_state=run.state) for item in stages
+    ]
+    body["stages"] = sorted(
+        stage_projections,
+        key=lambda item: (
+            item["topological_level"],
+            item["node_key"].encode("utf-8"),
+            item["shard_key"].encode("utf-8"),
+        ),
+    )
     body["artifacts"] = [_artifact_projection(item) for item in artifacts]
-    body["budget"] = _budget_projection(ledger)
+    body["budget"] = _budget_projection(ledger, run)
     return body
 
 
@@ -436,7 +486,7 @@ async def cancel_pipeline_run(
     return JSONResponse(status_code=200 if replay else 202, content=body)
 
 
-@router.get("/pipeline-runs/{run_id}/events")
+@router.get("/pipeline-runs/{run_id}/events", response_model=PipelineRunEventsResponseV1)
 async def pipeline_run_events(
     sc: SessionAndCtx,
     run_id: UUID,
@@ -492,12 +542,35 @@ async def _stage_for_team(sc: SessionAndCtx, stage_run_id: UUID) -> PipelineStag
     return stage
 
 
-@router.get("/pipeline-stage-runs/{stage_run_id}")
+@router.get("/pipeline-stage-runs/{stage_run_id}", response_model=PipelineStageRunDetailV1)
 async def get_pipeline_stage_run(sc: SessionAndCtx, stage_run_id: UUID) -> dict[str, Any]:
-    return _stage_projection(await _stage_for_team(sc, stage_run_id))
+    stage = await _stage_for_team(sc, stage_run_id)
+    run = (
+        await sc[0].execute(select(PipelineRun).where(PipelineRun.id == stage.pipeline_run_id))
+    ).scalar_one_or_none()
+    if run is None:
+        raise HTTPException(status_code=404, detail={"reason_code": "not_found"})
+    artifacts = list(
+        (
+            await sc[0].execute(
+                select(Artifact)
+                .where(Artifact.pipeline_stage_run_id == stage.id)
+                .order_by(Artifact.created_at, Artifact.id)
+            )
+        ).scalars()
+    )
+    return _stage_detail_projection(
+        stage,
+        topology=_graph_topology(run.graph_spec_json),
+        run_state=run.state,
+        artifacts=artifacts,
+    )
 
 
-@router.get("/pipeline-stage-runs/{stage_run_id}/attempts")
+@router.get(
+    "/pipeline-stage-runs/{stage_run_id}/attempts",
+    response_model=PipelineExecutionAttemptListV1,
+)
 async def list_pipeline_stage_attempts(sc: SessionAndCtx, stage_run_id: UUID) -> dict[str, Any]:
     stage = await _stage_for_team(sc, stage_run_id)
     rows = list(
@@ -895,50 +968,141 @@ def _recipe_projection(item: Any) -> dict[str, Any]:
     }
 
 
-def _stage_projection(item: PipelineStageRun) -> dict[str, Any]:
+def _graph_topology(graph: dict[str, Any]) -> dict[str, tuple[int, list[str]]]:
+    """Compute the UI-safe immutable node topology without returning raw graph JSON."""
+
+    raw_nodes = graph.get("nodes") if isinstance(graph, dict) else None
+    if not isinstance(raw_nodes, list):
+        return {}
+    needs_by_key: dict[str, list[str]] = {}
+    for raw in raw_nodes:
+        if not isinstance(raw, dict) or not isinstance(raw.get("node_key"), str):
+            continue
+        raw_needs = raw.get("needs", [])
+        if not isinstance(raw_needs, list) or not all(
+            isinstance(value, str) for value in raw_needs
+        ):
+            continue
+        needs_by_key[raw["node_key"]] = sorted(set(raw_needs), key=lambda value: value.encode())
+
+    levels: dict[str, int] = {}
+
+    def resolve(key: str, active: frozenset[str] = frozenset()) -> int:
+        if key in levels:
+            return levels[key]
+        if key in active:
+            return 0
+        upstream = needs_by_key.get(key, [])
+        level = 0 if not upstream else 1 + max(resolve(value, active | {key}) for value in upstream)
+        levels[key] = level
+        return level
+
+    return {key: (resolve(key), needs) for key, needs in needs_by_key.items()}
+
+
+def _resource_projection(item: PipelineStageRun) -> tuple[str | None, str]:
+    if item.node_kind == "gate":
+        return None, "controller"
+    raw_profile = getattr(item, "resource_profile_json", None)
+    profile = raw_profile if isinstance(raw_profile, dict) else {}
+    if isinstance(profile.get("name"), str) and isinstance(profile.get("version"), int):
+        name = f"{profile['name']}@{profile['version']}"
+    elif isinstance(profile.get("resource_profile"), str):
+        name = cast(str, profile["resource_profile"])
+    else:
+        name = None
+    variants = profile.get("execution_variants")
+    has_gpu = bool(
+        isinstance(variants, list)
+        and any(
+            isinstance(variant, dict)
+            and isinstance(variant.get("gpu_count_exact"), int)
+            and variant["gpu_count_exact"] > 0
+            for variant in variants
+        )
+    )
+    if not has_gpu and name is not None and "gpu" in name:
+        has_gpu = True
+    return name, "gpu" if has_gpu else "cpu"
+
+
+def _stage_summary_projection(
+    item: PipelineStageRun,
+    *,
+    topology: dict[str, tuple[int, list[str]]],
+    run_state: str,
+) -> dict[str, Any]:
+    level, upstream = topology.get(item.node_key, (0, []))
+    resource_name, resource_class = _resource_projection(item)
+    retry_allowed = item.state == "failed" and run_state == "finished"
+    ineligible = None
+    if not retry_allowed:
+        ineligible = "run_not_retryable" if item.state == "failed" else "stage_not_failed"
     return {
         "id": str(item.id),
-        "pipeline_run_id": str(item.pipeline_run_id),
         "node_key": item.node_key,
         "shard_key": item.shard_key,
         "node_kind": item.node_kind,
+        "topological_level": level,
+        "upstream_node_keys": upstream,
         "state": item.state,
         "domain_outcome": item.domain_outcome,
-        "reason": item.reason_code,
+        "reason_code": item.reason_code,
+        "attempt_count": item.attempt_count,
+        "resource_profile_name": resource_name,
+        "resource_class": resource_class,
+        "retry_allowed": retry_allowed,
+        "retry_ineligible_reason": ineligible,
+    }
+
+
+def _stage_detail_projection(
+    item: PipelineStageRun,
+    *,
+    topology: dict[str, tuple[int, list[str]]],
+    run_state: str,
+    artifacts: list[Artifact],
+) -> dict[str, Any]:
+    return {
+        **_stage_summary_projection(item, topology=topology, run_state=run_state),
+        "pipeline_run_id": str(item.pipeline_run_id),
         "execution_spec_digest": item.execution_spec_digest,
         "input_bindings_digest": item.resolved_input_bindings_digest,
         "resource_profile_digest": item.resource_profile_digest,
         "request_renderer_digest": item.request_renderer_digest,
-        "attempt_count": item.attempt_count,
         "latest_checkpoint_artifact_id": str(item.latest_checkpoint_artifact_id)
         if item.latest_checkpoint_artifact_id
         else None,
-        "retry_eligible": item.state == "failed",
-        "retry_ineligibility_reason": None if item.state == "failed" else "stage_not_failed",
+        "artifacts": [_artifact_projection(artifact) for artifact in artifacts],
     }
 
 
 def _attempt_projection(item: ExecutionAttempt) -> dict[str, Any]:
+    def iso(value: datetime | None) -> str | None:
+        return value.isoformat() if value is not None else None
+
     return {
         "id": str(item.id),
         "attempt_number": item.attempt_number,
         "state": item.state,
-        "worker_id": str(item.worker_id) if item.worker_id else None,
-        "started_at": item.started_at.isoformat() if item.started_at else None,
-        "finished_at": item.finished_at.isoformat() if item.finished_at else None,
-        "exit_code": item.exit_code,
-        "retry_class": item.retry_class,
-        "reason": item.reason_code,
+        "worker_id": str(item.worker_id) if getattr(item, "worker_id", None) else None,
+        "worker_pool_class": None,
+        "queued_at": iso(getattr(item, "queued_at", None)),
+        "claimed_at": iso(getattr(item, "claimed_at", None)),
+        "started_at": iso(getattr(item, "started_at", None)),
+        "finished_at": iso(getattr(item, "finished_at", None)),
+        "exit_code": getattr(item, "exit_code", None),
+        "retry_class": getattr(item, "retry_class", None),
+        "reason_code": getattr(item, "reason_code", None),
         "stage_request_digest": item.stage_request_digest,
         "result_manifest_digest": item.result_manifest_digest,
         "resumed_checkpoint_artifact_id": str(item.resumed_checkpoint_artifact_id)
-        if item.resumed_checkpoint_artifact_id
+        if getattr(item, "resumed_checkpoint_artifact_id", None)
         else None,
-        "cancellation_observed_at": item.cancellation_observed_at.isoformat()
-        if item.cancellation_observed_at
-        else None,
-        "cancellation_outcome": item.cancellation_outcome,
-        "cleanup_proof_digest": item.cleanup_proof_digest,
+        "cancellation_observed_at": iso(getattr(item, "cancellation_observed_at", None)),
+        "cancellation_outcome": getattr(item, "cancellation_outcome", None),
+        "cleanup_acknowledged_at": iso(getattr(item, "cleanup_acknowledged_at", None)),
+        "cleanup_proof_digest": getattr(item, "cleanup_proof_digest", None),
     }
 
 
@@ -952,30 +1116,97 @@ def _artifact_projection(item: Artifact) -> dict[str, Any]:
         "stored_size_bytes": item.stored_size_bytes,
         "file_count": item.file_count,
         "safety_state": item.safety_state,
+        "visibility": getattr(item, "visibility", "team"),
+        "share_status": getattr(item, "share_status", "pending_scan"),
         "download_path": f"/api/v1/pipeline-artifacts/{item.id}/download",
+        "pipeline_run_id": str(item.pipeline_run_id)
+        if getattr(item, "pipeline_run_id", None)
+        else None,
+        "pipeline_stage_run_id": str(item.pipeline_stage_run_id)
+        if getattr(item, "pipeline_stage_run_id", None)
+        else None,
+        "execution_attempt_id": str(item.execution_attempt_id)
+        if getattr(item, "execution_attempt_id", None)
+        else None,
+        "producer_kind": getattr(item, "producer_kind", None),
     }
 
 
-def _budget_projection(item: PipelineBudgetLedger | None) -> dict[str, Any] | None:
+def _counter(limit: int, reserved: int, settled: int) -> dict[str, int]:
+    return {
+        "limit": limit,
+        "reserved": reserved,
+        "settled": settled,
+        "remaining": limit - reserved - settled,
+    }
+
+
+def _budget_projection(
+    item: PipelineBudgetLedger | None, run: PipelineRun
+) -> dict[str, Any] | None:
     if item is None:
         return None
+    source = getattr(run, "budget_json", {})
+    wall_limit = int(source.get("max_wall_seconds", 1))
+    wall_settled = 0
+    if run.started_at is not None:
+        end = run.finished_at or datetime.now(run.started_at.tzinfo)
+        wall_settled = max(0, int((end - run.started_at).total_seconds()))
+    wall_deadline_at = getattr(item, "wall_deadline_at", None)
     return {
-        "provider": {
-            "limit_microusd": item.provider_limit_microusd,
-            "reserved_microusd": item.provider_reserved_microusd,
-            "settled_microusd": item.provider_settled_microusd,
-        },
-        "gpu": {
-            "limit_seconds": item.gpu_limit_seconds,
-            "reserved_seconds": item.gpu_reserved_seconds,
-            "settled_seconds": item.gpu_settled_seconds,
-        },
-        "artifact": {
-            "limit_bytes": item.artifact_limit_bytes,
-            "reserved_bytes": item.artifact_reserved_bytes,
-            "settled_bytes": item.artifact_settled_bytes,
-        },
-        "stage_runs_created": item.stage_runs_created,
-        "attempts_created": item.attempts_created,
+        "max_wall_seconds": _counter(wall_limit, 0, wall_settled),
+        "max_gpu_seconds": _counter(
+            item.gpu_limit_seconds, item.gpu_reserved_seconds, item.gpu_settled_seconds
+        ),
+        "max_provider_cost_usd": _counter(
+            item.provider_limit_microusd,
+            item.provider_reserved_microusd,
+            item.provider_settled_microusd,
+        ),
+        "max_artifact_bytes": _counter(
+            item.artifact_limit_bytes,
+            item.artifact_reserved_bytes,
+            item.artifact_settled_bytes,
+        ),
+        "max_stage_runs": _counter(
+            getattr(item, "stage_run_limit", max(1, item.stage_runs_created)),
+            0,
+            item.stage_runs_created,
+        ),
+        "max_attempts_total": _counter(
+            getattr(item, "attempt_limit", max(1, item.attempts_created)),
+            0,
+            item.attempts_created,
+        ),
+        "wall_deadline_at": wall_deadline_at.isoformat() if wall_deadline_at else None,
         "terminal_cause": item.terminal_cause,
+    }
+
+
+def _run_list_projection(
+    run: PipelineRun,
+    stages: list[PipelineStageRun],
+    ledger: PipelineBudgetLedger | None,
+) -> dict[str, Any]:
+    terminal = {"succeeded", "failed", "cancelled", "skipped"}
+    outcomes: dict[str, int] = {}
+    for stage in stages:
+        if stage.state == "succeeded" and stage.domain_outcome is not None:
+            outcomes[stage.domain_outcome] = outcomes.get(stage.domain_outcome, 0) + 1
+    return {
+        "id": str(run.id),
+        "display_name": run.display_name,
+        "recipe": {
+            "name": run.recipe_name,
+            "version": run.recipe_version,
+            "digest": run.recipe_digest,
+        },
+        "state": run.state,
+        "result": run.result,
+        "completed_stage_runs": sum(stage.state in terminal for stage in stages),
+        "total_stage_runs": len(stages),
+        "domain_outcomes": dict(sorted(outcomes.items(), key=lambda pair: pair[0].encode())),
+        "budget": _budget_projection(ledger, run) if ledger else None,
+        "created_at": run.created_at.isoformat(),
+        "finished_at": run.finished_at.isoformat() if run.finished_at else None,
     }

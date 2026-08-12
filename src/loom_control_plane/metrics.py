@@ -120,6 +120,85 @@ RETRY_EXHAUSTED_TOTAL = Counter(
     "Trials transitioned to failed because attempt_count >= max_attempts",
 )
 
+PIPELINE_RUNS = Gauge(
+    "loom_pipeline_runs",
+    "Current PipelineRuns by closed lifecycle state/result",
+    labelnames=("state", "result_status"),
+)
+PIPELINE_STAGE_RUNS = Gauge(
+    "loom_pipeline_stage_runs", "Current Pipeline StageRuns", labelnames=("state", "resource_class")
+)
+PIPELINE_STAGE_DURATION_SECONDS = Histogram(
+    "loom_pipeline_stage_duration_seconds",
+    "Committed Pipeline StageRun duration",
+    labelnames=("resource_class", "result"),
+    buckets=(
+        1,
+        5,
+        15,
+        30,
+        60,
+        120,
+        300,
+        600,
+        1800,
+        3600,
+        7200,
+        14400,
+        28800,
+        86400,
+        172800,
+        345600,
+        864000,
+    ),
+)
+EXECUTION_ATTEMPTS = Gauge(
+    "loom_execution_attempts",
+    "Current Pipeline execution Attempts",
+    labelnames=("state", "resource_class"),
+)
+PIPELINE_GPU_SECONDS_TOTAL = Counter(
+    "loom_pipeline_gpu_seconds_total",
+    "Settled Pipeline GPU seconds",
+    labelnames=("slurm_cluster", "gpu_count_class"),
+)
+PIPELINE_ARTIFACT_BYTES_TOTAL = Counter(
+    "loom_pipeline_artifact_bytes_total",
+    "Newly committed Pipeline Artifact bytes charged to the run budget",
+    labelnames=("artifact_class",),
+)
+PIPELINE_CANCEL_LATENCY_SECONDS = Histogram(
+    "loom_pipeline_cancel_latency_seconds",
+    "Pipeline cancellation acknowledgement latency",
+    labelnames=("outcome",),
+    buckets=(1, 2, 5, 10, 30, 60, 120, 300, 600),
+)
+PIPELINE_CONTROLLER_RECONCILE_ERRORS_TOTAL = Counter(
+    "loom_pipeline_controller_reconcile_errors_total",
+    "Exhausted Pipeline reconcile failures",
+    labelnames=("reason",),
+)
+PIPELINE_STAGE_QUEUE_AGE_SECONDS = Gauge(
+    "loom_pipeline_stage_queue_age_seconds",
+    "Maximum Pipeline StageRun queue age",
+    labelnames=("state", "resource_class"),
+)
+PIPELINE_STAGE_DEADLINE_OVERRUN_SECONDS = Gauge(
+    "loom_pipeline_stage_deadline_overrun_seconds",
+    "Maximum Pipeline Attempt deadline overrun",
+    labelnames=("resource_class",),
+)
+PIPELINE_CHECKPOINT_OLDEST_AGE_SECONDS = Gauge(
+    "loom_pipeline_checkpoint_oldest_age_seconds",
+    "Oldest active Pipeline checkpoint age",
+    labelnames=("resource_class",),
+)
+PIPELINE_ARTIFACT_COMMIT_FAILURES_TOTAL = Counter(
+    "loom_pipeline_artifact_commit_failures_total",
+    "Returned Pipeline Artifact commit failures",
+    labelnames=("commit_kind", "reason"),
+)
+
 # Live worker tokens flagged by the staleness audit. Labels:
 #   reason="unused_30d"  — last_seen_at (or issued_at, if never used)
 #                          is older than 30 days

@@ -207,6 +207,112 @@ type Team =
   paths["/api/v1/teams/{team_id}"]["get"]["responses"][200]["content"]["application/json"];
 export type AdminTeam = Team;
 
+export type PipelineRunListResponse =
+  paths["/api/v1/pipeline-runs"]["get"]["responses"][200]["content"]["application/json"];
+export type PipelineRunListItem = PipelineRunListResponse["items"][number];
+export type PipelineRunDetail =
+  paths["/api/v1/pipeline-runs/{run_id}"]["get"]["responses"][200]["content"]["application/json"];
+export type PipelineStageRunSummary = PipelineRunDetail["stages"][number];
+export type PipelineStageRunDetail =
+  paths["/api/v1/pipeline-stage-runs/{stage_run_id}"]["get"]["responses"][200]["content"]["application/json"];
+export type PipelineExecutionAttemptList =
+  paths["/api/v1/pipeline-stage-runs/{stage_run_id}/attempts"]["get"]["responses"][200]["content"]["application/json"];
+export type PipelineEventPage =
+  paths["/api/v1/pipeline-runs/{run_id}/events"]["get"]["responses"][200]["content"]["application/json"];
+export type PipelineCancelResponse =
+  paths["/api/v1/pipeline-runs/{run_id}/cancel"]["post"]["responses"][200]["content"]["application/json"];
+export type PipelineRetryResponse =
+  paths["/api/v1/pipeline-stage-runs/{stage_run_id}/retry"]["post"]["responses"][200]["content"]["application/json"];
+export type PipelineRetryBody =
+  paths["/api/v1/pipeline-stage-runs/{stage_run_id}/retry"]["post"]["requestBody"]["content"]["application/json"];
+
+export type PipelineRunListParams = {
+  state?: PipelineRunListItem["state"];
+  result?: Exclude<PipelineRunListItem["result"], null>;
+  recipe?: string;
+  created_after?: string;
+  created_before?: string;
+  cursor?: string;
+  limit: 50;
+};
+
+function pipelineQuery(
+  values: Record<string, string | number | undefined>,
+): string {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(values)) {
+    if (value !== undefined) params.set(key, String(value));
+  }
+  const encoded = params.toString();
+  return encoded ? `?${encoded}` : "";
+}
+
+export function listPipelineRuns(
+  params: PipelineRunListParams,
+): Promise<PipelineRunListResponse> {
+  return apiFetch<PipelineRunListResponse>(
+    `/api/v1/pipeline-runs${pipelineQuery(params)}`,
+  );
+}
+
+export function getPipelineRun(runId: string): Promise<PipelineRunDetail> {
+  return apiFetch<PipelineRunDetail>(
+    `/api/v1/pipeline-runs/${encodeURIComponent(runId)}`,
+  );
+}
+
+export function getPipelineStageRun(
+  stageRunId: string,
+): Promise<PipelineStageRunDetail> {
+  return apiFetch<PipelineStageRunDetail>(
+    `/api/v1/pipeline-stage-runs/${encodeURIComponent(stageRunId)}`,
+  );
+}
+
+export function listPipelineStageAttempts(
+  stageRunId: string,
+): Promise<PipelineExecutionAttemptList> {
+  return apiFetch<PipelineExecutionAttemptList>(
+    `/api/v1/pipeline-stage-runs/${encodeURIComponent(stageRunId)}/attempts`,
+  );
+}
+
+export function listPipelineEvents(
+  runId: string,
+  params: { after_seq: number; limit: 500 },
+  signal?: AbortSignal,
+): Promise<PipelineEventPage> {
+  return apiFetch<PipelineEventPage>(
+    `/api/v1/pipeline-runs/${encodeURIComponent(runId)}/events${pipelineQuery(params)}`,
+    { signal },
+  );
+}
+
+export function cancelPipelineRun(
+  runId: string,
+  body: { reason: string },
+): Promise<PipelineCancelResponse> {
+  return apiFetch<PipelineCancelResponse>(
+    `/api/v1/pipeline-runs/${encodeURIComponent(runId)}/cancel`,
+    { method: "POST", body: JSON.stringify(body) },
+  );
+}
+
+export function retryPipelineStageRun(
+  stageRunId: string,
+  body: PipelineRetryBody,
+  idempotencyKey: string,
+): Promise<PipelineRetryResponse> {
+  return apiFetch<PipelineRetryResponse>(
+    `/api/v1/pipeline-stage-runs/${encodeURIComponent(stageRunId)}/retry`,
+    {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify(body),
+    },
+  );
+}
+
 /** Plan 28 PR-3: backend catalog entry returned by GET /api/v1/backends.
  * Driven by the union of `capabilities.backend` reported by active workers. */
 export interface Backend {
@@ -718,6 +824,12 @@ export interface RunLibraryArtifact {
     batch_id?: string | null;
     trial_id?: string | null;
   };
+  pipeline?: {
+    run_id: string;
+    stage_run_id: string;
+    recipe: string;
+    result: string | null;
+  };
   share_status: ShareStatus;
   safety_state?: string;
   redaction_state?: string;
@@ -968,6 +1080,13 @@ function qs(
 }
 
 export const api = {
+  listPipelineRuns,
+  getPipelineRun,
+  getPipelineStageRun,
+  listPipelineStageAttempts,
+  listPipelineEvents,
+  cancelPipelineRun,
+  retryPipelineStageRun,
   getOverview: () =>
     apiFetch<OverviewSummary>("/api/v1/overview", { cache: "no-store" }),
   getMonitorSummary: (
@@ -1356,6 +1475,11 @@ export const api = {
   listRunLibraryBatches: (
     q: Record<string, string | undefined> = {},
   ) => apiFetch<RunLibraryBatchList>(`/api/v1/run-library/batches${qs(q)}`),
+  listRunLibraryArtifacts: (
+    q: Record<string, string | undefined> = {},
+  ) => apiFetch<{ items: RunLibraryArtifact[]; next_cursor: string | null }>(
+    `/api/v1/run-library/artifacts${qs(q)}`,
+  ),
   getRunLibraryBatch: (id: string, includeDebug = false) =>
     apiFetch<RunLibraryBatchDetail>(
       `/api/v1/run-library/batches/${id}${qs({

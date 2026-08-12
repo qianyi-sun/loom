@@ -293,6 +293,9 @@ def run_projection(run: PipelineRun) -> dict[str, Any]:
         "state": run.state,
         "result": run.result,
         "reason": run.result_reason,
+        "created_by_user_id": str(run.created_by_user_id)
+        if getattr(run, "created_by_user_id", None)
+        else None,
         "retry_of_pipeline_run_id": str(run.retry_of_pipeline_run_id)
         if run.retry_of_pipeline_run_id
         else None,
@@ -304,6 +307,18 @@ def run_projection(run: PipelineRun) -> dict[str, Any]:
         "finished_at": run.finished_at.isoformat() if run.finished_at else None,
         "cancellation_requested_at": (
             run.cancellation_requested_at.isoformat() if run.cancellation_requested_at else None
+        ),
+        "source_budget": getattr(
+            run,
+            "budget_json",
+            {
+                "max_provider_cost_usd": "0",
+                "max_gpu_seconds": 0,
+                "max_wall_seconds": 1,
+                "max_artifact_bytes": 1,
+                "max_stage_runs": 1,
+                "max_attempts_total": 1,
+            },
         ),
     }
 

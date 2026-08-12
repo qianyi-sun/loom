@@ -693,6 +693,63 @@ spec:
               let them finish.
             runbook_url: "https://github.com/qianyi-sun/loom/blob/dev/docs/architecture/multi-node-topology.md"
 
+        - alert: LoomPipelineStageQueueStuck
+          expr: (max by (state,resource_class) (loom_pipeline_stage_queue_age_seconds{state=~"ready|queued|retry_wait"}) > 900) or (max by (state,resource_class) (loom_pipeline_stage_queue_age_seconds{state="claimed"}) > 300)
+          for: 10m
+          labels: { severity: warning, component: control-plane }
+          annotations:
+            summary: "Pipeline StageRun queue age exceeded its closed threshold"
+            description: "A bounded Pipeline queue state is stale; inspect authorized summaries and redacted controller logs."
+            runbook_url: "https://github.com/qianyi-sun/loom/blob/dev/docs/runbooks/operator-runbook.md#pipeline-stage-queue-stuck"
+        - alert: LoomPipelineStageDeadlineOverrun
+          expr: max by (resource_class) (loom_pipeline_stage_deadline_overrun_seconds) > 0
+          for: 5m
+          labels: { severity: critical, component: worker }
+          annotations:
+            summary: "Pipeline Attempt exceeded timeout plus cleanup grace"
+            description: "A running Attempt is beyond its frozen deadline; inspect redacted worker lifecycle logs."
+            runbook_url: "https://github.com/qianyi-sun/loom/blob/dev/docs/runbooks/operator-runbook.md#pipeline-stage-deadline-overrun"
+        - alert: LoomPipelineControllerReconcileErrors
+          expr: sum(increase(loom_pipeline_controller_reconcile_errors_total[5m])) >= 3
+          for: 5m
+          labels: { severity: warning, component: control-plane }
+          annotations:
+            summary: "Pipeline controller reconcile operations exhausted retries"
+            description: "Three or more closed-category reconcile operations failed; inspect redacted controller logs."
+            runbook_url: "https://github.com/qianyi-sun/loom/blob/dev/docs/runbooks/operator-runbook.md#pipeline-controller-reconcile-errors"
+        - alert: LoomPipelineForcedCancellation
+          expr: sum(increase(loom_pipeline_cancel_latency_seconds_count{outcome="forced"}[15m])) > 0
+          for: 0m
+          labels: { severity: warning, component: worker }
+          annotations:
+            summary: "Pipeline cancellation required a forced cleanup"
+            description: "At least one cancellation completed through the forced closed outcome."
+            runbook_url: "https://github.com/qianyi-sun/loom/blob/dev/docs/runbooks/operator-runbook.md#pipeline-forced-cancellation"
+        - alert: LoomPipelineCheckpointStale
+          expr: max by (resource_class) (loom_pipeline_checkpoint_oldest_age_seconds) > 300
+          for: 10m
+          labels: { severity: warning, component: worker }
+          annotations:
+            summary: "Active checkpoint-enabled Pipeline Attempt is stale"
+            description: "The newest committed checkpoint is older than the bounded threshold."
+            runbook_url: "https://github.com/qianyi-sun/loom/blob/dev/docs/runbooks/operator-runbook.md#pipeline-checkpoint-stale"
+        - alert: LoomPipelineArtifactCommitFailures
+          expr: sum by (commit_kind) (increase(loom_pipeline_artifact_commit_failures_total[10m])) > 0
+          for: 5m
+          labels: { severity: warning, component: control-plane }
+          annotations:
+            summary: "Pipeline Artifact commit operation returned a failure"
+            description: "A closed commit kind returned a redacted terminal failure."
+            runbook_url: "https://github.com/qianyi-sun/loom/blob/dev/docs/runbooks/operator-runbook.md#pipeline-artifact-commit-failures"
+        - alert: LoomPipelineGpuAllocatedIdle
+          expr: max by (slurm_cluster,reason) (loom_pipeline_gpu_allocated_idle_seconds{reason=~"process_absent|cleanup_pending"}) > 300
+          for: 10m
+          labels: { severity: critical, component: worker }
+          annotations:
+            summary: "Allocated Pipeline GPU lacks its expected process group"
+            description: "A local leased GPU lifecycle is absent or awaiting cleanup; utilization is not used for this signal."
+            runbook_url: "https://github.com/qianyi-sun/loom/blob/dev/docs/runbooks/operator-runbook.md#pipeline-gpu-allocated-idle"
+
         # MinIO server-side errors. 5xx from PutObject/GetObject means
         # trial artifacts and trajectories are outright failing to
         # persist — not just slow. Every 5xx is a lost audit trail.

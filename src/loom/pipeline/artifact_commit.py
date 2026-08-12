@@ -45,11 +45,6 @@ MAX_MULTIPART_PARTS = 9_990
 MAX_PART_BYTES = 5 * GiB
 UPLOAD_TOKEN_TTL = timedelta(minutes=15)
 
-ARTIFACT_BYTES = Counter(
-    "loom_pipeline_artifact_bytes_total",
-    "Verified Pipeline Artifact data bytes",
-    ("commit_kind",),
-)
 ARTIFACT_PARTS = Counter(
     "loom_pipeline_artifact_parts_total",
     "Persisted Pipeline Artifact multipart parts",
@@ -880,7 +875,6 @@ class ArtifactCommitService:
         )
         file_state.receipts[part_number] = receipt
         ARTIFACT_PARTS.labels(session.producer.commit_kind).inc()
-        ARTIFACT_BYTES.labels(session.producer.commit_kind).inc(observed)
         session.updated_at = self._now()
         await self._repository.save(session)
         if (

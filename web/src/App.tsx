@@ -10,6 +10,8 @@ import BatchDetail from "./pages/BatchDetail";
 import Home from "./pages/Home";
 import InviteAccept from "./pages/InviteAccept";
 import Monitor from "./pages/Monitor";
+import PipelineRunDetail from "./pages/PipelineRunDetail";
+import PipelineRuns from "./pages/PipelineRuns";
 import NewBatch from "./pages/NewBatch";
 import NotFound from "./pages/NotFound";
 import PasswordAction from "./pages/PasswordAction";
@@ -32,6 +34,8 @@ export default function App(): JSX.Element {
       <Route path="/" element={<Layout />}>
         <Route index element={<Home />} />
         <Route path="monitor" element={<Monitor />} />
+        <Route path="pipelines" element={<PipelineRuns />} />
+        <Route path="pipelines/:runId" element={<PipelineRunDetail />} />
         <Route path="library" element={<RunLibrary />} />
         <Route path="library/batches/:batchId" element={<RunLibraryBatchDetail />} />
         {/* Legacy redirects — preserve old links from external docs / chats. */}

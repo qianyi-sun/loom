@@ -280,11 +280,12 @@ async def test_get_run_projects_stages_artifacts_and_budget_without_internal_fie
     body = response.json()
     assert body["id"] == str(run.id)
     assert body["stages"][0]["id"] == str(stage_id)
-    assert body["stages"][0]["retry_eligible"] is True
+    assert body["stages"][0]["retry_allowed"] is False
+    assert body["stages"][0]["retry_ineligible_reason"] == "run_not_retryable"
     assert body["artifacts"][0]["download_path"] == (
         f"/api/v1/pipeline-artifacts/{artifact_id}/download"
     )
-    assert body["budget"]["provider"]["settled_microusd"] == 125_000
+    assert body["budget"]["max_provider_cost_usd"]["settled"] == 125_000
     assert "team_id" not in body
     assert "graph_spec_json" not in body
 
@@ -292,7 +293,7 @@ async def test_get_run_projects_stages_artifacts_and_budget_without_internal_fie
 async def test_list_run_pagination_returns_an_opaque_signed_cursor() -> None:
     first = _run(created_at=datetime(2026, 8, 12, 12, 2, tzinfo=UTC))
     second = _run(created_at=datetime(2026, 8, 12, 12, 1, tzinfo=UTC))
-    session = _Session(_Result([first, second]))
+    session = _Session(_Result([first, second]), _Result([]), _Result([]))
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=_app(session, _context())),

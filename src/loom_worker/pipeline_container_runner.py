@@ -17,13 +17,16 @@ from types import MappingProxyType
 from typing import Literal, Protocol, runtime_checkable
 from uuid import UUID
 
+from loom_worker.pipeline_gpu_lifecycle import (
+    PipelineGpuCluster,
+    PipelineGpuLifecycleTracker,
+)
+
 IMAGE_DIGEST_RE = re.compile(
     r"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?"
     r"(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}$"
 )
-SHELL_EXECUTABLES = frozenset(
-    {"sh", "bash", "dash", "ash", "zsh", "ksh", "csh", "tcsh", "fish"}
-)
+SHELL_EXECUTABLES = frozenset({"sh", "bash", "dash", "ash", "zsh", "ksh", "csh", "tcsh", "fish"})
 SECRET_ARG_RE = re.compile(
     r"(?:\bBearer\s+[A-Za-z0-9._~+/=-]{8,}|"
     r"(?:api[_-]?key|password|passwd|secret|token|credential)\s*=|"
@@ -149,11 +152,15 @@ class PipelineContainerSpec:
             "LOOM_RESUME_CHECKPOINT",
             "LOOM_RESUME_CHECKPOINT_ARTIFACT_ID",
         }:
-            raise PipelineContainerContractError("resume environment must be the exact two-variable set")
+            raise PipelineContainerContractError(
+                "resume environment must be the exact two-variable set"
+            )
         if self.security_opt != ("no-new-privileges:true",):
             raise PipelineContainerContractError("no-new-privileges is mandatory")
         if not self.read_only_rootfs or self.seccomp_profile != "default":
-            raise PipelineContainerContractError("read-only rootfs and default seccomp are mandatory")
+            raise PipelineContainerContractError(
+                "read-only rootfs and default seccomp are mandatory"
+            )
         if self.privileged or self.host_pid or self.host_ipc or self.devices:
             raise PipelineContainerContractError("privileged host/device access is forbidden")
         if self.gpu_device_uuids:
@@ -168,7 +175,9 @@ class PipelineContainerSpec:
         if self.network_profile == "gateway":
             expected_targets.append(RUNTIME_SECRET_TARGET)
             if self.network_mode != GATEWAY_NETWORK_NAME:
-                raise PipelineContainerContractError("gateway work must use the fixed gateway network")
+                raise PipelineContainerContractError(
+                    "gateway work must use the fixed gateway network"
+                )
         elif self.network_profile == "none":
             if self.network_mode != "none":
                 raise PipelineContainerContractError("none work must use Docker network none")
@@ -216,24 +225,24 @@ class PipelineContainerSpec:
             for mount in self.mounts
         }
         create_kwargs: dict[str, object] = {
-                "image": self.image,
-                "command": list(self.argv),
-                "working_dir": str(self.workdir),
-                "user": f"{self.uid}:{self.gid}",
-                "network_mode": self.network_mode,
-                "read_only": True,
-                "cap_drop": ["ALL"],
-                "security_opt": ["no-new-privileges:true"],
-                "privileged": False,
-                "pid_mode": None,
-                "ipc_mode": None,
-                "devices": [],
-                "pids_limit": self.limits.pids,
-                "mem_limit": self.limits.memory_bytes,
-                "nano_cpus": int(float(self.limits.cpus) * 1_000_000_000),
-                "volumes": volumes,
-                "init": True,
-                "environment": dict(self.environment),
+            "image": self.image,
+            "command": list(self.argv),
+            "working_dir": str(self.workdir),
+            "user": f"{self.uid}:{self.gid}",
+            "network_mode": self.network_mode,
+            "read_only": True,
+            "cap_drop": ["ALL"],
+            "security_opt": ["no-new-privileges:true"],
+            "privileged": False,
+            "pid_mode": None,
+            "ipc_mode": None,
+            "devices": [],
+            "pids_limit": self.limits.pids,
+            "mem_limit": self.limits.memory_bytes,
+            "nano_cpus": int(float(self.limits.cpus) * 1_000_000_000),
+            "volumes": volumes,
+            "init": True,
+            "environment": dict(self.environment),
         }
         if self.gpu_device_uuids:
             create_kwargs["device_requests"] = [
@@ -450,6 +459,8 @@ class PipelineContainerBackend(Protocol):
 
     async def terminate(self, *, attempt_id: UUID, grace_seconds: int) -> bool: ...
 
+    async def expected_process_group_present(self, *, attempt_id: UUID) -> bool: ...
+
     async def teardown(self, *, attempt_id: UUID) -> None: ...
 
 
@@ -485,6 +496,8 @@ class PipelineContainerRunner:
     preflight: PipelineExecutionPreflight | None = None
     cancellation_grace_seconds: int = 30
     cancellation_poll_seconds: int = 5
+    gpu_cluster: PipelineGpuCluster | None = None
+    gpu_lifecycle: PipelineGpuLifecycleTracker | None = None
 
     async def run(self, request: PipelineExecutionRequest) -> PipelineRunResult:
         if self.cancellation_grace_seconds != 30 or self.cancellation_poll_seconds != 5:
@@ -515,21 +528,40 @@ class PipelineContainerRunner:
                     forced=False,
                     teardown_observed=True,
                 )
-                raise PipelineCancelledError(
-                    f"ExecutionAttempt {request.attempt_id} was cancelled"
-                )
+                raise PipelineCancelledError(f"ExecutionAttempt {request.attempt_id} was cancelled")
             if self.preflight is not None:
                 await self.preflight.attest(
                     attempt_id=request.attempt_id,
                     spec=self.spec,
                     input_view=input_view,
                 )
+            if self.spec.gpu_device_uuids and self.gpu_lifecycle is not None:
+                if self.gpu_cluster is None:
+                    raise PipelineContainerContractError(
+                        "GPU lifecycle tracking requires a closed slurm cluster"
+                    )
+                self.gpu_lifecycle.mark(
+                    request.attempt_id,
+                    cluster=self.gpu_cluster,
+                    reason="pre_start",
+                )
             backend_started = True
             process_result, forced = await self._run_with_cancellation(
                 attempt_id=request.attempt_id, input_view=input_view
             )
             if process_result is None:
-                await self.backend.teardown(attempt_id=request.attempt_id)
+                if self.spec.gpu_device_uuids and self.gpu_lifecycle is not None:
+                    assert self.gpu_cluster is not None
+                    self.gpu_lifecycle.mark(
+                        request.attempt_id,
+                        cluster=self.gpu_cluster,
+                        reason="cleanup_pending",
+                    )
+                try:
+                    await self.backend.teardown(attempt_id=request.attempt_id)
+                finally:
+                    if self.gpu_lifecycle is not None:
+                        self.gpu_lifecycle.clear(request.attempt_id)
                 backend_started = False
                 backend_torn_down = True
                 await self.materializer.release(
@@ -542,9 +574,7 @@ class PipelineContainerRunner:
                     forced=forced,
                     teardown_observed=True,
                 )
-                raise PipelineCancelledError(
-                    f"ExecutionAttempt {request.attempt_id} was cancelled"
-                )
+                raise PipelineCancelledError(f"ExecutionAttempt {request.attempt_id} was cancelled")
             if process_result.exit_code != 0:
                 raise PipelineProcessFailedError(process_result.exit_code)
             if process_result.stage_result is None or process_result.stage_result_digest is None:
@@ -563,7 +593,18 @@ class PipelineContainerRunner:
             )
         finally:
             if backend_started and not backend_torn_down:
-                await self.backend.teardown(attempt_id=request.attempt_id)
+                if self.spec.gpu_device_uuids and self.gpu_lifecycle is not None:
+                    assert self.gpu_cluster is not None
+                    self.gpu_lifecycle.mark(
+                        request.attempt_id,
+                        cluster=self.gpu_cluster,
+                        reason="cleanup_pending",
+                    )
+                try:
+                    await self.backend.teardown(attempt_id=request.attempt_id)
+                finally:
+                    if self.gpu_lifecycle is not None:
+                        self.gpu_lifecycle.clear(request.attempt_id)
             if input_view is not None and not input_released:
                 await self.materializer.release(
                     attempt_id=request.attempt_id,
@@ -594,6 +635,16 @@ class PipelineContainerRunner:
         )
         try:
             while True:
+                if self.spec.gpu_device_uuids and self.gpu_lifecycle is not None:
+                    assert self.gpu_cluster is not None
+                    if await self.backend.expected_process_group_present(attempt_id=attempt_id):
+                        self.gpu_lifecycle.process_present(attempt_id)
+                    else:
+                        self.gpu_lifecycle.mark(
+                            attempt_id,
+                            cluster=self.gpu_cluster,
+                            reason="process_absent",
+                        )
                 done, _pending = await asyncio.wait(
                     {process}, timeout=self.cancellation_poll_seconds
                 )
@@ -712,6 +763,11 @@ class FakePipelineContainerBackend:
         del attempt_id, grace_seconds
         self.calls.append("terminate")
         return self.terminate_forced
+
+    async def expected_process_group_present(self, *, attempt_id: UUID) -> bool:
+        del attempt_id
+        self.calls.append("probe")
+        return True
 
     async def teardown(self, *, attempt_id: UUID) -> None:
         del attempt_id

@@ -18,7 +18,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from loom.data_lifecycle_registry import ensure_batch_lifecycle_authority
-from loom.db.schema import Artifact, ArtifactLineageEdge, Batch, LlmCall, Team, Trial
+from loom.db.schema import (
+    Artifact,
+    ArtifactLineageEdge,
+    Batch,
+    LlmCall,
+    PipelineRun,
+    Team,
+    Trial,
+)
 from loom.security.redaction import redact_mapping, redact_text
 from loom_service.auth_guards import (
     is_admin,
@@ -1595,7 +1603,6 @@ async def list_run_library_batches(
         stmt = stmt.where(_batch_after_cursor(cur))
     artifact_filters = {
         "artifact_type": artifact_type,
-        "owner_team_id": owner_team_id,
         "source_batch_id": source_batch_id,
         "source_trial_id": source_trial_id,
         "safety_state": safety_state,
@@ -1665,6 +1672,27 @@ async def _artifact_rows_for_library(
     safety_state = artifact_filters.get("safety_state")
     if safety_state is not None:
         stmt = stmt.where(Artifact.safety_state == safety_state)
+    if artifact_filters.get("producer_kind") == "pipeline":
+        stmt = stmt.where(
+            Artifact.producer_kind.in_(("container", "platform", "checkpoint")),
+            Artifact.pipeline_run_id.is_not(None),
+            Artifact.pipeline_stage_run_id.is_not(None),
+        )
+        pipeline_recipe = artifact_filters.get("pipeline_recipe")
+        pipeline_result = artifact_filters.get("pipeline_result")
+        run_filter = select(PipelineRun.id)
+        if pipeline_recipe:
+            try:
+                recipe_name, recipe_version = str(pipeline_recipe).rsplit("@", 1)
+                run_filter = run_filter.where(
+                    PipelineRun.recipe_name == recipe_name,
+                    PipelineRun.recipe_version == int(recipe_version),
+                )
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=422, detail="invalid pipeline_recipe") from exc
+        if pipeline_result:
+            run_filter = run_filter.where(PipelineRun.result == pipeline_result)
+        stmt = stmt.where(Artifact.pipeline_run_id.in_(run_filter))
 
     if scope != "all":
         if ctx.team_id is None:
@@ -1700,6 +1728,27 @@ async def _artifact_rows_for_library(
         [artifact for artifact, _owner_team, _batch, _trial in selected],
     )
     out: list[dict[str, Any]] = []
+    pipeline_ids = (
+        {
+            artifact.pipeline_run_id
+            for artifact, _owner_team, _batch, _trial in selected
+            if artifact.pipeline_run_id is not None
+        }
+        if artifact_filters.get("producer_kind") == "pipeline"
+        else set()
+    )
+    pipeline_runs = {}
+    if pipeline_ids:
+        pipeline_runs = {
+            item.id: item
+            for item in list(
+                (
+                    await session.execute(
+                        select(PipelineRun).where(PipelineRun.id.in_(pipeline_ids))
+                    )
+                ).scalars()
+            )
+        }
     for artifact, owner_team, batch, trial in selected:
         item = _serialize_typed_artifact(
             request,
@@ -1711,6 +1760,14 @@ async def _artifact_rows_for_library(
             parents=parents_by_artifact.get(artifact.id, []),
         )
         if item is not None:
+            pipeline_run = pipeline_runs.get(artifact.pipeline_run_id)
+            if artifact_filters.get("producer_kind") == "pipeline" and pipeline_run is not None:
+                item["pipeline"] = {
+                    "run_id": str(pipeline_run.id),
+                    "stage_run_id": str(artifact.pipeline_stage_run_id),
+                    "recipe": f"{pipeline_run.recipe_name}@{pipeline_run.recipe_version}",
+                    "result": pipeline_run.result,
+                }
             out.append(redact_mapping(item) if safe_content_only else item)
     return out
 
@@ -1726,17 +1783,24 @@ async def list_run_library_artifacts(
     source_trial_id: Annotated[UUID | None, Query()] = None,
     safety_state: Annotated[str | None, Query()] = None,
     provenance_relation: Annotated[str | None, Query()] = None,
+    producer_kind: Annotated[str | None, Query(pattern="^pipeline$")] = None,
+    pipeline_recipe: Annotated[str | None, Query()] = None,
+    pipeline_result: Annotated[str | None, Query()] = None,
+    team_id: Annotated[UUID | None, Query()] = None,
     limit: Annotated[int, Query(gt=0, le=500)] = 200,
 ) -> dict[str, Any]:
     session, ctx = sc
     require_scope(ctx, "read:own")
     filters = {
         "artifact_type": artifact_type,
-        "owner_team_id": owner_team_id,
         "source_batch_id": source_batch_id,
         "source_trial_id": source_trial_id,
         "safety_state": safety_state,
         "provenance_relation": provenance_relation,
+        "producer_kind": producer_kind,
+        "pipeline_recipe": pipeline_recipe,
+        "pipeline_result": pipeline_result,
+        "owner_team_id": team_id or owner_team_id,
     }
     stmt_items = await _artifact_rows_for_library(
         session,
