@@ -15,10 +15,13 @@ from uuid import UUID
 from loom_capacity_manager.contracts import (
     AllocationInputV1,
     ClaimSlotMatchV1,
+    ConfigurationSnapshotV1,
     CurrentAssignmentV1,
     DesiredShapeCountV1,
+    Digest,
     FairnessCursorV1,
     FixedClaimV1,
+    Identifier,
     JointMatchingWitnessV1,
     ObservedCommitmentV1,
     PackingRequestV1,
@@ -27,6 +30,7 @@ from loom_capacity_manager.contracts import (
     PlacementAllowanceV1,
     PoolManifestV1,
     ProfileReferenceV1,
+    Quantity,
     RankedHypotheticalLaunchV1,
     ResourceDomainV1,
     ResourceVectorV1,
@@ -41,6 +45,11 @@ from loom_capacity_manager.contracts import (
     canonical_digest,
     checked_add,
     checked_sum,
+)
+from loom_capacity_manager.executable_contracts import (
+    ExecutionAuthorityV2,
+    ExecutionFenceV2,
+    StrictV2Model,
 )
 from loom_capacity_manager.fleet_state import (
     FleetStateError,
@@ -60,6 +69,68 @@ _PENDING_COMMITMENT_STATES = frozenset({"proposed", "accepted", "pending", "subm
 
 class ShadowAllocatorError(RuntimeError):
     """Raised when no complete bounded shadow allocation can be proven."""
+
+
+class ExecutableAllocationError(RuntimeError):
+    """Raised when a shadow plan cannot be promoted under the current fence."""
+
+
+class ExecutableEpochV2(StrictV2Model):
+    """Exact shadow placement promoted under one durable execution fence."""
+
+    execution: ExecutionFenceV2
+    configuration: ConfigurationSnapshotV1
+    input_digest: Digest
+    allocations: tuple[ShadowAllocationV1, ...]
+    next_fairness_cursors: tuple[FairnessCursorV1, ...]
+    hypothetical_launch_rank: tuple[RankedHypotheticalLaunchV1, ...]
+    pool_witnesses: tuple[PackingWitnessV1, ...]
+    blockers: tuple[Identifier, ...]
+    executable_new_capacity_ceiling: Quantity
+    executable_new_capacity_rate_per_minute: Quantity
+    executable: Literal[True] = True
+
+    @classmethod
+    def from_shadow(
+        cls,
+        shadow: ShadowEpochV1,
+        authority: ExecutionAuthorityV2,
+        allocation_epoch: int,
+    ) -> ExecutableEpochV2:
+        """Bind an unchanged placement to an exact active execution epoch."""
+
+        execution = ExecutionFenceV2.model_validate(
+            authority.model_dump(mode="python") | {"allocation_epoch": allocation_epoch}
+        )
+        return cls(
+            execution=execution,
+            configuration=shadow.configuration,
+            input_digest=shadow.input_digest,
+            allocations=shadow.allocations,
+            next_fairness_cursors=shadow.next_fairness_cursors,
+            hypothetical_launch_rank=shadow.hypothetical_launch_rank,
+            pool_witnesses=shadow.pool_witnesses,
+            blockers=shadow.blockers,
+            executable_new_capacity_ceiling=authority.executable_new_capacity_ceiling,
+            executable_new_capacity_rate_per_minute=(
+                authority.executable_new_capacity_rate_per_minute
+            ),
+        )
+
+
+def promote_shadow_epoch(
+    shadow: ShadowEpochV1,
+    authority: ExecutionAuthorityV2 | None,
+    *,
+    allocation_epoch: int,
+) -> ExecutableEpochV2:
+    """Promote one freshly computed shadow plan without changing its placement."""
+
+    if authority is None or authority.execution_state != "active":
+        raise ExecutableAllocationError("active execution authority is required")
+    if shadow.configuration.configuration_epoch != authority.configuration_epoch:
+        raise ExecutableAllocationError("configuration epoch changed")
+    return ExecutableEpochV2.from_shadow(shadow, authority, allocation_epoch)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2029,6 +2100,9 @@ def allocate_shadow(
 __all__ = [
     "MAX_ALLOCATION_DECISIONS",
     "AllocatorSearchBounds",
+    "ExecutableAllocationError",
+    "ExecutableEpochV2",
     "ShadowAllocatorError",
     "allocate_shadow",
+    "promote_shadow_epoch",
 ]

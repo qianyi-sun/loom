@@ -17,7 +17,8 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, text, update
+from sqlalchemy import delete, select, text, update
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom_capacity_manager.allocator import allocate_shadow
@@ -25,8 +26,15 @@ from loom_capacity_manager.api import RequestBodyLimitMiddleware, create_app
 from loom_capacity_manager.auth import CapacityPrincipalVerifier
 from loom_capacity_manager.config import CapacityManagerSettings, build_uvicorn_kwargs
 from loom_capacity_manager.contracts import MAX_CONTRACT_BYTES
-from loom_capacity_manager.models import Base, CapacityAuthorityState
+from loom_capacity_manager.executable_contracts import ExecutionActivationV2
+from loom_capacity_manager.models import (
+    Base,
+    CapacityAllocation,
+    CapacityAllocationEpoch,
+    CapacityAuthorityState,
+)
 from loom_capacity_manager.ownership import public_key_fingerprint
+from loom_capacity_manager.reconciler import reconcile_shadow_once
 from loom_capacity_manager.store import CapacityManagementStore
 from tests.capacity_fixtures import (
     AUTHORITY_ID,
@@ -44,6 +52,15 @@ from tests.capacity_fixtures import (
     fleet_with_development_template,
     pool_observation,
     subject_configuration,
+)
+from tests.integration.test_capacity_manager_execution_epoch import (
+    _policy as execution_policy,
+)
+from tests.integration.test_capacity_manager_execution_epoch import (
+    _register_execution_executors as register_execution_executors,
+)
+from tests.integration.test_capacity_manager_execution_epoch import (
+    _setup as setup_execution,
 )
 
 OPERATOR_TOKEN = "operator-api-secret"
@@ -725,6 +742,93 @@ def test_concurrent_reconciliation_trigger_is_rejected(
         )
     assert response.status_code == 409
     assert response.json() == {"detail": "shadow reconciliation already running"}
+
+
+async def test_allocation_reconcile_keeps_shadow_execution_bindings_null(
+    api_context: tuple[TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator],
+    operator_headers: dict[str, str],
+    capacity_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    client, _app, _settings, allocator = api_context
+    allocator.release.set()
+
+    response = client.post("/v1/shadow-reconciliations", headers=operator_headers)
+
+    assert response.status_code == 200, response.text
+    async with capacity_session_factory() as session:
+        epoch = (await session.execute(select(CapacityAllocationEpoch))).scalar_one()
+        allocations = (await session.execute(select(CapacityAllocation))).scalars().all()
+    assert epoch.status == "shadow"
+    assert epoch.executable is False
+    assert epoch.execution_epoch is None
+    assert epoch.execution_manifest_sha256 is None
+    assert allocations
+    assert all(allocation.mode == "shadow" for allocation in allocations)
+    assert all(allocation.executable is False for allocation in allocations)
+    assert all(allocation.execution_epoch is None for allocation in allocations)
+    assert all(allocation.execution_manifest_sha256 is None for allocation in allocations)
+    async with capacity_session_factory() as session:
+        with pytest.raises(DBAPIError):
+            async with session.begin_nested():
+                await session.execute(update(CapacityAllocation).values(mode="executable"))
+
+
+async def test_allocation_reconcile_commits_fresh_plan_under_active_execution_fence(
+    capacity_session: AsyncSession,
+) -> None:
+    fixture = await setup_execution(capacity_session, execution_policy=execution_policy())
+    prepared = await fixture.store.prepare_execution_epoch(
+        capacity_session,
+        fixture.request,
+        actor="activation-operator",
+        idempotency_key=UUID(int=880),
+    )
+    await register_execution_executors(capacity_session, fixture, prepared)
+    active = await fixture.store.activate_execution_epoch(
+        capacity_session,
+        ExecutionActivationV2(
+            authority_incarnation=AUTHORITY_ID,
+            expected_writer_epoch=fixture.writer.writer_epoch,
+            execution_epoch=prepared.execution_epoch,
+            execution_manifest_sha256=prepared.execution_manifest_sha256,
+            executable_new_capacity_ceiling=1,
+            executable_new_capacity_rate_per_minute=1,
+        ),
+        actor="activation-operator",
+        idempotency_key=UUID(int=881),
+    )
+    session_factory = async_sessionmaker(
+        bind=capacity_session.bind,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+
+    result = await reconcile_shadow_once(
+        session_factory,
+        fixture.writer,
+        store=fixture.store,
+    )
+
+    assert result.status == "committed"
+    epoch = (await capacity_session.execute(select(CapacityAllocationEpoch))).scalar_one()
+    allocations = (await capacity_session.execute(select(CapacityAllocation))).scalars().all()
+    assert epoch.status == "executable"
+    assert epoch.executable is True
+    assert epoch.execution_epoch == active.execution_epoch
+    assert epoch.execution_manifest_sha256 == active.execution_manifest_sha256
+    assert epoch.complete_payload["execution"]["allocation_epoch"] == epoch.allocation_epoch
+    assert epoch.complete_payload["executable_new_capacity_ceiling"] == 1
+    assert allocations
+    assert all(allocation.mode == "executable" for allocation in allocations)
+    assert all(allocation.executable is True for allocation in allocations)
+    assert all(allocation.execution_epoch == active.execution_epoch for allocation in allocations)
+    assert all(
+        allocation.execution_manifest_sha256 == active.execution_manifest_sha256
+        for allocation in allocations
+    )
+    with pytest.raises(DBAPIError):
+        async with capacity_session.begin_nested():
+            await capacity_session.execute(update(CapacityAllocation).values(mode="shadow"))
 
 
 def test_body_limit_and_status_pagination_are_bounded(

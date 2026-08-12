@@ -243,6 +243,11 @@ def upgrade() -> None:
             "effective_ceiling",
             name="capacity_execution_epoch_complete_authority_binding_key",
         ),
+        sa.UniqueConstraint(
+            "execution_epoch",
+            "execution_manifest_sha256",
+            name="capacity_execution_epoch_manifest_binding_key",
+        ),
     )
     op.create_table(
         "capacity_execution_executors",
@@ -302,6 +307,79 @@ def upgrade() -> None:
             "idempotency_key",
             name="capacity_execution_executor_idempotency_key",
         ),
+    )
+    op.add_column(
+        "capacity_allocation_epochs",
+        sa.Column("execution_epoch", sa.BigInteger(), nullable=True),
+    )
+    op.add_column(
+        "capacity_allocation_epochs",
+        sa.Column("execution_manifest_sha256", sa.Text(), nullable=True),
+    )
+    op.drop_constraint(
+        "capacity_allocation_status_check",
+        "capacity_allocation_epochs",
+        type_="check",
+    )
+    op.drop_constraint(
+        "capacity_allocation_epoch_shadow_only_check",
+        "capacity_allocation_epochs",
+        type_="check",
+    )
+    op.create_check_constraint(
+        "capacity_allocation_status_check",
+        "capacity_allocation_epochs",
+        "status IN ('shadow','failed','executable')",
+    )
+    op.create_check_constraint(
+        "capacity_allocation_epoch_mode_check",
+        "capacity_allocation_epochs",
+        "(status IN ('shadow','failed') AND executable = false "
+        "AND execution_epoch IS NULL AND execution_manifest_sha256 IS NULL) OR "
+        "(status = 'executable' AND executable = true "
+        "AND execution_epoch IS NOT NULL AND execution_manifest_sha256 IS NOT NULL)",
+    )
+    op.create_foreign_key(
+        "capacity_allocation_epoch_execution_fkey",
+        "capacity_allocation_epochs",
+        "capacity_execution_epochs",
+        ["execution_epoch", "execution_manifest_sha256"],
+        ["execution_epoch", "execution_manifest_sha256"],
+        ondelete="RESTRICT",
+    )
+    op.create_unique_constraint(
+        "capacity_allocation_epoch_execution_binding_key",
+        "capacity_allocation_epochs",
+        ["allocation_epoch", "execution_epoch", "execution_manifest_sha256"],
+    )
+    op.add_column(
+        "capacity_allocations",
+        sa.Column("execution_epoch", sa.BigInteger(), nullable=True),
+    )
+    op.add_column(
+        "capacity_allocations",
+        sa.Column("execution_manifest_sha256", sa.Text(), nullable=True),
+    )
+    op.drop_constraint(
+        "capacity_allocations_shadow_only_check",
+        "capacity_allocations",
+        type_="check",
+    )
+    op.create_check_constraint(
+        "capacity_allocations_mode_check",
+        "capacity_allocations",
+        "(mode = 'shadow' AND executable = false "
+        "AND execution_epoch IS NULL AND execution_manifest_sha256 IS NULL) OR "
+        "(mode = 'executable' AND executable = true "
+        "AND execution_epoch IS NOT NULL AND execution_manifest_sha256 IS NOT NULL)",
+    )
+    op.create_foreign_key(
+        "capacity_allocation_execution_binding_fkey",
+        "capacity_allocations",
+        "capacity_allocation_epochs",
+        ["allocation_epoch", "execution_epoch", "execution_manifest_sha256"],
+        ["allocation_epoch", "execution_epoch", "execution_manifest_sha256"],
+        ondelete="RESTRICT",
     )
     op.add_column(
         "capacity_authority_state",
@@ -790,6 +868,55 @@ def downgrade() -> None:
         "DROP TRIGGER capacity_execution_epoch_transition_guard ON capacity_execution_epochs"
     )
     op.execute("DROP FUNCTION capacity_execution_epoch_transition_guard()")
+    op.drop_constraint(
+        "capacity_allocation_execution_binding_fkey",
+        "capacity_allocations",
+        type_="foreignkey",
+    )
+    op.drop_constraint(
+        "capacity_allocations_mode_check",
+        "capacity_allocations",
+        type_="check",
+    )
+    op.create_check_constraint(
+        "capacity_allocations_shadow_only_check",
+        "capacity_allocations",
+        "mode = 'shadow' AND executable = false",
+    )
+    op.drop_column("capacity_allocations", "execution_manifest_sha256")
+    op.drop_column("capacity_allocations", "execution_epoch")
+    op.drop_constraint(
+        "capacity_allocation_epoch_execution_fkey",
+        "capacity_allocation_epochs",
+        type_="foreignkey",
+    )
+    op.drop_constraint(
+        "capacity_allocation_epoch_execution_binding_key",
+        "capacity_allocation_epochs",
+        type_="unique",
+    )
+    op.drop_constraint(
+        "capacity_allocation_epoch_mode_check",
+        "capacity_allocation_epochs",
+        type_="check",
+    )
+    op.drop_constraint(
+        "capacity_allocation_status_check",
+        "capacity_allocation_epochs",
+        type_="check",
+    )
+    op.create_check_constraint(
+        "capacity_allocation_status_check",
+        "capacity_allocation_epochs",
+        "status IN ('shadow','failed')",
+    )
+    op.create_check_constraint(
+        "capacity_allocation_epoch_shadow_only_check",
+        "capacity_allocation_epochs",
+        "executable = false",
+    )
+    op.drop_column("capacity_allocation_epochs", "execution_manifest_sha256")
+    op.drop_column("capacity_allocation_epochs", "execution_epoch")
     op.drop_constraint(
         "capacity_authority_execution_epoch_fkey",
         "capacity_authority_state",

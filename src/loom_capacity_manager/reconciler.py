@@ -1,4 +1,4 @@
-"""One-shot fenced reconciliation for non-executable capacity shadow epochs."""
+"""One-shot fenced reconciliation with exact executable promotion."""
 
 from __future__ import annotations
 
@@ -8,11 +8,14 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Literal
 
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom_capacity_manager.allocator import (
+    ExecutableEpochV2,
     ShadowAllocatorError,
     allocate_shadow,
+    promote_shadow_epoch,
 )
 from loom_capacity_manager.contracts import (
     AllocationInputV1,
@@ -20,8 +23,17 @@ from loom_capacity_manager.contracts import (
     ShadowEpochV1,
     canonical_digest,
 )
+from loom_capacity_manager.executable_contracts import ExecutionAuthorityV2
+from loom_capacity_manager.models import (
+    CapacityAllocation,
+    CapacityAllocationEpoch,
+    CapacityAuditEvent,
+    CapacityAuthorityState,
+    CapacityFairnessState,
+)
 from loom_capacity_manager.store import (
     CapacityManagementStore,
+    CapacityStoreError,
     StaleAllocationInputError,
     StaleWriterError,
     WriterFence,
@@ -38,6 +50,157 @@ class ShadowRunResult:
     input_digest: str
     reason: str | None
     attempt_count: int
+
+
+async def _commit_reconciled_epoch(
+    session: AsyncSession,
+    store: CapacityManagementStore,
+    writer: WriterFence,
+    shadow: ShadowEpochV1,
+) -> tuple[int, ShadowEpochV1 | ExecutableEpochV2]:
+    """Commit the fresh plan under the writer, input, and execution fences."""
+
+    async with session.begin():
+        connection = await session.connection()
+        isolation_level = await connection.get_isolation_level()
+        if isolation_level.upper() != "SERIALIZABLE":
+            raise CapacityStoreError("capacity mutations require a SERIALIZABLE database session")
+        authority_row = (
+            await session.execute(
+                select(CapacityAuthorityState)
+                .where(CapacityAuthorityState.singleton_id == 1)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if authority_row is None:
+            raise CapacityStoreError("capacity authority row is missing")
+        if (
+            authority_row.authority_incarnation != writer.authority_incarnation
+            or authority_row.writer_epoch != writer.writer_epoch
+        ):
+            raise StaleWriterError("writer is no longer current")
+
+        current_input = await store.load_allocation_input(session, writer)
+        if canonical_digest(current_input) != shadow.input_digest:
+            raise StaleAllocationInputError("allocation input changed before commit")
+        if current_input.configuration != shadow.configuration:
+            raise StaleAllocationInputError("configuration changed before commit")
+
+        authority = await store.execution_authority(session)
+        executable_authority = (
+            authority
+            if isinstance(authority, ExecutionAuthorityV2)
+            and authority.execution_state == "active"
+            and authority.executable_new_capacity_ceiling > 0
+            and authority.executable_new_capacity_rate_per_minute > 0
+            else None
+        )
+        if executable_authority is None:
+            raise StaleAllocationInputError("active execution authority changed before commit")
+        if (
+            executable_authority.authority_incarnation != writer.authority_incarnation
+            or executable_authority.writer_epoch != writer.writer_epoch
+            or executable_authority.execution_epoch != authority_row.execution_epoch
+            or executable_authority.execution_manifest_sha256
+            != authority_row.execution_manifest_sha256
+        ):
+            raise StaleWriterError("execution fence changed before commit")
+
+        now = (await session.execute(select(func.clock_timestamp()))).scalar_one()
+        row = CapacityAllocationEpoch(
+            writer_epoch=writer.writer_epoch,
+            configuration_epoch=shadow.configuration.configuration_epoch,
+            input_digest=shadow.input_digest,
+            status="executable",
+            failure_reason=None,
+            complete_payload={},
+            executable=True,
+            execution_epoch=executable_authority.execution_epoch,
+            execution_manifest_sha256=executable_authority.execution_manifest_sha256,
+            committed_at=now,
+        )
+        session.add(row)
+        await session.flush()
+
+        committed = promote_shadow_epoch(
+            shadow,
+            executable_authority,
+            allocation_epoch=row.allocation_epoch,
+        )
+        row.complete_payload = committed.model_dump(mode="json", exclude_none=False)
+
+        for allocation in shadow.allocations:
+            session.add(
+                CapacityAllocation(
+                    allocation_epoch=row.allocation_epoch,
+                    subject_id=allocation.subject_id,
+                    subject_incarnation=allocation.subject_incarnation,
+                    deployment_generation=allocation.deployment_generation,
+                    pool_id=allocation.pool_id,
+                    desired_shapes=[
+                        item.model_dump(mode="json", exclude_none=False)
+                        for item in allocation.desired_shapes
+                    ],
+                    desired_resources={},
+                    commitments=[
+                        match.model_dump(mode="json", exclude_none=False)
+                        for match in allocation.claim_slot_matches
+                    ],
+                    drains=[{"shape_id": shape_id} for shape_id in allocation.draining_shape_ids],
+                    allowances=[
+                        allowance.model_dump(mode="json", exclude_none=False)
+                        for allowance in allocation.placement_allowances
+                    ],
+                    witness=(
+                        {}
+                        if allocation.matching_witness is None
+                        else allocation.matching_witness.model_dump(mode="json", exclude_none=False)
+                    ),
+                    mode="executable",
+                    executable=True,
+                    execution_epoch=executable_authority.execution_epoch,
+                    execution_manifest_sha256=(executable_authority.execution_manifest_sha256),
+                )
+            )
+
+        await session.execute(delete(CapacityFairnessState))
+        for cursor in shadow.next_fairness_cursors:
+            session.add(
+                CapacityFairnessState(
+                    configuration_epoch=shadow.configuration.configuration_epoch,
+                    mode="shadow",
+                    scope="tier_account" if cursor.subject_id is None else "account_subject",
+                    phase=cursor.phase,
+                    tier_id=cursor.tier_id,
+                    account_id=cursor.account_id,
+                    subject_id=cursor.subject_id,
+                    cursor_id=str(
+                        cursor.subject_id if cursor.subject_id is not None else cursor.account_id
+                    )
+                    if (cursor.subject_id is not None or cursor.account_id is not None)
+                    else None,
+                    last_shadow_epoch=row.allocation_epoch,
+                )
+            )
+
+        authority_row.increase_freeze = False
+        authority_row.increase_freeze_reason = None
+        authority_row.updated_at = now
+        session.add(
+            CapacityAuditEvent(
+                actor_kind="manager",
+                actor_id=str(writer.authority_incarnation),
+                event_kind="capacity_executable_epoch_committed",
+                object_binding={"allocation_epoch": row.allocation_epoch},
+                detail={
+                    "input_digest": shadow.input_digest,
+                    "allocation_count": len(shadow.allocations),
+                    "execution_epoch": row.execution_epoch,
+                    "execution_manifest_sha256": row.execution_manifest_sha256,
+                },
+            )
+        )
+        return row.allocation_epoch, committed
 
 
 def _is_async_callable(allocator: ShadowAllocator) -> bool:
@@ -275,14 +438,30 @@ async def reconcile_shadow_once(
 
         try:
             async with session_factory() as session:
-                committed = await resolved_store.commit_shadow_epoch(
-                    session,
-                    writer,
-                    epoch,
-                )
+                execution = await resolved_store.execution_authority(session)
+            if (
+                isinstance(execution, ExecutionAuthorityV2)
+                and execution.execution_state == "active"
+            ):
+                async with session_factory() as session:
+                    allocation_epoch, committed = await _commit_reconciled_epoch(
+                        session,
+                        resolved_store,
+                        writer,
+                        epoch,
+                    )
+            else:
+                async with session_factory() as session:
+                    shadow_committed = await resolved_store.commit_shadow_epoch(
+                        session,
+                        writer,
+                        epoch,
+                    )
+                allocation_epoch = shadow_committed.allocation_epoch
+                committed = epoch
             return ShadowRunResult(
                 status="committed",
-                allocation_epoch=committed.allocation_epoch,
+                allocation_epoch=allocation_epoch,
                 input_digest=committed.input_digest,
                 reason=None,
                 attempt_count=attempt_count,
