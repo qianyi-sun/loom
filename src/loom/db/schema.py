@@ -3273,6 +3273,7 @@ class PipelineRun(Base):
     created_by_user_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
+    display_name: Mapped[str | None] = mapped_column(Text)
     submission_policy: Mapped[str] = mapped_column(Text, nullable=False)
     acceptance_authorization_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
     acceptance_candidate_sha256: Mapped[str | None] = mapped_column(Text)
@@ -3288,6 +3289,14 @@ class PipelineRun(Base):
     parameters_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     parameters_digest: Mapped[str] = mapped_column(Text, nullable=False)
     resolved_inputs_json: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
+    control_binding_snapshots_json: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    control_binding_snapshots_digest: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'sha256:37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570'"),
+    )
     budget_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     request_digest: Mapped[str] = mapped_column(Text, nullable=False)
     idempotency_key: Mapped[str] = mapped_column(Text, nullable=False)
@@ -3323,6 +3332,75 @@ class PipelineRun(Base):
     lease_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
     lease_expires_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+
+
+class ApiIdempotencyRecord(Base):
+    """Durable, endpoint-scoped replay authority for public Pipeline mutations."""
+
+    __tablename__ = "api_idempotency_records"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('pending','completed','failed')",
+            name="api_idempotency_records_state_check",
+        ),
+        CheckConstraint(
+            "request_digest ~ '^sha256:[0-9a-f]{64}$'",
+            name="api_idempotency_records_digest_check",
+        ),
+        CheckConstraint(
+            "octet_length(idempotency_key) BETWEEN 1 AND 128 "
+            "AND idempotency_key = btrim(idempotency_key) "
+            "AND idempotency_key !~ '[[:cntrl:]]'",
+            name="api_idempotency_records_key_check",
+        ),
+        CheckConstraint(
+            "(state = 'pending' AND response_status IS NULL AND resource_id IS NULL "
+            "AND completed_at IS NULL) OR "
+            "(state IN ('completed','failed') AND response_status IS NOT NULL "
+            "AND completed_at IS NOT NULL)",
+            name="api_idempotency_records_response_check",
+        ),
+        CheckConstraint(
+            "(team_id IS NULL AND endpoint IN "
+            "('judge_profile_apply','provider_binding_apply')) OR team_id IS NOT NULL",
+            name="api_idempotency_records_scope_check",
+        ),
+        Index(
+            "api_idempotency_records_team_endpoint_key_uidx",
+            "team_id",
+            "endpoint",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=text("team_id IS NOT NULL"),
+        ),
+        Index(
+            "api_idempotency_records_global_endpoint_key_uidx",
+            "endpoint",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=text("team_id IS NULL"),
+        ),
+        Index("api_idempotency_records_expiry_idx", "expires_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    team_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("teams.id", ondelete="CASCADE")
+    )
+    endpoint: Mapped[str] = mapped_column(Text, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(Text, nullable=False)
+    request_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'pending'"))
+    resource_type: Mapped[str | None] = mapped_column(Text)
+    resource_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    response_status: Mapped[int | None] = mapped_column(Integer)
+    response_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    owner_token: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False, default=uuid4)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
 
 
 class PipelineRunGpuBackendSelection(Base):
