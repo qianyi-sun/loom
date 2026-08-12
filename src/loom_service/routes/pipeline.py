@@ -22,6 +22,10 @@ from loom.db.schema import (
     TeamMembership,
 )
 from loom.pipeline.artifact_commit import PartReceiptV1
+from loom.pipeline.control_bindings import (
+    JudgeExecutionProfileApplyV1,
+    RecipeProviderBindingApplyV1,
+)
 from loom.pipeline.keys import canonical_digest
 from loom.pipeline.public_api import (
     PipelineRunCancelRequestV1,
@@ -43,6 +47,12 @@ from loom_service.pipeline_api_service import (
     encode_pipeline_cursor,
     request_user_cancellation,
     run_projection,
+)
+from loom_service.pipeline_control_bindings import (
+    apply_judge_profile,
+    apply_provider_binding,
+    read_current_binding,
+    read_current_profile,
 )
 from loom_service.routes.object_downloads import stream_object_response
 
@@ -130,6 +140,143 @@ async def _require_team_admin(sc: SessionAndCtx) -> None:
             status_code=403,
             detail={"reason_code": "team_admin_required", "message": "Team admin is required"},
         )
+
+
+def _site_admin_actor(sc: SessionAndCtx) -> UUID:
+    if not is_admin(sc[1]) or sc[1].user_id is None:
+        raise HTTPException(
+            status_code=403,
+            detail={"reason_code": "site_admin_required", "message": "Site admin is required"},
+        )
+    return sc[1].user_id
+
+
+def _apply_preconditions(
+    *, if_none_match: str | None, if_match_version: int | None
+) -> tuple[bool, int | None]:
+    if if_none_match == "*" and if_match_version is None:
+        return True, None
+    if if_none_match is None and if_match_version is not None and if_match_version > 0:
+        return False, if_match_version
+    raise HTTPException(
+        status_code=428,
+        detail={
+            "reason_code": "precondition_required",
+            "message": "Use If-None-Match:* for create or positive If-Match-Version for update",
+        },
+    )
+
+
+@router.get("/admin/judge-execution-profiles/{recipe_name}/{recipe_version}/{profile_name}")
+async def get_admin_judge_profile(
+    sc: SessionAndCtx, recipe_name: str, recipe_version: int, profile_name: str
+) -> dict[str, Any]:
+    _site_admin_actor(sc)
+    value = await read_current_profile(
+        sc[0], recipe_name=recipe_name, recipe_version=recipe_version, profile_name=profile_name
+    )
+    if value is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"reason_code": "not_found", "message": "Judge profile was not found"},
+        )
+    return value
+
+
+@router.put("/admin/judge-execution-profiles/{recipe_name}/{recipe_version}/{profile_name}")
+async def put_admin_judge_profile(
+    response: Response,
+    sc: SessionAndCtx,
+    recipe_name: str,
+    recipe_version: int,
+    profile_name: str,
+    payload: JudgeExecutionProfileApplyV1,
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+    if_none_match: Annotated[str | None, Header(alias="If-None-Match")] = None,
+    if_match_version: Annotated[int | None, Header(alias="If-Match-Version")] = None,
+) -> dict[str, Any]:
+    actor = _site_admin_actor(sc)
+    _validate_key(idempotency_key)
+    create_only, expected_version = _apply_preconditions(
+        if_none_match=if_none_match, if_match_version=if_match_version
+    )
+    try:
+        value, replay = await apply_judge_profile(
+            sc[0],
+            actor_id=actor,
+            recipe_name=recipe_name,
+            recipe_version=recipe_version,
+            profile_name=profile_name,
+            payload=payload,
+            idempotency_key=idempotency_key,
+            create_only=create_only,
+            expected_version=expected_version,
+        )
+        await sc[0].commit()
+    except PipelineApiError as exc:
+        await sc[0].rollback()
+        raise _error(exc) from exc
+    if replay:
+        response.headers["Idempotent-Replay"] = "true"
+    response.headers["ETag"] = f'"{value["snapshot_sha256"]}"'
+    response.headers["X-Config-Version"] = str(value["version"])
+    return value
+
+
+@router.get("/admin/recipe-provider-bindings/{recipe_name}/{recipe_version}/{logical_name}")
+async def get_admin_provider_binding(
+    sc: SessionAndCtx, recipe_name: str, recipe_version: int, logical_name: str
+) -> dict[str, Any]:
+    _site_admin_actor(sc)
+    value = await read_current_binding(
+        sc[0], recipe_name=recipe_name, recipe_version=recipe_version, logical_name=logical_name
+    )
+    if value is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"reason_code": "not_found", "message": "Provider binding was not found"},
+        )
+    return value
+
+
+@router.put("/admin/recipe-provider-bindings/{recipe_name}/{recipe_version}/{logical_name}")
+async def put_admin_provider_binding(
+    response: Response,
+    sc: SessionAndCtx,
+    recipe_name: str,
+    recipe_version: int,
+    logical_name: str,
+    payload: RecipeProviderBindingApplyV1,
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+    if_none_match: Annotated[str | None, Header(alias="If-None-Match")] = None,
+    if_match_version: Annotated[int | None, Header(alias="If-Match-Version")] = None,
+) -> dict[str, Any]:
+    actor = _site_admin_actor(sc)
+    _validate_key(idempotency_key)
+    create_only, expected_version = _apply_preconditions(
+        if_none_match=if_none_match, if_match_version=if_match_version
+    )
+    try:
+        value, replay = await apply_provider_binding(
+            sc[0],
+            actor_id=actor,
+            recipe_name=recipe_name,
+            recipe_version=recipe_version,
+            logical_name=logical_name,
+            payload=payload,
+            idempotency_key=idempotency_key,
+            create_only=create_only,
+            expected_version=expected_version,
+        )
+        await sc[0].commit()
+    except PipelineApiError as exc:
+        await sc[0].rollback()
+        raise _error(exc) from exc
+    if replay:
+        response.headers["Idempotent-Replay"] = "true"
+    response.headers["ETag"] = f'"{value["snapshot_sha256"]}"'
+    response.headers["X-Config-Version"] = str(value["version"])
+    return value
 
 
 @router.post("/pipeline-runs")

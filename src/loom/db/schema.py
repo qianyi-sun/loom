@@ -3403,6 +3403,180 @@ class ApiIdempotencyRecord(Base):
     expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
 
 
+class JudgeExecutionProfile(Base):
+    """One immutable version of a server-owned offline-judge profile."""
+
+    __tablename__ = "judge_execution_profiles"
+    __table_args__ = (
+        CheckConstraint("version > 0", name="judge_execution_profiles_version_positive"),
+        CheckConstraint(
+            "status IN ('active','disabled')",
+            name="judge_execution_profiles_status_check",
+        ),
+        CheckConstraint(
+            "snapshot_sha256 ~ '^sha256:[0-9a-f]{64}$'",
+            name="judge_execution_profiles_digest_check",
+        ),
+        CheckConstraint(
+            "octet_length(snapshot_bytes) > 1 AND "
+            "get_byte(snapshot_bytes, octet_length(snapshot_bytes)-1)=10",
+            name="judge_execution_profiles_document_check",
+        ),
+        UniqueConstraint(
+            "recipe_name",
+            "recipe_version",
+            "profile_name",
+            "version",
+            name="judge_execution_profiles_identity_uidx",
+        ),
+        Index(
+            "judge_execution_profiles_current_uidx",
+            "recipe_name",
+            "recipe_version",
+            "profile_name",
+            unique=True,
+            postgresql_where=text("is_current"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    profile_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    recipe_name: Mapped[str] = mapped_column(Text, nullable=False)
+    recipe_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    profile_name: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    environment: Mapped[str] = mapped_column(Text, nullable=False)
+    provider_connection_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("provider_connections.id", ondelete="RESTRICT"), nullable=False
+    )
+    agent_adapter: Mapped[str] = mapped_column(Text, nullable=False)
+    recipe_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    snapshot_bytes: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    snapshot_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    allowed_team_ids: Mapped[list[UUID]] = mapped_column(ARRAY(PgUUID(as_uuid=True)), nullable=False)
+    is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    created_by: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_by: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class RecipeProviderBinding(Base):
+    """One immutable version of the recipe-owned primitive Provider binding."""
+
+    __tablename__ = "recipe_provider_bindings"
+    __table_args__ = (
+        CheckConstraint("version > 0", name="recipe_provider_bindings_version_positive"),
+        CheckConstraint(
+            "status IN ('active','disabled')", name="recipe_provider_bindings_status_check"
+        ),
+        CheckConstraint(
+            "snapshot_sha256 ~ '^sha256:[0-9a-f]{64}$'",
+            name="recipe_provider_bindings_digest_check",
+        ),
+        CheckConstraint(
+            "octet_length(snapshot_bytes) > 1 AND "
+            "get_byte(snapshot_bytes, octet_length(snapshot_bytes)-1)=10",
+            name="recipe_provider_bindings_document_check",
+        ),
+        UniqueConstraint(
+            "recipe_name",
+            "recipe_version",
+            "logical_name",
+            "version",
+            name="recipe_provider_bindings_identity_uidx",
+        ),
+        Index(
+            "recipe_provider_bindings_current_uidx",
+            "recipe_name",
+            "recipe_version",
+            "logical_name",
+            unique=True,
+            postgresql_where=text("is_current"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    binding_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    recipe_name: Mapped[str] = mapped_column(Text, nullable=False)
+    recipe_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    logical_name: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    environment: Mapped[str] = mapped_column(Text, nullable=False)
+    provider_connection_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("provider_connections.id", ondelete="RESTRICT"), nullable=False
+    )
+    recipe_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    snapshot_bytes: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    snapshot_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    allowed_team_ids: Mapped[list[UUID]] = mapped_column(ARRAY(PgUUID(as_uuid=True)), nullable=False)
+    is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    created_by: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_by: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class PipelineRunControlBinding(Base):
+    """The exact immutable source snapshot selected for one PipelineRun node."""
+
+    __tablename__ = "pipeline_run_control_bindings"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('judge_profile','provider')", name="pipeline_run_control_bindings_kind_check"
+        ),
+        CheckConstraint(
+            "snapshot_sha256 ~ '^sha256:[0-9a-f]{64}$'",
+            name="pipeline_run_control_bindings_digest_check",
+        ),
+        CheckConstraint(
+            "octet_length(snapshot_bytes) > 1 AND "
+            "get_byte(snapshot_bytes, octet_length(snapshot_bytes)-1)=10",
+            name="pipeline_run_control_bindings_document_check",
+        ),
+        UniqueConstraint(
+            "pipeline_run_id", "logical_name", name="pipeline_run_control_bindings_name_uidx"
+        ),
+        UniqueConstraint(
+            "pipeline_run_id", "node_key", name="pipeline_run_control_bindings_node_uidx"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    pipeline_run_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("pipeline_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    logical_name: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    node_key: Mapped[str] = mapped_column(Text, nullable=False)
+    source_object_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    source_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    snapshot_bytes: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    snapshot_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    provider_connection_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("provider_connections.id", ondelete="RESTRICT"), nullable=False
+    )
+    provider_request_limit: Mapped[int] = mapped_column(Integer, nullable=False)
+    provider_cost_limit_microusd: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    per_call_timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class PipelineRunGpuBackendSelection(Base):
     __tablename__ = "pipeline_run_gpu_backend_selections"
     __table_args__ = (

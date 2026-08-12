@@ -284,6 +284,117 @@ WITH candidates AS (
      AND s.resource_profile_digest IS NOT NULL
      AND s.image_runtime_contract_json IS NOT NULL
      AND s.image_runtime_contract_digest IS NOT NULL
+     AND (
+       (
+         jsonb_array_length(
+           COALESCE(s.resolved_execution_spec_json->'control_binding_snapshots', '[]'::jsonb)
+         ) = 0
+         AND s.provider_connection_ref IS NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM pipeline_run_control_bindings unexpected
+            WHERE unexpected.pipeline_run_id = r.id
+              AND unexpected.node_key = s.node_key
+         )
+       )
+       OR EXISTS (
+         SELECT 1
+           FROM pipeline_run_control_bindings frozen
+           JOIN provider_connections connection
+             ON connection.id = frozen.provider_connection_id
+           JOIN LATERAL jsonb_array_elements(
+             s.resolved_execution_spec_json->'control_binding_snapshots'
+           ) control_ref ON true
+          WHERE frozen.pipeline_run_id = r.id
+            AND frozen.node_key = s.node_key
+            AND jsonb_array_length(
+                  s.resolved_execution_spec_json->'control_binding_snapshots'
+                ) = 1
+            AND control_ref->>'logical_name' = frozen.logical_name
+            AND control_ref->>'kind' = frozen.kind
+            AND (control_ref->>'object_id')::uuid = frozen.source_object_id
+            AND (control_ref->>'version')::integer = frozen.source_version
+            AND control_ref->>'snapshot_sha256' = frozen.snapshot_sha256
+            AND s.provider_connection_ref = frozen.provider_connection_id
+            AND frozen.snapshot_json->>'recipe_digest' = r.recipe_digest
+            AND frozen.snapshot_json->>'node_key' = s.node_key
+            AND frozen.snapshot_json->>'status' = 'active'
+            AND frozen.snapshot_json->>'provider_connection_id' =
+                frozen.provider_connection_id::text
+            AND (
+              frozen.snapshot_json->'allowed_team_ids' = '[]'::jsonb
+              OR frozen.snapshot_json->'allowed_team_ids' ? r.team_id::text
+            )
+            AND convert_from(
+                  substring(
+                    frozen.snapshot_bytes FROM 1 FOR octet_length(frozen.snapshot_bytes) - 1
+                  ), 'UTF8'
+                )::jsonb = frozen.snapshot_json
+            AND (
+              (
+                frozen.kind = 'judge_profile'
+                AND EXISTS (
+                  SELECT 1 FROM judge_execution_profiles source_profile
+                   WHERE source_profile.profile_id = frozen.source_object_id
+                     AND source_profile.version = frozen.source_version
+                     AND source_profile.snapshot_bytes = frozen.snapshot_bytes
+                     AND source_profile.snapshot_sha256 = frozen.snapshot_sha256
+                )
+                AND EXISTS (
+                  SELECT 1 FROM judge_execution_profiles live_profile
+                   WHERE live_profile.profile_id = frozen.source_object_id
+                     AND live_profile.is_current
+                     AND live_profile.status = 'active'
+                )
+              )
+              OR (
+                frozen.kind = 'provider'
+                AND EXISTS (
+                  SELECT 1 FROM recipe_provider_bindings source_binding
+                   WHERE source_binding.binding_id = frozen.source_object_id
+                     AND source_binding.version = frozen.source_version
+                     AND source_binding.snapshot_bytes = frozen.snapshot_bytes
+                     AND source_binding.snapshot_sha256 = frozen.snapshot_sha256
+                )
+                AND EXISTS (
+                  SELECT 1 FROM recipe_provider_bindings live_binding
+                   WHERE live_binding.binding_id = frozen.source_object_id
+                     AND live_binding.is_current
+                     AND live_binding.status = 'active'
+                )
+              )
+            )
+            AND connection.status = 'valid'
+            AND connection.deleted_at IS NULL
+            AND (
+              connection.allowed_models IS NULL
+              OR frozen.snapshot_json->>'model' = ANY(connection.allowed_models)
+            )
+            AND NOT EXISTS (
+              SELECT 1
+                FROM jsonb_array_elements(frozen.snapshot_json->'provider_asset_locks') asset_lock
+               WHERE NOT EXISTS (
+                 SELECT 1
+                   FROM jsonb_array_elements(
+                     s.image_runtime_contract_json->'provider_assets'
+                   ) image_asset
+                  WHERE image_asset->>'logical_name' = frozen.logical_name
+                    AND image_asset->>'role' = asset_lock->>'role'
+                    AND image_asset->>'image_path' = asset_lock->>'image_path'
+                    AND image_asset->>'sha256' = asset_lock->>'sha256'
+               )
+            )
+            AND EXISTS (
+              SELECT 1
+                FROM execution_attempt_provider_budgets attempt_budget
+               WHERE attempt_budget.attempt_id = a.id
+                 AND attempt_budget.binding_snapshot_sha256 = frozen.snapshot_sha256
+                 AND attempt_budget.request_limit = frozen.provider_request_limit
+                 AND attempt_budget.cost_limit_microusd = frozen.provider_cost_limit_microusd
+                 AND attempt_budget.per_call_timeout_seconds =
+                     frozen.per_call_timeout_seconds
+            )
+       )
+     )
      AND w.capability_snapshot_json IS NOT NULL
      AND w.capability_snapshot_json->>'schema_version' = 'loom.worker-capabilities.v1'
      AND (w.capability_snapshot_json->>'cpu_cores')::bigint >=
