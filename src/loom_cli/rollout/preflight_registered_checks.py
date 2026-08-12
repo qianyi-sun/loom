@@ -153,6 +153,7 @@ from loom_cli.rollout.systemd_unit_readiness import (
 )
 
 _CLEAR_EXTERNAL_SUPERVISOR_TRANSITION_DIGEST = hashlib.sha256(b"{}").hexdigest()
+EXTERNAL_SUPERVISOR_PREDECESSOR_TIMEOUT_SECONDS = 3600
 
 
 @dataclass(frozen=True, slots=True)
@@ -968,7 +969,9 @@ def build_external_supervisor_predecessor_check(
                 EvidenceField("pool-identity-digest", "sha256"),
                 EvidenceField("controller-bindings", "string-map"),
             ),
-            timeout_seconds=30,
+            # The GB10 adapter propagates this absolute bound across elapsed
+            # predecessor work and both possible controller observations.
+            timeout_seconds=EXTERNAL_SUPERVISOR_PREDECESSOR_TIMEOUT_SECONDS,
             freshness_ttl_seconds=120,
             remediation=(
                 "restore the checked-in #907 or active canonical supervisor authority, "
@@ -976,7 +979,7 @@ def build_external_supervisor_predecessor_check(
             ),
             secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
         ),
-        implementation_version="v2",
+        implementation_version="v4",
         operations={CheckOperation.PROBE: probe},
     )
 
@@ -3416,6 +3419,7 @@ def _empty_final_gate_probe() -> CheckProbe:
 
 
 __all__ = [
+    "EXTERNAL_SUPERVISOR_PREDECESSOR_TIMEOUT_SECONDS",
     "CredentialProbeSource",
     "ExternalSupervisorPredecessorSnapshot",
     "ExternalSupervisorPredecessorSource",

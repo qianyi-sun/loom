@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from loom.data_lifecycle import StagingCapacity
+from loom_cli.rollout import preflight_contract
 from loom_cli.rollout.external_supervisor_predecessor import (
     GB10_CANONICAL_UNIT_DIR,
     ExternalSupervisorCanonicalIdentity,
@@ -37,6 +38,7 @@ from loom_cli.rollout.preflight_contract import EXTERNAL_SUPERVISOR_ABSENT_DIGES
 from loom_cli.rollout.preflight_registered_checks import (
     CredentialProbeSource,
     ExternalSupervisorPredecessorSnapshot,
+    build_external_supervisor_predecessor_check,
 )
 from loom_cli.rollout.readonly_authority import ReadonlyAuthorityEvidence
 from tests.loom_cli.rollout.operator.test_checkpoint_inventory_provider import _config
@@ -847,17 +849,44 @@ def test_installed_predecessor_sources_share_one_pool_identity_snapshot() -> Non
     }
 
 
+@pytest.mark.parametrize(
+    ("elapsed_prework", "first_attempt_elapsed", "expected_timeouts", "expected_success"),
+    (
+        (200.0, 400, [1740, 1740], True),
+        (0.0, 1740, [1740], False),
+    ),
+)
 def test_installed_gb10_absent_retry_fits_inside_predecessor_check_deadline(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    elapsed_prework: float,
+    first_attempt_elapsed: int,
+    expected_timeouts: list[int],
+    expected_success: bool,
 ) -> None:
     candidate_root = Path(__file__).resolve().parents[4]
     context = _installed_predecessor_context(candidate_root)
     expected = SimpleNamespace()
     attempts: list[dict[str, object]] = []
+    elapsed_seconds = elapsed_prework
+    check_timeout = build_external_supervisor_predecessor_check(
+        lambda _context: {}
+    ).spec.timeout_seconds
+    cancellation = preflight_contract._CheckCancellation(check_timeout)
+    monkeypatch.setattr(preflight_contract, "monotonic", lambda: 0.0)
+    cancellation.mark_started()
+    context = CheckContext(context.bindings, _cancellation=cancellation)
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "monotonic",
+        lambda: elapsed_seconds,
+        raising=False,
+    )
 
     def run_subprocess(argv, **kwargs):
+        nonlocal elapsed_seconds
         attempts.append({"argv": tuple(argv), **kwargs})
+        elapsed_seconds += first_attempt_elapsed if len(attempts) == 1 else int(kwargs["timeout"])
         return SimpleNamespace(
             returncode=1 if len(attempts) == 1 else 0,
             stdout="",
@@ -877,8 +906,11 @@ def test_installed_gb10_absent_retry_fits_inside_predecessor_check_deadline(
     )
 
     class Transport:
+        def __init__(self, run):
+            self.run = run
+
         def observe(self, _artifact, authority=None):
-            result = commands.gb10_supervisor_controller(
+            result = self.run(
                 ("ssh", "fixed-controller"),
                 '{"schema_version":1}\n',
             )
@@ -890,16 +922,21 @@ def test_installed_gb10_absent_retry_fits_inside_predecessor_check_deadline(
     monkeypatch.setattr(
         installed_deep_preflight_factory,
         "build_fixed_gb10_external_supervisor_transport",
-        lambda **_kwargs: Transport(),
+        lambda **kwargs: Transport(kwargs["run"]),
     )
     source = installed_deep_preflight_factory._gb10_external_supervisor_observation_source(
         candidate_root=candidate_root,
         run=commands.gb10_supervisor_controller,
     )
 
-    assert source(context) is expected
-    assert [attempt["timeout"] for attempt in attempts] == [12, 12]
-    assert sum(int(attempt["timeout"]) for attempt in attempts) < 30
+    if expected_success:
+        assert source(context) is expected
+        assert elapsed_seconds + 600 <= check_timeout
+    else:
+        with pytest.raises(RuntimeError, match="deadline"):
+            source(context)
+        assert elapsed_seconds + 1740 + 600 > check_timeout
+    assert [attempt["timeout"] for attempt in attempts] == expected_timeouts
 
 
 def test_installed_gb10_observation_binds_context_candidate_to_typed_transport(
@@ -935,10 +972,13 @@ def test_installed_gb10_observation_binds_context_candidate_to_typed_transport(
     )
 
     assert source(context) is expected
-    assert captured["builder"] == {
+    builder = captured["builder"]
+    assert isinstance(builder, dict)
+    bounded_run = builder.pop("run")
+    assert callable(bounded_run)
+    assert builder == {
         "candidate_sha": context.bindings["candidate.sha"],
         "candidate_tree": context.bindings["candidate.tree"],
-        "run": run,
     }
     artifact = captured["artifact"]
     assert {item.execution_host for item in artifact.supervisors} == {"gx10-01c7"}

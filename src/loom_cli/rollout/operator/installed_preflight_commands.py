@@ -19,6 +19,7 @@ from .readonly_preflight_authority import READONLY_KUBECONFIG_PATH
 
 _DNS_RE = re.compile(r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$")
 _BOOT_ID_PROBE = ("cat", "/proc/sys/kernel/random/boot_id")
+GB10_SUPERVISOR_CONTROLLER_MAX_TIMEOUT_SECONDS = 1740
 
 
 class CommandResult(Protocol):
@@ -110,12 +111,24 @@ class InstalledPreflightCommands:
         self,
         argv: Sequence[str],
         payload: str,
+        *,
+        timeout: int = GB10_SUPERVISOR_CONTROLLER_MAX_TIMEOUT_SECONDS,
     ) -> CommandResult:
-        """Run one typed read-only controller observation with bounded stdin."""
+        """Run one cold-capable attempt within its propagated DAG allowance.
 
-        if not payload or len(payload.encode()) > 4 * 1024 * 1024:
+        The broker bounds uv synchronization at 1,200 seconds.  The outer
+        maximum leaves nine minutes for Git, hardening, and typed observation;
+        the caller may lower it to preserve the absolute check deadline.
+        """
+
+        if (
+            not payload
+            or len(payload.encode()) > 4 * 1024 * 1024
+            or type(timeout) is not int
+            or not 1 <= timeout <= GB10_SUPERVISOR_CONTROLLER_MAX_TIMEOUT_SECONDS
+        ):
             raise ValueError("GB10 supervisor controller payload is invalid")
-        return self._execute(argv, input=payload, timeout=12)
+        return self._execute(argv, input=payload, timeout=timeout)
 
     def systemd_preflight(self, argv: Sequence[str]) -> CommandResult:
         """Run only the fixed Tier 0 systemd probes with a short RPC bound."""
@@ -279,4 +292,9 @@ class InstalledPreflightCommands:
         return result
 
 
-__all__ = ["CommandResult", "InstalledPreflightCommands", "SubprocessRun"]
+__all__ = [
+    "GB10_SUPERVISOR_CONTROLLER_MAX_TIMEOUT_SECONDS",
+    "CommandResult",
+    "InstalledPreflightCommands",
+    "SubprocessRun",
+]

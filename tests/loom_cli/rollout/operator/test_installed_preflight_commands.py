@@ -222,6 +222,11 @@ def test_gb10_supervisor_controller_ssh_forwards_only_bounded_typed_stdin(
     )
 
     commands.gb10_supervisor_controller(("ssh", "fixed-controller"), '{"schema_version":1}\n')
+    commands.gb10_supervisor_controller(
+        ("ssh", "fixed-controller"),
+        '{"schema_version":1}\n',
+        timeout=1200,
+    )
 
     assert calls == [
         {
@@ -229,8 +234,15 @@ def test_gb10_supervisor_controller_ssh_forwards_only_bounded_typed_stdin(
             "cwd": None,
             "env": _environment(),
             "input": '{"schema_version":1}\n',
-            "timeout": 12,
-        }
+            "timeout": 1740,
+        },
+        {
+            "argv": ("ssh", "fixed-controller"),
+            "cwd": None,
+            "env": _environment(),
+            "input": '{"schema_version":1}\n',
+            "timeout": 1200,
+        },
     ]
     with pytest.raises(ValueError, match="payload is invalid"):
         commands.gb10_supervisor_controller(

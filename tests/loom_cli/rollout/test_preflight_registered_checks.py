@@ -659,6 +659,7 @@ def test_registered_external_supervisor_predecessor_binds_legacy_authority() -> 
         lambda _context: _external_supervisor_snapshots(snapshot)
     )
 
+    assert check.spec.timeout_seconds == 3600
     probe = check.operations[CheckOperation.PROBE](_external_supervisor_context())
 
     assert probe.passed
@@ -673,9 +674,7 @@ def test_registered_external_supervisor_predecessor_binds_every_controller() -> 
     gb10 = _external_supervisor_snapshot()
     snapshots = _external_supervisor_snapshots(gb10)
     oldlab = snapshots["TRT-EAI-OLDLAB-1"]
-    check = build_external_supervisor_predecessor_check(
-        lambda _context: snapshots
-    )
+    check = build_external_supervisor_predecessor_check(lambda _context: snapshots)
 
     probe = check.operations[CheckOperation.PROBE](_external_supervisor_context())
 

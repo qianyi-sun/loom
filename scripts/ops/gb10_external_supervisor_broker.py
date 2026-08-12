@@ -22,6 +22,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
@@ -47,6 +48,7 @@ _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _MAX_REQUEST_BYTES = 4 * 1024 * 1024
 _MAX_COMMAND_OUTPUT = 1024 * 1024
 _MAX_TREE_ENTRIES = 300_000
+_MAX_SYMLINK_HOPS = 40
 
 
 class BrokerError(RuntimeError):
@@ -275,6 +277,54 @@ def _safe_executable(path: Path, *, owner_uid: int, owner_gid: int, label: str) 
         raise BrokerError(f"{label} is unsafe")
 
 
+def _validate_relative_symlink_chain(
+    path: Path,
+    target: Path,
+    *,
+    root_resolved: Path,
+    system_python: Path,
+) -> None:
+    try:
+        resolved_parts = list(path.parent.resolve(strict=True).relative_to(root_resolved).parts)
+    except (OSError, ValueError) as exc:
+        raise BrokerError("candidate runtime symlink is unsafe") from exc
+    pending = deque(target.parts)
+    symlink_hops = 0
+    while pending:
+        part = pending.popleft()
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not resolved_parts:
+                raise BrokerError("candidate runtime symlink escapes authority")
+            resolved_parts.pop()
+            continue
+        resolved_parts.append(part)
+        destination = root_resolved.joinpath(*resolved_parts)
+        try:
+            metadata = os.lstat(destination)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise BrokerError("candidate runtime symlink is unsafe") from exc
+        if not stat.S_ISLNK(metadata.st_mode):
+            continue
+        symlink_hops += 1
+        if symlink_hops > _MAX_SYMLINK_HOPS:
+            raise BrokerError("candidate runtime symlink is unsafe")
+        nested = Path(os.readlink(destination))
+        resolved_parts.pop()
+        if nested.is_absolute():
+            try:
+                resolved = nested.resolve(strict=True)
+            except OSError as exc:
+                raise BrokerError("candidate runtime symlink is unsafe") from exc
+            if pending or resolved != system_python.resolve(strict=True):
+                raise BrokerError("candidate runtime symlink escapes authority")
+            return
+        pending.extendleft(reversed(nested.parts))
+
+
 def _safe_tree(
     root: Path,
     *,
@@ -305,9 +355,18 @@ def _safe_tree(
                     if resolved != system_python.resolve(strict=True):
                         raise BrokerError("candidate runtime symlink escapes authority")
                 else:
-                    resolved = (path.parent / target).resolve(strict=False)
-                    if not resolved.is_relative_to(root_resolved):
+                    # Reject a direct lexical escape before resolving the
+                    # complete in-root chain.  Standard venvs terminate at the
+                    # separately approved absolute system-Python link.
+                    destination = Path(os.path.normpath(path.parent.resolve(strict=True) / target))
+                    if not destination.is_relative_to(root_resolved):
                         raise BrokerError("candidate runtime symlink escapes authority")
+                    _validate_relative_symlink_chain(
+                        path,
+                        target,
+                        root_resolved=root_resolved,
+                        system_python=system_python,
+                    )
                 continue
             if not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)):
                 raise BrokerError("candidate runtime contains a special file")
@@ -856,7 +915,7 @@ def _publish_candidate(
                 str(system_python),
             ],
             environment=environment,
-            timeout=1800,
+            timeout=1200,
             run_as=build_identity,
         )
         sealed_temporary = Path(

@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-from typing import cast
+from time import monotonic
+from typing import Protocol, cast
 from urllib.parse import urlsplit
 
 from loom_cli.cluster_cmd import render_manifests
@@ -37,6 +38,7 @@ from loom_cli.rollout.preflight_artifact_store import (
 from loom_cli.rollout.preflight_attestation_store import PreflightAttestationStore
 from loom_cli.rollout.preflight_contract import CheckContext
 from loom_cli.rollout.preflight_registered_checks import (
+    EXTERNAL_SUPERVISOR_PREDECESSOR_TIMEOUT_SECONDS,
     ExternalSupervisorPredecessorSnapshot,
     ExternalSupervisorPredecessorSource,
 )
@@ -58,7 +60,11 @@ from .config import OperatorConfig
 from .deep_preflight_authority import RuntimePurpose
 from .installed_backup_authority import build_installed_backup_authority
 from .installed_deep_preflight import InstalledDeepPreflightComposition
-from .installed_preflight_commands import InstalledPreflightCommands
+from .installed_preflight_commands import (
+    GB10_SUPERVISOR_CONTROLLER_MAX_TIMEOUT_SECONDS,
+    CommandResult,
+    InstalledPreflightCommands,
+)
 from .installed_preflight_inputs import InstalledPreflightInputs
 from .model import CandidateBinding
 from .policy import sanitized_child_environment
@@ -73,7 +79,6 @@ from .protected_external_supervisor_transport import (
 )
 from .protected_gb10_external_supervisor_transport import (
     GB10_CONTROLLER_EXECUTION_HOST,
-    CommandRunner,
     build_fixed_gb10_external_supervisor_transport,
 )
 from .readonly_capacity_client import (
@@ -97,6 +102,19 @@ def _hash_json(value: object) -> str:
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+_GB10_CONTROLLER_DEADLINE_RESERVE_SECONDS = 600
+
+
+class _GB10ControllerRunner(Protocol):
+    def __call__(
+        self,
+        argv: Sequence[str],
+        payload: str,
+        *,
+        timeout: int,
+    ) -> CommandResult: ...
 
 
 def _readonly_capacity_probe_inputs(
@@ -420,7 +438,7 @@ def _controller_predecessor_sources(
 def _gb10_external_supervisor_observation_source(
     *,
     candidate_root: Path,
-    run: CommandRunner,
+    run: _GB10ControllerRunner,
 ) -> Callable[[CheckContext], ExternalSupervisorLiveObservation]:
     def observe(context: CheckContext) -> ExternalSupervisorLiveObservation:
         candidate_sha = context.bindings.get("candidate.sha")
@@ -435,10 +453,25 @@ def _gb10_external_supervisor_observation_source(
             environment="staging",
             execution_host=GB10_CONTROLLER_EXECUTION_HOST,
         )
+        check_deadline = context.deadline_monotonic
+        if check_deadline is None:
+            check_deadline = monotonic() + EXTERNAL_SUPERVISOR_PREDECESSOR_TIMEOUT_SECONDS
+        controller_deadline = check_deadline - _GB10_CONTROLLER_DEADLINE_RESERVE_SECONDS
+
+        def run_with_deadline(argv: Sequence[str], payload: str) -> CommandResult:
+            remaining = int(controller_deadline - monotonic())
+            if remaining < GB10_SUPERVISOR_CONTROLLER_MAX_TIMEOUT_SECONDS:
+                raise RuntimeError("GB10 controller deadline cannot admit a cold attempt")
+            return run(
+                argv,
+                payload,
+                timeout=GB10_SUPERVISOR_CONTROLLER_MAX_TIMEOUT_SECONDS,
+            )
+
         transport = build_fixed_gb10_external_supervisor_transport(
             candidate_sha=candidate_sha,
             candidate_tree=candidate_tree,
-            run=run,
+            run=run_with_deadline,
         )
         try:
             return transport.observe(artifact)
