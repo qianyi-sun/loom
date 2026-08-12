@@ -83,6 +83,8 @@ class FakeGitHubClient:
         ]
         self.created: list[dict[str, Any]] = []
         self.updated: list[tuple[int, dict[str, Any]]] = []
+        self.statuses: list[tuple[str, dict[str, Any]]] = []
+        self.writes: list[tuple[str, str]] = []
         self._next_check_id = 1000
 
     def get_pull_request(self, number: int) -> Mapping[str, Any]:
@@ -106,6 +108,7 @@ class FakeGitHubClient:
         return deepcopy(self.checks.get(context, []))
 
     def create_check_run(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        self.writes.append(("check:create", str(payload["name"])))
         check = deepcopy(dict(payload))
         check.update(
             {
@@ -119,6 +122,7 @@ class FakeGitHubClient:
         return deepcopy(check)
 
     def update_check_run(self, check_run_id: int, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        self.writes.append(("check:update", str(payload["name"])))
         for context, checks in list(self.checks.items()):
             for index, check in enumerate(checks):
                 if check["id"] == check_run_id:
@@ -133,6 +137,14 @@ class FakeGitHubClient:
                     self.updated.append((check_run_id, deepcopy(dict(payload))))
                     return deepcopy(check)
         raise AssertionError(f"unknown check id {check_run_id}")
+
+    def create_commit_status(
+        self, head_sha: str, payload: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        status = {"sha": head_sha, **deepcopy(dict(payload))}
+        self.statuses.append((head_sha, deepcopy(dict(payload))))
+        self.writes.append((f"status:{payload['state']}", str(payload["context"])))
+        return status
 
     def list_workflow_runs(
         self, workflow_id: int, head_sha: str, event: str
@@ -370,6 +382,13 @@ def test_draft_then_ready_creates_one_in_progress_check_per_context() -> None:
         check["external_id"] == f"loom-authoritative-gate:{REPOSITORY}:{HEAD}:{check['name']}"
         for check in client.created
     )
+    assert [payload["state"] for _, payload in client.statuses] == [
+        "pending"
+    ] * len(GATE_SPECS)
+    for spec in GATE_SPECS:
+        assert client.writes.index(("status:pending", spec.context)) < client.writes.index(
+            ("check:create", spec.context)
+        )
 
 
 @pytest.mark.parametrize("spec_index", range(len(GATE_SPECS)))
@@ -401,15 +420,95 @@ def test_terminal_result_retires_pending_and_creates_required_completed(
     assert required[0]["id"] != pending_id
     assert required[0]["status"] == "completed"
     assert required[0]["conclusion"] == "success"
+    assert required[0]["started_at"] == required[0]["completed_at"]
     assert not check_payload_is_pending(required[0])
     retired_name = f"authoritative-gate-retired ({spec.context} #{pending_id})"
     assert client.checks[retired_name][0]["id"] == pending_id
     assert client.checks[retired_name][0]["conclusion"] == "failure"
     assert_check_is_pending(client.checks[retired_name][0])
+    context_statuses = [
+        payload for _, payload in client.statuses if payload["context"] == spec.context
+    ]
+    assert [payload["state"] for payload in context_statuses] == ["pending", "success"]
+    terminal_create_index = max(
+        index
+        for index, write in enumerate(client.writes)
+        if write == ("check:create", spec.context)
+    )
+    assert terminal_create_index < client.writes.index(("status:success", spec.context))
 
     created_before_replay = len(client.created)
     assert process_event(workflow_event(run), client, context=spec.context).outcome == "success"
     assert len(client.created) == created_before_replay
+
+
+def test_pending_status_failure_prevents_a_green_or_missing_ledger_write() -> None:
+    class FailingPendingStatusClient(FakeGitHubClient):
+        def create_commit_status(
+            self, head_sha: str, payload: Mapping[str, Any]
+        ) -> Mapping[str, Any]:
+            raise PublisherError("temporary status failure")
+
+    client = FailingPendingStatusClient()
+
+    with pytest.raises(PublisherError, match="temporary status failure"):
+        process_event(
+            pull_event(action="ready_for_review"),
+            client,
+            context=GATE_SPECS[0].context,
+        )
+
+    assert not client.created
+    assert not client.updated
+
+
+def test_terminal_status_failure_leaves_the_last_commit_status_pending() -> None:
+    class FailingTerminalStatusClient(FakeGitHubClient):
+        def create_commit_status(
+            self, head_sha: str, payload: Mapping[str, Any]
+        ) -> Mapping[str, Any]:
+            if payload["state"] != "pending":
+                raise PublisherError("temporary status failure")
+            return super().create_commit_status(head_sha, payload)
+
+    client = FailingTerminalStatusClient()
+    current = generation()
+    seed_invalidation(client, current)
+    spec = GATE_SPECS[0]
+    run = workflow_run(
+        run_id=79,
+        generation=current,
+        status="completed",
+        conclusion="success",
+    )
+    client.runs[spec.workflow_id] = [run]
+    client.jobs[79] = [{"name": spec.attempt_job, "conclusion": "success"}]
+
+    with pytest.raises(PublisherError, match="temporary status failure"):
+        process_event(workflow_event(run), client, context=spec.context)
+
+    assert client.checks[spec.context][0]["conclusion"] == "failure"
+    assert all(payload["state"] == "pending" for _, payload in client.statuses)
+    assert client.statuses
+
+
+def test_mismatched_commit_status_response_fails_closed_before_ledger_write() -> None:
+    class MismatchedStatusClient(FakeGitHubClient):
+        def create_commit_status(
+            self, head_sha: str, payload: Mapping[str, Any]
+        ) -> Mapping[str, Any]:
+            return {"sha": head_sha, **payload, "context": "wrong-context"}
+
+    client = MismatchedStatusClient()
+
+    with pytest.raises(PublisherError, match="authoritative repository-checks commit status"):
+        process_event(
+            pull_event(action="ready_for_review"),
+            client,
+            context=GATE_SPECS[0].context,
+        )
+
+    assert not client.created
 
 
 def test_rapid_relevant_labels_update_the_same_checks_to_latest_generation() -> None:

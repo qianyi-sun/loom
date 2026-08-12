@@ -22,6 +22,7 @@ permissions:
   contents: read
   issues: read
   pull-requests: read
+  statuses: write
 
 jobs:
   # CheckRuns created with the workflow token attach to this workflow's first
