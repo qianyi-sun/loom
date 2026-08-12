@@ -103,7 +103,7 @@ class FakeGitHubClient:
 
     def list_check_runs(self, head_sha: str, context: str) -> Sequence[Mapping[str, Any]]:
         assert head_sha == HEAD
-        return deepcopy(self.checks[context])
+        return deepcopy(self.checks.get(context, []))
 
     def create_check_run(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         check = deepcopy(dict(payload))
@@ -114,7 +114,7 @@ class FakeGitHubClient:
             }
         )
         self._next_check_id += 1
-        self.checks[str(check["name"])].append(check)
+        self.checks.setdefault(str(check["name"]), []).append(check)
         self.created.append(deepcopy(check))
         return deepcopy(check)
 
@@ -372,6 +372,46 @@ def test_draft_then_ready_creates_one_in_progress_check_per_context() -> None:
     )
 
 
+@pytest.mark.parametrize("spec_index", range(len(GATE_SPECS)))
+def test_terminal_result_retires_pending_and_creates_required_completed(
+    spec_index: int,
+) -> None:
+    client = FakeGitHubClient()
+    current = generation()
+    seed_invalidation(client, current)
+    spec = GATE_SPECS[spec_index]
+    pending_id = client.checks[spec.context][0]["id"]
+    run = workflow_run(
+        spec_index=spec_index,
+        run_id=80 + spec_index,
+        generation=current,
+        status="completed",
+        conclusion="success",
+    )
+    client.runs[spec.workflow_id] = [run]
+    client.jobs[80 + spec_index] = [
+        {"name": spec.attempt_job, "conclusion": "success"}
+    ]
+
+    result = process_event(workflow_event(run), client, context=spec.context)
+
+    assert result.outcome == "success"
+    required = client.checks[spec.context]
+    assert len(required) == 1
+    assert required[0]["id"] != pending_id
+    assert required[0]["status"] == "completed"
+    assert required[0]["conclusion"] == "success"
+    assert not check_payload_is_pending(required[0])
+    retired_name = f"authoritative-gate-retired ({spec.context} #{pending_id})"
+    assert client.checks[retired_name][0]["id"] == pending_id
+    assert client.checks[retired_name][0]["conclusion"] == "failure"
+    assert_check_is_pending(client.checks[retired_name][0])
+
+    created_before_replay = len(client.created)
+    assert process_event(workflow_event(run), client, context=spec.context).outcome == "success"
+    assert len(client.created) == created_before_replay
+
+
 def test_rapid_relevant_labels_update_the_same_checks_to_latest_generation() -> None:
     client = FakeGitHubClient()
     client.pull["labels"] = [{"name": "ci:images"}]
@@ -507,10 +547,16 @@ def test_completed_check_fails_closed_in_place_for_a_new_same_head_generation() 
 
     assert process_event(workflow_event(replacement), client).outcome == "success"
     final_check = client.checks[GATE_SPECS[0].context][0]
-    assert final_check["id"] == original_check_id
+    assert final_check["id"] != original_check_id
     assert final_check["status"] == "completed"
     assert final_check["conclusion"] == "success"
     assert "pending" not in json.loads(final_check["output"]["summary"])
+    retired = client.checks[
+        f"authoritative-gate-retired ({GATE_SPECS[0].context} #{original_check_id})"
+    ][0]
+    assert retired["id"] == original_check_id
+    assert retired["conclusion"] == "failure"
+    assert_check_is_pending(retired)
 
 
 def test_check_run_response_from_an_unexpected_app_fails_closed() -> None:
@@ -883,12 +929,17 @@ def test_valid_duplicate_publisher_checks_reconcile_through_newest_identity() ->
 
     assert result.outcome == "success"
     assert client.updated[-1][0] == 2000
-    assert client.checks[spec.context][0]["id"] == original["id"]
-    assert_check_is_pending(client.checks[spec.context][0])
-    newest = client.checks[spec.context][1]
-    assert newest["id"] == 2000
+    assert len(client.checks[spec.context]) == 1
+    newest = client.checks[spec.context][0]
+    assert newest["id"] not in {original["id"], 2000}
     assert newest["status"] == "completed"
     assert newest["conclusion"] == "success"
+    assert client.checks[
+        f"authoritative-gate-retired ({spec.context} #{original['id']})"
+    ][0]["id"] == original["id"]
+    assert client.checks[f"authoritative-gate-retired ({spec.context} #2000)"][0][
+        "id"
+    ] == 2000
 
     client.pull["labels"] = [{"name": "ci:coverage-summary"}]
     client.pull["updated_at"] = "2026-07-22T10:00:01Z"
@@ -910,8 +961,8 @@ def test_valid_duplicate_publisher_checks_reconcile_through_newest_identity() ->
     )
 
     assert replacement.outcome == "in_progress"
-    assert any(check_id == 2000 for check_id, _ in client.updated[-4:])
-    assert_check_is_pending(client.checks[spec.context][1])
+    assert any(check_id == newest["id"] for check_id, _ in client.updated[-4:])
+    assert_check_is_pending(client.checks[spec.context][0])
 
 
 def test_base_without_publisher_keeps_legacy_gate_and_creates_no_custom_check() -> None:
@@ -1587,7 +1638,7 @@ def test_delayed_old_head_invocation_preserves_current_head_success() -> None:
         def list_check_runs(self, head_sha: str, context: str) -> Sequence[Mapping[str, Any]]:
             if head_sha != self.pull["head"]["sha"]:
                 return []
-            return deepcopy(self.checks[context])
+            return deepcopy(self.checks.get(context, []))
 
         def list_workflow_runs(
             self, workflow_id: int, head_sha: str, event: str
@@ -1759,10 +1810,13 @@ def test_workflow_attempt_webhook_is_an_inventory_floor() -> None:
 
     assert process_event(workflow_event(completed_second), client).outcome == "success"
     final_check = client.checks[GATE_SPECS[0].context][0]
-    assert final_check["id"] == original_check_id
+    assert final_check["id"] != original_check_id
     assert final_check["status"] == "completed"
     assert final_check["conclusion"] == "success"
     assert "pending" not in json.loads(final_check["output"]["summary"])
+    assert client.checks[
+        f"authoritative-gate-retired ({GATE_SPECS[0].context} #{original_check_id})"
+    ][0]["id"] == original_check_id
 
 
 def test_merge_group_new_attempt_during_completion_stays_pending() -> None:
@@ -2174,15 +2228,13 @@ def test_terminal_webhook_overrides_stale_rest_for_the_same_attempt(
     assert check["conclusion"] == "failure"
 
 
-def test_invalid_terminal_patch_response_is_compensated_to_pending() -> None:
+def test_invalid_terminal_creation_response_is_compensated_to_pending() -> None:
     class InvalidTerminalResponseClient(FakeGitHubClient):
-        def update_check_run(
-            self, check_run_id: int, payload: Mapping[str, Any]
-        ) -> Mapping[str, Any]:
-            response = super().update_check_run(check_run_id, payload)
+        def create_check_run(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+            response = super().create_check_run(payload)
             if (
                 payload.get("status") == "completed"
-                and payload.get("conclusion") != "neutral"
+                and not check_payload_is_pending(payload)
             ):
                 response = deepcopy(response)
                 response["external_id"] = "invalid-after-write"
@@ -2205,6 +2257,35 @@ def test_invalid_terminal_patch_response_is_compensated_to_pending() -> None:
 
     check = client.checks[GATE_SPECS[0].context][0]
     assert_check_is_pending(check)
+
+
+def test_invalid_retirement_response_is_compensated_to_pending() -> None:
+    class InvalidRetirementResponseClient(FakeGitHubClient):
+        def update_check_run(
+            self, check_run_id: int, payload: Mapping[str, Any]
+        ) -> Mapping[str, Any]:
+            response = super().update_check_run(check_run_id, payload)
+            if str(payload.get("name", "")).startswith("authoritative-gate-retired"):
+                response = deepcopy(response)
+                response["name"] = GATE_SPECS[0].context
+            return response
+
+    client = InvalidRetirementResponseClient()
+    current = generation()
+    seed_invalidation(client, current)
+    run = workflow_run(
+        run_id=966,
+        generation=current,
+        status="completed",
+        conclusion="success",
+    )
+    client.runs[GATE_SPECS[0].workflow_id] = [run]
+    client.jobs[966] = [{"name": GATE_SPECS[0].attempt_job, "conclusion": "success"}]
+
+    with pytest.raises(PublisherError, match="did not retire"):
+        process_event(workflow_event(run), client)
+
+    assert_check_is_pending(client.checks[GATE_SPECS[0].context][0])
 
 
 def test_observed_new_pr_authority_cannot_regress_within_one_invocation() -> None:
@@ -3311,7 +3392,7 @@ def test_post_merge_proven_stale_full_delivery_restores_preempted_success() -> N
     assert (state["run_id"], state["run_attempt"]) == (999, 1)
 
 
-def test_post_merge_restoration_rechecks_inventory_after_terminal_patch() -> None:
+def test_post_merge_restoration_rechecks_inventory_after_terminal_creation() -> None:
     tied_updated = "2026-07-22T10:00:01Z"
     current = generation(updated=tied_updated, action="reopened")
 
@@ -3319,14 +3400,11 @@ def test_post_merge_restoration_rechecks_inventory_after_terminal_patch() -> Non
         restoration_armed = False
         rerun_injected = False
 
-        def update_check_run(
-            self, check_run_id: int, payload: Mapping[str, Any]
-        ) -> Mapping[str, Any]:
-            response = super().update_check_run(check_run_id, payload)
+        def create_check_run(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+            response = super().create_check_run(payload)
             if (
                 self.restoration_armed
                 and payload.get("status") == "completed"
-                and payload.get("conclusion") != "neutral"
                 and not check_payload_is_pending(payload)
                 and not self.rerun_injected
             ):
