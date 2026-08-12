@@ -78,6 +78,7 @@ def _pool_executor(token: str = "executor-secret") -> dict[str, object]:
         "pool_reporter_incarnation": None,
         "executor_id": "oldlab-executor",
         "executor_incarnation": str(EXECUTOR_INCARNATION),
+        "executor_pool_generation": 1,
     }
 
 
@@ -111,6 +112,15 @@ def test_registry_accepts_only_a_complete_pool_executor_binding(tmp_path: Path) 
     with pytest.raises(PrincipalRegistryError, match="executor binding"):
         CapacityPrincipalVerifier.from_file(
             _write_registry(tmp_path / "invalid.json", [_operator(), incomplete])
+        )
+    missing_generation = _pool_executor()
+    missing_generation.pop("executor_pool_generation")
+    with pytest.raises(PrincipalRegistryError, match="executor binding"):
+        CapacityPrincipalVerifier.from_file(
+            _write_registry(
+                tmp_path / "missing-generation.json",
+                [_operator(), missing_generation],
+            )
         )
     overprivileged = _pool_executor()
     overprivileged["scopes"] = [

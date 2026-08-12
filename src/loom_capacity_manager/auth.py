@@ -70,6 +70,7 @@ class _PrincipalDocument(_StrictModel):
         Field(min_length=1, max_length=128, pattern=r"^[a-z0-9-]+$"),
     ] = None
     executor_incarnation: UUID | None = None
+    executor_pool_generation: Annotated[int | None, Field(gt=0)] = None
 
     @field_validator("scopes")
     @classmethod
@@ -88,7 +89,12 @@ class _PrincipalDocument(_StrictModel):
         has_subject = any(value is not None for value in subject_values)
         has_pool_reporter = self.pool_reporter_incarnation is not None
         has_executor = any(
-            value is not None for value in (self.executor_id, self.executor_incarnation)
+            value is not None
+            for value in (
+                self.executor_id,
+                self.executor_incarnation,
+                self.executor_pool_generation,
+            )
         )
         if has_subject and not all(value is not None for value in subject_values):
             raise ValueError("incomplete subject binding")
@@ -96,7 +102,12 @@ class _PrincipalDocument(_StrictModel):
             raise ValueError("incomplete pool binding")
         if has_executor and not all(
             value is not None
-            for value in (self.pool_id, self.executor_id, self.executor_incarnation)
+            for value in (
+                self.pool_id,
+                self.executor_id,
+                self.executor_incarnation,
+                self.executor_pool_generation,
+            )
         ):
             raise ValueError("incomplete executor binding")
         if has_subject and self.pool_id is not None:
@@ -159,9 +170,27 @@ class CapacityPrincipal:
     pool_reporter_incarnation: UUID | None
     executor_id: str | None
     executor_incarnation: UUID | None
+    executor_pool_generation: int | None
 
     def has_scope(self, scope: CapacityScope) -> bool:
         return scope in self.scopes
+
+    def matches_executor(
+        self,
+        *,
+        pool_id: str,
+        executor_id: str,
+        executor_incarnation: UUID,
+        pool_generation: int | None = None,
+    ) -> bool:
+        """Require the complete path/body executor identity, never only a scope."""
+
+        return (
+            self.pool_id == pool_id
+            and self.executor_id == executor_id
+            and self.executor_incarnation == executor_incarnation
+            and (pool_generation is None or self.executor_pool_generation == pool_generation)
+        )
 
 
 def _read_owner_only_file(path: Path) -> bytes:
@@ -256,6 +285,7 @@ class CapacityPrincipalVerifier:
                     pool_reporter_incarnation=item.pool_reporter_incarnation,
                     executor_id=item.executor_id,
                     executor_incarnation=item.executor_incarnation,
+                    executor_pool_generation=item.executor_pool_generation,
                 ),
             )
             for item in document.principals

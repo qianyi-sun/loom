@@ -304,6 +304,15 @@ def upgrade() -> None:
             name="capacity_execution_executor_incarnation_key",
         ),
         sa.UniqueConstraint(
+            "execution_epoch",
+            "execution_manifest_sha256",
+            "executor_id",
+            "executor_incarnation",
+            "pool_id",
+            "pool_generation",
+            name="capacity_execution_executor_exact_binding_key",
+        ),
+        sa.UniqueConstraint(
             "idempotency_key",
             name="capacity_execution_executor_idempotency_key",
         ),
@@ -380,6 +389,319 @@ def upgrade() -> None:
         ["allocation_epoch", "execution_epoch", "execution_manifest_sha256"],
         ["allocation_epoch", "execution_epoch", "execution_manifest_sha256"],
         ondelete="RESTRICT",
+    )
+    op.create_table(
+        "capacity_executable_executor_states",
+        sa.Column("id", sa.UUID(), nullable=False),
+        sa.Column("execution_epoch", sa.BigInteger(), nullable=False),
+        sa.Column("execution_manifest_sha256", sa.Text(), nullable=False),
+        sa.Column("executor_id", sa.Text(), nullable=False),
+        sa.Column("executor_incarnation", sa.UUID(), nullable=False),
+        sa.Column("pool_id", sa.Text(), nullable=False),
+        sa.Column("pool_generation", sa.BigInteger(), nullable=False),
+        sa.Column("state", sa.Text(), server_default=sa.text("'current'"), nullable=False),
+        sa.Column("heartbeat_high_water", sa.BigInteger(), server_default="0", nullable=False),
+        sa.Column("last_heartbeat_digest", sa.Text(), nullable=True),
+        sa.Column("command_high_water", sa.BigInteger(), server_default="0", nullable=False),
+        sa.Column("last_command_digest", sa.Text(), nullable=True),
+        sa.Column("journal_high_water", sa.BigInteger(), server_default="0", nullable=False),
+        sa.Column(
+            "journal_digest",
+            sa.Text(),
+            server_default=sa.text("repeat('0', 64)"),
+            nullable=False,
+        ),
+        sa.Column("inventory_high_water", sa.BigInteger(), server_default="0", nullable=False),
+        sa.Column("last_inventory_digest", sa.Text(), nullable=True),
+        sa.Column("inventory_payload", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+        sa.Column("last_inventory_at", postgresql.TIMESTAMP(timezone=True), nullable=True),
+        sa.Column("lease_expires_at", postgresql.TIMESTAMP(timezone=True), nullable=False),
+        sa.Column("last_heartbeat_at", postgresql.TIMESTAMP(timezone=True), nullable=False),
+        sa.Column(
+            "created_at",
+            postgresql.TIMESTAMP(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.CheckConstraint(
+            "execution_epoch > 0 AND pool_generation > 0 "
+            "AND pool_id IN ('gb10','oldlab') AND heartbeat_high_water >= 0 "
+            "AND command_high_water >= 0 AND journal_high_water >= 0 "
+            "AND inventory_high_water >= 0",
+            name="capacity_executable_executor_state_quantity_check",
+        ),
+        sa.CheckConstraint(
+            "execution_manifest_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND ((heartbeat_high_water = 0 AND last_heartbeat_digest IS NULL) "
+            "OR (heartbeat_high_water > 0 AND last_heartbeat_digest ~ '^[0-9a-f]{64}$')) "
+            "AND ((command_high_water = 0 AND last_command_digest IS NULL) "
+            "OR (command_high_water > 0 AND last_command_digest ~ '^[0-9a-f]{64}$')) "
+            "AND ((journal_high_water = 0 AND journal_digest = repeat('0', 64)) "
+            "OR (journal_high_water > 0 AND journal_digest ~ '^[0-9a-f]{64}$' "
+            "AND journal_digest <> repeat('0', 64))) "
+            "AND ((inventory_high_water = 0 AND last_inventory_digest IS NULL) "
+            "OR (inventory_high_water > 0 AND last_inventory_digest ~ '^[0-9a-f]{64}$'))",
+            name="capacity_executable_executor_state_digest_check",
+        ),
+        sa.CheckConstraint(
+            "state IN ('current','fenced','equivocal')",
+            name="capacity_executable_executor_state_check",
+        ),
+        sa.ForeignKeyConstraint(
+            [
+                "execution_epoch",
+                "execution_manifest_sha256",
+                "executor_id",
+                "executor_incarnation",
+                "pool_id",
+                "pool_generation",
+            ],
+            [
+                "capacity_execution_executors.execution_epoch",
+                "capacity_execution_executors.execution_manifest_sha256",
+                "capacity_execution_executors.executor_id",
+                "capacity_execution_executors.executor_incarnation",
+                "capacity_execution_executors.pool_id",
+                "capacity_execution_executors.pool_generation",
+            ],
+            name="capacity_executable_executor_registration_fkey",
+            ondelete="RESTRICT",
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint(
+            "execution_epoch", "pool_id", name="capacity_executable_executor_state_pool_key"
+        ),
+        sa.UniqueConstraint(
+            "executor_incarnation", name="capacity_executable_executor_state_incarnation_key"
+        ),
+        sa.UniqueConstraint(
+            "execution_epoch",
+            "executor_incarnation",
+            name="capacity_executable_executor_state_epoch_incarnation_key",
+        ),
+    )
+    op.create_table(
+        "capacity_executable_intents",
+        sa.Column("id", sa.UUID(), nullable=False),
+        sa.Column("intent_id", sa.UUID(), nullable=False),
+        sa.Column("tranche_id", sa.UUID(), nullable=False),
+        sa.Column("shape_instance_id", sa.Text(), nullable=False),
+        sa.Column("execution_epoch", sa.BigInteger(), nullable=False),
+        sa.Column("execution_manifest_sha256", sa.Text(), nullable=False),
+        sa.Column("configuration_epoch", sa.BigInteger(), nullable=False),
+        sa.Column("allocation_epoch", sa.BigInteger(), nullable=False),
+        sa.Column("executor_id", sa.Text(), nullable=False),
+        sa.Column("executor_incarnation", sa.UUID(), nullable=False),
+        sa.Column("pool_id", sa.Text(), nullable=False),
+        sa.Column("pool_generation", sa.BigInteger(), nullable=False),
+        sa.Column("subject_id", sa.UUID(), nullable=False),
+        sa.Column("subject_incarnation", sa.UUID(), nullable=False),
+        sa.Column("launch_rank", sa.BigInteger(), nullable=False),
+        sa.Column("proposal_digest", sa.Text(), nullable=False),
+        sa.Column("proposal_payload", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+        sa.Column("binding_digest", sa.Text(), nullable=False),
+        sa.Column("binding_payload", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+        sa.Column("state", sa.Text(), server_default=sa.text("'proposed'"), nullable=False),
+        sa.Column("accepted_at", postgresql.TIMESTAMP(timezone=True), nullable=True),
+        sa.Column("bootstrap_registration_epoch", sa.BigInteger(), nullable=True),
+        sa.Column("bootstrap_evidence_sha256", sa.Text(), nullable=True),
+        sa.Column("launch_ready_at", postgresql.TIMESTAMP(timezone=True), nullable=True),
+        sa.Column("permit_id", sa.UUID(), nullable=True),
+        sa.Column("permit_epoch", sa.BigInteger(), nullable=True),
+        sa.Column("permit_digest", sa.Text(), nullable=True),
+        sa.Column("permit_payload", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+        sa.Column("permit_expires_at", postgresql.TIMESTAMP(timezone=True), nullable=True),
+        sa.Column("permit_consumed_at", postgresql.TIMESTAMP(timezone=True), nullable=True),
+        sa.Column("protected_registration_epoch", sa.BigInteger(), nullable=True),
+        sa.Column("protected_release_idempotency_key", sa.UUID(), nullable=True),
+        sa.Column("protected_release_digest", sa.Text(), nullable=True),
+        sa.Column("protected_release_actor", sa.Text(), nullable=True),
+        sa.Column("protected_release_sha256", sa.Text(), nullable=True),
+        sa.Column(
+            "protected_release_payload", postgresql.JSONB(astext_type=sa.Text()), nullable=True
+        ),
+        sa.Column("inventory_sequence", sa.BigInteger(), nullable=True),
+        sa.Column("observed_state", sa.Text(), nullable=True),
+        sa.Column("terminal_kind", sa.Text(), nullable=True),
+        sa.Column("terminal_identity", sa.Text(), nullable=True),
+        sa.Column("terminal_evidence_sha256", sa.Text(), nullable=True),
+        sa.Column("released_at", postgresql.TIMESTAMP(timezone=True), nullable=True),
+        sa.Column(
+            "created_at",
+            postgresql.TIMESTAMP(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.CheckConstraint(
+            "execution_epoch > 0 AND allocation_epoch > 0 AND configuration_epoch > 0 "
+            "AND pool_generation > 0 AND launch_rank > 0",
+            name="capacity_executable_intent_quantity_check",
+        ),
+        sa.CheckConstraint(
+            "execution_manifest_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND proposal_digest ~ '^[0-9a-f]{64}$' "
+            "AND binding_digest ~ '^[0-9a-f]{64}$' "
+            "AND (bootstrap_evidence_sha256 IS NULL OR "
+            "bootstrap_evidence_sha256 ~ '^[0-9a-f]{64}$') "
+            "AND (permit_digest IS NULL OR permit_digest ~ '^[0-9a-f]{64}$') "
+            "AND (protected_release_digest IS NULL OR "
+            "protected_release_digest ~ '^[0-9a-f]{64}$') "
+            "AND (protected_release_sha256 IS NULL OR "
+            "protected_release_sha256 ~ '^[0-9a-f]{64}$') "
+            "AND (terminal_evidence_sha256 IS NULL OR "
+            "terminal_evidence_sha256 ~ '^[0-9a-f]{64}$')",
+            name="capacity_executable_intent_digest_check",
+        ),
+        sa.CheckConstraint(
+            "state IN ('proposed','accepted','launch-ready','permitted',"
+            "'submitting-unknown','bound','observed','terminal','closing','released',"
+            "'quarantined')",
+            name="capacity_executable_intent_state_check",
+        ),
+        sa.CheckConstraint(
+            "jsonb_typeof(binding_payload) = 'object' "
+            "AND jsonb_typeof(proposal_payload) = 'object'",
+            name="capacity_executable_intent_payload_check",
+        ),
+        sa.ForeignKeyConstraint(
+            ["execution_epoch", "execution_manifest_sha256"],
+            [
+                "capacity_execution_epochs.execution_epoch",
+                "capacity_execution_epochs.execution_manifest_sha256",
+            ],
+            name="capacity_executable_intent_execution_fkey",
+            ondelete="RESTRICT",
+        ),
+        sa.ForeignKeyConstraint(
+            ["allocation_epoch", "execution_epoch", "execution_manifest_sha256"],
+            [
+                "capacity_allocation_epochs.allocation_epoch",
+                "capacity_allocation_epochs.execution_epoch",
+                "capacity_allocation_epochs.execution_manifest_sha256",
+            ],
+            name="capacity_executable_intent_allocation_fkey",
+            ondelete="RESTRICT",
+        ),
+        sa.ForeignKeyConstraint(
+            [
+                "execution_epoch",
+                "execution_manifest_sha256",
+                "executor_id",
+                "executor_incarnation",
+                "pool_id",
+                "pool_generation",
+            ],
+            [
+                "capacity_execution_executors.execution_epoch",
+                "capacity_execution_executors.execution_manifest_sha256",
+                "capacity_execution_executors.executor_id",
+                "capacity_execution_executors.executor_incarnation",
+                "capacity_execution_executors.pool_id",
+                "capacity_execution_executors.pool_generation",
+            ],
+            name="capacity_executable_intent_executor_fkey",
+            ondelete="RESTRICT",
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("intent_id", name="capacity_executable_intent_identity_key"),
+        sa.UniqueConstraint("shape_instance_id", name="capacity_executable_shape_identity_key"),
+        sa.UniqueConstraint("tranche_id", name="capacity_executable_tranche_identity_key"),
+        sa.UniqueConstraint("permit_id", name="capacity_executable_permit_identity_key"),
+        sa.UniqueConstraint(
+            "protected_release_idempotency_key",
+            name="capacity_executable_protected_release_idempotency_key",
+        ),
+        sa.UniqueConstraint(
+            "execution_epoch",
+            "allocation_epoch",
+            "launch_rank",
+            name="capacity_executable_launch_rank_key",
+        ),
+    )
+    op.create_table(
+        "capacity_executable_command_receipts",
+        sa.Column("id", sa.UUID(), nullable=False),
+        sa.Column("execution_epoch", sa.BigInteger(), nullable=False),
+        sa.Column("executor_incarnation", sa.UUID(), nullable=False),
+        sa.Column("command_sequence", sa.BigInteger(), nullable=False),
+        sa.Column("operation_kind", sa.Text(), nullable=False),
+        sa.Column("request_digest", sa.Text(), nullable=False),
+        sa.Column("result_digest", sa.Text(), nullable=False),
+        sa.Column("result_payload", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+        sa.Column(
+            "created_at",
+            postgresql.TIMESTAMP(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.CheckConstraint(
+            "execution_epoch > 0 AND command_sequence > 0",
+            name="capacity_executable_command_receipt_quantity_check",
+        ),
+        sa.CheckConstraint(
+            "request_digest ~ '^[0-9a-f]{64}$' AND result_digest ~ '^[0-9a-f]{64}$'",
+            name="capacity_executable_command_receipt_digest_check",
+        ),
+        sa.ForeignKeyConstraint(
+            ["execution_epoch", "executor_incarnation"],
+            [
+                "capacity_executable_executor_states.execution_epoch",
+                "capacity_executable_executor_states.executor_incarnation",
+            ],
+            name="capacity_executable_command_receipt_executor_fkey",
+            ondelete="RESTRICT",
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint(
+            "executor_incarnation",
+            "command_sequence",
+            name="capacity_executable_command_receipt_sequence_key",
+        ),
+    )
+    op.create_table(
+        "capacity_executable_launch_rate_buckets",
+        sa.Column("id", sa.UUID(), nullable=False),
+        sa.Column("execution_epoch", sa.BigInteger(), nullable=False),
+        sa.Column("configuration_epoch", sa.BigInteger(), nullable=False),
+        sa.Column("scope", sa.Text(), nullable=False),
+        sa.Column("scope_identity", sa.Text(), nullable=False),
+        sa.Column("rate_per_minute", sa.BigInteger(), nullable=False),
+        sa.Column("capacity_microtokens", sa.BigInteger(), nullable=False),
+        sa.Column("available_microtokens", sa.BigInteger(), nullable=False),
+        sa.Column("refill_remainder", sa.BigInteger(), server_default="0", nullable=False),
+        sa.Column("last_refill_at", postgresql.TIMESTAMP(timezone=True), nullable=False),
+        sa.CheckConstraint(
+            "scope IN ('global','account','subject','pool')",
+            name="capacity_executable_launch_rate_bucket_scope_check",
+        ),
+        sa.CheckConstraint(
+            "configuration_epoch > 0 AND execution_epoch > 0 "
+            "AND rate_per_minute BETWEEN 0 AND 9223372036854 "
+            "AND capacity_microtokens = rate_per_minute * 1000000 "
+            "AND available_microtokens >= 0 "
+            "AND available_microtokens <= capacity_microtokens "
+            "AND refill_remainder >= 0 AND refill_remainder < 60000000",
+            name="capacity_executable_launch_rate_bucket_quantity_check",
+        ),
+        sa.ForeignKeyConstraint(
+            ["execution_epoch"],
+            ["capacity_execution_epochs.execution_epoch"],
+            name="capacity_executable_launch_rate_bucket_execution_fkey",
+            ondelete="RESTRICT",
+        ),
+        sa.ForeignKeyConstraint(
+            ["configuration_epoch"],
+            ["capacity_configuration_epochs.configuration_epoch"],
+            name="capacity_executable_launch_rate_bucket_configuration_fkey",
+            ondelete="RESTRICT",
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint(
+            "execution_epoch",
+            "scope",
+            "scope_identity",
+            name="capacity_executable_launch_rate_bucket_scope_key",
+        ),
     )
     op.execute(
         """
@@ -966,11 +1288,9 @@ def downgrade() -> None:
         """
         DO $$
         BEGIN
-          IF EXISTS (
-            SELECT 1 FROM capacity_allocation_epochs WHERE status = 'executable'
-          ) THEN
+          IF EXISTS (SELECT 1 FROM capacity_execution_epochs) THEN
             RAISE EXCEPTION
-              'cannot downgrade capacity_0004 with executable allocation history'
+              'cannot downgrade capacity_0004 with executable allocation history or execution evidence'
               USING ERRCODE = '55000';
           END IF;
         END;
@@ -993,6 +1313,10 @@ def downgrade() -> None:
     op.execute("DROP FUNCTION capacity_allocation_binding_guard()")
     op.execute("DROP TRIGGER capacity_allocation_epoch_binding_guard ON capacity_allocation_epochs")
     op.execute("DROP FUNCTION capacity_allocation_epoch_binding_guard()")
+    op.drop_table("capacity_executable_launch_rate_buckets")
+    op.drop_table("capacity_executable_command_receipts")
+    op.drop_table("capacity_executable_intents")
+    op.drop_table("capacity_executable_executor_states")
     op.drop_constraint(
         "capacity_allocation_execution_binding_fkey",
         "capacity_allocations",

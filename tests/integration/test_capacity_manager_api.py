@@ -23,7 +23,12 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom_capacity_manager.allocator import ShadowAllocatorError, allocate_shadow
-from loom_capacity_manager.api import RequestBodyLimitMiddleware, create_app
+from loom_capacity_manager.api import (
+    RequestBodyLimitMiddleware,
+    _health_payload,
+    _writer_matches_authority,
+    create_app,
+)
 from loom_capacity_manager.auth import CapacityPrincipalVerifier
 from loom_capacity_manager.config import CapacityManagerSettings, build_uvicorn_kwargs
 from loom_capacity_manager.contracts import MAX_CONTRACT_BYTES
@@ -37,7 +42,7 @@ from loom_capacity_manager.models import (
 )
 from loom_capacity_manager.ownership import public_key_fingerprint
 from loom_capacity_manager.reconciler import reconcile_shadow_once
-from loom_capacity_manager.store import CapacityManagementStore, StaleWriterError
+from loom_capacity_manager.store import CapacityManagementStore, StaleWriterError, WriterFence
 from tests.capacity_execution_fixtures import (
     execution_policy,
     register_execution_executors,
@@ -87,6 +92,7 @@ def _principal(
     pool_reporter_incarnation: UUID | None = None,
     executor_id: str | None = None,
     executor_incarnation: UUID | None = None,
+    executor_pool_generation: int | None = None,
 ) -> dict[str, object]:
     return {
         "principal_id": principal_id,
@@ -104,6 +110,11 @@ def _principal(
         "executor_id": executor_id,
         "executor_incarnation": (
             None if executor_incarnation is None else str(executor_incarnation)
+        ),
+        "executor_pool_generation": (
+            1
+            if executor_id is not None and executor_pool_generation is None
+            else executor_pool_generation
         ),
     }
 
@@ -464,6 +475,25 @@ def test_shadow_api_exposes_exactly_the_approved_routes(
             "/v1/executors/{pool_id}/reservations/{tranche_id}/release",
             ("POST",),
         ),
+        ("/v2/executors/{pool_id}/heartbeat", ("PUT",)),
+        ("/v2/executors/{pool_id}/checkpoint", ("GET",)),
+        ("/v2/executors/{pool_id}/work", ("GET",)),
+        ("/v2/executors/{pool_id}/inventory", ("PUT",)),
+        (
+            "/v2/executors/{pool_id}/reservations/{tranche_id}/accept",
+            ("POST",),
+        ),
+        ("/v2/executors/{pool_id}/intents/{intent_id}/bootstrap", ("POST",)),
+        ("/v2/executors/{pool_id}/permits/{permit_id}/consume", ("POST",)),
+        ("/v2/executors/{pool_id}/intents/{intent_id}/close", ("POST",)),
+        (
+            "/v2/executors/{pool_id}/reservations/{tranche_id}/release",
+            ("POST",),
+        ),
+        (
+            "/v2/reports/protected-releases/{subject_id}/{shape_instance_id}",
+            ("PUT",),
+        ),
         ("/v1/shadow-reconciliations", ("POST",)),
         ("/v1/status", ("GET",)),
         ("/v1/status/subjects", ("GET",)),
@@ -475,6 +505,20 @@ def test_shadow_api_exposes_exactly_the_approved_routes(
         ("/v1/audit-events", ("GET",)),
         ("/metrics", ("GET",)),
     }
+
+
+def test_v2_executor_work_route_is_exactly_pool_bound(
+    api_context: tuple[TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator],
+) -> None:
+    client, _app, _settings, _allocator = api_context
+    headers = {"Authorization": f"Bearer {OLDLAB_EXECUTOR_TOKEN}"}
+
+    own_pool = client.get("/v2/executors/oldlab/work", headers=headers)
+    crossed_pool = client.get("/v2/executors/gb10/work", headers=headers)
+
+    assert own_pool.status_code == 200
+    assert own_pool.json() is None
+    assert crossed_pool.status_code == 403
 
 
 def test_lifecycle_can_project_and_authenticate_a_personal_demand_reporter(
@@ -1246,4 +1290,19 @@ async def test_health_fails_closed_after_another_process_takes_writer_fence(
     assert response.json() == {
         "status": "not-ready",
         "executable_new_capacity_ceiling": 0,
+    }
+
+
+def test_active_execution_ceiling_does_not_fence_current_writer_health() -> None:
+    writer = WriterFence(authority_incarnation=AUTHORITY_ID, writer_epoch=3)
+    authority = CapacityAuthorityState(
+        authority_incarnation=AUTHORITY_ID,
+        writer_epoch=3,
+        executable_new_capacity_ceiling=1,
+    )
+
+    assert _writer_matches_authority(writer, authority)
+    assert json.loads(_health_payload(ready=True, executable_new_capacity_ceiling=1)) == {
+        "status": "ready",
+        "executable_new_capacity_ceiling": 1,
     }

@@ -18,6 +18,10 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 
 from loom_capacity_manager.contracts import canonical_bytes
+from loom_capacity_manager.executable_contracts import (
+    SignedExecutableOwnershipProofV2,
+    canonical_executable_bytes,
+)
 from loom_capacity_manager.grant_contracts import (
     OwnershipMetadataV1,
     SignedOwnershipProofV1,
@@ -160,6 +164,27 @@ class OwnershipKeyring:
         try:
             signature = base64.b64decode(proof.signature_base64, validate=True)
             public_key.verify(signature, canonical_bytes(proof.metadata))
+        except (InvalidSignature, ValueError, binascii.Error):
+            return False
+        return True
+
+    def verify_executable(
+        self,
+        proof: SignedExecutableOwnershipProofV2,
+        *,
+        expected_public_key_sha256: str,
+    ) -> bool:
+        """Verify an executable-v2 proof against the same configured trust roots."""
+
+        public_key = self._keys.get(proof.signing_key_id)
+        if public_key is None or not self.matches(
+            proof.signing_key_id,
+            expected_public_key_sha256,
+        ):
+            return False
+        try:
+            signature = base64.b64decode(proof.signature_base64, validate=True)
+            public_key.verify(signature, canonical_executable_bytes(proof.metadata))
         except (InvalidSignature, ValueError, binascii.Error):
             return False
         return True

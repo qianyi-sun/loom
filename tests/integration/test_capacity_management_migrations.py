@@ -44,6 +44,10 @@ EXPECTED_TABLES = {
     "capacity_executor_observations",
     "capacity_execution_epochs",
     "capacity_execution_executors",
+    "capacity_executable_command_receipts",
+    "capacity_executable_executor_states",
+    "capacity_executable_intents",
+    "capacity_executable_launch_rate_buckets",
     "capacity_fairness_state",
     "capacity_launch_permits",
     "capacity_launch_rate_buckets",
@@ -369,6 +373,55 @@ def test_execution_epochs_reject_truncate(capacity_postgres_url: str) -> None:
         with pytest.raises(IntegrityError, match="append-only"):
             with engine.begin() as connection:
                 connection.execute(text("TRUNCATE TABLE capacity_execution_epochs CASCADE"))
+    finally:
+        engine.dispose()
+
+
+def test_executable_runtime_rows_bind_exact_registered_executor(
+    capacity_postgres_url: str,
+) -> None:
+    engine = create_engine(capacity_postgres_url)
+    expected_executor_columns = [
+        "execution_epoch",
+        "execution_manifest_sha256",
+        "executor_id",
+        "executor_incarnation",
+        "pool_id",
+        "pool_generation",
+    ]
+    try:
+        with engine.connect() as connection:
+            schema = inspect(connection)
+            executor_uniques = {
+                item["name"]: item["column_names"]
+                for item in schema.get_unique_constraints("capacity_execution_executors")
+            }
+            assert executor_uniques["capacity_execution_executor_exact_binding_key"] == (
+                expected_executor_columns
+            )
+
+            for table_name, constraint_name in (
+                (
+                    "capacity_executable_executor_states",
+                    "capacity_executable_executor_registration_fkey",
+                ),
+                (
+                    "capacity_executable_intents",
+                    "capacity_executable_intent_executor_fkey",
+                ),
+            ):
+                foreign_keys = {item["name"]: item for item in schema.get_foreign_keys(table_name)}
+                assert foreign_keys[constraint_name]["constrained_columns"] == (
+                    expected_executor_columns
+                )
+
+            receipt_foreign_keys = {
+                item["name"]: item
+                for item in schema.get_foreign_keys("capacity_executable_command_receipts")
+            }
+            assert receipt_foreign_keys["capacity_executable_command_receipt_executor_fkey"][
+                "constrained_columns"
+            ] == ["execution_epoch", "executor_incarnation"]
     finally:
         engine.dispose()
 
