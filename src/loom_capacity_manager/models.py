@@ -39,13 +39,45 @@ class CapacityAuthorityState(Base):
             name="capacity_authority_recovery_state_check",
         ),
         CheckConstraint(
-            "executable_new_capacity_ceiling = 0",
-            name="capacity_authority_shadow_only_check",
+            "(execution_state = 'shadow' AND execution_epoch = 0 "
+            "AND execution_manifest_sha256 IS NULL "
+            "AND executable_new_capacity_ceiling = 0) OR "
+            "(execution_state = 'prepared' AND execution_epoch > 0 "
+            "AND execution_manifest_sha256 IS NOT NULL "
+            "AND execution_manifest_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND executable_new_capacity_ceiling = 0) OR "
+            "(execution_state = 'active' AND execution_epoch > 0 "
+            "AND execution_manifest_sha256 IS NOT NULL "
+            "AND execution_manifest_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND executable_new_capacity_ceiling > 0) OR "
+            "(execution_state = 'drain-only' AND execution_epoch > 0 "
+            "AND execution_manifest_sha256 IS NOT NULL "
+            "AND execution_manifest_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND executable_new_capacity_ceiling = 0)",
+            name="capacity_authority_execution_check",
         ),
         CheckConstraint(
             "global_pending_slot_ceiling >= 0 AND global_pending_job_ceiling >= 0 "
             "AND global_submission_rate_ceiling BETWEEN 0 AND 9223372036854",
             name="capacity_authority_limits_check",
+        ),
+        ForeignKeyConstraint(
+            (
+                "execution_epoch",
+                "execution_manifest_sha256",
+                "execution_state",
+                "executable_new_capacity_ceiling",
+            ),
+            (
+                "capacity_execution_epochs.execution_epoch",
+                "capacity_execution_epochs.execution_manifest_sha256",
+                "capacity_execution_epochs.state",
+                "capacity_execution_epochs.effective_ceiling",
+            ),
+            name="capacity_authority_execution_epoch_fkey",
+            ondelete="RESTRICT",
+            deferrable=True,
+            initially="DEFERRED",
         ),
     )
 
@@ -63,6 +95,13 @@ class CapacityAuthorityState(Base):
     executable_new_capacity_ceiling: Mapped[int] = mapped_column(
         BigInteger, nullable=False, server_default=text("0")
     )
+    execution_epoch: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    execution_state: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'shadow'")
+    )
+    execution_manifest_sha256: Mapped[str | None] = mapped_column(Text)
     global_pending_slot_ceiling: Mapped[int] = mapped_column(
         BigInteger, nullable=False, server_default=text("0")
     )
@@ -148,6 +187,175 @@ class CapacityConfigurationEpoch(Base):
     activation_actor: Mapped[str] = mapped_column(Text, nullable=False)
     activation_request_digest: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class CapacityExecutionEpoch(Base):
+    __tablename__ = "capacity_execution_epochs"
+    __table_args__ = (
+        CheckConstraint(
+            "execution_epoch > 0 AND prepared_writer_epoch > 0 "
+            "AND configuration_epoch > 0 AND fleet_generation > 0 "
+            "AND oldlab_pool_generation > 0 AND gb10_pool_generation > 0 "
+            "AND requested_ceiling = 1 AND effective_ceiling >= 0 "
+            "AND effective_ceiling <= requested_ceiling "
+            "AND requested_rate_per_minute > 0 AND effective_rate_per_minute >= 0 "
+            "AND effective_rate_per_minute <= requested_rate_per_minute",
+            name="capacity_execution_epoch_quantity_check",
+        ),
+        CheckConstraint(
+            "fleet_digest ~ '^[0-9a-f]{64}$' "
+            "AND execution_manifest_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND trusted_fleet_release_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND environment_acknowledgements_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND legacy_writer_manifest_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND rollback_evidence_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND request_digest ~ '^[0-9a-f]{64}$' "
+            "AND (activation_request_digest IS NULL OR "
+            "activation_request_digest ~ '^[0-9a-f]{64}$')",
+            name="capacity_execution_epoch_digest_check",
+        ),
+        CheckConstraint(
+            "oldlab_pool_id = 'oldlab' AND gb10_pool_id = 'gb10' "
+            "AND oldlab_executor_id <> gb10_executor_id "
+            "AND oldlab_executor_incarnation <> gb10_executor_incarnation",
+            name="capacity_execution_epoch_pool_check",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(manifest_payload) = 'object' "
+            "AND octet_length(manifest_payload::text) <= 8388608",
+            name="capacity_execution_epoch_manifest_check",
+        ),
+        CheckConstraint(
+            "state IN ('prepared','active','drain-only','retired')",
+            name="capacity_execution_epoch_state_check",
+        ),
+        CheckConstraint(
+            "(state = 'prepared' AND effective_ceiling = 0 "
+            "AND effective_rate_per_minute = 0 "
+            "AND activation_actor IS NULL AND activation_idempotency_key IS NULL "
+            "AND activation_request_digest IS NULL AND activated_at IS NULL "
+            "AND drain_only_at IS NULL AND retired_at IS NULL) OR "
+            "(state = 'active' AND effective_ceiling > 0 "
+            "AND effective_rate_per_minute > 0 "
+            "AND activation_actor IS NOT NULL AND activation_idempotency_key IS NOT NULL "
+            "AND activation_request_digest IS NOT NULL AND activated_at IS NOT NULL "
+            "AND drain_only_at IS NULL AND retired_at IS NULL) OR "
+            "(state = 'drain-only' AND effective_ceiling = 0 "
+            "AND effective_rate_per_minute = 0 "
+            "AND activation_actor IS NOT NULL AND activation_idempotency_key IS NOT NULL "
+            "AND activation_request_digest IS NOT NULL AND activated_at IS NOT NULL "
+            "AND drain_only_at IS NOT NULL "
+            "AND retired_at IS NULL) OR "
+            "(state = 'retired' AND effective_ceiling = 0 "
+            "AND effective_rate_per_minute = 0 AND retired_at IS NOT NULL)",
+            name="capacity_execution_epoch_state_time_check",
+        ),
+        UniqueConstraint(
+            "activation_idempotency_key",
+            name="capacity_execution_epoch_activation_idempotency_key",
+        ),
+        UniqueConstraint("idempotency_key", name="capacity_execution_epoch_idempotency_key"),
+        UniqueConstraint(
+            "execution_epoch",
+            "execution_manifest_sha256",
+            "state",
+            "effective_ceiling",
+            name="capacity_execution_epoch_authority_binding_key",
+        ),
+    )
+
+    execution_epoch: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    authority_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    prepared_writer_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    configuration_epoch: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("capacity_configuration_epochs.configuration_epoch", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    fleet_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    fleet_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    execution_manifest_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    manifest_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    trusted_fleet_release_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    oldlab_executor_id: Mapped[str] = mapped_column(Text, nullable=False)
+    oldlab_executor_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    oldlab_pool_id: Mapped[str] = mapped_column(Text, nullable=False)
+    oldlab_pool_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    gb10_executor_id: Mapped[str] = mapped_column(Text, nullable=False)
+    gb10_executor_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    gb10_pool_id: Mapped[str] = mapped_column(Text, nullable=False)
+    gb10_pool_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    environment_acknowledgements_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    legacy_writer_manifest_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    rollback_evidence_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    requested_ceiling: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    effective_ceiling: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    requested_rate_per_minute: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    effective_rate_per_minute: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    state: Mapped[str] = mapped_column(Text, nullable=False)
+    actor: Mapped[str] = mapped_column(Text, nullable=False)
+    idempotency_key: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    request_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    activation_actor: Mapped[str | None] = mapped_column(Text)
+    activation_idempotency_key: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    activation_request_digest: Mapped[str | None] = mapped_column(Text)
+    prepared_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+    activated_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    drain_only_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    retired_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+
+
+class CapacityExecutionExecutor(Base):
+    __tablename__ = "capacity_execution_executors"
+    __table_args__ = (
+        CheckConstraint(
+            "execution_epoch > 0 AND pool_generation > 0 "
+            "AND pool_id IN ('gb10','oldlab')",
+            name="capacity_execution_executor_binding_check",
+        ),
+        CheckConstraint(
+            "execution_manifest_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND signing_key_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND local_authority_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND controller_authority_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND registration_digest ~ '^[0-9a-f]{64}$'",
+            name="capacity_execution_executor_digest_check",
+        ),
+        UniqueConstraint(
+            "execution_epoch", "pool_id", name="capacity_execution_executor_pool_key"
+        ),
+        UniqueConstraint(
+            "executor_incarnation", name="capacity_execution_executor_incarnation_key"
+        ),
+        UniqueConstraint(
+            "idempotency_key", name="capacity_execution_executor_idempotency_key"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    execution_epoch: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("capacity_execution_epochs.execution_epoch", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    execution_manifest_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    executor_id: Mapped[str] = mapped_column(Text, nullable=False)
+    executor_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    pool_id: Mapped[str] = mapped_column(Text, nullable=False)
+    pool_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    signing_key_id: Mapped[str] = mapped_column(Text, nullable=False)
+    signing_key_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    local_authority_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    controller_authority_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    actor: Mapped[str] = mapped_column(Text, nullable=False)
+    idempotency_key: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    registration_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    registration_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    registered_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
     )
 
@@ -1456,6 +1664,8 @@ __all__ = [
     "CapacityDemandReporter",
     "CapacityDemandSnapshot",
     "CapacityDeploymentGeneration",
+    "CapacityExecutionEpoch",
+    "CapacityExecutionExecutor",
     "CapacityExecutor",
     "CapacityExecutorObservation",
     "CapacityFairnessState",
