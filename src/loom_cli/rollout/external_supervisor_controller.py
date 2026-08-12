@@ -9,6 +9,7 @@ from types import MappingProxyType
 
 from loom_cli.rollout.external_supervisor_predecessor import (
     ABSENT_PREDECESSOR_DIGEST,
+    EXTERNAL_SUPERVISOR_CONTROLLER_HOSTS,
     external_supervisor_unit_directory,
     external_supervisor_unit_set_digest_or_empty,
 )
@@ -168,7 +169,9 @@ class ExternalSupervisorControllerBinding:
 def encode_external_supervisor_controller_bindings(
     bindings: Mapping[str, ExternalSupervisorControllerBinding],
 ) -> dict[str, str]:
-    if not bindings or any(host != binding.execution_host for host, binding in bindings.items()):
+    if set(bindings) != EXTERNAL_SUPERVISOR_CONTROLLER_HOSTS or any(
+        host != binding.execution_host for host, binding in bindings.items()
+    ):
         raise ValueError("external supervisor controller binding set is invalid")
     encoded: dict[str, str] = {}
     for host in sorted(bindings):
@@ -198,6 +201,9 @@ def parse_external_supervisor_controller_bindings(
         if field in fields:
             raise ValueError("external supervisor controller binding field is duplicated")
         fields[field] = value
+
+    if set(grouped) != EXTERNAL_SUPERVISOR_CONTROLLER_HOSTS:
+        raise ValueError("external supervisor controller binding set is invalid")
 
     result: dict[str, ExternalSupervisorControllerBinding] = {}
     for host, fields in grouped.items():

@@ -17,7 +17,10 @@ from uuid import uuid4
 from loom_cli.rollout.external_supervisor_controller import (
     parse_external_supervisor_controller_bindings,
 )
-from loom_cli.rollout.external_supervisor_predecessor import GB10_CANONICAL_UNIT_DIR
+from loom_cli.rollout.external_supervisor_predecessor import (
+    EXTERNAL_SUPERVISOR_CONTROLLER_HOSTS,
+    GB10_CANONICAL_UNIT_DIR,
+)
 from loom_cli.rollout.external_supervisor_readiness import SCRIPT_PATH
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactPublication
 from loom_cli.rollout.preflight_contract import (
@@ -394,7 +397,8 @@ class FinalGatePlan:
                 raise ValueError("final gate supervisor controller unit key is invalid")
             controller_units.setdefault(host, {})[unit_name] = digest
         if (
-            set(self.supervisor_controller_artifact_digests) != controller_hosts
+            controller_hosts != EXTERNAL_SUPERVISOR_CONTROLLER_HOSTS
+            or set(self.supervisor_controller_artifact_digests) != controller_hosts
             or set(self.supervisor_controller_unit_set_digests) != controller_hosts
             or set(controller_units) != controller_hosts
             or {

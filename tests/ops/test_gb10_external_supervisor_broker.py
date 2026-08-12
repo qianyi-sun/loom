@@ -88,7 +88,17 @@ def _existing_candidate(
     system_python.chmod(0o755)
     (venv_bin / "python").symlink_to(system_python)
     root.chmod(0o755)
-    broker._harden_tree(candidate, owner_uid=os.geteuid(), owner_gid=os.getegid())
+    untrusted = candidate.with_name(f".{sha}.untrusted")
+    candidate.rename(untrusted)
+    candidate.mkdir()
+    broker._copy_hardened_tree(
+        untrusted,
+        candidate,
+        source_uid=os.geteuid(),
+        source_gid=os.getegid(),
+        owner_uid=os.geteuid(),
+        owner_gid=os.getegid(),
+    )
     return root, sha, tree, source, system_python
 
 
@@ -192,7 +202,17 @@ def test_candidate_inspection_disables_candidate_configured_executable_git_hooks
     system_python.chmod(0o755)
     (venv_bin / "python").symlink_to(system_python)
     root.chmod(0o755)
-    broker._harden_tree(candidate, owner_uid=os.geteuid(), owner_gid=os.getegid())
+    untrusted = candidate.with_name("candidate-untrusted")
+    candidate.rename(untrusted)
+    candidate.mkdir()
+    broker._copy_hardened_tree(
+        untrusted,
+        candidate,
+        source_uid=os.geteuid(),
+        source_gid=os.getegid(),
+        owner_uid=os.geteuid(),
+        owner_gid=os.getegid(),
+    )
 
     ready = broker.candidate_ready(
         root,
@@ -219,11 +239,16 @@ def test_candidate_hardening_rejects_external_hardlinks_before_mutation(
     candidate = tmp_path / "candidate"
     candidate.mkdir()
     os.link(external, candidate / "linked-state")
+    published = tmp_path / "published"
+    published.mkdir()
     before = external.stat()
 
     with pytest.raises(broker.BrokerError, match="hardlink"):
-        broker._harden_tree(
+        broker._copy_hardened_tree(
             candidate,
+            published,
+            source_uid=os.geteuid(),
+            source_gid=os.getegid(),
             owner_uid=os.geteuid(),
             owner_gid=os.getegid(),
         )
@@ -243,11 +268,16 @@ def test_candidate_hardening_rejects_external_hardlinked_symlink_before_mutation
     candidate = tmp_path / "candidate"
     candidate.mkdir()
     os.link(external, candidate / "linked-symlink", follow_symlinks=False)
+    published = tmp_path / "published"
+    published.mkdir()
     before = os.lstat(external)
 
     with pytest.raises(broker.BrokerError, match="hardlink"):
-        broker._harden_tree(
+        broker._copy_hardened_tree(
             candidate,
+            published,
+            source_uid=os.geteuid(),
+            source_gid=os.getegid(),
             owner_uid=os.geteuid(),
             owner_gid=os.getegid(),
         )
@@ -308,6 +338,71 @@ def test_absent_candidate_is_published_atomically_and_verified(tmp_path: Path) -
     candidate_mode = (candidates / sha).stat().st_mode
     assert candidate_mode & 0o055 == 0o055
     assert (candidates / sha / "repo/payload.txt").stat().st_mode & 0o044 == 0o044
+
+
+def test_candidate_publication_never_mutates_a_raced_external_inode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, sha, tree = _source_repo(tmp_path)
+    candidates = tmp_path / "candidates"
+    candidates.mkdir(mode=0o755)
+    external = tmp_path / "service-owned-state"
+    external.write_text("external state\n", encoding="utf-8")
+    external.chmod(0o600)
+    before = external.stat()
+    system_python = tmp_path / "system-python"
+    system_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    system_python.chmod(0o755)
+    fake_uv = tmp_path / "uv"
+    fake_uv.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        'mkdir -p "$UV_PROJECT_ENVIRONMENT/bin"\n'
+        f'ln -s {system_python} "$UV_PROJECT_ENVIRONMENT/bin/python"\n',
+        encoding="utf-8",
+    )
+    fake_uv.chmod(0o700)
+    original_open = broker.os.open
+    attacked = False
+
+    def swap_source_before_descriptor_open(
+        path: str | bytes | Path,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal attacked
+        if not attacked and path == "payload.txt" and dir_fd is not None:
+            attacked = True
+            os.unlink(path, dir_fd=dir_fd)
+            os.link(external, path, dst_dir_fd=dir_fd)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(broker.os, "open", swap_source_before_descriptor_open)
+
+    with pytest.raises(broker.BrokerError, match="changed during publication"):
+        broker.ensure_candidate(
+            candidates,
+            sha,
+            tree,
+            remote_url=str(source),
+            owner_uid=os.geteuid(),
+            owner_gid=os.getegid(),
+            build_uid=os.geteuid(),
+            build_gid=os.getegid(),
+            system_python=system_python,
+            uv_binary=fake_uv,
+        )
+
+    after = external.stat()
+    assert attacked
+    assert not (candidates / sha).exists()
+    assert after.st_mode == before.st_mode
+    assert after.st_uid == before.st_uid
+    assert after.st_gid == before.st_gid
+    assert external.read_text(encoding="utf-8") == "external state\n"
 
 
 def test_candidate_materialization_commands_run_as_unprivileged_service_identity(

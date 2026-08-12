@@ -8,7 +8,10 @@ from loom_cli.rollout.external_supervisor_controller import (
     ExternalSupervisorControllerBinding,
     encode_external_supervisor_controller_bindings,
 )
-from loom_cli.rollout.external_supervisor_predecessor import GB10_CANONICAL_UNIT_DIR
+from loom_cli.rollout.external_supervisor_predecessor import (
+    EXTERNAL_SUPERVISOR_CONTROLLER_HOSTS,
+    GB10_CANONICAL_UNIT_DIR,
+)
 from loom_cli.rollout.operator.backup_lease import BackupLease, component_set_digest
 from loom_cli.rollout.preflight_contract import (
     AttestationBindings,
@@ -274,7 +277,7 @@ def derive_attestation_bindings(
     )
     controller_hosts = set(controller_artifacts)
     if (
-        not controller_hosts
+        controller_hosts != EXTERNAL_SUPERVISOR_CONTROLLER_HOSTS
         or set(controller_target_units) != controller_hosts
         or set(controller_target_unit_sets) != controller_hosts
         or set(controller_predecessors) != controller_hosts

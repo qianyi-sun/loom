@@ -632,9 +632,32 @@ def _external_supervisor_snapshot() -> ExternalSupervisorPredecessorSnapshot:
     )
 
 
+def _external_supervisor_snapshots(
+    gb10: ExternalSupervisorPredecessorSnapshot,
+) -> dict[str, ExternalSupervisorPredecessorSnapshot]:
+    if gb10.kind == "absent":
+        oldlab = replace(gb10, live_evidence_digest="4" * 64)
+    else:
+        oldlab = replace(
+            gb10,
+            authority_digest="1" * 64,
+            unit_sha256={
+                "loom-autoscaler-oldlab-staging.service": "2" * 64,
+                "loom-autoscaler-oldlab-staging.timer": "3" * 64,
+            },
+            live_evidence_digest="4" * 64,
+        )
+    return {
+        "gx10-01c7": gb10,
+        "TRT-EAI-OLDLAB-1": oldlab,
+    }
+
+
 def test_registered_external_supervisor_predecessor_binds_legacy_authority() -> None:
     snapshot = _external_supervisor_snapshot()
-    check = build_external_supervisor_predecessor_check(lambda _context: snapshot)
+    check = build_external_supervisor_predecessor_check(
+        lambda _context: _external_supervisor_snapshots(snapshot)
+    )
 
     probe = check.operations[CheckOperation.PROBE](_external_supervisor_context())
 
@@ -648,20 +671,10 @@ def test_registered_external_supervisor_predecessor_binds_legacy_authority() -> 
 
 def test_registered_external_supervisor_predecessor_binds_every_controller() -> None:
     gb10 = _external_supervisor_snapshot()
-    oldlab = replace(
-        gb10,
-        authority_digest="1" * 64,
-        unit_sha256={
-            "loom-autoscaler-oldlab-staging.service": "2" * 64,
-            "loom-autoscaler-oldlab-staging.timer": "3" * 64,
-        },
-        live_evidence_digest="4" * 64,
-    )
+    snapshots = _external_supervisor_snapshots(gb10)
+    oldlab = snapshots["TRT-EAI-OLDLAB-1"]
     check = build_external_supervisor_predecessor_check(
-        lambda _context: {
-            "gx10-01c7": gb10,
-            "TRT-EAI-OLDLAB-1": oldlab,
-        }
+        lambda _context: snapshots
     )
 
     probe = check.operations[CheckOperation.PROBE](_external_supervisor_context())
@@ -675,6 +688,17 @@ def test_registered_external_supervisor_predecessor_binds_every_controller() -> 
         controller_bindings["TRT-EAI-OLDLAB-1/unit/loom-autoscaler-oldlab-staging.timer"]
         == oldlab.unit_sha256["loom-autoscaler-oldlab-staging.timer"]
     )
+
+
+def test_registered_external_supervisor_predecessor_rejects_missing_controller() -> None:
+    check = build_external_supervisor_predecessor_check(
+        lambda _context: {"gx10-01c7": _external_supervisor_snapshot()}
+    )
+
+    probe = check.operations[CheckOperation.PROBE](_external_supervisor_context())
+
+    assert not probe.passed
+    assert probe.evidence["controller-bindings"] == {}
 
 
 def test_registered_external_supervisor_predecessor_accepts_absent_but_rejects_malformed_or_pending() -> (
@@ -694,7 +718,9 @@ def test_registered_external_supervisor_predecessor_accepts_absent_but_rejects_m
         runtime_ready=True,
         pool_identity_digest="f" * 64,
     )
-    check = build_external_supervisor_predecessor_check(lambda _context: absent)
+    check = build_external_supervisor_predecessor_check(
+        lambda _context: _external_supervisor_snapshots(absent)
+    )
     assert check.operations[CheckOperation.PROBE](_external_supervisor_context()).passed
 
     # But absent stays tightly gated: it may not carry units, and it must carry
@@ -709,7 +735,9 @@ def test_registered_external_supervisor_predecessor_accepts_absent_but_rejects_m
         pending_transition_digest="f" * 64,
         transition_clear=False,
     )
-    check = build_external_supervisor_predecessor_check(lambda _context: pending)
+    check = build_external_supervisor_predecessor_check(
+        lambda _context: _external_supervisor_snapshots(pending)
+    )
     probe = check.operations[CheckOperation.PROBE](_external_supervisor_context())
     assert not probe.passed
     assert probe.evidence["pending-transition-digest"] == "f" * 64

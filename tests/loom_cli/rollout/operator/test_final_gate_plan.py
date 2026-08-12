@@ -452,6 +452,14 @@ def test_final_gate_plan_preserves_independent_supervisor_controller_authority(
     assert controllers["gx10-01c7"].unit_directory == GB10_CANONICAL_UNIT_DIR
     assert controllers["TRT-EAI-OLDLAB-1"].unit_directory == PROTECTED_CANONICAL_UNIT_DIR
 
+    gb10_only = {
+        key: value
+        for key, value in plan.supervisor_controller_bindings.items()
+        if key.startswith("gx10-01c7/")
+    }
+    with pytest.raises(ValueError, match="controller binding set"):
+        parse_external_supervisor_controller_bindings(gb10_only)
+
 
 def test_final_gate_plan_rejects_drift_or_content_tamper(tmp_path: Path) -> None:
     attestation = _attestation()

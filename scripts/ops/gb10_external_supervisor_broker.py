@@ -542,33 +542,195 @@ def candidate_ready(
     return True
 
 
-def _harden_tree(root: Path, *, owner_uid: int, owner_gid: int) -> None:
-    inventory: list[tuple[Path, os.stat_result]] = []
-    for directory, names, files in os.walk(root, topdown=False, followlinks=False):
-        for name in [*names, *files]:
-            path = Path(directory) / name
-            metadata = os.lstat(path)
-            if not (
-                stat.S_ISDIR(metadata.st_mode)
-                or stat.S_ISREG(metadata.st_mode)
-                or stat.S_ISLNK(metadata.st_mode)
-            ):
-                raise BrokerError("candidate runtime contains a special file")
-            if not stat.S_ISDIR(metadata.st_mode) and metadata.st_nlink != 1:
-                raise BrokerError("candidate runtime contains an external hardlink")
-            inventory.append((path, metadata))
-    for path, metadata in inventory:
-        if metadata.st_uid != owner_uid or metadata.st_gid != owner_gid:
-            os.lchown(path, owner_uid, owner_gid)
-        if stat.S_ISDIR(metadata.st_mode):
-            os.chmod(path, 0o555, follow_symlinks=False)
-        elif stat.S_ISREG(metadata.st_mode):
-            executable = bool(stat.S_IMODE(metadata.st_mode) & 0o111)
-            os.chmod(path, 0o555 if executable else 0o444, follow_symlinks=False)
-    metadata = os.lstat(root)
+def _set_fd_owner(descriptor: int, *, owner_uid: int, owner_gid: int) -> None:
+    metadata = os.fstat(descriptor)
     if metadata.st_uid != owner_uid or metadata.st_gid != owner_gid:
-        os.chown(root, owner_uid, owner_gid)
-    os.chmod(root, 0o555)
+        os.fchown(descriptor, owner_uid, owner_gid)
+
+
+def _copy_hardened_directory(
+    source: int,
+    destination: int,
+    *,
+    source_uid: int,
+    source_gid: int,
+    owner_uid: int,
+    owner_gid: int,
+    entries: list[int],
+) -> None:
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    for name in sorted(os.listdir(source)):
+        if not name or name in {".", ".."} or "/" in name or "\x00" in name:
+            raise BrokerError("candidate runtime entry name is unsafe")
+        entries[0] += 1
+        if entries[0] > _MAX_TREE_ENTRIES:
+            raise BrokerError("candidate runtime inventory is too large")
+        metadata = os.stat(name, dir_fd=source, follow_symlinks=False)
+        if metadata.st_uid != source_uid or metadata.st_gid != source_gid:
+            raise BrokerError("candidate build ownership drifted")
+        if stat.S_ISDIR(metadata.st_mode):
+            source_child = os.open(name, directory_flags, dir_fd=source)
+            try:
+                opened = os.fstat(source_child)
+                if (
+                    not stat.S_ISDIR(opened.st_mode)
+                    or opened.st_uid != source_uid
+                    or opened.st_gid != source_gid
+                ):
+                    raise BrokerError("candidate build directory changed during publication")
+                os.mkdir(name, mode=0o700, dir_fd=destination)
+                destination_child = os.open(name, directory_flags, dir_fd=destination)
+                try:
+                    _set_fd_owner(
+                        destination_child,
+                        owner_uid=owner_uid,
+                        owner_gid=owner_gid,
+                    )
+                    _copy_hardened_directory(
+                        source_child,
+                        destination_child,
+                        source_uid=source_uid,
+                        source_gid=source_gid,
+                        owner_uid=owner_uid,
+                        owner_gid=owner_gid,
+                        entries=entries,
+                    )
+                    os.fchmod(destination_child, 0o555)
+                    os.fsync(destination_child)
+                finally:
+                    os.close(destination_child)
+            finally:
+                os.close(source_child)
+            continue
+        if stat.S_ISREG(metadata.st_mode):
+            if metadata.st_nlink != 1:
+                raise BrokerError("candidate runtime contains an external hardlink")
+            source_file = os.open(name, file_flags, dir_fd=source)
+            try:
+                opened = os.fstat(source_file)
+                if (
+                    not stat.S_ISREG(opened.st_mode)
+                    or opened.st_uid != source_uid
+                    or opened.st_gid != source_gid
+                    or opened.st_nlink != 1
+                ):
+                    raise BrokerError("candidate build file changed during publication")
+                destination_file = os.open(
+                    name,
+                    os.O_WRONLY
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                    dir_fd=destination,
+                )
+                try:
+                    while True:
+                        chunk = os.read(source_file, 1024 * 1024)
+                        if not chunk:
+                            break
+                        offset = 0
+                        while offset < len(chunk):
+                            written = os.write(destination_file, chunk[offset:])
+                            if written <= 0:
+                                raise BrokerError("candidate runtime copy failed")
+                            offset += written
+                    if os.fstat(source_file).st_nlink != 1:
+                        raise BrokerError("candidate build file changed during publication")
+                    _set_fd_owner(
+                        destination_file,
+                        owner_uid=owner_uid,
+                        owner_gid=owner_gid,
+                    )
+                    os.fchmod(
+                        destination_file,
+                        0o555 if stat.S_IMODE(opened.st_mode) & 0o111 else 0o444,
+                    )
+                    os.fsync(destination_file)
+                finally:
+                    os.close(destination_file)
+            finally:
+                os.close(source_file)
+            continue
+        if stat.S_ISLNK(metadata.st_mode):
+            if metadata.st_nlink != 1:
+                raise BrokerError("candidate runtime contains an external hardlink")
+            target = os.readlink(name, dir_fd=source)
+            os.symlink(target, name, dir_fd=destination)
+            os.chown(
+                name,
+                owner_uid,
+                owner_gid,
+                dir_fd=destination,
+                follow_symlinks=False,
+            )
+            continue
+        raise BrokerError("candidate runtime contains a special file")
+
+
+def _copy_hardened_tree(
+    source: Path,
+    destination: Path,
+    *,
+    source_uid: int,
+    source_gid: int,
+    owner_uid: int,
+    owner_gid: int,
+) -> None:
+    """Copy untrusted build output into a new root-controlled immutable tree."""
+
+    if (
+        not source.is_absolute()
+        or not destination.is_absolute()
+        or ".." in source.parts
+        or ".." in destination.parts
+    ):
+        raise BrokerError("candidate runtime copy authority is invalid")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    source_descriptor = os.open(source, flags)
+    destination_descriptor = os.open(destination, flags)
+    try:
+        source_metadata = os.fstat(source_descriptor)
+        destination_metadata = os.fstat(destination_descriptor)
+        if (
+            source_metadata.st_uid != source_uid
+            or source_metadata.st_gid != source_gid
+            or not stat.S_ISDIR(source_metadata.st_mode)
+            or not stat.S_ISDIR(destination_metadata.st_mode)
+            or os.listdir(destination_descriptor)
+        ):
+            raise BrokerError("candidate runtime copy roots are unsafe")
+        _set_fd_owner(
+            destination_descriptor,
+            owner_uid=owner_uid,
+            owner_gid=owner_gid,
+        )
+        _copy_hardened_directory(
+            source_descriptor,
+            destination_descriptor,
+            source_uid=source_uid,
+            source_gid=source_gid,
+            owner_uid=owner_uid,
+            owner_gid=owner_gid,
+            entries=[0],
+        )
+        os.fchmod(destination_descriptor, 0o555)
+        os.fsync(destination_descriptor)
+    finally:
+        os.close(destination_descriptor)
+        os.close(source_descriptor)
 
 
 def _make_tree_removable(root: Path) -> None:
@@ -594,12 +756,15 @@ def _publish_candidate(
     system_python: Path,
     uv_binary: Path,
 ) -> Path:
-    temporary = Path(tempfile.mkdtemp(prefix=f".{candidate_sha}.", dir=candidates_root))
+    build_temporary = Path(
+        tempfile.mkdtemp(prefix=f".{candidate_sha}.build.", dir=candidates_root)
+    )
+    sealed_temporary: Path | None = None
     try:
-        os.chown(temporary, build_uid, build_gid)
-        os.chmod(temporary, 0o700)
+        os.chown(build_temporary, build_uid, build_gid)
+        os.chmod(build_temporary, 0o700)
         build_identity = (build_uid, build_gid)
-        repo = temporary / "repo"
+        repo = build_temporary / "repo"
         _run(["/usr/bin/git", "init", "-q", str(repo)], run_as=build_identity)
         _git(repo, "remote", "add", "origin", remote_url, run_as=build_identity)
         _git(
@@ -627,7 +792,7 @@ def _publish_candidate(
             "LC_ALL": "C.UTF-8",
             "PATH": "/usr/local/bin:/usr/bin:/bin",
             "UV_LINK_MODE": "copy",
-            "UV_PROJECT_ENVIRONMENT": str(temporary / "venv"),
+            "UV_PROJECT_ENVIRONMENT": str(build_temporary / "venv"),
         }
         _run(
             [
@@ -650,9 +815,19 @@ def _publish_candidate(
             timeout=1800,
             run_as=build_identity,
         )
-        _harden_tree(temporary, owner_uid=owner_uid, owner_gid=owner_gid)
+        sealed_temporary = Path(
+            tempfile.mkdtemp(prefix=f".{candidate_sha}.candidate.", dir=candidates_root)
+        )
+        _copy_hardened_tree(
+            build_temporary,
+            sealed_temporary,
+            source_uid=build_uid,
+            source_gid=build_gid,
+            owner_uid=owner_uid,
+            owner_gid=owner_gid,
+        )
         _validate_candidate_path(
-            temporary,
+            sealed_temporary,
             candidate_sha,
             candidate_tree,
             remote_url=remote_url,
@@ -662,10 +837,14 @@ def _publish_candidate(
             inspection_gid=build_gid,
             system_python=system_python,
         )
+        if not shutil.rmtree.avoids_symlink_attacks:
+            raise BrokerError("candidate build cleanup is unsafe")
+        shutil.rmtree(build_temporary)
         final = candidates_root / candidate_sha
         if os.path.lexists(final):
             raise BrokerError("candidate path appeared during publication")
-        os.rename(temporary, final)
+        os.rename(sealed_temporary, final)
+        sealed_temporary = None
         directory = os.open(candidates_root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
         try:
             os.fsync(directory)
@@ -673,9 +852,11 @@ def _publish_candidate(
             os.close(directory)
         return final
     finally:
-        if os.path.lexists(temporary):
-            _make_tree_removable(temporary)
-            shutil.rmtree(temporary)
+        if os.path.lexists(build_temporary):
+            shutil.rmtree(build_temporary)
+        if sealed_temporary is not None and os.path.lexists(sealed_temporary):
+            _make_tree_removable(sealed_temporary)
+            shutil.rmtree(sealed_temporary)
 
 
 def ensure_candidate(

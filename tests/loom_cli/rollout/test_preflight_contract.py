@@ -797,6 +797,10 @@ def _bindings(**overrides: object) -> AttestationBindings:
         "loom-autoscaler-gb10-staging.service": "d" * 64,
         "loom-autoscaler-gb10-staging.timer": "e" * 64,
     }
+    oldlab_predecessor_units = {
+        "loom-autoscaler-oldlab-staging.service": "4" * 64,
+        "loom-autoscaler-oldlab-staging.timer": "5" * 64,
+    }
     values: dict[str, object] = {
         "candidate_sha": "a" * 40,
         "candidate_tree": "b" * 40,
@@ -844,10 +848,35 @@ def _bindings(**overrides: object) -> AttestationBindings:
             "gx10-01c7/unit-directory": GB10_CANONICAL_UNIT_DIR,
             "gx10-01c7/transition-digest": "3" * 64,
             **{f"gx10-01c7/unit/{name}": digest for name, digest in predecessor_units.items()},
+            "TRT-EAI-OLDLAB-1/authority-kind": "legacy-manifest",
+            "TRT-EAI-OLDLAB-1/authority-digest": "6" * 64,
+            "TRT-EAI-OLDLAB-1/pointer-digest": EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+            "TRT-EAI-OLDLAB-1/unit-set-digest": external_supervisor_unit_set_digest(
+                oldlab_predecessor_units
+            ),
+            "TRT-EAI-OLDLAB-1/live-evidence-digest": "7" * 64,
+            "TRT-EAI-OLDLAB-1/pending-transition-digest": "8" * 64,
+            "TRT-EAI-OLDLAB-1/unit-directory": PROTECTED_CANONICAL_UNIT_DIR,
+            "TRT-EAI-OLDLAB-1/transition-digest": "9" * 64,
+            **{
+                f"TRT-EAI-OLDLAB-1/unit/{name}": digest
+                for name, digest in oldlab_predecessor_units.items()
+            },
         },
     }
     values.update(overrides)
     return AttestationBindings(**values)  # type: ignore[arg-type]
+
+
+def test_attestation_rejects_incomplete_external_supervisor_controller_coverage() -> None:
+    controller_bindings = {
+        key: value
+        for key, value in _bindings().supervisor_controller_bindings.items()
+        if key.startswith("gx10-01c7/")
+    }
+
+    with pytest.raises(ValueError, match="controller binding set"):
+        _bindings(supervisor_controller_bindings=controller_bindings)
 
 
 def test_attestation_binds_all_evidence_and_invalidates_drift() -> None:

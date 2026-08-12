@@ -244,6 +244,33 @@ def test_derives_complete_bindings_only_from_exact_evidence() -> None:
     assert controller_bindings["TRT-EAI-OLDLAB-1/unit-directory"] == PROTECTED_CANONICAL_UNIT_DIR
 
 
+def test_binding_derivation_rejects_incomplete_supervisor_controller_evidence() -> None:
+    incomplete: list[CheckExecution] = []
+    for execution in _executions():
+        evidence = dict(execution.evidence)
+        if execution.check_id == "systemd.render":
+            for field in (
+                "supervisor-controller-artifact-digests",
+                "supervisor-controller-unit-digests",
+                "supervisor-controller-unit-set-digests",
+            ):
+                values = evidence[field]
+                assert isinstance(values, dict)
+                evidence[field] = {
+                    key: value for key, value in values.items() if key.startswith("gx10-01c7")
+                }
+        elif execution.check_id == "external-supervisor.predecessor":
+            values = evidence["controller-bindings"]
+            assert isinstance(values, dict)
+            evidence["controller-bindings"] = {
+                key: value for key, value in values.items() if key.startswith("gx10-01c7/")
+            }
+        incomplete.append(_execution(execution.check_id, evidence))
+
+    with pytest.raises(ValueError, match="controller coverage"):
+        derive_attestation_bindings(_context(), incomplete)
+
+
 def test_restore_verified_lease_overrides_prebackup_reuse_evidence() -> None:
     lease = BackupLease(
         lease_id="lease-restored01",

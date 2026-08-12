@@ -115,6 +115,11 @@ def _build_active_artifact(*args, **kwargs) -> ExternalSupervisorArtifact:
 
 
 def _bound_artifact(tmp_path: Path):
+    plan, candidate_root, artifacts = _bound_multi_artifacts(tmp_path)
+    return plan, candidate_root, artifacts["gx10-01c7"]
+
+
+def _bound_single_artifact(tmp_path: Path):
     plan = _published_plan(tmp_path)
     candidate_root = tmp_path / "candidate"
     profile_target = candidate_root / "deploy/environment-state/staging.toml"
@@ -367,6 +372,11 @@ def _bound_multi_artifacts(tmp_path: Path):
     return bound, candidate_root, artifacts
 
 
+def test_final_plan_rejects_single_external_supervisor_controller(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="controller binding set"):
+        _bound_single_artifact(tmp_path)
+
+
 def _epoch(plan, state: ComponentState = ComponentState.EXACT) -> ComponentObservation:
     return ComponentObservation(
         state=state,
@@ -563,6 +573,7 @@ def test_component_classifies_bound_predecessor_partial_and_exact_states(tmp_pat
         candidate_root=candidate_root,
         transport=transport,
         epoch_guard=lambda value: _epoch(value),
+        execution_host=artifact.supervisors[0].execution_host,
         unit_dir=Path(external_supervisor_unit_directory(artifact.supervisors[0].execution_host)),
         artifact_builder=_build_active_artifact,
     )
@@ -688,7 +699,7 @@ def _bound_absent(tmp_path: Path):
     plan, candidate_root, artifact = _bound_artifact(tmp_path)
     predecessor_live = _observation(artifact, files="absent", runtime="absent")
     absent_unit_set = external_supervisor_unit_set_digest_or_empty({})
-    transition_digest = external_supervisor_transition_digest(
+    controller_transition_digest = external_supervisor_transition_digest(
         unit_directory=external_supervisor_unit_directory(artifact.supervisors[0].execution_host),
         candidate_sha=plan.candidate_sha,
         candidate_tree=plan.candidate_tree,
@@ -708,6 +719,58 @@ def _bound_absent(tmp_path: Path):
     )
     payload = plan.to_dict()
     payload.pop("plan_digest")
+    target_units = {
+        name: digest
+        for name, digest in plan.systemd_unit_digests.items()
+        if name not in UNIT_PATHS
+    }
+    aggregate_transition_digest = external_supervisor_transition_digest(
+        unit_directory=GB10_CANONICAL_UNIT_DIR,
+        candidate_sha=plan.candidate_sha,
+        candidate_tree=plan.candidate_tree,
+        environment=plan.environment,
+        predecessor_kind="absent",
+        predecessor_digest=ABSENT_PREDECESSOR_DIGEST,
+        predecessor_pointer_digest=ABSENT_PREDECESSOR_DIGEST,
+        predecessor_unit_sha256={},
+        predecessor_unit_set_digest=absent_unit_set,
+        predecessor_live_evidence_digest=predecessor_live.evidence_digest,
+        predecessor_pending_transition_digest=predecessor_live.pending_transition_digest,
+        target_artifact_digest=plan.supervisor_artifact_digest,
+        target_profile_sha256=plan.supervisor_profile_sha256,
+        target_script_sha256=plan.supervisor_script_digests,
+        target_unit_sha256=target_units,
+        target_unit_set_digest=external_supervisor_unit_set_digest(target_units),
+    )
+    controller_bindings = {
+        key: value
+        for key, value in plan.supervisor_controller_bindings.items()
+        if not key.startswith("gx10-01c7/")
+    }
+    controller_bindings.update(
+        {
+            f"{artifact.supervisors[0].execution_host}/authority-kind": "absent",
+            f"{artifact.supervisors[0].execution_host}/authority-digest": (
+                ABSENT_PREDECESSOR_DIGEST
+            ),
+            f"{artifact.supervisors[0].execution_host}/pointer-digest": (
+                ABSENT_PREDECESSOR_DIGEST
+            ),
+            f"{artifact.supervisors[0].execution_host}/unit-set-digest": absent_unit_set,
+            f"{artifact.supervisors[0].execution_host}/live-evidence-digest": (
+                predecessor_live.evidence_digest
+            ),
+            f"{artifact.supervisors[0].execution_host}/pending-transition-digest": (
+                predecessor_live.pending_transition_digest
+            ),
+            f"{artifact.supervisors[0].execution_host}/unit-directory": (
+                external_supervisor_unit_directory(artifact.supervisors[0].execution_host)
+            ),
+            f"{artifact.supervisors[0].execution_host}/transition-digest": (
+                controller_transition_digest
+            ),
+        }
+    )
     payload.update(
         {
             "supervisor_predecessor_kind": "absent",
@@ -719,27 +782,8 @@ def _bound_absent(tmp_path: Path):
             "supervisor_predecessor_pending_transition_digest": (
                 predecessor_live.pending_transition_digest
             ),
-            "supervisor_transition_digest": transition_digest,
-            "supervisor_controller_bindings": {
-                f"{artifact.supervisors[0].execution_host}/authority-kind": "absent",
-                f"{artifact.supervisors[0].execution_host}/authority-digest": (
-                    ABSENT_PREDECESSOR_DIGEST
-                ),
-                f"{artifact.supervisors[0].execution_host}/pointer-digest": (
-                    ABSENT_PREDECESSOR_DIGEST
-                ),
-                f"{artifact.supervisors[0].execution_host}/unit-set-digest": absent_unit_set,
-                f"{artifact.supervisors[0].execution_host}/live-evidence-digest": (
-                    predecessor_live.evidence_digest
-                ),
-                f"{artifact.supervisors[0].execution_host}/pending-transition-digest": (
-                    predecessor_live.pending_transition_digest
-                ),
-                f"{artifact.supervisors[0].execution_host}/unit-directory": (
-                    external_supervisor_unit_directory(artifact.supervisors[0].execution_host)
-                ),
-                f"{artifact.supervisors[0].execution_host}/transition-digest": (transition_digest),
-            },
+            "supervisor_transition_digest": aggregate_transition_digest,
+            "supervisor_controller_bindings": controller_bindings,
         }
     )
     bound = type(plan).from_dict({**payload, "plan_digest": _hash_json(payload)})
@@ -778,6 +822,7 @@ def test_component_classifies_absent_bootstrap_ready_via_plan_authority(tmp_path
         candidate_root=candidate_root,
         transport=transport,
         epoch_guard=lambda value: _epoch(value),
+        execution_host=artifact.supervisors[0].execution_host,
         unit_dir=Path(external_supervisor_unit_directory(artifact.supervisors[0].execution_host)),
         artifact_builder=_build_active_artifact,
     )
@@ -795,6 +840,7 @@ def test_component_stays_drifted_when_bare_observe_refuses_non_absent(tmp_path: 
         candidate_root=candidate_root,
         transport=transport,
         epoch_guard=lambda value: _epoch(value),
+        execution_host=artifact.supervisors[0].execution_host,
         unit_dir=Path(external_supervisor_unit_directory(artifact.supervisors[0].execution_host)),
         artifact_builder=_build_active_artifact,
     )
@@ -808,6 +854,7 @@ def test_component_applies_and_reaches_exact(tmp_path: Path) -> None:
         candidate_root=candidate_root,
         transport=transport,
         epoch_guard=lambda value: _epoch(value),
+        execution_host=artifact.supervisors[0].execution_host,
         unit_dir=Path(external_supervisor_unit_directory(artifact.supervisors[0].execution_host)),
         artifact_builder=_build_active_artifact,
     )
@@ -836,6 +883,7 @@ def test_component_rejects_stale_bytes_failed_state_and_epoch(tmp_path: Path) ->
         candidate_root=candidate_root,
         transport=transport,
         epoch_guard=lambda value: _epoch(value),
+        execution_host=artifact.supervisors[0].execution_host,
         unit_dir=Path(external_supervisor_unit_directory(artifact.supervisors[0].execution_host)),
         artifact_builder=_build_active_artifact,
     )
@@ -857,6 +905,7 @@ def test_component_rebuilds_and_rejects_candidate_or_plan_drift(tmp_path: Path) 
             _observation(artifact, files="legacy", runtime="exact"),
         ),
         epoch_guard=lambda value: _epoch(value),
+        execution_host=artifact.supervisors[0].execution_host,
         unit_dir=Path(external_supervisor_unit_directory(artifact.supervisors[0].execution_host)),
         artifact_builder=_build_active_artifact,
     )
@@ -1085,6 +1134,7 @@ def test_fixed_transport_converges_active_canonical_to_disabled_target(
         candidate_tree=plan.candidate_tree,
         image_tag=f"staging-{plan.candidate_sha[:7]}",
         environment=plan.environment,
+        execution_host="gx10-01c7",
     )
     assert len(disabled_artifact.supervisors) == 1
     disabled = disabled_artifact.supervisors[0]
@@ -1470,6 +1520,7 @@ def test_compensation_journal_blocks_across_candidate_until_same_identity_verifi
         candidate_sha="c" * 40,
         candidate_tree="d" * 40,
         image_tag="staging-ccccccc",
+        execution_host="gx10-01c7",
     )
     control = _Control(next_artifact, store)
     observation = FixedExternalSupervisorTransport(

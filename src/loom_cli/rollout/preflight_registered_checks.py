@@ -27,6 +27,7 @@ from loom_cli.rollout.credential_authority import (
 from loom_cli.rollout.docker_readiness import CommandRunner as DockerCommandRunner
 from loom_cli.rollout.docker_readiness import probe_docker_runtime
 from loom_cli.rollout.external_supervisor_predecessor import (
+    EXTERNAL_SUPERVISOR_CONTROLLER_HOSTS,
     external_supervisor_unit_directory,
 )
 from loom_cli.rollout.external_supervisor_readiness import (
@@ -252,7 +253,7 @@ class ExternalSupervisorPredecessorSnapshot:
 
 ExternalSupervisorPredecessorSource = Callable[
     [CheckContext],
-    ExternalSupervisorPredecessorSnapshot | Mapping[str, ExternalSupervisorPredecessorSnapshot],
+    Mapping[str, ExternalSupervisorPredecessorSnapshot],
 ]
 
 
@@ -881,19 +882,9 @@ def build_external_supervisor_predecessor_check(
         ):
             return _empty_external_supervisor_predecessor_probe()
         try:
-            observed = source(context)
-            if isinstance(observed, ExternalSupervisorPredecessorSnapshot):
-                inferred_host = (
-                    "TRT-EAI-OLDLAB-1"
-                    if any("oldlab" in name for name in observed.unit_sha256)
-                    else "gx10-01c7"
-                )
-                snapshots = {inferred_host: observed}
-            else:
-                snapshots = dict(observed)
+            snapshots = dict(source(context))
             if (
-                not snapshots
-                or len(snapshots) > 8
+                set(snapshots) != EXTERNAL_SUPERVISOR_CONTROLLER_HOSTS
                 or any(
                     not isinstance(host, str)
                     or not host

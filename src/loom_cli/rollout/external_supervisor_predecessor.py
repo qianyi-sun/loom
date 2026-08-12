@@ -32,6 +32,9 @@ NO_TRANSITION_GROUP_ID = hashlib.sha256(b"loom-external-supervisor-no-transition
 ]
 PROTECTED_CANONICAL_UNIT_DIR = "/var/lib/loom-staging-rollout/.config/systemd/user"
 GB10_CANONICAL_UNIT_DIR = "/var/lib/loom-rollout/.config/systemd/user"
+EXTERNAL_SUPERVISOR_CONTROLLER_HOSTS = frozenset(
+    {"gx10-01c7", "TRT-EAI-OLDLAB-1"}
+)
 _CONTROLLER_UNIT_DIRECTORIES = {
     "gx10-01c7": GB10_CANONICAL_UNIT_DIR,
     "trt-eai-oldlab-1": PROTECTED_CANONICAL_UNIT_DIR,
@@ -708,6 +711,7 @@ def load_predecessor_manifest(
 __all__ = [
     "ABSENT_PREDECESSOR_DIGEST",
     "DEFAULT_PREDECESSOR_MANIFEST",
+    "EXTERNAL_SUPERVISOR_CONTROLLER_HOSTS",
     "GB10_CANONICAL_UNIT_DIR",
     "NO_TRANSITION_GROUP_ID",
     "OLDLAB_PREDECESSOR_MANIFEST",
