@@ -951,7 +951,9 @@ def test_slurm_config_from_policy_uses_actuator_config_defaults_and_overrides() 
             "squeue_path": "/usr/bin/squeue",
             "sacct_path": "/usr/bin/sacct",
             "scancel_path": "/usr/bin/scancel",
+            "srun_path": "/usr/bin/srun",
             "command_timeout_seconds": 5.5,
+            "probe_mem_available": True,
             "exclusive": False,
             "container_cpus": 2.0,
             "container_memory_mib": 4096,
@@ -968,6 +970,8 @@ def test_slurm_config_from_policy_uses_actuator_config_defaults_and_overrides() 
     assert config.partition == "cpu"
     assert config.command_timeout_seconds == 5.5
     assert config.sbatch_path == "/usr/bin/sbatch"
+    assert config.srun_path == "/usr/bin/srun"
+    assert config.probe_mem_available is True
 
     csv_row = _policy_row(
         max_slots=6,

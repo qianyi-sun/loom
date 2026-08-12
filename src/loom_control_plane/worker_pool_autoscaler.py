@@ -1266,13 +1266,16 @@ def _slurm_config_from_policy(
         slurm_qos=str(actor_config.get("qos_normal") or actor_config.get("slurm_qos") or ""),
         slurm_reservation=str(actor_config.get("slurm_reservation") or ""),
         sinfo_path=str(actor_config.get("sinfo_path") or "sinfo"),
+        srun_path=str(actor_config.get("srun_path") or "srun"),
         resource_aware=resource_aware,
+        probe_mem_available=_optional_bool(
+            actor_config.get("probe_mem_available"),
+            default=False,
+        ),
         cpu_per_slot=int(actor_config.get("cpu_per_slot") or 2),
         memory_mib_per_slot=int(actor_config.get("memory_mib_per_slot") or 8192),
         reserved_cpus=int(
-            actor_config["reserved_cpus"]
-            if actor_config.get("reserved_cpus") is not None
-            else 4
+            actor_config["reserved_cpus"] if actor_config.get("reserved_cpus") is not None else 4
         ),
         reserved_memory_mib=int(
             actor_config["reserved_memory_mib"]
@@ -1359,6 +1362,8 @@ def _slurm_node_exclusion_details(
                     "free_memory_mib": resource.free_memory_mib,
                 },
             )
+            if resource.available_memory_mib is not None:
+                row["available_memory_mib"] = resource.available_memory_mib
         details.append(row)
     return details
 
@@ -1478,7 +1483,8 @@ async def _apply_slurm_scale_up(
     node_resources = None
     if config.resource_aware:
         try:
-            node_resources = await runner.query_node_resources(config.allowed_nodes)
+            probe_nodes = tuple(node for node in config.allowed_nodes if node not in active_nodes)
+            node_resources = await runner.query_node_resources(probe_nodes)
         except Exception as exc:
             return SlurmScaleUpActuatorResult(error=str(exc))
 
@@ -1669,9 +1675,7 @@ async def _apply_slurm_release_drained(
         .all()
     )
     worker_by_id = {str(worker.id): worker for worker in release_workers}
-    release_hostnames = {
-        str(worker.hostname) for worker in release_workers if worker.hostname
-    }
+    release_hostnames = {str(worker.hostname) for worker in release_workers if worker.hostname}
     in_flight_rows = (
         await session.execute(
             select(Trial.worker_id)

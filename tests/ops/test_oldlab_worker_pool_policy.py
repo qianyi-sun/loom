@@ -57,6 +57,16 @@ def test_oldlab_current_policy_defines_nonexclusive_container_caps() -> None:
     assert actuator["external_runner"] is True
 
 
+def test_oldlab_current_policy_opts_into_cache_aware_memory_admission_only() -> None:
+    policies = {
+        item["pool_name"]: item["actuator_config"]
+        for item in _profile()["worker_pool_autoscaler_policies"]
+    }
+
+    assert policies["oldlab"]["probe_mem_available"] is True
+    assert policies["gb10"].get("probe_mem_available", False) is False
+
+
 def test_oldlab_current_policy_uses_candidate_bound_shared_paths() -> None:
     actuator = _policy()["actuator_config"]
 

@@ -131,6 +131,10 @@ reserved_cpus = 4
 reserved_memory_mib = 20480
 max_concurrency_per_node = 6
 max_cpu_load_ratio = 1.0
+# Slurm FreeMem excludes reclaimable page cache on these double-duty hosts.
+# Probe Linux MemAvailable through a tiny immediate Slurm allocation while
+# sizing inactive, otherwise-safe nodes; probe failure remains closed.
+probe_mem_available = true
 # Double-duty nodes cannot be claimed exclusively.
 exclusive = false
 external_runner = true
