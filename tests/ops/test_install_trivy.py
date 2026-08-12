@@ -15,9 +15,18 @@ def _archive(
     *,
     member_type: bytes = tarfile.REGTYPE,
     duplicate: bool = False,
+    global_pax_size: int = 0,
+    gnu_long_name_size: int = 0,
 ) -> bytes:
     buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+    archive_format = tarfile.GNU_FORMAT if gnu_long_name_size else tarfile.PAX_FORMAT
+    pax_headers = {"comment": "x" * global_pax_size} if global_pax_size else None
+    with tarfile.open(
+        fileobj=buffer,
+        mode="w:gz",
+        format=archive_format,
+        pax_headers=pax_headers,
+    ) as archive:
         license_info = tarfile.TarInfo("LICENSE")
         license_payload = b"license"
         license_info.size = len(license_payload)
@@ -34,6 +43,11 @@ def _archive(
             else:
                 binary.linkname = "LICENSE"
                 archive.addfile(binary)
+        if gnu_long_name_size:
+            metadata = tarfile.TarInfo("x" * gnu_long_name_size)
+            metadata_payload = b"metadata"
+            metadata.size = len(metadata_payload)
+            archive.addfile(metadata, io.BytesIO(metadata_payload))
     return buffer.getvalue()
 
 
@@ -145,4 +159,73 @@ def test_installer_rejects_unsupported_architecture_before_download(
         )
 
     assert downloaded is False
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_installer_normalizes_truncated_archive_and_cleans_up(tmp_path: Path) -> None:
+    archive = _archive()
+    truncated = archive[: len(archive) // 2]
+
+    with pytest.raises(installer.TrivyInstallError, match="installation failed"):
+        installer._install_trivy(
+            tmp_path,
+            machine="x86_64",
+            release=_release(truncated),
+            opener=lambda _url, *, timeout: io.BytesIO(truncated),
+        )
+
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("limit_name", "limit_value", "message"),
+    [
+        ("_MAX_ARCHIVE_MEMBERS", 1, "too many members"),
+        ("_MAX_ARCHIVE_EXPANDED_BYTES", 1, "expanded size"),
+    ],
+)
+def test_installer_bounds_archive_traversal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    limit_name: str,
+    limit_value: int,
+    message: str,
+) -> None:
+    archive = _archive()
+    monkeypatch.setattr(installer, limit_name, limit_value)
+
+    with pytest.raises(installer.TrivyInstallError, match=message):
+        installer._install_trivy(
+            tmp_path,
+            machine="x86_64",
+            release=_release(archive),
+            opener=lambda _url, *, timeout: io.BytesIO(archive),
+        )
+
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "archive",
+    [
+        _archive(global_pax_size=16 * 1024),
+        _archive(gnu_long_name_size=16 * 1024),
+    ],
+    ids=["pax-global-header", "gnu-long-name"],
+)
+def test_installer_bounds_hidden_archive_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    archive: bytes,
+) -> None:
+    monkeypatch.setattr(installer, "_MAX_ARCHIVE_EXPANDED_BYTES", 12 * 1024)
+
+    with pytest.raises(installer.TrivyInstallError, match="expanded size"):
+        installer._install_trivy(
+            tmp_path,
+            machine="x86_64",
+            release=_release(archive),
+            opener=lambda _url, *, timeout: io.BytesIO(archive),
+        )
+
     assert list(tmp_path.iterdir()) == []

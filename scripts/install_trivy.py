@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import os
 import platform
@@ -30,6 +31,8 @@ else:  # pragma: no cover - direct workflow entry point
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 _DOWNLOAD_TIMEOUT_SECONDS = 60
 _MAX_ARCHIVE_BYTES = 128 * 1024 * 1024
+_MAX_ARCHIVE_MEMBERS = 256
+_MAX_ARCHIVE_EXPANDED_BYTES = 512 * 1024 * 1024
 _MAX_BINARY_BYTES = 256 * 1024 * 1024
 _RELEASE_BASE_URL = "https://github.com/aquasecurity/trivy/releases/download"
 
@@ -73,6 +76,26 @@ class TrivyInstallError(RuntimeError):
 
 
 _Opener = Callable[..., AbstractContextManager[BinaryIO]]
+
+
+class _ExpandedArchiveReader:
+    """Bound all decompressed bytes, including tar metadata hidden from callers."""
+
+    def __init__(self, source: gzip.GzipFile, *, max_bytes: int) -> None:
+        self._source = source
+        self._max_bytes = max_bytes
+        self._bytes_read = 0
+
+    def read(self, size: int = -1) -> bytes:
+        if size == 0:
+            return b""
+        remaining = self._max_bytes - self._bytes_read
+        read_size = remaining + 1 if size < 0 else min(size, remaining + 1)
+        payload = self._source.read(read_size)
+        self._bytes_read += len(payload)
+        if self._bytes_read > self._max_bytes:
+            raise TrivyInstallError("Trivy archive expanded size is too large")
+        return payload
 
 
 def _runner_architecture(machine: str) -> str:
@@ -134,32 +157,61 @@ def _download_archive(
 
 
 def _extract_binary(archive_path: Path, executable: Path) -> None:
-    with tarfile.open(archive_path, mode="r:gz") as archive:
-        candidates = [member for member in archive.getmembers() if member.name == "trivy"]
-        if len(candidates) != 1:
-            raise TrivyInstallError("Trivy archive must contain exactly one binary")
-        member = candidates[0]
-        if not member.isfile():
-            raise TrivyInstallError("Trivy archive binary must be a regular file")
-        if member.size <= 0 or member.size > _MAX_BINARY_BYTES:
-            raise TrivyInstallError("Trivy archive binary size is invalid")
-        source = archive.extractfile(member)
-        if source is None:
-            raise TrivyInstallError("Trivy archive binary is unreadable")
-        temporary_executable = executable.with_suffix(".tmp")
-        byte_count = 0
-        with source, temporary_executable.open("xb") as output:
-            while chunk := source.read(1024 * 1024):
-                byte_count += len(chunk)
-                if byte_count > member.size or byte_count > _MAX_BINARY_BYTES:
-                    raise TrivyInstallError("Trivy archive binary exceeds its declared size")
-                output.write(chunk)
-            output.flush()
-            os.fsync(output.fileno())
-        if byte_count != member.size:
-            raise TrivyInstallError("Trivy archive binary is truncated")
-        temporary_executable.chmod(0o755)
-        os.replace(temporary_executable, executable)
+    temporary_executable = executable.with_suffix(".tmp")
+    candidate_count = 0
+    member_count = 0
+    expanded_bytes = 0
+    with archive_path.open("rb") as compressed:
+        with gzip.GzipFile(fileobj=compressed, mode="rb") as decompressed:
+            bounded = _ExpandedArchiveReader(
+                decompressed,
+                max_bytes=_MAX_ARCHIVE_EXPANDED_BYTES,
+            )
+            with tarfile.open(fileobj=cast(BinaryIO, bounded), mode="r|") as archive:
+                for member in archive:
+                    member_count += 1
+                    if member_count > _MAX_ARCHIVE_MEMBERS:
+                        raise TrivyInstallError("Trivy archive contains too many members")
+                    if member.size < 0:
+                        raise TrivyInstallError("Trivy archive member size is invalid")
+                    expanded_bytes += member.size
+                    if expanded_bytes > _MAX_ARCHIVE_EXPANDED_BYTES:
+                        raise TrivyInstallError("Trivy archive expanded size is too large")
+                    if member.name != "trivy":
+                        continue
+
+                    candidate_count += 1
+                    if candidate_count > 1:
+                        raise TrivyInstallError(
+                            "Trivy archive must contain exactly one binary"
+                        )
+                    if not member.isfile():
+                        raise TrivyInstallError(
+                            "Trivy archive binary must be a regular file"
+                        )
+                    if member.size <= 0 or member.size > _MAX_BINARY_BYTES:
+                        raise TrivyInstallError("Trivy archive binary size is invalid")
+                    source = archive.extractfile(member)
+                    if source is None:
+                        raise TrivyInstallError("Trivy archive binary is unreadable")
+                    byte_count = 0
+                    with source, temporary_executable.open("xb") as output:
+                        while chunk := source.read(1024 * 1024):
+                            byte_count += len(chunk)
+                            if byte_count > member.size or byte_count > _MAX_BINARY_BYTES:
+                                raise TrivyInstallError(
+                                    "Trivy archive binary exceeds its declared size"
+                                )
+                            output.write(chunk)
+                        output.flush()
+                        os.fsync(output.fileno())
+                    if byte_count != member.size:
+                        raise TrivyInstallError("Trivy archive binary is truncated")
+
+    if candidate_count != 1:
+        raise TrivyInstallError("Trivy archive must contain exactly one binary")
+    temporary_executable.chmod(0o755)
+    os.replace(temporary_executable, executable)
 
 
 def _install_trivy(
@@ -197,7 +249,7 @@ def _install_trivy(
     except TrivyInstallError:
         shutil.rmtree(install_dir)
         raise
-    except (OSError, tarfile.TarError, urllib.error.URLError) as exc:
+    except (EOFError, OSError, tarfile.TarError, urllib.error.URLError) as exc:
         shutil.rmtree(install_dir)
         raise TrivyInstallError("pinned Trivy installation failed") from exc
     return executable
