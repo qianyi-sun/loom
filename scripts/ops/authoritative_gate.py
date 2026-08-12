@@ -126,6 +126,10 @@ class PublisherClient(Protocol):
         self, check_run_id: int, payload: Mapping[str, Any]
     ) -> Mapping[str, Any]: ...
 
+    def create_commit_status(
+        self, head_sha: str, payload: Mapping[str, Any]
+    ) -> Mapping[str, Any]: ...
+
     def list_workflow_runs(
         self, workflow_id: int, head_sha: str, event: str
     ) -> Sequence[Mapping[str, Any]]: ...
@@ -269,6 +273,18 @@ class GitHubClient:
         )
         if not isinstance(response, Mapping):
             raise PublisherError("GitHub update CheckRun response is not an object")
+        return response
+
+    def create_commit_status(
+        self, head_sha: str, payload: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        response = self._request(
+            "POST",
+            f"/repos/{self._repo_path}/statuses/{quote(head_sha, safe='')}",
+            payload=payload,
+        )
+        if not isinstance(response, Mapping):
+            raise PublisherError("GitHub create commit status response is not an object")
         return response
 
     def list_workflow_runs(
@@ -845,6 +861,17 @@ def _upsert_check(
     now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     verb = "awaiting" if status == "in_progress" else conclusion or "failure"
     external_id = spec.external_id(repository=client.repository, head_sha=head_sha)
+    commit_state = (
+        "pending"
+        if status == "in_progress"
+        else "success" if conclusion == "success" else "failure"
+    )
+    commit_status_payload = {
+        "state": commit_state,
+        "context": spec.context,
+        "target_url": details_url,
+        "description": f"Authoritative {spec.context}: {verb}",
+    }
     # GitHub rejects reopening an already-completed CheckRun. Preserve one
     # required identity while a generation is pending, using a completed/failure
     # sentinel when necessary. A terminal result must not PATCH that observed
@@ -885,7 +912,19 @@ def _upsert_check(
         payload["started_at"] = now
     else:
         payload["conclusion"] = conclusion
+        payload["started_at"] = now
         payload["completed_at"] = now
+    # A relevant same-head authority change must revoke an older successful
+    # carrier before any ledger write can fail. Commit statuses are append-only
+    # and emit their own status event, so they do not inherit the arbitrary
+    # CheckSuite that GitHub chooses for custom CheckRuns on the same SHA.
+    if status == "in_progress":
+        _publish_commit_status(
+            client,
+            head_sha=head_sha,
+            spec=spec,
+            payload=commit_status_payload,
+        )
     if status == "completed" and existing is not None:
         required_checks = matching_custom_checks(
             client.list_check_runs(head_sha, spec.context),
@@ -964,6 +1003,33 @@ def _upsert_check(
             raise PublisherError(
                 f"GitHub did not return the publisher-owned {spec.context} CheckRun"
             )
+    if status == "completed":
+        _publish_commit_status(
+            client,
+            head_sha=head_sha,
+            spec=spec,
+            payload=commit_status_payload,
+        )
+
+
+def _publish_commit_status(
+    client: PublisherClient,
+    *,
+    head_sha: str,
+    spec: GateSpec,
+    payload: Mapping[str, Any],
+) -> None:
+    response = client.create_commit_status(head_sha, payload)
+    if (
+        not response
+        or response.get("sha") not in {None, head_sha}
+        or response.get("context") != spec.context
+        or response.get("state") != payload.get("state")
+        or response.get("target_url") != payload.get("target_url")
+    ):
+        raise PublisherError(
+            f"GitHub did not return the authoritative {spec.context} commit status"
+        )
 
 
 def _pull_number_from_run(run: Mapping[str, Any], head_sha: str) -> int | None:

@@ -265,6 +265,21 @@ pending-to-success transition; an interrupted retirement or creation leaves the
 required context missing or failed. Do not use an empty or tree-identical commit
 to repair a check rollup.
 
+After changing the publisher, verify its identity transition on a disposable
+PR before closing the governance issue. For each protected context, inspect the
+exact head's CheckRuns through the GitHub API. The pending CheckRun ID must be
+renamed to `authoritative-gate-retired (<context> #<id>)` and completed with a
+failure conclusion; a different CheckRun ID must own the original protected
+name and already be terminal when created. The publisher also appends a commit
+status under the protected name after each fail-closed or terminal ledger write;
+that status event makes ruleset evaluation independent of the arbitrary
+CheckSuite to which GitHub attaches custom CheckRuns. All four current protected
+checks and statuses must come from GitHub Actions app `15368` and complete
+successfully before the PR merges through normal squash auto-merge. Keep the
+ruleset active with an empty bypass-actor list throughout this acceptance; a
+green source workflow or an ordinary non-required CheckRun is not equivalent
+evidence.
+
 Same-repository `dev`-to-`main` promotions use this publisher. Branch push
 aggregates use `*-push`, so they never duplicate a protected name on a
 later promotion PR that points at the same commit.
