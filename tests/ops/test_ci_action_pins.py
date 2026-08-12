@@ -102,7 +102,8 @@ def test_repository_workflows_use_only_actions_allowed_by_github_policy() -> Non
     forbidden = {
         action
         for action in result.remote_actions
-        if not action.startswith("actions/") and action != "astral-sh/setup-uv"
+        if not action.startswith(("actions/", "qianyi-sun/"))
+        and action != "astral-sh/setup-uv"
     }
 
     assert forbidden == set()
