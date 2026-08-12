@@ -31,6 +31,7 @@ from loom_control_plane.slurm_worker_jobs import (
     SlurmWorkerJobObservation,
     reconcile_slurm_worker_jobs,
     record_slurm_worker_job,
+    slurm_cluster_for_pool,
 )
 
 logger = logging.getLogger(__name__)
@@ -1302,6 +1303,7 @@ async def run_elastic_slurm_worker_controller_once(
                 session,
                 observations,
                 stale_after_seconds=config.stale_after_seconds,
+                slurm_cluster_id=slurm_cluster_for_pool(config.pool_name),
                 environment=config.environment,
                 pool_name=config.pool_name,
             )
@@ -1354,6 +1356,7 @@ async def run_elastic_slurm_worker_controller_once(
                     ),
                 ],
                 stale_after_seconds=config.stale_after_seconds,
+                slurm_cluster_id=slurm_cluster_for_pool(config.pool_name),
                 environment=config.environment,
                 pool_name=config.pool_name,
             )

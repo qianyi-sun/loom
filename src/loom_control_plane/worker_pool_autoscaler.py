@@ -11,12 +11,17 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import (
+    ExecutionAttempt,
     GB10WorkerNodeStatus,
     GB10WorkerPoolDesiredState,
+    PipelineRun,
+    PipelineRunGpuBackendSelection,
+    PipelineScopedPolicyActivation,
+    PipelineStageRun,
     SlurmWorkerJob,
     Trial,
     Worker,
@@ -49,6 +54,7 @@ from loom_control_plane.slurm_worker_jobs import (
     normalize_slurm_state,
     reconcile_slurm_worker_jobs,
     record_slurm_worker_job,
+    slurm_cluster_for_pool,
 )
 
 logger = logging.getLogger(__name__)
@@ -816,6 +822,38 @@ def _policy_to_config(row: WorkerPoolAutoscalerPolicy) -> AutoscalerPolicyConfig
     )
 
 
+def _apply_pipeline_scoped_activation(
+    policy: AutoscalerPolicyConfig,
+    row: WorkerPoolAutoscalerPolicy,
+    activation: PipelineScopedPolicyActivation | None,
+) -> AutoscalerPolicyConfig:
+    if not row.pool_name.startswith("behavior-"):
+        return policy
+    actor = row.actuator_config or {}
+    if (
+        activation is None
+        or activation.state != "active"
+        or activation.environment != row.environment
+        or activation.policy_id != row.pool_name
+        or activation.policy_config_sha256 != actor.get("policy_config_sha256")
+        or activation.desired_slots <= 0
+    ):
+        return replace(
+            policy,
+            enabled=False,
+            min_slots=0,
+            max_slots=0,
+            disabled_reason="pipeline_policy_activation_missing_or_stale",
+        )
+    return replace(
+        policy,
+        enabled=True,
+        min_slots=activation.desired_slots,
+        max_slots=activation.desired_slots,
+        disabled_reason=None,
+    )
+
+
 def _policy_uses_external_runner(row: WorkerPoolAutoscalerPolicy) -> bool:
     actor_config = row.actuator_config or {}
     return bool(actor_config.get("external_runner"))
@@ -863,6 +901,68 @@ def _queued_trial_matches_policy(
     if isinstance(cpu_arch, str) and cpu_arch not in {policy_arch, "any"}:
         return False
     return True
+
+
+def _queued_pipeline_attempt_matches_policy(
+    resource_profile: object,
+    execution_spec: object,
+    row: WorkerPoolAutoscalerPolicy,
+    *,
+    selected_variant_id: object = None,
+    selected_policy_id: object = None,
+    persisted_selection_digest: object = None,
+) -> bool:
+    if not isinstance(resource_profile, dict) or not isinstance(execution_spec, dict):
+        return False
+    variant_id = execution_spec.get("execution_variant_id")
+    matching = [
+        item
+        for item in resource_profile.get("execution_variants", [])
+        if isinstance(item, dict) and item.get("variant_id") == variant_id
+    ]
+    if len(matching) != 1 or matching[0].get("pool_class") != row.pool_name:
+        return False
+    gpu_count = matching[0].get("gpu_count_exact")
+    if not isinstance(gpu_count, int) or isinstance(gpu_count, bool):
+        return False
+    selection_digest = execution_spec.get("gpu_backend_selection_sha256")
+    actor = row.actuator_config or {}
+    policy_config_digest = actor.get("policy_config_sha256")
+    cluster_config_digest = actor.get("slurm_cluster_config_sha256")
+    if (
+        actor.get("policy_id") != row.pool_name
+        or not isinstance(policy_config_digest, str)
+        or len(policy_config_digest) != 71
+        or not policy_config_digest.startswith("sha256:")
+        or not isinstance(cluster_config_digest, str)
+        or len(cluster_config_digest) != 71
+        or not cluster_config_digest.startswith("sha256:")
+    ):
+        return False
+    if gpu_count > 0:
+        if (
+            not isinstance(selection_digest, str)
+            or selection_digest != persisted_selection_digest
+            or selected_variant_id != variant_id
+            or selected_policy_id != row.pool_name
+        ):
+            return False
+    elif any(
+        value is not None
+        for value in (
+            selection_digest,
+            selected_variant_id,
+            selected_policy_id,
+            persisted_selection_digest,
+        )
+    ):
+        return False
+    expected_cluster = actor.get("slurm_cluster_id")
+    if row.pool_name == "behavior-gpu-gb10":
+        return expected_cluster == "gb10"
+    if row.pool_name in {"behavior-gpu-oldlab", "behavior-cpu-data"}:
+        return expected_cluster == "oldlab"
+    return False
 
 
 def _field(obj: Any, name: str, default: Any = None) -> Any:
@@ -1118,6 +1218,86 @@ async def _load_observation(
             autoscaler_pool_name=autoscaler_pool_name,
         )
     )
+    pipeline_rows = (
+        await session.execute(
+            select(
+                PipelineStageRun.resource_profile_json,
+                PipelineStageRun.resolved_execution_spec_json,
+                PipelineRunGpuBackendSelection.variant_id,
+                PipelineRunGpuBackendSelection.policy_id,
+                PipelineRunGpuBackendSelection.gpu_backend_selection_sha256,
+            )
+            .join(ExecutionAttempt, ExecutionAttempt.stage_run_id == PipelineStageRun.id)
+            .join(PipelineRun, PipelineRun.id == PipelineStageRun.pipeline_run_id)
+            .join(
+                PipelineScopedPolicyActivation,
+                and_(
+                    PipelineScopedPolicyActivation.environment == row.environment,
+                    PipelineScopedPolicyActivation.policy_id == row.pool_name,
+                    PipelineScopedPolicyActivation.policy_config_sha256
+                    == str((row.actuator_config or {}).get("policy_config_sha256") or ""),
+                    PipelineScopedPolicyActivation.state == "active",
+                    PipelineScopedPolicyActivation.desired_slots > 0,
+                    or_(
+                        and_(
+                            PipelineRun.acceptance_authorization_id.is_not(None),
+                            PipelineScopedPolicyActivation.authority_kind == "acceptance",
+                            PipelineScopedPolicyActivation.authority_id
+                            == PipelineRun.acceptance_authorization_id,
+                        ),
+                        and_(
+                            PipelineRun.official_submission_kind
+                            == "behavior_acceptance_scenario_v1",
+                            PipelineScopedPolicyActivation.authority_kind == "acceptance",
+                            PipelineScopedPolicyActivation.authority_id
+                            == PipelineRun.official_submission_authority_id,
+                        ),
+                        and_(
+                            PipelineRun.official_submission_kind
+                            == "behavior_profile_calibration_run_v1",
+                            PipelineScopedPolicyActivation.authority_kind
+                            == "profile_calibration",
+                            PipelineScopedPolicyActivation.authority_id
+                            == PipelineRun.official_submission_authority_id,
+                        ),
+                    ),
+                ),
+            )
+            .outerjoin(
+                PipelineRunGpuBackendSelection,
+                and_(
+                    PipelineRunGpuBackendSelection.pipeline_run_id
+                    == PipelineStageRun.pipeline_run_id,
+                    PipelineRunGpuBackendSelection.gpu_backend_selection_sha256
+                    == PipelineStageRun.resolved_execution_spec_json[
+                        "gpu_backend_selection_sha256"
+                    ].as_string(),
+                ),
+            )
+            .where(
+                ExecutionAttempt.state == "queued",
+                PipelineStageRun.state == "queued",
+            )
+        )
+    ).all()
+    queued_slots += sum(
+        1
+        for (
+            resource_profile,
+            execution_spec,
+            selected_variant_id,
+            selected_policy_id,
+            persisted_selection_digest,
+        ) in pipeline_rows
+        if _queued_pipeline_attempt_matches_policy(
+            resource_profile,
+            execution_spec,
+            row,
+            selected_variant_id=selected_variant_id,
+            selected_policy_id=selected_policy_id,
+            persisted_selection_digest=persisted_selection_digest,
+        )
+    )
 
     return AutoscalerObservation(
         active_slots=active_slots,
@@ -1174,6 +1354,7 @@ async def _refresh_slurm_job_registry(
             environment=row.environment,
             pool_name=row.pool_name,
             now=now,
+            slurm_cluster_id=slurm_cluster_for_pool(row.pool_name),
         )
     except Exception as exc:
         logger.warning(
@@ -2334,8 +2515,13 @@ async def reconcile_worker_pool_autoscaler_once(
             now=now,
         )
     stmt = select(WorkerPoolAutoscalerPolicy).where(
-        WorkerPoolAutoscalerPolicy.enabled.is_(True),
         WorkerPoolAutoscalerPolicy.environment == scoped_environment,
+        or_(
+            WorkerPoolAutoscalerPolicy.enabled.is_(True),
+            WorkerPoolAutoscalerPolicy.pool_name.in_(
+                ("behavior-cpu-data", "behavior-gpu-gb10", "behavior-gpu-oldlab")
+            ),
+        ),
     )
     if pool_names:
         cleaned_pool_names = tuple(
@@ -2355,9 +2541,26 @@ async def reconcile_worker_pool_autoscaler_once(
         .scalars()
         .all()
     )
+    active_activations = {
+        activation.policy_id: activation
+        for activation in (
+            (
+                await session.execute(
+                    select(PipelineScopedPolicyActivation).where(
+                        PipelineScopedPolicyActivation.environment == scoped_environment,
+                        PipelineScopedPolicyActivation.state == "active",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    }
     decisions: list[AutoscalerDecision] = []
     for row in policies:
-        effective_policy = _policy_to_config(row)
+        effective_policy = _apply_pipeline_scoped_activation(
+            _policy_to_config(row), row, active_activations.get(row.pool_name)
+        )
         if capacity_grants is not None and dev_pool_instance_name(row.pool_name) is not None:
             effective_policy = apply_global_dev_capacity_grant(
                 effective_policy,

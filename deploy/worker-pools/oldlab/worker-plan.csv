@@ -1,0 +1,6 @@
+hostname,partition,gpu_tres,desired_state,direct_worker_enabled
+trt-eai-oldlab-1,all,gpu:rtx5080:2,slurm_only,false
+trt-eai-oldlab-2,all,gpu:rtx5080:2,slurm_only,false
+trt-eai-oldlab-3,all,gpu:rtx5080:2,slurm_only,false
+trt-eai-oldlab-4,all,gpu:rtx5080:2,slurm_only,false
+trt-eai-oldlab-5,all,gpu:rtx5080:2,slurm_only,false

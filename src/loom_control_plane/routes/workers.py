@@ -9,12 +9,16 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
-from sqlalchemy import insert, text, update
+from sqlalchemy import insert, null, text, update
 
 from loom.auth import verify_bearer_token
 from loom.db.schema import Worker
 from loom.models.capabilities import Capabilities
 from loom.models.result import FailureReason
+from loom.models.worker_capabilities import (
+    SlurmGpuAllocationEvidenceV1,
+    WorkerCapabilitySnapshotV1,
+)
 from loom.pipeline.keys import canonical_digest
 from loom.pipeline.work_protocol import (
     AcceptancePreflightGrantV1,
@@ -239,10 +243,15 @@ async def claim_any_work(
                                p.exclusive_fence_id, p.policy_id,
                                p.policy_config_sha256, p.policy_activation_epoch,
                                p.slurm_cluster_id, p.slurm_cluster_config_sha256,
-                               p.slurm_allocation_id
+                               p.slurm_allocation_id,
+                               w.capability_snapshot_json,
+                               w.capability_snapshot_digest,
+                               w.slurm_gpu_allocation_evidence_json,
+                               w.slurm_gpu_allocation_evidence_digest
                           FROM execution_attempts a
                           JOIN pipeline_stage_runs s ON s.id=a.stage_run_id
                           JOIN pipeline_runs r ON r.id=s.pipeline_run_id
+                          JOIN workers w ON w.id=a.worker_id
                           LEFT JOIN pipeline_acceptance_preflight_prerequisites p
                             ON p.pipeline_run_id=r.id AND p.fence_state='active'
                          WHERE a.id=(:attempt_id)::uuid
@@ -335,47 +344,65 @@ async def claim_any_work(
                     unpacked_size_bytes=checkpoint_row["unpacked_size_bytes"],
                     file_count=checkpoint_row["file_count"],
                 )
-            claim_payload = ExecutionAttemptClaimV1(
-                execution_attempt_id=attempt_row["id"],
-                pipeline_run_id=attempt_row["pipeline_run_id"],
-                stage_run_id=attempt_row["stage_run_id"],
-                team_id=attempt_row["team_id"],
-                node_key=attempt_row["node_key"],
-                shard_key=attempt_row["shard_key"],
-                attempt_number=attempt_row["attempt_number"],
-                claim_id=attempt_row["claim_id"],
-                lease_epoch=attempt_row["lease_epoch"],
-                lease_token=lease_token,
-                lease_expires_at=attempt_row["lease_expires_at"],
-                recipe_digest=attempt_row["recipe_digest"],
-                run_graph_digest=attempt_row["graph_spec_digest"],
-                execution_spec_snapshot=spec,
-                execution_spec_digest=attempt_row["execution_spec_digest"],
-                image=node["image"],
-                argv=node["argv"],
-                workdir=node["workdir"],
-                resource_profile_snapshot=attempt_row["resource_profile_json"],
-                resource_profile_digest=attempt_row["resource_profile_digest"],
-                network_profile=node["network_profile"],
-                image_runtime_contract_snapshot=(
-                    attempt_row["image_runtime_contract_json"]
-                ),
-                image_runtime_contract_digest=(
-                    attempt_row["image_runtime_contract_digest"]
-                ),
-                input_bindings=attempt_row["resolved_input_bindings_json"],
-                outputs=node["outputs"],
-                checkpoint=node["checkpoint"],
-                fanout_commit=node["fanout_commit"],
-                stage_request=stage_request,
-                acceptance_preflight=acceptance,
-                provider_connection_ref=attempt_row["provider_connection_ref"],
-                secret_refs=list(attempt_row["secret_refs"]),
-                resume_checkpoint=resume_checkpoint,
-                timeout_seconds=node["timeout_seconds"],
-                cancellation_poll_seconds=5,
-                cancellation_grace_seconds=30,
-            )
+            try:
+                claim_payload = ExecutionAttemptClaimV1(
+                    execution_attempt_id=attempt_row["id"],
+                    pipeline_run_id=attempt_row["pipeline_run_id"],
+                    stage_run_id=attempt_row["stage_run_id"],
+                    team_id=attempt_row["team_id"],
+                    node_key=attempt_row["node_key"],
+                    shard_key=attempt_row["shard_key"],
+                    attempt_number=attempt_row["attempt_number"],
+                    claim_id=attempt_row["claim_id"],
+                    lease_epoch=attempt_row["lease_epoch"],
+                    lease_token=lease_token,
+                    lease_expires_at=attempt_row["lease_expires_at"],
+                    recipe_digest=attempt_row["recipe_digest"],
+                    run_graph_digest=attempt_row["graph_spec_digest"],
+                    execution_spec_snapshot=spec,
+                    execution_spec_digest=attempt_row["execution_spec_digest"],
+                    image=node["image"],
+                    argv=node["argv"],
+                    workdir=node["workdir"],
+                    resource_profile_snapshot=attempt_row["resource_profile_json"],
+                    resource_profile_digest=attempt_row["resource_profile_digest"],
+                    network_profile=node["network_profile"],
+                    image_runtime_contract_snapshot=(
+                        attempt_row["image_runtime_contract_json"]
+                    ),
+                    image_runtime_contract_digest=(
+                        attempt_row["image_runtime_contract_digest"]
+                    ),
+                    worker_capability_snapshot=attempt_row[
+                        "capability_snapshot_json"
+                    ],
+                    worker_capability_snapshot_digest=attempt_row[
+                        "capability_snapshot_digest"
+                    ],
+                    slurm_gpu_allocation_evidence=attempt_row[
+                        "slurm_gpu_allocation_evidence_json"
+                    ],
+                    slurm_gpu_allocation_evidence_digest=attempt_row[
+                        "slurm_gpu_allocation_evidence_digest"
+                    ],
+                    input_bindings=attempt_row["resolved_input_bindings_json"],
+                    outputs=node["outputs"],
+                    checkpoint=node["checkpoint"],
+                    fanout_commit=node["fanout_commit"],
+                    stage_request=stage_request,
+                    acceptance_preflight=acceptance,
+                    provider_connection_ref=attempt_row["provider_connection_ref"],
+                    secret_refs=list(attempt_row["secret_refs"]),
+                    resume_checkpoint=resume_checkpoint,
+                    timeout_seconds=node["timeout_seconds"],
+                    cancellation_poll_seconds=5,
+                    cancellation_grace_seconds=30,
+                )
+            except ValidationError as exc:
+                await session.rollback()
+                raise HTTPException(
+                    status_code=409, detail="claim_contract_mismatch"
+                ) from exc
         envelope = WorkClaimV1(
             schema_version="loom.work-claim.v1",
             work_kind=row["work_kind"],
@@ -613,6 +640,90 @@ async def register_worker(
             input_cache_reserved_bytes=reserved_bytes,
             input_cache_ready_bytes=ready_bytes,
         )
+    capability_snapshot: WorkerCapabilitySnapshotV1 | None = None
+    allocation_evidence: SlurmGpuAllocationEvidenceV1 | None = None
+    raw_snapshot = payload.get("capability_snapshot")
+    raw_allocation_evidence = payload.get("slurm_gpu_allocation_evidence")
+    if raw_snapshot is not None:
+        try:
+            capability_snapshot = WorkerCapabilitySnapshotV1.model_validate(raw_snapshot)
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"invalid capability snapshot: {exc.errors()}"
+            ) from exc
+        snapshot_cache = (
+            capability_snapshot.input_cache_capacity_bytes,
+            capability_snapshot.input_cache_reserved_bytes,
+            capability_snapshot.input_cache_ready_bytes,
+        )
+        if any(value is not None for value in raw_cache_values) and snapshot_cache != (
+            capacity_bytes,
+            reserved_bytes,
+            ready_bytes,
+        ):
+            raise HTTPException(status_code=409, detail="input_cache_capacity_drift")
+        capacity_bytes, reserved_bytes, ready_bytes = snapshot_cache
+        if supported_work_kinds != ["trial", "execution_attempt"]:
+            raise HTTPException(
+                status_code=400,
+                detail="canonical capability snapshots require execution_attempt support",
+            )
+        expected_gpu_vendor = "nvidia" if capability_snapshot.gpu_devices else "none"
+        projected_network_policies = {
+            policy
+            for item in validated_caps
+            if item.get("cpu_arch", "x86_64") == capability_snapshot.cpu_arch
+            and item["gpu_vendor"] == expected_gpu_vendor
+            for policy in item["network_policies"]
+        }
+        required_legacy_network_policies = {
+            "no-network" if profile == "none" else "allowlist"
+            for profile in capability_snapshot.network_profiles
+        }
+        if not any(
+            item.get("cpu_arch", "x86_64") == capability_snapshot.cpu_arch
+            and item["gpu_vendor"] == expected_gpu_vendor
+            for item in validated_caps
+        ) or not required_legacy_network_policies <= projected_network_policies:
+            raise HTTPException(status_code=409, detail="legacy_capability_projection_drift")
+        if pool_name.startswith("behavior-") and max_concurrent != 1:
+            raise HTTPException(status_code=409, detail="pipeline_worker_concurrency_drift")
+        if capability_snapshot.gpu_devices:
+            if raw_allocation_evidence is None:
+                raise HTTPException(status_code=400, detail="slurm_gpu_allocation_required")
+            try:
+                allocation_evidence = SlurmGpuAllocationEvidenceV1.model_validate(
+                    raw_allocation_evidence
+                )
+            except ValidationError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"invalid Slurm GPU allocation evidence: {exc.errors()}",
+                ) from exc
+            snapshot_allocation_ids = {
+                item.allocation_id for item in capability_snapshot.gpu_devices
+            }
+            snapshot_uuids = sorted(
+                (item.device_uuid for item in capability_snapshot.gpu_devices), key=str.encode
+            )
+            if snapshot_allocation_ids != {allocation_evidence.allocation_id} or (
+                snapshot_uuids != allocation_evidence.device_uuids
+            ):
+                raise HTTPException(status_code=409, detail="slurm_gpu_allocation_drift")
+            expected_pool = (
+                "behavior-gpu-gb10"
+                if allocation_evidence.slurm_cluster_id == "gb10"
+                else "behavior-gpu-oldlab"
+            )
+            if pool_name != expected_pool:
+                raise HTTPException(status_code=409, detail="gpu_worker_pool_contract_drift")
+        elif raw_allocation_evidence is not None:
+            raise HTTPException(status_code=400, detail="cpu_worker_has_gpu_allocation")
+        elif pool_name != "behavior-cpu-data":
+            raise HTTPException(status_code=409, detail="cpu_worker_pool_contract_drift")
+        capability_identity = capability_snapshot.model_dump(mode="json")
+    elif raw_allocation_evidence is not None:
+        raise HTTPException(status_code=400, detail="allocation_requires_capability_snapshot")
     capability_snapshot_digest = canonical_digest(capability_identity)
     supplied_digest = payload.get("capability_snapshot_digest")
     if supplied_digest is not None and supplied_digest != capability_snapshot_digest:
@@ -627,6 +738,21 @@ async def register_worker(
             capabilities=validated_caps,
             supported_work_kinds=supported_work_kinds,
             capability_snapshot_digest=capability_snapshot_digest,
+            capability_snapshot_json=(
+                capability_snapshot.model_dump(mode="json")
+                if capability_snapshot is not None
+                else null()
+            ),
+            slurm_gpu_allocation_evidence_json=(
+                allocation_evidence.model_dump(mode="json")
+                if allocation_evidence is not None
+                else null()
+            ),
+            slurm_gpu_allocation_evidence_digest=(
+                canonical_digest(allocation_evidence)
+                if allocation_evidence is not None
+                else None
+            ),
             auth_token_hash=ctx.token_hash,
             max_concurrent=max_concurrent,
             pool_name=pool_name,
@@ -646,6 +772,9 @@ async def register_worker(
         "input_cache_capacity_bytes": capacity_bytes,
         "input_cache_reserved_bytes": reserved_bytes,
         "input_cache_ready_bytes": ready_bytes,
+        "slurm_gpu_allocation_evidence_digest": (
+            canonical_digest(allocation_evidence) if allocation_evidence is not None else None
+        ),
         "heartbeat_interval_sec": 5,
         "claim_poll_interval_sec": 1.0,
         "drain_timeout_sec": 600,

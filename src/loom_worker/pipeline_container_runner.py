@@ -124,6 +124,7 @@ class PipelineContainerSpec:
     host_pid: Literal[False] = False
     host_ipc: Literal[False] = False
     devices: tuple[str, ...] = ()
+    gpu_device_uuids: tuple[str, ...] = ()
     init: Literal[True] = True
 
     def __post_init__(self) -> None:
@@ -140,6 +141,14 @@ class PipelineContainerSpec:
             raise PipelineContainerContractError("read-only rootfs and default seccomp are mandatory")
         if self.privileged or self.host_pid or self.host_ipc or self.devices:
             raise PipelineContainerContractError("privileged host/device access is forbidden")
+        if self.gpu_device_uuids:
+            if self.gpu_device_uuids != tuple(sorted(self.gpu_device_uuids, key=str.encode)):
+                raise PipelineContainerContractError("GPU UUIDs must be bytewise sorted")
+            if len(self.gpu_device_uuids) != len(set(self.gpu_device_uuids)) or any(
+                re.fullmatch(r"GPU-[A-Za-z0-9][A-Za-z0-9_-]{0,122}", value) is None
+                for value in self.gpu_device_uuids
+            ):
+                raise PipelineContainerContractError("GPU UUID set is invalid")
         expected_targets = [INPUTS_TARGET, OUTPUTS_TARGET, SCRATCH_TARGET]
         if self.network_profile == "gateway":
             expected_targets.append(RUNTIME_SECRET_TARGET)
@@ -191,8 +200,7 @@ class PipelineContainerSpec:
             }
             for mount in self.mounts
         }
-        return MappingProxyType(
-            {
+        create_kwargs: dict[str, object] = {
                 "image": self.image,
                 "command": list(self.argv),
                 "working_dir": str(self.workdir),
@@ -210,8 +218,15 @@ class PipelineContainerSpec:
                 "nano_cpus": int(float(self.limits.cpus) * 1_000_000_000),
                 "volumes": volumes,
                 "init": True,
-            }
-        )
+        }
+        if self.gpu_device_uuids:
+            create_kwargs["device_requests"] = [
+                {
+                    "device_ids": list(self.gpu_device_uuids),
+                    "capabilities": [["gpu"]],
+                }
+            ]
+        return MappingProxyType(create_kwargs)
 
 
 def build_pipeline_container_spec(
@@ -230,6 +245,7 @@ def build_pipeline_container_spec(
     pids: int,
     scratch_bytes: int,
     runtime_secret_dir: Path | None = None,
+    gpu_device_uuids: Sequence[str] = (),
 ) -> PipelineContainerSpec:
     """Build the sole supported container policy from immutable fields."""
 
@@ -291,6 +307,7 @@ def build_pipeline_container_spec(
             pids=pids,
             scratch_bytes=scratch_bytes,
         ),
+        gpu_device_uuids=tuple(gpu_device_uuids),
     )
 
 
@@ -411,6 +428,19 @@ class PipelineContainerBackend(Protocol):
     async def teardown(self, *, attempt_id: UUID) -> None: ...
 
 
+@runtime_checkable
+class PipelineExecutionPreflight(Protocol):
+    """Attest the exact container/image/device mapping before stage argv."""
+
+    async def attest(
+        self,
+        *,
+        attempt_id: UUID,
+        spec: PipelineContainerSpec,
+        input_view: MaterializedInputView,
+    ) -> None: ...
+
+
 @dataclass(frozen=True)
 class PipelineExecutionRequest:
     attempt_id: UUID
@@ -427,6 +457,7 @@ class PipelineContainerRunner:
     committer: ArtifactCommitter
     cancellation: ExecutionCancellation
     backend: PipelineContainerBackend
+    preflight: PipelineExecutionPreflight | None = None
     cancellation_grace_seconds: int = 30
 
     async def run(self, request: PipelineExecutionRequest) -> PipelineRunResult:
@@ -460,6 +491,12 @@ class PipelineContainerRunner:
                 )
                 raise PipelineCancelledError(
                     f"ExecutionAttempt {request.attempt_id} was cancelled"
+                )
+            if self.preflight is not None:
+                await self.preflight.attest(
+                    attempt_id=request.attempt_id,
+                    spec=self.spec,
+                    input_view=input_view,
                 )
             backend_started = True
             process_result = await self.backend.run(

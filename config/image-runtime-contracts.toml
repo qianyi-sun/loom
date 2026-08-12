@@ -1,0 +1,4 @@
+# Fail-closed server-owned allowlist. Recipe/image child issues populate tested
+# immutable index+platform entries; tags and runtime registry discovery are never accepted.
+schema_version = "loom.image-runtime-registry.v1"
+contracts = []

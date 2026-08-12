@@ -117,6 +117,22 @@ async def test_runner_materializes_runs_commits_and_tears_down(tmp_path: Path) -
     assert backend.calls == ["run", "teardown"]
 
 
+async def test_runner_attests_preflight_before_stage_argv(tmp_path: Path) -> None:
+    runner, _, _, _, backend = _runner(tmp_path)
+    calls: list[str] = []
+
+    class _Preflight:
+        async def attest(self, *, attempt_id, spec, input_view) -> None:  # type: ignore[no-untyped-def]
+            del attempt_id, spec, input_view
+            assert backend.calls == []
+            calls.append("preflight")
+
+    runner.preflight = _Preflight()
+    await runner.run(_request())
+    assert calls == ["preflight"]
+    assert backend.calls == ["run", "teardown"]
+
+
 async def test_nonzero_exit_never_commits_and_still_tears_down(tmp_path: Path) -> None:
     runner, _, committer, _, backend = _runner(
         tmp_path,

@@ -120,6 +120,8 @@ class HttpControlPlaneClient:
         input_cache_capacity_bytes: int | None = None,
         input_cache_reserved_bytes: int | None = None,
         input_cache_ready_bytes: int | None = None,
+        capability_snapshot: Mapping[str, Any] | None = None,
+        slurm_gpu_allocation_evidence: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "hostname": hostname,
@@ -134,6 +136,12 @@ class HttpControlPlaneClient:
             payload["supported_work_kinds"] = list(supported_work_kinds)
         if capability_snapshot_digest is not None:
             payload["capability_snapshot_digest"] = capability_snapshot_digest
+        if capability_snapshot is not None:
+            payload["capability_snapshot"] = dict(capability_snapshot)
+        if slurm_gpu_allocation_evidence is not None:
+            payload["slurm_gpu_allocation_evidence"] = dict(
+                slurm_gpu_allocation_evidence
+            )
         cache_values = (
             input_cache_capacity_bytes,
             input_cache_reserved_bytes,
