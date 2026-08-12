@@ -70,18 +70,32 @@ class _PreparedFixture:
     request: ExecutionPreparationV2
 
 
-def _acknowledgement() -> SubjectExecutionAcknowledgementV2:
+def _source_candidate() -> CandidateBindingV2:
+    return CandidateBindingV2(
+        algorithm="source-sha256",
+        identity="1" * 64,
+        publication_sha256="2" * 64,
+    )
+
+
+def _protected_candidate() -> CandidateBindingV2:
+    return CandidateBindingV2(
+        algorithm="git-sha1",
+        identity="1" * 40,
+        publication_sha256="2" * 64,
+    )
+
+
+def _acknowledgement(
+    candidate: CandidateBindingV2 | None = None,
+) -> SubjectExecutionAcknowledgementV2:
     subject = subject_configuration(fleet_manifest())
     return SubjectExecutionAcknowledgementV2(
         subject_id=subject.subject_id,
         subject_incarnation=subject.subject_incarnation,
         configuration_generation=subject.configuration_generation,
         deployment_generation=subject.deployment_generation,
-        candidate=CandidateBindingV2(
-            algorithm="source-sha256",
-            identity="1" * 64,
-            publication_sha256="2" * 64,
-        ),
+        candidate=_source_candidate() if candidate is None else candidate,
         reporter_incarnation=subject.demand_reporter_incarnation,
         protected_admission_sha256="3" * 64,
         legacy_writer_high_water=0,
@@ -102,13 +116,15 @@ def _executor_binding(pool_id: str) -> PreparedExecutorBindingV2:
     )
 
 
-def _policy() -> ExecutionPreparationPolicyV2:
+def _policy(
+    candidate: CandidateBindingV2 | None = None,
+) -> ExecutionPreparationPolicyV2:
     return ExecutionPreparationPolicyV2(
         trusted_fleet_release_sha256=_TRUSTED_RELEASE,
         executable_new_capacity_ceiling=1,
         executable_new_capacity_rate_per_minute=1,
         executors=tuple(_executor_binding(pool_id) for pool_id in ("gb10", "oldlab")),
-        subject_acknowledgements=(_acknowledgement(),),
+        subject_acknowledgements=(_acknowledgement(candidate),),
         rollback_evidence_sha256="6" * 64,
         controller_authorities=tuple(
             PoolControllerAuthorityV2(
@@ -135,6 +151,7 @@ async def _setup(
     session: AsyncSession,
     *,
     execution_policy: ExecutionPreparationPolicyV2 | None = None,
+    candidate: CandidateBindingV2 | None = None,
 ) -> _PreparedFixture:
     for table in reversed(Base.metadata.sorted_tables):
         if table.name != CapacityAuthorityState.__tablename__:
@@ -182,13 +199,19 @@ async def _setup(
         actor="fleet-operator",
         idempotency_key=UUID(int=703),
     )
-    acknowledgement = _acknowledgement()
+    acknowledgement = _acknowledgement(candidate)
     session.add(
         CapacityCandidate(
             subject_id=acknowledgement.subject_id,
             subject_incarnation=acknowledgement.subject_incarnation,
             candidate_generation=subject.candidate_generation,
-            candidate_digest=acknowledgement.candidate.identity,
+            candidate_digest=(
+                acknowledgement.candidate.identity
+                if acknowledgement.candidate.algorithm == "source-sha256"
+                else "a" * 64
+            ),
+            candidate_identity_algorithm=acknowledgement.candidate.algorithm,
+            candidate_identity=acknowledgement.candidate.identity,
             source_payload={"publication_sha256": acknowledgement.candidate.publication_sha256},
             artifact_payload={},
             architecture_payload={},
@@ -462,7 +485,7 @@ async def test_execution_rechecks_durable_candidate_provenance(
     """A policy-matching acknowledgement cannot override durable candidate state."""
 
     fixture = await _setup(capacity_session, execution_policy=_policy())
-    await capacity_session.execute(update(CapacityCandidate).values(candidate_digest="9" * 64))
+    await capacity_session.execute(update(CapacityCandidate).values(candidate_identity="9" * 64))
     with pytest.raises(ExecutionConflictError, match="candidate provenance"):
         await fixture.store.prepare_execution_epoch(
             capacity_session,
@@ -471,7 +494,7 @@ async def test_execution_rechecks_durable_candidate_provenance(
             idempotency_key=UUID(int=733),
         )
 
-    await capacity_session.execute(update(CapacityCandidate).values(candidate_digest="1" * 64))
+    await capacity_session.execute(update(CapacityCandidate).values(candidate_identity="1" * 64))
     prepared = await fixture.store.prepare_execution_epoch(
         capacity_session,
         fixture.request,
@@ -506,9 +529,53 @@ async def test_execution_rechecks_durable_candidate_provenance(
         actor="activation-operator",
         idempotency_key=UUID(int=738),
     )
-    await capacity_session.execute(update(CapacityCandidate).values(candidate_digest="7" * 64))
+    await capacity_session.execute(update(CapacityCandidate).values(candidate_identity="7" * 64))
     with pytest.raises(AuthorityRecoveryError, match="owner policy"):
         await fixture.store.execution_authority(capacity_session)
+
+
+async def test_execution_accepts_exact_protected_git_candidate(
+    capacity_session: AsyncSession,
+) -> None:
+    """A protected release retains its exact 40-character Git identity."""
+
+    candidate = _protected_candidate()
+    fixture = await _setup(
+        capacity_session,
+        execution_policy=_policy(candidate),
+        candidate=candidate,
+    )
+
+    prepared = await fixture.store.prepare_execution_epoch(
+        capacity_session,
+        fixture.request,
+        actor="activation-operator",
+        idempotency_key=UUID(int=739),
+    )
+
+    assert prepared.execution_state == "prepared"
+
+
+async def test_execution_rejects_stale_protected_git_candidate(
+    capacity_session: AsyncSession,
+) -> None:
+    """A protected acknowledgement cannot substitute another exact Git commit."""
+
+    candidate = _protected_candidate()
+    fixture = await _setup(
+        capacity_session,
+        execution_policy=_policy(candidate),
+        candidate=candidate,
+    )
+    await capacity_session.execute(update(CapacityCandidate).values(candidate_identity="9" * 40))
+
+    with pytest.raises(ExecutionConflictError, match="candidate provenance"):
+        await fixture.store.prepare_execution_epoch(
+            capacity_session,
+            fixture.request,
+            actor="activation-operator",
+            idempotency_key=UUID(int=740),
+        )
 
 
 async def test_writer_restart_retires_a_stale_preparation(

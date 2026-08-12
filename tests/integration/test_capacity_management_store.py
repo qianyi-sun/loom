@@ -395,6 +395,10 @@ async def test_dynamic_development_projection_is_atomic_idempotent_and_shadow_on
     assert (
         await capacity_session.execute(select(func.count()).select_from(CapacityCandidate))
     ).scalar_one() == 1
+    candidate = (await capacity_session.execute(select(CapacityCandidate))).scalar_one()
+    assert candidate.candidate_digest == request.candidate_sha256
+    assert candidate.candidate_identity_algorithm == "source-sha256"
+    assert candidate.candidate_identity == request.candidate_sha256
     assert (
         await capacity_session.execute(
             select(func.count()).select_from(CapacityDeploymentGeneration)

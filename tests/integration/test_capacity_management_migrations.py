@@ -149,6 +149,7 @@ def test_capacity_0004_preserves_populated_writer_and_journal_across_downgrade(
     try:
         command.upgrade(cfg, "capacity_0003")
         with engine.begin() as connection:
+            candidate_id = uuid4()
             authority = connection.execute(
                 text(
                     "UPDATE capacity_authority_state SET writer_epoch = 7 "
@@ -179,6 +180,23 @@ def test_capacity_0004_preserves_populated_writer_and_journal_across_downgrade(
                     "idempotency_key": uuid4(),
                 },
             )
+            connection.execute(
+                text(
+                    "INSERT INTO capacity_candidates "
+                    "(id, subject_id, subject_incarnation, candidate_generation, "
+                    "candidate_digest, source_payload, artifact_payload, "
+                    "architecture_payload, launcher_payload, attestation_payload, "
+                    "protocol_payload) VALUES "
+                    "(:id, :subject_id, :subject_incarnation, 1, repeat('1', 64), "
+                    "jsonb_build_object('publication_sha256', repeat('2', 64)), "
+                    "'{}'::jsonb, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb)"
+                ),
+                {
+                    "id": candidate_id,
+                    "subject_id": uuid4(),
+                    "subject_incarnation": uuid4(),
+                },
+            )
 
         command.upgrade(cfg, "capacity_0004")
         with engine.connect() as connection:
@@ -200,6 +218,57 @@ def test_capacity_0004_preserves_populated_writer_and_journal_across_downgrade(
                 ).scalar_one()
                 == 0
             )
+            candidate = (
+                connection.execute(
+                    text(
+                        "SELECT candidate_digest, candidate_identity_algorithm, "
+                        "candidate_identity FROM capacity_candidates WHERE id = :id"
+                    ),
+                    {"id": candidate_id},
+                )
+                .mappings()
+                .one()
+            )
+            assert candidate == {
+                "candidate_digest": "1" * 64,
+                "candidate_identity_algorithm": "source-sha256",
+                "candidate_identity": "1" * 64,
+            }
+            candidate_columns = {
+                column["name"]: column
+                for column in inspect(connection).get_columns("capacity_candidates")
+            }
+            for column_name in (
+                "candidate_identity_algorithm",
+                "candidate_identity",
+            ):
+                assert candidate_columns[column_name]["nullable"] is False
+                assert candidate_columns[column_name]["default"] is None
+
+        for values in (
+            {
+                "candidate_identity_algorithm": "source-sha256",
+                "candidate_identity": "3" * 40,
+            },
+            {
+                "candidate_identity_algorithm": "git-sha1",
+                "candidate_identity": "3" * 64,
+            },
+            {
+                "candidate_identity_algorithm": "sha256",
+                "candidate_identity": "3" * 64,
+            },
+        ):
+            with pytest.raises(IntegrityError):
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            "UPDATE capacity_candidates SET "
+                            "candidate_identity_algorithm = :candidate_identity_algorithm, "
+                            "candidate_identity = :candidate_identity WHERE id = :id"
+                        ),
+                        values | {"id": candidate_id},
+                    )
 
         command.downgrade(cfg, "capacity_0003")
         with engine.connect() as connection:
@@ -216,6 +285,12 @@ def test_capacity_0004_preserves_populated_writer_and_journal_across_downgrade(
                 == 5
             )
             assert "capacity_execution_epochs" not in inspect(connection).get_table_names()
+            assert {
+                "candidate_identity_algorithm",
+                "candidate_identity",
+            }.isdisjoint(
+                column["name"] for column in inspect(connection).get_columns("capacity_candidates")
+            )
             assert (
                 connection.execute(
                     text(
@@ -240,6 +315,21 @@ def test_capacity_0004_preserves_populated_writer_and_journal_across_downgrade(
                 ).scalar_one()
                 == 5
             )
+            candidate = (
+                connection.execute(
+                    text(
+                        "SELECT candidate_identity_algorithm, candidate_identity "
+                        "FROM capacity_candidates WHERE id = :id"
+                    ),
+                    {"id": candidate_id},
+                )
+                .mappings()
+                .one()
+            )
+            assert candidate == {
+                "candidate_identity_algorithm": "source-sha256",
+                "candidate_identity": "1" * 64,
+            }
     finally:
         engine.dispose()
 

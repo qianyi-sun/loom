@@ -939,6 +939,8 @@ class CapacityManagementStore:
                     or current_deployment is None
                     or current_reporter is None
                     or current_candidate.candidate_digest != request.candidate_sha256
+                    or current_candidate.candidate_identity_algorithm != "source-sha256"
+                    or current_candidate.candidate_identity != request.candidate_sha256
                     or current_candidate.source_payload
                     != {"publication_sha256": request.candidate_publication_sha256}
                     or current_candidate.architecture_payload != expected_architecture
@@ -1069,6 +1071,8 @@ class CapacityManagementStore:
                         subject_incarnation=request.subject_incarnation,
                         candidate_generation=request.candidate_generation,
                         candidate_digest=request.candidate_sha256,
+                        candidate_identity_algorithm="source-sha256",
+                        candidate_identity=request.candidate_sha256,
                         source_payload={"publication_sha256": request.candidate_publication_sha256},
                         artifact_payload={"candidate_sha256": request.candidate_sha256},
                         architecture_payload={
@@ -2177,7 +2181,8 @@ class CapacityManagementStore:
             ).scalar_one_or_none()
             if (
                 candidate is None
-                or candidate.candidate_digest != acknowledgement.candidate.identity
+                or candidate.candidate_identity_algorithm != acknowledgement.candidate.algorithm
+                or candidate.candidate_identity != acknowledgement.candidate.identity
                 or candidate.source_payload.get("publication_sha256")
                 != acknowledgement.candidate.publication_sha256
             ):

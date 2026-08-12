@@ -581,6 +581,13 @@ class CapacityCandidate(Base):
             "candidate_digest ~ '^[0-9a-f]{64}$'",
             name="capacity_candidate_digest_check",
         ),
+        CheckConstraint(
+            "(candidate_identity_algorithm = 'git-sha1' "
+            "AND candidate_identity ~ '^[0-9a-f]{40}$') OR "
+            "(candidate_identity_algorithm = 'source-sha256' "
+            "AND candidate_identity ~ '^[0-9a-f]{64}$')",
+            name="capacity_candidate_identity_check",
+        ),
         UniqueConstraint(
             "subject_id",
             "subject_incarnation",
@@ -594,6 +601,8 @@ class CapacityCandidate(Base):
     subject_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
     candidate_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
     candidate_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    candidate_identity_algorithm: Mapped[str] = mapped_column(Text, nullable=False)
+    candidate_identity: Mapped[str] = mapped_column(Text, nullable=False)
     source_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     artifact_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     architecture_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)

@@ -20,6 +20,41 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    op.add_column(
+        "capacity_candidates",
+        sa.Column("candidate_identity_algorithm", sa.Text(), nullable=True),
+    )
+    op.add_column(
+        "capacity_candidates",
+        sa.Column("candidate_identity", sa.Text(), nullable=True),
+    )
+    # Before capacity_0004 the only CapacityCandidate producer is the
+    # personal dynamic projection, whose candidate_digest is its exact
+    # source-sha256 identity. Protected git-sha1 producers arrive later and
+    # must write the tagged fields explicitly.
+    op.execute(
+        "UPDATE capacity_candidates SET "
+        "candidate_identity_algorithm = 'source-sha256', "
+        "candidate_identity = candidate_digest"
+    )
+    op.alter_column(
+        "capacity_candidates",
+        "candidate_identity_algorithm",
+        nullable=False,
+    )
+    op.alter_column(
+        "capacity_candidates",
+        "candidate_identity",
+        nullable=False,
+    )
+    op.create_check_constraint(
+        "capacity_candidate_identity_check",
+        "capacity_candidates",
+        "(candidate_identity_algorithm = 'git-sha1' "
+        "AND candidate_identity ~ '^[0-9a-f]{40}$') OR "
+        "(candidate_identity_algorithm = 'source-sha256' "
+        "AND candidate_identity ~ '^[0-9a-f]{64}$')",
+    )
     op.create_table(
         "capacity_execution_epochs",
         sa.Column("execution_epoch", sa.BigInteger(), autoincrement=False, nullable=False),
@@ -564,3 +599,10 @@ def downgrade() -> None:
     op.drop_column("capacity_authority_state", "execution_epoch")
     op.drop_table("capacity_execution_executors")
     op.drop_table("capacity_execution_epochs")
+    op.drop_constraint(
+        "capacity_candidate_identity_check",
+        "capacity_candidates",
+        type_="check",
+    )
+    op.drop_column("capacity_candidates", "candidate_identity")
+    op.drop_column("capacity_candidates", "candidate_identity_algorithm")
