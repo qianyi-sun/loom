@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9,6 +10,7 @@ import pytest
 
 from loom.data_lifecycle import StagingCapacity
 from loom_cli.rollout.external_supervisor_predecessor import (
+    GB10_CANONICAL_UNIT_DIR,
     ExternalSupervisorCanonicalIdentity,
     ExternalSupervisorPoolIdentity,
     load_predecessor_manifest,
@@ -34,6 +36,9 @@ from loom_cli.rollout.preflight_registered_checks import (
 )
 from loom_cli.rollout.readonly_authority import ReadonlyAuthorityEvidence
 from tests.loom_cli.rollout.operator.test_checkpoint_inventory_provider import _config
+from tests.loom_cli.rollout.operator.test_protected_external_supervisor_component import (
+    _observation,
+)
 
 
 def _candidate() -> CandidateBinding:
@@ -478,6 +483,123 @@ def test_installed_predecessor_recognizes_exact_oldlab_activation_on_oldlab_host
     assert dict(snapshot.unit_sha256) == dict(store.manifest.unit_sha256)
     assert snapshot.transition_clear is True
     assert snapshot.runtime_ready is True
+
+
+def test_installed_gb10_predecessor_source_uses_remote_typed_observation_and_unit_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate_root = Path(__file__).resolve().parents[4]
+    candidate_sha = _git_run(["git", "-C", str(candidate_root), "rev-parse", "HEAD"]).stdout.strip()
+    candidate_tree = _git_run(
+        ["git", "-C", str(candidate_root), "rev-parse", "HEAD^{tree}"]
+    ).stdout.strip()
+    artifact = build_external_supervisor_artifact(
+        candidate_root,
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+        image_tag=f"staging-{candidate_sha[:7]}",
+        environment="staging",
+        execution_host="gx10-01c7",
+    )
+    observation = _observation(
+        artifact,
+        files="legacy",
+        runtime="exact",
+        unit_dir=Path(GB10_CANONICAL_UNIT_DIR),
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "AtomicUserUnitStore",
+        lambda **_kwargs: pytest.fail("remote source constructed a local unit store"),
+    )
+
+    source = installed_deep_preflight_factory._external_supervisor_predecessor_source(
+        candidate_root=candidate_root,
+        git_run=_git_run,
+        service_uid=501,
+        pool_identity_source=_pool_identity,
+        execution_host="gx10-01c7",
+        unit_dir=Path(GB10_CANONICAL_UNIT_DIR),
+        observation_source=lambda _context: observation,
+    )
+
+    snapshot = source(_installed_predecessor_context(candidate_root))
+
+    assert snapshot.kind == "legacy-manifest"
+    assert snapshot.runtime_ready is True
+
+
+def test_installed_predecessor_sources_require_exact_two_controller_map() -> None:
+    snapshot = ExternalSupervisorPredecessorSnapshot(
+        kind="absent",
+        authority_digest=EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+        pointer_digest=EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+        unit_sha256={},
+        live_evidence_digest="a" * 64,
+        pending_transition_digest=hashlib.sha256(b"{}").hexdigest(),
+        transition_clear=True,
+        runtime_ready=True,
+        pool_identity_digest="c" * 64,
+    )
+    combined = installed_deep_preflight_factory._controller_predecessor_sources(
+        {
+            "gx10-01c7": lambda _context: snapshot,
+            "TRT-EAI-OLDLAB-1": lambda _context: snapshot,
+        }
+    )
+
+    assert combined(SimpleNamespace()) == {
+        "gx10-01c7": snapshot,
+        "TRT-EAI-OLDLAB-1": snapshot,
+    }
+
+    with pytest.raises(ValueError, match="controller coverage"):
+        installed_deep_preflight_factory._controller_predecessor_sources(
+            {"TRT-EAI-OLDLAB-1": lambda _context: snapshot}
+        )
+
+
+def test_installed_gb10_observation_binds_context_candidate_to_typed_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate_root = Path(__file__).resolve().parents[4]
+    context = _installed_predecessor_context(candidate_root)
+    expected = SimpleNamespace()
+    captured: dict[str, object] = {}
+
+    class Transport:
+        def observe(self, artifact, authority=None):
+            captured["artifact"] = artifact
+            captured["authority"] = authority
+            return expected
+
+    def build(**kwargs):
+        captured["builder"] = kwargs
+        return Transport()
+
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "build_fixed_gb10_external_supervisor_transport",
+        build,
+    )
+
+    def run(*_args):
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    source = installed_deep_preflight_factory._gb10_external_supervisor_observation_source(
+        candidate_root=candidate_root,
+        run=run,
+    )
+
+    assert source(context) is expected
+    assert captured["builder"] == {
+        "candidate_sha": context.bindings["candidate.sha"],
+        "candidate_tree": context.bindings["candidate.tree"],
+        "run": run,
+    }
+    artifact = captured["artifact"]
+    assert {item.execution_host for item in artifact.supervisors} == {"gx10-01c7"}
+    assert captured["authority"] is None
 
 
 def test_installed_external_supervisor_predecessor_uses_live_schema_after_migration(

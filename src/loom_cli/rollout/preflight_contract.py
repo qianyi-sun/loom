@@ -1178,6 +1178,7 @@ class AttestationBindings:
     supervisor_predecessor_live_evidence_digest: str
     supervisor_predecessor_pending_transition_digest: str
     supervisor_transition_digest: str
+    supervisor_controller_bindings: Mapping[str, str]
 
     def __post_init__(self) -> None:
         git_identities = (
@@ -1299,6 +1300,16 @@ class AttestationBindings:
             "supervisor_predecessor_unit_sha256",
             MappingProxyType(dict(sorted(predecessor_units.items()))),
         )
+        from loom_cli.rollout.external_supervisor_controller import (
+            parse_external_supervisor_controller_bindings,
+        )
+
+        parse_external_supervisor_controller_bindings(self.supervisor_controller_bindings)
+        object.__setattr__(
+            self,
+            "supervisor_controller_bindings",
+            MappingProxyType(dict(sorted(self.supervisor_controller_bindings.items()))),
+        )
 
     def to_dict(self) -> dict[str, object]:
         return _attestation_bindings_payload(self)
@@ -1371,6 +1382,7 @@ class AttestationBindings:
                 "supervisor_predecessor_pending_transition_digest"
             ),
             supervisor_transition_digest=require_string("supervisor_transition_digest"),
+            supervisor_controller_bindings=require_string_map("supervisor_controller_bindings"),
         )
 
 

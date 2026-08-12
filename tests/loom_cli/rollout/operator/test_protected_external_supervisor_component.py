@@ -12,10 +12,16 @@ from unittest.mock import patch
 import pytest
 
 import loom_cli.rollout.operator.protected_external_supervisor_transport as transport_module
+from loom_cli.rollout.external_supervisor_controller import (
+    ExternalSupervisorControllerBinding,
+    encode_external_supervisor_controller_bindings,
+)
 from loom_cli.rollout.external_supervisor_predecessor import (
     ABSENT_PREDECESSOR_DIGEST,
+    GB10_CANONICAL_UNIT_DIR,
     ExternalSupervisorCanonicalIdentity,
     ExternalSupervisorPredecessorAuthority,
+    external_supervisor_unit_directory,
     external_supervisor_unit_set_digest,
     external_supervisor_unit_set_digest_or_empty,
     load_predecessor_manifest,
@@ -183,6 +189,7 @@ def _bound_artifact(tmp_path: Path):
     )
     payload = plan.to_dict()
     payload.pop("plan_digest")
+    execution_host = artifact.supervisors[0].execution_host
     payload.update(
         {
             "supervisor_artifact_digest": artifact.artifact_digest,
@@ -200,10 +207,158 @@ def _bound_artifact(tmp_path: Path):
                 predecessor_live.pending_transition_digest
             ),
             "supervisor_transition_digest": transition_digest,
+            "supervisor_controller_artifact_digests": {execution_host: artifact.artifact_digest},
+            "supervisor_controller_unit_digests": {
+                f"{execution_host}/{name}": digest for name, digest in artifact.unit_sha256.items()
+            },
+            "supervisor_controller_unit_set_digests": {
+                execution_host: external_supervisor_unit_set_digest(artifact.unit_sha256)
+            },
+            "supervisor_controller_bindings": {
+                f"{execution_host}/authority-kind": "legacy-manifest",
+                f"{execution_host}/authority-digest": legacy.manifest_digest,
+                f"{execution_host}/pointer-digest": ABSENT_PREDECESSOR_DIGEST,
+                f"{execution_host}/unit-set-digest": legacy.unit_set_digest,
+                f"{execution_host}/live-evidence-digest": predecessor_live.evidence_digest,
+                f"{execution_host}/pending-transition-digest": (
+                    predecessor_live.pending_transition_digest
+                ),
+                f"{execution_host}/transition-digest": transition_digest,
+                **{
+                    f"{execution_host}/unit/{name}": digest
+                    for name, digest in legacy.unit_sha256.items()
+                },
+            },
         }
     )
     bound = type(plan).from_dict({**payload, "plan_digest": _hash_json(payload)})
     return bound, candidate_root, artifact
+
+
+def _bound_multi_artifacts(tmp_path: Path):
+    plan = _published_plan(tmp_path)
+    candidate_root = tmp_path / "candidate"
+    profile_target = candidate_root / "deploy/environment-state/staging.toml"
+    script_target = candidate_root / "scripts/ops/worker_pool_autoscaler_external_once.py"
+    profile_target.parent.mkdir(parents=True, exist_ok=True)
+    script_target.parent.mkdir(parents=True, exist_ok=True)
+    repository = Path(__file__).resolve().parents[4]
+    shutil.copyfile(repository / "deploy/environment-state/staging.toml", profile_target)
+    shutil.copyfile(
+        repository / "scripts/ops/worker_pool_autoscaler_external_once.py",
+        script_target,
+    )
+    profile_target.chmod(0o600)
+    script_target.chmod(0o700)
+    full_artifact = _build_active_artifact(
+        candidate_root,
+        candidate_sha=plan.candidate_sha,
+        candidate_tree=plan.candidate_tree,
+        image_tag=f"staging-{plan.candidate_sha[:7]}",
+    )
+    artifacts = {
+        execution_host: _build_active_artifact(
+            candidate_root,
+            candidate_sha=plan.candidate_sha,
+            candidate_tree=plan.candidate_tree,
+            image_tag=f"staging-{plan.candidate_sha[:7]}",
+            execution_host=execution_host,
+        )
+        for execution_host in {
+            supervisor.execution_host for supervisor in full_artifact.supervisors
+        }
+    }
+    controller_bindings: dict[str, ExternalSupervisorControllerBinding] = {}
+    for execution_host, artifact in artifacts.items():
+        legacy = load_predecessor_manifest(execution_host=execution_host)
+        predecessor_live = _observation(
+            artifact,
+            files="legacy",
+            runtime="exact",
+            unit_dir=Path(external_supervisor_unit_directory(execution_host)),
+        )
+        controller_bindings[execution_host] = ExternalSupervisorControllerBinding.build(
+            execution_host=execution_host,
+            candidate_sha=plan.candidate_sha,
+            candidate_tree=plan.candidate_tree,
+            environment=plan.environment,
+            predecessor_kind="legacy-manifest",
+            predecessor_digest=legacy.manifest_digest,
+            predecessor_pointer_digest=ABSENT_PREDECESSOR_DIGEST,
+            predecessor_unit_sha256=legacy.unit_sha256,
+            predecessor_unit_set_digest=legacy.unit_set_digest,
+            predecessor_live_evidence_digest=predecessor_live.evidence_digest,
+            predecessor_pending_transition_digest=predecessor_live.pending_transition_digest,
+            target_artifact_digest=artifact.artifact_digest,
+            target_profile_sha256=artifact.profile_sha256,
+            target_script_sha256=artifact.script_sha256,
+            target_unit_sha256=artifact.unit_sha256,
+            target_unit_set_digest=external_supervisor_unit_set_digest(artifact.unit_sha256),
+        )
+    primary = controller_bindings["gx10-01c7"]
+    aggregate_transition = external_supervisor_transition_digest(
+        candidate_sha=plan.candidate_sha,
+        candidate_tree=plan.candidate_tree,
+        environment=plan.environment,
+        predecessor_kind=primary.predecessor_kind,
+        predecessor_digest=primary.predecessor_digest,
+        predecessor_pointer_digest=primary.predecessor_pointer_digest,
+        predecessor_unit_sha256=primary.predecessor_unit_sha256,
+        predecessor_unit_set_digest=primary.predecessor_unit_set_digest,
+        predecessor_live_evidence_digest=primary.predecessor_live_evidence_digest,
+        predecessor_pending_transition_digest=primary.predecessor_pending_transition_digest,
+        target_artifact_digest=full_artifact.artifact_digest,
+        target_profile_sha256=full_artifact.profile_sha256,
+        target_script_sha256=full_artifact.script_sha256,
+        target_unit_sha256=full_artifact.unit_sha256,
+        target_unit_set_digest=external_supervisor_unit_set_digest(full_artifact.unit_sha256),
+    )
+    unit_digests = {
+        **{
+            name: digest for name, digest in plan.systemd_unit_digests.items() if name in UNIT_PATHS
+        },
+        **full_artifact.unit_sha256,
+    }
+    payload = plan.to_dict()
+    payload.pop("plan_digest")
+    payload.update(
+        {
+            "supervisor_artifact_digest": full_artifact.artifact_digest,
+            "supervisor_profile_sha256": full_artifact.profile_sha256,
+            "supervisor_script_digests": dict(full_artifact.script_sha256),
+            "systemd_unit_digests": unit_digests,
+            "systemd_unit_set_digest": _hash_json({"failed": {}, "units": unit_digests}),
+            "supervisor_predecessor_kind": primary.predecessor_kind,
+            "supervisor_predecessor_digest": primary.predecessor_digest,
+            "supervisor_predecessor_pointer_digest": primary.predecessor_pointer_digest,
+            "supervisor_predecessor_unit_sha256": dict(primary.predecessor_unit_sha256),
+            "supervisor_predecessor_unit_set_digest": (primary.predecessor_unit_set_digest),
+            "supervisor_predecessor_live_evidence_digest": (
+                primary.predecessor_live_evidence_digest
+            ),
+            "supervisor_predecessor_pending_transition_digest": (
+                primary.predecessor_pending_transition_digest
+            ),
+            "supervisor_transition_digest": aggregate_transition,
+            "supervisor_controller_artifact_digests": {
+                host: artifact.artifact_digest for host, artifact in artifacts.items()
+            },
+            "supervisor_controller_unit_digests": {
+                f"{host}/{name}": digest
+                for host, artifact in artifacts.items()
+                for name, digest in artifact.unit_sha256.items()
+            },
+            "supervisor_controller_unit_set_digests": {
+                host: external_supervisor_unit_set_digest(artifact.unit_sha256)
+                for host, artifact in artifacts.items()
+            },
+            "supervisor_controller_bindings": (
+                encode_external_supervisor_controller_bindings(controller_bindings)
+            ),
+        }
+    )
+    bound = type(plan).from_dict({**payload, "plan_digest": _hash_json(payload)})
+    return bound, candidate_root, artifacts
 
 
 def _epoch(plan, state: ComponentState = ComponentState.EXACT) -> ComponentObservation:
@@ -221,8 +376,12 @@ def _observation(
     runtime: str,
     plan_digest: str = "a" * 64,
     attestation_digest: str = "b" * 64,
+    unit_dir: Path = PROTECTED_USER_UNIT_DIR,
 ) -> ExternalSupervisorLiveObservation:
-    legacy = load_predecessor_manifest()
+    execution_hosts = {supervisor.execution_host for supervisor in artifact.supervisors}
+    legacy = load_predecessor_manifest(
+        execution_host=(next(iter(execution_hosts)) if len(execution_hosts) == 1 else None)
+    )
     units: dict[str, bytes | None] = {}
     timers: dict[str, TimerRuntimeStatus] = {}
     services: dict[str, ServiceRuntimeStatus] = {}
@@ -234,14 +393,10 @@ def _observation(
             units[supervisor.service_name] = (
                 None if legacy_service is None else legacy_service.encode()
             )
-            units[supervisor.timer_name] = (
-                None if legacy_timer is None else legacy_timer.encode()
-            )
+            units[supervisor.timer_name] = None if legacy_timer is None else legacy_timer.encode()
         elif files == "partial":
             units[supervisor.service_name] = supervisor.service_unit.encode()
-            units[supervisor.timer_name] = (
-                None if legacy_timer is None else legacy_timer.encode()
-            )
+            units[supervisor.timer_name] = None if legacy_timer is None else legacy_timer.encode()
         else:
             units[supervisor.service_name] = (
                 supervisor.service_unit.encode() if files == "exact" else None
@@ -251,31 +406,35 @@ def _observation(
             )
         if runtime == "exact" and (files != "legacy" or legacy_pair_present):
             timers[supervisor.timer_name] = _timer_status(
-                supervisor.timer_name, "loaded", "enabled", "active"
+                supervisor.timer_name, "loaded", "enabled", "active", unit_dir=unit_dir
             )
             services[supervisor.service_name] = _service_status(
-                supervisor.service_name, "loaded", "success", 0
+                supervisor.service_name, "loaded", "success", 0, unit_dir=unit_dir
             )
         elif runtime == "failed":
             timers[supervisor.timer_name] = _timer_status(
-                supervisor.timer_name, "loaded", "enabled", "active"
+                supervisor.timer_name, "loaded", "enabled", "active", unit_dir=unit_dir
             )
             services[supervisor.service_name] = _service_status(
-                supervisor.service_name, "loaded", "failed", 1
+                supervisor.service_name, "loaded", "failed", 1, unit_dir=unit_dir
             )
         elif runtime == "loaded":
             timers[supervisor.timer_name] = _timer_status(
-                supervisor.timer_name, "loaded", "disabled", "inactive"
+                supervisor.timer_name, "loaded", "disabled", "inactive", unit_dir=unit_dir
             )
             services[supervisor.service_name] = _service_status(
-                supervisor.service_name, "loaded", "", None
+                supervisor.service_name, "loaded", "", None, unit_dir=unit_dir
             )
         else:
             timers[supervisor.timer_name] = _timer_status(
-                supervisor.timer_name, "not-found", "not-found", "inactive"
+                supervisor.timer_name,
+                "not-found",
+                "not-found",
+                "inactive",
+                unit_dir=unit_dir,
             )
             services[supervisor.service_name] = _service_status(
-                supervisor.service_name, "not-found", "", None
+                supervisor.service_name, "not-found", "", None, unit_dir=unit_dir
             )
     canonical = None
     if files == "exact" and runtime == "exact":
@@ -284,7 +443,11 @@ def _observation(
             plan_digest=plan_digest,
             attestation_digest=attestation_digest,
             transition_group_id="f" * 32,
-            runtime_evidence_digest=transport_module._expected_activation_runtime_digest(artifact),
+            runtime_evidence_digest=transport_module._expected_activation_runtime_digest(
+                artifact,
+                unit_dir=unit_dir,
+            ),
+            unit_dir=str(unit_dir),
         )
     if canonical is not None:
         authority = ExternalSupervisorPredecessorAuthority(
@@ -310,6 +473,7 @@ def _observation(
         services,
         canonical_identity=canonical,
         predecessor_authority=authority,
+        predecessor_manifest=legacy,
     )
 
 
@@ -320,12 +484,13 @@ def _timer_status(
     active_state: str,
     *,
     need_daemon_reload: str = "no",
+    unit_dir: Path = PROTECTED_USER_UNIT_DIR,
 ) -> TimerRuntimeStatus:
     return TimerRuntimeStatus(
         load_state,
         unit_file_state,
         active_state,
-        "" if load_state == "not-found" else str(PROTECTED_USER_UNIT_DIR / name),
+        "" if load_state == "not-found" else str(unit_dir / name),
         need_daemon_reload,
     )
 
@@ -337,12 +502,13 @@ def _service_status(
     exec_main_status: int | None,
     *,
     need_daemon_reload: str = "no",
+    unit_dir: Path = PROTECTED_USER_UNIT_DIR,
 ) -> ServiceRuntimeStatus:
     return ServiceRuntimeStatus(
         load_state,
         result,
         exec_main_status,
-        "" if load_state == "not-found" else str(PROTECTED_USER_UNIT_DIR / name),
+        "" if load_state == "not-found" else str(unit_dir / name),
         need_daemon_reload,
     )
 
@@ -407,6 +573,79 @@ def test_component_classifies_bound_predecessor_partial_and_exact_states(tmp_pat
     assert component.classify(plan).state is ComponentState.EXACT
 
 
+def test_component_identity_is_scoped_to_its_execution_host(tmp_path: Path) -> None:
+    plan, candidate_root, artifact = _bound_artifact(tmp_path)
+    execution_host = artifact.supervisors[0].execution_host
+    component = ProtectedExternalSupervisorComponent(
+        candidate_root=candidate_root,
+        transport=_Transport(
+            artifact,
+            _observation(artifact, files="legacy", runtime="exact"),
+        ),
+        epoch_guard=lambda value: _epoch(value),
+        execution_host=execution_host,
+        artifact_builder=_build_active_artifact,
+    ).component(plan)
+
+    assert component.component_id == "external-supervisors-gb10"
+
+
+def test_component_classifies_gb10_against_explicit_controller_unit_directory(
+    tmp_path: Path,
+) -> None:
+    plan, candidate_root, artifact = _bound_artifact(tmp_path)
+    unit_dir = Path(GB10_CANONICAL_UNIT_DIR)
+    component = ProtectedExternalSupervisorComponent(
+        candidate_root=candidate_root,
+        transport=_Transport(
+            artifact,
+            _observation(
+                artifact,
+                files="exact",
+                runtime="exact",
+                plan_digest=plan.plan_digest,
+                attestation_digest=plan.attestation_digest,
+                unit_dir=unit_dir,
+            ),
+        ),
+        epoch_guard=lambda value: _epoch(value),
+        execution_host="gx10-01c7",
+        unit_dir=unit_dir,
+        artifact_builder=_build_active_artifact,
+    )
+
+    assert component.classify(plan).state is ComponentState.EXACT
+
+
+def test_component_apply_classifies_gb10_against_explicit_controller_unit_directory(
+    tmp_path: Path,
+) -> None:
+    plan, candidate_root, artifacts = _bound_multi_artifacts(tmp_path)
+    artifact = artifacts["gx10-01c7"]
+    unit_dir = Path(GB10_CANONICAL_UNIT_DIR)
+    transport = _Transport(
+        artifact,
+        _observation(
+            artifact,
+            files="legacy",
+            runtime="exact",
+            unit_dir=unit_dir,
+        ),
+    )
+    component = ProtectedExternalSupervisorComponent(
+        candidate_root=candidate_root,
+        transport=transport,
+        epoch_guard=lambda value: _epoch(value),
+        execution_host="gx10-01c7",
+        unit_dir=unit_dir,
+        artifact_builder=_build_active_artifact,
+    )
+
+    component.apply(plan)
+
+    assert transport.applied == 1
+
+
 def _bound_absent(tmp_path: Path):
     plan, candidate_root, artifact = _bound_artifact(tmp_path)
     predecessor_live = _observation(artifact, files="absent", runtime="absent")
@@ -442,6 +681,23 @@ def _bound_absent(tmp_path: Path):
                 predecessor_live.pending_transition_digest
             ),
             "supervisor_transition_digest": transition_digest,
+            "supervisor_controller_bindings": {
+                f"{artifact.supervisors[0].execution_host}/authority-kind": "absent",
+                f"{artifact.supervisors[0].execution_host}/authority-digest": (
+                    ABSENT_PREDECESSOR_DIGEST
+                ),
+                f"{artifact.supervisors[0].execution_host}/pointer-digest": (
+                    ABSENT_PREDECESSOR_DIGEST
+                ),
+                f"{artifact.supervisors[0].execution_host}/unit-set-digest": absent_unit_set,
+                f"{artifact.supervisors[0].execution_host}/live-evidence-digest": (
+                    predecessor_live.evidence_digest
+                ),
+                f"{artifact.supervisors[0].execution_host}/pending-transition-digest": (
+                    predecessor_live.pending_transition_digest
+                ),
+                f"{artifact.supervisors[0].execution_host}/transition-digest": (transition_digest),
+            },
         }
     )
     bound = type(plan).from_dict({**payload, "plan_digest": _hash_json(payload)})

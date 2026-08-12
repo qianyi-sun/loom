@@ -34,7 +34,10 @@ def test_installer_is_pinned_to_the_gb10_controller_and_kubectl_digest() -> None
     assert 'CONTROLLER="gx10-01c7"' in source
     assert 'CLUSTER="trt-gb10"' in source
     assert 'KUBECTL_VERSION="v1.36.2"' in source
-    assert 'KUBECTL_SHA256="c957eb8c4bea27a3bb35b269edd9082e27f027f7b76b20b5bf4afebc726c6d3e"' in source
+    assert (
+        'KUBECTL_SHA256="c957eb8c4bea27a3bb35b269edd9082e27f027f7b76b20b5bf4afebc726c6d3e"'
+        in source
+    )
     assert "linux/arm64/kubectl" in source
     assert "sha256sum --check" in source
     assert "awk -F'\"' '/\"gitVersion\"/" in source
@@ -61,3 +64,14 @@ def test_installer_creates_only_non_personal_controller_roots() -> None:
     assert '"$SERVICE_HOME/.config/systemd/user"' in source
     assert "/home/qianyi" not in source
     assert "/shared_work2/qianyi" not in source
+
+
+def test_installer_publishes_only_the_forced_controller_broker_authority() -> None:
+    source = _source()
+
+    assert "--controller-public-key)" in source
+    assert 'BROKER_SOURCE="$REPO_ROOT/scripts/ops/gb10_external_supervisor_broker.py"' in source
+    assert 'BROKER_PATH="/usr/local/libexec/loom-gb10-external-supervisor-broker"' in source
+    assert 'SUDOERS_PATH="/etc/sudoers.d/loom-gb10-external-supervisor"' in source
+    assert 'SUDOERS_RULE="qianyi ALL=(root) NOPASSWD:NOSETENV: $BROKER_PATH \\"\\""' in source
+    assert '"$BROKER_PATH" --install-authority "$CONTROLLER_PUBLIC_KEY"' in source

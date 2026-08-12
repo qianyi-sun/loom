@@ -9,6 +9,10 @@ from pathlib import Path
 
 import pytest
 
+from loom_cli.rollout.external_supervisor_controller import (
+    ExternalSupervisorControllerBinding,
+    encode_external_supervisor_controller_bindings,
+)
 from loom_cli.rollout.operator.backup_lease import BackupLease, component_set_digest
 from loom_cli.rollout.operator.final_gate_plan import (
     FinalGatePlan,
@@ -90,6 +94,7 @@ def _attestation() -> PreflightAttestation:
     lease = _lease()
     systemd = _systemd_evidence()
     predecessor = _predecessor_evidence()
+    controller_bindings = _controller_bindings(systemd, predecessor)
     bindings = AttestationBindings(
         candidate_sha="a" * 40,
         candidate_tree="b" * 40,
@@ -158,6 +163,7 @@ def _attestation() -> PreflightAttestation:
             ),
             target_unit_set_digest=str(systemd["supervisor-unit-set-digest"]),
         ),
+        supervisor_controller_bindings=controller_bindings,
     )
     return PreflightAttestation.issue(
         bindings=bindings,
@@ -258,7 +264,11 @@ def _systemd_evidence() -> dict[str, object]:
     supervisor_units = {
         "loom-autoscaler-gb10-staging.service": "2" * 64,
         "loom-autoscaler-gb10-staging.timer": "3" * 64,
+        "loom-autoscaler-oldlab-staging.service": "4" * 64,
+        "loom-autoscaler-oldlab-staging.timer": "5" * 64,
     }
+    gb10_units = {name: digest for name, digest in supervisor_units.items() if "gb10" in name}
+    oldlab_units = {name: digest for name, digest in supervisor_units.items() if "oldlab" in name}
     units = {**{path: "1" * 64 for path in UNIT_PATHS}, **supervisor_units}
     return {
         "failed-units": {},
@@ -269,6 +279,18 @@ def _systemd_evidence() -> dict[str, object]:
         },
         "supervisor-unit-digests": supervisor_units,
         "supervisor-unit-set-digest": external_supervisor_unit_set_digest(supervisor_units),
+        "supervisor-controller-artifact-digests": {
+            "gx10-01c7": "7" * 64,
+            "TRT-EAI-OLDLAB-1": "8" * 64,
+        },
+        "supervisor-controller-unit-digests": {
+            **{f"gx10-01c7/{name}": digest for name, digest in gb10_units.items()},
+            **{f"TRT-EAI-OLDLAB-1/{name}": digest for name, digest in oldlab_units.items()},
+        },
+        "supervisor-controller-unit-set-digests": {
+            "gx10-01c7": external_supervisor_unit_set_digest(gb10_units),
+            "TRT-EAI-OLDLAB-1": external_supervisor_unit_set_digest(oldlab_units),
+        },
         "unit-count": len(units),
         "unit-digests": units,
         "unit-set-digest": hashlib.sha256(
@@ -286,6 +308,10 @@ def _predecessor_evidence(*, pool_identity_digest: str = "b" * 64) -> dict[str, 
         "loom-autoscaler-gb10-staging.service": "7" * 64,
         "loom-autoscaler-gb10-staging.timer": "8" * 64,
     }
+    oldlab_units = {
+        "loom-autoscaler-oldlab-staging.service": "c" * 64,
+        "loom-autoscaler-oldlab-staging.timer": "d" * 64,
+    }
     return {
         "authority-kind": "legacy-manifest",
         "authority-digest": "9" * 64,
@@ -297,7 +323,71 @@ def _predecessor_evidence(*, pool_identity_digest: str = "b" * 64) -> dict[str, 
         "transition-clear": True,
         "runtime-ready": True,
         "pool-identity-digest": pool_identity_digest,
+        "controller-bindings": {
+            "gx10-01c7/authority-kind": "legacy-manifest",
+            "gx10-01c7/authority-digest": "9" * 64,
+            "gx10-01c7/pointer-digest": EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+            "gx10-01c7/unit-set-digest": external_supervisor_unit_set_digest(units),
+            "gx10-01c7/live-evidence-digest": "a" * 64,
+            "gx10-01c7/pending-transition-digest": hashlib.sha256(b"{}").hexdigest(),
+            **{f"gx10-01c7/unit/{name}": digest for name, digest in units.items()},
+            "TRT-EAI-OLDLAB-1/authority-kind": "legacy-manifest",
+            "TRT-EAI-OLDLAB-1/authority-digest": "e" * 64,
+            "TRT-EAI-OLDLAB-1/pointer-digest": EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+            "TRT-EAI-OLDLAB-1/unit-set-digest": external_supervisor_unit_set_digest(oldlab_units),
+            "TRT-EAI-OLDLAB-1/live-evidence-digest": "f" * 64,
+            "TRT-EAI-OLDLAB-1/pending-transition-digest": hashlib.sha256(b"{}").hexdigest(),
+            **{f"TRT-EAI-OLDLAB-1/unit/{name}": digest for name, digest in oldlab_units.items()},
+        },
     }
+
+
+def _controller_bindings(
+    systemd: dict[str, object],
+    predecessor: dict[str, object],
+) -> dict[str, str]:
+    artifacts = systemd["supervisor-controller-artifact-digests"]
+    target_units = systemd["supervisor-controller-unit-digests"]
+    target_sets = systemd["supervisor-controller-unit-set-digests"]
+    predecessors = predecessor["controller-bindings"]
+    assert isinstance(artifacts, dict)
+    assert isinstance(target_units, dict)
+    assert isinstance(target_sets, dict)
+    assert isinstance(predecessors, dict)
+    bindings: dict[str, ExternalSupervisorControllerBinding] = {}
+    for host in artifacts:
+        prefix = f"{host}/"
+        predecessor_units = {
+            key.removeprefix(f"{prefix}unit/"): value
+            for key, value in predecessors.items()
+            if key.startswith(f"{prefix}unit/")
+        }
+        host_target_units = {
+            key.removeprefix(prefix): value
+            for key, value in target_units.items()
+            if key.startswith(prefix)
+        }
+        bindings[host] = ExternalSupervisorControllerBinding.build(
+            execution_host=host,
+            candidate_sha="a" * 40,
+            candidate_tree="b" * 40,
+            environment="staging",
+            predecessor_kind=predecessors[f"{prefix}authority-kind"],
+            predecessor_digest=predecessors[f"{prefix}authority-digest"],
+            predecessor_pointer_digest=predecessors[f"{prefix}pointer-digest"],
+            predecessor_unit_sha256=predecessor_units,
+            predecessor_unit_set_digest=predecessors[f"{prefix}unit-set-digest"],
+            predecessor_live_evidence_digest=predecessors[f"{prefix}live-evidence-digest"],
+            predecessor_pending_transition_digest=predecessors[
+                f"{prefix}pending-transition-digest"
+            ],
+            target_artifact_digest=artifacts[host],
+            target_profile_sha256=systemd["supervisor-profile-sha256"],
+            target_script_sha256=systemd["supervisor-script-digests"],
+            target_unit_sha256=host_target_units,
+            target_unit_set_digest=target_sets[host],
+        )
+    return encode_external_supervisor_controller_bindings(bindings)
 
 
 def _plan(tmp_path: Path) -> FinalGatePlan:
@@ -317,7 +407,7 @@ def test_final_gate_plan_binds_attestation_artifacts_and_checkpoint(tmp_path: Pa
     plan = _plan(tmp_path)
 
     assert FinalGatePlan.from_dict(plan.to_dict()) == plan
-    assert plan.schema_version == 3
+    assert plan.schema_version == 4
     assert plan.candidate_tree == "b" * 40
     assert plan.request_envelope_sha256 == driver_envelope_sha256(_envelope(_attestation()))
     assert plan.artifact_bundle_digest == "e" * 64
@@ -331,6 +421,24 @@ def test_final_gate_plan_binds_attestation_artifacts_and_checkpoint(tmp_path: Pa
     assert plan.service_token_source == _envelope(_attestation()).service_token_source
     assert plan.protected_baseline_digest == _baseline().baseline_digest
     assert plan.protected_baseline_resource_digests == _baseline().resource_digests
+
+
+def test_final_gate_plan_preserves_independent_supervisor_controller_authority(
+    tmp_path: Path,
+) -> None:
+    plan = _plan(tmp_path)
+
+    assert set(plan.supervisor_controller_artifact_digests) == {
+        "gx10-01c7",
+        "TRT-EAI-OLDLAB-1",
+    }
+    assert set(plan.supervisor_controller_unit_set_digests) == {
+        "gx10-01c7",
+        "TRT-EAI-OLDLAB-1",
+    }
+    assert dict(plan.supervisor_controller_bindings) == dict(
+        plan.to_dict()["supervisor_controller_bindings"]
+    )
 
 
 def test_final_gate_plan_rejects_drift_or_content_tamper(tmp_path: Path) -> None:
@@ -464,8 +572,8 @@ def test_final_gate_plan_accepts_absent_supervisor_predecessor(tmp_path: Path) -
     payload["supervisor_predecessor_unit_sha256"] = {}
     payload["supervisor_predecessor_digest"] = EXTERNAL_SUPERVISOR_ABSENT_DIGEST
     payload["supervisor_predecessor_pointer_digest"] = EXTERNAL_SUPERVISOR_ABSENT_DIGEST
-    payload["supervisor_predecessor_unit_set_digest"] = external_supervisor_unit_set_digest_or_empty(
-        {}
+    payload["supervisor_predecessor_unit_set_digest"] = (
+        external_supervisor_unit_set_digest_or_empty({})
     )
     target_unit_sha256 = {
         name: digest

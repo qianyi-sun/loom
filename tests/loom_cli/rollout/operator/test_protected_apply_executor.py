@@ -11,6 +11,9 @@ from types import SimpleNamespace
 import pytest
 
 from loom_cli.rollout.credential_authority import read_trusted_file
+from loom_cli.rollout.external_supervisor_predecessor import (
+    external_supervisor_unit_directory,
+)
 from loom_cli.rollout.gb10_convergence import (
     GB10ConvergenceState,
     GB10FleetCandidateObservation,
@@ -27,6 +30,7 @@ from loom_cli.rollout.operator.protected_environment_state_component import (
 from loom_cli.rollout.preflight_contract import CheckOperation
 from tests.loom_cli.rollout.operator.test_protected_external_supervisor_component import (
     _bound_artifact,
+    _bound_multi_artifacts,
     _observation,
 )
 
@@ -166,9 +170,16 @@ class EnvironmentState:
 
 
 class ExternalSupervisors:
-    def __init__(self, *, exact: bool = False, fail_reconcile: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        exact: bool = False,
+        fail_reconcile: bool = False,
+        unit_dir: Path = Path("/var/lib/loom-staging-rollout/.config/systemd/user"),
+    ) -> None:
         self.exact = exact
         self.fail_reconcile = fail_reconcile
+        self.unit_dir = unit_dir
         self.calls: list[str] = []
         self.plan_digest = "a" * 64
         self.attestation_digest = "b" * 64
@@ -181,6 +192,7 @@ class ExternalSupervisors:
             runtime="exact",
             plan_digest=self.plan_digest,
             attestation_digest=self.attestation_digest,
+            unit_dir=self.unit_dir,
         )
         if predecessor_authority is not None:
             assert predecessor_authority == observation.predecessor_authority
@@ -339,7 +351,7 @@ def test_executor_orders_legacy_migration_before_epoch_bootstrap(tmp_path: Path)
     assert roots[3].name == "03-environment-state"
     assert roots[4].name == "04-gb10-candidate"
     assert roots[5].name == "05-production-defaults"
-    assert roots[6].name == "06-external-supervisors"
+    assert roots[6].name == "06-external-supervisors-gb10"
 
 
 def test_executor_rejects_non_apply_operation(tmp_path: Path) -> None:
@@ -424,9 +436,81 @@ def test_convergence_reports_drift_without_applying(tmp_path: Path) -> None:
         "environment-state",
         "gb10-candidate",
         "production-defaults",
-        "external-supervisors",
+        "external-supervisors-gb10",
     }
     assert all(not call.endswith("-apply") for call in runner.calls)
+
+
+def test_convergence_blocks_when_only_oldlab_supervisor_is_stale(tmp_path: Path) -> None:
+    plan, candidate_root, _artifacts = _bound_multi_artifacts(tmp_path)
+    runner = Runner(revision="0072", epoch=8)
+    runner.plan_digest = plan.plan_digest
+    runner.manifest_status = 0
+    gb10_supervisor = ExternalSupervisors(
+        exact=True,
+        unit_dir=Path(external_supervisor_unit_directory("gx10-01c7")),
+    )
+    gb10_supervisor.plan_digest = plan.plan_digest
+    gb10_supervisor.attestation_digest = plan.attestation_digest
+
+    result = KubernetesProtectedConvergenceExecutor(
+        service_uid=os.geteuid(),
+        runner=runner,
+        gb10_transport=GB10Fleet(exact=True),
+        environment_state_transport=EnvironmentState(desired_exact=True),
+        candidate_root=candidate_root,
+        external_supervisor_transports={
+            "gx10-01c7": gb10_supervisor,
+            "TRT-EAI-OLDLAB-1": ExternalSupervisors(exact=False),
+        },
+        production_defaults_request=_defaults_request,
+        environment_state_attempts=1,
+    )("final.convergence", CheckOperation.VERIFY, plan)
+
+    assert result.blockers == {"external-supervisors-oldlab": "protected-component-not-exact"}
+
+
+def test_protected_apply_journals_and_activates_both_supervisor_controllers(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "state"
+    _attempt(state)
+    plan, candidate_root, _artifacts = _bound_multi_artifacts(tmp_path)
+    runner = Runner(revision="0069", epoch=7)
+    runner.plan_digest = plan.plan_digest
+    supervisors = {
+        "gx10-01c7": ExternalSupervisors(
+            unit_dir=Path(external_supervisor_unit_directory("gx10-01c7")),
+        ),
+        "TRT-EAI-OLDLAB-1": ExternalSupervisors(),
+    }
+
+    result = MigrationEpochProtectedApplyExecutor(
+        state_root=state,
+        service_uid=os.geteuid(),
+        runner=runner,
+        gb10_transport=GB10Fleet(),
+        environment_state_transport=EnvironmentState(),
+        candidate_root=candidate_root,
+        external_supervisor_transports=supervisors,
+        production_defaults_request=_defaults_request,
+    )("final.protected-apply", CheckOperation.APPLY, plan)
+
+    assert result.ready
+    assert all(
+        supervisor.calls[:2] == ["supervisor-reconcile", "supervisor-read"]
+        and "supervisor-apply" in supervisor.calls
+        for supervisor in supervisors.values()
+    )
+    component_roots = {
+        path.name.split("-", 1)[1]
+        for path in (state / "requests/req-alpha/attempts/1/protected-apply").iterdir()
+        if path.is_dir() and "-" in path.name
+    }
+    assert {
+        "external-supervisors-gb10",
+        "external-supervisors-oldlab",
+    } <= component_roots
 
 
 def test_convergence_waits_boundedly_for_worker_runtime(tmp_path: Path) -> None:

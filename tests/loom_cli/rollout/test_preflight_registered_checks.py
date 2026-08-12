@@ -646,6 +646,37 @@ def test_registered_external_supervisor_predecessor_binds_legacy_authority() -> 
     assert "database.schema.revision" in check.spec.input_keys
 
 
+def test_registered_external_supervisor_predecessor_binds_every_controller() -> None:
+    gb10 = _external_supervisor_snapshot()
+    oldlab = replace(
+        gb10,
+        authority_digest="1" * 64,
+        unit_sha256={
+            "loom-autoscaler-oldlab-staging.service": "2" * 64,
+            "loom-autoscaler-oldlab-staging.timer": "3" * 64,
+        },
+        live_evidence_digest="4" * 64,
+    )
+    check = build_external_supervisor_predecessor_check(
+        lambda _context: {
+            "gx10-01c7": gb10,
+            "TRT-EAI-OLDLAB-1": oldlab,
+        }
+    )
+
+    probe = check.operations[CheckOperation.PROBE](_external_supervisor_context())
+
+    assert probe.passed
+    controller_bindings = probe.evidence["controller-bindings"]
+    assert isinstance(controller_bindings, dict)
+    assert controller_bindings["gx10-01c7/authority-digest"] == gb10.authority_digest
+    assert controller_bindings["TRT-EAI-OLDLAB-1/authority-digest"] == (oldlab.authority_digest)
+    assert (
+        controller_bindings["TRT-EAI-OLDLAB-1/unit/loom-autoscaler-oldlab-staging.timer"]
+        == oldlab.unit_sha256["loom-autoscaler-oldlab-staging.timer"]
+    )
+
+
 def test_registered_external_supervisor_predecessor_accepts_absent_but_rejects_malformed_or_pending() -> (
     None
 ):
@@ -1808,10 +1839,26 @@ def test_registered_systemd_render_uses_exact_static_unit_verifier() -> None:
     assert result.evidence["supervisor-artifact-digest"] != "0" * 64
     assert result.evidence["supervisor-profile-sha256"] != "0" * 64
     assert set(result.evidence["supervisor-unit-digests"]) == {
+        "loom-autoscaler-gb10-staging.service",
+        "loom-autoscaler-gb10-staging.timer",
         "loom-autoscaler-oldlab-staging.service",
         "loom-autoscaler-oldlab-staging.timer",
     }
-    assert result.evidence["unit-count"] == 5
+    assert set(result.evidence["supervisor-controller-artifact-digests"]) == {
+        "gx10-01c7",
+        "TRT-EAI-OLDLAB-1",
+    }
+    assert set(result.evidence["supervisor-controller-unit-set-digests"]) == {
+        "gx10-01c7",
+        "TRT-EAI-OLDLAB-1",
+    }
+    assert set(result.evidence["supervisor-controller-unit-digests"]) == {
+        "gx10-01c7/loom-autoscaler-gb10-staging.service",
+        "gx10-01c7/loom-autoscaler-gb10-staging.timer",
+        "TRT-EAI-OLDLAB-1/loom-autoscaler-oldlab-staging.service",
+        "TRT-EAI-OLDLAB-1/loom-autoscaler-oldlab-staging.timer",
+    }
+    assert result.evidence["unit-count"] == 7
     assert set(result.evidence["supervisor-script-digests"]) == {SCRIPT_PATH}
 
 

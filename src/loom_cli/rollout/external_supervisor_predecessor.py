@@ -31,6 +31,11 @@ NO_TRANSITION_GROUP_ID = hashlib.sha256(b"loom-external-supervisor-no-transition
     :32
 ]
 PROTECTED_CANONICAL_UNIT_DIR = "/var/lib/loom-staging-rollout/.config/systemd/user"
+GB10_CANONICAL_UNIT_DIR = "/var/lib/loom-rollout/.config/systemd/user"
+_CONTROLLER_UNIT_DIRECTORIES = {
+    "gx10-01c7": GB10_CANONICAL_UNIT_DIR,
+    "trt-eai-oldlab-1": PROTECTED_CANONICAL_UNIT_DIR,
+}
 
 # This is the exact canonical file reviewed and merged by PR #907.  The
 # self-describing digest inside the JSON proves internal consistency, but it
@@ -69,6 +74,18 @@ def _hash_json(value: object) -> str:
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def external_supervisor_unit_directory(execution_host: str) -> str:
+    """Return the fixed service-owned user-systemd directory for one controller."""
+
+    if type(execution_host) is not str or not execution_host:
+        raise ValueError("external supervisor execution host is invalid")
+    normalized = execution_host.split(".", 1)[0].casefold()
+    try:
+        return _CONTROLLER_UNIT_DIRECTORIES[normalized]
+    except KeyError as exc:
+        raise ValueError("external supervisor execution host is unknown") from exc
 
 
 def external_supervisor_unit_set_digest(unit_sha256: Mapping[str, str]) -> str:
@@ -405,7 +422,7 @@ class ExternalSupervisorCanonicalIdentity:
                     self.evidence_digest,
                 )
             )
-            or self.unit_dir != PROTECTED_CANONICAL_UNIT_DIR
+            or self.unit_dir not in set(_CONTROLLER_UNIT_DIRECTORIES.values())
             or not Path(self.unit_dir).is_absolute()
         ):
             raise ValueError("external supervisor canonical identity is invalid")
@@ -425,6 +442,7 @@ class ExternalSupervisorCanonicalIdentity:
         attestation_digest: str,
         transition_group_id: str,
         runtime_evidence_digest: str,
+        unit_dir: str = PROTECTED_CANONICAL_UNIT_DIR,
     ) -> ExternalSupervisorCanonicalIdentity:
         payload = {
             "schema_version": 3,
@@ -436,7 +454,7 @@ class ExternalSupervisorCanonicalIdentity:
             "plan_digest": plan_digest,
             "attestation_digest": attestation_digest,
             "transition_group_id": transition_group_id,
-            "unit_dir": PROTECTED_CANONICAL_UNIT_DIR,
+            "unit_dir": unit_dir,
             "runtime_evidence_digest": runtime_evidence_digest,
             "unit_payloads": {
                 name: unit
@@ -455,6 +473,8 @@ class ExternalSupervisorCanonicalIdentity:
     def from_manifest(
         cls,
         manifest: ExternalSupervisorPredecessorManifest,
+        *,
+        unit_dir: str = PROTECTED_CANONICAL_UNIT_DIR,
     ) -> ExternalSupervisorCanonicalIdentity:
         payload = {
             "schema_version": 3,
@@ -466,7 +486,7 @@ class ExternalSupervisorCanonicalIdentity:
             "plan_digest": manifest.manifest_digest,
             "attestation_digest": manifest.manifest_digest,
             "transition_group_id": NO_TRANSITION_GROUP_ID,
-            "unit_dir": PROTECTED_CANONICAL_UNIT_DIR,
+            "unit_dir": unit_dir,
             "runtime_evidence_digest": manifest.manifest_digest,
             "unit_payloads": dict(manifest.unit_payloads),
             "unit_sha256": dict(manifest.unit_sha256),
@@ -688,6 +708,7 @@ def load_predecessor_manifest(
 __all__ = [
     "ABSENT_PREDECESSOR_DIGEST",
     "DEFAULT_PREDECESSOR_MANIFEST",
+    "GB10_CANONICAL_UNIT_DIR",
     "NO_TRANSITION_GROUP_ID",
     "OLDLAB_PREDECESSOR_MANIFEST",
     "PR907_PREDECESSOR_BYTES_SHA256",
@@ -706,6 +727,7 @@ __all__ = [
     "ExternalSupervisorPoolIdentity",
     "ExternalSupervisorPredecessorAuthority",
     "ExternalSupervisorPredecessorManifest",
+    "external_supervisor_unit_directory",
     "external_supervisor_unit_set_digest",
     "load_predecessor_manifest",
 ]

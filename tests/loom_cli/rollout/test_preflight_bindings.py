@@ -46,9 +46,17 @@ def _executions() -> tuple[CheckExecution, ...]:
         "loom-autoscaler-gb10-staging.service": "a" * 64,
         "loom-autoscaler-gb10-staging.timer": "b" * 64,
     }
+    oldlab_predecessor_units = {
+        "loom-autoscaler-oldlab-staging.service": "1" * 64,
+        "loom-autoscaler-oldlab-staging.timer": "2" * 64,
+    }
     target_units = {
         "loom-autoscaler-gb10-staging.service": "c" * 64,
         "loom-autoscaler-gb10-staging.timer": "d" * 64,
+    }
+    oldlab_target_units = {
+        "loom-autoscaler-oldlab-staging.service": "3" * 64,
+        "loom-autoscaler-oldlab-staging.timer": "4" * 64,
     }
     return (
         _execution(
@@ -80,6 +88,21 @@ def _executions() -> tuple[CheckExecution, ...]:
                 },
                 "supervisor-unit-digests": target_units,
                 "supervisor-unit-set-digest": external_supervisor_unit_set_digest(target_units),
+                "supervisor-controller-artifact-digests": {
+                    "gx10-01c7": "5" * 64,
+                    "TRT-EAI-OLDLAB-1": "8" * 64,
+                },
+                "supervisor-controller-unit-digests": {
+                    **{f"gx10-01c7/{name}": digest for name, digest in target_units.items()},
+                    **{
+                        f"TRT-EAI-OLDLAB-1/{name}": digest
+                        for name, digest in oldlab_target_units.items()
+                    },
+                },
+                "supervisor-controller-unit-set-digests": {
+                    "gx10-01c7": external_supervisor_unit_set_digest(target_units),
+                    "TRT-EAI-OLDLAB-1": external_supervisor_unit_set_digest(oldlab_target_units),
+                },
             },
         ),
         _execution(
@@ -94,6 +117,32 @@ def _executions() -> tuple[CheckExecution, ...]:
                 "pending-transition-digest": "0" * 64,
                 "transition-clear": True,
                 "runtime-ready": True,
+                "controller-bindings": {
+                    "gx10-01c7/authority-kind": "legacy-manifest",
+                    "gx10-01c7/authority-digest": "8" * 64,
+                    "gx10-01c7/pointer-digest": EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+                    "gx10-01c7/unit-set-digest": external_supervisor_unit_set_digest(
+                        predecessor_units
+                    ),
+                    "gx10-01c7/live-evidence-digest": "9" * 64,
+                    "gx10-01c7/pending-transition-digest": "0" * 64,
+                    **{
+                        f"gx10-01c7/unit/{name}": digest
+                        for name, digest in predecessor_units.items()
+                    },
+                    "TRT-EAI-OLDLAB-1/authority-kind": "legacy-manifest",
+                    "TRT-EAI-OLDLAB-1/authority-digest": "a" * 64,
+                    "TRT-EAI-OLDLAB-1/pointer-digest": (EXTERNAL_SUPERVISOR_ABSENT_DIGEST),
+                    "TRT-EAI-OLDLAB-1/unit-set-digest": (
+                        external_supervisor_unit_set_digest(oldlab_predecessor_units)
+                    ),
+                    "TRT-EAI-OLDLAB-1/live-evidence-digest": "b" * 64,
+                    "TRT-EAI-OLDLAB-1/pending-transition-digest": "0" * 64,
+                    **{
+                        f"TRT-EAI-OLDLAB-1/unit/{name}": digest
+                        for name, digest in oldlab_predecessor_units.items()
+                    },
+                },
             },
         ),
         _execution("gb10.shared-mount", {"mount-digest": "2" * 64}),
@@ -173,6 +222,16 @@ def test_derives_complete_bindings_only_from_exact_evidence() -> None:
         target_script_sha256=systemd.evidence["supervisor-script-digests"],  # type: ignore[arg-type]
         target_unit_sha256=systemd.evidence["supervisor-unit-digests"],  # type: ignore[arg-type]
         target_unit_set_digest=str(systemd.evidence["supervisor-unit-set-digest"]),
+    )
+    controller_bindings = dict(bindings.supervisor_controller_bindings)
+    assert {
+        key.removesuffix("/transition-digest")
+        for key in controller_bindings
+        if key.endswith("/transition-digest")
+    } == {"gx10-01c7", "TRT-EAI-OLDLAB-1"}
+    assert (
+        controller_bindings["gx10-01c7/transition-digest"]
+        != (controller_bindings["TRT-EAI-OLDLAB-1/transition-digest"])
     )
 
 

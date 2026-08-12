@@ -101,6 +101,16 @@ def _attestation() -> PreflightAttestation:
         supervisor_predecessor_live_evidence_digest="1" * 64,
         supervisor_predecessor_pending_transition_digest="2" * 64,
         supervisor_transition_digest="3" * 64,
+        supervisor_controller_bindings={
+            "gx10-01c7/authority-kind": "legacy-manifest",
+            "gx10-01c7/authority-digest": "f" * 64,
+            "gx10-01c7/pointer-digest": EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+            "gx10-01c7/unit-set-digest": external_supervisor_unit_set_digest(predecessor_units),
+            "gx10-01c7/live-evidence-digest": "1" * 64,
+            "gx10-01c7/pending-transition-digest": "2" * 64,
+            "gx10-01c7/transition-digest": "3" * 64,
+            **{f"gx10-01c7/unit/{name}": digest for name, digest in predecessor_units.items()},
+        },
     )
     return PreflightAttestation.issue(
         bindings=bindings,

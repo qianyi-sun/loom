@@ -14,6 +14,9 @@ from types import MappingProxyType
 from typing import TypedDict, cast
 from uuid import uuid4
 
+from loom_cli.rollout.external_supervisor_controller import (
+    parse_external_supervisor_controller_bindings,
+)
 from loom_cli.rollout.external_supervisor_readiness import SCRIPT_PATH
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactPublication
 from loom_cli.rollout.preflight_contract import (
@@ -54,6 +57,9 @@ class _SystemdEvidence(TypedDict):
     supervisor_unit_set_digest: str
     systemd_unit_digests: dict[str, str]
     systemd_unit_set_digest: str
+    controller_artifact_digests: dict[str, str]
+    controller_unit_digests: dict[str, str]
+    controller_unit_set_digests: dict[str, str]
 
 
 class _PredecessorEvidence(TypedDict):
@@ -64,6 +70,7 @@ class _PredecessorEvidence(TypedDict):
     unit_set_digest: str
     live_evidence_digest: str
     pending_transition_digest: str
+    controller_bindings: dict[str, str]
 
 
 class FinalGatePlanError(RuntimeError):
@@ -138,6 +145,10 @@ class FinalGatePlan:
     supervisor_predecessor_live_evidence_digest: str
     supervisor_predecessor_pending_transition_digest: str
     supervisor_transition_digest: str
+    supervisor_controller_artifact_digests: Mapping[str, str]
+    supervisor_controller_unit_digests: Mapping[str, str]
+    supervisor_controller_unit_set_digests: Mapping[str, str]
+    supervisor_controller_bindings: Mapping[str, str]
     check_implementation_digests: Mapping[str, str]
     evidence_hashes: Mapping[str, str]
     protected_baseline_digest: str
@@ -148,7 +159,7 @@ class FinalGatePlan:
         validate_safe_identifier(self.request_id, "request_id")
         validate_safe_identifier(self.rollout_id, "rollout_id")
         if (
-            self.schema_version != 3
+            self.schema_version != 4
             or type(self.attempt_number) is not int
             or self.attempt_number < 1
             or self.source_mode not in {"merged-dev", "sealed-cumulative"}
@@ -249,6 +260,10 @@ class FinalGatePlan:
             "check implementation": self.check_implementation_digests,
             "evidence": self.evidence_hashes,
             "protected baseline": self.protected_baseline_resource_digests,
+            "supervisor controller artifact": self.supervisor_controller_artifact_digests,
+            "supervisor controller unit": self.supervisor_controller_unit_digests,
+            "supervisor controller unit set": self.supervisor_controller_unit_set_digests,
+            "supervisor controller binding": self.supervisor_controller_bindings,
         }
 
         def _entries_well_formed(values: Mapping[str, str]) -> bool:
@@ -366,6 +381,55 @@ class FinalGatePlan:
         )
         if expected_transition != self.supervisor_transition_digest:
             raise ValueError("final gate supervisor transition identity drifted")
+        controller_bindings = parse_external_supervisor_controller_bindings(
+            self.supervisor_controller_bindings
+        )
+        controller_hosts = set(controller_bindings)
+        controller_units: dict[str, dict[str, str]] = {}
+        for key, digest in self.supervisor_controller_unit_digests.items():
+            host, separator, unit_name = key.partition("/")
+            if not separator or not host or not unit_name:
+                raise ValueError("final gate supervisor controller unit key is invalid")
+            controller_units.setdefault(host, {})[unit_name] = digest
+        if (
+            set(self.supervisor_controller_artifact_digests) != controller_hosts
+            or set(self.supervisor_controller_unit_set_digests) != controller_hosts
+            or set(controller_units) != controller_hosts
+            or {
+                name: digest
+                for host_units in controller_units.values()
+                for name, digest in host_units.items()
+            }
+            != target_unit_sha256
+        ):
+            raise ValueError("final gate supervisor controller coverage drifted")
+        for host, binding in controller_bindings.items():
+            host_units = controller_units[host]
+            if (
+                external_supervisor_unit_set_digest(host_units)
+                != self.supervisor_controller_unit_set_digests[host]
+                or external_supervisor_transition_digest(
+                    candidate_sha=self.candidate_sha,
+                    candidate_tree=self.candidate_tree,
+                    environment=self.environment,
+                    predecessor_kind=binding.predecessor_kind,
+                    predecessor_digest=binding.predecessor_digest,
+                    predecessor_pointer_digest=binding.predecessor_pointer_digest,
+                    predecessor_unit_sha256=binding.predecessor_unit_sha256,
+                    predecessor_unit_set_digest=binding.predecessor_unit_set_digest,
+                    predecessor_live_evidence_digest=(binding.predecessor_live_evidence_digest),
+                    predecessor_pending_transition_digest=(
+                        binding.predecessor_pending_transition_digest
+                    ),
+                    target_artifact_digest=self.supervisor_controller_artifact_digests[host],
+                    target_profile_sha256=self.supervisor_profile_sha256,
+                    target_script_sha256=self.supervisor_script_digests,
+                    target_unit_sha256=host_units,
+                    target_unit_set_digest=self.supervisor_controller_unit_set_digests[host],
+                )
+                != binding.transition_digest
+            ):
+                raise ValueError("final gate supervisor controller transition drifted")
         if self.check_implementation_digests.keys() != self.evidence_hashes.keys():
             raise ValueError("final gate check evidence maps differ")
         if self.protected_baseline_resource_digests.keys() != _PROTECTED_BASELINE_IDS:
@@ -408,6 +472,17 @@ class FinalGatePlan:
             "protected_baseline_resource_digests",
             MappingProxyType(dict(self.protected_baseline_resource_digests)),
         )
+        for field_name in (
+            "supervisor_controller_artifact_digests",
+            "supervisor_controller_unit_digests",
+            "supervisor_controller_unit_set_digests",
+            "supervisor_controller_bindings",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                MappingProxyType(dict(sorted(getattr(self, field_name).items()))),
+            )
 
     @classmethod
     def build(
@@ -423,6 +498,13 @@ class FinalGatePlan:
         bindings = attestation.bindings
         systemd = _parse_systemd_evidence(systemd_evidence)
         predecessor = _parse_external_supervisor_predecessor_evidence(predecessor_evidence)
+        attested_controller_bindings = dict(bindings.supervisor_controller_bindings)
+        if {
+            key: value
+            for key, value in attested_controller_bindings.items()
+            if not key.endswith("/transition-digest")
+        } != predecessor["controller_bindings"]:
+            raise ValueError("final gate supervisor controller predecessor drifted")
         supervisor_transition = external_supervisor_transition_digest(
             candidate_sha=bindings.candidate_sha,
             candidate_tree=bindings.candidate_tree,
@@ -485,7 +567,7 @@ class FinalGatePlan:
         ):
             raise ValueError("final gate plan inputs drifted")
         payload = {
-            "schema_version": 3,
+            "schema_version": 4,
             "request_id": envelope.request_id,
             "rollout_id": envelope.rollout_id,
             "attempt_number": envelope.attempt_number,
@@ -551,6 +633,10 @@ class FinalGatePlan:
                 "pending_transition_digest"
             ],
             "supervisor_transition_digest": supervisor_transition,
+            "supervisor_controller_artifact_digests": systemd["controller_artifact_digests"],
+            "supervisor_controller_unit_digests": systemd["controller_unit_digests"],
+            "supervisor_controller_unit_set_digests": systemd["controller_unit_set_digests"],
+            "supervisor_controller_bindings": attested_controller_bindings,
             "check_implementation_digests": dict(attestation.check_implementation_digests),
             "evidence_hashes": dict(attestation.evidence_hashes),
             "protected_baseline_digest": baseline.baseline_digest,
@@ -641,6 +727,16 @@ class FinalGatePlan:
                 value, "supervisor_predecessor_pending_transition_digest"
             ),
             supervisor_transition_digest=_string(value, "supervisor_transition_digest"),
+            supervisor_controller_artifact_digests=_string_map(
+                value, "supervisor_controller_artifact_digests"
+            ),
+            supervisor_controller_unit_digests=_string_map(
+                value, "supervisor_controller_unit_digests"
+            ),
+            supervisor_controller_unit_set_digests=_string_map(
+                value, "supervisor_controller_unit_set_digests"
+            ),
+            supervisor_controller_bindings=_string_map(value, "supervisor_controller_bindings"),
             check_implementation_digests=_string_map(value, "check_implementation_digests"),
             evidence_hashes=_string_map(value, "evidence_hashes"),
             protected_baseline_digest=_string(value, "protected_baseline_digest"),
@@ -814,6 +910,9 @@ def _parse_systemd_evidence(value: Mapping[str, object]) -> _SystemdEvidence:
     supervisor_unit_digests = value.get("supervisor-unit-digests")
     failed_units = value.get("failed-units")
     script_digests = value.get("supervisor-script-digests")
+    controller_artifact_digests = value.get("supervisor-controller-artifact-digests")
+    controller_unit_digests = value.get("supervisor-controller-unit-digests")
+    controller_unit_set_digests = value.get("supervisor-controller-unit-set-digests")
     unit_count = value.get("unit-count")
     strings = {
         "supervisor_artifact_digest": value.get("supervisor-artifact-digest"),
@@ -837,6 +936,9 @@ def _parse_systemd_evidence(value: Mapping[str, object]) -> _SystemdEvidence:
         or not isinstance(supervisor_unit_digests, Mapping)
         or not isinstance(script_digests, Mapping)
         or not isinstance(failed_units, Mapping)
+        or not isinstance(controller_artifact_digests, Mapping)
+        or not isinstance(controller_unit_digests, Mapping)
+        or not isinstance(controller_unit_set_digests, Mapping)
         or failed_units
         or type(unit_count) is not int
         or unit_count != len(unit_digests)
@@ -847,7 +949,14 @@ def _parse_systemd_evidence(value: Mapping[str, object]) -> _SystemdEvidence:
             or not key
             or not isinstance(item, str)
             or _SHA256_RE.fullmatch(item) is None
-            for values in (unit_digests, supervisor_unit_digests, script_digests)
+            for values in (
+                unit_digests,
+                supervisor_unit_digests,
+                script_digests,
+                controller_artifact_digests,
+                controller_unit_digests,
+                controller_unit_set_digests,
+            )
             for key, item in values.items()
         )
         or any(
@@ -869,6 +978,9 @@ def _parse_systemd_evidence(value: Mapping[str, object]) -> _SystemdEvidence:
         "supervisor_unit_set_digest": strings["supervisor_unit_set_digest"],
         "systemd_unit_digests": dict(unit_digests),
         "systemd_unit_set_digest": cast(str, strings["systemd_unit_set_digest"]),
+        "controller_artifact_digests": dict(controller_artifact_digests),
+        "controller_unit_digests": dict(controller_unit_digests),
+        "controller_unit_set_digests": dict(controller_unit_set_digests),
     }
 
 
@@ -894,8 +1006,10 @@ def _parse_external_supervisor_predecessor_evidence(
         # final_attestation_admission.py). We still require it to be present and a
         # well-formed sha256 so the evidence stays schema-conformant.
         "pool-identity-digest",
+        "controller-bindings",
     }
     units = value.get("unit-digests")
+    controller_bindings = value.get("controller-bindings")
     strings = {
         "kind": value.get("authority-kind"),
         "authority_digest": value.get("authority-digest"),
@@ -913,6 +1027,8 @@ def _parse_external_supervisor_predecessor_evidence(
         set(value) != expected_fields
         or strings["kind"] not in {"legacy-manifest", "canonical", "absent"}
         or not isinstance(units, Mapping)
+        or not isinstance(controller_bindings, Mapping)
+        or not controller_bindings
         or bool(units) == supervisor_predecessor_absent
         or (strings["authority_digest"] == EXTERNAL_SUPERVISOR_ABSENT_DIGEST)
         != supervisor_predecessor_absent
@@ -935,6 +1051,10 @@ def _parse_external_supervisor_predecessor_evidence(
             if name != "kind"
         )
         or external_supervisor_unit_set_digest_or_empty(units) != strings["unit_set_digest"]
+        or any(
+            not isinstance(key, str) or not key or not isinstance(item, str) or not item
+            for key, item in controller_bindings.items()
+        )
     ):
         raise ValueError("final gate external supervisor predecessor evidence is invalid")
     return {
@@ -945,6 +1065,7 @@ def _parse_external_supervisor_predecessor_evidence(
         "unit_set_digest": strings["unit_set_digest"],
         "live_evidence_digest": cast(str, strings["live_evidence_digest"]),
         "pending_transition_digest": cast(str, strings["pending_transition_digest"]),
+        "controller_bindings": dict(controller_bindings),
     }
 
 

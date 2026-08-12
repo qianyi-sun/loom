@@ -40,9 +40,7 @@ _POST_APPLY_DRIFT_EVIDENCE_CHECKS = frozenset(
 _PRE_APPLY_DRIFT_EVIDENCE_CHECKS = _POST_APPLY_DRIFT_EVIDENCE_CHECKS | {
     "external-supervisor.predecessor"
 }
-_ROTATING_CREDENTIAL_METADATA = frozenset(
-    {"readonly-kubeconfig", "rehearsal-kubeconfig"}
-)
+_ROTATING_CREDENTIAL_METADATA = frozenset({"readonly-kubeconfig", "rehearsal-kubeconfig"})
 
 
 class PostApplyDriftTransientError(ValueError):
@@ -219,6 +217,12 @@ def validate_final_attestation(
         == bindings.supervisor_predecessor_pending_transition_digest,
         evidence("external-supervisor.predecessor", "transition-clear") is True,
         evidence("external-supervisor.predecessor", "runtime-ready") is True,
+        string_map("external-supervisor.predecessor", "controller-bindings")
+        == {
+            key: value
+            for key, value in bindings.supervisor_controller_bindings.items()
+            if not key.endswith("/transition-digest")
+        },
     )
     # The drift-sensitive external-supervisor.predecessor *authority* and
     # transition fields are re-checked individually above. We deliberately do
@@ -376,9 +380,7 @@ def validate_post_apply_attestation_drift(
         # Protected apply can leave a short read-after-write window across the
         # independently managed OLDLAB and GB10 hosts.  Re-observe without
         # mutating; the action source still fails closed after its bounded wait.
-        raise PostApplyDriftTransientError(
-            "post-apply drift-sensitive evidence changed"
-        )
+        raise PostApplyDriftTransientError("post-apply drift-sensitive evidence changed")
     payload = {
         "checks": {
             execution.check_id: {

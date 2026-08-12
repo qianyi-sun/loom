@@ -17,6 +17,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
+from loom_cli.rollout.external_supervisor_controller import (
+    parse_external_supervisor_controller_bindings,
+)
+from loom_cli.rollout.external_supervisor_predecessor import (
+    PROTECTED_CANONICAL_UNIT_DIR,
+    external_supervisor_unit_directory,
+)
 from loom_cli.rollout.final_gate_readiness import FinalGateResult
 from loom_cli.rollout.preflight_contract import CheckOperation
 
@@ -258,8 +265,11 @@ class MigrationEpochProtectedApplyExecutor:
     gb10_transport: ProtectedGB10FleetTransport
     environment_state_transport: ProtectedEnvironmentStateTransport
     candidate_root: Path
-    external_supervisor_transport: ProtectedExternalSupervisorTransport
+    external_supervisor_transport: ProtectedExternalSupervisorTransport | None = None
     external_supervisor_execution_host: str | None = None
+    external_supervisor_transports: Mapping[str, ProtectedExternalSupervisorTransport] = field(
+        default_factory=dict
+    )
     production_defaults_request: ProductionDefaultsTransport = field(
         default_factory=HttpxProductionDefaultsTransport
     )
@@ -272,6 +282,7 @@ class MigrationEpochProtectedApplyExecutor:
             or not self.candidate_root.is_absolute()
             or ".." in self.candidate_root.parts
             or self.service_uid < 0
+            or bool(self.external_supervisor_transport) == bool(self.external_supervisor_transports)
         ):
             raise ValueError("protected apply executor authority is invalid")
 
@@ -291,7 +302,19 @@ class MigrationEpochProtectedApplyExecutor:
         # pointer selects active target convergence, active predecessor
         # convergence, or (only for an explicit absent predecessor) quiescence;
         # every path is identity/hash-bound and fails closed on verification.
-        self.external_supervisor_transport.reconcile_compensations()
+        supervisor_components = _external_supervisor_components(
+            candidate_root=self.candidate_root,
+            plan=plan,
+            epoch_guard=KubernetesProtectedEpochComponent(
+                runner=self.runner,
+                environment=environment,
+            ).classify,
+            transport=self.external_supervisor_transport,
+            execution_host=self.external_supervisor_execution_host,
+            transports=self.external_supervisor_transports,
+        )
+        for supervisor_component in supervisor_components:
+            supervisor_component.transport.reconcile_compensations()
         epoch = KubernetesProtectedEpochComponent(
             runner=self.runner,
             environment=environment,
@@ -323,12 +346,9 @@ class MigrationEpochProtectedApplyExecutor:
             transport=self.environment_state_transport,
             epoch_guard=epoch.classify,
         ).component(plan)
-        external_supervisors = ProtectedExternalSupervisorComponent(
-            candidate_root=self.candidate_root,
-            transport=self.external_supervisor_transport,
-            epoch_guard=epoch.classify,
-            execution_host=self.external_supervisor_execution_host,
-        ).component(plan)
+        external_supervisors = tuple(
+            supervisor.component(plan) for supervisor in supervisor_components
+        )
         components = (
             (
                 migration,
@@ -337,7 +357,7 @@ class MigrationEpochProtectedApplyExecutor:
                 environment_state,
                 gb10,
                 production_defaults,
-                external_supervisors,
+                *external_supervisors,
             )
             if requires_legacy_epoch_bootstrap(plan)
             else (
@@ -347,7 +367,7 @@ class MigrationEpochProtectedApplyExecutor:
                 environment_state,
                 gb10,
                 production_defaults,
-                external_supervisors,
+                *external_supervisors,
             )
         )
         terminals = ProtectedApplyJournal(
@@ -380,8 +400,11 @@ class KubernetesProtectedConvergenceExecutor:
     gb10_transport: ProtectedGB10FleetTransport
     environment_state_transport: ProtectedEnvironmentStateTransport
     candidate_root: Path
-    external_supervisor_transport: ProtectedExternalSupervisorTransport
+    external_supervisor_transport: ProtectedExternalSupervisorTransport | None = None
     external_supervisor_execution_host: str | None = None
+    external_supervisor_transports: Mapping[str, ProtectedExternalSupervisorTransport] = field(
+        default_factory=dict
+    )
     environment_state_attempts: int = 121
     environment_state_interval_seconds: float = 5.0
     sleep: Callable[[float], None] = time.sleep
@@ -398,6 +421,7 @@ class KubernetesProtectedConvergenceExecutor:
             or not 1 <= self.environment_state_attempts <= 721
             or not 0 <= self.environment_state_interval_seconds <= 30
             or not callable(self.sleep)
+            or bool(self.external_supervisor_transport) == bool(self.external_supervisor_transports)
         ):
             raise ValueError("protected convergence authority is invalid")
 
@@ -419,6 +443,14 @@ class KubernetesProtectedConvergenceExecutor:
         environment_state_component = ProtectedEnvironmentStateComponent(
             transport=self.environment_state_transport,
             epoch_guard=epoch.classify,
+        )
+        supervisor_components = _external_supervisor_components(
+            candidate_root=self.candidate_root,
+            plan=plan,
+            epoch_guard=epoch.classify,
+            transport=self.external_supervisor_transport,
+            execution_host=self.external_supervisor_execution_host,
+            transports=self.external_supervisor_transports,
         )
         observations = {
             "database-migration": KubernetesProtectedMigrationComponent(
@@ -449,13 +481,12 @@ class KubernetesProtectedConvergenceExecutor:
                 epoch_guard=epoch.classify,
                 request=self.production_defaults_request,
             ).classify(plan),
-            "external-supervisors": ProtectedExternalSupervisorComponent(
-                candidate_root=self.candidate_root,
-                transport=self.external_supervisor_transport,
-                epoch_guard=epoch.classify,
-                execution_host=self.external_supervisor_execution_host,
-            ).classify(plan),
         }
+        external_component_ids: list[str] = []
+        for supervisor in supervisor_components:
+            component = supervisor.component(plan)
+            external_component_ids.append(component.component_id)
+            observations[component.component_id] = component.classify(plan)
         expected_epoch = plan.starting_mutation_epoch + 1
         blockers = {
             component_id: "protected-component-not-exact"
@@ -472,8 +503,9 @@ class KubernetesProtectedConvergenceExecutor:
             blockers["gb10-candidate"] = "protected-epoch-not-exact"
         if observations["production-defaults"].observed_epoch != expected_epoch:
             blockers["production-defaults"] = "protected-epoch-not-exact"
-        if observations["external-supervisors"].observed_epoch != expected_epoch:
-            blockers["external-supervisors"] = "protected-epoch-not-exact"
+        for component_id in external_component_ids:
+            if observations[component_id].observed_epoch != expected_epoch:
+                blockers[component_id] = "protected-epoch-not-exact"
         return FinalGateResult(
             check_id=check_id,
             operation=operation,
@@ -506,6 +538,50 @@ def _terminal_evidence_digest(terminals: Mapping[str, ComponentTerminal]) -> str
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def _external_supervisor_components(
+    *,
+    candidate_root: Path,
+    plan: FinalGatePlan,
+    epoch_guard: Callable[[FinalGatePlan], ComponentObservation],
+    transport: ProtectedExternalSupervisorTransport | None,
+    execution_host: str | None,
+    transports: Mapping[str, ProtectedExternalSupervisorTransport],
+) -> tuple[ProtectedExternalSupervisorComponent, ...]:
+    if transports:
+        controller_hosts = set(
+            parse_external_supervisor_controller_bindings(plan.supervisor_controller_bindings)
+        )
+        if set(transports) != controller_hosts or any(
+            not host or item is None for host, item in transports.items()
+        ):
+            raise ValueError("protected external supervisor transport coverage drifted")
+        return tuple(
+            ProtectedExternalSupervisorComponent(
+                candidate_root=candidate_root,
+                transport=transports[host],
+                epoch_guard=epoch_guard,
+                execution_host=host,
+                unit_dir=Path(external_supervisor_unit_directory(host)),
+            )
+            for host in sorted(transports)
+        )
+    if transport is None:
+        raise ValueError("protected external supervisor transport is unavailable")
+    return (
+        ProtectedExternalSupervisorComponent(
+            candidate_root=candidate_root,
+            transport=transport,
+            epoch_guard=epoch_guard,
+            execution_host=execution_host,
+            unit_dir=(
+                Path(PROTECTED_CANONICAL_UNIT_DIR)
+                if execution_host is None
+                else Path(external_supervisor_unit_directory(execution_host))
+            ),
+        ),
+    )
 
 
 def _observation_evidence_digest(

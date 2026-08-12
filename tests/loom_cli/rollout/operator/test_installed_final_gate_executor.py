@@ -213,7 +213,8 @@ def test_installed_protected_dispatch_binds_fixed_candidate_and_supervisor_trans
 ) -> None:
     executor = _executor(tmp_path)
     plan = _bound_plan(tmp_path)
-    sentinel_supervisor = object()
+    sentinel_oldlab_supervisor = object()
+    sentinel_gb10_supervisor = object()
     sentinel_gb10 = object()
     captured: dict[str, object] = {}
 
@@ -222,13 +223,28 @@ def test_installed_protected_dispatch_binds_fixed_candidate_and_supervisor_trans
         "build_fixed_external_supervisor_transport",
         lambda *, service_uid: (
             captured.setdefault("service_uid", service_uid),
-            sentinel_supervisor,
+            sentinel_oldlab_supervisor,
         )[1],
     )
+
+    def build_gb10_supervisor(**kwargs):
+        captured["gb10_supervisor_builder"] = kwargs
+        return sentinel_gb10_supervisor
+
+    monkeypatch.setattr(
+        installed_module,
+        "build_fixed_gb10_external_supervisor_transport",
+        build_gb10_supervisor,
+    )
+
+    def build_gb10_fleet(*args, **kwargs):
+        captured["gb10_fleet_builder"] = (args, kwargs)
+        return sentinel_gb10
+
     monkeypatch.setattr(
         installed_module,
         "build_fixed_gb10_ssh_transport",
-        lambda *_args, **_kwargs: sentinel_gb10,
+        build_gb10_fleet,
     )
 
     class _ProtectedExecutor:
@@ -243,7 +259,18 @@ def test_installed_protected_dispatch_binds_fixed_candidate_and_supervisor_trans
 
     assert executor(check_id, operation, plan) == "dispatched"  # type: ignore[comparison-overlap]
     assert captured["candidate_root"] == executor.config.runner_repo
-    assert captured["external_supervisor_transport"] is sentinel_supervisor
+    assert captured["external_supervisor_transports"] == {
+        "gx10-01c7": sentinel_gb10_supervisor,
+        "TRT-EAI-OLDLAB-1": sentinel_oldlab_supervisor,
+    }
+    assert captured["gb10_supervisor_builder"] == {
+        "candidate_sha": plan.candidate_sha,
+        "candidate_tree": plan.candidate_tree,
+        "run": executor._supervisor_ssh_run,
+    }
+    gb10_fleet_args, gb10_fleet_kwargs = captured["gb10_fleet_builder"]
+    assert gb10_fleet_args == (executor.config.cluster_config_path,)
+    assert gb10_fleet_kwargs["run"] == executor._ssh_run
     assert captured["gb10_transport"] is sentinel_gb10
     environment_state = captured["environment_state_transport"]
     assert isinstance(environment_state, HttpxProtectedEnvironmentStateTransport)
@@ -251,3 +278,41 @@ def test_installed_protected_dispatch_binds_fixed_candidate_and_supervisor_trans
     assert environment_state.cp_url == executor.config.cp_url
     assert environment_state.expected_env_template_sha256 == "a" * 64
     assert captured["service_uid"] == os.geteuid()
+
+
+def test_installed_supervisor_ssh_runner_forwards_bounded_stdin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor = _executor(tmp_path)
+    captured: dict[str, object] = {}
+
+    def run(argv, **kwargs):
+        captured["argv"] = tuple(argv)
+        captured.update(kwargs)
+        return SimpleNamespace(returncode=0, stdout="{}\n", stderr="")
+
+    monkeypatch.setattr(installed_module.subprocess, "run", run)
+
+    result = executor._supervisor_ssh_run(("ssh", "fixed-host"), '{"operation":"observe"}\n')
+
+    assert result.returncode == 0
+    assert captured["argv"] == ("ssh", "fixed-host")
+    assert captured["input"] == '{"operation":"observe"}\n'
+    assert captured["timeout"] == 180
+    assert captured["shell"] is False
+
+
+def test_installed_supervisor_ssh_runner_rejects_oversized_stdin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor = _executor(tmp_path)
+    monkeypatch.setattr(
+        installed_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("oversized stdin reached subprocess"),
+    )
+
+    with pytest.raises(ValueError, match="input is too large"):
+        executor._supervisor_ssh_run(("ssh", "fixed-host"), "x" * (4 * 1024 * 1024 + 1))
