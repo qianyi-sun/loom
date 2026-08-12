@@ -554,11 +554,7 @@ def _harden_tree(root: Path, *, owner_uid: int, owner_gid: int) -> None:
                 or stat.S_ISLNK(metadata.st_mode)
             ):
                 raise BrokerError("candidate runtime contains a special file")
-            if (
-                not stat.S_ISDIR(metadata.st_mode)
-                and not stat.S_ISLNK(metadata.st_mode)
-                and metadata.st_nlink != 1
-            ):
+            if not stat.S_ISDIR(metadata.st_mode) and metadata.st_nlink != 1:
                 raise BrokerError("candidate runtime contains an external hardlink")
             inventory.append((path, metadata))
     for path, metadata in inventory:

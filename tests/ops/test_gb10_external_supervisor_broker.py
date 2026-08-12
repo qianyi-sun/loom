@@ -235,6 +235,31 @@ def test_candidate_hardening_rejects_external_hardlinks_before_mutation(
     assert external.read_text(encoding="utf-8") == "preserve\n"
 
 
+def test_candidate_hardening_rejects_external_hardlinked_symlink_before_mutation(
+    tmp_path: Path,
+) -> None:
+    external = tmp_path / "service-owned-link"
+    external.symlink_to("preserve-target")
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    os.link(external, candidate / "linked-symlink", follow_symlinks=False)
+    before = os.lstat(external)
+
+    with pytest.raises(broker.BrokerError, match="hardlink"):
+        broker._harden_tree(
+            candidate,
+            owner_uid=os.geteuid(),
+            owner_gid=os.getegid(),
+        )
+
+    after = os.lstat(external)
+    assert after.st_mode == before.st_mode
+    assert after.st_uid == before.st_uid
+    assert after.st_gid == before.st_gid
+    assert after.st_nlink == before.st_nlink
+    assert os.readlink(external) == "preserve-target"
+
+
 def test_absent_candidate_is_published_atomically_and_verified(tmp_path: Path) -> None:
     source, sha, tree = _source_repo(tmp_path)
     candidates = tmp_path / "candidates"
