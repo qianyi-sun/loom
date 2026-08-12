@@ -1,0 +1,16 @@
+hostname,partition,gpu_tres,desired_state,direct_worker_enabled
+trt-gb10-1,gb10,gpu:gb10:1,slurm_only,false
+trt-gb10-10,gb10,gpu:gb10:1,slurm_only,false
+trt-gb10-11,gb10,gpu:gb10:1,slurm_only,false
+trt-gb10-12,gb10,gpu:gb10:1,slurm_only,false
+trt-gb10-13,gb10,gpu:gb10:1,slurm_only,false
+trt-gb10-14,gb10,gpu:gb10:1,slurm_only,false
+trt-gb10-15,gb10,gpu:gb10:1,slurm_only,false
+trt-gb10-2,gb10,gpu:gb10:1,slurm_only,false
+trt-gb10-3,gb10,gpu:gb10:1,slurm_only,false
+trt-gb10-4,gb10,gpu:gb10:1,slurm_only,false
+trt-gb10-5,gb10,gpu:gb10:1,slurm_only,false
+trt-gb10-6,gb10,gpu:gb10:1,slurm_only,false
+trt-gb10-7,gb10,gpu:gb10:1,drain,false
+trt-gb10-8,gb10,gpu:gb10:1,slurm_only,false
+trt-gb10-9,gb10,gpu:gb10:1,slurm_only,false

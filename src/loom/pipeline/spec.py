@@ -35,6 +35,7 @@ NAME_PATTERN = r"^[a-z][a-z0-9_]{0,62}$"
 RECIPE_NAME_PATTERN = r"^[a-z][a-z0-9-]{0,127}$"
 ARTIFACT_TYPE_PATTERN = r"^[a-z][a-z0-9_.-]{0,126}\.v[1-9][0-9]*$"
 RESOURCE_PROFILE_PATTERN = r"^[a-z][a-z0-9_-]{0,62}@[1-9][0-9]*$"
+EXECUTION_VARIANT_PATTERN = r"^[a-z][a-z0-9_-]{0,62}$"
 IMAGE_PATTERN = r"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}$"
 REASON_PATTERN = r"^[a-z][a-z0-9_]{0,127}$"
 _SECRET_KEY_PATTERN = re.compile(
@@ -48,6 +49,9 @@ _OPAQUE_REFERENCE_PATTERN = re.compile(r"^(?:loom|k8s-secret)://[A-Za-z0-9._/@:-
 
 Digest = Annotated[str, StringConstraints(pattern=SHA256_PATTERN)]
 BindingName = Annotated[str, StringConstraints(pattern=NAME_PATTERN)]
+ExecutionVariantId = Annotated[
+    str, StringConstraints(pattern=EXECUTION_VARIANT_PATTERN)
+]
 NodeKey = Annotated[str, StringConstraints(pattern=NAME_PATTERN)]
 ArtifactType = Annotated[str, StringConstraints(pattern=ARTIFACT_TYPE_PATTERN)]
 PositiveSafeInt = Annotated[int, Field(strict=True, ge=1, le=MAX_SAFE_INTEGER)]
@@ -696,7 +700,7 @@ class ExecutionSpecSnapshotV1(PipelineModel):
     container_node: ContainerNodeV1
     image_runtime_contract_digest: Digest
     resource_profile_digest: Digest
-    execution_variant_id: BindingName | None
+    execution_variant_id: ExecutionVariantId
     gpu_backend_selection_sha256: Digest | None
     resolved_image_manifest_digest: Digest
     network_profile: Literal["none", "gateway"]
@@ -718,8 +722,10 @@ class ExecutionSpecSnapshotV1(PipelineModel):
             raise ValueError("snapshot node_key must match container_node")
         if self.network_profile != self.container_node.network_profile:
             raise ValueError("snapshot network_profile must match container_node")
-        if (self.execution_variant_id is None) != (self.gpu_backend_selection_sha256 is None):
-            raise ValueError("GPU variant and selection digest must be both null or both non-null")
+        if (self.execution_variant_id == "cpu-data-x86_64") != (
+            self.gpu_backend_selection_sha256 is None
+        ):
+            raise ValueError("only the CPU variant may omit GPU backend selection evidence")
         if self.container_node.request_renderer is None:
             if self.request_renderer_lock_digest is not None:
                 raise ValueError("renderer lock digest must be null without renderer")

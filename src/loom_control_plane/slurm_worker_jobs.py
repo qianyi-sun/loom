@@ -32,6 +32,10 @@ _SECRET_KEY_PARTS = (
 )
 
 
+def slurm_cluster_for_pool(pool_name: str) -> str:
+    return "gb10" if pool_name == "gb10" or pool_name.endswith("-gb10") else "oldlab"
+
+
 @dataclass(frozen=True)
 class SlurmWorkerJobObservation:
     job_id: str
@@ -242,11 +246,20 @@ async def record_slurm_worker_job(
     compose_project: str | None = None,
     submitted_at: datetime | None = None,
     submission_error: str | None = None,
+    slurm_cluster_id: str | None = None,
 ) -> tuple[SlurmWorkerJob, bool]:
+    slurm_cluster_id = slurm_cluster_id or slurm_cluster_for_pool(pool_name)
+    if slurm_cluster_id not in {"oldlab", "gb10"}:
+        raise ValueError("slurm_cluster_id must be oldlab or gb10")
+    if slurm_cluster_id != slurm_cluster_for_pool(pool_name):
+        raise ValueError("Slurm cluster does not match the worker pool")
     if job_id is not None:
         existing_by_job_id = (
             await session.execute(
-                select(SlurmWorkerJob).where(SlurmWorkerJob.job_id == job_id),
+                select(SlurmWorkerJob).where(
+                    SlurmWorkerJob.slurm_cluster_id == slurm_cluster_id,
+                    SlurmWorkerJob.job_id == job_id,
+                ),
             )
         ).scalar_one_or_none()
         if existing_by_job_id is not None:
@@ -292,6 +305,7 @@ async def record_slurm_worker_job(
     now = datetime.now(UTC)
     state = _normalize_slurm_state(slurm_state)
     job = SlurmWorkerJob(
+        slurm_cluster_id=slurm_cluster_id,
         environment=environment,
         pool_name=pool_name,
         nodelist=nodelist,
@@ -340,9 +354,12 @@ async def reconcile_slurm_worker_jobs(
     environment: str | None = None,
     pool_name: str | None = None,
     now: datetime | None = None,
+    slurm_cluster_id: str | None = None,
 ) -> SlurmWorkerJobReconcileResult:
     if (environment is None) != (pool_name is None):
         raise ValueError("environment and pool_name must be provided together")
+    if slurm_cluster_id is not None and slurm_cluster_id not in {"oldlab", "gb10"}:
+        raise ValueError("slurm_cluster_id must be oldlab or gb10")
     now = now or datetime.now(UTC)
     cutoff = now - timedelta(seconds=stale_after_seconds)
     observed_job_ids = {obs.job_id for obs in observations}
@@ -353,6 +370,10 @@ async def reconcile_slurm_worker_jobs(
         job_stmt = select(SlurmWorkerJob).where(
             SlurmWorkerJob.job_id == obs.job_id,
         )
+        if slurm_cluster_id is not None:
+            job_stmt = job_stmt.where(
+                SlurmWorkerJob.slurm_cluster_id == slurm_cluster_id
+            )
         if environment is not None and pool_name is not None:
             job_stmt = job_stmt.where(
                 SlurmWorkerJob.environment == environment,
@@ -365,7 +386,11 @@ async def reconcile_slurm_worker_jobs(
             missing += 1
             logger.info(
                 "slurm_worker_observation_without_record",
-                extra={"job_id": obs.job_id, "slurm_state": obs.slurm_state},
+                extra={
+                    "job_id": obs.job_id,
+                    "slurm_state": obs.slurm_state,
+                    "slurm_cluster_id": slurm_cluster_id,
+                },
             )
             continue
         state = _normalize_slurm_state(obs.slurm_state)
@@ -430,6 +455,8 @@ async def reconcile_slurm_worker_jobs(
             SlurmWorkerJob.environment == environment,
             SlurmWorkerJob.pool_name == pool_name,
         )
+    if slurm_cluster_id is not None:
+        active_stmt = active_stmt.where(SlurmWorkerJob.slurm_cluster_id == slurm_cluster_id)
     if observed_job_ids:
         active_stmt = active_stmt.where(
             or_(
@@ -468,6 +495,7 @@ def slurm_worker_job_to_dict(job: SlurmWorkerJob) -> dict[str, object]:
 
     return {
         "id": str(job.id),
+        "slurm_cluster_id": job.slurm_cluster_id,
         "environment": job.environment,
         "pool_name": job.pool_name,
         "nodelist": job.nodelist,

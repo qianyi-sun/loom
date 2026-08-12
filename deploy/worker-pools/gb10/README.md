@@ -20,6 +20,21 @@ healthy busy node can advertise no free capacity and becomes eligible again
 after resources are released. The autoscaler does not reinterpret a busy host
 as removed inventory.
 
+## Disabled Pipeline GPU admission surface
+
+Issue #1213 adds a separate, fail-closed Pipeline policy contract in
+`worker-plan.csv`, `controller.env.example`, and `slurm/`. It declares the
+final `trt-gb10-1` through `trt-gb10-15` topology, one exclusive
+`gpu:gb10:1` job and one concurrency-1 `behavior-gpu-gb10` worker per
+allocation. `trt-gb10-7` remains present as `drain`/`DOWN`; topology is never
+made healthy by deleting a quarantined host.
+
+That Pipeline policy merges with its autoscaler disabled and desired slots
+zero. The files do not alter the legacy staging Trial pool described above,
+install Slurm bytes, start a supervisor, or enable direct/node-agent task
+capacity. A later authorized candidate-bound rollout must verify the exact
+bundle, Slurm client and munge connectivity before activation.
+
 Only tasks declaring `environment.cpu_arch = "arm64"` or `"any"` can run in
 this pool. Missing architecture requirements are treated as `x86_64` and are
 not claimed by GB10 workers.

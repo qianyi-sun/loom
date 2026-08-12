@@ -181,6 +181,102 @@ def test_register_rejects_partial_or_overcommitted_cache_snapshot(
     assert overcommitted.status_code == 400
 
 
+def test_gpu_registration_requires_exact_slurm_pool_and_persists_evidence(
+    app,
+    worker_token,
+    postgres_url: str,
+):  # type: ignore[no-untyped-def]
+    evidence = {
+        "allocation_id": "gb10:123",
+        "slurm_cluster_id": "gb10",
+        "job_id": "123",
+        "node_name": "trt-gb10-3",
+        "partition": "gb10",
+        "gpu_tres": "gpu:gb10:1",
+        "allocated_device_ids": [0],
+        "device_uuids": ["GPU-GB10"],
+        "variant_id": "gb10-shared-1gpu",
+    }
+    snapshot = {
+        "schema_version": "loom.worker-capabilities.v1",
+        "cpu_arch": "arm64",
+        "cpu_cores": 20,
+        "memory_bytes": 128 << 30,
+        "scratch_bytes": 200 << 30,
+        "network_profiles": ["gateway", "none"],
+        "container_runtime_features": [
+            "egl",
+            "loom-secret-tmpfs-v1",
+            "nvidia-container-runtime",
+        ],
+        "gpu_devices": [
+            {
+                "allocation_id": "gb10:123",
+                "device_uuid": "GPU-GB10",
+                "vendor": "nvidia",
+                "model": "NVIDIA GB10",
+                "memory_kind": "unified",
+                "memory_mb": None,
+                "unified_memory_mb": 124_000,
+                "nvidia_driver_version": "580.12.0",
+                "mig_mode": "not_supported",
+            }
+        ],
+        "input_cache_capacity_bytes": 1_649_267_441_664,
+        "input_cache_reserved_bytes": 0,
+        "input_cache_ready_bytes": 0,
+    }
+    payload = {
+        "hostname": "trt-gb10-3",
+        "version": "0.1",
+        "capabilities": [
+            {
+                **_VALID_CAP,
+                "cpu_arch": "arm64",
+                "gpu_vendor": "nvidia",
+                "network_policies": ["allowlist", "no-network"],
+            }
+        ],
+        "supported_work_kinds": ["trial", "execution_attempt"],
+        "max_concurrent": 1,
+        "pool_name": "behavior-gpu-gb10",
+        "capability_snapshot": snapshot,
+        "slurm_gpu_allocation_evidence": evidence,
+    }
+    with TestClient(app) as client:
+        rejected = client.post(
+            "/workers/register",
+            headers={"Authorization": f"Bearer {worker_token}"},
+            json={**payload, "pool_name": "gb10"},
+        )
+        assert rejected.status_code == 409
+        response = client.post(
+            "/workers/register",
+            headers={"Authorization": f"Bearer {worker_token}"},
+            json=payload,
+        )
+        assert response.status_code == 200, response.text
+        worker_id = response.json()["worker_id"]
+
+    engine = create_engine(postgres_url)
+    try:
+        with engine.connect() as connection:
+            row = connection.execute(
+                text(
+                    "SELECT capability_snapshot_json->>'cpu_arch',"
+                    "slurm_gpu_allocation_evidence_json->>'allocation_id',"
+                    "slurm_gpu_allocation_evidence_digest "
+                    "FROM workers WHERE id=:worker_id"
+                ),
+                {"worker_id": worker_id},
+            ).one()
+    finally:
+        engine.dispose()
+    assert row[0] == "arm64"
+    assert row[1] == "gb10:123"
+    assert row[2].startswith("sha256:")
+
+
 def test_register_rejects_missing_capabilities(app, worker_token):  # type: ignore[no-untyped-def]
     with TestClient(app) as client:
         r = client.post(

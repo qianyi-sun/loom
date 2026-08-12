@@ -278,7 +278,7 @@ async def test_register_worker_with_retry_does_not_retry_auth_failure() -> None:
     assert attempts == 1
 
 
-async def test_pipeline_registration_advertises_both_work_kinds() -> None:
+async def test_pipeline_registration_advertises_both_work_kinds(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     recorded: dict[str, object] = {}
 
     class _FakeCPClient:
@@ -289,6 +289,15 @@ async def test_pipeline_registration_advertises_both_work_kinds() -> None:
                 "capability_snapshot_digest": "sha256:" + "a" * 64,
             }
 
+    monkeypatch.setattr(
+        ml,
+        "_pipeline_registration_payload",
+        lambda _settings: {
+            "capability_snapshot": {
+                "schema_version": "loom.worker-capabilities.v1",
+            },
+        },
+    )
     await ml._register_worker_with_retry(  # type: ignore[attr-defined]
         cp_client=_FakeCPClient(),
         settings=_RegistrationSettings(),

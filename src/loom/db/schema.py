@@ -2223,6 +2223,26 @@ class Worker(Base):
             "AND input_cache_ready_bytes <= input_cache_capacity_bytes",
             name="workers_input_cache_capacity_check",
         ),
+        CheckConstraint(
+            "capability_snapshot_json IS NULL OR "
+            "jsonb_typeof(capability_snapshot_json) = 'object'",
+            name="workers_capability_snapshot_json_check",
+        ),
+        CheckConstraint(
+            "(slurm_gpu_allocation_evidence_json IS NULL) = "
+            "(slurm_gpu_allocation_evidence_digest IS NULL)",
+            name="workers_slurm_gpu_evidence_group_check",
+        ),
+        CheckConstraint(
+            "slurm_gpu_allocation_evidence_json IS NULL OR "
+            "jsonb_typeof(slurm_gpu_allocation_evidence_json) = 'object'",
+            name="workers_slurm_gpu_evidence_json_check",
+        ),
+        CheckConstraint(
+            "slurm_gpu_allocation_evidence_digest IS NULL OR "
+            "slurm_gpu_allocation_evidence_digest ~ '^sha256:[0-9a-f]{64}$'",
+            name="workers_slurm_gpu_evidence_digest_check",
+        ),
         Index("idx_workers_drain_state", "drain_state"),
     )
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -2236,6 +2256,9 @@ class Worker(Base):
         default=lambda: ["trial"],
     )
     capability_snapshot_digest: Mapped[str | None] = mapped_column(Text)
+    capability_snapshot_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    slurm_gpu_allocation_evidence_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    slurm_gpu_allocation_evidence_digest: Mapped[str | None] = mapped_column(Text)
     auth_token_hash: Mapped[bytes | None] = mapped_column(LargeBinary)
     lease_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
     max_concurrent: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
@@ -2274,6 +2297,10 @@ class SlurmWorkerJob(Base):
             name="slurm_worker_jobs_state_check",
         ),
         CheckConstraint(
+            "slurm_cluster_id IN ('oldlab','gb10')",
+            name="slurm_worker_jobs_cluster_check",
+        ),
+        CheckConstraint(
             "requested_cpus IS NULL OR requested_cpus > 0",
             name="slurm_worker_jobs_requested_cpus_positive_check",
         ),
@@ -2299,6 +2326,7 @@ class SlurmWorkerJob(Base):
         ),
         Index(
             "slurm_worker_jobs_job_id_uidx",
+            "slurm_cluster_id",
             "job_id",
             unique=True,
             postgresql_where=text("job_id IS NOT NULL"),
@@ -2326,6 +2354,9 @@ class SlurmWorkerJob(Base):
     )
 
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    slurm_cluster_id: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'oldlab'")
+    )
     environment: Mapped[str] = mapped_column(Text, nullable=False)
     pool_name: Mapped[str] = mapped_column(Text, nullable=False)
     nodelist: Mapped[str] = mapped_column(Text, nullable=False)
@@ -2688,6 +2719,83 @@ class WorkerPoolAutoscalerPolicy(Base):
         TIMESTAMP(timezone=True),
         server_default=func.now(),
         nullable=False,
+    )
+
+
+class PipelineScopedPolicyActivation(Base):
+    """Authorization-scoped mutable capacity for immutable Pipeline policies."""
+
+    __tablename__ = "pipeline_scoped_policy_activations"
+    __table_args__ = (
+        CheckConstraint(
+            "length(trim(environment)) > 0",
+            name="pipeline_policy_activation_environment_nonempty_check",
+        ),
+        CheckConstraint(
+            "policy_id IN ('behavior-cpu-data','behavior-gpu-oldlab','behavior-gpu-gb10')",
+            name="pipeline_policy_activation_policy_check",
+        ),
+        CheckConstraint(
+            "policy_config_sha256 ~ '^sha256:[0-9a-f]{64}$'",
+            name="pipeline_policy_activation_config_digest_check",
+        ),
+        CheckConstraint(
+            "authority_kind IN ('acceptance','profile_calibration')",
+            name="pipeline_policy_activation_authority_kind_check",
+        ),
+        CheckConstraint(
+            "activation_epoch > 0", name="pipeline_policy_activation_epoch_positive_check"
+        ),
+        CheckConstraint(
+            "state IN ('active','draining','disabled')",
+            name="pipeline_policy_activation_state_check",
+        ),
+        CheckConstraint(
+            "((state = 'active' AND desired_slots > 0) OR "
+            "(state IN ('draining','disabled') AND desired_slots = 0))",
+            name="pipeline_policy_activation_state_slots_check",
+        ),
+        CheckConstraint(
+            "((policy_id = 'behavior-cpu-data' AND desired_slots <= 2) OR "
+            "(policy_id IN ('behavior-gpu-oldlab','behavior-gpu-gb10') "
+            "AND desired_slots <= 1))",
+            name="pipeline_policy_activation_slot_ceiling_check",
+        ),
+        UniqueConstraint(
+            "authority_kind",
+            "authority_id",
+            "policy_id",
+            name="pipeline_policy_activation_authority_policy_uidx",
+        ),
+        UniqueConstraint(
+            "environment",
+            "policy_id",
+            "activation_epoch",
+            name="pipeline_policy_activation_environment_epoch_uidx",
+        ),
+        Index(
+            "pipeline_policy_activation_active_policy_uidx",
+            "environment",
+            "policy_id",
+            unique=True,
+            postgresql_where=text("state = 'active'"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    environment: Mapped[str] = mapped_column(Text, nullable=False)
+    policy_id: Mapped[str] = mapped_column(Text, nullable=False)
+    policy_config_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    authority_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    authority_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    activation_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    state: Mapped[str] = mapped_column(Text, nullable=False)
+    desired_slots: Mapped[int] = mapped_column(Integer, nullable=False)
+    activated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
     )
 
 
@@ -3215,6 +3323,68 @@ class PipelineRun(Base):
     lease_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
     lease_expires_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+
+
+class PipelineRunGpuBackendSelection(Base):
+    __tablename__ = "pipeline_run_gpu_backend_selections"
+    __table_args__ = (
+        CheckConstraint(
+            "scope IN ('all_gpu_nodes','oldlab_preflight','gb10_preflight')",
+            name="pipeline_gpu_selection_scope_check",
+        ),
+        CheckConstraint(
+            "variant_id IN ('gb10-shared-1gpu','oldlab-rtx5080-2gpu')",
+            name="pipeline_gpu_selection_variant_check",
+        ),
+        CheckConstraint(
+            "policy_id IN ('behavior-gpu-gb10','behavior-gpu-oldlab')",
+            name="pipeline_gpu_selection_policy_check",
+        ),
+        CheckConstraint(
+            "selection_source IN "
+            "('recipe_hash','acceptance_authority','profile_calibration_authority')",
+            name="pipeline_gpu_selection_source_check",
+        ),
+        CheckConstraint(
+            "gpu_backend_selection_sha256 ~ '^sha256:[0-9a-f]{64}$'",
+            name="pipeline_gpu_selection_digest_check",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(selection_json) = 'object' AND "
+            "octet_length(selection_bytes) > 1 AND "
+            "get_byte(selection_bytes, octet_length(selection_bytes) - 1) = 10",
+            name="pipeline_gpu_selection_document_check",
+        ),
+        CheckConstraint(
+            "(variant_id = 'gb10-shared-1gpu' AND policy_id = 'behavior-gpu-gb10') "
+            "OR (variant_id = 'oldlab-rtx5080-2gpu' "
+            "AND policy_id = 'behavior-gpu-oldlab')",
+            name="pipeline_gpu_selection_variant_policy_check",
+        ),
+        CheckConstraint(
+            "(selection_source = 'recipe_hash' AND scope = 'all_gpu_nodes') OR "
+            "(selection_source <> 'recipe_hash' AND (scope = 'all_gpu_nodes' OR "
+            "((variant_id = 'gb10-shared-1gpu' AND scope = 'gb10_preflight') OR "
+            "(variant_id = 'oldlab-rtx5080-2gpu' AND scope = 'oldlab_preflight'))))",
+            name="pipeline_gpu_selection_scope_authority_check",
+        ),
+        UniqueConstraint(
+            "pipeline_run_id", "scope", name="pipeline_gpu_selection_run_scope_uidx"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    pipeline_run_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("pipeline_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    scope: Mapped[str] = mapped_column(Text, nullable=False)
+    variant_id: Mapped[str] = mapped_column(Text, nullable=False)
+    policy_id: Mapped[str] = mapped_column(Text, nullable=False)
+    selection_source: Mapped[str] = mapped_column(Text, nullable=False)
+    selected_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    selection_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    selection_bytes: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    gpu_backend_selection_sha256: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 class PipelineStageRun(Base):

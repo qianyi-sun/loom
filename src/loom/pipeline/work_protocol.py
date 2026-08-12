@@ -7,6 +7,7 @@ no object-store locator, host path, credential value, or mutable image tag.
 from __future__ import annotations
 
 import json
+import re
 import unicodedata
 from datetime import datetime
 from hashlib import sha256
@@ -16,6 +17,10 @@ from uuid import UUID
 
 from pydantic import Field, StringConstraints, field_validator, model_validator
 
+from loom.models.worker_capabilities import (
+    SlurmGpuAllocationEvidenceV1,
+    WorkerCapabilitySnapshotV1,
+)
 from loom.pipeline.keys import MAX_SAFE_INTEGER, canonical_digest, canonical_document
 from loom.pipeline.spec import (
     IMAGE_PATTERN,
@@ -41,6 +46,10 @@ _OpaqueReference = Annotated[
     StringConstraints(pattern=r"^(?:loom|k8s-secret)://[A-Za-z0-9._/@:-]+$"),
 ]
 _ImageReference = Annotated[str, StringConstraints(pattern=IMAGE_PATTERN)]
+_KebabName = Annotated[
+    str,
+    StringConstraints(pattern=r"^[a-z][a-z0-9_-]{0,126}$", max_length=127),
+]
 _BoundedText = Annotated[str, StringConstraints(min_length=1, max_length=500)]
 _RuntimeSeconds = Annotated[int, Field(strict=True, ge=0, le=MAX_SAFE_INTEGER)]
 
@@ -175,18 +184,18 @@ class ResourceDeviceRolesV1(PipelineModel):
 
 
 class ResourceExecutionVariantV1(PipelineModel):
-    variant_id: BindingName
+    variant_id: _KebabName
     cpu_arch: Literal["x86_64", "arm64"]
     gpu_count_exact: NonNegativeSafeInt
-    gpu_vendor: Literal["none", "nvidia"]
+    gpu_vendor: Literal["nvidia"] | None
     allowed_gpu_models: list[str]
-    gpu_memory_kind: Literal["none", "dedicated", "unified"]
-    gpu_memory_mb_min: NonNegativeSafeInt
-    gpu_unified_memory_mb_min: NonNegativeSafeInt
-    memory_accounting_kind: Literal["container", "unified_host"]
+    gpu_memory_kind: Literal["dedicated", "unified"] | None
+    gpu_memory_mb_min: NonNegativeSafeInt | None
+    gpu_unified_memory_mb_min: NonNegativeSafeInt | None
+    memory_accounting_kind: Literal["separate", "unified_shared"]
     container_memory_bytes_override: NonNegativeSafeInt | None
     same_gpu_model_required: bool
-    pool_class: str
+    pool_class: Literal["behavior-cpu-data", "behavior-gpu-oldlab", "behavior-gpu-gb10"]
     device_roles: ResourceDeviceRolesV1 | None
 
     @field_validator("allowed_gpu_models")
@@ -198,26 +207,51 @@ class ResourceExecutionVariantV1(PipelineModel):
     def gpu_fields_are_coherent(self) -> ResourceExecutionVariantV1:
         if self.gpu_count_exact == 0:
             if (
-                self.gpu_vendor != "none"
-                or self.gpu_memory_kind != "none"
+                self.gpu_vendor is not None
+                or self.gpu_memory_kind is not None
                 or self.allowed_gpu_models
-                or self.gpu_memory_mb_min != 0
-                or self.gpu_unified_memory_mb_min != 0
+                or self.gpu_memory_mb_min is not None
+                or self.gpu_unified_memory_mb_min is not None
                 or self.device_roles is not None
+                or self.memory_accounting_kind != "separate"
+                or self.container_memory_bytes_override is not None
+                or self.same_gpu_model_required
+                or self.pool_class != "behavior-cpu-data"
             ):
                 raise ValueError("CPU execution variant cannot carry GPU requirements")
-        elif (
-            self.gpu_vendor != "nvidia"
-            or self.gpu_memory_kind == "none"
-            or not self.allowed_gpu_models
-            or self.device_roles is None
-        ):
-            raise ValueError("GPU execution variant is incomplete")
+        else:
+            if (
+                self.gpu_vendor != "nvidia"
+                or self.gpu_memory_kind is None
+                or not self.allowed_gpu_models
+                or self.device_roles is None
+                or not self.same_gpu_model_required
+            ):
+                raise ValueError("GPU execution variant is incomplete")
+            if max(self.device_roles.sim_gpu_index, self.device_roles.vla_gpu_index) >= (
+                self.gpu_count_exact
+            ):
+                raise ValueError("GPU device role index exceeds the requested device count")
+            if self.gpu_memory_kind == "dedicated":
+                if (
+                    self.gpu_memory_mb_min is None
+                    or self.gpu_unified_memory_mb_min is not None
+                    or self.memory_accounting_kind != "separate"
+                    or self.container_memory_bytes_override is not None
+                ):
+                    raise ValueError("dedicated GPU memory accounting is invalid")
+            elif (
+                self.gpu_memory_mb_min is not None
+                or self.gpu_unified_memory_mb_min is None
+                or self.memory_accounting_kind != "unified_shared"
+                or self.container_memory_bytes_override is None
+            ):
+                raise ValueError("unified GPU memory accounting is invalid")
         return self
 
 
 class ResourceProfileV1(PipelineModel):
-    name: BindingName
+    name: _KebabName
     version: PositiveVersion
     execution_variants: Annotated[list[ResourceExecutionVariantV1], Field(min_length=1)]
     cpu_cores: PositiveSafeInt
@@ -243,6 +277,25 @@ class ResourceProfileV1(PipelineModel):
         _ordered_unique_strings(ids, "execution variants")
         return values
 
+    @model_validator(mode="after")
+    def runtime_and_network_requirements_are_coherent(self) -> ResourceProfileV1:
+        has_gpu = any(item.gpu_count_exact > 0 for item in self.execution_variants)
+        host_features = set(self.required_host_runtime_features)
+        image_features = set(self.required_image_features)
+        if self.network_profile == "gateway":
+            if "loom-secret-tmpfs-v1" not in host_features:
+                raise ValueError("gateway profiles require loom-secret-tmpfs-v1")
+        elif "loom-secret-tmpfs-v1" in host_features:
+            raise ValueError("network=none profiles cannot request a runtime secret mount")
+        if has_gpu:
+            if not {"egl", "nvidia-container-runtime"} <= host_features:
+                raise ValueError("GPU profiles require NVIDIA runtime and EGL")
+            if not {"isaac-sim-5.1", "omnigibson-3.8"} <= image_features:
+                raise ValueError("GPU profiles require the attested simulation image features")
+        elif image_features != {"behavior-cpu-data"}:
+            raise ValueError("zero-GPU profiles require only behavior-cpu-data")
+        return self
+
 
 class ProviderAssetImageEntryV1(PipelineModel):
     logical_name: BindingName
@@ -259,6 +312,13 @@ class ProviderAssetImageEntryV1(PipelineModel):
         if any(part in {"", ".", ".."} for part in value.split("/")[1:]):
             raise ValueError("provider asset path contains an invalid component")
         return value
+
+    @model_validator(mode="after")
+    def path_matches_logical_name(self) -> ProviderAssetImageEntryV1:
+        prefix = f"/opt/behavior/provider-assets/{self.logical_name}/"
+        if not self.image_path.startswith(prefix) or self.image_path == prefix:
+            raise ValueError("provider asset path must be below its logical-name directory")
+        return self
 
 
 class ImageRuntimeContractV1(PipelineModel):
@@ -280,6 +340,13 @@ class ImageRuntimeContractV1(PipelineModel):
     @classmethod
     def application_features_are_canonical(cls, values: list[str]) -> list[str]:
         return _ordered_unique_strings([_nfc(value) for value in values], "image features")
+
+    @field_validator("min_nvidia_driver_version")
+    @classmethod
+    def driver_version_is_numeric(cls, value: str | None) -> str | None:
+        if value is not None and re.fullmatch(r"[0-9]+(?:\.[0-9]+)+", value) is None:
+            raise ValueError("minimum NVIDIA driver version must use dotted integers")
+        return value
 
     @field_validator("provider_assets")
     @classmethod
@@ -340,6 +407,10 @@ class ExecutionAttemptClaimV1(PipelineModel):
     network_profile: Literal["none", "gateway"]
     image_runtime_contract_snapshot: ImageRuntimeContractV1
     image_runtime_contract_digest: Digest
+    worker_capability_snapshot: WorkerCapabilitySnapshotV1
+    worker_capability_snapshot_digest: Digest
+    slurm_gpu_allocation_evidence: SlurmGpuAllocationEvidenceV1 | None
+    slurm_gpu_allocation_evidence_digest: Digest | None
     input_bindings: Annotated[list[BindingSetV1], Field(max_length=128)]
     outputs: Annotated[list[OutputDeclV1], Field(max_length=64)]
     checkpoint: CheckpointPolicyV1 | None
@@ -397,6 +468,18 @@ class ExecutionAttemptClaimV1(PipelineModel):
             raise ValueError("resource profile identity drift")
         if self.resource_profile_snapshot.network_profile != self.network_profile:
             raise ValueError("resource profile network drift")
+        if self.timeout_seconds > self.resource_profile_snapshot.timeout_seconds_max:
+            raise ValueError("stage timeout exceeds the ResourceProfile maximum")
+        final_output_bytes = sum(output.max_bytes for output in node.outputs)
+        if node.fanout_commit is not None:
+            item = next(
+                output
+                for output in node.outputs
+                if output.name == node.fanout_commit.item_binding_name
+            )
+            final_output_bytes += item.max_bytes * (node.fanout_commit.max_items - 1)
+        if final_output_bytes > self.resource_profile_snapshot.scratch_bytes:
+            raise ValueError("container output maximum exceeds the combined scratch quota")
         if self.image_runtime_contract_snapshot.image_index_digest != self.image:
             raise ValueError("image index identity drift")
         if (
@@ -404,6 +487,115 @@ class ExecutionAttemptClaimV1(PipelineModel):
             != spec.resolved_image_manifest_digest
         ):
             raise ValueError("resolved image manifest drift")
+        if self.worker_capability_snapshot_digest != canonical_digest(
+            self.worker_capability_snapshot
+        ):
+            raise ValueError("worker capability snapshot/digest drift")
+        if (self.slurm_gpu_allocation_evidence is None) != (
+            self.slurm_gpu_allocation_evidence_digest is None
+        ):
+            raise ValueError("Slurm allocation evidence and digest must be present together")
+        if self.slurm_gpu_allocation_evidence is not None and (
+            self.slurm_gpu_allocation_evidence_digest
+            != canonical_digest(self.slurm_gpu_allocation_evidence)
+        ):
+            raise ValueError("Slurm allocation evidence digest drift")
+        variants = {
+            item.variant_id: item for item in self.resource_profile_snapshot.execution_variants
+        }
+        selected_variant_id = spec.execution_variant_id
+        try:
+            variant = variants[selected_variant_id]
+        except KeyError as exc:
+            raise ValueError("selected execution variant is absent from the profile") from exc
+        capability = self.worker_capability_snapshot
+        if (
+            capability.cpu_arch != variant.cpu_arch
+            or capability.cpu_cores < self.resource_profile_snapshot.cpu_cores
+            or capability.memory_bytes < (
+                variant.container_memory_bytes_override
+                or self.resource_profile_snapshot.memory_bytes
+            )
+            or capability.scratch_bytes < self.resource_profile_snapshot.scratch_bytes
+            or capability.input_cache_capacity_bytes
+            < self.resource_profile_snapshot.input_cache_capacity_bytes_min
+            or not set(self.resource_profile_snapshot.required_host_runtime_features)
+            <= set(capability.container_runtime_features)
+            or self.network_profile not in capability.network_profiles
+        ):
+            raise ValueError("worker capability does not satisfy the ResourceProfile")
+        image_contract = self.image_runtime_contract_snapshot
+        if (
+            image_contract.cpu_arch != variant.cpu_arch
+            or not set(self.resource_profile_snapshot.required_image_features)
+            <= set(image_contract.application_features)
+        ):
+            raise ValueError("image runtime contract does not satisfy the selected variant")
+        if variant.gpu_count_exact == 0:
+            if (
+                capability.gpu_devices
+                or self.slurm_gpu_allocation_evidence is not None
+                or image_contract.gpu_vendor != "none"
+                or spec.gpu_backend_selection_sha256 is not None
+            ):
+                raise ValueError("zero-GPU execution cannot carry GPU allocation evidence")
+        else:
+            evidence = self.slurm_gpu_allocation_evidence
+            devices = capability.gpu_devices
+            if evidence is None or len(devices) != variant.gpu_count_exact:
+                raise ValueError("GPU execution requires its exact Slurm allocation")
+            if evidence.variant_id != variant.variant_id or {
+                item.allocation_id for item in devices
+            } != {evidence.allocation_id}:
+                raise ValueError("GPU variant and Slurm allocation evidence drift")
+            if [item.device_uuid for item in devices] != evidence.device_uuids:
+                raise ValueError("GPU capability UUIDs and allocation evidence drift")
+            if any(item.model not in variant.allowed_gpu_models for item in devices):
+                raise ValueError("GPU model is not allowed by the selected variant")
+            if variant.same_gpu_model_required and len({item.model for item in devices}) != 1:
+                raise ValueError("GPU devices must use the same selected model")
+            if variant.gpu_memory_kind == "dedicated":
+                if any(
+                    item.memory_kind != "dedicated"
+                    or item.memory_mb is None
+                    or variant.gpu_memory_mb_min is None
+                    or item.memory_mb < variant.gpu_memory_mb_min
+                    for item in devices
+                ):
+                    raise ValueError("dedicated GPU memory does not satisfy the variant")
+            elif variant.gpu_memory_kind == "unified":
+                if any(
+                    item.memory_kind != "unified"
+                    or item.unified_memory_mb is None
+                    or variant.gpu_unified_memory_mb_min is None
+                    or item.unified_memory_mb < variant.gpu_unified_memory_mb_min
+                    for item in devices
+                ):
+                    raise ValueError("unified GPU memory does not satisfy the variant")
+            else:
+                raise ValueError("GPU variant has no closed memory accounting kind")
+            expected_cluster = (
+                "gb10" if variant.variant_id == "gb10-shared-1gpu" else "oldlab"
+            )
+            if evidence.slurm_cluster_id != expected_cluster:
+                raise ValueError("GPU variant and Slurm cluster drift")
+            if spec.gpu_backend_selection_sha256 is None:
+                raise ValueError("GPU execution requires frozen backend selection evidence")
+            if image_contract.gpu_vendor != "nvidia":
+                raise ValueError("GPU variant requires an NVIDIA image runtime contract")
+            minimum_driver = image_contract.min_nvidia_driver_version
+            if minimum_driver is None:
+                raise ValueError("GPU image contract has no minimum NVIDIA driver")
+            minimum_parts = tuple(int(part) for part in minimum_driver.split("."))
+            for device in devices:
+                actual_parts = tuple(
+                    int(part) for part in device.nvidia_driver_version.split(".")
+                )
+                width = max(len(actual_parts), len(minimum_parts))
+                if actual_parts + (0,) * (width - len(actual_parts)) < minimum_parts + (
+                    0,
+                ) * (width - len(minimum_parts)):
+                    raise ValueError("NVIDIA driver is below the image runtime minimum")
         if canonical_digest(self.input_bindings) != spec.resolved_input_bindings_digest:
             raise ValueError("input bindings digest drift")
         renderer_digest = self.stage_request.renderer_digest if self.stage_request else None

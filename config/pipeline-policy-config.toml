@@ -1,0 +1,86 @@
+schema_version = "loom.pipeline-policy-registry.v1"
+
+[[clusters]]
+cluster_id = "gb10"
+cluster_name = "trt-gb10"
+submit_host_ref = "loom://slurm/gb10"
+worker_plan_path = "deploy/worker-pools/gb10/worker-plan.csv"
+autoscaler_supervisor_id = "loom-autoscaler-gb10"
+slurm_conf_bundle_paths = ["deploy/worker-pools/gb10/slurm/cgroup.conf", "deploy/worker-pools/gb10/slurm/gres.conf", "deploy/worker-pools/gb10/slurm/slurm.conf"]
+
+[[clusters]]
+cluster_id = "oldlab"
+cluster_name = "trt-oldlab"
+submit_host_ref = "loom://slurm/oldlab"
+worker_plan_path = "deploy/worker-pools/oldlab/worker-plan.csv"
+autoscaler_supervisor_id = "loom-autoscaler-oldlab"
+slurm_conf_bundle_paths = ["deploy/worker-pools/oldlab/slurm/cgroup.conf", "deploy/worker-pools/oldlab/slurm/gres.conf", "deploy/worker-pools/oldlab/slurm/slurm.conf"]
+
+[[policies]]
+schema_version = "loom.policy-config-snapshot.v1"
+policy_id = "behavior-cpu-data"
+version = 1
+actuator = "slurm"
+slurm_cluster_id = "oldlab"
+pool_class = "behavior-cpu-data"
+requested_concurrency = 1
+min_slots = 0
+max_slots = 4
+required_gpu_count_per_slot = 0
+allowed_nodes = ["trt-eai-oldlab-1", "trt-eai-oldlab-2", "trt-eai-oldlab-3", "trt-eai-oldlab-4", "trt-eai-oldlab-5"]
+partition = "all"
+qos = "normal"
+resource_profiles = [
+  { name = "behavior-export-io", version = 1, allowed_variant_ids = ["cpu-data-x86_64"] },
+  { name = "behavior-offline-gateway", version = 1, allowed_variant_ids = ["cpu-data-x86_64"] },
+  { name = "behavior-offline-none", version = 1, allowed_variant_ids = ["cpu-data-x86_64"] },
+]
+input_cache_capacity_bytes_min = 1649267441664
+input_cache_raw_bytes_min = 1940314637252
+scratch_bytes_min = 824633720832
+
+[[policies]]
+schema_version = "loom.policy-config-snapshot.v1"
+policy_id = "behavior-gpu-gb10"
+version = 1
+actuator = "slurm"
+slurm_cluster_id = "gb10"
+pool_class = "behavior-gpu-gb10"
+requested_concurrency = 1
+min_slots = 0
+max_slots = 1
+required_gpu_count_per_slot = 1
+allowed_nodes = ["trt-gb10-1", "trt-gb10-10", "trt-gb10-11", "trt-gb10-12", "trt-gb10-13", "trt-gb10-14", "trt-gb10-15", "trt-gb10-2", "trt-gb10-3", "trt-gb10-4", "trt-gb10-5", "trt-gb10-6", "trt-gb10-7", "trt-gb10-8", "trt-gb10-9"]
+partition = "gb10"
+qos = "normal"
+gpu_tres = "gpu:gb10:1"
+resource_profiles = [
+  { name = "behavior-sim-local-gateway", version = 1, allowed_variant_ids = ["gb10-shared-1gpu"] },
+  { name = "behavior-sim-local-none", version = 1, allowed_variant_ids = ["gb10-shared-1gpu"] },
+]
+input_cache_capacity_bytes_min = 1649267441664
+input_cache_raw_bytes_min = 1940314637252
+scratch_bytes_min = 161061273600
+
+[[policies]]
+schema_version = "loom.policy-config-snapshot.v1"
+policy_id = "behavior-gpu-oldlab"
+version = 1
+actuator = "slurm"
+slurm_cluster_id = "oldlab"
+pool_class = "behavior-gpu-oldlab"
+requested_concurrency = 1
+min_slots = 0
+max_slots = 1
+required_gpu_count_per_slot = 2
+allowed_nodes = ["trt-eai-oldlab-1", "trt-eai-oldlab-2", "trt-eai-oldlab-3", "trt-eai-oldlab-4", "trt-eai-oldlab-5"]
+partition = "all"
+qos = "normal"
+gpu_tres = "gpu:rtx5080:2"
+resource_profiles = [
+  { name = "behavior-sim-local-gateway", version = 1, allowed_variant_ids = ["oldlab-rtx5080-2gpu"] },
+  { name = "behavior-sim-local-none", version = 1, allowed_variant_ids = ["oldlab-rtx5080-2gpu"] },
+]
+input_cache_capacity_bytes_min = 1649267441664
+input_cache_raw_bytes_min = 1940314637252
+scratch_bytes_min = 161061273600

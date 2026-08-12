@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import pytest
@@ -11,6 +11,10 @@ import loom.driver.docker as docker_module
 from loom.driver.base import StartOptions
 from loom.driver.docker import DockerDriver
 from loom.errors import DriverError
+from loom_worker.pipeline_container_runner import (
+    PipelineContainerContractError,
+    build_pipeline_container_spec,
+)
 
 
 class _FakeContainer:
@@ -503,3 +507,52 @@ async def test_docker_driver_binds_only_slurm_allocated_gpu_devices(
             "capabilities": [["gpu"]],
         },
     ]
+
+
+def test_pipeline_container_passes_only_sorted_allocation_gpu_uuids(
+    tmp_path: Path,
+) -> None:
+    inputs = tmp_path / "inputs"
+    outputs = tmp_path / "outputs"
+    scratch = tmp_path / "scratch"
+    for path in (inputs, outputs, scratch):
+        path.mkdir()
+    spec = build_pipeline_container_spec(
+        image="registry.example.com/loom/sim@sha256:" + "a" * 64,
+        argv=["/opt/loom/gpu-preflight"],
+        workdir="/workspace",
+        uid=1000,
+        gid=1000,
+        input_dir=inputs,
+        outputs_dir=outputs,
+        scratch_dir=scratch,
+        network_profile="none",
+        cpus=16,
+        memory_bytes=64 << 30,
+        pids=4096,
+        scratch_bytes=150 << 30,
+        gpu_device_uuids=["GPU-AAAA", "GPU-BBBB"],
+    )
+    assert spec.docker_create_kwargs()["device_requests"] == [
+        {
+            "device_ids": ["GPU-AAAA", "GPU-BBBB"],
+            "capabilities": [["gpu"]],
+        }
+    ]
+    with pytest.raises(PipelineContainerContractError, match="GPU UUID set"):
+        build_pipeline_container_spec(
+            image="registry.example.com/loom/sim@sha256:" + "a" * 64,
+            argv=["/opt/loom/gpu-preflight"],
+            workdir="/workspace",
+            uid=1000,
+            gid=1000,
+            input_dir=inputs,
+            outputs_dir=outputs,
+            scratch_dir=scratch,
+            network_profile="none",
+            cpus=16,
+            memory_bytes=64 << 30,
+            pids=4096,
+            scratch_bytes=150 << 30,
+            gpu_device_uuids=["0"],
+        )
