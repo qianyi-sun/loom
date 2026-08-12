@@ -147,6 +147,26 @@ runtime_policy = "start"
 rollout_role = "primary"
 
 [[components]]
+id = "capacity-manager"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.capacity-manager"
+build_context = "."
+source_paths = [
+  ".dockerignore",
+  "README.md",
+  "deploy/Dockerfile.capacity-manager",
+  "capacity_migrations/**",
+  "pyproject.toml",
+  "src/loom_capacity_manager/**",
+]
+smoke_owner = "staging-smoke"
+scan_owner = "images"
+attestation_owner = "release-provenance"
+release_digest = "loom-capacity-manager"
+runtime_policy = "start"
+rollout_role = "none"
+
+[[components]]
 id = "personal-dev-builder"
 kind = "release-image"
 dockerfile = "deploy/Dockerfile.personal-dev-builder"

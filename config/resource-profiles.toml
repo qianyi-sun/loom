@@ -1,0 +1,72 @@
+schema_version = "loom.resource-profile-registry.v1"
+
+[[profiles]]
+name = "behavior-export-io"
+version = 1
+execution_variants = [{ variant_id = "cpu-data-x86_64", cpu_arch = "x86_64", gpu_count_exact = 0, allowed_gpu_models = [], memory_accounting_kind = "separate", same_gpu_model_required = false, pool_class = "behavior-cpu-data" }]
+cpu_cores = 8
+memory_bytes = 68719476736
+scratch_bytes = 824633720832
+timeout_seconds_max = 7200
+required_host_runtime_features = []
+required_image_features = ["behavior-cpu-data"]
+network_profile = "none"
+input_cache_capacity_bytes_min = 1649267441664
+
+[[profiles]]
+name = "behavior-offline-gateway"
+version = 1
+execution_variants = [{ variant_id = "cpu-data-x86_64", cpu_arch = "x86_64", gpu_count_exact = 0, allowed_gpu_models = [], memory_accounting_kind = "separate", same_gpu_model_required = false, pool_class = "behavior-cpu-data" }]
+cpu_cores = 8
+memory_bytes = 17179869184
+scratch_bytes = 53687091200
+timeout_seconds_max = 3600
+required_host_runtime_features = ["loom-secret-tmpfs-v1"]
+required_image_features = ["behavior-cpu-data"]
+network_profile = "gateway"
+input_cache_capacity_bytes_min = 1649267441664
+
+[[profiles]]
+name = "behavior-offline-none"
+version = 1
+execution_variants = [{ variant_id = "cpu-data-x86_64", cpu_arch = "x86_64", gpu_count_exact = 0, allowed_gpu_models = [], memory_accounting_kind = "separate", same_gpu_model_required = false, pool_class = "behavior-cpu-data" }]
+cpu_cores = 8
+memory_bytes = 17179869184
+scratch_bytes = 53687091200
+timeout_seconds_max = 3600
+required_host_runtime_features = []
+required_image_features = ["behavior-cpu-data"]
+network_profile = "none"
+input_cache_capacity_bytes_min = 1649267441664
+
+[[profiles]]
+name = "behavior-sim-local-gateway"
+version = 1
+execution_variants = [
+  { variant_id = "gb10-shared-1gpu", cpu_arch = "arm64", gpu_count_exact = 1, gpu_vendor = "nvidia", allowed_gpu_models = ["NVIDIA GB10"], gpu_memory_kind = "unified", gpu_unified_memory_mb_min = 120000, memory_accounting_kind = "unified_shared", container_memory_bytes_override = 125829120000, same_gpu_model_required = true, pool_class = "behavior-gpu-gb10", device_roles = { sim_gpu_index = 0, vla_gpu_index = 0 } },
+  { variant_id = "oldlab-rtx5080-2gpu", cpu_arch = "x86_64", gpu_count_exact = 2, gpu_vendor = "nvidia", allowed_gpu_models = ["NVIDIA GeForce RTX 5080"], gpu_memory_kind = "dedicated", gpu_memory_mb_min = 16000, memory_accounting_kind = "separate", same_gpu_model_required = true, pool_class = "behavior-gpu-oldlab", device_roles = { sim_gpu_index = 0, vla_gpu_index = 1 } },
+]
+cpu_cores = 16
+memory_bytes = 68719476736
+scratch_bytes = 161061273600
+timeout_seconds_max = 14400
+required_host_runtime_features = ["egl", "loom-secret-tmpfs-v1", "nvidia-container-runtime"]
+required_image_features = ["isaac-sim-5.1", "omnigibson-3.8"]
+network_profile = "gateway"
+input_cache_capacity_bytes_min = 1649267441664
+
+[[profiles]]
+name = "behavior-sim-local-none"
+version = 1
+execution_variants = [
+  { variant_id = "gb10-shared-1gpu", cpu_arch = "arm64", gpu_count_exact = 1, gpu_vendor = "nvidia", allowed_gpu_models = ["NVIDIA GB10"], gpu_memory_kind = "unified", gpu_unified_memory_mb_min = 120000, memory_accounting_kind = "unified_shared", container_memory_bytes_override = 125829120000, same_gpu_model_required = true, pool_class = "behavior-gpu-gb10", device_roles = { sim_gpu_index = 0, vla_gpu_index = 0 } },
+  { variant_id = "oldlab-rtx5080-2gpu", cpu_arch = "x86_64", gpu_count_exact = 2, gpu_vendor = "nvidia", allowed_gpu_models = ["NVIDIA GeForce RTX 5080"], gpu_memory_kind = "dedicated", gpu_memory_mb_min = 16000, memory_accounting_kind = "separate", same_gpu_model_required = true, pool_class = "behavior-gpu-oldlab", device_roles = { sim_gpu_index = 0, vla_gpu_index = 1 } },
+]
+cpu_cores = 16
+memory_bytes = 68719476736
+scratch_bytes = 161061273600
+timeout_seconds_max = 14400
+required_host_runtime_features = ["egl", "nvidia-container-runtime"]
+required_image_features = ["isaac-sim-5.1", "omnigibson-3.8"]
+network_profile = "none"
+input_cache_capacity_bytes_min = 1649267441664

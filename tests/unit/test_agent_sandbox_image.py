@@ -35,7 +35,7 @@ def test_agent_sandbox_image_files_exist_and_are_used_by_dockerfile() -> None:
     assert PYTHON_REQUIREMENTS.is_file()
     assert PYTHON_CLI_REQUIREMENTS.is_file()
     assert "FROM node:22-bookworm-slim AS node-runtime" in dockerfile
-    assert "python:3.12-bookworm" in dockerfile
+    assert "python:3.12-slim" in dockerfile
     assert "COPY --from=node-runtime /usr/local/ /usr/local/" in dockerfile
     assert "deb.nodesource.com" not in dockerfile
     assert "deploy/agent-sandbox/npm-packages.txt" in dockerfile
@@ -50,6 +50,25 @@ def test_agent_sandbox_image_files_exist_and_are_used_by_dockerfile() -> None:
     assert 'importlib.import_module("openhands.sdk")' in dockerfile
     assert 'importlib.import_module("loom_launcher.openhands_sdk_runner")' in dockerfile
     assert "openhands_sdk.run" not in dockerfile
+
+
+def test_agent_sandbox_renders_and_executes_the_shared_aider_installer() -> None:
+    dockerfile = DOCKERFILE.read_text()
+
+    assert "from loom_launcher.adapters._aider_install import AIDER_INSTALL_SCRIPT" in dockerfile
+    assert "AIDER_INSTALL_SCRIPT" in dockerfile
+    assert "chmod 0700" in dockerfile
+    assert "LOOM_AIDER_VENV=/opt/agent-runtimes/python-cli/aider" in dockerfile
+    assert '"$(grep ^aider-chat==' not in dockerfile
+    assert '"$(grep ^litellm==' not in dockerfile
+
+
+def test_aider_cli_manifest_has_only_the_secure_local_distribution() -> None:
+    entries = _manifest_entries(PYTHON_CLI_REQUIREMENTS)
+    aider_entries = {entry for entry in entries if entry.startswith("aider-chat==")}
+
+    assert aider_entries == {"aider-chat==0.86.2+loom.1"}
+    assert not any(entry.startswith("litellm==") for entry in entries)
 
 
 def test_agent_sandbox_package_manifests_cover_catalog_runtime_contracts() -> None:

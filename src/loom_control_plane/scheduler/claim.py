@@ -284,6 +284,176 @@ WITH candidates AS (
      AND s.resource_profile_digest IS NOT NULL
      AND s.image_runtime_contract_json IS NOT NULL
      AND s.image_runtime_contract_digest IS NOT NULL
+     AND w.capability_snapshot_json IS NOT NULL
+     AND w.capability_snapshot_json->>'schema_version' = 'loom.worker-capabilities.v1'
+     AND (w.capability_snapshot_json->>'cpu_cores')::bigint >=
+         (s.resource_profile_json->>'cpu_cores')::bigint
+     AND (w.capability_snapshot_json->>'scratch_bytes')::bigint >=
+         (s.resource_profile_json->>'scratch_bytes')::bigint
+     AND (w.capability_snapshot_json->>'input_cache_capacity_bytes')::bigint >=
+         (s.resource_profile_json->>'input_cache_capacity_bytes_min')::bigint
+     AND (w.capability_snapshot_json->'network_profiles') ?
+         (s.resource_profile_json->>'network_profile')
+     AND (s.resource_profile_json->'required_host_runtime_features') <@
+         (w.capability_snapshot_json->'container_runtime_features')
+     AND (s.resource_profile_json->'required_image_features') <@
+         (s.image_runtime_contract_json->'application_features')
+     AND (
+       w.pool_name NOT LIKE 'behavior-%'
+       OR EXISTS (
+         SELECT 1
+           FROM worker_pool_autoscaler_policies pipeline_policy
+           JOIN pipeline_scoped_policy_activations activation
+             ON activation.environment = pipeline_policy.environment
+            AND activation.policy_id = pipeline_policy.pool_name
+            AND activation.policy_config_sha256 =
+                pipeline_policy.actuator_config->>'policy_config_sha256'
+            AND activation.state = 'active'
+            AND activation.desired_slots > 0
+          WHERE pipeline_policy.pool_name = w.pool_name
+            AND pipeline_policy.actuator = 'slurm'
+            AND pipeline_policy.min_slots = 0
+            AND pipeline_policy.actuator_config->>'policy_id' = w.pool_name
+            AND COALESCE(
+                  pipeline_policy.actuator_config->>'policy_config_sha256', ''
+                ) ~ '^sha256:[0-9a-f]{64}$'
+            AND COALESCE(
+                  pipeline_policy.actuator_config->>'slurm_cluster_config_sha256', ''
+                ) ~ '^sha256:[0-9a-f]{64}$'
+            AND pipeline_policy.actuator_config->>'slurm_cluster_id' =
+                CASE
+                  WHEN w.pool_name = 'behavior-gpu-gb10' THEN 'gb10'
+                  ELSE 'oldlab'
+                END
+            AND (pipeline_policy.actuator_config->'allowed_nodes') ? w.hostname
+            AND EXISTS (
+              SELECT 1
+                FROM slurm_worker_jobs policy_job
+               WHERE policy_job.worker_id = w.id
+                 AND policy_job.environment = pipeline_policy.environment
+                 AND policy_job.pool_name = w.pool_name
+                 AND policy_job.state = 'running'
+            )
+            AND (
+              (r.acceptance_authorization_id IS NOT NULL
+               AND activation.authority_kind = 'acceptance'
+               AND activation.authority_id = r.acceptance_authorization_id)
+              OR
+              (r.official_submission_kind = 'behavior_acceptance_scenario_v1'
+               AND activation.authority_kind = 'acceptance'
+               AND activation.authority_id = r.official_submission_authority_id)
+              OR
+              (r.official_submission_kind = 'behavior_profile_calibration_run_v1'
+               AND activation.authority_kind = 'profile_calibration'
+               AND activation.authority_id = r.official_submission_authority_id)
+            )
+       )
+     )
+     AND (
+       w.pool_name <> 'behavior-cpu-data'
+       OR EXISTS (
+         SELECT 1
+           FROM slurm_worker_jobs cpu_slurm_job
+          WHERE cpu_slurm_job.worker_id = w.id
+            AND cpu_slurm_job.slurm_cluster_id = 'oldlab'
+            AND cpu_slurm_job.pool_name = 'behavior-cpu-data'
+            AND cpu_slurm_job.nodelist = w.hostname
+            AND cpu_slurm_job.requested_gpu_tres IS NULL
+            AND cpu_slurm_job.requested_gpus = 0
+            AND cpu_slurm_job.requested_concurrency = 1
+            AND cpu_slurm_job.state = 'running'
+       )
+     )
+     AND EXISTS (
+       SELECT 1
+         FROM jsonb_array_elements(
+           s.resource_profile_json->'execution_variants'
+         ) variant
+        WHERE (
+          variant->>'variant_id' =
+             s.resolved_execution_spec_json->>'execution_variant_id'
+        )
+          AND variant->>'cpu_arch' = w.capability_snapshot_json->>'cpu_arch'
+          AND variant->>'cpu_arch' = s.image_runtime_contract_json->>'cpu_arch'
+          AND w.pool_name = variant->>'pool_class'
+          AND (
+            (variant->>'gpu_count_exact')::integer = 0
+            OR EXISTS (
+              SELECT 1
+                FROM pipeline_run_gpu_backend_selections backend_selection
+               WHERE backend_selection.pipeline_run_id = r.id
+                 AND backend_selection.variant_id = variant->>'variant_id'
+                 AND backend_selection.policy_id = w.pool_name
+                 AND backend_selection.gpu_backend_selection_sha256 =
+                     s.resolved_execution_spec_json->>'gpu_backend_selection_sha256'
+            )
+          )
+          AND (w.capability_snapshot_json->>'memory_bytes')::bigint >=
+              COALESCE(
+                (variant->>'container_memory_bytes_override')::bigint,
+                (s.resource_profile_json->>'memory_bytes')::bigint
+              )
+          AND jsonb_array_length(w.capability_snapshot_json->'gpu_devices') =
+              (variant->>'gpu_count_exact')::integer
+          AND (
+            (variant->>'gpu_count_exact')::integer = 0
+            OR NOT EXISTS (
+              SELECT 1
+                FROM jsonb_array_elements(
+                  w.capability_snapshot_json->'gpu_devices'
+                ) device
+               WHERE NOT ((variant->'allowed_gpu_models') ? (device->>'model'))
+                  OR (
+                    variant->>'gpu_memory_kind' = 'dedicated'
+                    AND (
+                      device->>'memory_kind' <> 'dedicated'
+                      OR (device->>'memory_mb')::integer <
+                         (variant->>'gpu_memory_mb_min')::integer
+                    )
+                  )
+                  OR (
+                    variant->>'gpu_memory_kind' = 'unified'
+                    AND (
+                      device->>'memory_kind' <> 'unified'
+                      OR (device->>'unified_memory_mb')::integer <
+                         (variant->>'gpu_unified_memory_mb_min')::integer
+                    )
+                  )
+            )
+          )
+          AND (
+            ((variant->>'gpu_count_exact')::integer = 0
+             AND w.slurm_gpu_allocation_evidence_json IS NULL
+             AND s.image_runtime_contract_json->>'gpu_vendor' = 'none')
+            OR
+            ((variant->>'gpu_count_exact')::integer > 0
+             AND w.slurm_gpu_allocation_evidence_json IS NOT NULL
+             AND w.slurm_gpu_allocation_evidence_json->>'variant_id' =
+                 variant->>'variant_id'
+             AND s.image_runtime_contract_json->>'gpu_vendor' = 'nvidia')
+          )
+          AND (
+            (variant->>'gpu_count_exact')::integer = 0
+            OR EXISTS (
+              SELECT 1
+                FROM slurm_worker_jobs slurm_job
+               WHERE slurm_job.worker_id = w.id
+                 AND slurm_job.slurm_cluster_id =
+                     w.slurm_gpu_allocation_evidence_json->>'slurm_cluster_id'
+                 AND slurm_job.job_id =
+                     w.slurm_gpu_allocation_evidence_json->>'job_id'
+                 AND slurm_job.pool_name = w.pool_name
+                 AND slurm_job.nodelist =
+                     w.slurm_gpu_allocation_evidence_json->>'node_name'
+                 AND slurm_job.requested_gpu_tres =
+                     w.slurm_gpu_allocation_evidence_json->>'gpu_tres'
+                 AND slurm_job.requested_gpus =
+                     (variant->>'gpu_count_exact')::integer
+                 AND slurm_job.requested_concurrency = 1
+                 AND slurm_job.state = 'running'
+            )
+          )
+     )
      AND EXISTS (
        SELECT 1
          FROM jsonb_array_elements(w.capabilities) capability
@@ -304,17 +474,35 @@ WITH candidates AS (
      AND ledger.terminal_cause IS NULL
      AND ledger.wall_deadline_at > NOW()
      AND (
-       NOT EXISTS (
+       (r.acceptance_authorization_id IS NULL AND NOT EXISTS (
          SELECT 1 FROM pipeline_acceptance_preflight_prerequisites any_fence
           WHERE any_fence.worker_id = w.id AND any_fence.fence_state = 'active'
-       )
-       OR EXISTS (
+       ))
+       OR (r.acceptance_authorization_id IS NOT NULL AND EXISTS (
          SELECT 1 FROM pipeline_acceptance_preflight_prerequisites fence
           WHERE fence.worker_id = w.id
             AND fence.fence_state = 'active'
             AND fence.pipeline_run_id = r.id
             AND fence.worker_capability_snapshot_digest = w.capability_snapshot_digest
             AND fence.worker_lease_epoch = w.lease_epoch
+            AND EXISTS (
+              SELECT 1
+                FROM pipeline_scoped_policy_activations activation
+               WHERE activation.environment = (
+                       SELECT job.environment
+                         FROM slurm_worker_jobs job
+                        WHERE job.worker_id = w.id AND job.state = 'running'
+                        ORDER BY job.updated_at DESC, job.id
+                        LIMIT 1
+                     )
+                 AND activation.policy_id = fence.policy_id
+                 AND activation.policy_config_sha256 = fence.policy_config_sha256
+                 AND activation.authority_kind = 'acceptance'
+                 AND activation.authority_id = fence.authorization_id
+                 AND activation.activation_epoch = fence.policy_activation_epoch
+                 AND activation.state = 'active'
+                 AND activation.desired_slots > 0
+            )
             AND (
               (s.node_key LIKE '%acceptance_preflight_cold'
                AND fence.state = 'satisfied')
@@ -322,7 +510,7 @@ WITH candidates AS (
               (s.node_key LIKE '%acceptance_preflight_warm'
                AND fence.state = 'consumed')
             )
-       )
+       ))
      )
 ), picked AS (
   SELECT work_kind, id, family_key, batch_id

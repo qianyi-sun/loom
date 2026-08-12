@@ -7,7 +7,7 @@ import os
 import re
 import secrets
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
@@ -56,6 +56,7 @@ _HEX_PREFIX_RE = re.compile(r"^[0-9a-f]{4,64}$")
 
 
 class _SlurmWorkerJobCreate(BaseModel):
+    slurm_cluster_id: Literal["oldlab", "gb10"] | None = None
     environment: str
     pool_name: str
     nodelist: str
@@ -88,6 +89,9 @@ class _SlurmWorkerObservation(BaseModel):
 class _SlurmWorkerReconcileRequest(BaseModel):
     observations: list[_SlurmWorkerObservation] = Field(default_factory=list)
     stale_after_seconds: int = Field(default=300, ge=0)
+    slurm_cluster_id: Literal["oldlab", "gb10"] | None = None
+    environment: str | None = None
+    pool_name: str | None = None
 
 
 class _GB10DesiredStatePayload(BaseModel):
@@ -372,6 +376,7 @@ async def create_slurm_worker_job(
             env=payload.env,
             submitted_at=payload.submitted_at,
             submission_error=payload.submission_error,
+            slurm_cluster_id=payload.slurm_cluster_id,
         )
         if duplicate:
             existing_id = str(job.id)
@@ -412,6 +417,9 @@ async def reconcile_slurm_worker_job_records(
             session,
             observations,
             stale_after_seconds=payload.stale_after_seconds,
+            slurm_cluster_id=payload.slurm_cluster_id,
+            environment=payload.environment,
+            pool_name=payload.pool_name,
         )
         await session.commit()
     return result.as_dict()

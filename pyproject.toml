@@ -130,8 +130,8 @@ abort_family = "loom.family_run.failure:AbortFamilyPolicy"
 s3_artifacts = "loom.family_run.state_backends:S3ArtifactsStateBackend"
 
 [tool.setuptools.packages.find]
-where = ["src"]
-include = ["loom*", "loom_drivers*"]
+where = ["src", "."]
+include = ["loom*", "loom_drivers*", "capacity_migrations*"]
 
 [tool.setuptools.package-data]
 "loom_cli.data" = ["*.toml", "*.json", "grafana/*.json", "envoy/*.yaml"]
@@ -140,6 +140,8 @@ include = ["loom*", "loom_drivers*"]
 # spec; without this entry they'd be excluded from the wheel.
 "loom_cli.templates.k8s" = ["*.yaml.j2", "_env.j2"]
 "loom_cli.catalog_data" = ["*.json"]
+"capacity_migrations" = ["alembic.ini", "env.py", "script.py.mako"]
+"capacity_migrations.versions" = ["*.py"]
 
 [tool.ruff]
 line-length = 100

@@ -49,18 +49,18 @@ def resource_profile() -> dict[str, Any]:
         "version": 1,
         "execution_variants": [
             {
-                "variant_id": "linux_amd64",
+                "variant_id": "cpu-data-x86_64",
                 "cpu_arch": "x86_64",
                 "gpu_count_exact": 0,
-                "gpu_vendor": "none",
+                "gpu_vendor": None,
                 "allowed_gpu_models": [],
-                "gpu_memory_kind": "none",
-                "gpu_memory_mb_min": 0,
-                "gpu_unified_memory_mb_min": 0,
-                "memory_accounting_kind": "container",
+                "gpu_memory_kind": None,
+                "gpu_memory_mb_min": None,
+                "gpu_unified_memory_mb_min": None,
+                "memory_accounting_kind": "separate",
                 "container_memory_bytes_override": None,
                 "same_gpu_model_required": False,
-                "pool_class": "cpu",
+                "pool_class": "behavior-cpu-data",
                 "device_roles": None,
             }
         ],
@@ -68,8 +68,8 @@ def resource_profile() -> dict[str, Any]:
         "memory_bytes": 1_073_741_824,
         "scratch_bytes": 1_073_741_824,
         "timeout_seconds_max": 120,
-        "required_host_runtime_features": ["docker-v1"],
-        "required_image_features": ["nonroot-v1"],
+        "required_host_runtime_features": [],
+        "required_image_features": ["behavior-cpu-data"],
         "network_profile": "none",
         "input_cache_capacity_bytes_min": 0,
     }
@@ -84,7 +84,7 @@ def image_contract() -> dict[str, Any]:
         "gpu_vendor": "none",
         "cuda_userspace_version": None,
         "min_nvidia_driver_version": None,
-        "application_features": ["nonroot-v1"],
+        "application_features": ["behavior-cpu-data"],
         "provider_assets": [],
         "preflight_argv": ["/opt/loom/preflight"],
         "preflight_digest": D0,
@@ -109,6 +109,22 @@ def binding() -> dict[str, Any]:
                 "unpacked_size_bytes": 10,
             }
         ],
+    }
+
+
+def worker_capability() -> dict[str, Any]:
+    return {
+        "schema_version": "loom.worker-capabilities.v1",
+        "cpu_arch": "x86_64",
+        "cpu_cores": 2,
+        "memory_bytes": 2_147_483_648,
+        "scratch_bytes": 2_147_483_648,
+        "network_profiles": ["none"],
+        "container_runtime_features": [],
+        "gpu_devices": [],
+        "input_cache_capacity_bytes": 0,
+        "input_cache_reserved_bytes": 0,
+        "input_cache_ready_bytes": 0,
     }
 
 
@@ -152,7 +168,7 @@ def execution_spec() -> dict[str, Any]:
         },
         "image_runtime_contract_digest": runtime_digest,
         "resource_profile_digest": profile_digest,
-        "execution_variant_id": None,
+        "execution_variant_id": "cpu-data-x86_64",
         "gpu_backend_selection_sha256": None,
         "resolved_image_manifest_digest": D3,
         "network_profile": "none",
@@ -191,6 +207,10 @@ def attempt_claim() -> dict[str, Any]:
         "network_profile": "none",
         "image_runtime_contract_snapshot": image_contract(),
         "image_runtime_contract_digest": spec["image_runtime_contract_digest"],
+        "worker_capability_snapshot": worker_capability(),
+        "worker_capability_snapshot_digest": canonical_digest(worker_capability()),
+        "slurm_gpu_allocation_evidence": None,
+        "slurm_gpu_allocation_evidence_digest": None,
         "input_bindings": [binding()],
         "outputs": spec["container_node"]["outputs"],
         "checkpoint": None,

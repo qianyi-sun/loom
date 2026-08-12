@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from alembic.config import Config as AlembicConfig
 from alembic.script import ScriptDirectory
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
+
+from loom_capacity_manager.migration_resources import (
+    resolve_capacity_migration_resources,
+)
 
 
 class CapacitySchemaNotAtHeadError(RuntimeError):
@@ -16,10 +18,9 @@ class CapacitySchemaNotAtHeadError(RuntimeError):
 
 
 def _capacity_head() -> str:
-    repo_root = Path(__file__).resolve().parents[2]
-    config_path = repo_root / "capacity_migrations" / "alembic.ini"
-    config = AlembicConfig(str(config_path))
-    config.set_main_option("script_location", str(repo_root / "capacity_migrations"))
+    resources = resolve_capacity_migration_resources()
+    config = AlembicConfig(str(resources.config))
+    config.set_main_option("script_location", str(resources.scripts))
     head = ScriptDirectory.from_config(config).get_current_head()
     if head is None:  # pragma: no cover - packaging corruption
         raise CapacitySchemaNotAtHeadError("capacity migration tree has no head revision")
@@ -30,9 +31,11 @@ def _remediation(actual: str | None, expected: str) -> CapacitySchemaNotAtHeadEr
     observed = actual if actual is not None else "<missing>"
     return CapacitySchemaNotAtHeadError(
         "capacity management database schema is not at head "
-        f"(observed {observed}, expected {expected}); export the owner-only "
-        "runtime URL as LOOM_CAPACITY_DB_URL and run "
-        "alembic -c capacity_migrations/alembic.ini upgrade head"
+        f"(observed {observed}, expected {expected}); run the installed migration "
+        "command with the reviewed bootstrap identity: "
+        "python -m loom_capacity_manager.migrate "
+        "--db-url-file <owner-only-database-url-file> "
+        "--expected-authority-incarnation <reviewed-non-nil-uuid>"
     )
 
 

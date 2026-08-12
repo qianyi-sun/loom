@@ -22,6 +22,15 @@ returns malformed data falls back to `FreeMem` and remains closed. The worker
 setup guard also delays Docker setup and build work when I/O pressure, swap, or
 D-state process thresholds are unsafe.
 
+## Disabled Pipeline GPU admission surface
+
+Issue #1213 adds a separate repository-owned Pipeline contract in
+`worker-plan.csv` and `slurm/`. It freezes `trt-eai-oldlab-1` through
+`trt-eai-oldlab-5`, one exclusive `gpu:rtx5080:2` job and one concurrency-1
+`behavior-gpu-oldlab` worker per allocation. It merges disabled with desired
+slots zero and does not change the live legacy Trial policy above. Installation
+and activation remain a later candidate-bound rollout action.
+
 The service-owned candidate checkout, worker env, and job output directories
 are under `/shared_work/loom/staging-rollout/` and must be visible on every
 allowed compute node. Personal checkouts and control-host-only paths are not

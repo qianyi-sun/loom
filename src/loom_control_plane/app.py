@@ -42,6 +42,7 @@ from loom_control_plane.routes import (
     artifacts,
     execution_attempts,
     health,
+    pipeline_catalog,
     state,
     step_tokens,
     tasks,
@@ -253,6 +254,7 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
         lifespan=lifespan,
     )
     app.include_router(health.router)
+    app.include_router(pipeline_catalog.router)
     app.include_router(trials.router)
     app.include_router(workers.router)
     app.include_router(state.router)

@@ -54,7 +54,7 @@ run-name: >-
                     contains(github.event.pull_request.labels.*.name, 'ci:coverage-summary') && '1' || '0'),
              github.event.pull_request.number || 'none') }}
 
-# Builds and (on push to dev/main) publishes every release image declared
+# Builds, scans, attests, verifies, and (on push to dev/main) publishes every release image declared
 # in config/component-ownership.toml. The manifest owns image identity,
 # Dockerfile, build context, and source-path selection; this workflow contains
 # no editable image allowlist.
@@ -263,7 +263,7 @@ jobs:
       checks: read
       contents: read
     outputs:
-      routes: ${{ steps.route.outputs.routes }}
+      routes: ${{ steps.route.outputs.routes || '{}' }}
     steps:
       - name: Checkout trusted route action
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -293,19 +293,22 @@ jobs:
               for item in builds
               if item["architecture"] == "amd64"
               and item["image"] not in {
+                  "capacity-manager",
                   "personal-dev-activation-agent",
                   "personal-dev-builder",
                   "pipeline-orchestrator",
               }
           ]
-          if not keys or len(keys) != len(set(keys)):
-              raise SystemExit("native AMD64 route keys are empty or duplicated")
+          if len(keys) != len(set(keys)):
+              raise SystemExit("native AMD64 route keys are duplicated")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write("job_keys=" + json.dumps(keys, separators=(",", ":")) + "\n")
+              output.write("needs_route=" + ("true" if keys else "false") + "\n")
           PY
 
       - name: Resolve immutable assignments
         id: route
+        if: steps.keys.outputs.needs_route == 'true'
         uses: ./.loom-ci-route-action/.github/actions/ci-runner-route
         with:
           route-mode: ${{ vars.LOOM_CI_ROUTE_MODE || 'disabled' }}
@@ -328,7 +331,7 @@ jobs:
       needs.plan.outputs.images != '[]'
     runs-on: >-
       ${{ matrix.architecture == 'arm64' && fromJSON('["ubuntu-24.04-arm"]') ||
-          (matrix.image == 'personal-dev-activation-agent' || matrix.image == 'personal-dev-builder' || matrix.image == 'pipeline-orchestrator') && fromJSON('["ubuntu-24.04"]') ||
+          (matrix.image == 'capacity-manager' || matrix.image == 'personal-dev-activation-agent' || matrix.image == 'personal-dev-builder' || matrix.image == 'pipeline-orchestrator') && fromJSON('["ubuntu-24.04"]') ||
           fromJSON(needs.image-route.outputs.routes)[matrix.image] }}
     timeout-minutes: 45
     permissions:
@@ -422,9 +425,9 @@ jobs:
           docker buildx inspect
 
       - name: Build without registry or cache write authority
-        # Each job builds exactly one platform on matching native hardware.
-        # Eligible same-repository PRs also emit a local Docker archive; the
-        # untrusted job still has no registry, cache, or secret authority.
+        # Each job builds exactly one platform on matching native hardware and
+        # always emits the exact local archive consumed by the vulnerability
+        # gate. The untrusted job has no registry, cache, or secret authority.
         shell: bash
         env:
           IMAGE_NAME: ${{ matrix.image }}
@@ -437,7 +440,6 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}
           ARCHITECTURE: ${{ matrix.architecture }}
           PLATFORM: ${{ matrix.platform }}
-          INTERNAL_PULL_REQUEST: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
         run: |
           set -euo pipefail
 
@@ -451,9 +453,10 @@ jobs:
               exit 1
               ;;
           esac
-          if [[ "$INTERNAL_PULL_REQUEST" == "true" ]]; then
+          if [[ "$EVENT_NAME" == "pull_request" && -n "$PR_NUMBER" ]]; then
             image_tag="candidate-${HEAD_SHA}-${ARCHITECTURE}"
           fi
+          archive="/tmp/${IMAGE_NAME}-${ARCHITECTURE}.docker.tar"
           build_args=(
             docker buildx build
             --platform "$PLATFORM"
@@ -462,14 +465,46 @@ jobs:
             --provenance=false
             --label "org.opencontainers.image.revision=${HEAD_SHA}"
             --build-arg "LOOM_BUILD_SHA=${HEAD_SHA}"
+            --output "type=docker,dest=${archive}"
           )
-          if [[ "$INTERNAL_PULL_REQUEST" == "true" ]]; then
-            archive="/tmp/${IMAGE_NAME}-${ARCHITECTURE}.docker.tar"
-            build_args+=(--output \
-              "type=docker,dest=${archive}")
-          fi
           build_args+=("$BUILD_CONTEXT")
           "${build_args[@]}"
+
+      - name: Generate controlled Trivy policy
+        run: |
+          python3 scripts/write_trivy_release_policy.py \
+            --config-file /tmp/loom-trivy-release.yaml \
+            --ignore-file /tmp/loom-trivy-release.ignore.yaml
+
+      - name: Scan native image archive
+        shell: bash
+        env:
+          ARCHIVE: /tmp/${{ matrix.image }}-${{ matrix.architecture }}.docker.tar
+          REPORT: /tmp/${{ matrix.image }}-${{ matrix.architecture }}.trivy.json
+          IMAGE_NAME: ${{ matrix.image }}
+          ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          set -euo pipefail
+          trivy_bin=$(python3 scripts/install_trivy.py --install-root "$RUNNER_TEMP")
+          set +e
+          "$trivy_bin" --config /tmp/loom-trivy-release.yaml image \
+            --input "$ARCHIVE" \
+            --format json \
+            --output "$REPORT" \
+            --ignorefile /tmp/loom-trivy-release.ignore.yaml \
+            --show-suppressed \
+            --cache-dir "$RUNNER_TEMP/loom-trivy-cache"
+          scan_status=$?
+          set -e
+          if (( scan_status != 0 )); then
+            python3 scripts/summarize_trivy_report.py "$REPORT" || true
+            exit "$scan_status"
+          fi
+          python3 scripts/validate_trivy_release_report.py \
+            --component "$IMAGE_NAME" \
+            --architecture "$ARCHITECTURE" \
+            --report "$REPORT" \
+            --ignore-file /tmp/loom-trivy-release.ignore.yaml
 
       - name: Record candidate archive provenance
         if: >-
@@ -587,158 +622,27 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  resolve-candidate:
-    name: resolve exact merged image candidate
-    needs: plan
+
+  publish:
+    name: publish ${{ matrix.image }} (${{ matrix.platform }})
+    needs: [plan]
     if: >-
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') &&
       needs.plan.outputs.gate_mode == 'full' &&
       needs.plan.outputs.required == 'true' &&
       needs.plan.outputs.images != '[]'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      actions: read
-      contents: read
-      pull-requests: read
-    outputs:
-      available: ${{ steps.resolve.outputs.available }}
-      source_head: ${{ steps.resolve.outputs.source_head }}
-      source_base: ${{ steps.resolve.outputs.source_base }}
-      source_tree: ${{ steps.resolve.outputs.source_tree }}
-      source_run_id: ${{ steps.resolve.outputs.source_run_id }}
-      source_run_attempt: ${{ steps.resolve.outputs.source_run_attempt }}
-      builds: ${{ steps.resolve.outputs.builds }}
-    steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-
-      - name: Resolve exact successful PR candidate index
-        id: resolve
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
-          REF_NAME: ${{ github.ref_name }}
-          HEAD_SHA: ${{ github.sha }}
-          EXPECTED_MATRIX: ${{ needs.plan.outputs.native_builds }}
-        run: |
-          set -euo pipefail
-
-          fallback() {
-            builds=$(jq -cn --argjson matrix "$EXPECTED_MATRIX" \
-              '$matrix | map(. + {candidate_artifact: "", archive_sha256: "", archive_size: 0})')
-            {
-              echo 'available=false'
-              echo 'source_head='
-              echo 'source_base='
-              echo 'source_tree='
-              echo 'source_run_id='
-              echo 'source_run_attempt='
-              echo "builds=$builds"
-            } >> "$GITHUB_OUTPUT"
-          }
-
-          pulls=$(gh api -H 'Accept: application/vnd.github+json' \
-            "repos/${REPOSITORY}/commits/${HEAD_SHA}/pulls")
-          matches=$(jq -c \
-            --arg repository "$REPOSITORY" \
-            --arg ref "$REF_NAME" \
-            --arg head "$HEAD_SHA" \
-            '[.[] | select(.merged_at != null and .merge_commit_sha == $head and
-                           .base.ref == $ref and .head.repo.full_name == $repository)]' \
-            <<< "$pulls")
-          if [[ "$(jq 'length' <<< "$matches")" != "1" ]]; then
-            echo 'No unique same-repository merged PR; rebuilding on trusted push.'
-            fallback
-            exit 0
-          fi
-
-          pull_number=$(jq -r '.[0].number' <<< "$matches")
-          source_head=$(jq -r '.[0].head.sha' <<< "$matches")
-          source_base=$(jq -r '.[0].base.sha' <<< "$matches")
-          source_tree=$(gh api "repos/${REPOSITORY}/git/commits/${source_head}" --jq .tree.sha)
-          push_tree=$(git rev-parse "${HEAD_SHA}^{tree}")
-          if [[ "$source_tree" != "$push_tree" ]]; then
-            echo 'Merged tree differs from PR head tree; rebuilding on trusted push.'
-            fallback
-            exit 0
-          fi
-
-          runs=$(gh api -H 'Accept: application/vnd.github+json' \
-            "repos/${REPOSITORY}/actions/workflows/images.yml/runs?event=pull_request&head_sha=${source_head}&status=success&per_page=100")
-          while IFS=$'\t' read -r run_id run_attempt; do
-            [[ -n "$run_id" && -n "$run_attempt" ]] || continue
-            candidate_dir="${RUNNER_TEMP}/image-candidate-${run_id}-${run_attempt}"
-            if ! gh run download "$run_id" --repo "$REPOSITORY" \
-                --name "image-candidate-index-attempt-${run_attempt}" \
-                --dir "$candidate_dir" \
-                >/dev/null 2>&1; then
-              continue
-            fi
-            index_path="${candidate_dir}/image-candidate-index.json"
-            candidate_output="${candidate_dir}/github-output"
-            if python3 scripts/ci_image_candidate.py verify-index \
-                --index "$index_path" \
-                --expected-matrix-json "$EXPECTED_MATRIX" \
-                --repository "$REPOSITORY" \
-                --pull-request "$pull_number" \
-                --head-sha "$source_head" \
-                --base-sha "$source_base" \
-                --tree-sha "$source_tree" \
-                --run-id "$run_id" \
-                --run-attempt "$run_attempt" \
-                --github-output "$candidate_output"; then
-              artifacts=$(gh api --paginate \
-                -H 'Accept: application/vnd.github+json' \
-                --jq '.artifacts[]' \
-                "repos/${REPOSITORY}/actions/runs/${run_id}/artifacts?per_page=100" \
-                | jq -sc '.')
-              required_artifacts=$(jq -c '[.builds[].candidate_artifact] | sort' \
-                "$index_path")
-              available_artifacts=$(jq -c \
-                '[.[] | select(.expired == false) | .name] | unique | sort' \
-                <<< "$artifacts")
-              if ! jq -en --argjson required "$required_artifacts" \
-                  --argjson available "$available_artifacts" \
-                  '$required - $available | length == 0' >/dev/null; then
-                echo "Candidate archives for run ${run_id} attempt ${run_attempt} are unavailable."
-                continue
-              fi
-              cat "$candidate_output" >> "$GITHUB_OUTPUT"
-              echo "Resolved candidate run ${run_id} attempt ${run_attempt}."
-              exit 0
-            fi
-          done < <(jq -r \
-            '.workflow_runs | sort_by(.created_at, .id) | reverse[] |
-             [.id, .run_attempt] | @tsv' <<< "$runs")
-
-          echo 'No exact successful candidate index; rebuilding on trusted push.'
-          fallback
-
-  publish:
-    name: publish ${{ matrix.image }} (${{ matrix.platform }})
-    needs: [plan, resolve-candidate]
-    if: >-
-      github.event_name == 'push' &&
-      (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') &&
-      needs.plan.outputs.gate_mode == 'full' &&
-      needs.plan.outputs.required == 'true' &&
-      needs.plan.outputs.images != '[]' &&
-      needs.resolve-candidate.result == 'success'
     runs-on: ${{ matrix.architecture == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 45
     permissions:
-      actions: read
+      attestations: write
       contents: read
+      id-token: write
       packages: write
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(needs.resolve-candidate.outputs.builds) }}
+        include: ${{ fromJSON(needs.plan.outputs.native_builds) }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
@@ -758,13 +662,6 @@ jobs:
           GHCR_ACTOR: ${{ github.actor }}
           ARCHITECTURE: ${{ matrix.architecture }}
           PLATFORM: ${{ matrix.platform }}
-          CANDIDATE_ARTIFACT: ${{ matrix.candidate_artifact }}
-          ARCHIVE_SHA256: ${{ matrix.archive_sha256 }}
-          ARCHIVE_SIZE: ${{ matrix.archive_size }}
-          CANDIDATE_AVAILABLE: ${{ needs.resolve-candidate.outputs.available }}
-          CANDIDATE_SOURCE_HEAD: ${{ needs.resolve-candidate.outputs.source_head }}
-          CANDIDATE_SOURCE_RUN: ${{ needs.resolve-candidate.outputs.source_run_id }}
-          CANDIDATE_SOURCE_ATTEMPT: ${{ needs.resolve-candidate.outputs.source_run_attempt }}
         run: |
           set -euo pipefail
 
@@ -798,65 +695,86 @@ jobs:
             x86_64:amd64:linux/amd64 | aarch64:arm64:linux/arm64 | arm64:arm64:linux/arm64) ;;
             *) echo "FAIL: runner architecture does not match the publish platform" >&2; exit 1 ;;
           esac
-          if [[ "$CANDIDATE_AVAILABLE" == "true" ]]; then
-            [[ "$CANDIDATE_SOURCE_HEAD" =~ ^[0-9a-f]{40}$ ]] || exit 1
-            [[ "$CANDIDATE_SOURCE_RUN" =~ ^[1-9][0-9]*$ ]] || exit 1
-            [[ "$CANDIDATE_SOURCE_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || exit 1
-            [[ "$CANDIDATE_ARTIFACT" == "image-candidate-archive-${IMAGE_NAME}-${ARCHITECTURE}-attempt-${CANDIDATE_SOURCE_ATTEMPT}" ]] || exit 1
-            [[ "$ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]] || exit 1
-            [[ "$ARCHIVE_SIZE" =~ ^[1-9][0-9]*$ ]] || exit 1
-          else
-            [[ -z "$CANDIDATE_SOURCE_HEAD" && -z "$CANDIDATE_ARTIFACT" ]] || exit 1
-            [[ -z "$ARCHIVE_SHA256" && "$ARCHIVE_SIZE" == "0" ]] || exit 1
-          fi
 
       - name: Create native buildx builder
-        if: matrix.candidate_artifact == ''
         run: |
           set -euo pipefail
           docker buildx create --name loom-publisher --use --bootstrap
           docker buildx inspect
 
-      - name: Download exact PR candidate archive
-        if: matrix.candidate_artifact != ''
+      - name: Build trusted image archive
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
-          SOURCE_RUN_ID: ${{ needs.resolve-candidate.outputs.source_run_id }}
-          CANDIDATE_ARTIFACT: ${{ matrix.candidate_artifact }}
-          IMAGE_NAME: ${{ matrix.image }}
-          ARCHITECTURE: ${{ matrix.architecture }}
-          ARCHIVE_SHA256: ${{ matrix.archive_sha256 }}
-          ARCHIVE_SIZE: ${{ matrix.archive_size }}
-        run: |
-          set -euo pipefail
-          candidate_dir="${RUNNER_TEMP}/loom-image-candidate"
-          gh run download "$SOURCE_RUN_ID" --repo "$REPOSITORY" \
-            --name "$CANDIDATE_ARTIFACT" --dir "$candidate_dir"
-          archive="${candidate_dir}/${IMAGE_NAME}-${ARCHITECTURE}.docker.tar"
-          test -f "$archive"
-          test "$(wc -c < "$archive" | tr -d ' ')" = "$ARCHIVE_SIZE"
-          printf '%s  %s\n' "$ARCHIVE_SHA256" "$archive" | sha256sum --check --strict
-
-      - name: Load and verify PR candidate archive
-        if: matrix.candidate_artifact != ''
-        shell: bash
-        env:
+          DOCKERFILE: ${{ matrix.dockerfile }}
+          BUILD_CONTEXT: ${{ matrix.context }}
           IMAGE_DIGEST_NAME: ${{ matrix.image_name }}
           IMAGE_NAME: ${{ matrix.image }}
           ARCHITECTURE: ${{ matrix.architecture }}
-          CANDIDATE_SOURCE_HEAD: ${{ needs.resolve-candidate.outputs.source_head }}
+          PLATFORM: ${{ matrix.platform }}
+          HEAD_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          archive="${RUNNER_TEMP}/loom-image-candidate/${IMAGE_NAME}-${ARCHITECTURE}.docker.tar"
-          docker load --input "$archive"
-          local_image="loom-ci-${IMAGE_DIGEST_NAME}:candidate-${CANDIDATE_SOURCE_HEAD}-${ARCHITECTURE}"
-          inspected=$(docker image inspect "$local_image" --format '{{json .}}')
-          jq -e --arg architecture "$ARCHITECTURE" --arg head "$CANDIDATE_SOURCE_HEAD" \
-            '.Architecture == $architecture and .Os == "linux" and
-             .Config.Labels["org.opencontainers.image.revision"] == $head' \
-            <<< "$inspected" >/dev/null
+          archive="/tmp/${IMAGE_NAME}-${ARCHITECTURE}.release.docker.tar"
+          local_image="loom-ci-${IMAGE_DIGEST_NAME}:release-${HEAD_SHA}-${ARCHITECTURE}"
+          docker buildx build \
+            --platform "$PLATFORM" \
+            --file "$DOCKERFILE" \
+            --tag "$local_image" \
+            --provenance=false \
+            --label "org.opencontainers.image.revision=${HEAD_SHA}" \
+            --build-arg "LOOM_BUILD_SHA=${HEAD_SHA}" \
+            --output "type=docker,dest=${archive}" \
+            "$BUILD_CONTEXT"
+
+      - name: Generate controlled Trivy policy
+        run: |
+          python3 scripts/write_trivy_release_policy.py \
+            --config-file /tmp/loom-trivy-release.yaml \
+            --ignore-file /tmp/loom-trivy-release.ignore.yaml
+
+      - name: Scan trusted image archive
+        shell: bash
+        env:
+          ARCHIVE: /tmp/${{ matrix.image }}-${{ matrix.architecture }}.release.docker.tar
+          REPORT: /tmp/${{ matrix.image }}-${{ matrix.architecture }}.release.trivy.json
+          IMAGE_NAME: ${{ matrix.image }}
+          ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          set -euo pipefail
+          trivy_bin=$(python3 scripts/install_trivy.py --install-root "$RUNNER_TEMP")
+          set +e
+          "$trivy_bin" --config /tmp/loom-trivy-release.yaml image \
+            --input "$ARCHIVE" \
+            --format json \
+            --output "$REPORT" \
+            --ignorefile /tmp/loom-trivy-release.ignore.yaml \
+            --show-suppressed \
+            --cache-dir "$RUNNER_TEMP/loom-trivy-cache"
+          scan_status=$?
+          set -e
+          if (( scan_status != 0 )); then
+            python3 scripts/summarize_trivy_report.py "$REPORT" || true
+            exit "$scan_status"
+          fi
+          python3 scripts/validate_trivy_release_report.py \
+            --component "$IMAGE_NAME" \
+            --architecture "$ARCHITECTURE" \
+            --report "$REPORT" \
+            --ignore-file /tmp/loom-trivy-release.ignore.yaml
+
+      - name: Record trusted scan digest
+        id: scan
+        shell: bash
+        env:
+          IMAGE_NAME: ${{ matrix.image }}
+          ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          set -euo pipefail
+          report="/tmp/${IMAGE_NAME}-${ARCHITECTURE}.release.trivy.json"
+          test -s "$report"
+          digest=$(sha256sum "$report" | cut -d ' ' -f 1)
+          [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || exit 1
+          echo "report_sha256=$digest" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
         shell: bash
@@ -868,7 +786,56 @@ jobs:
           printf '%s' "$GHCR_TOKEN" \
             | docker login ghcr.io --username "$GHCR_ACTOR" --password-stdin
 
-      - name: Build and publish trusted image
+      - name: Publish scanned architecture image
+        id: architecture-publish
+        shell: bash
+        env:
+          IMAGE_NAME: ${{ matrix.image }}
+          IMAGE_DIGEST_NAME: ${{ matrix.image_name }}
+          HEAD_SHA: ${{ github.sha }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          set -euo pipefail
+
+          archive="/tmp/${IMAGE_NAME}-${ARCHITECTURE}.release.docker.tar"
+          docker load --input "$archive"
+          local_image="loom-ci-${IMAGE_DIGEST_NAME}:release-${HEAD_SHA}-${ARCHITECTURE}"
+          inspected=$(docker image inspect "$local_image" --format '{{json .}}')
+          jq -e --arg architecture "$ARCHITECTURE" --arg head "$HEAD_SHA" \
+            '.Architecture == $architecture and .Os == "linux" and
+             .Config.Labels["org.opencontainers.image.revision"] == $head' \
+            <<< "$inspected" >/dev/null
+          owner_lower=$(printf '%s' "$REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+          image="ghcr.io/${owner_lower}/${IMAGE_DIGEST_NAME}"
+          target="${image}:build-${HEAD_SHA}-${ARCHITECTURE}"
+          docker tag "$local_image" "$target"
+          push_output=$(docker push "$target" 2>&1)
+          printf '%s\n' "$push_output"
+          mapfile -t push_digests < <(
+            sed -nE 's/^.*digest: (sha256:[0-9a-f]{64}) size: [0-9]+.*$/\1/p' \
+              <<< "$push_output"
+          )
+          [[ ${#push_digests[@]} -eq 1 ]] || {
+            echo "FAIL: docker push did not emit exactly one architecture digest" >&2
+            exit 1
+          }
+          digest="${push_digests[0]}"
+          registry_manifest="/tmp/${IMAGE_NAME}-${ARCHITECTURE}.registry-manifest.json"
+          docker buildx imagetools inspect --raw "${image}@${digest}" \
+            > "$registry_manifest"
+          jq -e \
+            '.schemaVersion == 2 and
+             (.config.digest | test("^sha256:[0-9a-f]{64}$")) and
+             (.layers | type == "array")' \
+            "$registry_manifest" >/dev/null
+          {
+            echo "subject_name=$image"
+            echo "subject_digest=$digest"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Prepare architecture release predicate
+        id: architecture-evidence
         shell: bash
         env:
           IMAGE_NAME: ${{ matrix.image }}
@@ -880,34 +847,180 @@ jobs:
           REPOSITORY_OWNER: ${{ github.repository_owner }}
           ARCHITECTURE: ${{ matrix.architecture }}
           PLATFORM: ${{ matrix.platform }}
-          CANDIDATE_ARTIFACT: ${{ matrix.candidate_artifact }}
-          CANDIDATE_SOURCE_HEAD: ${{ needs.resolve-candidate.outputs.source_head }}
+          SCAN_REPORT_SHA256: ${{ steps.scan.outputs.report_sha256 }}
+          SUBJECT_NAME: ${{ steps.architecture-publish.outputs.subject_name }}
+          SUBJECT_DIGEST: ${{ steps.architecture-publish.outputs.subject_digest }}
         run: |
           set -euo pipefail
+          tree_sha=$(git rev-parse "${HEAD_SHA}^{tree}")
+          predicate="/tmp/${IMAGE_NAME}-${ARCHITECTURE}.slsa.json"
+          python3 scripts/ci_image_release_evidence.py predicate-architecture \
+            --repository "$GITHUB_REPOSITORY" \
+            --ref-name "$REF_NAME" \
+            --head-sha "$HEAD_SHA" \
+            --tree-sha "$tree_sha" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --image "$IMAGE_NAME" \
+            --image-name "$IMAGE_DIGEST_NAME" \
+            --dockerfile "$DOCKERFILE" \
+            --build-context "$BUILD_CONTEXT" \
+            --platform "$PLATFORM" \
+            --architecture "$ARCHITECTURE" \
+            --scan-report-sha256 "$SCAN_REPORT_SHA256" \
+            --build-mode trusted-rebuild \
+            --output "$predicate"
+          {
+            echo "subject_name=$SUBJECT_NAME"
+            echo "subject_digest=$SUBJECT_DIGEST"
+            echo "predicate=$predicate"
+            echo "tree_sha=$tree_sha"
+            echo "build_mode=trusted-rebuild"
+          } >> "$GITHUB_OUTPUT"
 
-          owner_lower=$(printf '%s' "$REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
-          image="ghcr.io/${owner_lower}/${IMAGE_DIGEST_NAME}"
-          target="${image}:build-${HEAD_SHA}-${ARCHITECTURE}"
-          if [[ -n "$CANDIDATE_ARTIFACT" ]]; then
-            local_image="loom-ci-${IMAGE_DIGEST_NAME}:candidate-${CANDIDATE_SOURCE_HEAD}-${ARCHITECTURE}"
-            docker tag "$local_image" "$target"
-            docker push "$target"
-            echo "Published exact PR candidate archive without rebuilding."
-            exit 0
+      - name: Attest published architecture digest
+        id: architecture-attestation
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.architecture-evidence.outputs.subject_name }}
+          subject-digest: ${{ steps.architecture-evidence.outputs.subject_digest }}
+          predicate-type: https://slsa.dev/provenance/v1
+          predicate-path: ${{ steps.architecture-evidence.outputs.predicate }}
+          push-to-registry: true
+
+      - name: Verify published architecture attestation
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE_PATH: ${{ steps.architecture-attestation.outputs.bundle-path }}
+          SUBJECT_NAME: ${{ steps.architecture-evidence.outputs.subject_name }}
+          SUBJECT_DIGEST: ${{ steps.architecture-evidence.outputs.subject_digest }}
+          TREE_SHA: ${{ steps.architecture-evidence.outputs.tree_sha }}
+          IMAGE_NAME: ${{ matrix.image }}
+          IMAGE_DIGEST_NAME: ${{ matrix.image_name }}
+          DOCKERFILE: ${{ matrix.dockerfile }}
+          BUILD_CONTEXT: ${{ matrix.context }}
+          REF_NAME: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          ARCHITECTURE: ${{ matrix.architecture }}
+          PLATFORM: ${{ matrix.platform }}
+          SCAN_REPORT_SHA256: ${{ steps.scan.outputs.report_sha256 }}
+          BUILD_MODE: ${{ steps.architecture-evidence.outputs.build_mode }}
+        run: |
+          set -euo pipefail
+          if [[ "$BUILD_MODE" != "trusted-rebuild" ]]; then
+            echo "FAIL: invalid architecture build mode" >&2
+            exit 1
           fi
-          build_args=(
-            docker buildx build
-            --platform "$PLATFORM"
-            --file "$DOCKERFILE"
-            --tag "$target"
-            --push
-            --provenance=false
-            --label "org.opencontainers.image.revision=${HEAD_SHA}"
-            --build-arg "LOOM_BUILD_SHA=${HEAD_SHA}"
-          )
-          build_args+=("$BUILD_CONTEXT")
-          "${build_args[@]}"
-          echo "No exact candidate was available; rebuilt on trusted push."
+          verification="/tmp/${IMAGE_NAME}-${ARCHITECTURE}.verified.json"
+          gh attestation verify "oci://${SUBJECT_NAME}@${SUBJECT_DIGEST}" \
+            --bundle "$BUNDLE_PATH" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/images.yml" \
+            --source-digest "$HEAD_SHA" \
+            --source-ref "refs/heads/${REF_NAME}" \
+            --deny-self-hosted-runners \
+            --predicate-type https://slsa.dev/provenance/v1 \
+            --format json > "$verification"
+          python3 scripts/ci_image_release_evidence.py verify-architecture \
+            --verification "$verification" \
+            --repository "$GITHUB_REPOSITORY" \
+            --ref-name "$REF_NAME" \
+            --head-sha "$HEAD_SHA" \
+            --tree-sha "$TREE_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --image "$IMAGE_NAME" \
+            --image-name "$IMAGE_DIGEST_NAME" \
+            --dockerfile "$DOCKERFILE" \
+            --build-context "$BUILD_CONTEXT" \
+            --platform "$PLATFORM" \
+            --architecture "$ARCHITECTURE" \
+            --scan-report-sha256 "$SCAN_REPORT_SHA256" \
+            --build-mode "$BUILD_MODE" \
+            --subject-name "$SUBJECT_NAME" \
+            --subject-digest "$SUBJECT_DIGEST" \
+            --output "/tmp/${IMAGE_NAME}-${ARCHITECTURE}.verified-metadata.json"
+
+      - name: Record verified architecture evidence
+        shell: bash
+        env:
+          IMAGE_NAME: ${{ matrix.image }}
+          IMAGE_DIGEST_NAME: ${{ matrix.image_name }}
+          DOCKERFILE: ${{ matrix.dockerfile }}
+          BUILD_CONTEXT: ${{ matrix.context }}
+          REF_NAME: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          TREE_SHA: ${{ steps.architecture-evidence.outputs.tree_sha }}
+          ARCHITECTURE: ${{ matrix.architecture }}
+          PLATFORM: ${{ matrix.platform }}
+          SUBJECT_NAME: ${{ steps.architecture-evidence.outputs.subject_name }}
+          SUBJECT_DIGEST: ${{ steps.architecture-evidence.outputs.subject_digest }}
+          SCAN_REPORT_SHA256: ${{ steps.scan.outputs.report_sha256 }}
+          BUILD_MODE: ${{ steps.architecture-evidence.outputs.build_mode }}
+        run: |
+          set -euo pipefail
+          if [[ "$BUILD_MODE" != "trusted-rebuild" ]]; then
+            echo "FAIL: invalid architecture build mode" >&2
+            exit 1
+          fi
+          record_dir=/tmp/loom-image-release-records
+          mkdir -p "$record_dir"
+          python3 scripts/ci_image_release_evidence.py record-architecture \
+            --repository "$GITHUB_REPOSITORY" \
+            --ref-name "$REF_NAME" \
+            --head-sha "$HEAD_SHA" \
+            --tree-sha "$TREE_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --image "$IMAGE_NAME" \
+            --image-name "$IMAGE_DIGEST_NAME" \
+            --dockerfile "$DOCKERFILE" \
+            --build-context "$BUILD_CONTEXT" \
+            --platform "$PLATFORM" \
+            --architecture "$ARCHITECTURE" \
+            --subject-name "$SUBJECT_NAME" \
+            --subject-digest "$SUBJECT_DIGEST" \
+            --scan-report-sha256 "$SCAN_REPORT_SHA256" \
+            --build-mode "$BUILD_MODE" \
+            --output "${record_dir}/${IMAGE_NAME}-${ARCHITECTURE}.json"
+
+      - name: Validate verified architecture evidence
+        shell: bash
+        env:
+          IMAGE_NAME: ${{ matrix.image }}
+          IMAGE_DIGEST_NAME: ${{ matrix.image_name }}
+          DOCKERFILE: ${{ matrix.dockerfile }}
+          BUILD_CONTEXT: ${{ matrix.context }}
+          REF_NAME: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          TREE_SHA: ${{ steps.architecture-evidence.outputs.tree_sha }}
+          ARCHITECTURE: ${{ matrix.architecture }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci_image_release_evidence.py validate-architecture-record \
+            --repository "$GITHUB_REPOSITORY" \
+            --ref-name "$REF_NAME" \
+            --head-sha "$HEAD_SHA" \
+            --tree-sha "$TREE_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --image "$IMAGE_NAME" \
+            --image-name "$IMAGE_DIGEST_NAME" \
+            --dockerfile "$DOCKERFILE" \
+            --build-context "$BUILD_CONTEXT" \
+            --platform "$PLATFORM" \
+            --architecture "$ARCHITECTURE" \
+            --record "/tmp/loom-image-release-records/${IMAGE_NAME}-${ARCHITECTURE}.json"
+
+      - name: Upload verified architecture evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-release-record-${{ matrix.image }}-${{ matrix.architecture }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: /tmp/loom-image-release-records/${{ matrix.image }}-${{ matrix.architecture }}.json
+          if-no-files-found: error
+          retention-days: 1
 
   publish-manifest:
     name: publish ${{ matrix.image }} manifest
@@ -922,7 +1035,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
+      actions: read
+      attestations: write
       contents: read
+      id-token: write
       packages: write
     strategy:
       fail-fast: false
@@ -957,6 +1073,51 @@ jobs:
           [[ ${#GHCR_ACTOR} -le 100 \
             && "$GHCR_ACTOR" =~ ^[A-Za-z0-9][A-Za-z0-9-]*(\[bot\])?$ ]] || exit 1
 
+      - name: Download exact AMD64 architecture evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: image-release-record-${{ matrix.image }}-amd64-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: /tmp/loom-image-release-artifacts/amd64
+
+      - name: Download exact ARM64 architecture evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: image-release-record-${{ matrix.image }}-arm64-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: /tmp/loom-image-release-artifacts/arm64
+
+      - name: Validate exact architecture evidence
+        id: architecture-records
+        shell: bash
+        env:
+          IMAGE_NAME: ${{ matrix.image }}
+          IMAGE_DIGEST_NAME: ${{ matrix.image_name }}
+          DOCKERFILE: ${{ matrix.dockerfile }}
+          BUILD_CONTEXT: ${{ matrix.context }}
+          REF_NAME: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          tree_sha=$(git rev-parse "${HEAD_SHA}^{tree}")
+          metadata="/tmp/${IMAGE_NAME}-architecture-records.json"
+          python3 scripts/ci_image_release_evidence.py validate-architecture-records \
+            --repository "$GITHUB_REPOSITORY" \
+            --ref-name "$REF_NAME" \
+            --head-sha "$HEAD_SHA" \
+            --tree-sha "$tree_sha" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --image "$IMAGE_NAME" \
+            --image-name "$IMAGE_DIGEST_NAME" \
+            --dockerfile "$DOCKERFILE" \
+            --build-context "$BUILD_CONTEXT" \
+            --records-dir /tmp/loom-image-release-artifacts \
+            --output "$metadata"
+          {
+            echo "metadata=$metadata"
+            echo "subject_name=$(jq -er .subject_name "$metadata")"
+            echo "tree_sha=$tree_sha"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Log in to GHCR
         shell: bash
         env:
@@ -967,43 +1128,230 @@ jobs:
           printf '%s' "$GHCR_TOKEN" \
             | docker login ghcr.io --username "$GHCR_ACTOR" --password-stdin
 
-      - name: Join and verify native image manifest
+      - name: Verify architecture attestations
+        id: architectures
         shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE_NAME: ${{ matrix.image }}
           IMAGE_DIGEST_NAME: ${{ matrix.image_name }}
+          DOCKERFILE: ${{ matrix.dockerfile }}
+          BUILD_CONTEXT: ${{ matrix.context }}
+          REF_NAME: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          TREE_SHA: ${{ steps.architecture-records.outputs.tree_sha }}
+          SUBJECT_NAME: ${{ steps.architecture-records.outputs.subject_name }}
+          RECORDS_METADATA: ${{ steps.architecture-records.outputs.metadata }}
+        run: |
+          set -euo pipefail
+          for architecture in amd64 arm64; do
+            platform="linux/${architecture}"
+            record="/tmp/loom-image-release-artifacts/${architecture}/${IMAGE_NAME}-${architecture}.json"
+            subject_name=$(jq -er .subject.name "$record")
+            digest=$(jq -er .subject.digest "$record")
+            scan_digest=$(jq -er .scan.report_sha256 "$record")
+            build_mode=$(jq -er .build.mode "$record")
+            build=$(jq -cer .build "$record")
+            [[ "$subject_name" == "$SUBJECT_NAME" ]] || exit 1
+            if [[ "$build_mode" != "trusted-rebuild" ]]; then
+              echo "FAIL: invalid recorded architecture build mode" >&2
+              exit 1
+            fi
+            verification="/tmp/${IMAGE_NAME}-${architecture}.registry-verified.json"
+            gh attestation verify "oci://${subject_name}@${digest}" \
+              --bundle-from-oci \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/images.yml" \
+              --source-digest "$HEAD_SHA" \
+              --source-ref "refs/heads/${REF_NAME}" \
+              --deny-self-hosted-runners \
+              --predicate-type https://slsa.dev/provenance/v1 \
+              --format json > "$verification"
+            metadata="/tmp/${IMAGE_NAME}-${architecture}.registry-metadata.json"
+            python3 scripts/ci_image_release_evidence.py verify-architecture \
+              --verification "$verification" \
+              --repository "$GITHUB_REPOSITORY" \
+              --ref-name "$REF_NAME" \
+              --head-sha "$HEAD_SHA" \
+              --tree-sha "$TREE_SHA" \
+              --run-id "$GITHUB_RUN_ID" \
+              --run-attempt "$GITHUB_RUN_ATTEMPT" \
+              --image "$IMAGE_NAME" \
+              --image-name "$IMAGE_DIGEST_NAME" \
+              --dockerfile "$DOCKERFILE" \
+              --build-context "$BUILD_CONTEXT" \
+              --platform "$platform" \
+              --architecture "$architecture" \
+              --scan-report-sha256 "$scan_digest" \
+              --build-mode "$build_mode" \
+              --subject-name "$subject_name" \
+              --subject-digest "$digest" \
+              --output "$metadata"
+            {
+              echo "${architecture}_digest=$digest"
+              echo "${architecture}_scan=$scan_digest"
+              echo "${architecture}_build=$build"
+            } >> "$GITHUB_OUTPUT"
+          done
+          echo "subject_name=$SUBJECT_NAME" >> "$GITHUB_OUTPUT"
+          echo "tree_sha=$TREE_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Join verified native image manifest
+        id: manifest-evidence
+        shell: bash
+        env:
+          IMAGE_NAME: ${{ matrix.image }}
+          IMAGE_DIGEST_NAME: ${{ matrix.image_name }}
+          DOCKERFILE: ${{ matrix.dockerfile }}
+          BUILD_CONTEXT: ${{ matrix.context }}
           REF_NAME: ${{ github.ref_name }}
           HEAD_SHA: ${{ github.sha }}
           REPOSITORY_OWNER: ${{ github.repository_owner }}
+          AMD64_DIGEST: ${{ steps.architectures.outputs.amd64_digest }}
+          ARM64_DIGEST: ${{ steps.architectures.outputs.arm64_digest }}
+          AMD64_SCAN: ${{ steps.architectures.outputs.amd64_scan }}
+          ARM64_SCAN: ${{ steps.architectures.outputs.arm64_scan }}
+          AMD64_BUILD: ${{ steps.architectures.outputs.amd64_build }}
+          ARM64_BUILD: ${{ steps.architectures.outputs.arm64_build }}
+          TREE_SHA: ${{ steps.architectures.outputs.tree_sha }}
         run: |
           set -euo pipefail
           owner_lower=$(printf '%s' "$REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
           image="ghcr.io/${owner_lower}/${IMAGE_DIGEST_NAME}"
+          amd64_digest="$AMD64_DIGEST"
+          arm64_digest="$ARM64_DIGEST"
+          create_output=$(docker buildx imagetools create \
+            --progress plain \
+            --tag "${image}:manifest-${HEAD_SHA}" \
+            "${image}@${amd64_digest}" \
+            "${image}@${arm64_digest}" 2>&1)
+          printf '%s\n' "$create_output"
+          mapfile -t manifest_digests < <(
+            sed -nE \
+              's/^.*pushing manifest for .*@(sha256:[0-9a-f]{64}).*$/\1/p' \
+              <<< "$create_output"
+          )
+          [[ ${#manifest_digests[@]} -eq 1 ]] || {
+            echo "FAIL: manifest creation did not emit exactly one digest" >&2
+            exit 1
+          }
+          manifest_digest="${manifest_digests[0]}"
+          docker buildx imagetools inspect --raw "${image}@${manifest_digest}" \
+            > /tmp/loom-image-manifest.json
+          python3 scripts/ci_image_release_evidence.py validate-manifest \
+            --manifest "/tmp/loom-image-manifest.json" \
+            --architecture-digest "linux/amd64=${AMD64_DIGEST}" \
+            --architecture-digest "linux/arm64=${ARM64_DIGEST}"
+          predicate="/tmp/${IMAGE_NAME}-manifest.slsa.json"
+          python3 scripts/ci_image_release_evidence.py predicate-manifest \
+            --repository "$GITHUB_REPOSITORY" \
+            --ref-name "$REF_NAME" \
+            --head-sha "$HEAD_SHA" \
+            --tree-sha "$TREE_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --image "$IMAGE_NAME" \
+            --image-name "$IMAGE_DIGEST_NAME" \
+            --dockerfile "$DOCKERFILE" \
+            --build-context "$BUILD_CONTEXT" \
+            --architecture-digest "linux/amd64=${AMD64_DIGEST}" \
+            --architecture-digest "linux/arm64=${ARM64_DIGEST}" \
+            --scan-report-digest "linux/amd64=${AMD64_SCAN}" \
+            --scan-report-digest "linux/arm64=${ARM64_SCAN}" \
+            --architecture-build "linux/amd64=${AMD64_BUILD}" \
+            --architecture-build "linux/arm64=${ARM64_BUILD}" \
+            --output "$predicate"
+          {
+            echo "subject_name=$image"
+            echo "subject_digest=$manifest_digest"
+            echo "predicate=$predicate"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Attest published manifest digest
+        id: manifest-attestation
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.manifest-evidence.outputs.subject_name }}
+          subject-digest: ${{ steps.manifest-evidence.outputs.subject_digest }}
+          predicate-type: https://slsa.dev/provenance/v1
+          predicate-path: ${{ steps.manifest-evidence.outputs.predicate }}
+          push-to-registry: true
+
+      - name: Verify published manifest attestation
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE_PATH: ${{ steps.manifest-attestation.outputs.bundle-path }}
+          SUBJECT_NAME: ${{ steps.manifest-evidence.outputs.subject_name }}
+          SUBJECT_DIGEST: ${{ steps.manifest-evidence.outputs.subject_digest }}
+          IMAGE_NAME: ${{ matrix.image }}
+          IMAGE_DIGEST_NAME: ${{ matrix.image_name }}
+          DOCKERFILE: ${{ matrix.dockerfile }}
+          BUILD_CONTEXT: ${{ matrix.context }}
+          REF_NAME: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+          TREE_SHA: ${{ steps.architectures.outputs.tree_sha }}
+          AMD64_DIGEST: ${{ steps.architectures.outputs.amd64_digest }}
+          ARM64_DIGEST: ${{ steps.architectures.outputs.arm64_digest }}
+          AMD64_SCAN: ${{ steps.architectures.outputs.amd64_scan }}
+          ARM64_SCAN: ${{ steps.architectures.outputs.arm64_scan }}
+          AMD64_BUILD: ${{ steps.architectures.outputs.amd64_build }}
+          ARM64_BUILD: ${{ steps.architectures.outputs.arm64_build }}
+        run: |
+          set -euo pipefail
+          verification="/tmp/${IMAGE_NAME}-manifest.verified.json"
+          gh attestation verify "oci://${SUBJECT_NAME}@${SUBJECT_DIGEST}" \
+            --bundle "$BUNDLE_PATH" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/images.yml" \
+            --source-digest "$HEAD_SHA" \
+            --source-ref "refs/heads/${REF_NAME}" \
+            --deny-self-hosted-runners \
+            --predicate-type https://slsa.dev/provenance/v1 \
+            --format json > "$verification"
+          python3 scripts/ci_image_release_evidence.py verify-manifest \
+            --verification "$verification" \
+            --repository "$GITHUB_REPOSITORY" \
+            --ref-name "$REF_NAME" \
+            --head-sha "$HEAD_SHA" \
+            --tree-sha "$TREE_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --image "$IMAGE_NAME" \
+            --image-name "$IMAGE_DIGEST_NAME" \
+            --dockerfile "$DOCKERFILE" \
+            --build-context "$BUILD_CONTEXT" \
+            --subject-name "$SUBJECT_NAME" \
+            --subject-digest "$SUBJECT_DIGEST" \
+            --architecture-digest "linux/amd64=${AMD64_DIGEST}" \
+            --architecture-digest "linux/arm64=${ARM64_DIGEST}" \
+            --scan-report-digest "linux/amd64=${AMD64_SCAN}" \
+            --scan-report-digest "linux/arm64=${ARM64_SCAN}" \
+            --architecture-build "linux/amd64=${AMD64_BUILD}" \
+            --architecture-build "linux/arm64=${ARM64_BUILD}"
+
+      - name: Publish verified manifest tags
+        shell: bash
+        env:
+          SUBJECT_NAME: ${{ steps.manifest-evidence.outputs.subject_name }}
+          SUBJECT_DIGEST: ${{ steps.manifest-evidence.outputs.subject_digest }}
+          REF_NAME: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
           sha_short="${HEAD_SHA:0:12}"
           docker buildx imagetools create \
-            --tag "${image}:${sha_short}" \
-            --tag "${image}:${REF_NAME}" \
-            "${image}:build-${HEAD_SHA}-amd64" \
-            "${image}:build-${HEAD_SHA}-arm64"
-          docker buildx imagetools inspect --raw "${image}:${sha_short}" \
-            > /tmp/loom-image-manifest.json
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
-
-          payload = json.loads(Path("/tmp/loom-image-manifest.json").read_text())
-          platforms = {
-              f"{platform['os']}/{platform['architecture']}"
-              for item in payload.get("manifests", [])
-              if isinstance((platform := item.get("platform")), dict)
-              and platform.get("os")
-              and platform.get("architecture")
-          }
-          expected = {"linux/amd64", "linux/arm64"}
-          if platforms != expected:
-              raise SystemExit(
-                  f"FAIL: manifest platforms {sorted(platforms)} != {sorted(expected)}"
-              )
-          PY
+            --tag "${SUBJECT_NAME}:${sha_short}" \
+            --tag "${SUBJECT_NAME}:${REF_NAME}" \
+            "${SUBJECT_NAME}@${SUBJECT_DIGEST}"
+          for tag in "$sha_short" "$REF_NAME"; do
+            published=$(docker buildx imagetools inspect "${SUBJECT_NAME}:${tag}" \
+              | awk '$1 == "Digest:" {print $2; exit}')
+            [[ "$published" == "$SUBJECT_DIGEST" ]] || {
+              echo "FAIL: verified manifest tag ${tag} resolved to ${published}" >&2
+              exit 1
+            }
+          done
 
   images-gate:
     name: >-
@@ -1016,7 +1364,7 @@ jobs:
           'images-gate-filtered' }}
     runs-on: ubuntu-latest
     if: always() && needs.plan.outputs.gate_mode != 'filtered'
-    needs: [plan, build, candidate-index, resolve-candidate, publish, publish-manifest]
+    needs: [plan, build, candidate-index, publish, publish-manifest]
     steps:
       - name: Enforce selected image result
         env:
@@ -1026,7 +1374,6 @@ jobs:
           REQUIRED: ${{ needs.plan.outputs.required }}
           BUILD_RESULT: ${{ needs.build.result }}
           CANDIDATE_INDEX_RESULT: ${{ needs.candidate-index.result }}
-          RESOLVE_RESULT: ${{ needs.resolve-candidate.result }}
           PUBLISH_RESULT: ${{ needs.publish.result }}
           MANIFEST_RESULT: ${{ needs.publish-manifest.result }}
           INTERNAL_PULL_REQUEST: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
@@ -1055,7 +1402,6 @@ jobs:
             if [[ "$EVENT_NAME" == "push" ]]; then
               [[ "$BUILD_RESULT" == "skipped" ]] || exit 1
               [[ "$CANDIDATE_INDEX_RESULT" == "skipped" ]] || exit 1
-              [[ "$RESOLVE_RESULT" == "success" ]] || exit 1
               [[ "$PUBLISH_RESULT" == "success" ]] || exit 1
               [[ "$MANIFEST_RESULT" == "success" ]] || exit 1
             else
@@ -1065,14 +1411,12 @@ jobs:
               else
                 [[ "$CANDIDATE_INDEX_RESULT" == "skipped" ]] || exit 1
               fi
-              [[ "$RESOLVE_RESULT" == "skipped" ]] || exit 1
               [[ "$PUBLISH_RESULT" == "skipped" ]] || exit 1
               [[ "$MANIFEST_RESULT" == "skipped" ]] || exit 1
             fi
           else
             [[ "$BUILD_RESULT" == "skipped" ]] || exit 1
             [[ "$CANDIDATE_INDEX_RESULT" == "skipped" ]] || exit 1
-            [[ "$RESOLVE_RESULT" == "skipped" ]] || exit 1
             [[ "$PUBLISH_RESULT" == "skipped" ]] || exit 1
             [[ "$MANIFEST_RESULT" == "skipped" ]] || exit 1
           fi
