@@ -5162,6 +5162,50 @@ def test_acl_removal_state_rejects_permission_drift_for_equivalent_uid() -> None
     )
 
 
+def test_acl_removal_state_rejects_duplicate_resolved_user_identities() -> None:
+    path = host.PROTECTED_INPUTS[0]
+    adjustment = host.AclSnapshotAdjustment.from_dict(
+        {
+            "path": str(path),
+            "before_acl": [
+                "user::rw-",
+                "user:2012:r--",
+                "user:loom-rollout:r--",
+                "group::r--",
+                "mask::r--",
+                "other::---",
+            ],
+            "after_acl": [
+                "user::rw-",
+                "user:loom-rollout:r--",
+                "group::r--",
+                "mask::r--",
+                "other::---",
+            ],
+        }
+    )
+    runner = StatefulAclRunner()
+    runner.passwd["jinbang"] = "jinbang:x:2012:2012::/home/jinbang:/bin/bash\n"
+    runner.seed(
+        path,
+        access=(
+            "user::rw-",
+            "user:2012:r--",
+            "user:jinbang:r--",
+            "group::r--",
+            "mask::r--",
+            "other::---",
+        ),
+    )
+
+    with pytest.raises(host.InstallError, match="duplicate user identities"):
+        host.HostSystem(runner).acl_removal_state(
+            host.AclGrant(path),
+            adjustment,
+            remove_service_entry=True,
+        )
+
+
 def test_remove_acl_is_idempotent_after_nss_resolves_restored_uid_name() -> None:
     path = host.PROTECTED_INPUTS[0]
     adjustment = host.AclSnapshotAdjustment.from_dict(
