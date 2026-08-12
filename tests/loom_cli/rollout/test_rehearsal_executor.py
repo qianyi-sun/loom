@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import uuid
+from collections import Counter
 from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import replace
@@ -1208,7 +1209,7 @@ def test_release_loads_exact_images_and_verifies_all_scoped_resources() -> None:
         for index, (command, _payload) in enumerate(calls)
         if command[:4] == ("systemd-run", "--user", "--wait", "--collect")
     ]
-    validation_index, validation_argv = validation_calls[0]
+    validation_index = validation_calls[0][0]
     release_apply_index = next(
         index for index, (_command, payload) in enumerate(calls) if payload == release.payload
     )
@@ -1227,25 +1228,29 @@ def test_release_loads_exact_images_and_verifies_all_scoped_resources() -> None:
         in policy_seed_argv
     )
 
-    supervisor = supervisor_artifact.supervisors[0]
     working_directory = staging_working_directory(plan.candidate_sha)
-    separator = validation_argv.index("--")
-    assert validation_argv[:4] == ("systemd-run", "--user", "--wait", "--collect")
-    assert f"--property=WorkingDirectory={working_directory}" in validation_argv
-    assert (
-        f"--property=Environment=PYTHONPATH={working_directory}/src PYTHONDONTWRITEBYTECODE=1"
-    ) in validation_argv
-    assert "--property=TimeoutStartSec=180s" in validation_argv
-    assert "--property=RuntimeMaxSec=180s" in validation_argv
-    assert "--property=KillMode=control-group" in validation_argv
-    assert (
-        validation_argv[separator + 1 :]
-        == supervisor_artifact.validation_argv(
+    actual_validation_commands: Counter[tuple[str, ...]] = Counter()
+    for _index, validation_argv in validation_calls:
+        separator = validation_argv.index("--")
+        assert validation_argv[:4] == ("systemd-run", "--user", "--wait", "--collect")
+        assert f"--property=WorkingDirectory={working_directory}" in validation_argv
+        assert (
+            f"--property=Environment=PYTHONPATH={working_directory}/src "
+            "PYTHONDONTWRITEBYTECODE=1"
+        ) in validation_argv
+        assert "--property=TimeoutStartSec=180s" in validation_argv
+        assert "--property=RuntimeMaxSec=180s" in validation_argv
+        assert "--property=KillMode=control-group" in validation_argv
+        assert validation_argv[-1] == "--validate-only"
+        actual_validation_commands[validation_argv[separator + 1 :]] += 1
+
+    expected_validation_commands = Counter(
+        supervisor_artifact.validation_argv(
             plan.resources.namespace,
             EXTERNAL_SUPERVISOR_REHEARSAL_KUBECONFIG,
-        )[supervisor.name]
+        ).values()
     )
-    assert validation_argv[-1] == "--validate-only"
+    assert actual_validation_commands == expected_validation_commands
 
 
 def test_external_supervisor_default_rebuilds_only_from_fixed_staging_root(
