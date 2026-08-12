@@ -929,7 +929,7 @@ class SubprocessSlurmCommandRunner:
                     continue
                 try:
                     available_memory_mib = await self._query_node_available_memory(node)
-                except RuntimeError as exc:
+                except (OSError, RuntimeError) as exc:
                     logger.warning(
                         "elastic_slurm_worker_node_memory_probe_failed",
                         extra={

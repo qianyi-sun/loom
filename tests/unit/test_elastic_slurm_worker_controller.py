@@ -1025,8 +1025,16 @@ async def test_query_node_resources_probes_linux_available_memory_when_enabled(
     assert probe[-1] == "/proc/meminfo"
 
 
+@pytest.mark.parametrize(
+    "probe_error",
+    [
+        RuntimeError("memory probe could not start immediately"),
+        FileNotFoundError("srun is unavailable"),
+    ],
+)
 async def test_query_node_resources_falls_back_to_slurm_free_memory_on_probe_error(
     monkeypatch: pytest.MonkeyPatch,
+    probe_error: OSError | RuntimeError,
 ) -> None:
     async def fake_run_command(
         args: tuple[str, ...],
@@ -1040,7 +1048,7 @@ async def test_query_node_resources_falls_back_to_slurm_free_memory_on_probe_err
                 stdout="oldlab-3|mixed|24|120000|27500|1.0|0/24/0/24\n",
                 stderr="",
             )
-        raise RuntimeError("memory probe could not start immediately")
+        raise probe_error
 
     monkeypatch.setattr(controller, "_run_command", fake_run_command)
     config = _config(
