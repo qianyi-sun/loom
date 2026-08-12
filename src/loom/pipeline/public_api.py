@@ -10,7 +10,7 @@ import re
 import unicodedata
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol
 from uuid import UUID
 
 from pydantic import AfterValidator, Field, StringConstraints, field_validator, model_validator
@@ -29,6 +29,9 @@ from loom.pipeline.spec import (
     RunBudgetV1,
 )
 from loom.pipeline.state import PipelineRunResult, PipelineRunState
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 
 def validate_idempotency_key(value: str) -> str:
@@ -291,7 +294,17 @@ class PipelineRecipeBindingResolver(Protocol):
         recipe_identity: RecipeIdentityV1,
         judge_profile_id: UUID | None,
         logical_slots: tuple[str, ...],
+        *,
+        session: AsyncSession | None = None,
     ) -> ResolvedRecipeControlBindingsV1: ...
+
+    async def persist_run_bindings(
+        self,
+        session: AsyncSession,
+        *,
+        pipeline_run_id: UUID,
+        items: ResolvedRecipeControlBindingsV1,
+    ) -> None: ...
 
 
 class AcceptanceRecipeSubmissionV1(PipelineModel):

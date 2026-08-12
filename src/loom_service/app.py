@@ -59,6 +59,7 @@ from loom_service.personal_dev_lifecycle import (
     build_personal_dev_capacity_runtime,
     personal_dev_reconcile_run_loop,
 )
+from loom_service.pipeline_control_bindings import SqlPipelineRecipeBindingResolver
 from loom_service.routes import (
     admin_audit,
     agents,
@@ -258,6 +259,9 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
 
         app.state.settings = settings
         app.state.session_factory = session_factory
+        pipeline_binding_resolver = SqlPipelineRecipeBindingResolver(session_factory)
+        app.state.pipeline_binding_resolver = pipeline_binding_resolver
+        app.state.pipeline_judge_profile_reader = pipeline_binding_resolver
         app.state.admin_secret_verifier = admin_secret_verifier
         app.state.minio_client = minio_client
         app.state.http_client = http_client

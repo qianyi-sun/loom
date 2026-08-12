@@ -20,6 +20,7 @@ from loom.db.schema import (
     PipelineBudgetLedger,
     PipelineEvent,
     PipelineRun,
+    PipelineRunControlBinding,
     PipelineRunGpuBackendSelection,
     PipelineStageRun,
 )
@@ -306,6 +307,7 @@ async def create_public_run(
             registration.identity,
             request.judge_profile_id,
             tuple(item[0] for item in logical_slots),
+            session=session,
         )
         binding_items = [item.model_dump(mode="json") for item in binding_result.items]
         if (
@@ -372,6 +374,11 @@ async def create_public_run(
         state="submitted",
     )
     session.add(run)
+    if binding_items:
+        assert binding_resolver is not None
+        await binding_resolver.persist_run_bindings(
+            session, pipeline_run_id=run.id, items=binding_result
+        )
     _add_ordinary_gpu_selection(session, run, graph)
     await session.flush()
     response = run_projection(run)
@@ -470,23 +477,19 @@ async def create_retry_run(
     if logical_slots:
         if binding_resolver is None:
             raise PipelineApiError(409, "binding_drift", "Control binding resolver is unavailable")
-        judge_profile_id = next(
+        # A full replay freezes the source Run's immutable rows.  Admin updates
+        # must not substitute a newer current version into a retry.
+        source_rows = list(
             (
-                UUID(item["object_id"])
-                for item in source.control_binding_snapshots_json
-                if item["kind"] == "judge_profile"
-            ),
-            None,
+                await session.execute(
+                    select(PipelineRunControlBinding).where(
+                        PipelineRunControlBinding.pipeline_run_id == source.id
+                    )
+                )
+            ).scalars()
         )
-        rebound = await binding_resolver.resolve(
-            team_id,
-            registration.identity,
-            judge_profile_id,
-            tuple(item[0] for item in logical_slots),
-        )
-        rebound_json = [item.model_dump(mode="json") for item in rebound.items]
-        if canonical_digest(rebound_json) != source.control_binding_snapshots_digest:
-            raise PipelineApiError(409, "binding_drift", "Control binding snapshot drifted")
+        if len(source_rows) != 2:
+            raise PipelineApiError(409, "binding_drift", "Control binding rows are incomplete")
     candidate_graph = graph.model_dump(mode="python")
     candidate_graph["budget"] = request.budget.model_dump(mode="python")
     try:
@@ -518,6 +521,25 @@ async def create_retry_run(
         retry_from_stage_run_id=stage.id,
     )
     session.add(new_run)
+    if logical_slots:
+        for frozen_binding in source_rows:
+            session.add(
+                PipelineRunControlBinding(
+                    pipeline_run_id=new_run.id,
+                    logical_name=frozen_binding.logical_name,
+                    kind=frozen_binding.kind,
+                    node_key=frozen_binding.node_key,
+                    source_object_id=frozen_binding.source_object_id,
+                    source_version=frozen_binding.source_version,
+                    snapshot_json=frozen_binding.snapshot_json,
+                    snapshot_bytes=frozen_binding.snapshot_bytes,
+                    snapshot_sha256=frozen_binding.snapshot_sha256,
+                    provider_connection_id=frozen_binding.provider_connection_id,
+                    provider_request_limit=frozen_binding.provider_request_limit,
+                    provider_cost_limit_microusd=frozen_binding.provider_cost_limit_microusd,
+                    per_call_timeout_seconds=frozen_binding.per_call_timeout_seconds,
+                )
+            )
     _add_ordinary_gpu_selection(session, new_run, graph)
     await session.flush()
     response = run_projection(new_run)
