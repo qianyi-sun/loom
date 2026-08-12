@@ -201,15 +201,20 @@ component-scoped least-access NetworkPolicies in `loom-dev`. The manager
 release image is published as `loom-capacity-manager` for native AMD64 and
 ARM64 and runs as UID/GID 65532.
 
-Release publication preserves source-accurate, immutable evidence. Both native
-archives are checked by the pinned Trivy action using image scanning, OS and
+Release publication preserves source-accurate, immutable evidence. Each native
+archive is rebuilt from the protected release commit inside the hosted
+`publish` job and is checked by Trivy v0.70.0 using image scanning, OS and
 library vulnerabilities, a `10m0s` timeout, `CRITICAL` severity, exit code 1,
-unfixed findings included, the vulnerability scanner only, and no cache. The
-signed predicate binds that complete policy and action identity. A trusted
-release rebuild binds the release head/tree/current run; reuse of a verified PR
-candidate additionally binds the resolver's candidate head/tree/run/attempt.
-Each architecture push contributes its emitted digest directly to a canonical
-post-verification record, rather than allowing a later mutable-tag lookup.
+unfixed findings included, the vulnerability scanner only, and no cache. A
+repository helper writes the fixed config and empty ignore file outside the
+checkout before each scan. The signed predicate binds the scanner identity,
+pinned action identity, complete policy-file identities, and scan report. Its
+only publication mode is `trusted-rebuild`, bound to the protected release
+head, tree, ref, and current run. PR candidate archives remain untrusted CI
+evidence only: the publisher never downloads, loads, scans as release,
+attests, or publishes those bytes. Each architecture push contributes its
+emitted digest directly to a canonical post-verification record, rather than
+allowing a later mutable-tag lookup.
 
 The manifest job accepts exactly the current image's AMD64 and ARM64 records,
 validates their release and mode identities, verifies the registry
@@ -220,11 +225,13 @@ digest. The official release SHA and branch tags move only after final
 verification succeeds. These controls publish the inert Package 5A image; they
 do not add apply, activation, runtime capacity authority, or execution.
 
-The shared `loom-dev` namespace is the infrastructure home, not another
-application subject. Production, staging, and all personal
-`loom-dev-<name>` deployments report to this one authority and share the
-operator-defined physical OLDLAB/GB10 capacity according to their tiers and
-limits.
+The Kubernetes namespace `loom-dev` is the shared infrastructure home, not the
+logical shared-development demand subject. The one authority accounts for all
+four demand classes: production; staging; shared development (the logical
+`development` subject under the `shared-development` account); and personal
+development (each `dev-<name>` subject backed by a `loom-dev-<name>` application
+namespace). All four share the operator-defined physical OLDLAB/GB10 capacity
+according to their tiers and limits.
 
 The renderer requires a digest-pinned manager image and reviewed non-nil
 authority UUID. It references, but never creates or prints, the existing

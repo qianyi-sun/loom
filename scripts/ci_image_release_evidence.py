@@ -10,7 +10,29 @@ import re
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from scripts.write_trivy_release_policy import (
+        TRIVY_CONFIG_SHA256,
+        TRIVY_IGNORE_SHA256,
+        TRIVY_SCANNER_NAME,
+        TRIVY_VERSION,
+    )
+elif __package__:
+    from scripts.write_trivy_release_policy import (
+        TRIVY_CONFIG_SHA256,
+        TRIVY_IGNORE_SHA256,
+        TRIVY_SCANNER_NAME,
+        TRIVY_VERSION,
+    )
+else:  # pragma: no cover - direct workflow script entry point
+    from write_trivy_release_policy import (
+        TRIVY_CONFIG_SHA256,
+        TRIVY_IGNORE_SHA256,
+        TRIVY_SCANNER_NAME,
+        TRIVY_VERSION,
+    )
 
 SLSA_PREDICATE_TYPE = "https://slsa.dev/provenance/v1"
 _STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
@@ -20,14 +42,10 @@ _HEX64 = re.compile(r"[0-9a-f]{64}")
 _REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _COMPONENT = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?")
 _IMAGE_NAME = re.compile(r"[a-z0-9]+(?:[._-][a-z0-9]+)*")
-_SUBJECT_NAME = re.compile(
-    r"ghcr\.io/[a-z0-9](?:[a-z0-9-]{0,38})/[a-z0-9]+(?:[._-][a-z0-9]+)*"
-)
+_SUBJECT_NAME = re.compile(r"ghcr\.io/[a-z0-9](?:[a-z0-9-]{0,38})/[a-z0-9]+(?:[._-][a-z0-9]+)*")
 _PLATFORMS = {"amd64": "linux/amd64", "arm64": "linux/arm64"}
-_BUILD_MODES = {"trusted-rebuild", "verified-pr-candidate"}
-TRIVY_ACTION = (
-    "aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25"
-)
+_BUILD_MODES = {"trusted-rebuild"}
+TRIVY_ACTION = "aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25"
 
 
 class EvidenceError(ValueError):
@@ -155,9 +173,7 @@ def _source(common: Mapping[str, object]) -> dict[str, str]:
     }
 
 
-def _require_release_subject(
-    *, repository: str, image_name: str, subject_name: str
-) -> None:
+def _require_release_subject(*, repository: str, image_name: str, subject_name: str) -> None:
     repository = _exact(_REPOSITORY, repository, "repository")
     image_name = _exact(_IMAGE_NAME, image_name, "image name")
     subject_name = _exact(_SUBJECT_NAME, subject_name, "attestation subject name")
@@ -177,22 +193,22 @@ def _run_details(
         "builder": {"id": common["workflow_identity"]},
         "metadata": {
             "invocationId": (
-                f"https://github.com/{repository}/actions/runs/{run_id}/attempts/"
-                f"{run_attempt}"
+                f"https://github.com/{repository}/actions/runs/{run_id}/attempts/{run_attempt}"
             )
         },
         "byproducts": list(byproducts),
     }
 
 
-def _scan_policy(report_sha256: str) -> dict[str, object]:
-    report_sha256 = _exact(_HEX64, report_sha256, "scan report digest")
+def _scan_policy_parameters() -> dict[str, object]:
     return {
         "action": TRIVY_ACTION,
+        "scanner": {"name": TRIVY_SCANNER_NAME, "version": TRIVY_VERSION},
+        "config_sha256": TRIVY_CONFIG_SHA256,
+        "ignore_sha256": TRIVY_IGNORE_SHA256,
         "scan_type": "image",
         "vuln_type": ["os", "library"],
         "timeout": "10m0s",
-        "report_sha256": report_sha256,
         "severity": ["CRITICAL"],
         "exit_code": 1,
         "ignore_unfixed": False,
@@ -201,43 +217,20 @@ def _scan_policy(report_sha256: str) -> dict[str, object]:
     }
 
 
+def _scan_policy(report_sha256: str) -> dict[str, object]:
+    return {
+        **_scan_policy_parameters(),
+        "report_sha256": _exact(_HEX64, report_sha256, "scan report digest"),
+    }
+
+
 def _build(
     *,
     build_mode: str,
-    candidate_head_sha: str | None = None,
-    candidate_tree_sha: str | None = None,
-    candidate_run_id: int | None = None,
-    candidate_run_attempt: int | None = None,
 ) -> dict[str, object]:
     if build_mode not in _BUILD_MODES:
         raise EvidenceError("build mode is invalid")
-    candidate_values = (
-        candidate_head_sha,
-        candidate_tree_sha,
-        candidate_run_id,
-        candidate_run_attempt,
-    )
-    if build_mode == "trusted-rebuild":
-        if any(value is not None for value in candidate_values):
-            raise EvidenceError("candidate source is forbidden for trusted rebuild")
-        return {"mode": build_mode}
-    if any(value is None for value in candidate_values):
-        raise EvidenceError("candidate source is incomplete")
-    assert candidate_head_sha is not None
-    assert candidate_tree_sha is not None
-    assert candidate_run_id is not None
-    assert candidate_run_attempt is not None
-    return {
-        "mode": build_mode,
-        "candidate_source": {
-            "commit": _exact(_HEX40, candidate_head_sha, "candidate source commit"),
-            "tree": _exact(_HEX40, candidate_tree_sha, "candidate source tree"),
-            "run_id": _positive_integer(candidate_run_id, "candidate source run id"),
-            "run_attempt": _positive_integer(
-                candidate_run_attempt, "candidate source run attempt"
-            ),
-        },
-    }
+    return {"mode": build_mode}
 
 
 def _validated_build(value: object) -> dict[str, object]:
@@ -248,24 +241,6 @@ def _validated_build(value: object) -> dict[str, object]:
         if set(value) != {"mode"}:
             raise EvidenceError("architecture build is invalid")
         return _build(build_mode="trusted-rebuild")
-    if mode == "verified-pr-candidate":
-        if set(value) != {"mode", "candidate_source"}:
-            raise EvidenceError("architecture build is invalid")
-        candidate = value["candidate_source"]
-        if not isinstance(candidate, Mapping) or set(candidate) != {
-            "commit",
-            "tree",
-            "run_id",
-            "run_attempt",
-        }:
-            raise EvidenceError("architecture build is invalid")
-        return _build(
-            build_mode=mode,
-            candidate_head_sha=candidate["commit"],
-            candidate_tree_sha=candidate["tree"],
-            candidate_run_id=candidate["run_id"],
-            candidate_run_attempt=candidate["run_attempt"],
-        )
     raise EvidenceError("build mode is invalid")
 
 
@@ -285,10 +260,6 @@ def architecture_predicate(
     architecture: str,
     scan_report_sha256: str,
     build_mode: str,
-    candidate_head_sha: str | None = None,
-    candidate_tree_sha: str | None = None,
-    candidate_run_id: int | None = None,
-    candidate_run_attempt: int | None = None,
 ) -> dict[str, object]:
     """Return the canonical SLSA predicate for one published architecture."""
 
@@ -307,13 +278,7 @@ def architecture_predicate(
     if architecture not in _PLATFORMS or _PLATFORMS[architecture] != platform:
         raise EvidenceError("image platform is invalid")
     scan = _scan_policy(scan_report_sha256)
-    build = _build(
-        build_mode=build_mode,
-        candidate_head_sha=candidate_head_sha,
-        candidate_tree_sha=candidate_tree_sha,
-        candidate_run_id=candidate_run_id,
-        candidate_run_attempt=candidate_run_attempt,
-    )
+    build = _build(build_mode=build_mode)
     return {
         "buildDefinition": {
             "buildType": common["workflow_identity"],
@@ -364,14 +329,10 @@ def _exact_platform_map(values: Mapping[str, str], label: str) -> dict[str, str]
     return {platform: str(values[platform]) for platform in sorted(values)}
 
 
-def _exact_build_map(
-    values: Mapping[str, object], label: str
-) -> dict[str, dict[str, object]]:
+def _exact_build_map(values: Mapping[str, object], label: str) -> dict[str, dict[str, object]]:
     if not isinstance(values, Mapping) or set(values) != set(_PLATFORMS.values()):
         raise EvidenceError(f"{label} must cover exactly both native platforms")
-    return {
-        platform: _validated_build(values[platform]) for platform in sorted(values)
-    }
+    return {platform: _validated_build(values[platform]) for platform in sorted(values)}
 
 
 def manifest_predicate(
@@ -404,15 +365,9 @@ def manifest_predicate(
         dockerfile=dockerfile,
         build_context=build_context,
     )
-    architecture_digests = _exact_platform_map(
-        architecture_digests, "architecture digests"
-    )
-    scan_report_digests = _exact_platform_map(
-        scan_report_digests, "scan report digests"
-    )
-    architecture_builds = _exact_build_map(
-        architecture_builds, "architecture builds"
-    )
+    architecture_digests = _exact_platform_map(architecture_digests, "architecture digests")
+    scan_report_digests = _exact_platform_map(scan_report_digests, "scan report digests")
+    architecture_builds = _exact_build_map(architecture_builds, "architecture builds")
     for digest in architecture_digests.values():
         if not digest.startswith("sha256:") or _HEX64.fullmatch(digest[7:]) is None:
             raise EvidenceError("architecture digest is invalid")
@@ -433,16 +388,8 @@ def manifest_predicate(
                 "architecture_subjects": architecture_digests,
                 "architecture_builds": architecture_builds,
                 "scan": {
-                    "action": TRIVY_ACTION,
-                    "scan_type": "image",
-                    "vuln_type": ["os", "library"],
-                    "timeout": "10m0s",
+                    **_scan_policy_parameters(),
                     "report_sha256": scan_report_digests,
-                    "severity": ["CRITICAL"],
-                    "exit_code": 1,
-                    "ignore_unfixed": False,
-                    "scanners": ["vuln"],
-                    "cache": False,
                 },
             },
             "internalParameters": {
@@ -500,9 +447,7 @@ def _matching_predicates(
     subject_name = _exact(_SUBJECT_NAME, subject_name, "attestation subject name")
     if not subject_digest.startswith("sha256:") or _HEX64.fullmatch(subject_digest[7:]) is None:
         raise EvidenceError("attestation subject digest is invalid")
-    expected_subject = [
-        {"name": subject_name, "digest": {"sha256": subject_digest[7:]}}
-    ]
+    expected_subject = [{"name": subject_name, "digest": {"sha256": subject_digest[7:]}}]
     predicates: list[Mapping[str, object]] = []
     for statement in _verified_statements(payload):
         if (
@@ -534,10 +479,6 @@ def verify_architecture_attestation(
     subject_digest: str,
     build_mode: str,
     scan_report_sha256: str | None = None,
-    candidate_head_sha: str | None = None,
-    candidate_tree_sha: str | None = None,
-    candidate_run_id: int | None = None,
-    candidate_run_attempt: int | None = None,
 ) -> str:
     """Require exactly one canonical verified architecture attestation."""
 
@@ -567,10 +508,6 @@ def verify_architecture_attestation(
                 architecture=architecture,
                 scan_report_sha256=observed_scan,
                 build_mode=build_mode,
-                candidate_head_sha=candidate_head_sha,
-                candidate_tree_sha=candidate_tree_sha,
-                candidate_run_id=candidate_run_id,
-                candidate_run_attempt=candidate_run_attempt,
             )
         except (EvidenceError, KeyError, TypeError):
             continue
@@ -655,10 +592,6 @@ def architecture_record(
     subject_digest: str,
     scan_report_sha256: str,
     build_mode: str,
-    candidate_head_sha: str | None = None,
-    candidate_tree_sha: str | None = None,
-    candidate_run_id: int | None = None,
-    candidate_run_attempt: int | None = None,
 ) -> dict[str, object]:
     """Return the canonical immutable handoff record for one architecture."""
 
@@ -683,13 +616,7 @@ def architecture_record(
     if not subject_digest.startswith("sha256:") or _HEX64.fullmatch(subject_digest[7:]) is None:
         raise EvidenceError("record subject digest is invalid")
     scan = _scan_policy(scan_report_sha256)
-    build = _build(
-        build_mode=build_mode,
-        candidate_head_sha=candidate_head_sha,
-        candidate_tree_sha=candidate_tree_sha,
-        candidate_run_id=candidate_run_id,
-        candidate_run_attempt=candidate_run_attempt,
-    )
+    build = _build(build_mode=build_mode)
     return {
         "schema_version": 1,
         "subject": {"name": subject_name, "digest": subject_digest},
@@ -740,16 +667,6 @@ def validate_architecture_record(
         build = _validated_build(payload["build"])
         if not isinstance(subject, Mapping) or not isinstance(scan, Mapping):
             raise EvidenceError("canonical architecture record is invalid")
-        candidate = build.get("candidate_source")
-        candidate_head_sha: str | None = None
-        candidate_tree_sha: str | None = None
-        candidate_run_id: int | None = None
-        candidate_run_attempt: int | None = None
-        if isinstance(candidate, Mapping):
-            candidate_head_sha = cast(str, candidate["commit"])
-            candidate_tree_sha = cast(str, candidate["tree"])
-            candidate_run_id = cast(int, candidate["run_id"])
-            candidate_run_attempt = cast(int, candidate["run_attempt"])
         expected = architecture_record(
             repository=repository,
             ref_name=ref_name,
@@ -767,10 +684,6 @@ def validate_architecture_record(
             subject_digest=subject["digest"],
             scan_report_sha256=scan["report_sha256"],
             build_mode=cast(str, build["mode"]),
-            candidate_head_sha=candidate_head_sha,
-            candidate_tree_sha=candidate_tree_sha,
-            candidate_run_id=candidate_run_id,
-            candidate_run_attempt=candidate_run_attempt,
         )
     except (KeyError, TypeError):
         raise EvidenceError("canonical architecture record is invalid") from None
@@ -800,18 +713,15 @@ def validate_architecture_records(
     if {entry.name for entry in directories} != expected_directories or any(
         not entry.is_dir() or entry.is_symlink() for entry in directories
     ):
-        raise EvidenceError(
-            "record directory must contain exactly the expected architecture files"
-        )
+        raise EvidenceError("record directory must contain exactly the expected architecture files")
     architectures: dict[str, object] = {}
     subject_names: set[str] = set()
     for architecture, platform in sorted(_PLATFORMS.items()):
         directory = records_dir / architecture
         expected_name = f"{image}-{architecture}.json"
         entries = list(directory.iterdir())
-        if (
-            {entry.name for entry in entries} != {expected_name}
-            or any(not entry.is_file() or entry.is_symlink() for entry in entries)
+        if {entry.name for entry in entries} != {expected_name} or any(
+            not entry.is_file() or entry.is_symlink() for entry in entries
         ):
             raise EvidenceError(
                 "record directory must contain exactly the expected architecture files"
@@ -943,23 +853,10 @@ def _platform_build_map(values: Sequence[str]) -> dict[str, object]:
 
 def _build_mode_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--build-mode", required=True)
-    parser.add_argument("--candidate-head-sha")
-    parser.add_argument("--candidate-tree-sha")
-    parser.add_argument("--candidate-run-id", type=int)
-    parser.add_argument("--candidate-run-attempt", type=int)
 
 
 def _build_namespace(arguments: argparse.Namespace) -> dict[str, Any]:
-    return {
-        key: getattr(arguments, key)
-        for key in (
-            "build_mode",
-            "candidate_head_sha",
-            "candidate_tree_sha",
-            "candidate_run_id",
-            "candidate_run_attempt",
-        )
-    }
+    return {"build_mode": arguments.build_mode}
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -1020,9 +917,7 @@ def main() -> None:
     validate_record.add_argument("--output", type=Path)
     validate_manifest = operations.add_parser("validate-manifest")
     validate_manifest.add_argument("--manifest", type=Path, required=True)
-    validate_manifest.add_argument(
-        "--architecture-digest", action="append", required=True
-    )
+    validate_manifest.add_argument("--architecture-digest", action="append", required=True)
     validate_manifest.add_argument("--output", type=Path)
     arguments = parser.parse_args()
     try:
@@ -1096,9 +991,7 @@ def main() -> None:
             architecture_digests = _platform_map(
                 arguments.architecture_digest, "architecture digest"
             )
-            scan_report_digests = _platform_map(
-                arguments.scan_report_digest, "scan report digest"
-            )
+            scan_report_digests = _platform_map(arguments.scan_report_digest, "scan report digest")
             architecture_builds = _platform_build_map(arguments.architecture_build)
             if arguments.operation == "predicate-manifest":
                 if arguments.output is None:

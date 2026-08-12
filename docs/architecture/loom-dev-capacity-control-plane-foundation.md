@@ -246,23 +246,29 @@ fixed executable and fixed credential paths in the manager container.
 runtime and `capacity_migrations`. It runs the manager as UID/GID 65532 and is
 registered as the `loom-capacity-manager` release image in the typed component
 ownership manifest. Existing image planning, native AMD64/ARM64 builds,
-candidate preservation, and trusted push publication are therefore inherited
-without a new workflow-owned image allowlist. Every native build produces a
-Docker archive and passes the pinned Trivy action with scan type `image`, OS and
+untrusted PR candidate evidence, and trusted push publication are therefore
+inherited without a new workflow-owned image allowlist. Official publication
+never reuses candidate bytes: each hosted `publish` architecture rebuilds its
+Docker archive from the protected release commit, scans that source-fresh
+archive, and only then loads and pushes it. PR candidate archives may be
+retained for untrusted CI evidence, but the publisher never downloads, loads,
+scans as release, attests, or publishes them. Both untrusted validation and the
+trusted release scan use pinned Trivy v0.70.0 with scan type `image`, OS and
 library vulnerability types, a `10m0s` timeout, `CRITICAL` severity, exit code
-1, unfixed findings included, the `vuln` scanner only, and caching disabled. The
-trusted publisher rescans that exact archive under the same policy before
-loading and pushing it. It captures the one digest emitted by that push and
+1, unfixed findings included, the `vuln` scanner only, and caching disabled.
+The trusted scan selects fixed config and empty-ignore files generated outside
+the checkout. The publisher captures the one digest emitted by the push and
 uses the immutable subject only for registry validation, SLSA v1 attestation,
 and strict verification; it never resolves the mutable architecture build tag.
 
-The predicate binds the complete Trivy policy and pinned action identity,
-scan-report digest, release commit/tree/ref/run/attempt, Dockerfile, context,
-and platform. `trusted-rebuild` binds the archive built in the release run;
-`verified-pr-candidate` additionally binds the resolver-provided candidate
-head/tree/run/attempt. Only after architecture attestation verification does
-the publisher upload one canonical immutable record containing those source
-identities, mode, subject name/digest, and scan digest. The manifest publisher
+The predicate binds the Trivy scanner name/version, controlled config and
+empty-ignore hashes, pinned action identity, scan-report digest, release
+commit/tree/ref/run/attempt, Dockerfile, context, and platform. Official
+records accept only `trusted-rebuild`, binding the archive built in the current
+release run; no candidate artifact identity enters the predicate or record.
+Only after architecture attestation verification does the publisher upload one
+canonical immutable record containing those source identities, mode, subject
+name/digest, and scan digest. The manifest publisher
 downloads exactly the AMD64 and ARM64 records for the current image and run,
 validates the two-record set fail-closed, re-verifies each recorded immutable
 subject, and joins only those two digests. It creates only a temporary

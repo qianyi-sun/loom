@@ -1,0 +1,1 @@
+"""Capacity management schema revisions."""

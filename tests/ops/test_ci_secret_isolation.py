@@ -106,7 +106,6 @@ def test_images_publish_authority_is_push_only_on_trusted_branches() -> None:
     }
     assert write_capable_jobs == {"publish", "publish-manifest"}
     assert publish["permissions"] == {
-        "actions": "read",
         "attestations": "write",
         "contents": "read",
         "id-token": "write",
@@ -114,6 +113,7 @@ def test_images_publish_authority_is_push_only_on_trusted_branches() -> None:
     }
     manifest = workflow["jobs"]["publish-manifest"]
     assert manifest["permissions"] == {
+        "actions": "read",
         "attestations": "write",
         "contents": "read",
         "id-token": "write",
@@ -124,8 +124,7 @@ def test_images_publish_authority_is_push_only_on_trusted_branches() -> None:
         "(github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && "
         "needs.plan.outputs.gate_mode == 'full' && "
         "needs.plan.outputs.required == 'true' && "
-        "needs.plan.outputs.images != '[]' && "
-        "needs.resolve-candidate.result == 'success'"
+        "needs.plan.outputs.images != '[]'"
     )
     assert _checkout_steps(publish)
     assert all(
@@ -164,8 +163,8 @@ def test_images_publish_authority_is_push_only_on_trusted_branches() -> None:
     assert "docker buildx imagetools create" in manifest_script
     assert '"${image}@${amd64_digest}"' in manifest_script
     assert '"${image}@${arm64_digest}"' in manifest_script
-    assert '"linux/amd64": os.environ["AMD64_DIGEST"]' in manifest_script
-    assert '"linux/arm64": os.environ["ARM64_DIGEST"]' in manifest_script
+    assert '--architecture-digest "linux/amd64=${AMD64_DIGEST}"' in manifest_script
+    assert '--architecture-digest "linux/arm64=${ARM64_DIGEST}"' in manifest_script
     assert "LOOM_CI_IMAGE_RUNS_ON" not in str(publish)
     assert "LOOM_CI_IMAGE_RUNS_ON" not in str(manifest)
 
@@ -190,7 +189,6 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
         "image-route",
         "build",
         "candidate-index",
-        "resolve-candidate",
         "publish",
         "publish-manifest",
         "images-gate",
@@ -209,13 +207,13 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
     assert "environment" not in jobs["image-route"]
 
     assert jobs["publish"]["permissions"] == {
-        "actions": "read",
         "attestations": "write",
         "contents": "read",
         "id-token": "write",
         "packages": "write",
     }
     assert jobs["publish-manifest"]["permissions"] == {
+        "actions": "read",
         "attestations": "write",
         "contents": "read",
         "id-token": "write",
@@ -223,12 +221,6 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
     }
     assert "environment" not in jobs["publish"]
     assert "environment" not in jobs["publish-manifest"]
-    assert jobs["resolve-candidate"]["permissions"] == {
-        "actions": "read",
-        "contents": "read",
-        "pull-requests": "read",
-    }
-    assert all(value == "read" for value in jobs["resolve-candidate"]["permissions"].values())
 
 
 def test_images_secret_and_cache_authority_is_exact() -> None:
@@ -399,12 +391,6 @@ def test_image_input_validation_rejects_shell_metacharacters_and_ambiguous_value
         "BASE_SHA": "b" * 40,
         "REPOSITORY_OWNER": "qianyi-sun",
         "GHCR_ACTOR": "qianyi-sun",
-        "CANDIDATE_AVAILABLE": "false",
-        "CANDIDATE_ARTIFACT": "",
-        "CANDIDATE_SOURCE_HEAD": "",
-        "CANDIDATE_SOURCE_RUN": "",
-        "ARCHIVE_SHA256": "",
-        "ARCHIVE_SIZE": "0",
         **_native_arch_env(),
     }
     env[field] = payload
@@ -477,12 +463,6 @@ def test_image_input_validation_accepts_actual_github_context_shapes(
             "BASE_SHA": "b" * 40,
             "REPOSITORY_OWNER": "qianyi-sun",
             "GHCR_ACTOR": "github-actions[bot]",
-            "CANDIDATE_AVAILABLE": "false",
-            "CANDIDATE_ARTIFACT": "",
-            "CANDIDATE_SOURCE_HEAD": "",
-            "CANDIDATE_SOURCE_RUN": "",
-            "ARCHIVE_SHA256": "",
-            "ARCHIVE_SIZE": "0",
             **_native_arch_env(),
         },
     )

@@ -72,19 +72,24 @@ in `config/ci-upgrade-policy.json`. Workflow routing is implemented in
 ## Release image evidence
 
 Image routing remains separate from release authority. The untrusted build and
-trusted publication scans both use the pinned Trivy action with `scan-type:
-image`, `vuln-type: os,library`, `timeout: 10m0s`, `severity: CRITICAL`,
-`exit-code: '1'`, `ignore-unfixed: 'false'`, `scanners: vuln`, and `cache:
-'false'`. The signed release predicate binds every one of those fields, the
-pinned action identity, and the resulting report digest.
+trusted publication scans both use pinned Trivy v0.70.0 with `scan-type: image`,
+`vuln-type: os,library`, `timeout: 10m0s`, `severity: CRITICAL`, `exit-code:
+'1'`, `ignore-unfixed: 'false'`, `scanners: vuln`, and `cache: 'false'`. Before
+each trusted scan, a repository helper writes the fixed config and empty ignore
+file outside the checkout. The signed release predicate binds every reviewed
+field, scanner name/version, controlled-file hashes, pinned action identity,
+and resulting report digest.
 
-The publisher captures the single digest emitted by each architecture push.
-Its `trusted-rebuild` evidence binds the release head/tree/current run, while
-`verified-pr-candidate` also binds the exact resolver head/tree/run/attempt.
-After immutable-digest attestation verification, each architecture uploads one
-uniquely named canonical record. The manifest job downloads and accepts exactly
-the current image's AMD64 and ARM64 records, verifies their recorded registry
-subjects, and joins only their immutable digests.
+The hosted publisher rebuilds every architecture archive from the protected
+release commit and captures the single digest emitted by each architecture
+push. Official evidence accepts only `trusted-rebuild` and binds the release
+head, tree, ref, and current run. PR candidate archives remain untrusted CI
+evidence only and are never downloaded, loaded, scanned as release, attested,
+or published by the publisher. After immutable-digest attestation verification,
+each architecture uploads one uniquely named canonical record. The manifest job
+downloads and accepts exactly the current image's AMD64 and ARM64 records,
+verifies their recorded registry subjects, and joins only their immutable
+digests.
 
 Manifest creation writes only the temporary `manifest-${HEAD_SHA}` tag and
 captures the creation digest directly. Registry validation and final

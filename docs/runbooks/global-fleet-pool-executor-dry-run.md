@@ -8,9 +8,12 @@ entry point, or Slurm mutation surface.
 
 Do not install a second global manager or one executor per development
 environment. The single manager runs in the shared `loom-dev` infrastructure
-namespace and accounts for production, staging, and every personal
-`loom-dev-<name>` application subject together. OLDLAB and GB10 each have
-exactly one controller-local executor incarnation and journal.
+namespace. That Kubernetes namespace is not the logical shared-development
+demand subject. The manager accounts for all four demand classes together:
+production; staging; shared development (the logical `development` subject);
+and personal development (each `dev-<name>` subject backed by a
+`loom-dev-<name>` application namespace). OLDLAB and GB10 each have exactly one
+controller-local executor incarnation and journal.
 
 ## Render and status evidence
 

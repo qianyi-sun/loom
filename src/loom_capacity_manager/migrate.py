@@ -12,9 +12,23 @@ from uuid import UUID
 
 from alembic import command
 from alembic.config import Config as AlembicConfig
-from sqlalchemy import Engine, MetaData, RowMapping, Table, create_engine, inspect, select, update
+from sqlalchemy import (
+    Connection,
+    Engine,
+    MetaData,
+    RowMapping,
+    Table,
+    create_engine,
+    inspect,
+    select,
+    text,
+    update,
+)
 
 from loom_capacity_manager.config import read_owner_only_secret
+from loom_capacity_manager.migration_resources import (
+    resolve_capacity_migration_resources,
+)
 from loom_capacity_manager.models import CapacityAuditEvent, CapacityAuthorityState
 from loom_capacity_manager.postgres_timeouts import capacity_migration_connect_args
 
@@ -27,12 +41,16 @@ _AUTHORITY_MARKER_ACTOR_KIND = "migration"
 _AUTHORITY_MARKER_ACTOR_ID = "capacity-authority-bootstrap"
 _AUTHORITY_SEED_EVENT = "authority_incarnation_seeded"
 _AUTHORITY_BOUND_EVENT = "authority_incarnation_bound"
-_RESERVED_AUTHORITY_EVENTS = frozenset(
-    {_AUTHORITY_SEED_EVENT, _AUTHORITY_BOUND_EVENT}
-)
+_RESERVED_AUTHORITY_EVENTS = frozenset({_AUTHORITY_SEED_EVENT, _AUTHORITY_BOUND_EVENT})
 _AUTHORITY_EVENT_STATES = {
     _AUTHORITY_SEED_EVENT: "migration-generated-seed",
     _AUTHORITY_BOUND_EVENT: "reviewed-bootstrap-bound",
+}
+_MIGRATION_ADVISORY_LOCK_NAMESPACE = 1280266061  # ASCII "LOOM"
+_MIGRATION_ADVISORY_LOCK_RESOURCE = 1128353857  # ASCII "CAPA"
+_MIGRATION_ADVISORY_LOCK_PARAMETERS = {
+    "namespace": _MIGRATION_ADVISORY_LOCK_NAMESPACE,
+    "resource": _MIGRATION_ADVISORY_LOCK_RESOURCE,
 }
 
 
@@ -103,10 +121,94 @@ def _non_nil_uuid_argument(value: str) -> UUID:
             "expected capacity authority incarnation must be a UUID"
         ) from exc
     if expected.int == 0:
-        raise argparse.ArgumentTypeError(
-            "expected capacity authority incarnation must be non-nil"
-        )
+        raise argparse.ArgumentTypeError("expected capacity authority incarnation must be non-nil")
     return expected
+
+
+def _bind_fresh_authority_connection(
+    connection: Connection,
+    expected: UUID,
+) -> None:
+    authority_table = cast(Table, CapacityAuthorityState.__table__)
+    audit_table = cast(Table, CapacityAuditEvent.__table__)
+    authority = (
+        connection.execute(
+            select(authority_table).where(authority_table.c.singleton_id == 1).with_for_update()
+        )
+        .mappings()
+        .one()
+    )
+    reserved_rows = (
+        connection.execute(
+            select(
+                audit_table.c.id,
+                audit_table.c.actor_kind,
+                audit_table.c.actor_id,
+                audit_table.c.event_kind,
+                audit_table.c.object_binding,
+                audit_table.c.detail,
+            )
+            .where(audit_table.c.event_kind.in_(_RESERVED_AUTHORITY_EVENTS))
+            .order_by(audit_table.c.id)
+        )
+        .mappings()
+        .all()
+    )
+    markers = _validated_reserved_markers(reserved_rows)
+    seed_marker = markers.get(_AUTHORITY_SEED_EVENT)
+    bound_marker = markers.get(_AUTHORITY_BOUND_EVENT)
+    if seed_marker is not None and bound_marker is not None and seed_marker[1] >= bound_marker[1]:
+        raise CapacityAuthorityBootstrapError(
+            "capacity authority seed marker must precede binding marker"
+        )
+    current = authority["authority_incarnation"]
+    if bound_marker is not None and bound_marker[0] != current:
+        raise CapacityAuthorityBootstrapError(
+            "capacity authority binding marker conflicts with its state"
+        )
+    if bound_marker is None and seed_marker is not None and seed_marker[0] != current:
+        raise CapacityAuthorityBootstrapError(
+            "capacity authority seed marker conflicts with its state"
+        )
+    binding_marker = _authority_marker(_AUTHORITY_BOUND_EVENT, expected)
+    if authority["authority_incarnation"] == expected:
+        if bound_marker is None:
+            connection.execute(audit_table.insert().values(**binding_marker))
+        return
+    if bound_marker is not None or seed_marker is None or seed_marker[0] != current:
+        raise CapacityAuthorityBootstrapError(
+            "capacity authority UUID is not the migration-generated seed"
+        )
+    if (
+        authority["writer_epoch"] != 0
+        or authority["recovery_state"] != "shadow"
+        or authority["increase_freeze"] is not True
+        or authority["executable_new_capacity_ceiling"] != 0
+        or authority["global_pending_slot_ceiling"] != 0
+        or authority["global_pending_job_ceiling"] != 0
+        or authority["global_submission_rate_ceiling"] != 0
+    ):
+        raise CapacityAuthorityBootstrapError(
+            "capacity authority database is not an unused frozen shadow"
+        )
+    table_names = sorted(
+        name
+        for name in inspect(connection).get_table_names()
+        if name.startswith("capacity_") and name != authority_table.name
+    )
+    for table_name in table_names:
+        table = Table(table_name, MetaData(), autoload_with=connection)
+        statement = select(1).select_from(table)
+        if table_name == audit_table.name:
+            statement = statement.where(table.c.id != seed_marker[1])
+        if connection.execute(statement.limit(1)).first() is not None:
+            raise CapacityAuthorityBootstrapError("capacity authority database is not empty")
+    connection.execute(
+        update(authority_table)
+        .where(authority_table.c.singleton_id == 1)
+        .values(authority_incarnation=expected)
+    )
+    connection.execute(audit_table.insert().values(**binding_marker))
 
 
 def bind_fresh_authority(engine: Engine, expected: UUID) -> None:
@@ -115,96 +217,9 @@ def bind_fresh_authority(engine: Engine, expected: UUID) -> None:
     if not isinstance(engine, Engine):
         raise TypeError("capacity authority bootstrap requires a synchronous engine")
     _validate_expected_authority(expected)
-    authority_table = cast(Table, CapacityAuthorityState.__table__)
-    audit_table = cast(Table, CapacityAuditEvent.__table__)
     try:
         with engine.begin() as connection:
-            authority = (
-                connection.execute(
-                    select(authority_table)
-                    .where(authority_table.c.singleton_id == 1)
-                    .with_for_update()
-                )
-                .mappings()
-                .one()
-            )
-            reserved_rows = (
-                connection.execute(
-                    select(
-                        audit_table.c.id,
-                        audit_table.c.actor_kind,
-                        audit_table.c.actor_id,
-                        audit_table.c.event_kind,
-                        audit_table.c.object_binding,
-                        audit_table.c.detail,
-                    )
-                    .where(audit_table.c.event_kind.in_(_RESERVED_AUTHORITY_EVENTS))
-                    .order_by(audit_table.c.id)
-                )
-                .mappings()
-                .all()
-            )
-            markers = _validated_reserved_markers(reserved_rows)
-            seed_marker = markers.get(_AUTHORITY_SEED_EVENT)
-            bound_marker = markers.get(_AUTHORITY_BOUND_EVENT)
-            if (
-                seed_marker is not None
-                and bound_marker is not None
-                and seed_marker[1] >= bound_marker[1]
-            ):
-                raise CapacityAuthorityBootstrapError(
-                    "capacity authority seed marker must precede binding marker"
-                )
-            current = authority["authority_incarnation"]
-            if bound_marker is not None and bound_marker[0] != current:
-                raise CapacityAuthorityBootstrapError(
-                    "capacity authority binding marker conflicts with its state"
-                )
-            if bound_marker is None and seed_marker is not None and seed_marker[0] != current:
-                raise CapacityAuthorityBootstrapError(
-                    "capacity authority seed marker conflicts with its state"
-                )
-            binding_marker = _authority_marker(_AUTHORITY_BOUND_EVENT, expected)
-            if authority["authority_incarnation"] == expected:
-                if bound_marker is None:
-                    connection.execute(audit_table.insert().values(**binding_marker))
-                return
-            if bound_marker is not None or seed_marker is None or seed_marker[0] != current:
-                raise CapacityAuthorityBootstrapError(
-                    "capacity authority UUID is not the migration-generated seed"
-                )
-            if (
-                authority["writer_epoch"] != 0
-                or authority["recovery_state"] != "shadow"
-                or authority["increase_freeze"] is not True
-                or authority["executable_new_capacity_ceiling"] != 0
-                or authority["global_pending_slot_ceiling"] != 0
-                or authority["global_pending_job_ceiling"] != 0
-                or authority["global_submission_rate_ceiling"] != 0
-            ):
-                raise CapacityAuthorityBootstrapError(
-                    "capacity authority database is not an unused frozen shadow"
-                )
-            table_names = sorted(
-                name
-                for name in inspect(connection).get_table_names()
-                if name.startswith("capacity_") and name != authority_table.name
-            )
-            for table_name in table_names:
-                table = Table(table_name, MetaData(), autoload_with=connection)
-                statement = select(1).select_from(table)
-                if table_name == audit_table.name:
-                    statement = statement.where(table.c.id != seed_marker[1])
-                if connection.execute(statement.limit(1)).first() is not None:
-                    raise CapacityAuthorityBootstrapError(
-                        "capacity authority database is not empty"
-                    )
-            connection.execute(
-                update(authority_table)
-                .where(authority_table.c.singleton_id == 1)
-                .values(authority_incarnation=expected)
-            )
-            connection.execute(audit_table.insert().values(**binding_marker))
+            _bind_fresh_authority_connection(connection, expected)
     except CapacityAuthorityBootstrapError:
         raise
     except Exception as exc:
@@ -223,38 +238,85 @@ def migrate_capacity_database(
 
     _validate_expected_authority(expected)
     database_url = read_owner_only_secret(db_url_file)
-    config_path = alembic_ini or Path(__file__).resolve().parents[2] / "capacity_migrations/alembic.ini"
-    if not config_path.is_file():
-        raise CapacityAuthorityBootstrapError("capacity migration configuration is missing")
-    previous_url = os.environ.get("LOOM_CAPACITY_DB_URL")
     try:
-        os.environ["LOOM_CAPACITY_DB_URL"] = database_url
-        config = AlembicConfig(str(config_path))
-        config.set_main_option("script_location", str(config_path.parent))
-        command.upgrade(config, "head")
-    except Exception as exc:
-        raise CapacityAuthorityBootstrapError("capacity schema migration failed") from exc
-    finally:
-        if previous_url is None:
-            os.environ.pop("LOOM_CAPACITY_DB_URL", None)
-        else:
-            os.environ["LOOM_CAPACITY_DB_URL"] = previous_url
-
+        resources = resolve_capacity_migration_resources(alembic_ini)
+    except RuntimeError as exc:
+        raise CapacityAuthorityBootstrapError(
+            "capacity migration configuration is missing"
+        ) from exc
     engine = create_engine(
         database_url,
         isolation_level="SERIALIZABLE",
         connect_args=capacity_migration_connect_args(),
     )
+    connection: Connection | None = None
+    lock_acquired = False
     try:
-        bind_fresh_authority(engine, expected)
+        try:
+            connection = engine.connect()
+            connection.execute(
+                text("SELECT pg_advisory_lock(:namespace, :resource)"),
+                _MIGRATION_ADVISORY_LOCK_PARAMETERS,
+            )
+            lock_acquired = True
+            connection.commit()
+        except Exception as exc:
+            raise CapacityAuthorityBootstrapError(
+                "capacity schema migration lock acquisition failed"
+            ) from exc
+
+        previous_url = os.environ.get("LOOM_CAPACITY_DB_URL")
+        try:
+            os.environ["LOOM_CAPACITY_DB_URL"] = database_url
+            config = AlembicConfig(str(resources.config))
+            config.set_main_option("script_location", str(resources.scripts))
+            config.attributes["connection"] = connection
+            command.upgrade(config, "head")
+        except Exception as exc:
+            raise CapacityAuthorityBootstrapError("capacity schema migration failed") from exc
+        finally:
+            if previous_url is None:
+                os.environ.pop("LOOM_CAPACITY_DB_URL", None)
+            else:
+                os.environ["LOOM_CAPACITY_DB_URL"] = previous_url
+
+        try:
+            with connection.begin():
+                _bind_fresh_authority_connection(connection, expected)
+        except CapacityAuthorityBootstrapError:
+            raise
+        except Exception as exc:
+            raise CapacityAuthorityBootstrapError(
+                "capacity authority bootstrap could not verify the management database"
+            ) from exc
     finally:
-        engine.dispose()
+        try:
+            if connection is not None:
+                if connection.in_transaction():
+                    connection.rollback()
+                if lock_acquired:
+                    try:
+                        unlocked = connection.execute(
+                            text("SELECT pg_advisory_unlock(:namespace, :resource)"),
+                            _MIGRATION_ADVISORY_LOCK_PARAMETERS,
+                        ).scalar_one()
+                        if unlocked is not True:
+                            raise CapacityAuthorityBootstrapError(
+                                "capacity migration advisory lock was not held"
+                            )
+                        connection.commit()
+                    except Exception:
+                        if connection.in_transaction():
+                            connection.rollback()
+                        raise
+        finally:
+            if connection is not None:
+                connection.close()
+            engine.dispose()
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Migrate a new frozen global capacity authority"
-    )
+    parser = argparse.ArgumentParser(description="Migrate a new frozen global capacity authority")
     parser.add_argument("--db-url-file", type=Path, required=True)
     parser.add_argument(
         "--expected-authority-incarnation",

@@ -139,14 +139,16 @@ def test_capacity_schema_has_independent_revision_table(
         environment_engine.dispose()
 
 
-async def test_capacity_schema_error_never_names_environment_migrations(
+async def test_capacity_schema_error_uses_installed_capacity_migration_command(
     empty_capacity_engine: AsyncEngine,
 ) -> None:
     with pytest.raises(CapacitySchemaNotAtHeadError) as caught:
         await assert_capacity_schema_at_head(empty_capacity_engine)
     message = str(caught.value)
-    assert "capacity_migrations/alembic.ini" in message
-    assert "migrations/alembic.ini" not in message.replace("capacity_migrations/alembic.ini", "")
+    assert "python -m loom_capacity_manager.migrate" in message
+    assert "--db-url-file <owner-only-database-url-file>" in message
+    assert "--expected-authority-incarnation <reviewed-non-nil-uuid>" in message
+    assert "capacity_migrations/alembic.ini" not in message
 
 
 async def test_capacity_schema_startup_returns_numeric_head(
@@ -292,17 +294,19 @@ def test_capacity_migration_downgrades_and_reupgrades(
                     CapacityAuthorityState.singleton_id == 1
                 )
             ).scalar_one()
-            seeds = connection.execute(
-                select(CapacityAuditEvent).where(
-                    CapacityAuditEvent.event_kind == "authority_incarnation_seeded"
+            seeds = (
+                connection.execute(
+                    select(CapacityAuditEvent).where(
+                        CapacityAuditEvent.event_kind == "authority_incarnation_seeded"
+                    )
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
             assert len(seeds) == 1
             assert seeds[0]["actor_kind"] == "migration"
             assert seeds[0]["actor_id"] == "capacity-authority-bootstrap"
-            assert seeds[0]["object_binding"] == {
-                "authority_incarnation": str(authority)
-            }
+            assert seeds[0]["object_binding"] == {"authority_incarnation": str(authority)}
             assert seeds[0]["detail"] == {"state": "migration-generated-seed"}
     finally:
         engine.dispose()
@@ -325,8 +329,7 @@ def test_capacity_alembic_connection_enforces_fixed_postgres_timeouts(
 ) -> None:
     root = Path(__file__).resolve().parents[2]
     encoded_url = (
-        f"{capacity_postgres_url}?application_name=capacity%40migration"
-        "&connect_timeout=99"
+        f"{capacity_postgres_url}?application_name=capacity%40migration&connect_timeout=99"
     )
     cfg = AlembicConfig(str(root / "capacity_migrations" / "alembic.ini"))
     cfg.set_main_option("script_location", str(root / "capacity_migrations"))

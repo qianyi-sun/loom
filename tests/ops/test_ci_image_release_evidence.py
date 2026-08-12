@@ -24,9 +24,7 @@ _AMD64_DIGEST = "e" * 64
 _ARM64_DIGEST = "f" * 64
 _CANDIDATE_HEAD = "1" * 40
 _CANDIDATE_TREE = "2" * 40
-_TRIVY_ACTION = (
-    "aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25"
-)
+_TRIVY_ACTION = "aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25"
 _SCRIPT = Path(__file__).resolve().parents[2] / "scripts/ci_image_release_evidence.py"
 
 
@@ -110,6 +108,9 @@ def test_architecture_predicate_binds_source_build_scan_and_invocation() -> None
     assert external["build"] == {"mode": "trusted-rebuild"}
     assert external["scan"] == {
         "action": _TRIVY_ACTION,
+        "scanner": {"name": "Trivy", "version": "v0.70.0"},
+        "config_sha256": ("11c249a9a4b4c3b45c521d424a83a619ff25e4e02c6b205ea38a946d376052bf"),
+        "ignore_sha256": ("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
         "scan_type": "image",
         "vuln_type": ["os", "library"],
         "timeout": "10m0s",
@@ -121,9 +122,42 @@ def test_architecture_predicate_binds_source_build_scan_and_invocation() -> None
         "report_sha256": _SCAN,
     }
     run_details: Any = predicate["runDetails"]
-    assert run_details["metadata"]["invocationId"].endswith(
-        "/actions/runs/123/attempts/2"
-    )
+    assert run_details["metadata"]["invocationId"].endswith("/actions/runs/123/attempts/2")
+
+
+def test_official_architecture_evidence_rejects_pr_candidate_bytes() -> None:
+    with pytest.raises(EvidenceError, match="build mode"):
+        architecture_predicate(
+            **_common(),
+            platform="linux/arm64",
+            architecture="arm64",
+            scan_report_sha256=_SCAN,
+            build_mode="verified-pr-candidate",
+        )
+
+
+def test_official_manifest_evidence_rejects_pr_candidate_build_identity() -> None:
+    with pytest.raises(EvidenceError, match="build mode"):
+        manifest_predicate(
+            **_common(),
+            architecture_digests={
+                "linux/amd64": f"sha256:{_AMD64_DIGEST}",
+                "linux/arm64": f"sha256:{_ARM64_DIGEST}",
+            },
+            scan_report_digests={"linux/amd64": _SCAN, "linux/arm64": "1" * 64},
+            architecture_builds={
+                "linux/amd64": {"mode": "trusted-rebuild"},
+                "linux/arm64": {
+                    "mode": "verified-pr-candidate",
+                    "candidate_source": {
+                        "commit": _CANDIDATE_HEAD,
+                        "tree": _CANDIDATE_TREE,
+                        "run_id": 456,
+                        "run_attempt": 3,
+                    },
+                },
+            },
+        )
 
 
 def test_architecture_verification_is_exact_and_returns_the_scan_digest() -> None:
@@ -135,21 +169,24 @@ def test_architecture_verification_is_exact_and_returns_the_scan_digest() -> Non
         build_mode="trusted-rebuild",
     )
 
-    assert verify_architecture_attestation(
-        _verification(predicate),
-        **_common(),
-        platform="linux/amd64",
-        architecture="amd64",
-        subject_name="ghcr.io/qianyi-sun/loom-capacity-manager",
-        subject_digest=f"sha256:{_DIGEST}",
-        build_mode="trusted-rebuild",
-    ) == _SCAN
+    assert (
+        verify_architecture_attestation(
+            _verification(predicate),
+            **_common(),
+            platform="linux/amd64",
+            architecture="amd64",
+            subject_name="ghcr.io/qianyi-sun/loom-capacity-manager",
+            subject_digest=f"sha256:{_DIGEST}",
+            build_mode="trusted-rebuild",
+        )
+        == _SCAN
+    )
 
     tampered = _verification(deepcopy(predicate))
     tampered_payload: Any = tampered
-    tampered_payload[0]["verificationResult"]["statement"]["predicate"][
-        "buildDefinition"
-    ]["externalParameters"]["source"]["tree"] = "0" * 40
+    tampered_payload[0]["verificationResult"]["statement"]["predicate"]["buildDefinition"][
+        "externalParameters"
+    ]["source"]["tree"] = "0" * 40
     with pytest.raises(EvidenceError):
         verify_architecture_attestation(
             tampered,
@@ -172,9 +209,7 @@ def test_architecture_verification_rejects_a_different_registry_subject() -> Non
     )
     verification = _verification(predicate)
     statement: Any = verification[0]["verificationResult"]
-    statement["statement"]["subject"][0]["name"] = (
-        "ghcr.io/different-owner/loom-capacity-manager"
-    )
+    statement["statement"]["subject"][0]["name"] = "ghcr.io/different-owner/loom-capacity-manager"
 
     with pytest.raises(EvidenceError, match="expected release image"):
         verify_architecture_attestation(
@@ -186,34 +221,6 @@ def test_architecture_verification_rejects_a_different_registry_subject() -> Non
             subject_digest=f"sha256:{_DIGEST}",
             build_mode="trusted-rebuild",
         )
-
-
-def test_candidate_predicate_additionally_binds_resolver_source() -> None:
-    predicate = architecture_predicate(
-        **_common(),
-        platform="linux/arm64",
-        architecture="arm64",
-        scan_report_sha256=_SCAN,
-        build_mode="verified-pr-candidate",
-        candidate_head_sha=_CANDIDATE_HEAD,
-        candidate_tree_sha=_CANDIDATE_TREE,
-        candidate_run_id=456,
-        candidate_run_attempt=3,
-    )
-
-    external: Any = predicate["buildDefinition"]
-    external = external["externalParameters"]
-    assert external["source"]["commit"] == _SHA
-    assert external["source"]["tree"] == _TREE
-    assert external["build"] == {
-        "mode": "verified-pr-candidate",
-        "candidate_source": {
-            "commit": _CANDIDATE_HEAD,
-            "tree": _CANDIDATE_TREE,
-            "run_id": 456,
-            "run_attempt": 3,
-        },
-    }
 
 
 @pytest.mark.parametrize("build_mode", ["", "candidate", "trusted", "TRUSTED-REBUILD"])
@@ -228,54 +235,37 @@ def test_architecture_predicate_rejects_malformed_build_mode(build_mode: str) ->
         )
 
 
-def test_candidate_mode_requires_complete_candidate_source() -> None:
-    with pytest.raises(EvidenceError, match="candidate source"):
-        architecture_predicate(
-            **_common(),
-            platform="linux/amd64",
-            architecture="amd64",
-            scan_report_sha256=_SCAN,
-            build_mode="verified-pr-candidate",
-            candidate_head_sha=_CANDIDATE_HEAD,
-            candidate_tree_sha=_CANDIDATE_TREE,
-            candidate_run_id=456,
-        )
-
-
-def test_trusted_rebuild_rejects_candidate_source() -> None:
-    with pytest.raises(EvidenceError, match="candidate source"):
-        architecture_predicate(
-            **_common(),
-            platform="linux/amd64",
-            architecture="amd64",
-            scan_report_sha256=_SCAN,
-            build_mode="trusted-rebuild",
-            candidate_head_sha=_CANDIDATE_HEAD,
-            candidate_tree_sha=_CANDIDATE_TREE,
-            candidate_run_id=456,
-            candidate_run_attempt=3,
-        )
-
-
-def test_candidate_verification_rejects_tampered_source_mode() -> None:
+@pytest.mark.parametrize(
+    ("path", "replacement"),
+    [
+        (("scanner", "name"), "Other"),
+        (("scanner", "version"), "v0.70.1"),
+        (("config_sha256",), "0" * 64),
+        (("ignore_sha256",), "0" * 64),
+    ],
+)
+def test_architecture_verification_rejects_scan_tool_or_policy_drift(
+    path: tuple[str, ...],
+    replacement: str,
+) -> None:
     predicate = architecture_predicate(
         **_common(),
         platform="linux/amd64",
         architecture="amd64",
         scan_report_sha256=_SCAN,
-        build_mode="verified-pr-candidate",
-        candidate_head_sha=_CANDIDATE_HEAD,
-        candidate_tree_sha=_CANDIDATE_TREE,
-        candidate_run_id=456,
-        candidate_run_attempt=3,
+        build_mode="trusted-rebuild",
     )
     tampered = _verification(deepcopy(predicate))
     tampered_payload: Any = tampered
-    tampered_payload[0]["verificationResult"]["statement"]["predicate"][
-        "buildDefinition"
-    ]["externalParameters"]["build"]["mode"] = "trusted-rebuild"
+    scan = tampered_payload[0]["verificationResult"]["statement"]["predicate"]["buildDefinition"][
+        "externalParameters"
+    ]["scan"]
+    target = scan
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = replacement
 
-    with pytest.raises(EvidenceError):
+    with pytest.raises(EvidenceError, match="exactly one"):
         verify_architecture_attestation(
             tampered,
             **_common(),
@@ -283,11 +273,7 @@ def test_candidate_verification_rejects_tampered_source_mode() -> None:
             architecture="amd64",
             subject_name="ghcr.io/qianyi-sun/loom-capacity-manager",
             subject_digest=f"sha256:{_DIGEST}",
-            build_mode="verified-pr-candidate",
-            candidate_head_sha=_CANDIDATE_HEAD,
-            candidate_tree_sha=_CANDIDATE_TREE,
-            candidate_run_id=456,
-            candidate_run_attempt=3,
+            build_mode="trusted-rebuild",
         )
 
 
@@ -301,9 +287,9 @@ def test_architecture_verification_rejects_boolean_for_integer_policy_field() ->
     )
     tampered = _verification(deepcopy(predicate))
     tampered_payload: Any = tampered
-    tampered_payload[0]["verificationResult"]["statement"]["predicate"][
-        "buildDefinition"
-    ]["externalParameters"]["scan"]["exit_code"] = True
+    tampered_payload[0]["verificationResult"]["statement"]["predicate"]["buildDefinition"][
+        "externalParameters"
+    ]["scan"]["exit_code"] = True
 
     with pytest.raises(EvidenceError, match="exactly one"):
         verify_architecture_attestation(
@@ -327,18 +313,27 @@ def test_manifest_attestation_binds_both_verified_architecture_subjects() -> Non
         scan_report_digests={"linux/amd64": _SCAN, "linux/arm64": "1" * 64},
         architecture_builds={
             "linux/amd64": {"mode": "trusted-rebuild"},
-            "linux/arm64": {
-                "mode": "verified-pr-candidate",
-                "candidate_source": {
-                    "commit": _CANDIDATE_HEAD,
-                    "tree": _CANDIDATE_TREE,
-                    "run_id": 456,
-                    "run_attempt": 3,
-                },
-            },
+            "linux/arm64": {"mode": "trusted-rebuild"},
         },
     )
     verification = _verification(predicate)
+    external: Any = predicate["buildDefinition"]
+    external = external["externalParameters"]
+    assert external["scan"] == {
+        "action": _TRIVY_ACTION,
+        "scanner": {"name": "Trivy", "version": "v0.70.0"},
+        "config_sha256": ("11c249a9a4b4c3b45c521d424a83a619ff25e4e02c6b205ea38a946d376052bf"),
+        "ignore_sha256": ("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+        "scan_type": "image",
+        "vuln_type": ["os", "library"],
+        "timeout": "10m0s",
+        "severity": ["CRITICAL"],
+        "exit_code": 1,
+        "ignore_unfixed": False,
+        "scanners": ["vuln"],
+        "cache": False,
+        "report_sha256": {"linux/amd64": _SCAN, "linux/arm64": "1" * 64},
+    }
 
     verify_manifest_attestation(
         verification,
@@ -352,15 +347,7 @@ def test_manifest_attestation_binds_both_verified_architecture_subjects() -> Non
         scan_report_digests={"linux/amd64": _SCAN, "linux/arm64": "1" * 64},
         architecture_builds={
             "linux/amd64": {"mode": "trusted-rebuild"},
-            "linux/arm64": {
-                "mode": "verified-pr-candidate",
-                "candidate_source": {
-                    "commit": _CANDIDATE_HEAD,
-                    "tree": _CANDIDATE_TREE,
-                    "run_id": 456,
-                    "run_attempt": 3,
-                },
-            },
+            "linux/arm64": {"mode": "trusted-rebuild"},
         },
     )
 
@@ -378,16 +365,59 @@ def test_manifest_attestation_binds_both_verified_architecture_subjects() -> Non
             scan_report_digests={"linux/amd64": _SCAN, "linux/arm64": "1" * 64},
             architecture_builds={
                 "linux/amd64": {"mode": "trusted-rebuild"},
-                "linux/arm64": {
-                    "mode": "verified-pr-candidate",
-                    "candidate_source": {
-                        "commit": _CANDIDATE_HEAD,
-                        "tree": _CANDIDATE_TREE,
-                        "run_id": 456,
-                        "run_attempt": 3,
-                    },
-                },
+                "linux/arm64": {"mode": "trusted-rebuild"},
             },
+        )
+
+
+@pytest.mark.parametrize(
+    ("path", "replacement"),
+    [
+        (("scanner", "name"), "Other"),
+        (("scanner", "version"), "v0.70.1"),
+        (("config_sha256",), "0" * 64),
+        (("ignore_sha256",), "0" * 64),
+    ],
+)
+def test_manifest_verification_rejects_scan_tool_or_policy_drift(
+    path: tuple[str, ...],
+    replacement: str,
+) -> None:
+    architecture_digests = {
+        "linux/amd64": f"sha256:{_AMD64_DIGEST}",
+        "linux/arm64": f"sha256:{_ARM64_DIGEST}",
+    }
+    scan_report_digests = {"linux/amd64": _SCAN, "linux/arm64": "1" * 64}
+    architecture_builds = {
+        "linux/amd64": {"mode": "trusted-rebuild"},
+        "linux/arm64": {"mode": "trusted-rebuild"},
+    }
+    predicate = manifest_predicate(
+        **_common(),
+        architecture_digests=architecture_digests,
+        scan_report_digests=scan_report_digests,
+        architecture_builds=architecture_builds,
+    )
+    tampered = _verification(deepcopy(predicate))
+    tampered_payload: Any = tampered
+    scan = tampered_payload[0]["verificationResult"]["statement"]["predicate"]["buildDefinition"][
+        "externalParameters"
+    ]["scan"]
+    assert path[0] in scan, f"manifest scan evidence does not bind {path[0]}"
+    target = scan
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = replacement
+
+    with pytest.raises(EvidenceError, match="exactly one"):
+        verify_manifest_attestation(
+            tampered,
+            **_common(),
+            subject_name="ghcr.io/qianyi-sun/loom-capacity-manager",
+            subject_digest=f"sha256:{_DIGEST}",
+            architecture_digests=architecture_digests,
+            scan_report_digests=scan_report_digests,
+            architecture_builds=architecture_builds,
         )
 
 
@@ -409,9 +439,9 @@ def test_manifest_verification_rejects_float_for_integer_run_id() -> None:
     )
     tampered = _verification(deepcopy(predicate))
     tampered_payload: Any = tampered
-    tampered_payload[0]["verificationResult"]["statement"]["predicate"][
-        "buildDefinition"
-    ]["internalParameters"]["github"]["run_id"] = 123.0
+    tampered_payload[0]["verificationResult"]["statement"]["predicate"]["buildDefinition"][
+        "internalParameters"
+    ]["github"]["run_id"] = 123.0
 
     with pytest.raises(EvidenceError, match="exactly one"):
         verify_manifest_attestation(
@@ -606,18 +636,24 @@ def test_cli_validates_exact_canonical_architecture_record_set(tmp_path: Path) -
     records.mkdir()
     amd64 = _artifact_record_path(records, "amd64")
     arm64 = _artifact_record_path(records, "arm64")
-    assert _write_record(
-        amd64,
-        architecture="amd64",
-        subject_digest=_AMD64_DIGEST,
-        scan_digest=_SCAN,
-    ).returncode == 0
-    assert _write_record(
-        arm64,
-        architecture="arm64",
-        subject_digest=_ARM64_DIGEST,
-        scan_digest="1" * 64,
-    ).returncode == 0
+    assert (
+        _write_record(
+            amd64,
+            architecture="amd64",
+            subject_digest=_AMD64_DIGEST,
+            scan_digest=_SCAN,
+        ).returncode
+        == 0
+    )
+    assert (
+        _write_record(
+            arm64,
+            architecture="arm64",
+            subject_digest=_ARM64_DIGEST,
+            scan_digest="1" * 64,
+        ).returncode
+        == 0
+    )
     output = tmp_path / "validated.json"
 
     result = _run_cli(
@@ -651,12 +687,15 @@ def test_cli_validates_exact_canonical_architecture_record_set(tmp_path: Path) -
 
 def test_cli_validates_one_canonical_architecture_record(tmp_path: Path) -> None:
     record = tmp_path / "capacity-manager-amd64.json"
-    assert _write_record(
-        record,
-        architecture="amd64",
-        subject_digest=_AMD64_DIGEST,
-        scan_digest=_SCAN,
-    ).returncode == 0
+    assert (
+        _write_record(
+            record,
+            architecture="amd64",
+            subject_digest=_AMD64_DIGEST,
+            scan_digest=_SCAN,
+        ).returncode
+        == 0
+    )
 
     result = _run_cli(
         "validate-architecture-record",
@@ -672,19 +711,24 @@ def test_cli_validates_one_canonical_architecture_record(tmp_path: Path) -> None
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize(("path", "replacement"), [(("schema_version",), True), (("release", "run_attempt"), 2.0)])
+@pytest.mark.parametrize(
+    ("path", "replacement"), [(("schema_version",), True), (("release", "run_attempt"), 2.0)]
+)
 def test_cli_record_validation_is_type_strict(
     tmp_path: Path,
     path: tuple[str, ...],
     replacement: object,
 ) -> None:
     record = tmp_path / "capacity-manager-amd64.json"
-    assert _write_record(
-        record,
-        architecture="amd64",
-        subject_digest=_AMD64_DIGEST,
-        scan_digest=_SCAN,
-    ).returncode == 0
+    assert (
+        _write_record(
+            record,
+            architecture="amd64",
+            subject_digest=_AMD64_DIGEST,
+            scan_digest=_SCAN,
+        ).returncode
+        == 0
+    )
     payload = json.loads(record.read_text(encoding="utf-8"))
     target = payload
     for key in path[:-1]:
@@ -735,9 +779,7 @@ def test_cli_rejects_extra_or_tampered_architecture_records(tmp_path: Path) -> N
     duplicate_path.unlink()
 
     record = json.loads(
-        (records / "amd64" / "capacity-manager-amd64.json").read_text(
-            encoding="utf-8"
-        )
+        (records / "amd64" / "capacity-manager-amd64.json").read_text(encoding="utf-8")
     )
     record["release"]["tree"] = "0" * 40
     (records / "amd64" / "capacity-manager-amd64.json").write_text(
@@ -883,12 +925,15 @@ def test_cli_rejects_duplicate_key_in_architecture_records(
     records = tmp_path / "records"
     records.mkdir()
     amd64 = _artifact_record_path(records, "amd64")
-    assert _write_record(
-        amd64,
-        architecture="amd64",
-        subject_digest=_AMD64_DIGEST,
-        scan_digest=_SCAN,
-    ).returncode == 0
+    assert (
+        _write_record(
+            amd64,
+            architecture="amd64",
+            subject_digest=_AMD64_DIGEST,
+            scan_digest=_SCAN,
+        ).returncode
+        == 0
+    )
     raw = amd64.read_text(encoding="utf-8").replace(
         '"schema_version":1',
         '"schema_version":1,"schema_version":1',
@@ -908,12 +953,15 @@ def test_cli_rejects_duplicate_key_in_architecture_records(
         )
     else:
         arm64 = _artifact_record_path(records, "arm64")
-        assert _write_record(
-            arm64,
-            architecture="arm64",
-            subject_digest=_ARM64_DIGEST,
-            scan_digest="1" * 64,
-        ).returncode == 0
+        assert (
+            _write_record(
+                arm64,
+                architecture="arm64",
+                subject_digest=_ARM64_DIGEST,
+                scan_digest="1" * 64,
+            ).returncode
+            == 0
+        )
         result = _run_cli(
             "validate-architecture-records",
             *_cli_common(),
@@ -976,12 +1024,15 @@ def test_cli_rejects_duplicate_key_in_manifest_json(tmp_path: Path) -> None:
 
 def test_cli_rejects_nonfinite_architecture_record_value(tmp_path: Path) -> None:
     record = tmp_path / "capacity-manager-amd64.json"
-    assert _write_record(
-        record,
-        architecture="amd64",
-        subject_digest=_AMD64_DIGEST,
-        scan_digest=_SCAN,
-    ).returncode == 0
+    assert (
+        _write_record(
+            record,
+            architecture="amd64",
+            subject_digest=_AMD64_DIGEST,
+            scan_digest=_SCAN,
+        ).returncode
+        == 0
+    )
     raw = record.read_text(encoding="utf-8").replace(
         '"schema_version":1',
         '"schema_version":NaN',
@@ -1006,12 +1057,15 @@ def test_cli_rejects_nonfinite_architecture_record_value(tmp_path: Path) -> None
 
 def test_cli_rejects_exponent_overflow_in_architecture_record(tmp_path: Path) -> None:
     record = tmp_path / "capacity-manager-amd64.json"
-    assert _write_record(
-        record,
-        architecture="amd64",
-        subject_digest=_AMD64_DIGEST,
-        scan_digest=_SCAN,
-    ).returncode == 0
+    assert (
+        _write_record(
+            record,
+            architecture="amd64",
+            subject_digest=_AMD64_DIGEST,
+            scan_digest=_SCAN,
+        ).returncode
+        == 0
+    )
     raw = record.read_text(encoding="utf-8").replace(
         '"schema_version":1',
         '"schema_version":1e999',

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -10,6 +11,7 @@ from uuid import UUID
 
 import pytest
 from sqlalchemy import Connection, Engine, create_engine, delete, select, text, update
+from sqlalchemy.engine import make_url
 
 import loom_capacity_manager.migrate as capacity_migrate
 from loom_capacity_manager.migrate import (
@@ -22,6 +24,89 @@ from loom_capacity_manager.models import Base, CapacityAuditEvent, CapacityAutho
 _MIGRATION_AUTHORITY = UUID("00000000-0000-4000-8000-000000000900")
 _REVIEWED_AUTHORITY = UUID("00000000-0000-4000-8000-000000000901")
 _OTHER_AUTHORITY = UUID("00000000-0000-4000-8000-000000000902")
+_MIGRATION_ADVISORY_LOCK = (1280266061, 1128353857)
+_TEST_BINDING_GATE_LOCK = (1280266061, 1413829460)
+
+
+def _database_url_for_application(database_url: str, application_name: str) -> str:
+    return (
+        make_url(database_url)
+        .update_query_dict({"application_name": application_name})
+        .render_as_string(hide_password=False)
+    )
+
+
+def _migration_process(
+    database_url_file: Path,
+    authority: UUID,
+) -> subprocess.Popen[str]:
+    return subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "loom_capacity_manager.migrate",
+            "--db-url-file",
+            str(database_url_file),
+            "--expected-authority-incarnation",
+            str(authority),
+        ],
+        cwd=Path(__file__).resolve().parents[2],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def _wait_for_advisory_lock(
+    observer: Connection,
+    application_name: str,
+    query_fragment: str,
+    process: subprocess.Popen[str],
+) -> None:
+    deadline = time.monotonic() + 10
+    observed: list[dict[str, object]] = []
+    while time.monotonic() < deadline:
+        observed = [
+            dict(row)
+            for row in observer.execute(
+                text(
+                    "SELECT state, wait_event_type, wait_event, query "
+                    "FROM pg_stat_activity WHERE application_name = :application_name"
+                ),
+                {"application_name": application_name},
+            ).mappings()
+        ]
+        if (
+            len(observed) == 1
+            and observed[0]["wait_event_type"] == "Lock"
+            and observed[0]["wait_event"] == "advisory"
+            and query_fragment in str(observed[0]["query"])
+        ):
+            return
+        if process.poll() is not None:
+            output, error = process.communicate()
+            raise AssertionError(
+                f"{application_name} exited before waiting on {query_fragment!r}: "
+                f"returncode={process.returncode}, stdout={output!r}, stderr={error!r}"
+            )
+        time.sleep(0.01)
+    raise AssertionError(f"{application_name} did not wait on {query_fragment!r}: {observed!r}")
+
+
+def _terminate_process(process: subprocess.Popen[str] | None) -> None:
+    if process is None:
+        return
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+    if process.stdout is not None:
+        process.stdout.close()
+    if process.stderr is not None:
+        process.stderr.close()
 
 
 def _seed_marker(authority: UUID) -> dict[str, object]:
@@ -57,9 +142,7 @@ def _reset_empty_shadow(database_url: str) -> None:
                 )
             )
             connection.execute(
-                CapacityAuditEvent.__table__.insert().values(
-                    **_seed_marker(_MIGRATION_AUTHORITY)
-                )
+                CapacityAuditEvent.__table__.insert().values(**_seed_marker(_MIGRATION_AUTHORITY))
             )
     finally:
         engine.dispose()
@@ -154,9 +237,7 @@ def test_binding_marker_is_exact_and_idempotent(capacity_postgres_url: str) -> N
     assert len(markers) == 1
     assert markers[0]["actor_kind"] == "migration"
     assert markers[0]["actor_id"] == "capacity-authority-bootstrap"
-    assert markers[0]["object_binding"] == {
-        "authority_incarnation": str(_REVIEWED_AUTHORITY)
-    }
+    assert markers[0]["object_binding"] == {"authority_incarnation": str(_REVIEWED_AUTHORITY)}
     assert markers[0]["detail"] == {"state": "reviewed-bootstrap-bound"}
 
 
@@ -283,12 +364,12 @@ def test_concurrent_expected_and_wrong_uuid_fail_closed_on_markerless_state(
             observed = [
                 dict(row)
                 for row in connection.execute(
-                text(
-                    "SELECT state, wait_event_type, wait_event, query "
-                    "FROM pg_stat_activity WHERE application_name = :application_name"
-                ),
-                {"application_name": application_name},
-            ).mappings()
+                    text(
+                        "SELECT state, wait_event_type, wait_event, query "
+                        "FROM pg_stat_activity WHERE application_name = :application_name"
+                    ),
+                    {"application_name": application_name},
+                ).mappings()
             ]
             if len(observed) == 1 and observed[0]["wait_event_type"] == "Lock":
                 return
@@ -366,9 +447,7 @@ def test_any_malformed_reserved_authority_evidence_fails_closed(
                 .where(CapacityAuthorityState.singleton_id == 1)
                 .values(authority_incarnation=_REVIEWED_AUTHORITY)
             )
-            connection.execute(
-                CapacityAuditEvent.__table__.insert().values(**reserved_marker)
-            )
+            connection.execute(CapacityAuditEvent.__table__.insert().values(**reserved_marker))
         with pytest.raises(CapacityAuthorityBootstrapError):
             bind_fresh_authority(engine, _REVIEWED_AUTHORITY)
     finally:
@@ -381,9 +460,7 @@ def test_duplicate_seed_evidence_fails_closed(capacity_postgres_url: str) -> Non
     try:
         with engine.begin() as connection:
             connection.execute(
-                CapacityAuditEvent.__table__.insert().values(
-                    **_seed_marker(_MIGRATION_AUTHORITY)
-                )
+                CapacityAuditEvent.__table__.insert().values(**_seed_marker(_MIGRATION_AUTHORITY))
             )
         with pytest.raises(CapacityAuthorityBootstrapError):
             bind_fresh_authority(engine, _REVIEWED_AUTHORITY)
@@ -445,9 +522,7 @@ def test_seed_event_after_binding_event_fails_closed(
                 )
             )
             connection.execute(
-                CapacityAuditEvent.__table__.insert().values(
-                    **_seed_marker(_MIGRATION_AUTHORITY)
-                )
+                CapacityAuditEvent.__table__.insert().values(**_seed_marker(_MIGRATION_AUTHORITY))
             )
         with pytest.raises(CapacityAuthorityBootstrapError):
             bind_fresh_authority(engine, _REVIEWED_AUTHORITY)
@@ -607,10 +682,7 @@ def test_migration_entrypoint_accepts_percent_encoded_database_url(
 ) -> None:
     _reset_empty_shadow(capacity_postgres_url)
     separator = "&" if "?" in capacity_postgres_url else "?"
-    encoded_url = (
-        f"{capacity_postgres_url}{separator}"
-        "application_name=capacity%40bootstrap"
-    )
+    encoded_url = f"{capacity_postgres_url}{separator}application_name=capacity%40bootstrap"
     database_url_file = tmp_path / "database-url"
     database_url_file.write_text(encoded_url, encoding="utf-8")
     database_url_file.chmod(0o600)
@@ -620,31 +692,222 @@ def test_migration_entrypoint_accepts_percent_encoded_database_url(
     assert _authority(capacity_postgres_url)["authority_incarnation"] == _REVIEWED_AUTHORITY
 
 
+def test_whole_migration_commands_share_one_lock_through_authority_binding(
+    capacity_postgres_url: str,
+    tmp_path: Path,
+) -> None:
+    _reset_empty_shadow(capacity_postgres_url)
+    expected_application = "capacity-migration-expected"
+    wrong_application = "capacity-migration-wrong"
+    expected_url_file = tmp_path / "expected-database-url"
+    wrong_url_file = tmp_path / "wrong-database-url"
+    expected_url_file.write_text(
+        _database_url_for_application(capacity_postgres_url, expected_application),
+        encoding="utf-8",
+    )
+    wrong_url_file.write_text(
+        _database_url_for_application(capacity_postgres_url, wrong_application),
+        encoding="utf-8",
+    )
+    expected_url_file.chmod(0o600)
+    wrong_url_file.chmod(0o600)
+
+    control_engine = create_engine(capacity_postgres_url)
+    expected_process: subprocess.Popen[str] | None = None
+    wrong_process: subprocess.Popen[str] | None = None
+    gate_connection: Connection | None = None
+    gate_transaction = None
+    try:
+        with control_engine.begin() as connection:
+            connection.execute(
+                text(
+                    "CREATE FUNCTION loom_test_gate_capacity_binding() "
+                    "RETURNS trigger LANGUAGE plpgsql AS $$ "
+                    "BEGIN "
+                    "IF NEW.event_kind = 'authority_incarnation_bound' THEN "
+                    "PERFORM pg_advisory_xact_lock("
+                    f"{_TEST_BINDING_GATE_LOCK[0]}, {_TEST_BINDING_GATE_LOCK[1]}); "
+                    "END IF; "
+                    "RETURN NEW; "
+                    "END; $$"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE TRIGGER loom_test_gate_capacity_binding "
+                    "BEFORE INSERT ON capacity_audit_events "
+                    "FOR EACH ROW EXECUTE FUNCTION loom_test_gate_capacity_binding()"
+                )
+            )
+
+        gate_connection = control_engine.connect()
+        gate_transaction = gate_connection.begin()
+        gate_connection.execute(
+            text("SELECT pg_advisory_xact_lock(:namespace, :resource)"),
+            {
+                "namespace": _TEST_BINDING_GATE_LOCK[0],
+                "resource": _TEST_BINDING_GATE_LOCK[1],
+            },
+        )
+        with control_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as observer:
+            expected_process = _migration_process(
+                expected_url_file,
+                _REVIEWED_AUTHORITY,
+            )
+            _wait_for_advisory_lock(
+                observer,
+                expected_application,
+                "INSERT INTO capacity_audit_events",
+                expected_process,
+            )
+
+            wrong_process = _migration_process(wrong_url_file, _OTHER_AUTHORITY)
+            _wait_for_advisory_lock(
+                observer,
+                wrong_application,
+                "pg_advisory_lock",
+                wrong_process,
+            )
+
+        gate_transaction.commit()
+        expected_output, expected_error = expected_process.communicate(timeout=15)
+        wrong_output, wrong_error = wrong_process.communicate(timeout=15)
+
+        assert expected_process.returncode == 0, (expected_output, expected_error)
+        assert wrong_process.returncode == 1, (wrong_output, wrong_error)
+        assert wrong_output == ""
+        assert wrong_error.endswith("error: capacity migration failed\n")
+        assert capacity_postgres_url not in wrong_error
+        assert _authority(capacity_postgres_url)["authority_incarnation"] == (_REVIEWED_AUTHORITY)
+        with control_engine.connect() as connection:
+            binding_markers = connection.execute(
+                select(CapacityAuditEvent.id).where(
+                    CapacityAuditEvent.event_kind == "authority_incarnation_bound"
+                )
+            ).all()
+        assert len(binding_markers) == 1
+    finally:
+        if gate_transaction is not None and gate_transaction.is_active:
+            gate_transaction.rollback()
+        _terminate_process(expected_process)
+        _terminate_process(wrong_process)
+        if gate_connection is not None:
+            gate_connection.close()
+        with control_engine.begin() as connection:
+            connection.execute(
+                text(
+                    "DROP TRIGGER IF EXISTS loom_test_gate_capacity_binding "
+                    "ON capacity_audit_events"
+                )
+            )
+            connection.execute(text("DROP FUNCTION IF EXISTS loom_test_gate_capacity_binding()"))
+        control_engine.dispose()
+
+
+def test_migration_releases_supplied_connection_lock_after_alembic_failure(
+    capacity_postgres_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url_file = tmp_path / "database-url"
+    database_url_file.write_text(capacity_postgres_url, encoding="utf-8")
+    database_url_file.chmod(0o600)
+    explicit_alembic_ini = Path(__file__).resolve().parents[2] / "capacity_migrations/alembic.ini"
+    captured: dict[str, object] = {}
+    observer_engine = create_engine(capacity_postgres_url)
+
+    def fail_upgrade(config: object, revision: str) -> None:
+        assert isinstance(config, capacity_migrate.AlembicConfig)
+        connection = config.attributes["connection"]
+        assert isinstance(connection, Connection)
+        backend_pid = connection.execute(text("SELECT pg_backend_pid()"))
+        captured["backend_pid"] = backend_pid.scalar_one()
+        captured["config_file_name"] = config.config_file_name
+        captured["revision"] = revision
+        with observer_engine.connect() as observer:
+            captured["lock_granted"] = observer.execute(
+                text(
+                    "SELECT granted FROM pg_locks "
+                    "WHERE locktype = 'advisory' AND pid = :backend_pid "
+                    "AND classid = :namespace AND objid = :resource "
+                    "AND objsubid = 2"
+                ),
+                {
+                    "backend_pid": captured["backend_pid"],
+                    "namespace": _MIGRATION_ADVISORY_LOCK[0],
+                    "resource": _MIGRATION_ADVISORY_LOCK[1],
+                },
+            ).scalar_one_or_none()
+        raise RuntimeError("deliberate Alembic failure")
+
+    monkeypatch.setattr(capacity_migrate.command, "upgrade", fail_upgrade)
+    try:
+        with pytest.raises(
+            CapacityAuthorityBootstrapError,
+            match="capacity schema migration failed",
+        ):
+            migrate_capacity_database(
+                database_url_file,
+                _REVIEWED_AUTHORITY,
+                alembic_ini=explicit_alembic_ini,
+            )
+
+        assert captured == {
+            "backend_pid": captured["backend_pid"],
+            "config_file_name": str(explicit_alembic_ini),
+            "revision": "head",
+            "lock_granted": True,
+        }
+        with observer_engine.connect() as observer:
+            acquired = observer.execute(
+                text("SELECT pg_try_advisory_lock(:namespace, :resource)"),
+                {
+                    "namespace": _MIGRATION_ADVISORY_LOCK[0],
+                    "resource": _MIGRATION_ADVISORY_LOCK[1],
+                },
+            ).scalar_one()
+            assert acquired is True
+            assert (
+                observer.execute(
+                    text("SELECT pg_advisory_unlock(:namespace, :resource)"),
+                    {
+                        "namespace": _MIGRATION_ADVISORY_LOCK[0],
+                        "resource": _MIGRATION_ADVISORY_LOCK[1],
+                    },
+                ).scalar_one()
+                is True
+            )
+    finally:
+        observer_engine.dispose()
+
+
 def test_authority_binding_connection_enforces_fixed_postgres_timeouts(
+    capacity_postgres_url: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database_url = (
-        "postgresql+psycopg://operator:secret@example.invalid/capacity"
-        "?application_name=capacity%40bootstrap&connect_timeout=99"
+        make_url(capacity_postgres_url)
+        .update_query_dict(
+            {
+                "application_name": "capacity@bootstrap",
+                "connect_timeout": "99",
+            }
+        )
+        .render_as_string(hide_password=False)
     )
     database_url_file = tmp_path / "database-url"
     database_url_file.write_text(database_url, encoding="utf-8")
     database_url_file.chmod(0o600)
     captured: dict[str, object] = {}
+    real_create_engine = create_engine
 
-    class FakeEngine:
-        def dispose(self) -> None:
-            captured["disposed"] = True
-
-    def create(url: str, **kwargs: object) -> FakeEngine:
+    def create(url: str, **kwargs: object) -> Engine:
         captured["url"] = url
         captured["kwargs"] = kwargs
-        return FakeEngine()
+        return real_create_engine(url, **kwargs)
 
-    monkeypatch.setattr(capacity_migrate.command, "upgrade", lambda *_args: None)
     monkeypatch.setattr(capacity_migrate, "create_engine", create)
-    monkeypatch.setattr(capacity_migrate, "bind_fresh_authority", lambda *_args: None)
 
     migrate_capacity_database(database_url_file, _REVIEWED_AUTHORITY)
 
@@ -657,5 +920,4 @@ def test_authority_binding_connection_enforces_fixed_postgres_timeouts(
                 "options": "-c lock_timeout=30000 -c statement_timeout=300000",
             },
         },
-        "disposed": True,
     }
