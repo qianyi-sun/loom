@@ -752,6 +752,7 @@ export DOCKER_CONFIG="$job_runtime_dir/docker"
 export XDG_CONFIG_HOME="$job_runtime_dir/xdg-config"
 export XDG_RUNTIME_DIR="$job_runtime_dir/xdg-runtime"
 export TMPDIR="$job_runtime_dir/tmp"
+export PYTHONDONTWRITEBYTECODE=1
 /usr/bin/mkdir -p "$HOME" "$DOCKER_CONFIG" "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR" "$TMPDIR"
 
 export LOOM_WORKER_SLURM_JOB_ID="$SLURM_JOB_ID"

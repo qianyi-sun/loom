@@ -486,6 +486,80 @@ printf '%s|%s|%s|%s\n' \
     assert not job_runtime.exists()
 
 
+def test_build_sbatch_request_keeps_candidate_repo_free_of_python_bytecode(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    package = repo / "src/loom_control_plane"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "slurm_job_cgroup.py").write_text(
+        'print("loom-job-4242.slice")\n',
+        encoding="utf-8",
+    )
+    (repo / "deploy").mkdir()
+    (repo / "deploy/docker-compose.remote-worker.yml").write_text(
+        "services: {}\n",
+        encoding="utf-8",
+    )
+    env_file = tmp_path / "worker.env"
+    env_file.write_text("LOOM_IMAGE_TAG=test\n", encoding="utf-8")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_docker = fake_bin / "docker"
+    fake_docker.write_text(
+        """#!/bin/sh
+set -eu
+if [ "${1:-}" = "info" ]; then
+  printf '%s\n' systemd
+  exit 0
+fi
+if [ "${1:-}" = "compose" ]; then
+  exit 0
+fi
+exit 1
+""",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o755)
+    request = build_sbatch_request(
+        _config(
+            allowed_nodes=("oldlab-3",),
+            env_file=str(env_file),
+            repo_dir=str(repo),
+        ),
+        node="oldlab-3",
+    )
+    environment = os.environ.copy()
+    environment.pop("PYTHONDONTWRITEBYTECODE", None)
+    environment.update(
+        {
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "SLURM_JOB_ID": "4242",
+            "LOOM_WORKER_SANDBOX_IDENTITY": "staging",
+            "LOOM_WORKER_CANDIDATE_SHA": "a" * 40,
+            "LOOM_WORKER_SLURM_ALLOCATED_GPUS": "0",
+            "LOOM_WORKER_REQUIRE_CGROUP_PARENT": "1",
+            "LOOM_WORKER_JOB_PIDS_MAX": "3072",
+            "LOOM_REMOTE_WORKER_ENV_FILE": str(env_file),
+            "LOOM_REMOTE_WORKER_REPO_DIR": str(repo),
+        },
+    )
+
+    result = subprocess.run(
+        ["/bin/bash"],
+        input=request.stdin,
+        cwd=repo,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert list(repo.rglob("__pycache__")) == []
+
+
 def test_nonexclusive_sbatch_rejects_missing_job_pids_max() -> None:
     with pytest.raises(ValueError, match="job_pids_max is required"):
         build_sbatch_request(
