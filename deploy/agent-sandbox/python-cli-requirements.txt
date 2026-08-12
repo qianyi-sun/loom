@@ -1,6 +1,6 @@
 # Python CLI-only agent runtimes installed into isolated virtual environments.
 # Keep this list in sync with runtime_contract.required_packages.
-aider-chat==0.86.2
+aider-chat==0.86.2+loom.1
 mini-swe-agent==2.4.2
 # terminal-bench: upstream pyproject at pinned commit 91e10457 declares
 # version 0.1.0, which was never published to PyPI. The terminus-2

@@ -19,14 +19,29 @@ class TrivyException(NamedTuple):
     """One reviewed, temporary vulnerability-policy exception."""
 
     vulnerability_id: str
-    purl: str
+    purls: tuple[str, ...]
     expires_at: date
     statement: str
 
 TRIVY_SCANNER_NAME = "Trivy"
 TRIVY_VERSION = "v0.70.0"
-_TRIVY_EXCEPTION_PURL = "pkg:deb/debian/perl-base"
-_TRIVY_EXCEPTION_STATEMENT = "No fixed Debian package was available on 2026-08-12."
+_PERL_PURLS = (
+    "pkg:deb/debian/libperl5.36",
+    "pkg:deb/debian/libperl5.40",
+    "pkg:deb/debian/perl",
+    "pkg:deb/debian/perl-base",
+    "pkg:deb/debian/perl-modules-5.36",
+    "pkg:deb/debian/perl-modules-5.40",
+)
+_PERL_EXCEPTION_STATEMENT = (
+    "No fixed Debian package was available on 2026-08-12; these Perl packages are "
+    "required by Debian base runtimes, the agent toolchain, and the staging-compatible "
+    "PostgreSQL 17.4 rehearsal image."
+)
+_POSTGRES_EXCEPTION_STATEMENT = (
+    "No fixed Debian package was available on 2026-08-12; this package is a required "
+    "dependency of the staging-compatible PostgreSQL 17.4 rehearsal image."
+)
 TRIVY_CONFIG_BYTES = (
     b"exit-code: 1\n"
     b"pkg:\n"
@@ -44,55 +59,81 @@ TRIVY_CONFIG_BYTES = (
 )
 TRIVY_EXCEPTIONS = (
     TrivyException(
-        "CVE-2026-13221",
-        _TRIVY_EXCEPTION_PURL,
+        "CVE-2023-45853",
+        ("pkg:deb/debian/zlib1g",),
         date(2026, 9, 12),
-        _TRIVY_EXCEPTION_STATEMENT,
+        (
+            "Debian marked this finding will-not-fix on 2026-08-12; zlib1g is a "
+            "required dependency of the staging-compatible PostgreSQL 17.4 rehearsal "
+            "image."
+        ),
+    ),
+    TrivyException(
+        "CVE-2025-7458",
+        ("pkg:deb/debian/libsqlite3-0",),
+        date(2026, 9, 12),
+        _POSTGRES_EXCEPTION_STATEMENT,
+    ),
+    TrivyException(
+        "CVE-2026-13221",
+        _PERL_PURLS,
+        date(2026, 9, 12),
+        _PERL_EXCEPTION_STATEMENT,
     ),
     TrivyException(
         "CVE-2026-42496",
-        _TRIVY_EXCEPTION_PURL,
+        _PERL_PURLS,
         date(2026, 9, 12),
-        _TRIVY_EXCEPTION_STATEMENT,
+        _PERL_EXCEPTION_STATEMENT,
+    ),
+    TrivyException(
+        "CVE-2026-43185",
+        ("pkg:deb/debian/linux-libc-dev",),
+        date(2026, 9, 12),
+        (
+            "No fixed Debian package was available on 2026-08-12; linux-libc-dev is "
+            "required by the agent sandbox compiler toolchain."
+        ),
     ),
     TrivyException(
         "CVE-2026-57433",
-        _TRIVY_EXCEPTION_PURL,
+        _PERL_PURLS,
         date(2026, 9, 12),
-        _TRIVY_EXCEPTION_STATEMENT,
+        _PERL_EXCEPTION_STATEMENT,
+    ),
+    TrivyException(
+        "CVE-2026-6653",
+        ("pkg:deb/debian/libxml2",),
+        date(2026, 9, 12),
+        _POSTGRES_EXCEPTION_STATEMENT,
     ),
     TrivyException(
         "CVE-2026-8376",
-        _TRIVY_EXCEPTION_PURL,
+        _PERL_PURLS,
         date(2026, 9, 12),
-        _TRIVY_EXCEPTION_STATEMENT,
+        _PERL_EXCEPTION_STATEMENT,
     ),
 )
-TRIVY_IGNORE_BYTES = (
-    b"vulnerabilities:\n"
-    b"  - id: CVE-2026-13221\n"
-    b"    purls:\n"
-    b'      - "pkg:deb/debian/perl-base"\n'
-    b"    expired_at: 2026-09-12\n"
-    b"    statement: No fixed Debian package was available on 2026-08-12.\n"
-    b"  - id: CVE-2026-42496\n"
-    b"    purls:\n"
-    b'      - "pkg:deb/debian/perl-base"\n'
-    b"    expired_at: 2026-09-12\n"
-    b"    statement: No fixed Debian package was available on 2026-08-12.\n"
-    b"  - id: CVE-2026-57433\n"
-    b"    purls:\n"
-    b'      - "pkg:deb/debian/perl-base"\n'
-    b"    expired_at: 2026-09-12\n"
-    b"    statement: No fixed Debian package was available on 2026-08-12.\n"
-    b"  - id: CVE-2026-8376\n"
-    b"    purls:\n"
-    b'      - "pkg:deb/debian/perl-base"\n'
-    b"    expired_at: 2026-09-12\n"
-    b"    statement: No fixed Debian package was available on 2026-08-12.\n"
-)
+
+
+def _render_ignore_bytes(exceptions: tuple[TrivyException, ...]) -> bytes:
+    rendered_lines = ["vulnerabilities:"]
+    for exception in exceptions:
+        rendered_lines.extend(
+            (
+                f"  - id: {exception.vulnerability_id}",
+                "    purls:",
+                *(f'      - "{purl}"' for purl in exception.purls),
+                f"    expired_at: {exception.expires_at.isoformat()}",
+                f"    statement: {exception.statement}",
+            )
+        )
+    return ("\n".join(rendered_lines) + "\n").encode("ascii")
+
+
+TRIVY_IGNORE_BYTES = _render_ignore_bytes(TRIVY_EXCEPTIONS)
 TRIVY_CONFIG_SHA256 = "35492da1d08b142bd1489ac54ecdedab62634b7b3095a37cebbe10b61df1adac"
-TRIVY_IGNORE_SHA256 = "83156c673c73bc58e7848876fe2144f36e7ab2dc147b7a6a55a41bfa2a88ee29"
+TRIVY_IGNORE_SHA256 = "b09bd1a38036f5e4274586af64616a306590ec33b1e2ac8a73d67ab88d2e4d5a"
 
 
 class TrivyPolicyError(RuntimeError):
@@ -112,28 +153,23 @@ def _verify_constant_hashes() -> None:
 
 def _verify_exception_policy(today: date) -> None:
     declared_ids = tuple(exception.vulnerability_id for exception in TRIVY_EXCEPTIONS)
-    rendered_lines = ["vulnerabilities:"]
-    for exception in TRIVY_EXCEPTIONS:
-        rendered_lines.extend(
-            (
-                f"  - id: {exception.vulnerability_id}",
-                "    purls:",
-                f'      - "{exception.purl}"',
-                f"    expired_at: {exception.expires_at.isoformat()}",
-                f"    statement: {exception.statement}",
-            )
-        )
-    rendered_ignore = ("\n".join(rendered_lines) + "\n").encode("ascii")
     if (
         declared_ids != tuple(sorted(set(declared_ids)))
-        or rendered_ignore != TRIVY_IGNORE_BYTES
+        or _render_ignore_bytes(TRIVY_EXCEPTIONS) != TRIVY_IGNORE_BYTES
     ):
         raise TrivyPolicyError("controlled Trivy exceptions are inconsistent")
     for exception in TRIVY_EXCEPTIONS:
         if re.fullmatch(r"CVE-[0-9]{4}-[0-9]{4,}", exception.vulnerability_id) is None:
             raise TrivyPolicyError("controlled Trivy exception identifier is invalid")
-        if exception.purl != _TRIVY_EXCEPTION_PURL:
-            raise TrivyPolicyError("controlled Trivy exception package is invalid")
+        if (
+            not exception.purls
+            or exception.purls != tuple(sorted(set(exception.purls)))
+            or any(
+                re.fullmatch(r"pkg:deb/debian/[a-z0-9][a-z0-9.+-]*", purl) is None
+                for purl in exception.purls
+            )
+        ):
+            raise TrivyPolicyError("controlled Trivy exception packages are invalid")
         if not exception.statement or "\n" in exception.statement:
             raise TrivyPolicyError("controlled Trivy exception statement is invalid")
         if today >= exception.expires_at:

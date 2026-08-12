@@ -257,10 +257,16 @@ trusted release scan use pinned Trivy v0.70.0 with scan type `image`, OS and
 library vulnerability types, a `10m0s` timeout, `CRITICAL` severity, exit code
 1, unfixed findings included, the `vuln` scanner only, and caching disabled.
 The trusted scan selects fixed config and a reviewed ignore file generated
-outside the checkout. It exempts only CVE-2026-13221, CVE-2026-42496,
-CVE-2026-57433, and CVE-2026-8376 while no fixed Debian package exists. Each
-exception is scoped to the Debian `perl-base` PURL, carries a review statement,
-and expires at 2026-09-12 UTC; policy generation fails closed at that boundary.
+outside the checkout. Fixable findings are remediated in their images first.
+The temporary policy covers the four unfixed Perl CVEs (CVE-2026-13221,
+CVE-2026-42496, CVE-2026-57433, and CVE-2026-8376) only for the Debian Perl
+packages required by Debian base runtimes, the agent toolchain, and the
+staging-compatible PostgreSQL 17.4 rehearsal image, CVE-2026-43185 only for
+the agent compiler's
+`linux-libc-dev`, and CVE-2025-7458, CVE-2026-6653, and CVE-2023-45853 only
+for required PostgreSQL 17.4 rehearsal dependencies. Each exception carries
+exact Debian PURL scopes and a review statement and expires at 2026-09-12 UTC;
+policy generation fails closed at that boundary.
 A repository-owned installer accepts only the architecture-
 specific v0.70.0 release archive whose repository-pinned SHA-256 matches,
 avoiding any third-party action forbidden by repository policy. The publisher

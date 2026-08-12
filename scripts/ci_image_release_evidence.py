@@ -234,7 +234,7 @@ def _scan_policy_parameters(platforms: Sequence[str]) -> dict[str, object]:
         "exceptions": [
             {
                 "id": exception.vulnerability_id,
-                "purls": [exception.purl],
+                "purls": list(exception.purls),
                 "expires_at": exception.expires_at.isoformat(),
                 "statement": exception.statement,
             }

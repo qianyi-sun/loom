@@ -9,7 +9,9 @@ LABEL org.opencontainers.image.revision="${LOOM_BUILD_SHA}"
 WORKDIR /opt/loom
 COPY web/package.json web/package-lock.json ./web/
 RUN npm ci --prefix web --ignore-scripts \
-    && npm cache clean --force
+    && npm cache clean --force \
+    && rm -rf /usr/lib/node_modules/npm \
+    && rm -f /usr/bin/npm /usr/bin/npx
 RUN install -d -o root -g root -m 0755 /opt/loom/web/scripts
 COPY --chmod=0444 web/scripts/staging-admin-browser-smoke.mjs \
     /opt/loom/web/scripts/staging-admin-browser-smoke.mjs

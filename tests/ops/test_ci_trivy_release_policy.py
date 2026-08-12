@@ -31,28 +31,112 @@ CONFIG_BYTES = (
 CONFIG_SHA256 = "35492da1d08b142bd1489ac54ecdedab62634b7b3095a37cebbe10b61df1adac"
 IGNORE_BYTES = (
     b"vulnerabilities:\n"
+    b"  - id: CVE-2023-45853\n"
+    b"    purls:\n"
+    b'      - "pkg:deb/debian/zlib1g"\n'
+    b"    expired_at: 2026-09-12\n"
+    b"    statement: Debian marked this finding will-not-fix on 2026-08-12; zlib1g is a required dependency of the staging-compatible PostgreSQL 17.4 rehearsal image.\n"
+    b"  - id: CVE-2025-7458\n"
+    b"    purls:\n"
+    b'      - "pkg:deb/debian/libsqlite3-0"\n'
+    b"    expired_at: 2026-09-12\n"
+    b"    statement: No fixed Debian package was available on 2026-08-12; this package is a required dependency of the staging-compatible PostgreSQL 17.4 rehearsal image.\n"
     b"  - id: CVE-2026-13221\n"
     b"    purls:\n"
+    b'      - "pkg:deb/debian/libperl5.36"\n'
+    b'      - "pkg:deb/debian/libperl5.40"\n'
+    b'      - "pkg:deb/debian/perl"\n'
     b'      - "pkg:deb/debian/perl-base"\n'
+    b'      - "pkg:deb/debian/perl-modules-5.36"\n'
+    b'      - "pkg:deb/debian/perl-modules-5.40"\n'
     b"    expired_at: 2026-09-12\n"
-    b"    statement: No fixed Debian package was available on 2026-08-12.\n"
+    b"    statement: No fixed Debian package was available on 2026-08-12; these Perl packages are required by Debian base runtimes, the agent toolchain, and the staging-compatible PostgreSQL 17.4 rehearsal image.\n"
     b"  - id: CVE-2026-42496\n"
     b"    purls:\n"
+    b'      - "pkg:deb/debian/libperl5.36"\n'
+    b'      - "pkg:deb/debian/libperl5.40"\n'
+    b'      - "pkg:deb/debian/perl"\n'
     b'      - "pkg:deb/debian/perl-base"\n'
+    b'      - "pkg:deb/debian/perl-modules-5.36"\n'
+    b'      - "pkg:deb/debian/perl-modules-5.40"\n'
     b"    expired_at: 2026-09-12\n"
-    b"    statement: No fixed Debian package was available on 2026-08-12.\n"
+    b"    statement: No fixed Debian package was available on 2026-08-12; these Perl packages are required by Debian base runtimes, the agent toolchain, and the staging-compatible PostgreSQL 17.4 rehearsal image.\n"
+    b"  - id: CVE-2026-43185\n"
+    b"    purls:\n"
+    b'      - "pkg:deb/debian/linux-libc-dev"\n'
+    b"    expired_at: 2026-09-12\n"
+    b"    statement: No fixed Debian package was available on 2026-08-12; linux-libc-dev is required by the agent sandbox compiler toolchain.\n"
     b"  - id: CVE-2026-57433\n"
     b"    purls:\n"
+    b'      - "pkg:deb/debian/libperl5.36"\n'
+    b'      - "pkg:deb/debian/libperl5.40"\n'
+    b'      - "pkg:deb/debian/perl"\n'
     b'      - "pkg:deb/debian/perl-base"\n'
+    b'      - "pkg:deb/debian/perl-modules-5.36"\n'
+    b'      - "pkg:deb/debian/perl-modules-5.40"\n'
     b"    expired_at: 2026-09-12\n"
-    b"    statement: No fixed Debian package was available on 2026-08-12.\n"
+    b"    statement: No fixed Debian package was available on 2026-08-12; these Perl packages are required by Debian base runtimes, the agent toolchain, and the staging-compatible PostgreSQL 17.4 rehearsal image.\n"
+    b"  - id: CVE-2026-6653\n"
+    b"    purls:\n"
+    b'      - "pkg:deb/debian/libxml2"\n'
+    b"    expired_at: 2026-09-12\n"
+    b"    statement: No fixed Debian package was available on 2026-08-12; this package is a required dependency of the staging-compatible PostgreSQL 17.4 rehearsal image.\n"
     b"  - id: CVE-2026-8376\n"
     b"    purls:\n"
+    b'      - "pkg:deb/debian/libperl5.36"\n'
+    b'      - "pkg:deb/debian/libperl5.40"\n'
+    b'      - "pkg:deb/debian/perl"\n'
     b'      - "pkg:deb/debian/perl-base"\n'
+    b'      - "pkg:deb/debian/perl-modules-5.36"\n'
+    b'      - "pkg:deb/debian/perl-modules-5.40"\n'
     b"    expired_at: 2026-09-12\n"
-    b"    statement: No fixed Debian package was available on 2026-08-12.\n"
+    b"    statement: No fixed Debian package was available on 2026-08-12; these Perl packages are required by Debian base runtimes, the agent toolchain, and the staging-compatible PostgreSQL 17.4 rehearsal image.\n"
 )
-IGNORE_SHA256 = "83156c673c73bc58e7848876fe2144f36e7ab2dc147b7a6a55a41bfa2a88ee29"
+IGNORE_SHA256 = "b09bd1a38036f5e4274586af64616a306590ec33b1e2ac8a73d67ab88d2e4d5a"
+
+
+def test_temporary_exceptions_cover_only_required_unfixed_packages() -> None:
+    exceptions = {item.vulnerability_id: item for item in policy.TRIVY_EXCEPTIONS}
+
+    expected_perl_purls = (
+        "pkg:deb/debian/libperl5.36",
+        "pkg:deb/debian/libperl5.40",
+        "pkg:deb/debian/perl",
+        "pkg:deb/debian/perl-base",
+        "pkg:deb/debian/perl-modules-5.36",
+        "pkg:deb/debian/perl-modules-5.40",
+    )
+    for vulnerability_id in (
+        "CVE-2026-13221",
+        "CVE-2026-42496",
+        "CVE-2026-57433",
+        "CVE-2026-8376",
+    ):
+        assert exceptions[vulnerability_id].purls == expected_perl_purls
+
+    assert exceptions["CVE-2026-43185"].purls == (
+        "pkg:deb/debian/linux-libc-dev",
+    )
+    assert exceptions["CVE-2025-7458"].purls == ("pkg:deb/debian/libsqlite3-0",)
+    assert exceptions["CVE-2026-6653"].purls == ("pkg:deb/debian/libxml2",)
+    assert exceptions["CVE-2023-45853"].purls == ("pkg:deb/debian/zlib1g",)
+
+
+def test_temporary_perl_exceptions_explain_every_required_runtime() -> None:
+    exceptions = {item.vulnerability_id: item for item in policy.TRIVY_EXCEPTIONS}
+    expected_statement = (
+        "No fixed Debian package was available on 2026-08-12; these Perl packages are "
+        "required by Debian base runtimes, the agent toolchain, and the staging-compatible "
+        "PostgreSQL 17.4 rehearsal image."
+    )
+
+    for vulnerability_id in (
+        "CVE-2026-13221",
+        "CVE-2026-42496",
+        "CVE-2026-57433",
+        "CVE-2026-8376",
+    ):
+        assert exceptions[vulnerability_id].statement == expected_statement
 
 
 def test_policy_writer_ignores_checkout_local_trivy_overrides(tmp_path: Path) -> None:
@@ -141,3 +225,44 @@ def test_workflow_scans_only_the_controlled_absolute_policy_files() -> None:
         assert "python3 scripts/install_trivy.py" in scan["run"]
         assert "--config /tmp/loom-trivy-release.yaml" in scan["run"]
         assert "--ignorefile /tmp/loom-trivy-release.ignore.yaml" in scan["run"]
+        assert "--show-suppressed" in scan["run"]
+        validation = (
+            "python3 scripts/validate_trivy_release_report.py \\\n"
+            '  --component "$IMAGE_NAME" \\\n'
+            '  --architecture "$ARCHITECTURE" \\\n'
+            '  --report "$REPORT" \\\n'
+            "  --ignore-file /tmp/loom-trivy-release.ignore.yaml"
+        )
+        assert scan["run"].rstrip().endswith(validation)
+        assert scan["env"]["IMAGE_NAME"] == "${{ matrix.image }}"
+        assert scan["env"]["ARCHITECTURE"] == "${{ matrix.architecture }}"
+
+        next_step = steps[scan_index + 1]
+        if job_name == "build":
+            assert next_step["name"] == "Record candidate archive provenance"
+        else:
+            assert next_step["name"] == "Record trusted scan digest"
+
+
+def test_workflow_validates_complete_reports_before_hashing_or_recording() -> None:
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github/workflows/images.yml").read_text(encoding="utf-8")
+    )
+
+    build_steps = workflow["jobs"]["build"]["steps"]
+    build_names = [step.get("name") for step in build_steps]
+    assert build_names.index("Scan native image archive") < build_names.index(
+        "Record candidate archive provenance"
+    )
+
+    publish_steps = workflow["jobs"]["publish"]["steps"]
+    publish_names = [step.get("name") for step in publish_steps]
+    assert publish_names.index("Scan trusted image archive") < publish_names.index(
+        "Record trusted scan digest"
+    )
+    digest_step = next(
+        step
+        for step in publish_steps
+        if step.get("name") == "Record trusted scan digest"
+    )
+    assert 'sha256sum "$report"' in digest_step["run"]

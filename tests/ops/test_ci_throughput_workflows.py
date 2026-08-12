@@ -936,6 +936,8 @@ def test_release_images_are_scanned_attested_and_verified_before_manifest_join()
     assert build_scan["env"] == {
         "ARCHIVE": "/tmp/${{ matrix.image }}-${{ matrix.architecture }}.docker.tar",
         "REPORT": "/tmp/${{ matrix.image }}-${{ matrix.architecture }}.trivy.json",
+        "IMAGE_NAME": "${{ matrix.image }}",
+        "ARCHITECTURE": "${{ matrix.architecture }}",
     }
     assert build_scan["run"].strip() == (
         "set -euo pipefail\n"
@@ -946,13 +948,19 @@ def test_release_images_are_scanned_attested_and_verified_before_manifest_join()
         "  --format json \\\n"
         '  --output "$REPORT" \\\n'
         "  --ignorefile /tmp/loom-trivy-release.ignore.yaml \\\n"
+        "  --show-suppressed \\\n"
         '  --cache-dir "$RUNNER_TEMP/loom-trivy-cache"\n'
         "scan_status=$?\n"
         "set -e\n"
         "if (( scan_status != 0 )); then\n"
         '  python3 scripts/summarize_trivy_report.py "$REPORT" || true\n'
         '  exit "$scan_status"\n'
-        "fi"
+        "fi\n"
+        "python3 scripts/validate_trivy_release_report.py \\\n"
+        '  --component "$IMAGE_NAME" \\\n'
+        '  --architecture "$ARCHITECTURE" \\\n'
+        '  --report "$REPORT" \\\n'
+        "  --ignore-file /tmp/loom-trivy-release.ignore.yaml"
     )
     assert build_step_names.index("Build without registry or cache write authority") < (
         build_step_names.index("Scan native image archive")
@@ -981,6 +989,8 @@ def test_release_images_are_scanned_attested_and_verified_before_manifest_join()
         "REPORT": (
             "/tmp/${{ matrix.image }}-${{ matrix.architecture }}.release.trivy.json"
         ),
+        "IMAGE_NAME": "${{ matrix.image }}",
+        "ARCHITECTURE": "${{ matrix.architecture }}",
     }
     assert trusted_scan["run"] == build_scan["run"]
     assert architecture_publish["id"] == "architecture-publish"
@@ -996,6 +1006,9 @@ def test_release_images_are_scanned_attested_and_verified_before_manifest_join()
     assert architecture_attestation["with"]["predicate-type"] == ("https://slsa.dev/provenance/v1")
     assert architecture_attestation["with"]["push-to-registry"] is True
     assert publish_names.index("Scan trusted image archive") < publish_names.index(
+        "Record trusted scan digest"
+    )
+    assert publish_names.index("Record trusted scan digest") < publish_names.index(
         "Publish scanned architecture image"
     )
     assert publish_names.index("Publish scanned architecture image") < publish_names.index(

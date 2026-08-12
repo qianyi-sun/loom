@@ -28,20 +28,79 @@ _TRIVY_RELEASE = "https://github.com/aquasecurity/trivy/releases/download/v0.70.
 _TRIVY_AMD64 = "8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9"
 _TRIVY_ARM64 = "2f6bb988b553a1bbac6bdd1ce890f5e412439564e17522b88a4541b4f364fc8d"
 _SCRIPT = Path(__file__).resolve().parents[2] / "scripts/ci_image_release_evidence.py"
-_TRIVY_EXCEPTION_STATEMENT = "No fixed Debian package was available on 2026-08-12."
+_PERL_PURLS = [
+    "pkg:deb/debian/libperl5.36",
+    "pkg:deb/debian/libperl5.40",
+    "pkg:deb/debian/perl",
+    "pkg:deb/debian/perl-base",
+    "pkg:deb/debian/perl-modules-5.36",
+    "pkg:deb/debian/perl-modules-5.40",
+]
+_PERL_STATEMENT = (
+    "No fixed Debian package was available on 2026-08-12; these Perl packages are "
+    "required by Debian base runtimes, the agent toolchain, and the staging-compatible "
+    "PostgreSQL 17.4 rehearsal image."
+)
+_POSTGRES_STATEMENT = (
+    "No fixed Debian package was available on 2026-08-12; this package is a required "
+    "dependency of the staging-compatible PostgreSQL 17.4 rehearsal image."
+)
 _TRIVY_EXCEPTIONS = [
     {
-        "id": vulnerability_id,
-        "purls": ["pkg:deb/debian/perl-base"],
+        "id": "CVE-2023-45853",
+        "purls": ["pkg:deb/debian/zlib1g"],
         "expires_at": "2026-09-12",
-        "statement": _TRIVY_EXCEPTION_STATEMENT,
+        "statement": (
+            "Debian marked this finding will-not-fix on 2026-08-12; zlib1g is a "
+            "required dependency of the staging-compatible PostgreSQL 17.4 rehearsal "
+            "image."
+        ),
+    },
+    {
+        "id": "CVE-2025-7458",
+        "purls": ["pkg:deb/debian/libsqlite3-0"],
+        "expires_at": "2026-09-12",
+        "statement": _POSTGRES_STATEMENT,
+    },
+    *[
+    {
+        "id": vulnerability_id,
+        "purls": _PERL_PURLS,
+        "expires_at": "2026-09-12",
+        "statement": _PERL_STATEMENT,
     }
     for vulnerability_id in (
         "CVE-2026-13221",
         "CVE-2026-42496",
-        "CVE-2026-57433",
-        "CVE-2026-8376",
     )
+    ],
+    {
+        "id": "CVE-2026-43185",
+        "purls": ["pkg:deb/debian/linux-libc-dev"],
+        "expires_at": "2026-09-12",
+        "statement": (
+            "No fixed Debian package was available on 2026-08-12; linux-libc-dev is "
+            "required by the agent sandbox compiler toolchain."
+        ),
+    },
+    {
+        "id": "CVE-2026-57433",
+        "purls": _PERL_PURLS,
+        "expires_at": "2026-09-12",
+        "statement": _PERL_STATEMENT,
+    },
+    {
+        "id": "CVE-2026-6653",
+        "purls": ["pkg:deb/debian/libxml2"],
+        "expires_at": "2026-09-12",
+        "statement": _POSTGRES_STATEMENT,
+    },
+    {
+        "id": "CVE-2026-8376",
+        "purls": _PERL_PURLS,
+        "expires_at": "2026-09-12",
+        "statement": _PERL_STATEMENT,
+    },
 ]
 
 
@@ -131,7 +190,7 @@ def test_architecture_predicate_binds_source_build_scan_and_invocation() -> None
             "archives": {"linux/amd64": _TRIVY_AMD64},
         },
         "config_sha256": ("35492da1d08b142bd1489ac54ecdedab62634b7b3095a37cebbe10b61df1adac"),
-        "ignore_sha256": ("83156c673c73bc58e7848876fe2144f36e7ab2dc147b7a6a55a41bfa2a88ee29"),
+        "ignore_sha256": ("b09bd1a38036f5e4274586af64616a306590ec33b1e2ac8a73d67ab88d2e4d5a"),
         "scan_type": "image",
         "vuln_type": ["os", "library"],
         "timeout": "10m0s",
@@ -352,7 +411,7 @@ def test_manifest_attestation_binds_both_verified_architecture_subjects() -> Non
             },
         },
         "config_sha256": ("35492da1d08b142bd1489ac54ecdedab62634b7b3095a37cebbe10b61df1adac"),
-        "ignore_sha256": ("83156c673c73bc58e7848876fe2144f36e7ab2dc147b7a6a55a41bfa2a88ee29"),
+        "ignore_sha256": ("b09bd1a38036f5e4274586af64616a306590ec33b1e2ac8a73d67ab88d2e4d5a"),
         "scan_type": "image",
         "vuln_type": ["os", "library"],
         "timeout": "10m0s",

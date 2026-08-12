@@ -1,4 +1,19 @@
+FROM golang:1.25.7-alpine@sha256:f6751d823c26342f9506c03797d2527668d095b0a15f1862cddb4d927a7a4ced AS gosu-builder
+
+RUN CGO_ENABLED=0 go install github.com/tianon/gosu@v0.0.0-20250923190938-6456aaa0f3c8 && \
+    /go/bin/gosu --version
+
 FROM postgres:17.4@sha256:304ab813518754228f9f792f79d6da36359b82d8ecf418096c636725f8c930ad
+
+COPY --from=gosu-builder /go/bin/gosu /usr/local/bin/gosu
+RUN apt-get update -qq && \
+    apt-get install -y --only-upgrade --no-install-recommends \
+      libgnutls30=3.7.9-2+deb12u7 \
+      libssl3=3.0.20-1~deb12u2 \
+      libxml2=2.9.14+dfsg-1.3~deb12u6 \
+      openssl=3.0.20-1~deb12u2 && \
+    rm -rf /var/lib/apt/lists/* && \
+    gosu --version
 
 ARG LOOM_BUILD_SHA
 LABEL org.opencontainers.image.revision="${LOOM_BUILD_SHA}"

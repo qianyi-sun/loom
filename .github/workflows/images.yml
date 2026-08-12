@@ -481,6 +481,8 @@ jobs:
         env:
           ARCHIVE: /tmp/${{ matrix.image }}-${{ matrix.architecture }}.docker.tar
           REPORT: /tmp/${{ matrix.image }}-${{ matrix.architecture }}.trivy.json
+          IMAGE_NAME: ${{ matrix.image }}
+          ARCHITECTURE: ${{ matrix.architecture }}
         run: |
           set -euo pipefail
           trivy_bin=$(python3 scripts/install_trivy.py --install-root "$RUNNER_TEMP")
@@ -490,6 +492,7 @@ jobs:
             --format json \
             --output "$REPORT" \
             --ignorefile /tmp/loom-trivy-release.ignore.yaml \
+            --show-suppressed \
             --cache-dir "$RUNNER_TEMP/loom-trivy-cache"
           scan_status=$?
           set -e
@@ -497,6 +500,11 @@ jobs:
             python3 scripts/summarize_trivy_report.py "$REPORT" || true
             exit "$scan_status"
           fi
+          python3 scripts/validate_trivy_release_report.py \
+            --component "$IMAGE_NAME" \
+            --architecture "$ARCHITECTURE" \
+            --report "$REPORT" \
+            --ignore-file /tmp/loom-trivy-release.ignore.yaml
 
       - name: Record candidate archive provenance
         if: >-
@@ -729,6 +737,8 @@ jobs:
         env:
           ARCHIVE: /tmp/${{ matrix.image }}-${{ matrix.architecture }}.release.docker.tar
           REPORT: /tmp/${{ matrix.image }}-${{ matrix.architecture }}.release.trivy.json
+          IMAGE_NAME: ${{ matrix.image }}
+          ARCHITECTURE: ${{ matrix.architecture }}
         run: |
           set -euo pipefail
           trivy_bin=$(python3 scripts/install_trivy.py --install-root "$RUNNER_TEMP")
@@ -738,6 +748,7 @@ jobs:
             --format json \
             --output "$REPORT" \
             --ignorefile /tmp/loom-trivy-release.ignore.yaml \
+            --show-suppressed \
             --cache-dir "$RUNNER_TEMP/loom-trivy-cache"
           scan_status=$?
           set -e
@@ -745,6 +756,11 @@ jobs:
             python3 scripts/summarize_trivy_report.py "$REPORT" || true
             exit "$scan_status"
           fi
+          python3 scripts/validate_trivy_release_report.py \
+            --component "$IMAGE_NAME" \
+            --architecture "$ARCHITECTURE" \
+            --report "$REPORT" \
+            --ignore-file /tmp/loom-trivy-release.ignore.yaml
 
       - name: Record trusted scan digest
         id: scan
