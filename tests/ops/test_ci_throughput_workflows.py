@@ -931,23 +931,22 @@ def test_release_images_are_scanned_attested_and_verified_before_manifest_join()
     )
     assert "type=docker,dest=${archive}" in build_script
     assert "INTERNAL_PULL_REQUEST" not in build_script
-    assert build_scan["uses"].startswith("aquasecurity/trivy-action@")
-    assert build_scan["with"] == {
-        "input": "/tmp/${{ matrix.image }}-${{ matrix.architecture }}.docker.tar",
-        "format": "json",
-        "output": "/tmp/${{ matrix.image }}-${{ matrix.architecture }}.trivy.json",
-        "scan-type": "image",
-        "vuln-type": "os,library",
-        "timeout": "10m0s",
-        "exit-code": "1",
-        "ignore-unfixed": "false",
-        "severity": "CRITICAL",
-        "scanners": "vuln",
-        "cache": "false",
-        "version": "v0.70.0",
-        "trivy-config": "/tmp/loom-trivy-release.yaml",
-        "trivyignores": "/tmp/loom-trivy-release.ignore",
+    assert "uses" not in build_scan
+    assert build_scan["shell"] == "bash"
+    assert build_scan["env"] == {
+        "ARCHIVE": "/tmp/${{ matrix.image }}-${{ matrix.architecture }}.docker.tar",
+        "REPORT": "/tmp/${{ matrix.image }}-${{ matrix.architecture }}.trivy.json",
     }
+    assert build_scan["run"].strip() == (
+        "set -euo pipefail\n"
+        "trivy_bin=$(python3 scripts/install_trivy.py --install-root \"$RUNNER_TEMP\")\n"
+        '"$trivy_bin" --config /tmp/loom-trivy-release.yaml image \\\n'
+        '  --input "$ARCHIVE" \\\n'
+        "  --format json \\\n"
+        '  --output "$REPORT" \\\n'
+        "  --ignorefile /tmp/loom-trivy-release.ignore \\\n"
+        '  --cache-dir "$RUNNER_TEMP/loom-trivy-cache"'
+    )
     assert build_step_names.index("Build without registry or cache write authority") < (
         build_step_names.index("Scan native image archive")
     )
@@ -966,25 +965,17 @@ def test_release_images_are_scanned_attested_and_verified_before_manifest_join()
         for step in publish["steps"]
         if step.get("name") == "Attest published architecture digest"
     )
-    assert trusted_scan["uses"] == (
-        f"aquasecurity/trivy-action@{_locked_action_sha('aquasecurity/trivy-action')}"
-    )
-    assert trusted_scan["with"] == {
-        "input": ("/tmp/${{ matrix.image }}-${{ matrix.architecture }}.release.docker.tar"),
-        "format": "json",
-        "output": ("/tmp/${{ matrix.image }}-${{ matrix.architecture }}.release.trivy.json"),
-        "scan-type": "image",
-        "vuln-type": "os,library",
-        "timeout": "10m0s",
-        "exit-code": "1",
-        "ignore-unfixed": "false",
-        "severity": "CRITICAL",
-        "scanners": "vuln",
-        "cache": "false",
-        "version": "v0.70.0",
-        "trivy-config": "/tmp/loom-trivy-release.yaml",
-        "trivyignores": "/tmp/loom-trivy-release.ignore",
+    assert "uses" not in trusted_scan
+    assert trusted_scan["shell"] == "bash"
+    assert trusted_scan["env"] == {
+        "ARCHIVE": (
+            "/tmp/${{ matrix.image }}-${{ matrix.architecture }}.release.docker.tar"
+        ),
+        "REPORT": (
+            "/tmp/${{ matrix.image }}-${{ matrix.architecture }}.release.trivy.json"
+        ),
     }
+    assert trusted_scan["run"] == build_scan["run"]
     assert architecture_publish["id"] == "architecture-publish"
     assert 'push_output=$(docker push "$target" 2>&1)' in architecture_publish["run"]
     assert "subject_name=$image" in architecture_publish["run"]

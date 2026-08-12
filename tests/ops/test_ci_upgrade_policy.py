@@ -53,15 +53,18 @@ def test_image_supply_chain_upgrade_has_real_previous_release_rollbacks() -> Non
         batch for batch in policy["batches"] if batch["name"] == "image-supply-chain"
     )
 
+    assert image_batch["compatibility_tests"] == [
+        "uv run --no-sync pytest -q tests/ops/test_ci_action_pins.py "
+        "tests/ops/test_install_trivy.py tests/ops/test_ci_trivy_release_policy.py "
+        "tests/ops/test_ci_image_release_evidence.py "
+        "tests/ops/test_ci_throughput_workflows.py",
+        "actionlint .github/workflows/images.yml",
+    ]
     assert image_batch["rollback"] == {
         "actions/attest-build-provenance": {
             "sha": "0f67c3f4856b2e3261c31976d6725780e5e4c373",
             "version": "v4.1.1",
-        },
-        "aquasecurity/trivy-action": {
-            "sha": "57a97c7e7821a5776cebc9bb87c984fa69cba8f1",
-            "version": "v0.35.0",
-        },
+        }
     }
 
 

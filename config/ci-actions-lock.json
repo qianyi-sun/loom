@@ -25,10 +25,6 @@
       "sha": "4d101475d8b20a2381f78447822ac1eab6504dd8",
       "version": "v4.2.2"
     },
-    "aquasecurity/trivy-action": {
-      "sha": "ed142fd0673e97e23eac54620cfb913e5ce36c25",
-      "version": "v0.36.0"
-    },
     "astral-sh/setup-uv": {
       "sha": "fac544c07dec837d0ccb6301d7b5580bf5edae39",
       "version": "v8.2.0"

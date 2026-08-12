@@ -257,18 +257,21 @@ trusted release scan use pinned Trivy v0.70.0 with scan type `image`, OS and
 library vulnerability types, a `10m0s` timeout, `CRITICAL` severity, exit code
 1, unfixed findings included, the `vuln` scanner only, and caching disabled.
 The trusted scan selects fixed config and empty-ignore files generated outside
-the checkout. The publisher captures the one digest emitted by the push and
-uses the immutable subject only for registry validation, SLSA v1 attestation,
-and strict verification; it never resolves the mutable architecture build tag.
+the checkout. A repository-owned installer accepts only the architecture-
+specific v0.70.0 release archive whose repository-pinned SHA-256 matches,
+avoiding any third-party action forbidden by repository policy. The publisher
+captures the one digest emitted by the push and uses the immutable subject only
+for registry validation, SLSA v1 attestation, and strict verification; it never
+resolves the mutable architecture build tag.
 
 The predicate binds the Trivy scanner name/version, controlled config and
-empty-ignore hashes, pinned action identity, scan-report digest, release
-commit/tree/ref/run/attempt, Dockerfile, context, and platform. Official
-records accept only `trusted-rebuild`, binding the archive built in the current
-release run; no candidate artifact identity enters the predicate or record.
-Only after architecture attestation verification does the publisher upload one
-canonical immutable record containing those source identities, mode, subject
-name/digest, and scan digest. The manifest publisher
+empty-ignore hashes, release URL and architecture archive digest, scan-report
+digest, release commit/tree/ref/run/attempt, Dockerfile, context, and platform.
+Official records accept only `trusted-rebuild`, binding the archive built in
+the current release run; no candidate artifact identity enters the predicate
+or record. Only after architecture attestation verification does the publisher
+upload one canonical immutable record containing those source identities,
+mode, subject name/digest, and scan digest. The manifest publisher
 downloads exactly the AMD64 and ARM64 records for the current image and run,
 validates the two-record set fail-closed, re-verifies each recorded immutable
 subject, and joins only those two digests. It creates only a temporary

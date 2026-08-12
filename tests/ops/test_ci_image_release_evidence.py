@@ -24,7 +24,9 @@ _AMD64_DIGEST = "e" * 64
 _ARM64_DIGEST = "f" * 64
 _CANDIDATE_HEAD = "1" * 40
 _CANDIDATE_TREE = "2" * 40
-_TRIVY_ACTION = "aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25"
+_TRIVY_RELEASE = "https://github.com/aquasecurity/trivy/releases/download/v0.70.0"
+_TRIVY_AMD64 = "8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9"
+_TRIVY_ARM64 = "2f6bb988b553a1bbac6bdd1ce890f5e412439564e17522b88a4541b4f364fc8d"
 _SCRIPT = Path(__file__).resolve().parents[2] / "scripts/ci_image_release_evidence.py"
 
 
@@ -107,9 +109,13 @@ def test_architecture_predicate_binds_source_build_scan_and_invocation() -> None
     }
     assert external["build"] == {"mode": "trusted-rebuild"}
     assert external["scan"] == {
-        "action": _TRIVY_ACTION,
-        "scanner": {"name": "Trivy", "version": "v0.70.0"},
-        "config_sha256": ("11c249a9a4b4c3b45c521d424a83a619ff25e4e02c6b205ea38a946d376052bf"),
+        "scanner": {
+            "name": "Trivy",
+            "version": "v0.70.0",
+            "release": _TRIVY_RELEASE,
+            "archives": {"linux/amd64": _TRIVY_AMD64},
+        },
+        "config_sha256": ("35492da1d08b142bd1489ac54ecdedab62634b7b3095a37cebbe10b61df1adac"),
         "ignore_sha256": ("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
         "scan_type": "image",
         "vuln_type": ["os", "library"],
@@ -320,9 +326,16 @@ def test_manifest_attestation_binds_both_verified_architecture_subjects() -> Non
     external: Any = predicate["buildDefinition"]
     external = external["externalParameters"]
     assert external["scan"] == {
-        "action": _TRIVY_ACTION,
-        "scanner": {"name": "Trivy", "version": "v0.70.0"},
-        "config_sha256": ("11c249a9a4b4c3b45c521d424a83a619ff25e4e02c6b205ea38a946d376052bf"),
+        "scanner": {
+            "name": "Trivy",
+            "version": "v0.70.0",
+            "release": _TRIVY_RELEASE,
+            "archives": {
+                "linux/amd64": _TRIVY_AMD64,
+                "linux/arm64": _TRIVY_ARM64,
+            },
+        },
+        "config_sha256": ("35492da1d08b142bd1489ac54ecdedab62634b7b3095a37cebbe10b61df1adac"),
         "ignore_sha256": ("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
         "scan_type": "image",
         "vuln_type": ["os", "library"],

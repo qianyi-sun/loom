@@ -207,14 +207,16 @@ archive is rebuilt from the protected release commit inside the hosted
 library vulnerabilities, a `10m0s` timeout, `CRITICAL` severity, exit code 1,
 unfixed findings included, the vulnerability scanner only, and no cache. A
 repository helper writes the fixed config and empty ignore file outside the
-checkout before each scan. The signed predicate binds the scanner identity,
-pinned action identity, complete policy-file identities, and scan report. Its
-only publication mode is `trusted-rebuild`, bound to the protected release
-head, tree, ref, and current run. PR candidate archives remain untrusted CI
-evidence only: the publisher never downloads, loads, scans as release,
-attests, or publishes those bytes. Each architecture push contributes its
-emitted digest directly to a canonical post-verification record, rather than
-allowing a later mutable-tag lookup.
+checkout before each scan. A repository-owned installer accepts only the
+architecture-specific v0.70.0 release archive whose repository-pinned SHA-256
+matches; no policy-forbidden third-party action is required. The signed
+predicate binds the scanner identity, release URL and architecture archive
+digest, complete policy-file identities, and scan report. Its only publication mode is
+`trusted-rebuild`, bound to the protected release head, tree, ref, and current
+run. PR candidate archives remain untrusted CI evidence only: the publisher
+never downloads, loads, scans as release, attests, or publishes those bytes.
+Each architecture push contributes its emitted digest directly to a canonical
+post-verification record, rather than allowing a later mutable-tag lookup.
 
 The manifest job accepts exactly the current image's AMD64 and ARM64 records,
 validates their release and mode identities, verifies the registry

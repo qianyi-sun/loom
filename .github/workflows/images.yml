@@ -477,22 +477,19 @@ jobs:
             --ignore-file /tmp/loom-trivy-release.ignore
 
       - name: Scan native image archive
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          input: /tmp/${{ matrix.image }}-${{ matrix.architecture }}.docker.tar
-          format: json
-          output: /tmp/${{ matrix.image }}-${{ matrix.architecture }}.trivy.json
-          scan-type: image
-          vuln-type: os,library
-          timeout: 10m0s
-          exit-code: '1'
-          ignore-unfixed: 'false'
-          severity: CRITICAL
-          scanners: vuln
-          cache: 'false'
-          version: v0.70.0
-          trivy-config: /tmp/loom-trivy-release.yaml
-          trivyignores: /tmp/loom-trivy-release.ignore
+        shell: bash
+        env:
+          ARCHIVE: /tmp/${{ matrix.image }}-${{ matrix.architecture }}.docker.tar
+          REPORT: /tmp/${{ matrix.image }}-${{ matrix.architecture }}.trivy.json
+        run: |
+          set -euo pipefail
+          trivy_bin=$(python3 scripts/install_trivy.py --install-root "$RUNNER_TEMP")
+          "$trivy_bin" --config /tmp/loom-trivy-release.yaml image \
+            --input "$ARCHIVE" \
+            --format json \
+            --output "$REPORT" \
+            --ignorefile /tmp/loom-trivy-release.ignore \
+            --cache-dir "$RUNNER_TEMP/loom-trivy-cache"
 
       - name: Record candidate archive provenance
         if: >-
@@ -721,22 +718,19 @@ jobs:
             --ignore-file /tmp/loom-trivy-release.ignore
 
       - name: Scan trusted image archive
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          input: /tmp/${{ matrix.image }}-${{ matrix.architecture }}.release.docker.tar
-          format: json
-          output: /tmp/${{ matrix.image }}-${{ matrix.architecture }}.release.trivy.json
-          scan-type: image
-          vuln-type: os,library
-          timeout: 10m0s
-          exit-code: '1'
-          ignore-unfixed: 'false'
-          severity: CRITICAL
-          scanners: vuln
-          cache: 'false'
-          version: v0.70.0
-          trivy-config: /tmp/loom-trivy-release.yaml
-          trivyignores: /tmp/loom-trivy-release.ignore
+        shell: bash
+        env:
+          ARCHIVE: /tmp/${{ matrix.image }}-${{ matrix.architecture }}.release.docker.tar
+          REPORT: /tmp/${{ matrix.image }}-${{ matrix.architecture }}.release.trivy.json
+        run: |
+          set -euo pipefail
+          trivy_bin=$(python3 scripts/install_trivy.py --install-root "$RUNNER_TEMP")
+          "$trivy_bin" --config /tmp/loom-trivy-release.yaml image \
+            --input "$ARCHIVE" \
+            --format json \
+            --output "$REPORT" \
+            --ignorefile /tmp/loom-trivy-release.ignore \
+            --cache-dir "$RUNNER_TEMP/loom-trivy-cache"
 
       - name: Record trusted scan digest
         id: scan

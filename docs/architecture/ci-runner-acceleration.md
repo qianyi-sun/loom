@@ -76,9 +76,12 @@ trusted publication scans both use pinned Trivy v0.70.0 with `scan-type: image`,
 `vuln-type: os,library`, `timeout: 10m0s`, `severity: CRITICAL`, `exit-code:
 '1'`, `ignore-unfixed: 'false'`, `scanners: vuln`, and `cache: 'false'`. Before
 each trusted scan, a repository helper writes the fixed config and empty ignore
-file outside the checkout. The signed release predicate binds every reviewed
-field, scanner name/version, controlled-file hashes, pinned action identity,
-and resulting report digest.
+file outside the checkout. A second repository-owned helper installs only the
+architecture-specific v0.70.0 release archive against its repository-pinned
+SHA-256; this avoids relying on actions forbidden by repository policy. The
+signed release predicate binds every reviewed field, scanner name/version,
+release URL and architecture archive digest, controlled-file hashes, and
+resulting report digest.
 
 The hosted publisher rebuilds every architecture archive from the protected
 release commit and captures the single digest emitted by each architecture

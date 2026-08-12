@@ -15,6 +15,10 @@ TRIVY_SCANNER_NAME = "Trivy"
 TRIVY_VERSION = "v0.70.0"
 TRIVY_CONFIG_BYTES = (
     b"exit-code: 1\n"
+    b"pkg:\n"
+    b"  types:\n"
+    b"    - os\n"
+    b"    - library\n"
     b"scan:\n"
     b"  scanners:\n"
     b"    - vuln\n"
@@ -23,12 +27,9 @@ TRIVY_CONFIG_BYTES = (
     b"timeout: 10m0s\n"
     b"vulnerability:\n"
     b"  ignore-unfixed: false\n"
-    b"  type:\n"
-    b"    - os\n"
-    b"    - library\n"
 )
 TRIVY_IGNORE_BYTES = b""
-TRIVY_CONFIG_SHA256 = "11c249a9a4b4c3b45c521d424a83a619ff25e4e02c6b205ea38a946d376052bf"
+TRIVY_CONFIG_SHA256 = "35492da1d08b142bd1489ac54ecdedab62634b7b3095a37cebbe10b61df1adac"
 TRIVY_IGNORE_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 

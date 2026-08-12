@@ -12,6 +12,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 POLICY_SCRIPT = REPO_ROOT / "scripts/write_trivy_release_policy.py"
 CONFIG_BYTES = (
     b"exit-code: 1\n"
+    b"pkg:\n"
+    b"  types:\n"
+    b"    - os\n"
+    b"    - library\n"
     b"scan:\n"
     b"  scanners:\n"
     b"    - vuln\n"
@@ -20,11 +24,8 @@ CONFIG_BYTES = (
     b"timeout: 10m0s\n"
     b"vulnerability:\n"
     b"  ignore-unfixed: false\n"
-    b"  type:\n"
-    b"    - os\n"
-    b"    - library\n"
 )
-CONFIG_SHA256 = "11c249a9a4b4c3b45c521d424a83a619ff25e4e02c6b205ea38a946d376052bf"
+CONFIG_SHA256 = "35492da1d08b142bd1489ac54ecdedab62634b7b3095a37cebbe10b61df1adac"
 IGNORE_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 
@@ -89,6 +90,6 @@ def test_workflow_scans_only_the_controlled_absolute_policy_files() -> None:
             "  --config-file /tmp/loom-trivy-release.yaml \\\n"
             "  --ignore-file /tmp/loom-trivy-release.ignore"
         )
-        assert scan["with"]["version"] == "v0.70.0"
-        assert scan["with"]["trivy-config"] == "/tmp/loom-trivy-release.yaml"
-        assert scan["with"]["trivyignores"] == "/tmp/loom-trivy-release.ignore"
+        assert "python3 scripts/install_trivy.py" in scan["run"]
+        assert "--config /tmp/loom-trivy-release.yaml" in scan["run"]
+        assert "--ignorefile /tmp/loom-trivy-release.ignore" in scan["run"]

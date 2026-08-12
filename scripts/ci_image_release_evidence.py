@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
+    from scripts.install_trivy import TRIVY_ARCHIVE_SHA256, TRIVY_RELEASE_URL
     from scripts.write_trivy_release_policy import (
         TRIVY_CONFIG_SHA256,
         TRIVY_IGNORE_SHA256,
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
         TRIVY_VERSION,
     )
 elif __package__:
+    from scripts.install_trivy import TRIVY_ARCHIVE_SHA256, TRIVY_RELEASE_URL
     from scripts.write_trivy_release_policy import (
         TRIVY_CONFIG_SHA256,
         TRIVY_IGNORE_SHA256,
@@ -27,6 +29,7 @@ elif __package__:
         TRIVY_VERSION,
     )
 else:  # pragma: no cover - direct workflow script entry point
+    from install_trivy import TRIVY_ARCHIVE_SHA256, TRIVY_RELEASE_URL
     from write_trivy_release_policy import (
         TRIVY_CONFIG_SHA256,
         TRIVY_IGNORE_SHA256,
@@ -45,7 +48,6 @@ _IMAGE_NAME = re.compile(r"[a-z0-9]+(?:[._-][a-z0-9]+)*")
 _SUBJECT_NAME = re.compile(r"ghcr\.io/[a-z0-9](?:[a-z0-9-]{0,38})/[a-z0-9]+(?:[._-][a-z0-9]+)*")
 _PLATFORMS = {"amd64": "linux/amd64", "arm64": "linux/arm64"}
 _BUILD_MODES = {"trusted-rebuild"}
-TRIVY_ACTION = "aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25"
 
 
 class EvidenceError(ValueError):
@@ -200,10 +202,24 @@ def _run_details(
     }
 
 
-def _scan_policy_parameters() -> dict[str, object]:
+def _scan_policy_parameters(platforms: Sequence[str]) -> dict[str, object]:
+    archives: dict[str, str] = {}
+    for platform_name in sorted(platforms):
+        matches = [
+            architecture
+            for architecture, expected_platform in _PLATFORMS.items()
+            if expected_platform == platform_name
+        ]
+        if len(matches) != 1:
+            raise EvidenceError("scanner platform is invalid")
+        archives[platform_name] = TRIVY_ARCHIVE_SHA256[matches[0]]
     return {
-        "action": TRIVY_ACTION,
-        "scanner": {"name": TRIVY_SCANNER_NAME, "version": TRIVY_VERSION},
+        "scanner": {
+            "name": TRIVY_SCANNER_NAME,
+            "version": TRIVY_VERSION,
+            "release": TRIVY_RELEASE_URL,
+            "archives": archives,
+        },
         "config_sha256": TRIVY_CONFIG_SHA256,
         "ignore_sha256": TRIVY_IGNORE_SHA256,
         "scan_type": "image",
@@ -217,9 +233,9 @@ def _scan_policy_parameters() -> dict[str, object]:
     }
 
 
-def _scan_policy(report_sha256: str) -> dict[str, object]:
+def _scan_policy(report_sha256: str, *, platform: str) -> dict[str, object]:
     return {
-        **_scan_policy_parameters(),
+        **_scan_policy_parameters([platform]),
         "report_sha256": _exact(_HEX64, report_sha256, "scan report digest"),
     }
 
@@ -277,7 +293,7 @@ def architecture_predicate(
     )
     if architecture not in _PLATFORMS or _PLATFORMS[architecture] != platform:
         raise EvidenceError("image platform is invalid")
-    scan = _scan_policy(scan_report_sha256)
+    scan = _scan_policy(scan_report_sha256, platform=platform)
     build = _build(build_mode=build_mode)
     return {
         "buildDefinition": {
@@ -388,7 +404,7 @@ def manifest_predicate(
                 "architecture_subjects": architecture_digests,
                 "architecture_builds": architecture_builds,
                 "scan": {
-                    **_scan_policy_parameters(),
+                    **_scan_policy_parameters(sorted(_PLATFORMS.values())),
                     "report_sha256": scan_report_digests,
                 },
             },
@@ -615,7 +631,7 @@ def architecture_record(
     )
     if not subject_digest.startswith("sha256:") or _HEX64.fullmatch(subject_digest[7:]) is None:
         raise EvidenceError("record subject digest is invalid")
-    scan = _scan_policy(scan_report_sha256)
+    scan = _scan_policy(scan_report_sha256, platform=platform)
     build = _build(build_mode=build_mode)
     return {
         "schema_version": 1,
@@ -1027,7 +1043,8 @@ if __name__ == "__main__":
 
 __all__ = [
     "SLSA_PREDICATE_TYPE",
-    "TRIVY_ACTION",
+    "TRIVY_ARCHIVE_SHA256",
+    "TRIVY_RELEASE_URL",
     "EvidenceError",
     "architecture_predicate",
     "architecture_record",
