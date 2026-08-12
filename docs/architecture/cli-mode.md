@@ -1,5 +1,10 @@
 # CLI mode
 
+> This page describes the local `loom run` evaluator. The separate
+> `loom pipeline ...` namespace is a service-mode client for official Recipe
+> PipelineRuns; it uses authenticated `/api/v1/pipeline-*` routes and does not
+> expose local execution or raw graph controls.
+
 `loom run` is a **stateless** wrapper around the same `Trial.run()`
 orchestrator service mode uses. No Control Plane, no Worker, no
 Gateway, no Postgres, no MinIO required.

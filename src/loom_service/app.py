@@ -37,6 +37,7 @@ from loom.personal_dev_candidate import PersonalDevCandidateLimits
 from loom.personal_dev_environment import PersonalDevLifecycleLimits
 from loom.security.secret_store import assert_existing_secrets_decryptable
 from loom.startup_retry import retry_startup_dependency
+from loom.system_identities import assert_pipeline_controller_identity
 from loom.taskset.transform_sandbox import TransformSandboxConfig
 from loom.workload_trust import WorkloadTrustContract
 from loom_service.batch_runner import run_loop as batch_run_loop
@@ -75,6 +76,7 @@ from loom_service.routes import (
     monitor,
     overview,
     personal_dev_candidates,
+    pipeline,
     provider_connections,
     rate_cards,
     run_library,
@@ -127,7 +129,9 @@ async def _assert_secret_store_startup(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> int:
     async with session_factory() as session:
-        return await assert_existing_secrets_decryptable(session)
+        count = await assert_existing_secrets_decryptable(session)
+        await assert_pipeline_controller_identity(session)
+        return count
 
 
 async def _assert_schema_startup(engine: AsyncEngine) -> int:
@@ -481,6 +485,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
     app.include_router(models.router, prefix="/api/v1")
     app.include_router(monitor.router, prefix="/api/v1")
     app.include_router(overview.router, prefix="/api/v1")
+    app.include_router(pipeline.router, prefix="/api/v1")
     app.include_router(backends.router, prefix="/api/v1")
     app.include_router(local_servers.router, prefix="/api/v1")
     app.include_router(provider_connections.router, prefix="/api/v1")

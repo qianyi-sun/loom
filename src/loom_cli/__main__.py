@@ -245,6 +245,11 @@ def _build_parser() -> argparse.ArgumentParser:
         add_help=False,
     )
     sub.add_parser(
+        "pipeline",
+        help="Submit and inspect fixed official-Recipe Pipelines",
+        add_help=False,
+    )
+    sub.add_parser(
         "resources",
         help="Inspect concurrent task slots and resource-pool pressure",
         add_help=False,
@@ -373,6 +378,9 @@ def main(argv: list[str] | None = None) -> int:
     if raw and raw[0] == "eval":
         from loom_cli.eval_cmd import dispatch as eval_dispatch
         return eval_dispatch(raw[1:])
+    if raw and raw[0] == "pipeline":
+        from loom_cli.pipeline_cmd import dispatch as pipeline_dispatch
+        return pipeline_dispatch(raw[1:])
     if raw and raw[0] == "resources":
         from loom_cli.resources_cmd import dispatch as resources_dispatch
         return resources_dispatch(raw[1:])

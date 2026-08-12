@@ -1637,6 +1637,32 @@ connections that use the synced rate card and `pricing_source=rate-card` with
 `rate_card_provider=yibuapi` return per-trial, per-batch, and admin usage
 costs; self-deployed/private APIs return token totals and usage confidence
 without inventing a dollar amount.
+
+## Official Recipe Pipelines
+
+`loom pipeline` is the authenticated, server-backed interface for immutable
+official Recipes. It does not accept raw graphs, images, pools, networks,
+providers, secrets, or object-store locations. A typical submission is:
+
+```bash
+loom pipeline run \
+  --recipe behavior-recovery@1 \
+  --input task_set=00000000-0000-4000-8000-000000000001 \
+  --params @params.json \
+  --budget @budget.json \
+  --idempotency-key my-run-001
+```
+
+Use `loom pipeline list`, `show`, and `watch` to inspect it. `watch` only polls
+events; Ctrl-C stops watching and never cancels the run. `retry-stage` creates
+a new full replay PipelineRun from the original immutable inputs and snapshots;
+it never reopens a StageRun or reuses a checkpoint. Artifact downloads use the
+same-origin authorized Loom route and never reveal an internal object-store URL.
+
+Input import is restricted to the current team owner. It validates a local
+manifest and tree before the first HTTP request, creates a deterministic
+`payload.tar.zst`, rotates the upload token, and aborts on interruption. See
+`loom pipeline --help` for the fixed command set.
 When inspecting a main production batch plus linked supplemental reruns, pass
 `batch_id=<main-batch-id>&include_batch_family=true` to `/api/v1/usage` or use
 `loom eval usage --batch-id <main-batch-id> --include-batch-family`. Add
