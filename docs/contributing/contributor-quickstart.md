@@ -288,6 +288,11 @@ snapshot, authority generation, and source run/attempt all still match exactly.
 It must never synthesize success from an empty association, and any competing
 open association remains a fail-closed authority error.
 
+Acceptance evidence for this boundary must include a post-merge read-back: the
+four exact-head terminal CheckRuns and their latest same-name commit statuses
+must remain successful after the PR closes, not merely at the instant native
+auto-merge becomes eligible.
+
 Same-repository `dev`-to-`main` promotions use this publisher. Branch push
 aggregates use `*-push`, so they never duplicate a protected name on a
 later promotion PR that points at the same commit.
