@@ -3348,6 +3348,50 @@ class HostSystem:
             target.pop(("user", SERVICE_USER), None)
         return _canonical_acl_snapshot(target)
 
+    def _acl_snapshot_by_user_identity(
+        self,
+        snapshot: Sequence[str],
+        *,
+        allow_empty: bool,
+    ) -> dict[tuple[str, str], str]:
+        normalized: dict[tuple[str, str], str] = {}
+        for (tag, qualifier), permissions in _acl_snapshot_map(
+            snapshot,
+            allow_empty=allow_empty,
+        ).items():
+            stable_qualifier = qualifier
+            if tag == "user" and qualifier and not qualifier.isdigit():
+                result = self._probe(["getent", "passwd", qualifier])
+                lines = result.stdout.strip().splitlines()
+                fields = lines[0].split(":") if len(lines) == 1 else []
+                if (
+                    result.returncode == 0
+                    and len(fields) >= 3
+                    and fields[0] == qualifier
+                    and fields[2].isdigit()
+                ):
+                    stable_qualifier = fields[2]
+            key = (tag, stable_qualifier)
+            if key in normalized:
+                raise InstallError("ACL contains duplicate user identities")
+            normalized[key] = permissions
+        return normalized
+
+    def _acl_snapshots_match_user_identities(
+        self,
+        left: Sequence[str],
+        right: Sequence[str],
+        *,
+        allow_empty: bool,
+    ) -> bool:
+        return self._acl_snapshot_by_user_identity(
+            left,
+            allow_empty=allow_empty,
+        ) == self._acl_snapshot_by_user_identity(
+            right,
+            allow_empty=allow_empty,
+        )
+
     def acl_removal_state(
         self,
         grant: AclGrant,
@@ -3364,15 +3408,28 @@ class HostSystem:
             self._acl_entries(grant.path),
             default=grant.default,
         )
-        if current == self._acl_removal_target(
+        removal_target = self._acl_removal_target(
             grant,
             adjustment,
             remove_service_entry=remove_service_entry,
+        )
+        if current == removal_target or self._acl_snapshots_match_user_identities(
+            current,
+            removal_target,
+            allow_empty=grant.default,
         ):
             return "removed"
-        if current == adjustment.before_acl:
+        if current == adjustment.before_acl or self._acl_snapshots_match_user_identities(
+            current,
+            adjustment.before_acl,
+            allow_empty=grant.default,
+        ):
             return "before"
-        if current == adjustment.after_acl:
+        if current == adjustment.after_acl or self._acl_snapshots_match_user_identities(
+            current,
+            adjustment.after_acl,
+            allow_empty=grant.default,
+        ):
             return "after"
         return "drift"
 
@@ -3422,6 +3479,7 @@ class HostSystem:
     ) -> None:
         entries = self._acl_entries(grant.path)
         current_acl = self._acl_snapshot(entries, default=grant.default)
+        transition_acl = current_acl
         service_key = ("user", SERVICE_USER)
         if adjustment is not None:
             target_acl = self._acl_removal_target(
@@ -3429,12 +3487,29 @@ class HostSystem:
                 adjustment,
                 remove_service_entry=remove_service_entry,
             )
-            if current_acl == target_acl:
+            if current_acl == target_acl or self._acl_snapshots_match_user_identities(
+                current_acl,
+                target_acl,
+                allow_empty=grant.default,
+            ):
                 return
-            if current_acl not in {
+            if current_acl == adjustment.before_acl:
+                transition_acl = adjustment.before_acl
+            elif current_acl == adjustment.after_acl:
+                transition_acl = adjustment.after_acl
+            elif self._acl_snapshots_match_user_identities(
+                current_acl,
                 adjustment.before_acl,
+                allow_empty=grant.default,
+            ):
+                transition_acl = adjustment.before_acl
+            elif self._acl_snapshots_match_user_identities(
+                current_acl,
                 adjustment.after_acl,
-            }:
+                allow_empty=grant.default,
+            ):
+                transition_acl = adjustment.after_acl
+            else:
                 raise InstallError("service ACL changed before removal")
         else:
             current = _acl_snapshot_map(current_acl, allow_empty=grant.default)
@@ -3446,14 +3521,18 @@ class HostSystem:
         self._apply_acl_transition(
             grant.path,
             default=grant.default,
-            before_acl=current_acl,
+            before_acl=transition_acl,
             after_acl=target_acl,
         )
         restored = self._acl_snapshot(
             self._acl_entries(grant.path),
             default=grant.default,
         )
-        if restored != target_acl:
+        if restored != target_acl and not self._acl_snapshots_match_user_identities(
+            restored,
+            target_acl,
+            allow_empty=grant.default,
+        ):
             raise InstallError("service ACL restoration did not converge")
 
     def export_kubeconfig(self) -> bytes:
