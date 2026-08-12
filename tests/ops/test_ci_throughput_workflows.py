@@ -610,7 +610,7 @@ def test_images_builds_use_planner_selection() -> None:
     required_output = jobs["plan"]["outputs"]["required"]
     assert "steps.plan.outputs.required" in required_output
     assert "steps.event.outputs.required" in required_output
-    assert set(jobs["build"]["needs"]) == {"plan", "image-route"}
+    assert set(jobs["build"]["needs"]) == {"plan", "image-route", "trivy-binary"}
     assert "needs.plan.outputs.required == 'true'" in jobs["build"]["if"]
 
 
@@ -666,7 +666,7 @@ def test_images_workflow_uses_path_aware_matrix_plan() -> None:
     assert "images" in jobs["plan"]["outputs"]
     assert "native_builds" in jobs["plan"]["outputs"]
     build = jobs["build"]
-    assert set(build["needs"]) == {"plan", "image-route"}
+    assert set(build["needs"]) == {"plan", "image-route", "trivy-binary"}
     assert build["strategy"]["matrix"]["include"] == (
         "${{ fromJSON(needs.plan.outputs.native_builds) }}"
     )
@@ -902,7 +902,7 @@ def test_trusted_publisher_rebuilds_without_candidate_resolution() -> None:
     names = [step.get("name") for step in publish["steps"]]
 
     assert "resolve-candidate" not in jobs
-    assert publish["needs"] == ["plan"]
+    assert publish["needs"] == ["plan", "trivy-binary"]
     assert publish["strategy"]["matrix"]["include"] == (
         "${{ fromJSON(needs.plan.outputs.native_builds) }}"
     )
@@ -916,9 +916,35 @@ def test_trusted_publisher_rebuilds_without_candidate_resolution() -> None:
 
 def test_release_images_are_scanned_attested_and_verified_before_manifest_join() -> None:
     workflow = _workflow(".github/workflows/images.yml")
+    trivy_binary = workflow["jobs"]["trivy-binary"]
     build = workflow["jobs"]["build"]
     publish = workflow["jobs"]["publish"]
     manifest = workflow["jobs"]["publish-manifest"]
+
+    assert trivy_binary["needs"] == ["plan"]
+    assert trivy_binary["permissions"] == {"contents": "read"}
+    assert trivy_binary["runs-on"] == "ubuntu-24.04"
+    assert "strategy" not in trivy_binary
+    install = next(
+        step
+        for step in trivy_binary["steps"]
+        if step.get("name") == "Install and record pinned Trivy binary"
+    )
+    upload = next(
+        step
+        for step in trivy_binary["steps"]
+        if step.get("name") == "Upload exact verified Trivy binary"
+    )
+    assert "for architecture in amd64 arm64" in install["run"]
+    assert "python3 scripts/install_trivy.py" in install["run"]
+    assert '--architecture "$architecture"' in install["run"]
+    assert "sha256sum --check trivy.sha256" in install["run"]
+    assert upload["with"]["name"] == (
+        "trivy-binaries-run-${{ github.run_id }}-"
+        "attempt-${{ github.run_attempt }}"
+    )
+    assert build["needs"] == ["plan", "image-route", "trivy-binary"]
+    assert publish["needs"] == ["plan", "trivy-binary"]
 
     build_step_names = [step.get("name") for step in build["steps"]]
     build_script = next(
@@ -941,7 +967,7 @@ def test_release_images_are_scanned_attested_and_verified_before_manifest_join()
     }
     assert build_scan["run"].strip() == (
         "set -euo pipefail\n"
-        "trivy_bin=$(python3 scripts/install_trivy.py --install-root \"$RUNNER_TEMP\")\n"
+        'trivy_bin="/tmp/loom-trivy-binaries/${ARCHITECTURE}/trivy"\n'
         "set +e\n"
         '"$trivy_bin" --config /tmp/loom-trivy-release.yaml image \\\n'
         '  --input "$ARCHIVE" \\\n'
@@ -963,6 +989,12 @@ def test_release_images_are_scanned_attested_and_verified_before_manifest_join()
         "  --ignore-file /tmp/loom-trivy-release.ignore.yaml"
     )
     assert build_step_names.index("Build without registry or cache write authority") < (
+        build_step_names.index("Scan native image archive")
+    )
+    assert build_step_names.index("Download exact verified Trivy binary") < (
+        build_step_names.index("Verify distributed Trivy binary")
+    )
+    assert build_step_names.index("Verify distributed Trivy binary") < (
         build_step_names.index("Scan native image archive")
     )
 

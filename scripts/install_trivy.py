@@ -14,6 +14,7 @@ import stat
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -30,6 +31,7 @@ else:  # pragma: no cover - direct workflow entry point
 
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 _DOWNLOAD_TIMEOUT_SECONDS = 60
+_DOWNLOAD_RETRY_DELAYS_SECONDS = (1.0, 2.0, 4.0, 8.0)
 _MAX_ARCHIVE_BYTES = 128 * 1024 * 1024
 _MAX_ARCHIVE_MEMBERS = 256
 _MAX_ARCHIVE_EXPANDED_BYTES = 512 * 1024 * 1024
@@ -76,6 +78,7 @@ class TrivyInstallError(RuntimeError):
 
 
 _Opener = Callable[..., AbstractContextManager[BinaryIO]]
+_Sleeper = Callable[[float], None]
 
 
 class _ExpandedArchiveReader:
@@ -156,6 +159,50 @@ def _download_archive(
         raise TrivyInstallError("Trivy release archive digest mismatch")
 
 
+def _download_error_is_retryable(error: BaseException) -> bool:
+    if isinstance(error, urllib.error.HTTPError):
+        # A release-asset redirect can transiently return 403 when its signed
+        # blob URL is stale. Every successful response is still pinned by SHA.
+        return error.code in {403, 408, 425, 429} or 500 <= error.code < 600
+    return isinstance(error, (TimeoutError, ConnectionError, urllib.error.URLError))
+
+
+def _download_error_kind(error: BaseException) -> str:
+    if isinstance(error, urllib.error.HTTPError):
+        return f"HTTP {error.code}"
+    if isinstance(error, urllib.error.URLError):
+        return type(error.reason).__name__
+    return type(error).__name__
+
+
+def _download_archive_with_retry(
+    *,
+    url: str,
+    destination: Path,
+    expected_sha256: str,
+    opener: _Opener,
+    sleeper: _Sleeper,
+) -> None:
+    delays = (*_DOWNLOAD_RETRY_DELAYS_SECONDS, None)
+    for attempt, delay in enumerate(delays, start=1):
+        try:
+            _download_archive(
+                url=url,
+                destination=destination,
+                expected_sha256=expected_sha256,
+                opener=opener,
+            )
+            return
+        except (TimeoutError, ConnectionError, urllib.error.URLError) as exc:
+            destination.unlink(missing_ok=True)
+            if delay is None or not _download_error_is_retryable(exc):
+                raise TrivyInstallError(
+                    "pinned Trivy release download failed after "
+                    f"{attempt} attempt(s) ({_download_error_kind(exc)})"
+                ) from exc
+            sleeper(delay)
+
+
 def _extract_binary(archive_path: Path, executable: Path) -> None:
     temporary_executable = executable.with_suffix(".tmp")
     candidate_count = 0
@@ -220,6 +267,7 @@ def _install_trivy(
     machine: str,
     release: TrivyRelease,
     opener: _Opener,
+    sleeper: _Sleeper = time.sleep,
 ) -> Path:
     """Install a supplied reviewed release; dependency injection supports tests."""
 
@@ -231,11 +279,12 @@ def _install_trivy(
     archive_path = install_dir / selected.filename
     executable = install_dir / "trivy"
     try:
-        _download_archive(
+        _download_archive_with_retry(
             url=f"{_RELEASE_BASE_URL}/{release.version}/{selected.filename}",
             destination=archive_path,
             expected_sha256=selected.sha256,
             opener=opener,
+            sleeper=sleeper,
         )
         _extract_binary(archive_path, executable)
         archive_path.unlink()
@@ -255,12 +304,12 @@ def _install_trivy(
     return executable
 
 
-def install_trivy(install_root: Path) -> Path:
-    """Install the repository-pinned Trivy release for the current machine."""
+def install_trivy(install_root: Path, *, architecture: str | None = None) -> Path:
+    """Install the pinned Trivy release for the selected or current architecture."""
 
     return _install_trivy(
         install_root,
-        machine=platform.machine(),
+        machine=platform.machine() if architecture is None else architecture,
         release=TRIVY_RELEASE,
         opener=cast(_Opener, urllib.request.urlopen),
     )
@@ -269,11 +318,18 @@ def install_trivy(install_root: Path) -> Path:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--install-root", type=Path, required=True)
+    parser.add_argument("--architecture", choices=sorted(TRIVY_RELEASE.archives))
     arguments = parser.parse_args()
     try:
-        executable = install_trivy(arguments.install_root)
-    except (OSError, TrivyInstallError):
+        executable = install_trivy(
+            arguments.install_root,
+            architecture=arguments.architecture,
+        )
+    except OSError:
         sys.stderr.write("error: pinned Trivy installation failed\n")
+        raise SystemExit(1) from None
+    except TrivyInstallError as exc:
+        sys.stderr.write(f"error: {exc}\n")
         raise SystemExit(1) from None
     sys.stdout.write(f"{executable}\n")
 

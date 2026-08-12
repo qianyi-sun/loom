@@ -4,6 +4,7 @@ import hashlib
 import io
 import stat
 import tarfile
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -51,7 +52,11 @@ def _archive(
     return buffer.getvalue()
 
 
-def _release(archive: bytes) -> installer.TrivyRelease:
+def _release(
+    archive: bytes,
+    *,
+    arm_archive: bytes | None = None,
+) -> installer.TrivyRelease:
     return installer.TrivyRelease(
         version="v0.70.0",
         archives={
@@ -61,7 +66,11 @@ def _release(archive: bytes) -> installer.TrivyRelease:
             ),
             "arm64": installer.TrivyArchive(
                 filename="trivy_0.70.0_Linux-ARM64.tar.gz",
-                sha256="a" * 64,
+                sha256=(
+                    hashlib.sha256(arm_archive).hexdigest()
+                    if arm_archive is not None
+                    else "a" * 64
+                ),
             ),
         },
     )
@@ -96,6 +105,135 @@ def test_installer_verifies_archive_and_extracts_only_trivy(tmp_path: Path) -> N
     assert sorted(path.name for path in executable.parent.iterdir()) == ["trivy"]
 
 
+def test_installer_can_prepare_an_explicit_cross_architecture_binary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    amd64_archive = _archive(b"amd64-trivy")
+    arm64_archive = _archive(b"arm64-trivy")
+    requested: list[str] = []
+
+    def open_archive(url: str, *, timeout: int) -> io.BytesIO:
+        requested.append(url)
+        assert timeout == 60
+        return io.BytesIO(arm64_archive)
+
+    monkeypatch.setattr(
+        installer,
+        "TRIVY_RELEASE",
+        _release(amd64_archive, arm_archive=arm64_archive),
+    )
+    monkeypatch.setattr(installer.urllib.request, "urlopen", open_archive)
+    monkeypatch.setattr(installer.platform, "machine", lambda: "riscv64")
+
+    executable = installer.install_trivy(tmp_path, architecture="arm64")
+
+    assert requested == [
+        "https://github.com/aquasecurity/trivy/releases/download/v0.70.0/"
+        "trivy_0.70.0_Linux-ARM64.tar.gz"
+    ]
+    assert executable.read_bytes() == b"arm64-trivy"
+
+
+def test_installer_retries_transient_downloads_and_reverifies_digest(
+    tmp_path: Path,
+) -> None:
+    payload = b"verified-after-transient-downloads"
+    archive = _archive(payload)
+    attempts = 0
+    delays: list[float] = []
+
+    def transient_open(_url: str, *, timeout: int) -> io.BytesIO:
+        nonlocal attempts
+        attempts += 1
+        assert timeout == 60
+        if attempts < 3:
+            raise urllib.error.URLError("temporary release asset failure")
+        return io.BytesIO(archive)
+
+    executable = installer._install_trivy(
+        tmp_path,
+        machine="x86_64",
+        release=_release(archive),
+        opener=transient_open,
+        sleeper=delays.append,
+    )
+
+    assert attempts == 3
+    assert delays == [1.0, 2.0]
+    assert executable.read_bytes() == payload
+    assert sorted(path.name for path in executable.parent.iterdir()) == ["trivy"]
+
+
+def test_installer_does_not_retry_non_transient_http_failure(tmp_path: Path) -> None:
+    attempts = 0
+    delays: list[float] = []
+
+    def missing_release(url: str, *, timeout: int) -> io.BytesIO:
+        nonlocal attempts
+        attempts += 1
+        raise urllib.error.HTTPError(url, 404, "not found", {}, None)
+
+    with pytest.raises(installer.TrivyInstallError, match="after 1 attempt"):
+        installer._install_trivy(
+            tmp_path,
+            machine="x86_64",
+            release=_release(_archive()),
+            opener=missing_release,
+            sleeper=delays.append,
+        )
+
+    assert attempts == 1
+    assert delays == []
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_installer_retries_stale_signed_release_redirect(tmp_path: Path) -> None:
+    archive = _archive()
+    attempts = 0
+
+    def stale_then_current(url: str, *, timeout: int) -> io.BytesIO:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise urllib.error.HTTPError(url, 403, "stale signed redirect", {}, None)
+        return io.BytesIO(archive)
+
+    executable = installer._install_trivy(
+        tmp_path,
+        machine="x86_64",
+        release=_release(archive),
+        opener=stale_then_current,
+        sleeper=lambda _delay: None,
+    )
+
+    assert attempts == 2
+    assert executable.is_file()
+
+
+def test_installer_bounds_transient_download_retries(tmp_path: Path) -> None:
+    attempts = 0
+    delays: list[float] = []
+
+    def unavailable_release(_url: str, *, timeout: int) -> io.BytesIO:
+        nonlocal attempts
+        attempts += 1
+        raise urllib.error.URLError("temporary release asset failure")
+
+    with pytest.raises(installer.TrivyInstallError, match="after 5 attempt"):
+        installer._install_trivy(
+            tmp_path,
+            machine="x86_64",
+            release=_release(_archive()),
+            opener=unavailable_release,
+            sleeper=delays.append,
+        )
+
+    assert attempts == 5
+    assert delays == [1.0, 2.0, 4.0, 8.0]
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_installer_rejects_archive_digest_mismatch_without_leaving_files(
     tmp_path: Path,
 ) -> None:
@@ -106,14 +244,22 @@ def test_installer_rejects_archive_digest_mismatch_without_leaving_files(
         sha256="0" * 64,
     )
 
+    attempts = 0
+
+    def mismatched_archive(_url: str, *, timeout: int) -> io.BytesIO:
+        nonlocal attempts
+        attempts += 1
+        return io.BytesIO(archive)
+
     with pytest.raises(installer.TrivyInstallError, match="digest"):
         installer._install_trivy(
             tmp_path,
             machine="x86_64",
             release=release,
-            opener=lambda _url, *, timeout: io.BytesIO(archive),
+            opener=mismatched_archive,
         )
 
+    assert attempts == 1
     assert list(tmp_path.iterdir()) == []
 
 
