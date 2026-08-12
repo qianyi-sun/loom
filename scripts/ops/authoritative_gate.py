@@ -845,14 +845,14 @@ def _upsert_check(
     now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     verb = "awaiting" if status == "in_progress" else conclusion or "failure"
     external_id = spec.external_id(repository=client.repository, head_sha=head_sha)
-    # GitHub rejects reopening an already-completed CheckRun. Replacing that
-    # object with a new id also leaves auto-merge pinned to the retired id even
-    # after the required-context rollup turns green. Preserve the one stable
-    # CheckRun identity instead: a newer generation is represented by a
-    # completed/failure sentinel whose signed state says it is still pending.
-    # The exact source attempt later updates this same id to its real terminal
-    # success or failure. This is fail-closed throughout and avoids duplicate
-    # required contexts on one SHA.
+    # GitHub rejects reopening an already-completed CheckRun. Preserve one
+    # required identity while a generation is pending, using a completed/failure
+    # sentinel when necessary. A terminal result must not PATCH that observed
+    # required identity to success: GitHub can leave the ruleset and native
+    # auto-merge pinned to the earlier state. Retire the blocking identity out
+    # of the protected name, then create the exact terminal required CheckRun
+    # already completed. Missing or failed required state remains fail-closed if
+    # either write is interrupted.
     completed_pending = (
         status == "in_progress"
         and existing is not None
@@ -886,7 +886,57 @@ def _upsert_check(
     else:
         payload["conclusion"] = conclusion
         payload["completed_at"] = now
-    if existing is None:
+    if status == "completed" and existing is not None:
+        required_checks = matching_custom_checks(
+            client.list_check_runs(head_sha, spec.context),
+            spec,
+            repository=client.repository,
+            head_sha=head_sha,
+        )
+        if not required_checks:
+            raise PublisherError(f"publisher-owned {spec.context} CheckRun disappeared")
+        for required in required_checks:
+            check_id = required.get("id")
+            if not isinstance(check_id, int):
+                raise PublisherError(f"custom CheckRun for {spec.context} has no integer id")
+            retired_name = f"authoritative-gate-retired ({spec.context} #{check_id})"
+            retired = client.update_check_run(
+                check_id,
+                {
+                    "name": retired_name,
+                    "external_id": external_id,
+                    "status": "completed",
+                    "conclusion": "failure",
+                    "completed_at": now,
+                    "details_url": details_url,
+                    "output": {
+                        "title": f"Retired pending {spec.context}",
+                        "summary": _state_summary(
+                            generation,
+                            authority_epoch=authority_epoch,
+                            authority_history_count=authority_history_count,
+                            pending=True,
+                            run_id=run_id,
+                            run_attempt=run_attempt,
+                        ),
+                    },
+                },
+            )
+            retired_app = retired.get("app") if isinstance(retired, Mapping) else None
+            if (
+                not isinstance(retired, Mapping)
+                or retired.get("name") != retired_name
+                or retired.get("external_id") != external_id
+                or retired.get("status") != "completed"
+                or retired.get("conclusion") != "failure"
+                or not isinstance(retired_app, Mapping)
+                or retired_app.get("id") != GITHUB_ACTIONS_APP_ID
+            ):
+                raise PublisherError(
+                    f"GitHub did not retire the pending {spec.context} CheckRun"
+                )
+        response = client.create_check_run(payload)
+    elif existing is None:
         response = client.create_check_run(payload)
     else:
         check_id = existing.get("id")
@@ -897,7 +947,8 @@ def _upsert_check(
     if response:
         app = response.get("app")
         if (
-            response.get("external_id") != external_id
+            response.get("name") != spec.context
+            or response.get("external_id") != external_id
             or not isinstance(app, Mapping)
             or app.get("id") != GITHUB_ACTIONS_APP_ID
             or response.get("status") != effective_status

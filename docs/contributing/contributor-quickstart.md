@@ -256,8 +256,14 @@ live state and the exact run attempt before and after a terminal update; if auth
 changed during the CheckRun write, the same check is returned to `in_progress`.
 Mask-aware event occurrences cover observable add/remove sequences whose final
 labels match. Comments and unrelated labels do not replace the epoch or share
-the authoritative source concurrency lane. Do not use an empty or
-tree-identical commit to repair a check rollup.
+the authoritative source concurrency lane. A pending generation keeps one
+fail-closed required identity. Once the exact source result is terminal, the
+publisher retires that pending identity out of the protected name and creates
+the new required CheckRun already completed. The direct terminal creation makes
+GitHub evaluate the exact current result without depending on an in-place
+pending-to-success transition; an interrupted retirement or creation leaves the
+required context missing or failed. Do not use an empty or tree-identical commit
+to repair a check rollup.
 
 Same-repository `dev`-to-`main` promotions use this publisher. Branch push
 aggregates use `*-push`, so they never duplicate a protected name on a
