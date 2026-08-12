@@ -259,11 +259,12 @@ labels match. Comments and unrelated labels do not replace the epoch or share
 the authoritative source concurrency lane. A pending generation keeps one
 fail-closed required identity. Once the exact source result is terminal, the
 publisher retires that pending identity out of the protected name and creates
-the new required CheckRun already completed. The direct terminal creation makes
-GitHub evaluate the exact current result without depending on an in-place
-pending-to-success transition; an interrupted retirement or creation leaves the
-required context missing or failed. Do not use an empty or tree-identical commit
-to repair a check rollup.
+the new required CheckRun already completed. That CheckRun is the signed audit
+ledger; the same-name commit status is the ruleset event carrier, avoiding any
+dependency on which CheckSuite GitHub selected for the custom check. An
+interrupted status, retirement, or creation leaves the required context pending,
+missing, or failed. Do not use an empty or tree-identical commit to repair a
+check rollup.
 
 After changing the publisher, verify its identity transition on a disposable
 PR before closing the governance issue. For each protected context, inspect the
