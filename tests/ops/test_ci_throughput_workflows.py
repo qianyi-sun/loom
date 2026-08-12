@@ -940,12 +940,19 @@ def test_release_images_are_scanned_attested_and_verified_before_manifest_join()
     assert build_scan["run"].strip() == (
         "set -euo pipefail\n"
         "trivy_bin=$(python3 scripts/install_trivy.py --install-root \"$RUNNER_TEMP\")\n"
+        "set +e\n"
         '"$trivy_bin" --config /tmp/loom-trivy-release.yaml image \\\n'
         '  --input "$ARCHIVE" \\\n'
         "  --format json \\\n"
         '  --output "$REPORT" \\\n'
-        "  --ignorefile /tmp/loom-trivy-release.ignore \\\n"
-        '  --cache-dir "$RUNNER_TEMP/loom-trivy-cache"'
+        "  --ignorefile /tmp/loom-trivy-release.ignore.yaml \\\n"
+        '  --cache-dir "$RUNNER_TEMP/loom-trivy-cache"\n'
+        "scan_status=$?\n"
+        "set -e\n"
+        "if (( scan_status != 0 )); then\n"
+        '  python3 scripts/summarize_trivy_report.py "$REPORT" || true\n'
+        '  exit "$scan_status"\n'
+        "fi"
     )
     assert build_step_names.index("Build without registry or cache write authority") < (
         build_step_names.index("Scan native image archive")

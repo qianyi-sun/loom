@@ -206,13 +206,18 @@ archive is rebuilt from the protected release commit inside the hosted
 `publish` job and is checked by Trivy v0.70.0 using image scanning, OS and
 library vulnerabilities, a `10m0s` timeout, `CRITICAL` severity, exit code 1,
 unfixed findings included, the vulnerability scanner only, and no cache. A
-repository helper writes the fixed config and empty ignore file outside the
-checkout before each scan. A repository-owned installer accepts only the
-architecture-specific v0.70.0 release archive whose repository-pinned SHA-256
-matches; no policy-forbidden third-party action is required. The signed
+repository helper writes the fixed config and reviewed ignore file outside the
+checkout before each scan. The only exceptions are CVE-2026-13221,
+CVE-2026-42496, CVE-2026-57433, and CVE-2026-8376; all lack a fixed Debian
+package, are scoped to the Debian `perl-base` PURL, and include their review
+statement and 2026-09-12 UTC expiration in the signed predicate. Policy
+generation fails closed at that boundary. A repository-owned installer accepts
+only the architecture-specific v0.70.0 release archive whose repository-pinned
+SHA-256 matches; no policy-forbidden third-party action is required. The signed
 predicate binds the scanner identity, release URL and architecture archive
-digest, complete policy-file identities, and scan report. Its only publication mode is
-`trusted-rebuild`, bound to the protected release head, tree, ref, and current
+digest, complete policy-file identities, explicit exception metadata, and scan
+report. Its only publication mode is `trusted-rebuild`, bound to the protected
+release head, tree, ref, and current
 run. PR candidate archives remain untrusted CI evidence only: the publisher
 never downloads, loads, scans as release, attests, or publishes those bytes.
 Each architecture push contributes its emitted digest directly to a canonical

@@ -28,6 +28,21 @@ _TRIVY_RELEASE = "https://github.com/aquasecurity/trivy/releases/download/v0.70.
 _TRIVY_AMD64 = "8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9"
 _TRIVY_ARM64 = "2f6bb988b553a1bbac6bdd1ce890f5e412439564e17522b88a4541b4f364fc8d"
 _SCRIPT = Path(__file__).resolve().parents[2] / "scripts/ci_image_release_evidence.py"
+_TRIVY_EXCEPTION_STATEMENT = "No fixed Debian package was available on 2026-08-12."
+_TRIVY_EXCEPTIONS = [
+    {
+        "id": vulnerability_id,
+        "purls": ["pkg:deb/debian/perl-base"],
+        "expires_at": "2026-09-12",
+        "statement": _TRIVY_EXCEPTION_STATEMENT,
+    }
+    for vulnerability_id in (
+        "CVE-2026-13221",
+        "CVE-2026-42496",
+        "CVE-2026-57433",
+        "CVE-2026-8376",
+    )
+]
 
 
 class _Common(TypedDict):
@@ -116,13 +131,14 @@ def test_architecture_predicate_binds_source_build_scan_and_invocation() -> None
             "archives": {"linux/amd64": _TRIVY_AMD64},
         },
         "config_sha256": ("35492da1d08b142bd1489ac54ecdedab62634b7b3095a37cebbe10b61df1adac"),
-        "ignore_sha256": ("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+        "ignore_sha256": ("83156c673c73bc58e7848876fe2144f36e7ab2dc147b7a6a55a41bfa2a88ee29"),
         "scan_type": "image",
         "vuln_type": ["os", "library"],
         "timeout": "10m0s",
         "severity": ["CRITICAL"],
         "exit_code": 1,
         "ignore_unfixed": False,
+        "exceptions": _TRIVY_EXCEPTIONS,
         "scanners": ["vuln"],
         "cache": False,
         "report_sha256": _SCAN,
@@ -336,13 +352,14 @@ def test_manifest_attestation_binds_both_verified_architecture_subjects() -> Non
             },
         },
         "config_sha256": ("35492da1d08b142bd1489ac54ecdedab62634b7b3095a37cebbe10b61df1adac"),
-        "ignore_sha256": ("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+        "ignore_sha256": ("83156c673c73bc58e7848876fe2144f36e7ab2dc147b7a6a55a41bfa2a88ee29"),
         "scan_type": "image",
         "vuln_type": ["os", "library"],
         "timeout": "10m0s",
         "severity": ["CRITICAL"],
         "exit_code": 1,
         "ignore_unfixed": False,
+        "exceptions": _TRIVY_EXCEPTIONS,
         "scanners": ["vuln"],
         "cache": False,
         "report_sha256": {"linux/amd64": _SCAN, "linux/arm64": "1" * 64},

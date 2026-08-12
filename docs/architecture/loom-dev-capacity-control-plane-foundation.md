@@ -256,8 +256,12 @@ scans as release, attests, or publishes them. Both untrusted validation and the
 trusted release scan use pinned Trivy v0.70.0 with scan type `image`, OS and
 library vulnerability types, a `10m0s` timeout, `CRITICAL` severity, exit code
 1, unfixed findings included, the `vuln` scanner only, and caching disabled.
-The trusted scan selects fixed config and empty-ignore files generated outside
-the checkout. A repository-owned installer accepts only the architecture-
+The trusted scan selects fixed config and a reviewed ignore file generated
+outside the checkout. It exempts only CVE-2026-13221, CVE-2026-42496,
+CVE-2026-57433, and CVE-2026-8376 while no fixed Debian package exists. Each
+exception is scoped to the Debian `perl-base` PURL, carries a review statement,
+and expires at 2026-09-12 UTC; policy generation fails closed at that boundary.
+A repository-owned installer accepts only the architecture-
 specific v0.70.0 release archive whose repository-pinned SHA-256 matches,
 avoiding any third-party action forbidden by repository policy. The publisher
 captures the one digest emitted by the push and uses the immutable subject only
@@ -265,8 +269,9 @@ for registry validation, SLSA v1 attestation, and strict verification; it never
 resolves the mutable architecture build tag.
 
 The predicate binds the Trivy scanner name/version, controlled config and
-empty-ignore hashes, release URL and architecture archive digest, scan-report
-digest, release commit/tree/ref/run/attempt, Dockerfile, context, and platform.
+ignore hashes, explicit exception IDs, package scopes, statements, and expiries,
+release URL and architecture archive digest, scan-report digest, release
+commit/tree/ref/run/attempt, Dockerfile, context, and platform.
 Official records accept only `trusted-rebuild`, binding the archive built in
 the current release run; no candidate artifact identity enters the predicate
 or record. Only after architecture attestation verification does the publisher

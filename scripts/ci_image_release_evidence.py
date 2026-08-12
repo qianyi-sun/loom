@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from scripts.install_trivy import TRIVY_ARCHIVE_SHA256, TRIVY_RELEASE_URL
     from scripts.write_trivy_release_policy import (
         TRIVY_CONFIG_SHA256,
+        TRIVY_EXCEPTIONS,
         TRIVY_IGNORE_SHA256,
         TRIVY_SCANNER_NAME,
         TRIVY_VERSION,
@@ -24,6 +25,7 @@ elif __package__:
     from scripts.install_trivy import TRIVY_ARCHIVE_SHA256, TRIVY_RELEASE_URL
     from scripts.write_trivy_release_policy import (
         TRIVY_CONFIG_SHA256,
+        TRIVY_EXCEPTIONS,
         TRIVY_IGNORE_SHA256,
         TRIVY_SCANNER_NAME,
         TRIVY_VERSION,
@@ -32,6 +34,7 @@ else:  # pragma: no cover - direct workflow script entry point
     from install_trivy import TRIVY_ARCHIVE_SHA256, TRIVY_RELEASE_URL
     from write_trivy_release_policy import (
         TRIVY_CONFIG_SHA256,
+        TRIVY_EXCEPTIONS,
         TRIVY_IGNORE_SHA256,
         TRIVY_SCANNER_NAME,
         TRIVY_VERSION,
@@ -228,6 +231,15 @@ def _scan_policy_parameters(platforms: Sequence[str]) -> dict[str, object]:
         "severity": ["CRITICAL"],
         "exit_code": 1,
         "ignore_unfixed": False,
+        "exceptions": [
+            {
+                "id": exception.vulnerability_id,
+                "purls": [exception.purl],
+                "expires_at": exception.expires_at.isoformat(),
+                "statement": exception.statement,
+            }
+            for exception in TRIVY_EXCEPTIONS
+        ],
         "scanners": ["vuln"],
         "cache": False,
     }

@@ -75,13 +75,20 @@ Image routing remains separate from release authority. The untrusted build and
 trusted publication scans both use pinned Trivy v0.70.0 with `scan-type: image`,
 `vuln-type: os,library`, `timeout: 10m0s`, `severity: CRITICAL`, `exit-code:
 '1'`, `ignore-unfixed: 'false'`, `scanners: vuln`, and `cache: 'false'`. Before
-each trusted scan, a repository helper writes the fixed config and empty ignore
-file outside the checkout. A second repository-owned helper installs only the
-architecture-specific v0.70.0 release archive against its repository-pinned
-SHA-256; this avoids relying on actions forbidden by repository policy. The
+each scan, a repository helper writes the fixed config and reviewed ignore file
+outside the checkout. That file temporarily exempts only CVE-2026-13221,
+CVE-2026-42496, CVE-2026-57433, and CVE-2026-8376, which have no fixed Debian
+package. Each structured exception is scoped to the Debian `perl-base` PURL,
+records its review statement, and expires at 2026-09-12 UTC; policy generation
+fails closed at that boundary. A second repository-owned helper installs only
+the architecture-specific v0.70.0 release archive against its
+repository-pinned SHA-256; this avoids relying on actions forbidden by
+repository policy. The
 signed release predicate binds every reviewed field, scanner name/version,
-release URL and architecture archive digest, controlled-file hashes, and
-resulting report digest.
+release URL and architecture archive digest, controlled-file hashes, explicit
+exception IDs, package scopes, statements, expiries, and resulting report
+digest. A failed scan prints a bounded, log-safe critical-finding summary
+while preserving Trivy's exit code.
 
 The hosted publisher rebuilds every architecture archive from the protected
 release commit and captures the single digest emitted by each architecture
