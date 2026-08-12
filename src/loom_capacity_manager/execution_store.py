@@ -17,8 +17,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom_capacity_manager.contracts import (
     MICROTOKENS_PER_LAUNCH,
+    PackingRequestV1,
+    PackingShapeRequestV1,
     PoolObservationV1,
+    ResourceDomainV1,
     ResourceVectorV1,
+    WorkerShapeV1,
     checked_add_vectors,
     checked_sum_vectors,
     vector_fits,
@@ -65,6 +69,7 @@ from loom_capacity_manager.models import (
 )
 from loom_capacity_manager.ownership import OwnershipKeyring
 from loom_capacity_manager.store import CapacityStoreError, ExecutionConflictError
+from loom_capacity_manager.topology import TopologyInfeasible, TopologySearchLimit, pack_topology
 
 _EXECUTION_NAMESPACE = UUID("82e6e16b-6c44-4af2-894b-af8fbb3fead2")
 
@@ -1538,39 +1543,51 @@ class CapacityExecutionStore:
         )
         if not vector_fits(checked_add_vectors(committed, binding.resources), total):
             raise ExecutionConflictError("pool headroom changed")
-        node_capacity = {
-            node["node_id"]: ResourceVectorV1.model_validate(node["allocatable"])
-            for domain in pool.topology["resource_domains"]
-            for node in domain["nodes"]
-        }
-        shape = next(
+        shape_payload = next(
             (item for item in profile.shape_catalog if item["shape_id"] == binding.shape_id),
             None,
         )
-        if (
-            shape is None
-            or len(shape["node_resources"]) != len(binding.node_ids)
-            or any(node_id not in node_capacity for node_id in binding.node_ids)
-        ):
+        if shape_payload is None:
             raise ExecutionConflictError("selected node headroom changed")
-        committed_by_node: dict[str, ResourceVectorV1] = {}
-        for item in observation.commitments:
-            for node_id in item.node_ids:
-                committed_by_node[node_id] = checked_add_vectors(
-                    committed_by_node.get(node_id, ResourceVectorV1()),
-                    item.resources,
+        shape = WorkerShapeV1.model_validate(shape_payload)
+        selected = frozenset(binding.node_ids)
+        configured_domains = tuple(
+            ResourceDomainV1.model_validate(item) for item in pool.topology["resource_domains"]
+        )
+        domains = tuple(
+            domain.model_copy(
+                update={"nodes": tuple(node for node in domain.nodes if node.node_id in selected)}
+            )
+            for domain in configured_domains
+            if any(node.node_id in selected for node in domain.nodes)
+        )
+        if len(shape.node_resources) != len(selected) or sum(
+            len(domain.nodes) for domain in domains
+        ) != len(selected):
+            raise ExecutionConflictError("selected node headroom changed")
+        overlapping = tuple(
+            item
+            for item in observation.commitments
+            if not item.node_ids or selected.intersection(item.node_ids)
+        )
+        try:
+            witness = pack_topology(
+                PackingRequestV1(
+                    pool_id=binding.pool_id,
+                    domains=domains,
+                    fixed_commitments=overlapping,
+                    desired_shapes=(
+                        PackingShapeRequestV1(
+                            instance_id=binding.shape_instance_id,
+                            shape=shape,
+                        ),
+                    ),
                 )
-        for node_id, required in zip(
-            binding.node_ids,
-            shape["node_resources"],
-            strict=True,
-        ):
-            used = committed_by_node.get(node_id, ResourceVectorV1())
-            if not vector_fits(
-                checked_add_vectors(used, ResourceVectorV1.model_validate(required)),
-                node_capacity[node_id],
-            ):
-                raise ExecutionConflictError("selected node headroom changed")
+            )
+        except (TopologyInfeasible, TopologySearchLimit) as exc:
+            raise ExecutionConflictError("selected node headroom changed") from exc
+        if set(witness.placements[0].node_ids) != selected:
+            raise ExecutionConflictError("selected node headroom changed")
         account = (
             await session.execute(
                 select(CapacityAccountPolicy).where(

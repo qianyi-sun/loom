@@ -36,6 +36,7 @@ from loom_capacity_manager.models import (
     CapacityExecutableIntent,
     CapacityPool,
     CapacityPoolObservation,
+    CapacityWorkerProfile,
 )
 from loom_capacity_manager.ownership import OwnershipKeyring
 from loom_capacity_manager.reconciler import reconcile_shadow_once
@@ -47,7 +48,7 @@ from tests.capacity_execution_fixtures import (
     register_execution_executors,
     setup_execution,
 )
-from tests.capacity_fixtures import demand_snapshot, pool_observation, resource_vector
+from tests.capacity_fixtures import demand_snapshot, pool_observation, resource_vector, shape
 
 
 def test_execution_store_is_a_distinct_v2_ledger() -> None:
@@ -413,6 +414,155 @@ async def test_permit_consumption_rechecks_selected_node_headroom(
                 ),
             )
         }
+    )
+    await capacity_session.execute(
+        update(CapacityPoolObservation)
+        .where(CapacityPoolObservation.pool_id == permit.binding.pool_id)
+        .values(payload=occupied.model_dump(mode="json", exclude_none=False))
+    )
+
+    with pytest.raises(ExecutionConflictError, match="node headroom"):
+        await store.consume_launch_permit(
+            capacity_session,
+            ExecutablePermitConsumptionV2(
+                permit_id=permit.permit_id,
+                permit_digest=store.contract_digest(permit),
+                binding=permit.binding,
+                command_sequence=3,
+            ),
+        )
+
+
+async def _heterogeneous_multi_node_permit(
+    store: CapacityExecutionStore,
+    session: AsyncSession,
+    *,
+    reverse_shape_parts: bool,
+    commitment_headroom: bool = False,
+):  # type: ignore[no-untyped-def]
+    permit = await _launch_ready(store, session)
+    small = resource_vector(slots=0, cpu_millicores=2, memory_bytes=2)
+    large = resource_vector(slots=1, cpu_millicores=8, memory_bytes=8)
+    worker_shape = shape(
+        "heterogeneous-two-node",
+        concurrency_slots=1,
+        total=resource_vector(slots=1, cpu_millicores=10, memory_bytes=10),
+        per_node=(large, small) if reverse_shape_parts else (small, large),
+        compatible_domain_ids=("gb10-arm",),
+    )
+    pool = (
+        await session.execute(
+            select(CapacityPool).where(
+                CapacityPool.configuration_epoch == permit.binding.execution.configuration_epoch,
+                CapacityPool.pool_id == permit.binding.pool_id,
+            )
+        )
+    ).scalar_one()
+    topology = json.loads(json.dumps(pool.topology))
+    template = topology["resource_domains"][0]["nodes"][0]
+    topology["resource_domains"][0]["nodes"] = [
+        {
+            **template,
+            "node_id": "gb10-node-a",
+            "allocatable": resource_vector(
+                slots=0,
+                cpu_millicores=3 if commitment_headroom else 2,
+                memory_bytes=3 if commitment_headroom else 2,
+            ).model_dump(mode="json", exclude_none=False),
+        },
+        {
+            **template,
+            "node_id": "gb10-node-z",
+            "allocatable": resource_vector(
+                slots=1,
+                cpu_millicores=9 if commitment_headroom else 8,
+                memory_bytes=9 if commitment_headroom else 8,
+            ).model_dump(mode="json", exclude_none=False),
+        },
+    ]
+    pool.topology = topology
+    profile = (
+        await session.execute(
+            select(CapacityWorkerProfile).where(
+                CapacityWorkerProfile.pool_id == permit.binding.pool_id,
+                CapacityWorkerProfile.profile_generation == permit.binding.profile_generation,
+            )
+        )
+    ).scalar_one()
+    profile.shape_catalog = [worker_shape.model_dump(mode="json", exclude_none=False)]
+    binding_payload = permit.binding.model_dump(mode="python")
+    binding_payload.update(
+        {
+            "shape_id": worker_shape.shape_id,
+            "concurrency_slots": worker_shape.concurrency_slots,
+            "resources": worker_shape.total_resources,
+            "node_ids": ("gb10-node-z", "gb10-node-a"),
+        }
+    )
+    binding = type(permit.binding).model_validate(binding_payload)
+    changed = permit.model_copy(update={"binding": binding})
+    intent = (
+        await session.execute(
+            select(CapacityExecutableIntent).where(
+                CapacityExecutableIntent.intent_id == binding.intent_id
+            )
+        )
+    ).scalar_one()
+    intent.binding_digest = store.contract_digest(binding)
+    intent.binding_payload = binding.model_dump(mode="json", exclude_none=False)
+    intent.permit_digest = store.contract_digest(changed)
+    intent.permit_payload = changed.model_dump(mode="json", exclude_none=False)
+    return changed
+
+
+async def test_selected_node_feasibility_does_not_depend_on_canonical_node_order(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityExecutionStore()
+    permit = await _heterogeneous_multi_node_permit(
+        store,
+        capacity_session,
+        reverse_shape_parts=True,
+    )
+
+    consumed = await store.consume_launch_permit(
+        capacity_session,
+        ExecutablePermitConsumptionV2(
+            permit_id=permit.permit_id,
+            permit_digest=store.contract_digest(permit),
+            binding=permit.binding,
+            command_sequence=3,
+        ),
+    )
+
+    assert consumed.intent_id == permit.binding.intent_id
+
+
+async def test_overlapping_multi_node_commitment_fails_closed(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityExecutionStore()
+    permit = await _heterogeneous_multi_node_permit(
+        store,
+        capacity_session,
+        reverse_shape_parts=False,
+        commitment_headroom=True,
+    )
+    ambiguous = (
+        pool_observation(
+            pool_id=permit.binding.pool_id,
+            commitment_ids=("ambiguous-multi-node",),
+        )
+        .commitments[0]
+        .model_copy(
+            update={
+                "resources": resource_vector(slots=0, cpu_millicores=1, memory_bytes=1),
+                "node_ids": permit.binding.node_ids,
+            }
+        )
+    )
+    occupied = pool_observation(pool_id=permit.binding.pool_id).model_copy(
+        update={"commitments": (ambiguous,)}
     )
     await capacity_session.execute(
         update(CapacityPoolObservation)
