@@ -56,3 +56,9 @@ HEARTBEAT_FAILURES_TOTAL = Counter(
     "loom_worker_heartbeat_failures_total",
     "Heartbeat thread ticks that failed to PATCH the CP",
 )
+
+PIPELINE_GPU_ALLOCATED_IDLE_SECONDS = Gauge(
+    "loom_pipeline_gpu_allocated_idle_seconds",
+    "Maximum age of a leased local GPU Attempt without its expected process group",
+    labelnames=("slurm_cluster", "reason"),
+)

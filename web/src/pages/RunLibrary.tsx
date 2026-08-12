@@ -150,6 +150,9 @@ export default function RunLibrary(): JSX.Element {
   const modelName = searchParams.get("model_name") ?? searchParams.get("model") ?? "";
   const providerConnectionId = searchParams.get("provider_connection_id") ?? "";
   const providerModelId = searchParams.get("provider_model_id") ?? "";
+  const pipelineOnly = searchParams.get("producer_kind") === "pipeline";
+  const pipelineRecipe = searchParams.get("pipeline_recipe") ?? "";
+  const pipelineResult = searchParams.get("pipeline_result") ?? "";
   const page = useCursorPage(
     JSON.stringify([
       scope,
@@ -163,6 +166,9 @@ export default function RunLibrary(): JSX.Element {
       modelName,
       providerConnectionId,
       providerModelId,
+      pipelineOnly,
+      pipelineRecipe,
+      pipelineResult,
     ]),
   );
 
@@ -206,6 +212,13 @@ export default function RunLibrary(): JSX.Element {
         cursor: page.cursor ?? undefined,
         limit: "50",
       }),
+    enabled: !pipelineOnly,
+  });
+
+  const pipelineArtifactsQuery = useQuery({
+    queryKey: ["run-library-pipeline-artifacts", scope, teamId, artifactType, pipelineRecipe, pipelineResult],
+    queryFn: () => api.listRunLibraryArtifacts({ producer_kind: "pipeline", pipeline_recipe: pipelineRecipe || undefined, pipeline_result: pipelineResult || undefined, team_id: teamId || undefined, artifact_type: artifactType || undefined, scope: scope === "all" ? "all" : undefined }),
+    enabled: pipelineOnly,
   });
 
   function updateParam(key: string, value: string): void {
@@ -265,6 +278,12 @@ export default function RunLibrary(): JSX.Element {
 
       <Card>
         <Card.Body className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
+            <input type="checkbox" checked={pipelineOnly} onChange={(event) => updateParam("producer_kind", event.target.checked ? "pipeline" : "")} />
+            Pipeline artifacts only
+          </label>
+          <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">Pipeline Recipe<Input value={pipelineRecipe} onChange={(event) => updateParam("pipeline_recipe", event.target.value.normalize("NFC"))} placeholder="name@version" className="mt-1 normal-case tracking-normal" /></label>
+          <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">Pipeline result<select value={pipelineResult} onChange={(event) => updateParam("pipeline_result", event.target.value)} className="mt-1 block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm normal-case tracking-normal text-slate-800"><option value="">Any result</option>{["succeeded", "partial_failed", "failed", "cancelled", "budget_exhausted"].map((value) => <option key={value}>{value}</option>)}</select></label>
           <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
             Search
             <Input
@@ -399,7 +418,15 @@ export default function RunLibrary(): JSX.Element {
 
       <Card>
         <Card.Body className="p-0">
-          {query.isPending ? (
+          {pipelineOnly ? pipelineArtifactsQuery.isPending ? (
+            <div className="p-5"><LoadingState /></div>
+          ) : pipelineArtifactsQuery.isError ? (
+            <div className="p-5"><ErrorState error={pipelineArtifactsQuery.error} /></div>
+          ) : pipelineArtifactsQuery.data.items.length === 0 ? (
+            <EmptyState label="No Pipeline artifacts match this view." hint="Clear a Pipeline filter or select another team." />
+          ) : (
+            <div className="overflow-x-auto"><table className="min-w-full text-sm"><thead><tr>{["Artifact", "Type", "Producer Pipeline", "Producer Stage", "Recipe", "Result", "Team", "Scan status"].map((header) => <th key={header} className="px-4 py-3 text-left text-xs uppercase text-slate-500">{header}</th>)}</tr></thead><tbody>{pipelineArtifactsQuery.data.items.map((artifact) => <tr key={artifact.id ?? artifact.key} className="border-t"><td className="px-4 py-3">{artifact.key}</td><td className="px-4 py-3">{artifact.artifact_type ?? "—"}</td><td className="px-4 py-3">{artifact.pipeline ? <Link className="text-accent" to={`/pipelines/${artifact.pipeline.run_id}`}>{artifact.pipeline.run_id}</Link> : "—"}</td><td className="px-4 py-3">{artifact.pipeline?.stage_run_id ?? "—"}</td><td className="px-4 py-3">{artifact.pipeline?.recipe ?? "—"}</td><td className="px-4 py-3">{artifact.pipeline?.result ?? "Pending"}</td><td className="px-4 py-3">{artifact.owner_team?.name ?? "—"}</td><td className="px-4 py-3">{artifact.share_status === "pending_scan" ? "Team private — scan pending" : artifact.share_status}</td></tr>)}</tbody></table></div>
+          ) : query.isPending ? (
             <div className="p-5">
               <LoadingState />
             </div>
@@ -512,7 +539,7 @@ export default function RunLibrary(): JSX.Element {
           )}
         </Card.Body>
         <Card.Footer>
-          <Pagination
+          {pipelineOnly ? <p className="text-xs text-slate-500">Pipeline Artifact results are bounded to the authorized server page.</p> : <Pagination
             state={page.state}
             hasNext={query.data?.next_cursor != null}
             isLoading={query.isPending || query.isFetching}
@@ -524,7 +551,7 @@ export default function RunLibrary(): JSX.Element {
             onPrev={page.prev}
             onRetry={() => void query.refetch()}
             className="mt-0"
-          />
+          />}
         </Card.Footer>
       </Card>
     </div>

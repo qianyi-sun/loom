@@ -26,6 +26,7 @@ from loom.db.schema import (
     SlurmWorkerJob,
     Worker,
 )
+from loom.pipeline.artifact_commit import ArtifactCommitError
 from loom.pipeline.keys import canonical_digest
 from loom.pipeline.work_protocol import (
     CheckpointPrepareRequestV1,
@@ -51,6 +52,12 @@ from loom_control_plane.execution_attempt_fencing import (
     idempotency_values,
     replay_or_conflict,
     verify_attempt_claim,
+)
+from loom_control_plane.metrics import (
+    PIPELINE_ARTIFACT_BYTES_TOTAL,
+    PIPELINE_ARTIFACT_COMMIT_FAILURES_TOTAL,
+    PIPELINE_CANCEL_LATENCY_SECONDS,
+    PIPELINE_STAGE_DURATION_SECONDS,
 )
 
 router = APIRouter()
@@ -94,6 +101,54 @@ class FinalOutputServiceV1(Protocol):
 
 class CheckpointServiceV1(FinalOutputServiceV1, Protocol):
     pass
+
+
+def _stage_resource_class(stage: PipelineStageRun) -> str:
+    if stage.node_kind == "gate":
+        return "controller"
+    profile = stage.resource_profile_json or {}
+    variants = profile.get("execution_variants", [])
+    return (
+        "gpu"
+        if any(
+            isinstance(item, dict) and int(item.get("gpu_count_exact", 0)) > 0 for item in variants
+        )
+        else "cpu"
+    )
+
+
+def _artifact_failure_reason(error: Exception) -> str:
+    if isinstance(error, TimeoutError | ConnectionError):
+        return "transport"
+    reason = error.reason if isinstance(error, ArtifactCommitError) else ""
+    if "fenced" in reason or "claim" in reason:
+        return "fenced"
+    if any(value in reason for value in ("digest", "hash", "integrity", "readback")):
+        return "integrity"
+    if any(value in reason for value in ("budget", "quota", "too_large", "exceeded")):
+        return "quota"
+    if any(
+        value in reason
+        for value in ("contract", "invalid", "mismatch", "conflict", "not_found", "session")
+    ):
+        return "contract"
+    return "internal"
+
+
+async def _commit_artifact_operation(
+    service: FinalOutputServiceV1,
+    *,
+    commit_kind: str,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    try:
+        return await service.commit(**kwargs)
+    except Exception as exc:
+        PIPELINE_ARTIFACT_COMMIT_FAILURES_TOTAL.labels(
+            commit_kind=commit_kind,
+            reason=_artifact_failure_reason(exc),
+        ).inc()
+        raise
 
 
 async def _ack_cancellation_outbox(
@@ -427,9 +482,7 @@ async def report_attempt_started(
                 select(PipelineStageRun).where(PipelineStageRun.id == attempt.stage_run_id)
             )
         ).scalar_one()
-        if stage.node_key.endswith(
-            ("acceptance_preflight_cold", "acceptance_preflight_warm")
-        ):
+        if stage.node_key.endswith(("acceptance_preflight_cold", "acceptance_preflight_warm")):
             evidence = await session.get(PipelineInputMaterializationEvidence, attempt.id)
             if evidence is None or evidence.input_view_sha256 != payload.input_view_digest:
                 raise HTTPException(
@@ -583,7 +636,9 @@ async def report_attempt_cancelled(
             raise HTTPException(status_code=409, detail="cancellation_not_requested")
         active_uploads = (
             await session.execute(
-                select(func.count()).select_from(ArtifactUploadSession).where(
+                select(func.count())
+                .select_from(ArtifactUploadSession)
+                .where(
                     ArtifactUploadSession.execution_attempt_id == attempt.id,
                     ArtifactUploadSession.state.in_(
                         ["preparing", "uploading", "uploaded", "committing", "committed_ready"]
@@ -593,7 +648,9 @@ async def report_attempt_cancelled(
         ).scalar_one()
         active_reservations = (
             await session.execute(
-                select(func.count()).select_from(PipelineBudgetReservation).where(
+                select(func.count())
+                .select_from(PipelineBudgetReservation)
+                .where(
                     PipelineBudgetReservation.execution_attempt_id == attempt.id,
                     PipelineBudgetReservation.state == "active",
                 )
@@ -605,10 +662,12 @@ async def report_attempt_cancelled(
             released = list(
                 (
                     await session.execute(
-                        select(PipelineBudgetReservation).where(
+                        select(PipelineBudgetReservation)
+                        .where(
                             PipelineBudgetReservation.execution_attempt_id == attempt.id,
                             PipelineBudgetReservation.state == "active",
-                        ).with_for_update()
+                        )
+                        .with_for_update()
                     )
                 ).scalars()
             )
@@ -660,7 +719,19 @@ async def report_attempt_cancelled(
             payload=payload,
             response=response,
         )
+        cancellation_latency = max(
+            (payload.observed_at - attempt.cancellation_requested_at).total_seconds(), 0
+        )
+        stage_duration = max((payload.observed_at - stage.created_at).total_seconds(), 0)
+        resource_class = _stage_resource_class(stage)
         await session.commit()
+        PIPELINE_CANCEL_LATENCY_SECONDS.labels(outcome=payload.outcome).observe(
+            cancellation_latency
+        )
+        PIPELINE_STAGE_DURATION_SECONDS.labels(
+            resource_class=resource_class,
+            result="cancelled",
+        ).observe(stage_duration)
         return response
 
 
@@ -693,7 +764,7 @@ async def report_attempt_complete(
         service = getattr(request.app.state, "execution_attempt_completion_service", None)
         if service is None:
             raise HTTPException(status_code=503, detail="artifact_committer_unavailable")
-        await service.complete(attempt=attempt, report=payload, session=session)
+        committed_bytes = await service.complete(attempt=attempt, report=payload, session=session)
         attempt.state = "succeeded"
         attempt.exit_code = 0
         attempt.result_manifest_json = payload.stage_result.model_dump(mode="json")
@@ -709,6 +780,9 @@ async def report_attempt_complete(
             response=response,
         )
         await session.commit()
+        for artifact_class, byte_count in (committed_bytes or {}).items():
+            if byte_count:
+                PIPELINE_ARTIFACT_BYTES_TOTAL.labels(artifact_class=artifact_class).inc(byte_count)
         return response
 
 
@@ -841,7 +915,9 @@ async def report_worker_lost_cleanup(
             attempt.cancellation_outcome = "worker_lost_cleanup"
         active_uploads = (
             await session.execute(
-                select(func.count()).select_from(ArtifactUploadSession).where(
+                select(func.count())
+                .select_from(ArtifactUploadSession)
+                .where(
                     ArtifactUploadSession.execution_attempt_id == attempt.id,
                     ArtifactUploadSession.state.in_(
                         ["preparing", "uploading", "uploaded", "committing", "committed_ready"]
@@ -851,7 +927,9 @@ async def report_worker_lost_cleanup(
         ).scalar_one()
         active_reservations = (
             await session.execute(
-                select(func.count()).select_from(PipelineBudgetReservation).where(
+                select(func.count())
+                .select_from(PipelineBudgetReservation)
+                .where(
                     PipelineBudgetReservation.execution_attempt_id == attempt.id,
                     PipelineBudgetReservation.state == "active",
                 )
@@ -869,10 +947,12 @@ async def report_worker_lost_cleanup(
             reservations = list(
                 (
                     await session.execute(
-                        select(PipelineBudgetReservation).where(
+                        select(PipelineBudgetReservation)
+                        .where(
                             PipelineBudgetReservation.execution_attempt_id == attempt.id,
                             PipelineBudgetReservation.state == "active",
-                        ).with_for_update()
+                        )
+                        .with_for_update()
                     )
                 ).scalars()
             )
@@ -902,6 +982,14 @@ async def report_worker_lost_cleanup(
                 outcome="worker_lost_cleanup",
                 cleanup_proof=proof,
             )
+            cancellation_requested_at = attempt.cancellation_requested_at
+            if cancellation_requested_at is None:
+                raise HTTPException(status_code=409, detail="cancellation_not_requested")
+            cancellation_latency = max(
+                (payload.observed_at - cancellation_requested_at).total_seconds(), 0
+            )
+            stage_duration = max((payload.observed_at - stage.created_at).total_seconds(), 0)
+            resource_class = _stage_resource_class(stage)
         response = {"execution_attempt_id": str(attempt_id), "state": attempt.state}
         await _journal_response(
             session,
@@ -912,6 +1000,14 @@ async def report_worker_lost_cleanup(
             response=response,
         )
         await session.commit()
+        if terminal_cause is not None:
+            PIPELINE_CANCEL_LATENCY_SECONDS.labels(outcome="worker_lost_cleanup").observe(
+                cancellation_latency
+            )
+            PIPELINE_STAGE_DURATION_SECONDS.labels(
+                resource_class=resource_class,
+                result="cancelled",
+            ).observe(stage_duration)
         return response
 
 
@@ -1154,7 +1250,9 @@ async def commit_checkpoint_session(
         authorization=authorization,
         allow_cancelling=True,
     )
-    return await service.commit(
+    return await _commit_artifact_operation(
+        service,
+        commit_kind="checkpoint",
         attempt=attempt,
         session_id=session_id,
         request_id=request_id,
@@ -1444,7 +1542,9 @@ async def commit_final_output_session(
         lease_token=lease_token,
         authorization=authorization,
     )
-    return await service.commit(
+    return await _commit_artifact_operation(
+        service,
+        commit_kind="final_output",
         attempt=attempt,
         session_id=session_id,
         request_id=request_id,

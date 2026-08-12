@@ -13,7 +13,15 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol
 from uuid import UUID
 
-from pydantic import AfterValidator, Field, StringConstraints, field_validator, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 from loom.pipeline.keys import canonical_digest
 from loom.pipeline.spec import (
@@ -28,7 +36,7 @@ from loom.pipeline.spec import (
     RecipeIdentityV1,
     RunBudgetV1,
 )
-from loom.pipeline.state import PipelineRunResult, PipelineRunState
+from loom.pipeline.state import PipelineRunResult, PipelineRunState, PipelineStageRunState
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -102,6 +110,12 @@ OfficialSubmissionKind = Annotated[
     str,
     StringConstraints(pattern=r"^[a-z][a-z0-9_.-]{0,63}$"),
 ]
+
+
+class PipelineReadModel(BaseModel):
+    """Closed response model that accepts adapter serialization primitives."""
+
+    model_config = ConfigDict(extra="forbid")
 
 
 def _normalize_bounded_text(value: str, *, label: str, maximum_bytes: int) -> str:
@@ -206,7 +220,7 @@ class PipelineRunEventsQueryV1(PipelineModel):
     limit: Annotated[int, Field(strict=True, ge=1, le=500)] = 200
 
 
-class PipelineRunEventV1(PipelineModel):
+class PipelineRunEventV1(PipelineReadModel):
     seq: PositiveSafeInt
     stage_run_id: UUID | None
     execution_attempt_id: UUID | None
@@ -220,7 +234,7 @@ class PipelineRunEventV1(PipelineModel):
         return _aware(value, label="event created_at")
 
 
-class PipelineRunEventsResponseV1(PipelineModel):
+class PipelineRunEventsResponseV1(PipelineReadModel):
     events: Annotated[list[PipelineRunEventV1], Field(max_length=500)]
     next_after_seq: NonNegativeSafeInt
     terminal: bool
@@ -238,6 +252,163 @@ class PipelineRunEventsResponseV1(PipelineModel):
         if self.terminal and self.retry_after_ms is not None:
             raise ValueError("a terminal event response cannot request another poll")
         return self
+
+
+# Public read projections intentionally live beside the mutation contracts.  This
+# gives FastAPI/OpenAPI one closed source of truth and keeps the browser from
+# recreating server response shapes with handwritten interfaces (#1217).
+PipelineNodeKind = Literal["container", "gate"]
+PipelineResourceClass = Literal["controller", "cpu", "gpu"]
+PipelineRetryIneligibleReason = Literal[
+    "run_not_retryable",
+    "stage_not_failed",
+    "recipe_snapshot_unavailable",
+    "input_drift",
+    "input_not_reusable",
+    "binding_drift",
+    "budget_invalid",
+]
+ExecutionAttemptState = Literal[
+    "fault_pending", "queued", "claimed", "running", "succeeded", "failed", "cancelled", "lost"
+]
+
+
+class PipelineRecipeIdentityProjectionV1(PipelineReadModel):
+    name: str
+    version: PositiveVersion
+    digest: str
+
+
+class PipelineStageRunSummaryV1(PipelineReadModel):
+    id: UUID
+    node_key: str
+    shard_key: str
+    node_kind: PipelineNodeKind
+    topological_level: NonNegativeSafeInt
+    upstream_node_keys: list[str]
+    state: PipelineStageRunState
+    domain_outcome: str | None
+    reason_code: str | None
+    attempt_count: NonNegativeSafeInt
+    resource_profile_name: str | None
+    resource_class: PipelineResourceClass
+    retry_allowed: bool
+    retry_ineligible_reason: PipelineRetryIneligibleReason | None
+
+
+class PipelineArtifactSummaryV1(PipelineReadModel):
+    id: UUID
+    name: str
+    artifact_type: str
+    content_sha256: str
+    manifest_sha256: str | None
+    stored_size_bytes: NonNegativeSafeInt | None
+    file_count: NonNegativeSafeInt | None
+    safety_state: str
+    visibility: str
+    share_status: str
+    download_path: str
+    pipeline_run_id: UUID | None
+    pipeline_stage_run_id: UUID | None
+    execution_attempt_id: UUID | None
+    producer_kind: str | None
+
+
+class PipelineBudgetCounterV1(PipelineReadModel):
+    limit: NonNegativeSafeInt
+    reserved: NonNegativeSafeInt
+    settled: NonNegativeSafeInt
+    remaining: int
+
+
+class PipelineBudgetLedgerProjectionV1(PipelineReadModel):
+    max_wall_seconds: PipelineBudgetCounterV1
+    max_gpu_seconds: PipelineBudgetCounterV1
+    max_provider_cost_usd: PipelineBudgetCounterV1
+    max_artifact_bytes: PipelineBudgetCounterV1
+    max_stage_runs: PipelineBudgetCounterV1
+    max_attempts_total: PipelineBudgetCounterV1
+    wall_deadline_at: datetime | None
+    terminal_cause: str | None
+
+
+class PipelineRunListItemV1(PipelineReadModel):
+    id: UUID
+    display_name: str | None
+    recipe: PipelineRecipeIdentityProjectionV1
+    state: PipelineRunState
+    result: PipelineRunResult | None
+    completed_stage_runs: NonNegativeSafeInt
+    total_stage_runs: NonNegativeSafeInt
+    domain_outcomes: dict[str, NonNegativeSafeInt]
+    budget: PipelineBudgetLedgerProjectionV1 | None
+    created_at: datetime
+    finished_at: datetime | None
+
+
+class PipelineRunListResponseV1(PipelineReadModel):
+    items: list[PipelineRunListItemV1]
+    next_cursor: str | None
+
+
+class PipelineRunDetailV1(PipelineReadModel):
+    id: UUID
+    display_name: str | None
+    recipe: PipelineRecipeIdentityProjectionV1
+    graph_digest: str
+    control_binding_snapshots_digest: str
+    parameters_digest: str
+    request_digest: str
+    state: PipelineRunState
+    result: PipelineRunResult | None
+    reason: str | None
+    created_by_user_id: UUID | None
+    retry_of_pipeline_run_id: UUID | None
+    retry_from_stage_run_id: UUID | None
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+    cancellation_requested_at: datetime | None
+    source_budget: RunBudgetV1
+    stages: list[PipelineStageRunSummaryV1]
+    artifacts: list[PipelineArtifactSummaryV1]
+    budget: PipelineBudgetLedgerProjectionV1 | None
+
+
+class PipelineStageRunDetailV1(PipelineStageRunSummaryV1):
+    pipeline_run_id: UUID
+    execution_spec_digest: str | None
+    input_bindings_digest: str | None
+    resource_profile_digest: str | None
+    request_renderer_digest: str | None
+    latest_checkpoint_artifact_id: UUID | None
+    artifacts: list[PipelineArtifactSummaryV1]
+
+
+class PipelineExecutionAttemptV1(PipelineReadModel):
+    id: UUID
+    attempt_number: PositiveSafeInt
+    state: ExecutionAttemptState
+    worker_id: UUID | None
+    worker_pool_class: str | None
+    queued_at: datetime | None
+    claimed_at: datetime | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    exit_code: int | None
+    retry_class: str | None
+    reason_code: str | None
+    stage_request_digest: str | None
+    result_manifest_digest: str | None
+    resumed_checkpoint_artifact_id: UUID | None
+    cancellation_observed_at: datetime | None
+    cancellation_outcome: str | None
+    cleanup_acknowledged_at: datetime | None
+    cleanup_proof_digest: str | None
+
+
+class PipelineExecutionAttemptListV1(PipelineReadModel):
+    items: list[PipelineExecutionAttemptV1]
 
 
 class PipelineMutationResultV1(PipelineModel):
@@ -521,18 +692,24 @@ __all__ = [
     "OfficialRecipeSubmissionRequestV1",
     "PipelineAcceptanceRecipeSubmitter",
     "PipelineCancelResultV1",
+    "PipelineExecutionAttemptListV1",
+    "PipelineExecutionAttemptV1",
     "PipelineIdempotencyEndpoint",
     "PipelineMutationResultV1",
     "PipelineOfficialRecipeSubmitter",
     "PipelineRecipeBindingResolver",
     "PipelineRunCancelRequestV1",
+    "PipelineRunDetailV1",
     "PipelineRunEventV1",
     "PipelineRunEventsQueryV1",
     "PipelineRunEventsResponseV1",
     "PipelineRunListQueryV1",
+    "PipelineRunListResponseV1",
     "PipelineRunRetryRequestV1",
     "PipelineRunSubmitRequestV1",
     "PipelineStageRetryRequestV1",
+    "PipelineStageRunDetailV1",
+    "PipelineStageRunSummaryV1",
     "ResolvedRecipeControlBindingV1",
     "ResolvedRecipeControlBindingsV1",
     "canonical_pipeline_request_digest",

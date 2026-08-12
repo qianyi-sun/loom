@@ -1,39 +1,174 @@
 apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loom-grafana-dashboards
+  namespace: loom
+  labels:
+    grafana_dashboard: '1'
 data:
+  operator-overview.json: "{\n  \"uid\": \"loom-operator-overview\",\n  \"title\"\
+    : \"Loom \u2014 Operator Overview\",\n  \"tags\": [\"loom\"],\n  \"timezone\"\
+    : \"browser\",\n  \"schemaVersion\": 39,\n  \"time\": { \"from\": \"now-1h\",\
+    \ \"to\": \"now\" },\n  \"refresh\": \"30s\",\n  \"templating\": { \"list\": []\
+    \ },\n  \"panels\": [\n    {\n      \"id\": 1,\n      \"type\": \"stat\",\n  \
+    \    \"title\": \"Control Plane Up\",\n      \"gridPos\": { \"x\": 0, \"y\": 0,\
+    \ \"w\": 3, \"h\": 4 },\n      \"options\": {\n        \"reduceOptions\": { \"\
+    calcs\": [\"lastNotNull\"] },\n        \"colorMode\": \"background\",\n      \
+    \  \"graphMode\": \"none\",\n        \"textMode\": \"auto\"\n      },\n      \"\
+    fieldConfig\": {\n        \"defaults\": {\n          \"mappings\": [\n       \
+    \     { \"type\": \"value\", \"options\": { \"0\": { \"text\": \"DOWN\", \"color\"\
+    : \"red\" }, \"1\": { \"text\": \"UP\", \"color\": \"green\" } } }\n         \
+    \ ],\n          \"thresholds\": { \"mode\": \"absolute\", \"steps\": [{ \"value\"\
+    : null, \"color\": \"red\" }, { \"value\": 1, \"color\": \"green\" }] }\n    \
+    \    }\n      },\n      \"targets\": [\n        {\n          \"expr\": \"up{job=~\\\
+    \".*loom-control-plane.*\\\"}\",\n          \"legendFormat\": \"control-plane\"\
+    ,\n          \"refId\": \"A\"\n        }\n      ]\n    },\n    {\n      \"id\"\
+    : 2,\n      \"type\": \"stat\",\n      \"title\": \"LLM Gateway Up\",\n      \"\
+    gridPos\": { \"x\": 3, \"y\": 0, \"w\": 3, \"h\": 4 },\n      \"options\": {\n\
+    \        \"reduceOptions\": { \"calcs\": [\"lastNotNull\"] },\n        \"colorMode\"\
+    : \"background\",\n        \"graphMode\": \"none\",\n        \"textMode\": \"\
+    auto\"\n      },\n      \"fieldConfig\": {\n        \"defaults\": {\n        \
+    \  \"mappings\": [\n            { \"type\": \"value\", \"options\": { \"0\": {\
+    \ \"text\": \"DOWN\", \"color\": \"red\" }, \"1\": { \"text\": \"UP\", \"color\"\
+    : \"green\" } } }\n          ],\n          \"thresholds\": { \"mode\": \"absolute\"\
+    , \"steps\": [{ \"value\": null, \"color\": \"red\" }, { \"value\": 1, \"color\"\
+    : \"green\" }] }\n        }\n      },\n      \"targets\": [\n        {\n     \
+    \     \"expr\": \"up{job=~\\\".*loom-llm-gateway.*\\\"}\",\n          \"legendFormat\"\
+    : \"llm-gateway\",\n          \"refId\": \"A\"\n        }\n      ]\n    },\n \
+    \   {\n      \"id\": 3,\n      \"type\": \"stat\",\n      \"title\": \"Loom Service\
+    \ Up\",\n      \"gridPos\": { \"x\": 6, \"y\": 0, \"w\": 3, \"h\": 4 },\n    \
+    \  \"options\": {\n        \"reduceOptions\": { \"calcs\": [\"lastNotNull\"] },\n\
+    \        \"colorMode\": \"background\",\n        \"graphMode\": \"none\",\n  \
+    \      \"textMode\": \"auto\"\n      },\n      \"fieldConfig\": {\n        \"\
+    defaults\": {\n          \"mappings\": [\n            { \"type\": \"value\", \"\
+    options\": { \"0\": { \"text\": \"DOWN\", \"color\": \"red\" }, \"1\": { \"text\"\
+    : \"UP\", \"color\": \"green\" } } }\n          ],\n          \"thresholds\":\
+    \ { \"mode\": \"absolute\", \"steps\": [{ \"value\": null, \"color\": \"red\"\
+    \ }, { \"value\": 1, \"color\": \"green\" }] }\n        }\n      },\n      \"\
+    targets\": [\n        {\n          \"expr\": \"up{job=~\\\".*loom-service.*\\\"\
+    }\",\n          \"legendFormat\": \"loom-service\",\n          \"refId\": \"A\"\
+    \n        }\n      ]\n    },\n    {\n      \"id\": 4,\n      \"type\": \"stat\"\
+    ,\n      \"title\": \"Worker Up\",\n      \"gridPos\": { \"x\": 9, \"y\": 0, \"\
+    w\": 3, \"h\": 4 },\n      \"options\": {\n        \"reduceOptions\": { \"calcs\"\
+    : [\"lastNotNull\"] },\n        \"colorMode\": \"background\",\n        \"graphMode\"\
+    : \"none\",\n        \"textMode\": \"auto\"\n      },\n      \"fieldConfig\":\
+    \ {\n        \"defaults\": {\n          \"mappings\": [\n            { \"type\"\
+    : \"value\", \"options\": { \"0\": { \"text\": \"DOWN\", \"color\": \"red\" },\
+    \ \"1\": { \"text\": \"UP\", \"color\": \"green\" } } }\n          ],\n      \
+    \    \"thresholds\": { \"mode\": \"absolute\", \"steps\": [{ \"value\": null,\
+    \ \"color\": \"red\" }, { \"value\": 1, \"color\": \"green\" }] }\n        }\n\
+    \      },\n      \"targets\": [\n        {\n          \"expr\": \"up{job=~\\\"\
+    .*loom-worker.*\\\"}\",\n          \"legendFormat\": \"worker\",\n          \"\
+    refId\": \"A\"\n        }\n      ]\n    },\n    {\n      \"id\": 5,\n      \"\
+    type\": \"stat\",\n      \"title\": \"Active Workers\",\n      \"gridPos\": {\
+    \ \"x\": 12, \"y\": 0, \"w\": 3, \"h\": 4 },\n      \"options\": {\n        \"\
+    reduceOptions\": { \"calcs\": [\"lastNotNull\"] },\n        \"colorMode\": \"\
+    background\",\n        \"graphMode\": \"none\",\n        \"textMode\": \"auto\"\
+    \n      },\n      \"fieldConfig\": {\n        \"defaults\": {\n          \"thresholds\"\
+    : {\n            \"mode\": \"absolute\",\n            \"steps\": [\n         \
+    \     { \"value\": null, \"color\": \"red\" },\n              { \"value\": 1,\
+    \ \"color\": \"yellow\" },\n              { \"value\": 3, \"color\": \"green\"\
+    \ }\n            ]\n          }\n        }\n      },\n      \"targets\": [\n \
+    \       {\n          \"expr\": \"loom_workers_active\",\n          \"legendFormat\"\
+    : \"active workers\",\n          \"refId\": \"A\"\n        }\n      ]\n    },\n\
+    \    {\n      \"id\": 6,\n      \"type\": \"timeseries\",\n      \"title\": \"\
+    Queue Depth (all teams)\",\n      \"gridPos\": { \"x\": 15, \"y\": 0, \"w\": 9,\
+    \ \"h\": 8 },\n      \"fieldConfig\": {\n        \"defaults\": {\n          \"\
+    custom\": { \"lineWidth\": 2 },\n          \"thresholds\": {\n            \"mode\"\
+    : \"absolute\",\n            \"steps\": [\n              { \"value\": null, \"\
+    color\": \"green\" },\n              { \"value\": 50, \"color\": \"yellow\" },\n\
+    \              { \"value\": 100, \"color\": \"red\" }\n            ]\n       \
+    \   }\n        }\n      },\n      \"targets\": [\n        {\n          \"expr\"\
+    : \"sum(loom_queue_depth)\",\n          \"legendFormat\": \"queue depth\",\n \
+    \         \"refId\": \"A\"\n        }\n      ]\n    },\n    {\n      \"id\": 7,\n\
+    \      \"type\": \"timeseries\",\n      \"title\": \"In-flight Trials by State\"\
+    ,\n      \"gridPos\": { \"x\": 0, \"y\": 4, \"w\": 12, \"h\": 8 },\n      \"fieldConfig\"\
+    : {\n        \"defaults\": {\n          \"custom\": { \"lineWidth\": 2 }\n   \
+    \     }\n      },\n      \"targets\": [\n        {\n          \"expr\": \"sum\
+    \ by (state) (loom_trials_inflight)\",\n          \"legendFormat\": \"{{state}}\"\
+    ,\n          \"refId\": \"A\"\n        }\n      ]\n    },\n    {\n      \"id\"\
+    : 8,\n      \"type\": \"timeseries\",\n      \"title\": \"Claim Latency P95\"\
+    ,\n      \"gridPos\": { \"x\": 0, \"y\": 12, \"w\": 12, \"h\": 8 },\n      \"\
+    fieldConfig\": {\n        \"defaults\": {\n          \"unit\": \"s\",\n      \
+    \    \"custom\": { \"lineWidth\": 2 },\n          \"thresholds\": {\n        \
+    \    \"mode\": \"absolute\",\n            \"steps\": [\n              { \"value\"\
+    : null, \"color\": \"green\" },\n              { \"value\": 0.5, \"color\": \"\
+    yellow\" },\n              { \"value\": 1.0, \"color\": \"red\" }\n          \
+    \  ]\n          }\n        }\n      },\n      \"targets\": [\n        {\n    \
+    \      \"expr\": \"histogram_quantile(0.95, sum by (le) (rate(loom_claim_latency_sec_bucket[5m])))\"\
+    ,\n          \"legendFormat\": \"p95\",\n          \"refId\": \"A\"\n        }\n\
+    \      ]\n    },\n    {\n      \"id\": 9,\n      \"type\": \"timeseries\",\n \
+    \     \"title\": \"Gateway Call Rate by Result\",\n      \"gridPos\": { \"x\"\
+    : 12, \"y\": 8, \"w\": 12, \"h\": 8 },\n      \"fieldConfig\": {\n        \"defaults\"\
+    : {\n          \"unit\": \"reqps\",\n          \"custom\": { \"lineWidth\": 2\
+    \ }\n        }\n      },\n      \"targets\": [\n        {\n          \"expr\"\
+    : \"sum by (result) (rate(loom_gateway_llm_calls_total[5m]))\",\n          \"\
+    legendFormat\": \"{{result}}\",\n          \"refId\": \"A\"\n        }\n     \
+    \ ]\n    },\n    {\n      \"id\": 10,\n      \"type\": \"timeseries\",\n     \
+    \ \"title\": \"Service HTTP 5xx Rate\",\n      \"gridPos\": { \"x\": 12, \"y\"\
+    : 16, \"w\": 12, \"h\": 8 },\n      \"fieldConfig\": {\n        \"defaults\":\
+    \ {\n          \"unit\": \"percentunit\",\n          \"custom\": { \"lineWidth\"\
+    : 2 },\n          \"thresholds\": {\n            \"mode\": \"absolute\",\n   \
+    \         \"steps\": [\n              { \"value\": null, \"color\": \"green\"\
+    \ },\n              { \"value\": 0.01, \"color\": \"yellow\" },\n            \
+    \  { \"value\": 0.05, \"color\": \"red\" }\n            ]\n          }\n     \
+    \   }\n      },\n      \"targets\": [\n        {\n          \"expr\": \"sum(rate(loom_svc_http_requests_total{status_class=\\\
+    \"5xx\\\"}[5m])) / sum(rate(loom_svc_http_requests_total[5m]))\",\n          \"\
+    legendFormat\": \"5xx rate\",\n          \"refId\": \"A\"\n        }\n      ]\n\
+    \    },\n    {\n      \"id\": 11,\n      \"type\": \"timeseries\",\n      \"title\"\
+    : \"Trial Completion Rate by Result\",\n      \"gridPos\": { \"x\": 0, \"y\":\
+    \ 20, \"w\": 12, \"h\": 8 },\n      \"fieldConfig\": {\n        \"defaults\":\
+    \ {\n          \"unit\": \"reqps\",\n          \"custom\": { \"lineWidth\": 2\
+    \ }\n        }\n      },\n      \"targets\": [\n        {\n          \"expr\"\
+    : \"sum by (result) (rate(loom_worker_trials_completed_total[5m]))\",\n      \
+    \    \"legendFormat\": \"{{result}}\",\n          \"refId\": \"A\"\n        }\n\
+    \      ]\n    },\n    {\n      \"id\": 12,\n      \"type\": \"table\",\n     \
+    \ \"title\": \"Cumulative LLM Cost \u2014 Top 5 Teams\",\n      \"gridPos\": {\
+    \ \"x\": 12, \"y\": 24, \"w\": 12, \"h\": 8 },\n      \"options\": {\n       \
+    \ \"sortBy\": [{ \"displayName\": \"Cost (USD)\", \"desc\": true }]\n      },\n\
+    \      \"fieldConfig\": {\n        \"defaults\": {\n          \"unit\": \"currencyUSD\"\
+    \n        }\n      },\n      \"targets\": [\n        {\n          \"expr\": \"\
+    topk(5, sum by (team_id) (loom_gateway_cost_usd_total))\",\n          \"legendFormat\"\
+    : \"{{team_id}}\",\n          \"refId\": \"A\",\n          \"instant\": true\n\
+    \        }\n      ],\n      \"transformations\": [\n        { \"id\": \"labelsToFields\"\
+    , \"options\": { \"mode\": \"columns\" } },\n        { \"id\": \"sortBy\", \"\
+    options\": { \"fields\": [{ \"displayName\": \"Value\", \"desc\": true }] } }\n\
+    \      ]\n    }\n  ]\n}\n"
   control-plane.json: "{\n  \"uid\": \"loom-control-plane\",\n  \"title\": \"Loom\
-    \ — Control Plane Deep Dive\",\n  \"tags\": [\"loom\"],\n  \"timezone\": \"browser\"\
-    ,\n  \"schemaVersion\": 39,\n  \"time\": { \"from\": \"now-1h\", \"to\": \"now\"\
-    \ },\n  \"refresh\": \"30s\",\n  \"templating\": { \"list\": [] },\n  \"panels\"\
-    : [\n    {\n      \"id\": 1,\n      \"type\": \"stat\",\n      \"title\": \"Active\
-    \ Workers\",\n      \"gridPos\": { \"x\": 0, \"y\": 0, \"w\": 4, \"h\": 4 },\n\
-    \      \"options\": {\n        \"reduceOptions\": { \"calcs\": [\"lastNotNull\"\
-    ] },\n        \"colorMode\": \"background\",\n        \"graphMode\": \"none\"\
-    ,\n        \"textMode\": \"auto\"\n      },\n      \"fieldConfig\": {\n      \
-    \  \"defaults\": {\n          \"thresholds\": {\n            \"mode\": \"absolute\"\
-    ,\n            \"steps\": [\n              { \"value\": null, \"color\": \"red\"\
-    \ },\n              { \"value\": 1, \"color\": \"yellow\" },\n              {\
-    \ \"value\": 3, \"color\": \"green\" }\n            ]\n          }\n        }\n\
-    \      },\n      \"targets\": [\n        {\n          \"expr\": \"loom_workers_active\"\
-    ,\n          \"legendFormat\": \"active workers\",\n          \"refId\": \"A\"\
-    \n        }\n      ]\n    },\n    {\n      \"id\": 2,\n      \"type\": \"timeseries\"\
-    ,\n      \"title\": \"Trial State Transitions (rate 5m)\",\n      \"gridPos\"\
-    : { \"x\": 4, \"y\": 0, \"w\": 20, \"h\": 8 },\n      \"fieldConfig\": {\n   \
-    \     \"defaults\": {\n          \"unit\": \"reqps\",\n          \"custom\": {\
-    \ \"lineWidth\": 2 }\n        }\n      },\n      \"targets\": [\n        {\n \
-    \         \"expr\": \"sum by (to_state) (rate(loom_trials_state_total[5m]))\"\
-    ,\n          \"legendFormat\": \"→ {{to_state}}\",\n          \"refId\": \"A\"\
-    \n        }\n      ]\n    },\n    {\n      \"id\": 3,\n      \"type\": \"timeseries\"\
-    ,\n      \"title\": \"Queue Depth — Top 10 Teams\",\n      \"gridPos\": { \"x\"\
-    : 0, \"y\": 8, \"w\": 12, \"h\": 8 },\n      \"fieldConfig\": {\n        \"defaults\"\
-    : {\n          \"custom\": { \"lineWidth\": 2 },\n          \"thresholds\": {\n\
-    \            \"mode\": \"absolute\",\n            \"steps\": [\n             \
-    \ { \"value\": null, \"color\": \"green\" },\n              { \"value\": 50, \"\
+    \ \u2014 Control Plane Deep Dive\",\n  \"tags\": [\"loom\"],\n  \"timezone\":\
+    \ \"browser\",\n  \"schemaVersion\": 39,\n  \"time\": { \"from\": \"now-1h\",\
+    \ \"to\": \"now\" },\n  \"refresh\": \"30s\",\n  \"templating\": { \"list\": []\
+    \ },\n  \"panels\": [\n    {\n      \"id\": 1,\n      \"type\": \"stat\",\n  \
+    \    \"title\": \"Active Workers\",\n      \"gridPos\": { \"x\": 0, \"y\": 0,\
+    \ \"w\": 4, \"h\": 4 },\n      \"options\": {\n        \"reduceOptions\": { \"\
+    calcs\": [\"lastNotNull\"] },\n        \"colorMode\": \"background\",\n      \
+    \  \"graphMode\": \"none\",\n        \"textMode\": \"auto\"\n      },\n      \"\
+    fieldConfig\": {\n        \"defaults\": {\n          \"thresholds\": {\n     \
+    \       \"mode\": \"absolute\",\n            \"steps\": [\n              { \"\
+    value\": null, \"color\": \"red\" },\n              { \"value\": 1, \"color\"\
+    : \"yellow\" },\n              { \"value\": 3, \"color\": \"green\" }\n      \
+    \      ]\n          }\n        }\n      },\n      \"targets\": [\n        {\n\
+    \          \"expr\": \"loom_workers_active\",\n          \"legendFormat\": \"\
+    active workers\",\n          \"refId\": \"A\"\n        }\n      ]\n    },\n  \
+    \  {\n      \"id\": 2,\n      \"type\": \"timeseries\",\n      \"title\": \"Trial\
+    \ State Transitions (rate 5m)\",\n      \"gridPos\": { \"x\": 4, \"y\": 0, \"\
+    w\": 20, \"h\": 8 },\n      \"fieldConfig\": {\n        \"defaults\": {\n    \
+    \      \"unit\": \"reqps\",\n          \"custom\": { \"lineWidth\": 2 }\n    \
+    \    }\n      },\n      \"targets\": [\n        {\n          \"expr\": \"sum by\
+    \ (to_state) (rate(loom_trials_state_total[5m]))\",\n          \"legendFormat\"\
+    : \"\u2192 {{to_state}}\",\n          \"refId\": \"A\"\n        }\n      ]\n \
+    \   },\n    {\n      \"id\": 3,\n      \"type\": \"timeseries\",\n      \"title\"\
+    : \"Queue Depth \u2014 Top 10 Teams\",\n      \"gridPos\": { \"x\": 0, \"y\":\
+    \ 8, \"w\": 12, \"h\": 8 },\n      \"fieldConfig\": {\n        \"defaults\": {\n\
+    \          \"custom\": { \"lineWidth\": 2 },\n          \"thresholds\": {\n  \
+    \          \"mode\": \"absolute\",\n            \"steps\": [\n              {\
+    \ \"value\": null, \"color\": \"green\" },\n              { \"value\": 50, \"\
     color\": \"yellow\" },\n              { \"value\": 100, \"color\": \"red\" }\n\
     \            ]\n          }\n        }\n      },\n      \"targets\": [\n     \
     \   {\n          \"expr\": \"topk(10, sum by (team_id) (loom_queue_depth))\",\n\
     \          \"legendFormat\": \"{{team_id}}\",\n          \"refId\": \"A\"\n  \
     \      }\n      ]\n    },\n    {\n      \"id\": 4,\n      \"type\": \"timeseries\"\
-    ,\n      \"title\": \"In-flight Trials per Team × State\",\n      \"gridPos\"\
+    ,\n      \"title\": \"In-flight Trials per Team \xD7 State\",\n      \"gridPos\"\
     : { \"x\": 12, \"y\": 8, \"w\": 12, \"h\": 8 },\n      \"fieldConfig\": {\n  \
     \      \"defaults\": {\n          \"custom\": { \"lineWidth\": 2 }\n        }\n\
     \      },\n      \"targets\": [\n        {\n          \"expr\": \"sum by (team_id,\
@@ -77,10 +212,68 @@ data:
     value\": 0.5, \"color\": \"red\" }\n            ]\n          }\n        }\n  \
     \    },\n      \"targets\": [\n        {\n          \"expr\": \"rate(loom_worker_reclaim_total[5m])\"\
     ,\n          \"legendFormat\": \"reclaim rate\",\n          \"refId\": \"A\"\n\
-    \        }\n      ]\n    }\n  ]\n}\n"
-  llm-gateway.json: "{\n  \"uid\": \"loom-llm-gateway\",\n  \"title\": \"Loom — LLM\
-    \ Gateway Deep Dive\",\n  \"tags\": [\"loom\"],\n  \"timezone\": \"browser\",\n\
-    \  \"schemaVersion\": 39,\n  \"time\": { \"from\": \"now-1h\", \"to\": \"now\"\
+    \        }\n      ]\n    },\n    { \"id\": 9, \"type\": \"timeseries\", \"title\"\
+    : \"PipelineRuns by state/result\", \"gridPos\": { \"x\": 0, \"y\": 32, \"w\"\
+    : 12, \"h\": 8 }, \"fieldConfig\": { \"defaults\": { \"unit\": \"short\" } },\
+    \ \"targets\": [{ \"expr\": \"sum by (state,result_status) (loom_pipeline_runs)\"\
+    , \"legendFormat\": \"{{state}} / {{result_status}}\", \"refId\": \"A\" }] },\n\
+    \    { \"id\": 10, \"type\": \"timeseries\", \"title\": \"StageRuns by state/resource\"\
+    , \"gridPos\": { \"x\": 12, \"y\": 32, \"w\": 12, \"h\": 8 }, \"fieldConfig\"\
+    : { \"defaults\": { \"unit\": \"short\" } }, \"targets\": [{ \"expr\": \"sum by\
+    \ (state,resource_class) (loom_pipeline_stage_runs)\", \"legendFormat\": \"{{state}}\
+    \ / {{resource_class}}\", \"refId\": \"A\" }] },\n    { \"id\": 11, \"type\":\
+    \ \"timeseries\", \"title\": \"Attempts by state/resource\", \"gridPos\": { \"\
+    x\": 0, \"y\": 40, \"w\": 12, \"h\": 8 }, \"fieldConfig\": { \"defaults\": { \"\
+    unit\": \"short\" } }, \"targets\": [{ \"expr\": \"sum by (state,resource_class)\
+    \ (loom_execution_attempts)\", \"legendFormat\": \"{{state}} / {{resource_class}}\"\
+    , \"refId\": \"A\" }] },\n    { \"id\": 12, \"type\": \"timeseries\", \"title\"\
+    : \"Stage duration p50/p95\", \"gridPos\": { \"x\": 12, \"y\": 40, \"w\": 12,\
+    \ \"h\": 8 }, \"fieldConfig\": { \"defaults\": { \"unit\": \"s\" } }, \"targets\"\
+    : [{ \"expr\": \"histogram_quantile(0.50, sum by (le,resource_class) (rate(loom_pipeline_stage_duration_seconds_bucket[5m])))\"\
+    , \"legendFormat\": \"p50 {{resource_class}}\", \"refId\": \"A\" }, { \"expr\"\
+    : \"histogram_quantile(0.95, sum by (le,resource_class) (rate(loom_pipeline_stage_duration_seconds_bucket[5m])))\"\
+    , \"legendFormat\": \"p95 {{resource_class}}\", \"refId\": \"B\" }] },\n    {\
+    \ \"id\": 13, \"type\": \"timeseries\", \"title\": \"Settled GPU seconds rate\"\
+    , \"gridPos\": { \"x\": 0, \"y\": 48, \"w\": 12, \"h\": 8 }, \"fieldConfig\":\
+    \ { \"defaults\": { \"unit\": \"s\" } }, \"targets\": [{ \"expr\": \"sum by (slurm_cluster,gpu_count_class)\
+    \ (rate(loom_pipeline_gpu_seconds_total[5m]))\", \"legendFormat\": \"{{slurm_cluster}}\
+    \ / {{gpu_count_class}}\", \"refId\": \"A\" }] },\n    { \"id\": 14, \"type\"\
+    : \"timeseries\", \"title\": \"Pipeline Artifact byte rate\", \"gridPos\": { \"\
+    x\": 12, \"y\": 48, \"w\": 12, \"h\": 8 }, \"fieldConfig\": { \"defaults\": {\
+    \ \"unit\": \"Bps\" } }, \"targets\": [{ \"expr\": \"sum by (artifact_class) (rate(loom_pipeline_artifact_bytes_total[5m]))\"\
+    , \"legendFormat\": \"{{artifact_class}}\", \"refId\": \"A\" }] },\n    { \"id\"\
+    : 15, \"type\": \"timeseries\", \"title\": \"Cancellation p95 / forced\", \"gridPos\"\
+    : { \"x\": 0, \"y\": 56, \"w\": 12, \"h\": 8 }, \"fieldConfig\": { \"defaults\"\
+    : { \"unit\": \"s\" } }, \"targets\": [{ \"expr\": \"histogram_quantile(0.95,\
+    \ sum by (le,outcome) (rate(loom_pipeline_cancel_latency_seconds_bucket[5m])))\"\
+    , \"legendFormat\": \"p95 {{outcome}}\", \"refId\": \"A\" }, { \"expr\": \"sum(increase(loom_pipeline_cancel_latency_seconds_count{outcome=\\\
+    \"forced\\\"}[15m]))\", \"legendFormat\": \"forced\", \"refId\": \"B\" }] },\n\
+    \    { \"id\": 16, \"type\": \"timeseries\", \"title\": \"Reconcile and commit\
+    \ failures\", \"gridPos\": { \"x\": 12, \"y\": 56, \"w\": 12, \"h\": 8 }, \"fieldConfig\"\
+    : { \"defaults\": { \"unit\": \"short\" } }, \"targets\": [{ \"expr\": \"sum by\
+    \ (reason) (rate(loom_pipeline_controller_reconcile_errors_total[5m]))\", \"legendFormat\"\
+    : \"reconcile {{reason}}\", \"refId\": \"A\" }, { \"expr\": \"sum by (commit_kind,reason)\
+    \ (rate(loom_pipeline_artifact_commit_failures_total[5m]))\", \"legendFormat\"\
+    : \"{{commit_kind}} / {{reason}}\", \"refId\": \"B\" }] },\n    { \"id\": 17,\
+    \ \"type\": \"timeseries\", \"title\": \"Stage queue/deadline age\", \"gridPos\"\
+    : { \"x\": 0, \"y\": 64, \"w\": 12, \"h\": 8 }, \"fieldConfig\": { \"defaults\"\
+    : { \"unit\": \"s\" } }, \"targets\": [{ \"expr\": \"max by (state,resource_class)\
+    \ (loom_pipeline_stage_queue_age_seconds)\", \"legendFormat\": \"queue {{state}}\
+    \ / {{resource_class}}\", \"refId\": \"A\" }, { \"expr\": \"max by (resource_class)\
+    \ (loom_pipeline_stage_deadline_overrun_seconds)\", \"legendFormat\": \"deadline\
+    \ {{resource_class}}\", \"refId\": \"B\" }] },\n    { \"id\": 18, \"type\": \"\
+    timeseries\", \"title\": \"Checkpoint age\", \"gridPos\": { \"x\": 12, \"y\":\
+    \ 64, \"w\": 12, \"h\": 8 }, \"fieldConfig\": { \"defaults\": { \"unit\": \"s\"\
+    \ } }, \"targets\": [{ \"expr\": \"max by (resource_class) (loom_pipeline_checkpoint_oldest_age_seconds)\"\
+    , \"legendFormat\": \"{{resource_class}}\", \"refId\": \"A\" }] },\n    { \"id\"\
+    : 19, \"type\": \"timeseries\", \"title\": \"Allocated GPU without process\",\
+    \ \"gridPos\": { \"x\": 0, \"y\": 72, \"w\": 24, \"h\": 8 }, \"fieldConfig\":\
+    \ { \"defaults\": { \"unit\": \"s\" } }, \"targets\": [{ \"expr\": \"max by (slurm_cluster,reason)\
+    \ (loom_pipeline_gpu_allocated_idle_seconds)\", \"legendFormat\": \"{{slurm_cluster}}\
+    \ / {{reason}}\", \"refId\": \"A\" }] }\n  ]\n}\n"
+  llm-gateway.json: "{\n  \"uid\": \"loom-llm-gateway\",\n  \"title\": \"Loom \u2014\
+    \ LLM Gateway Deep Dive\",\n  \"tags\": [\"loom\"],\n  \"timezone\": \"browser\"\
+    ,\n  \"schemaVersion\": 39,\n  \"time\": { \"from\": \"now-1h\", \"to\": \"now\"\
     \ },\n  \"refresh\": \"30s\",\n  \"templating\": { \"list\": [] },\n  \"panels\"\
     : [\n    {\n      \"id\": 1,\n      \"type\": \"timeseries\",\n      \"title\"\
     : \"Call Rate by Provider (stacked)\",\n      \"gridPos\": { \"x\": 0, \"y\":\
@@ -92,38 +285,38 @@ data:
     \     {\n          \"expr\": \"sum by (provider) (rate(loom_gateway_llm_calls_total[5m]))\"\
     ,\n          \"legendFormat\": \"{{provider}}\",\n          \"refId\": \"A\"\n\
     \        }\n      ]\n    },\n    {\n      \"id\": 2,\n      \"type\": \"timeseries\"\
-    ,\n      \"title\": \"Call Rate by Result (stacked — highlight non-ok)\",\n  \
-    \    \"gridPos\": { \"x\": 12, \"y\": 0, \"w\": 12, \"h\": 8 },\n      \"fieldConfig\"\
-    : {\n        \"defaults\": {\n          \"unit\": \"reqps\",\n          \"custom\"\
-    : {\n            \"lineWidth\": 2,\n            \"fillOpacity\": 20,\n       \
-    \     \"stacking\": { \"mode\": \"normal\" }\n          }\n        },\n      \
-    \  \"overrides\": [\n          {\n            \"matcher\": { \"id\": \"byName\"\
-    , \"options\": \"ok\" },\n            \"properties\": [{ \"id\": \"color\", \"\
-    value\": { \"mode\": \"fixed\", \"fixedColor\": \"green\" } }]\n          },\n\
-    \          {\n            \"matcher\": { \"id\": \"byName\", \"options\": \"upstream_error\"\
+    ,\n      \"title\": \"Call Rate by Result (stacked \u2014 highlight non-ok)\"\
+    ,\n      \"gridPos\": { \"x\": 12, \"y\": 0, \"w\": 12, \"h\": 8 },\n      \"\
+    fieldConfig\": {\n        \"defaults\": {\n          \"unit\": \"reqps\",\n  \
+    \        \"custom\": {\n            \"lineWidth\": 2,\n            \"fillOpacity\"\
+    : 20,\n            \"stacking\": { \"mode\": \"normal\" }\n          }\n     \
+    \   },\n        \"overrides\": [\n          {\n            \"matcher\": { \"id\"\
+    : \"byName\", \"options\": \"ok\" },\n            \"properties\": [{ \"id\": \"\
+    color\", \"value\": { \"mode\": \"fixed\", \"fixedColor\": \"green\" } }]\n  \
+    \        },\n          {\n            \"matcher\": { \"id\": \"byName\", \"options\"\
+    : \"upstream_error\" },\n            \"properties\": [{ \"id\": \"color\", \"\
+    value\": { \"mode\": \"fixed\", \"fixedColor\": \"red\" } }]\n          },\n \
+    \         {\n            \"matcher\": { \"id\": \"byName\", \"options\": \"auth_error\"\
     \ },\n            \"properties\": [{ \"id\": \"color\", \"value\": { \"mode\"\
-    : \"fixed\", \"fixedColor\": \"red\" } }]\n          },\n          {\n       \
-    \     \"matcher\": { \"id\": \"byName\", \"options\": \"auth_error\" },\n    \
-    \        \"properties\": [{ \"id\": \"color\", \"value\": { \"mode\": \"fixed\"\
-    , \"fixedColor\": \"orange\" } }]\n          },\n          {\n            \"matcher\"\
-    : { \"id\": \"byName\", \"options\": \"ssrf_blocked\" },\n            \"properties\"\
-    : [{ \"id\": \"color\", \"value\": { \"mode\": \"fixed\", \"fixedColor\": \"purple\"\
+    : \"fixed\", \"fixedColor\": \"orange\" } }]\n          },\n          {\n    \
+    \        \"matcher\": { \"id\": \"byName\", \"options\": \"ssrf_blocked\" },\n\
+    \            \"properties\": [{ \"id\": \"color\", \"value\": { \"mode\": \"fixed\"\
+    , \"fixedColor\": \"purple\" } }]\n          },\n          {\n            \"matcher\"\
+    : { \"id\": \"byName\", \"options\": \"rate_limited\" },\n            \"properties\"\
+    : [{ \"id\": \"color\", \"value\": { \"mode\": \"fixed\", \"fixedColor\": \"yellow\"\
     \ } }]\n          },\n          {\n            \"matcher\": { \"id\": \"byName\"\
-    , \"options\": \"rate_limited\" },\n            \"properties\": [{ \"id\": \"\
-    color\", \"value\": { \"mode\": \"fixed\", \"fixedColor\": \"yellow\" } }]\n \
-    \         },\n          {\n            \"matcher\": { \"id\": \"byName\", \"options\"\
-    : \"timeout\" },\n            \"properties\": [{ \"id\": \"color\", \"value\"\
-    : { \"mode\": \"fixed\", \"fixedColor\": \"dark-red\" } }]\n          }\n    \
-    \    ]\n      },\n      \"options\": {\n        \"tooltip\": { \"mode\": \"multi\"\
-    \ }\n      },\n      \"targets\": [\n        {\n          \"expr\": \"sum by (result)\
-    \ (rate(loom_gateway_llm_calls_total[5m]))\",\n          \"legendFormat\": \"\
-    {{result}}\",\n          \"refId\": \"A\"\n        }\n      ]\n    },\n    {\n\
-    \      \"id\": 3,\n      \"type\": \"timeseries\",\n      \"title\": \"Latency\
-    \ P50 / P95 / P99 by Provider\",\n      \"gridPos\": { \"x\": 0, \"y\": 8, \"\
-    w\": 12, \"h\": 8 },\n      \"fieldConfig\": {\n        \"defaults\": {\n    \
-    \      \"unit\": \"s\",\n          \"custom\": { \"lineWidth\": 2 }\n        }\n\
-    \      },\n      \"targets\": [\n        {\n          \"expr\": \"histogram_quantile(0.50,\
-    \ sum by (le, provider) (rate(loom_gateway_llm_call_latency_sec_bucket[5m])))\"\
+    , \"options\": \"timeout\" },\n            \"properties\": [{ \"id\": \"color\"\
+    , \"value\": { \"mode\": \"fixed\", \"fixedColor\": \"dark-red\" } }]\n      \
+    \    }\n        ]\n      },\n      \"options\": {\n        \"tooltip\": { \"mode\"\
+    : \"multi\" }\n      },\n      \"targets\": [\n        {\n          \"expr\":\
+    \ \"sum by (result) (rate(loom_gateway_llm_calls_total[5m]))\",\n          \"\
+    legendFormat\": \"{{result}}\",\n          \"refId\": \"A\"\n        }\n     \
+    \ ]\n    },\n    {\n      \"id\": 3,\n      \"type\": \"timeseries\",\n      \"\
+    title\": \"Latency P50 / P95 / P99 by Provider\",\n      \"gridPos\": { \"x\"\
+    : 0, \"y\": 8, \"w\": 12, \"h\": 8 },\n      \"fieldConfig\": {\n        \"defaults\"\
+    : {\n          \"unit\": \"s\",\n          \"custom\": { \"lineWidth\": 2 }\n\
+    \        }\n      },\n      \"targets\": [\n        {\n          \"expr\": \"\
+    histogram_quantile(0.50, sum by (le, provider) (rate(loom_gateway_llm_call_latency_sec_bucket[5m])))\"\
     ,\n          \"legendFormat\": \"{{provider}} p50\",\n          \"refId\": \"\
     A\"\n        },\n        {\n          \"expr\": \"histogram_quantile(0.95, sum\
     \ by (le, provider) (rate(loom_gateway_llm_call_latency_sec_bucket[5m])))\",\n\
@@ -158,10 +351,10 @@ data:
     \          \"expr\": \"sum by (provider) (rate(loom_gateway_cost_usd_total[5m]))\
     \ * 60\",\n          \"legendFormat\": \"{{provider}}\",\n          \"refId\"\
     : \"A\"\n        }\n      ]\n    },\n    {\n      \"id\": 7,\n      \"type\":\
-    \ \"table\",\n      \"title\": \"Cumulative Cost by Team — Top 10\",\n      \"\
-    gridPos\": { \"x\": 0, \"y\": 24, \"w\": 24, \"h\": 8 },\n      \"options\": {\n\
-    \        \"sortBy\": [{ \"displayName\": \"Cost (USD)\", \"desc\": true }]\n \
-    \     },\n      \"fieldConfig\": {\n        \"defaults\": {\n          \"unit\"\
+    \ \"table\",\n      \"title\": \"Cumulative Cost by Team \u2014 Top 10\",\n  \
+    \    \"gridPos\": { \"x\": 0, \"y\": 24, \"w\": 24, \"h\": 8 },\n      \"options\"\
+    : {\n        \"sortBy\": [{ \"displayName\": \"Cost (USD)\", \"desc\": true }]\n\
+    \      },\n      \"fieldConfig\": {\n        \"defaults\": {\n          \"unit\"\
     : \"currencyUSD\"\n        }\n      },\n      \"targets\": [\n        {\n    \
     \      \"expr\": \"topk(10, sum by (team_id) (loom_gateway_cost_usd_total))\"\
     ,\n          \"legendFormat\": \"{{team_id}}\",\n          \"refId\": \"A\",\n\
@@ -169,263 +362,150 @@ data:
     \ [\n        { \"id\": \"labelsToFields\", \"options\": { \"mode\": \"columns\"\
     \ } },\n        { \"id\": \"sortBy\", \"options\": { \"fields\": [{ \"displayName\"\
     : \"Value\", \"desc\": true }] } }\n      ]\n    }\n  ]\n}\n"
-  loom-service.json: "{\n  \"uid\": \"loom-service\",\n  \"title\": \"Loom \u2014 Service Deep\
-    \ Dive\",\n  \"tags\": [\"loom\"],\n  \"timezone\": \"browser\",\n  \"schemaVersion\": 39,\n\
-    \  \"time\": { \"from\": \"now-1h\", \"to\": \"now\" },\n  \"refresh\": \"30s\",\n  \"templating\"\
-    : { \"list\": [] },\n  \"panels\": [\n    {\n      \"id\": 1,\n      \"type\": \"timeseries\"\
-    ,\n      \"title\": \"HTTP Request Rate by Status Class (stacked)\",\n      \"gridPos\"\
-    : { \"x\": 0, \"y\": 0, \"w\": 12, \"h\": 8 },\n      \"fieldConfig\": {\n        \"defaults\"\
-    : {\n          \"unit\": \"reqps\",\n          \"custom\": {\n            \"lineWidth\"\
-    : 2,\n            \"fillOpacity\": 20,\n            \"stacking\": { \"mode\": \"normal\"\
-    \ }\n          }\n        },\n        \"overrides\": [\n          {\n            \"matcher\"\
-    : { \"id\": \"byName\", \"options\": \"2xx\" },\n            \"properties\": [{ \"id\":\
-    \ \"color\", \"value\": { \"mode\": \"fixed\", \"fixedColor\": \"green\" } }]\n        \
-    \  },\n          {\n            \"matcher\": { \"id\": \"byName\", \"options\": \"4xx\"\
-    \ },\n            \"properties\": [{ \"id\": \"color\", \"value\": { \"mode\": \"fixed\"\
-    , \"fixedColor\": \"yellow\" } }]\n          },\n          {\n            \"matcher\": {\
-    \ \"id\": \"byName\", \"options\": \"5xx\" },\n            \"properties\": [{ \"id\": \"\
-    color\", \"value\": { \"mode\": \"fixed\", \"fixedColor\": \"red\" } }]\n          }\n \
-    \       ]\n      },\n      \"options\": {\n        \"tooltip\": { \"mode\": \"multi\" }\n\
-    \      },\n      \"targets\": [\n        {\n          \"expr\": \"sum by (status_class)\
-    \ (rate(loom_svc_http_requests_total[5m]))\",\n          \"legendFormat\": \"{{status_class}}\"\
-    ,\n          \"refId\": \"A\"\n        }\n      ]\n    },\n    {\n      \"id\": 2,\n   \
-    \   \"type\": \"timeseries\",\n      \"title\": \"HTTP Request Latency P50 / P95 / P99\"\
-    ,\n      \"gridPos\": { \"x\": 12, \"y\": 0, \"w\": 12, \"h\": 8 },\n      \"fieldConfig\"\
-    : {\n        \"defaults\": {\n          \"unit\": \"s\",\n          \"custom\": { \"lineWidth\"\
-    : 2 },\n          \"thresholds\": {\n            \"mode\": \"absolute\",\n            \"\
-    steps\": [\n              { \"value\": null, \"color\": \"green\" },\n              { \"\
-    value\": 0.5, \"color\": \"yellow\" },\n              { \"value\": 2.0, \"color\": \"red\"\
-    \ }\n            ]\n          }\n        }\n      },\n      \"targets\": [\n        {\n\
-    \          \"expr\": \"histogram_quantile(0.50, sum by (le) (rate(loom_svc_http_request_latency_sec_bucket[5m])))\"\
-    ,\n          \"legendFormat\": \"p50\",\n          \"refId\": \"A\"\n        },\n      \
-    \  {\n          \"expr\": \"histogram_quantile(0.95, sum by (le) (rate(loom_svc_http_request_latency_sec_bucket[5m])))\"\
-    ,\n          \"legendFormat\": \"p95\",\n          \"refId\": \"B\"\n        },\n      \
-    \  {\n          \"expr\": \"histogram_quantile(0.99, sum by (le) (rate(loom_svc_http_request_latency_sec_bucket[5m])))\"\
-    ,\n          \"legendFormat\": \"p99\",\n          \"refId\": \"C\"\n        }\n      ]\n\
-    \    },\n    {\n      \"id\": 3,\n      \"type\": \"table\",\n      \"title\": \"Top 10\
-    \ Routes by Request Rate\",\n      \"gridPos\": { \"x\": 0, \"y\": 8, \"w\": 12, \"h\":\
-    \ 8 },\n      \"options\": {\n        \"sortBy\": [{ \"displayName\": \"Rate (req/s)\",\
-    \ \"desc\": true }]\n      },\n      \"fieldConfig\": {\n        \"defaults\": {\n     \
-    \     \"unit\": \"reqps\"\n        }\n      },\n      \"targets\": [\n        {\n      \
-    \    \"expr\": \"topk(10, sum by (route, method) (rate(loom_svc_http_requests_total[5m])))\"\
-    ,\n          \"legendFormat\": \"{{method}} {{route}}\",\n          \"refId\": \"A\",\n\
-    \          \"instant\": true\n        }\n      ],\n      \"transformations\": [\n      \
-    \  { \"id\": \"labelsToFields\", \"options\": { \"mode\": \"columns\" } },\n        { \"\
-    id\": \"sortBy\", \"options\": { \"fields\": [{ \"displayName\": \"Value\", \"desc\": true\
-    \ }] } }\n      ]\n    },\n    {\n      \"id\": 4,\n      \"type\": \"table\",\n      \"\
-    title\": \"Top 10 Routes by P95 Latency\",\n      \"gridPos\": { \"x\": 12, \"y\": 8, \"\
-    w\": 12, \"h\": 8 },\n      \"options\": {\n        \"sortBy\": [{ \"displayName\": \"P95\
-    \ Latency (s)\", \"desc\": true }]\n      },\n      \"fieldConfig\": {\n        \"defaults\"\
-    : {\n          \"unit\": \"s\"\n        }\n      },\n      \"targets\": [\n        {\n \
-    \         \"expr\": \"topk(10, histogram_quantile(0.95, sum by (le, route, method) (rate(loom_svc_http_request_latency_sec_bucket[5m]))))\"\
-    ,\n          \"legendFormat\": \"{{method}} {{route}}\",\n          \"refId\": \"A\",\n\
-    \          \"instant\": true\n        }\n      ],\n      \"transformations\": [\n      \
-    \  { \"id\": \"labelsToFields\", \"options\": { \"mode\": \"columns\" } },\n        { \"\
-    id\": \"sortBy\", \"options\": { \"fields\": [{ \"displayName\": \"Value\", \"desc\": true\
-    \ }] } }\n      ]\n    },\n    {\n      \"id\": 5,\n      \"type\": \"timeseries\",\n  \
-    \    \"title\": \"Batch Runner Tick Rate by Result\",\n      \"gridPos\": { \"x\": 0, \"\
-    y\": 16, \"w\": 12, \"h\": 8 },\n      \"fieldConfig\": {\n        \"defaults\": {\n   \
-    \       \"unit\": \"reqps\",\n          \"custom\": { \"lineWidth\": 2 }\n        }\n  \
-    \    },\n      \"targets\": [\n        {\n          \"expr\": \"sum by (result) (rate(loom_svc_batch_runner_ticks_total[5m]))\"\
-    ,\n          \"legendFormat\": \"{{result}}\",\n          \"refId\": \"A\"\n        }\n\
-    \      ]\n    },\n    {\n      \"id\": 6,\n      \"type\": \"timeseries\",\n      \"title\"\
-    : \"Batch Runner Trials Dispatched Rate\",\n      \"gridPos\": { \"x\": 12, \"y\": 16, \"\
-    w\": 12, \"h\": 8 },\n      \"fieldConfig\": {\n        \"defaults\": {\n          \"unit\"\
-    : \"reqps\",\n          \"custom\": { \"lineWidth\": 2 }\n        }\n      },\n      \"\
-    targets\": [\n        {\n          \"expr\": \"rate(loom_svc_batch_runner_trials_dispatched_total[5m])\"\
-    ,\n          \"legendFormat\": \"dispatched/s\",\n          \"refId\": \"A\"\n        }\n\
-    \      ]\n    },\n    {\n      \"id\": 7,\n      \"type\": \"timeseries\",\n      \"title\"\
-    : \"Tokens Issued Rate by Type\",\n      \"gridPos\": { \"x\": 0, \"y\": 24, \"w\": 12,\
-    \ \"h\": 8 },\n      \"fieldConfig\": {\n        \"defaults\": {\n          \"unit\": \"\
-    reqps\",\n          \"custom\": { \"lineWidth\": 2 }\n        }\n      },\n      \"targets\"\
-    : [\n        {\n          \"expr\": \"sum by (token_type) (rate(loom_svc_tokens_issued_total[5m]))\"\
-    ,\n          \"legendFormat\": \"{{token_type}}\",\n          \"refId\": \"A\"\n       \
-    \ }\n      ]\n    },\n    {\n      \"id\": 8,\n      \"type\": \"timeseries\",\n      \"\
-    title\": \"Tokens Revoked Rate\",\n      \"gridPos\": { \"x\": 12, \"y\": 24, \"w\": 12,\
-    \ \"h\": 8 },\n      \"fieldConfig\": {\n        \"defaults\": {\n          \"unit\": \"\
-    reqps\",\n          \"custom\": { \"lineWidth\": 2 }\n        }\n      },\n      \"targets\"\
-    : [\n        {\n          \"expr\": \"rate(loom_svc_tokens_revoked_total[5m])\",\n     \
-    \     \"legendFormat\": \"revoked/s\",\n          \"refId\": \"A\"\n        }\n      ]\n\
-    \    },\n    {\n      \"id\": 9,\n      \"type\": \"timeseries\",\n      \"title\": \"Auth\
-    \ Failures by Kind and Reason\",\n      \"gridPos\": { \"x\": 0, \"y\": 32, \"w\": 12, \"\
-    h\": 8 },\n      \"fieldConfig\": {\n        \"defaults\": {\n          \"unit\": \"reqps\"\
-    ,\n          \"custom\": { \"lineWidth\": 2 }\n        }\n      },\n      \"targets\": [\n\
-    \        {\n          \"expr\": \"sum by (auth_kind, reason) (rate(loom_svc_auth_failures_total[5m]))\"\
-    ,\n          \"legendFormat\": \"{{auth_kind}} / {{reason}}\",\n          \"refId\": \"\
-    A\"\n        }\n      ]\n    },\n    {\n      \"id\": 10,\n      \"type\": \"timeseries\"\
-    ,\n      \"title\": \"Submission Rejects by Reason\",\n      \"gridPos\": { \"x\": 12, \"\
-    y\": 32, \"w\": 12, \"h\": 8 },\n      \"fieldConfig\": {\n        \"defaults\": {\n   \
-    \       \"unit\": \"reqps\",\n          \"custom\": { \"lineWidth\": 2 }\n        }\n  \
-    \    },\n      \"targets\": [\n        {\n          \"expr\": \"sum by (reason) (rate(loom_svc_submission_rejects_total[5m]))\"\
-    ,\n          \"legendFormat\": \"{{reason}}\",\n          \"refId\": \"A\"\n        }\n\
-    \      ]\n    },\n    {\n      \"id\": 11,\n      \"type\": \"timeseries\",\n      \"title\"\
-    : \"Invite Lifecycle Mutations\",\n      \"gridPos\": { \"x\": 0, \"y\": 40, \"w\": 12,\
-    \ \"h\": 8 },\n      \"fieldConfig\": {\n        \"defaults\": {\n          \"unit\": \"\
-    reqps\",\n          \"custom\": { \"lineWidth\": 2 }\n        }\n      },\n      \"targets\"\
-    : [\n        {\n          \"expr\": \"sum by (action, result) (rate(loom_svc_invites_total[5m]))\"\
-    ,\n          \"legendFormat\": \"{{action}} / {{result}}\",\n          \"refId\": \"A\"\n\
-    \        }\n      ]\n    },\n    {\n      \"id\": 12,\n      \"type\": \"timeseries\",\n\
-    \      \"title\": \"Artifact Download Volume and Team Controls\",\n      \"gridPos\": {\
-    \ \"x\": 12, \"y\": 40, \"w\": 12, \"h\": 8 },\n      \"fieldConfig\": {\n        \"defaults\"\
-    : {\n          \"custom\": { \"lineWidth\": 2 }\n        }\n      },\n      \"targets\"\
-    : [\n        {\n          \"expr\": \"sum by (artifact_kind) (rate(loom_svc_artifact_download_bytes_total[5m]))\"\
-    ,\n          \"legendFormat\": \"bytes/s {{artifact_kind}}\",\n          \"refId\": \"A\"\
-    \n        },\n        {\n          \"expr\": \"sum by (action) (rate(loom_svc_team_emergency_actions_total[5m]))\"\
-    ,\n          \"legendFormat\": \"team action/s {{action}}\",\n          \"refId\": \"B\"\
-    \n        }\n      ]\n    }\n  ]\n}\n"
-  operator-overview.json: "{\n  \"uid\": \"loom-operator-overview\",\n  \"title\"\
-    : \"Loom — Operator Overview\",\n  \"tags\": [\"loom\"],\n  \"timezone\": \"browser\"\
-    ,\n  \"schemaVersion\": 39,\n  \"time\": { \"from\": \"now-1h\", \"to\": \"now\"\
+  loom-service.json: "{\n  \"uid\": \"loom-service\",\n  \"title\": \"Loom \u2014\
+    \ Service Deep Dive\",\n  \"tags\": [\"loom\"],\n  \"timezone\": \"browser\",\n\
+    \  \"schemaVersion\": 39,\n  \"time\": { \"from\": \"now-1h\", \"to\": \"now\"\
     \ },\n  \"refresh\": \"30s\",\n  \"templating\": { \"list\": [] },\n  \"panels\"\
-    : [\n    {\n      \"id\": 1,\n      \"type\": \"stat\",\n      \"title\": \"Control\
-    \ Plane Up\",\n      \"gridPos\": { \"x\": 0, \"y\": 0, \"w\": 3, \"h\": 4 },\n\
-    \      \"options\": {\n        \"reduceOptions\": { \"calcs\": [\"lastNotNull\"\
-    ] },\n        \"colorMode\": \"background\",\n        \"graphMode\": \"none\"\
-    ,\n        \"textMode\": \"auto\"\n      },\n      \"fieldConfig\": {\n      \
-    \  \"defaults\": {\n          \"mappings\": [\n            { \"type\": \"value\"\
-    , \"options\": { \"0\": { \"text\": \"DOWN\", \"color\": \"red\" }, \"1\": { \"\
-    text\": \"UP\", \"color\": \"green\" } } }\n          ],\n          \"thresholds\"\
-    : { \"mode\": \"absolute\", \"steps\": [{ \"value\": null, \"color\": \"red\"\
-    \ }, { \"value\": 1, \"color\": \"green\" }] }\n        }\n      },\n      \"\
-    targets\": [\n        {\n          \"expr\": \"up{job=~\\\".*loom-control-plane.*\\\
-    \"}\",\n          \"legendFormat\": \"control-plane\",\n          \"refId\": \"\
-    A\"\n        }\n      ]\n    },\n    {\n      \"id\": 2,\n      \"type\": \"stat\"\
-    ,\n      \"title\": \"LLM Gateway Up\",\n      \"gridPos\": { \"x\": 3, \"y\"\
-    : 0, \"w\": 3, \"h\": 4 },\n      \"options\": {\n        \"reduceOptions\": {\
-    \ \"calcs\": [\"lastNotNull\"] },\n        \"colorMode\": \"background\",\n  \
-    \      \"graphMode\": \"none\",\n        \"textMode\": \"auto\"\n      },\n  \
-    \    \"fieldConfig\": {\n        \"defaults\": {\n          \"mappings\": [\n\
-    \            { \"type\": \"value\", \"options\": { \"0\": { \"text\": \"DOWN\"\
-    , \"color\": \"red\" }, \"1\": { \"text\": \"UP\", \"color\": \"green\" } } }\n\
-    \          ],\n          \"thresholds\": { \"mode\": \"absolute\", \"steps\":\
-    \ [{ \"value\": null, \"color\": \"red\" }, { \"value\": 1, \"color\": \"green\"\
-    \ }] }\n        }\n      },\n      \"targets\": [\n        {\n          \"expr\"\
-    : \"up{job=~\\\".*loom-llm-gateway.*\\\"}\",\n          \"legendFormat\": \"llm-gateway\"\
-    ,\n          \"refId\": \"A\"\n        }\n      ]\n    },\n    {\n      \"id\"\
-    : 3,\n      \"type\": \"stat\",\n      \"title\": \"Loom Service Up\",\n     \
-    \ \"gridPos\": { \"x\": 6, \"y\": 0, \"w\": 3, \"h\": 4 },\n      \"options\"\
-    : {\n        \"reduceOptions\": { \"calcs\": [\"lastNotNull\"] },\n        \"\
-    colorMode\": \"background\",\n        \"graphMode\": \"none\",\n        \"textMode\"\
-    : \"auto\"\n      },\n      \"fieldConfig\": {\n        \"defaults\": {\n    \
-    \      \"mappings\": [\n            { \"type\": \"value\", \"options\": { \"0\"\
-    : { \"text\": \"DOWN\", \"color\": \"red\" }, \"1\": { \"text\": \"UP\", \"color\"\
-    : \"green\" } } }\n          ],\n          \"thresholds\": { \"mode\": \"absolute\"\
-    , \"steps\": [{ \"value\": null, \"color\": \"red\" }, { \"value\": 1, \"color\"\
-    : \"green\" }] }\n        }\n      },\n      \"targets\": [\n        {\n     \
-    \     \"expr\": \"up{job=~\\\".*loom-service.*\\\"}\",\n          \"legendFormat\"\
-    : \"loom-service\",\n          \"refId\": \"A\"\n        }\n      ]\n    },\n\
-    \    {\n      \"id\": 4,\n      \"type\": \"stat\",\n      \"title\": \"Worker\
-    \ Up\",\n      \"gridPos\": { \"x\": 9, \"y\": 0, \"w\": 3, \"h\": 4 },\n    \
-    \  \"options\": {\n        \"reduceOptions\": { \"calcs\": [\"lastNotNull\"] },\n\
-    \        \"colorMode\": \"background\",\n        \"graphMode\": \"none\",\n  \
-    \      \"textMode\": \"auto\"\n      },\n      \"fieldConfig\": {\n        \"\
-    defaults\": {\n          \"mappings\": [\n            { \"type\": \"value\", \"\
-    options\": { \"0\": { \"text\": \"DOWN\", \"color\": \"red\" }, \"1\": { \"text\"\
-    : \"UP\", \"color\": \"green\" } } }\n          ],\n          \"thresholds\":\
-    \ { \"mode\": \"absolute\", \"steps\": [{ \"value\": null, \"color\": \"red\"\
-    \ }, { \"value\": 1, \"color\": \"green\" }] }\n        }\n      },\n      \"\
-    targets\": [\n        {\n          \"expr\": \"up{job=~\\\".*loom-worker.*\\\"\
-    }\",\n          \"legendFormat\": \"worker\",\n          \"refId\": \"A\"\n  \
-    \      }\n      ]\n    },\n    {\n      \"id\": 5,\n      \"type\": \"stat\",\n\
-    \      \"title\": \"Active Workers\",\n      \"gridPos\": { \"x\": 12, \"y\":\
-    \ 0, \"w\": 3, \"h\": 4 },\n      \"options\": {\n        \"reduceOptions\": {\
-    \ \"calcs\": [\"lastNotNull\"] },\n        \"colorMode\": \"background\",\n  \
-    \      \"graphMode\": \"none\",\n        \"textMode\": \"auto\"\n      },\n  \
-    \    \"fieldConfig\": {\n        \"defaults\": {\n          \"thresholds\": {\n\
-    \            \"mode\": \"absolute\",\n            \"steps\": [\n             \
-    \ { \"value\": null, \"color\": \"red\" },\n              { \"value\": 1, \"color\"\
-    : \"yellow\" },\n              { \"value\": 3, \"color\": \"green\" }\n      \
-    \      ]\n          }\n        }\n      },\n      \"targets\": [\n        {\n\
-    \          \"expr\": \"loom_workers_active\",\n          \"legendFormat\": \"\
-    active workers\",\n          \"refId\": \"A\"\n        }\n      ]\n    },\n  \
-    \  {\n      \"id\": 6,\n      \"type\": \"timeseries\",\n      \"title\": \"Queue\
-    \ Depth (all teams)\",\n      \"gridPos\": { \"x\": 15, \"y\": 0, \"w\": 9, \"\
-    h\": 8 },\n      \"fieldConfig\": {\n        \"defaults\": {\n          \"custom\"\
-    : { \"lineWidth\": 2 },\n          \"thresholds\": {\n            \"mode\": \"\
-    absolute\",\n            \"steps\": [\n              { \"value\": null, \"color\"\
-    : \"green\" },\n              { \"value\": 50, \"color\": \"yellow\" },\n    \
-    \          { \"value\": 100, \"color\": \"red\" }\n            ]\n          }\n\
-    \        }\n      },\n      \"targets\": [\n        {\n          \"expr\": \"\
-    sum(loom_queue_depth)\",\n          \"legendFormat\": \"queue depth\",\n     \
-    \     \"refId\": \"A\"\n        }\n      ]\n    },\n    {\n      \"id\": 7,\n\
-    \      \"type\": \"timeseries\",\n      \"title\": \"In-flight Trials by State\"\
-    ,\n      \"gridPos\": { \"x\": 0, \"y\": 4, \"w\": 12, \"h\": 8 },\n      \"fieldConfig\"\
-    : {\n        \"defaults\": {\n          \"custom\": { \"lineWidth\": 2 }\n   \
-    \     }\n      },\n      \"targets\": [\n        {\n          \"expr\": \"sum\
-    \ by (state) (loom_trials_inflight)\",\n          \"legendFormat\": \"{{state}}\"\
-    ,\n          \"refId\": \"A\"\n        }\n      ]\n    },\n    {\n      \"id\"\
-    : 8,\n      \"type\": \"timeseries\",\n      \"title\": \"Claim Latency P95\"\
-    ,\n      \"gridPos\": { \"x\": 0, \"y\": 12, \"w\": 12, \"h\": 8 },\n      \"\
-    fieldConfig\": {\n        \"defaults\": {\n          \"unit\": \"s\",\n      \
-    \    \"custom\": { \"lineWidth\": 2 },\n          \"thresholds\": {\n        \
-    \    \"mode\": \"absolute\",\n            \"steps\": [\n              { \"value\"\
-    : null, \"color\": \"green\" },\n              { \"value\": 0.5, \"color\": \"\
-    yellow\" },\n              { \"value\": 1.0, \"color\": \"red\" }\n          \
-    \  ]\n          }\n        }\n      },\n      \"targets\": [\n        {\n    \
-    \      \"expr\": \"histogram_quantile(0.95, sum by (le) (rate(loom_claim_latency_sec_bucket[5m])))\"\
-    ,\n          \"legendFormat\": \"p95\",\n          \"refId\": \"A\"\n        }\n\
-    \      ]\n    },\n    {\n      \"id\": 9,\n      \"type\": \"timeseries\",\n \
-    \     \"title\": \"Gateway Call Rate by Result\",\n      \"gridPos\": { \"x\"\
-    : 12, \"y\": 8, \"w\": 12, \"h\": 8 },\n      \"fieldConfig\": {\n        \"defaults\"\
+    : [\n    {\n      \"id\": 1,\n      \"type\": \"timeseries\",\n      \"title\"\
+    : \"HTTP Request Rate by Status Class (stacked)\",\n      \"gridPos\": { \"x\"\
+    : 0, \"y\": 0, \"w\": 12, \"h\": 8 },\n      \"fieldConfig\": {\n        \"defaults\"\
+    : {\n          \"unit\": \"reqps\",\n          \"custom\": {\n            \"lineWidth\"\
+    : 2,\n            \"fillOpacity\": 20,\n            \"stacking\": { \"mode\":\
+    \ \"normal\" }\n          }\n        },\n        \"overrides\": [\n          {\n\
+    \            \"matcher\": { \"id\": \"byName\", \"options\": \"2xx\" },\n    \
+    \        \"properties\": [{ \"id\": \"color\", \"value\": { \"mode\": \"fixed\"\
+    , \"fixedColor\": \"green\" } }]\n          },\n          {\n            \"matcher\"\
+    : { \"id\": \"byName\", \"options\": \"4xx\" },\n            \"properties\": [{\
+    \ \"id\": \"color\", \"value\": { \"mode\": \"fixed\", \"fixedColor\": \"yellow\"\
+    \ } }]\n          },\n          {\n            \"matcher\": { \"id\": \"byName\"\
+    , \"options\": \"5xx\" },\n            \"properties\": [{ \"id\": \"color\", \"\
+    value\": { \"mode\": \"fixed\", \"fixedColor\": \"red\" } }]\n          }\n  \
+    \      ]\n      },\n      \"options\": {\n        \"tooltip\": { \"mode\": \"\
+    multi\" }\n      },\n      \"targets\": [\n        {\n          \"expr\": \"sum\
+    \ by (status_class) (rate(loom_svc_http_requests_total[5m]))\",\n          \"\
+    legendFormat\": \"{{status_class}}\",\n          \"refId\": \"A\"\n        }\n\
+    \      ]\n    },\n    {\n      \"id\": 2,\n      \"type\": \"timeseries\",\n \
+    \     \"title\": \"HTTP Request Latency P50 / P95 / P99\",\n      \"gridPos\"\
+    : { \"x\": 12, \"y\": 0, \"w\": 12, \"h\": 8 },\n      \"fieldConfig\": {\n  \
+    \      \"defaults\": {\n          \"unit\": \"s\",\n          \"custom\": { \"\
+    lineWidth\": 2 },\n          \"thresholds\": {\n            \"mode\": \"absolute\"\
+    ,\n            \"steps\": [\n              { \"value\": null, \"color\": \"green\"\
+    \ },\n              { \"value\": 0.5, \"color\": \"yellow\" },\n             \
+    \ { \"value\": 2.0, \"color\": \"red\" }\n            ]\n          }\n       \
+    \ }\n      },\n      \"targets\": [\n        {\n          \"expr\": \"histogram_quantile(0.50,\
+    \ sum by (le) (rate(loom_svc_http_request_latency_sec_bucket[5m])))\",\n     \
+    \     \"legendFormat\": \"p50\",\n          \"refId\": \"A\"\n        },\n   \
+    \     {\n          \"expr\": \"histogram_quantile(0.95, sum by (le) (rate(loom_svc_http_request_latency_sec_bucket[5m])))\"\
+    ,\n          \"legendFormat\": \"p95\",\n          \"refId\": \"B\"\n        },\n\
+    \        {\n          \"expr\": \"histogram_quantile(0.99, sum by (le) (rate(loom_svc_http_request_latency_sec_bucket[5m])))\"\
+    ,\n          \"legendFormat\": \"p99\",\n          \"refId\": \"C\"\n        }\n\
+    \      ]\n    },\n    {\n      \"id\": 3,\n      \"type\": \"table\",\n      \"\
+    title\": \"Top 10 Routes by Request Rate\",\n      \"gridPos\": { \"x\": 0, \"\
+    y\": 8, \"w\": 12, \"h\": 8 },\n      \"options\": {\n        \"sortBy\": [{ \"\
+    displayName\": \"Rate (req/s)\", \"desc\": true }]\n      },\n      \"fieldConfig\"\
+    : {\n        \"defaults\": {\n          \"unit\": \"reqps\"\n        }\n     \
+    \ },\n      \"targets\": [\n        {\n          \"expr\": \"topk(10, sum by (route,\
+    \ method) (rate(loom_svc_http_requests_total[5m])))\",\n          \"legendFormat\"\
+    : \"{{method}} {{route}}\",\n          \"refId\": \"A\",\n          \"instant\"\
+    : true\n        }\n      ],\n      \"transformations\": [\n        { \"id\": \"\
+    labelsToFields\", \"options\": { \"mode\": \"columns\" } },\n        { \"id\"\
+    : \"sortBy\", \"options\": { \"fields\": [{ \"displayName\": \"Value\", \"desc\"\
+    : true }] } }\n      ]\n    },\n    {\n      \"id\": 4,\n      \"type\": \"table\"\
+    ,\n      \"title\": \"Top 10 Routes by P95 Latency\",\n      \"gridPos\": { \"\
+    x\": 12, \"y\": 8, \"w\": 12, \"h\": 8 },\n      \"options\": {\n        \"sortBy\"\
+    : [{ \"displayName\": \"P95 Latency (s)\", \"desc\": true }]\n      },\n     \
+    \ \"fieldConfig\": {\n        \"defaults\": {\n          \"unit\": \"s\"\n   \
+    \     }\n      },\n      \"targets\": [\n        {\n          \"expr\": \"topk(10,\
+    \ histogram_quantile(0.95, sum by (le, route, method) (rate(loom_svc_http_request_latency_sec_bucket[5m]))))\"\
+    ,\n          \"legendFormat\": \"{{method}} {{route}}\",\n          \"refId\"\
+    : \"A\",\n          \"instant\": true\n        }\n      ],\n      \"transformations\"\
+    : [\n        { \"id\": \"labelsToFields\", \"options\": { \"mode\": \"columns\"\
+    \ } },\n        { \"id\": \"sortBy\", \"options\": { \"fields\": [{ \"displayName\"\
+    : \"Value\", \"desc\": true }] } }\n      ]\n    },\n    {\n      \"id\": 5,\n\
+    \      \"type\": \"timeseries\",\n      \"title\": \"Batch Runner Tick Rate by\
+    \ Result\",\n      \"gridPos\": { \"x\": 0, \"y\": 16, \"w\": 12, \"h\": 8 },\n\
+    \      \"fieldConfig\": {\n        \"defaults\": {\n          \"unit\": \"reqps\"\
+    ,\n          \"custom\": { \"lineWidth\": 2 }\n        }\n      },\n      \"targets\"\
+    : [\n        {\n          \"expr\": \"sum by (result) (rate(loom_svc_batch_runner_ticks_total[5m]))\"\
+    ,\n          \"legendFormat\": \"{{result}}\",\n          \"refId\": \"A\"\n \
+    \       }\n      ]\n    },\n    {\n      \"id\": 6,\n      \"type\": \"timeseries\"\
+    ,\n      \"title\": \"Batch Runner Trials Dispatched Rate\",\n      \"gridPos\"\
+    : { \"x\": 12, \"y\": 16, \"w\": 12, \"h\": 8 },\n      \"fieldConfig\": {\n \
+    \       \"defaults\": {\n          \"unit\": \"reqps\",\n          \"custom\"\
+    : { \"lineWidth\": 2 }\n        }\n      },\n      \"targets\": [\n        {\n\
+    \          \"expr\": \"rate(loom_svc_batch_runner_trials_dispatched_total[5m])\"\
+    ,\n          \"legendFormat\": \"dispatched/s\",\n          \"refId\": \"A\"\n\
+    \        }\n      ]\n    },\n    {\n      \"id\": 7,\n      \"type\": \"timeseries\"\
+    ,\n      \"title\": \"Tokens Issued Rate by Type\",\n      \"gridPos\": { \"x\"\
+    : 0, \"y\": 24, \"w\": 12, \"h\": 8 },\n      \"fieldConfig\": {\n        \"defaults\"\
     : {\n          \"unit\": \"reqps\",\n          \"custom\": { \"lineWidth\": 2\
     \ }\n        }\n      },\n      \"targets\": [\n        {\n          \"expr\"\
-    : \"sum by (result) (rate(loom_gateway_llm_calls_total[5m]))\",\n          \"\
-    legendFormat\": \"{{result}}\",\n          \"refId\": \"A\"\n        }\n     \
-    \ ]\n    },\n    {\n      \"id\": 10,\n      \"type\": \"timeseries\",\n     \
-    \ \"title\": \"Service HTTP 5xx Rate\",\n      \"gridPos\": { \"x\": 12, \"y\"\
-    : 16, \"w\": 12, \"h\": 8 },\n      \"fieldConfig\": {\n        \"defaults\":\
-    \ {\n          \"unit\": \"percentunit\",\n          \"custom\": { \"lineWidth\"\
-    : 2 },\n          \"thresholds\": {\n            \"mode\": \"absolute\",\n   \
-    \         \"steps\": [\n              { \"value\": null, \"color\": \"green\"\
-    \ },\n              { \"value\": 0.01, \"color\": \"yellow\" },\n            \
-    \  { \"value\": 0.05, \"color\": \"red\" }\n            ]\n          }\n     \
-    \   }\n      },\n      \"targets\": [\n        {\n          \"expr\": \"sum(rate(loom_svc_http_requests_total{status_class=\\\
-    \"5xx\\\"}[5m])) / sum(rate(loom_svc_http_requests_total[5m]))\",\n          \"\
-    legendFormat\": \"5xx rate\",\n          \"refId\": \"A\"\n        }\n      ]\n\
-    \    },\n    {\n      \"id\": 11,\n      \"type\": \"timeseries\",\n      \"title\"\
-    : \"Trial Completion Rate by Result\",\n      \"gridPos\": { \"x\": 0, \"y\":\
-    \ 20, \"w\": 12, \"h\": 8 },\n      \"fieldConfig\": {\n        \"defaults\":\
-    \ {\n          \"unit\": \"reqps\",\n          \"custom\": { \"lineWidth\": 2\
+    : \"sum by (token_type) (rate(loom_svc_tokens_issued_total[5m]))\",\n        \
+    \  \"legendFormat\": \"{{token_type}}\",\n          \"refId\": \"A\"\n       \
+    \ }\n      ]\n    },\n    {\n      \"id\": 8,\n      \"type\": \"timeseries\"\
+    ,\n      \"title\": \"Tokens Revoked Rate\",\n      \"gridPos\": { \"x\": 12,\
+    \ \"y\": 24, \"w\": 12, \"h\": 8 },\n      \"fieldConfig\": {\n        \"defaults\"\
+    : {\n          \"unit\": \"reqps\",\n          \"custom\": { \"lineWidth\": 2\
     \ }\n        }\n      },\n      \"targets\": [\n        {\n          \"expr\"\
-    : \"sum by (result) (rate(loom_worker_trials_completed_total[5m]))\",\n      \
-    \    \"legendFormat\": \"{{result}}\",\n          \"refId\": \"A\"\n        }\n\
-    \      ]\n    },\n    {\n      \"id\": 12,\n      \"type\": \"table\",\n     \
-    \ \"title\": \"Cumulative LLM Cost — Top 5 Teams\",\n      \"gridPos\": { \"x\"\
-    : 12, \"y\": 24, \"w\": 12, \"h\": 8 },\n      \"options\": {\n        \"sortBy\"\
-    : [{ \"displayName\": \"Cost (USD)\", \"desc\": true }]\n      },\n      \"fieldConfig\"\
-    : {\n        \"defaults\": {\n          \"unit\": \"currencyUSD\"\n        }\n\
-    \      },\n      \"targets\": [\n        {\n          \"expr\": \"topk(5, sum\
-    \ by (team_id) (loom_gateway_cost_usd_total))\",\n          \"legendFormat\":\
-    \ \"{{team_id}}\",\n          \"refId\": \"A\",\n          \"instant\": true\n\
-    \        }\n      ],\n      \"transformations\": [\n        { \"id\": \"labelsToFields\"\
-    , \"options\": { \"mode\": \"columns\" } },\n        { \"id\": \"sortBy\", \"\
-    options\": { \"fields\": [{ \"displayName\": \"Value\", \"desc\": true }] } }\n\
-    \      ]\n    }\n  ]\n}\n"
-  worker.json: "{\n  \"uid\": \"loom-worker\",\n  \"title\": \"Loom — Worker Fleet\
-    \ Deep Dive\",\n  \"tags\": [\"loom\"],\n  \"timezone\": \"browser\",\n  \"schemaVersion\"\
-    : 39,\n  \"time\": { \"from\": \"now-1h\", \"to\": \"now\" },\n  \"refresh\":\
-    \ \"30s\",\n  \"templating\": { \"list\": [] },\n  \"panels\": [\n    {\n    \
-    \  \"id\": 1,\n      \"type\": \"timeseries\",\n      \"title\": \"In-flight Trials\
-    \ (all workers, stacked by instance)\",\n      \"gridPos\": { \"x\": 0, \"y\"\
-    : 0, \"w\": 12, \"h\": 8 },\n      \"fieldConfig\": {\n        \"defaults\": {\n\
-    \          \"custom\": {\n            \"lineWidth\": 2,\n            \"fillOpacity\"\
-    : 20,\n            \"stacking\": { \"mode\": \"normal\" }\n          }\n     \
-    \   }\n      },\n      \"options\": {\n        \"tooltip\": { \"mode\": \"multi\"\
-    \ }\n      },\n      \"targets\": [\n        {\n          \"expr\": \"loom_worker_trials_inflight\"\
-    ,\n          \"legendFormat\": \"{{instance}}\",\n          \"refId\": \"A\"\n\
-    \        }\n      ]\n    },\n    {\n      \"id\": 2,\n      \"type\": \"timeseries\"\
-    ,\n      \"title\": \"Trial Throughput by Backend (started rate)\",\n      \"\
-    gridPos\": { \"x\": 12, \"y\": 0, \"w\": 12, \"h\": 8 },\n      \"fieldConfig\"\
-    : {\n        \"defaults\": {\n          \"unit\": \"reqps\",\n          \"custom\"\
-    : { \"lineWidth\": 2 }\n        }\n      },\n      \"targets\": [\n        {\n\
-    \          \"expr\": \"sum by (backend) (rate(loom_worker_trials_started_total[5m]))\"\
-    ,\n          \"legendFormat\": \"{{backend}}\",\n          \"refId\": \"A\"\n\
-    \        }\n      ]\n    },\n    {\n      \"id\": 3,\n      \"type\": \"timeseries\"\
-    ,\n      \"title\": \"Trial Completion Rate by Backend + Result\",\n      \"gridPos\"\
-    : { \"x\": 0, \"y\": 8, \"w\": 12, \"h\": 8 },\n      \"fieldConfig\": {\n   \
-    \     \"defaults\": {\n          \"unit\": \"reqps\",\n          \"custom\": {\
-    \ \"lineWidth\": 2 }\n        }\n      },\n      \"targets\": [\n        {\n \
-    \         \"expr\": \"sum by (backend, result) (rate(loom_worker_trials_completed_total[5m]))\"\
+    : \"rate(loom_svc_tokens_revoked_total[5m])\",\n          \"legendFormat\": \"\
+    revoked/s\",\n          \"refId\": \"A\"\n        }\n      ]\n    },\n    {\n\
+    \      \"id\": 9,\n      \"type\": \"timeseries\",\n      \"title\": \"Auth Failures\
+    \ by Kind and Reason\",\n      \"gridPos\": { \"x\": 0, \"y\": 32, \"w\": 12,\
+    \ \"h\": 8 },\n      \"fieldConfig\": {\n        \"defaults\": {\n          \"\
+    unit\": \"reqps\",\n          \"custom\": { \"lineWidth\": 2 }\n        }\n  \
+    \    },\n      \"targets\": [\n        {\n          \"expr\": \"sum by (auth_kind,\
+    \ reason) (rate(loom_svc_auth_failures_total[5m]))\",\n          \"legendFormat\"\
+    : \"{{auth_kind}} / {{reason}}\",\n          \"refId\": \"A\"\n        }\n   \
+    \   ]\n    },\n    {\n      \"id\": 10,\n      \"type\": \"timeseries\",\n   \
+    \   \"title\": \"Submission Rejects by Reason\",\n      \"gridPos\": { \"x\":\
+    \ 12, \"y\": 32, \"w\": 12, \"h\": 8 },\n      \"fieldConfig\": {\n        \"\
+    defaults\": {\n          \"unit\": \"reqps\",\n          \"custom\": { \"lineWidth\"\
+    : 2 }\n        }\n      },\n      \"targets\": [\n        {\n          \"expr\"\
+    : \"sum by (reason) (rate(loom_svc_submission_rejects_total[5m]))\",\n       \
+    \   \"legendFormat\": \"{{reason}}\",\n          \"refId\": \"A\"\n        }\n\
+    \      ]\n    },\n    {\n      \"id\": 11,\n      \"type\": \"timeseries\",\n\
+    \      \"title\": \"Invite Lifecycle Mutations\",\n      \"gridPos\": { \"x\"\
+    : 0, \"y\": 40, \"w\": 12, \"h\": 8 },\n      \"fieldConfig\": {\n        \"defaults\"\
+    : {\n          \"unit\": \"reqps\",\n          \"custom\": { \"lineWidth\": 2\
+    \ }\n        }\n      },\n      \"targets\": [\n        {\n          \"expr\"\
+    : \"sum by (action, result) (rate(loom_svc_invites_total[5m]))\",\n          \"\
+    legendFormat\": \"{{action}} / {{result}}\",\n          \"refId\": \"A\"\n   \
+    \     }\n      ]\n    },\n    {\n      \"id\": 12,\n      \"type\": \"timeseries\"\
+    ,\n      \"title\": \"Artifact Download Volume and Team Controls\",\n      \"\
+    gridPos\": { \"x\": 12, \"y\": 40, \"w\": 12, \"h\": 8 },\n      \"fieldConfig\"\
+    : {\n        \"defaults\": {\n          \"custom\": { \"lineWidth\": 2 }\n   \
+    \     }\n      },\n      \"targets\": [\n        {\n          \"expr\": \"sum\
+    \ by (artifact_kind) (rate(loom_svc_artifact_download_bytes_total[5m]))\",\n \
+    \         \"legendFormat\": \"bytes/s {{artifact_kind}}\",\n          \"refId\"\
+    : \"A\"\n        },\n        {\n          \"expr\": \"sum by (action) (rate(loom_svc_team_emergency_actions_total[5m]))\"\
+    ,\n          \"legendFormat\": \"team action/s {{action}}\",\n          \"refId\"\
+    : \"B\"\n        }\n      ]\n    }\n  ]\n}\n"
+  worker.json: "{\n  \"uid\": \"loom-worker\",\n  \"title\": \"Loom \u2014 Worker\
+    \ Fleet Deep Dive\",\n  \"tags\": [\"loom\"],\n  \"timezone\": \"browser\",\n\
+    \  \"schemaVersion\": 39,\n  \"time\": { \"from\": \"now-1h\", \"to\": \"now\"\
+    \ },\n  \"refresh\": \"30s\",\n  \"templating\": { \"list\": [] },\n  \"panels\"\
+    : [\n    {\n      \"id\": 1,\n      \"type\": \"timeseries\",\n      \"title\"\
+    : \"In-flight Trials (all workers, stacked by instance)\",\n      \"gridPos\"\
+    : { \"x\": 0, \"y\": 0, \"w\": 12, \"h\": 8 },\n      \"fieldConfig\": {\n   \
+    \     \"defaults\": {\n          \"custom\": {\n            \"lineWidth\": 2,\n\
+    \            \"fillOpacity\": 20,\n            \"stacking\": { \"mode\": \"normal\"\
+    \ }\n          }\n        }\n      },\n      \"options\": {\n        \"tooltip\"\
+    : { \"mode\": \"multi\" }\n      },\n      \"targets\": [\n        {\n       \
+    \   \"expr\": \"loom_worker_trials_inflight\",\n          \"legendFormat\": \"\
+    {{instance}}\",\n          \"refId\": \"A\"\n        }\n      ]\n    },\n    {\n\
+    \      \"id\": 2,\n      \"type\": \"timeseries\",\n      \"title\": \"Trial Throughput\
+    \ by Backend (started rate)\",\n      \"gridPos\": { \"x\": 12, \"y\": 0, \"w\"\
+    : 12, \"h\": 8 },\n      \"fieldConfig\": {\n        \"defaults\": {\n       \
+    \   \"unit\": \"reqps\",\n          \"custom\": { \"lineWidth\": 2 }\n       \
+    \ }\n      },\n      \"targets\": [\n        {\n          \"expr\": \"sum by (backend)\
+    \ (rate(loom_worker_trials_started_total[5m]))\",\n          \"legendFormat\"\
+    : \"{{backend}}\",\n          \"refId\": \"A\"\n        }\n      ]\n    },\n \
+    \   {\n      \"id\": 3,\n      \"type\": \"timeseries\",\n      \"title\": \"\
+    Trial Completion Rate by Backend + Result\",\n      \"gridPos\": { \"x\": 0, \"\
+    y\": 8, \"w\": 12, \"h\": 8 },\n      \"fieldConfig\": {\n        \"defaults\"\
+    : {\n          \"unit\": \"reqps\",\n          \"custom\": { \"lineWidth\": 2\
+    \ }\n        }\n      },\n      \"targets\": [\n        {\n          \"expr\"\
+    : \"sum by (backend, result) (rate(loom_worker_trials_completed_total[5m]))\"\
     ,\n          \"legendFormat\": \"{{backend}} / {{result}}\",\n          \"refId\"\
     : \"A\"\n        }\n      ]\n    },\n    {\n      \"id\": 4,\n      \"type\":\
     \ \"timeseries\",\n      \"title\": \"Trial Duration P50 / P95 / P99 by Backend\"\
@@ -470,10 +550,3 @@ data:
     \    },\n      \"targets\": [\n        {\n          \"expr\": \"rate(loom_worker_heartbeat_failures_total[5m])\"\
     ,\n          \"legendFormat\": \"heartbeat failures/s\",\n          \"refId\"\
     : \"A\"\n        }\n      ]\n    }\n  ]\n}\n"
-kind: ConfigMap
-metadata:
-  labels:
-    grafana_dashboard: '1'
-  name: loom-grafana-dashboards
-  namespace: loom
-

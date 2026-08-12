@@ -17,6 +17,7 @@ const NAV_ITEMS = [
   { to: "/", label: "Home" },
   { to: "/batches/new", label: "New batch" },
   { to: "/monitor", label: "Monitor" },
+  { to: "/pipelines", label: "Pipelines" },
   { to: "/library", label: "Run Library" },
   { to: "/providers", label: "Providers" },
   { to: "/task-sets", label: "Task Sets" },

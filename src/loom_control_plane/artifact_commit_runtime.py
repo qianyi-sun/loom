@@ -60,6 +60,7 @@ from loom_control_plane.artifact_read_service import (
     ResolvedArtifactInput,
     ResolvedStoredFile,
 )
+from loom_control_plane.metrics import PIPELINE_ARTIFACT_BYTES_TOTAL
 
 _PRODUCER_ADAPTER: TypeAdapter[CommitProducerV1] = TypeAdapter(CommitProducerV1)
 
@@ -118,9 +119,7 @@ def _session_values(state: _SessionState) -> dict[str, Any]:
         )
     elif isinstance(producer, AcceptanceEvidenceProducerV1):
         values.update(
-            pipeline_acceptance_authorization_id=(
-                producer.pipeline_acceptance_authorization_id
-            ),
+            pipeline_acceptance_authorization_id=(producer.pipeline_acceptance_authorization_id),
             acceptance_action=producer.acceptance_action,
             acceptance_candidate_sha256=producer.acceptance_candidate_sha256,
             acceptance_result_kind=producer.acceptance_result_kind,
@@ -254,9 +253,7 @@ class SqlArtifactCommitRepository(ArtifactCommitRepositoryV1):
                     # CompleteMultipartUpload may have succeeded while the DB
                     # response was lost. Recover only from a cryptographically
                     # matching final object; never guess from ETag/metadata.
-                    facts = await self._store.stat_object(
-                        bucket=self._bucket, key=object_key
-                    )
+                    facts = await self._store.stat_object(bucket=self._bucket, key=object_key)
                     expected_size = sum(item.size_bytes for item in receipts.values())
                     observed_digest = facts.checksum_sha256
                     if observed_digest is None:
@@ -266,16 +263,11 @@ class SqlArtifactCommitRepository(ArtifactCommitRepositoryV1):
                         ):
                             digest.update(chunk)
                         observed_digest = f"sha256:{digest.hexdigest()}"
-                    if (
-                        facts.content_length != expected_size
-                        or (
-                            file_row.expected_sha256 is not None
-                            and observed_digest != file_row.expected_sha256
-                        )
+                    if facts.content_length != expected_size or (
+                        file_row.expected_sha256 is not None
+                        and observed_digest != file_row.expected_sha256
                     ):
-                        raise ArtifactCommitError(
-                            "multipart_completion_recovery_drift"
-                        ) from exc
+                        raise ArtifactCommitError("multipart_completion_recovery_drift") from exc
                     from loom.pipeline.artifact_commit import VerifiedFileV1
 
                     verified = VerifiedFileV1(
@@ -301,9 +293,7 @@ class SqlArtifactCommitRepository(ArtifactCommitRepositoryV1):
             prefix=row.prefix,
             expected_total_max_bytes=row.expected_total_max_bytes,
             upload_token_digest=(
-                b""
-                if row.upload_token_digest is None
-                else bytes(row.upload_token_digest)
+                b"" if row.upload_token_digest is None else bytes(row.upload_token_digest)
             ),
             token_expires_at=row.expires_at,
             state=row.state,
@@ -353,7 +343,8 @@ class SqlArtifactCommitRepository(ArtifactCommitRepositoryV1):
                             safety_state="verified_internal",
                         )
                         for item in sorted(
-                            state.item_manifests.values(), key=lambda value: value.artifact_name.encode()
+                            state.item_manifests.values(),
+                            key=lambda value: value.artifact_name.encode(),
                         )
                     ],
                 )
@@ -394,9 +385,7 @@ class SqlArtifactCommitRepository(ArtifactCommitRepositoryV1):
             return InputMaterializationProducerV1(
                 commit_kind="input_materialization",
                 team_id=row.team_id,
-                pipeline_input_materialization_id=cast(
-                    UUID, row.pipeline_input_materialization_id
-                ),
+                pipeline_input_materialization_id=cast(UUID, row.pipeline_input_materialization_id),
                 actor_user_id=cast(UUID, row.actor_user_id),
             )
         if row.commit_kind == "acceptance_evidence":
@@ -678,7 +667,10 @@ class CheckpointRouteService(FinalOutputRouteService):
             ).scalar_one_or_none()
             if reservation is None:
                 amount = int(policy["max_bytes"])
-                if ledger.artifact_reserved_bytes + ledger.artifact_settled_bytes + amount > ledger.artifact_limit_bytes:
+                if (
+                    ledger.artifact_reserved_bytes + ledger.artifact_settled_bytes + amount
+                    > ledger.artifact_limit_bytes
+                ):
                     raise ArtifactCommitError("checkpoint_budget_unavailable")
                 reservation = PipelineBudgetReservation(
                     pipeline_run_id=run.id,
@@ -749,7 +741,9 @@ class CheckpointRouteService(FinalOutputRouteService):
             request_digest=request_digest,
         )
         async with self._session_factory() as db, db.begin():
-            upload = await db.get(ArtifactUploadSession, grant.upload_session_id, with_for_update=True)
+            upload = await db.get(
+                ArtifactUploadSession, grant.upload_session_id, with_for_update=True
+            )
             if upload is None:
                 raise ArtifactCommitError("not_found")
             upload.checkpoint_envelope_json = envelope.model_dump(mode="json")
@@ -761,14 +755,19 @@ class CheckpointRouteService(FinalOutputRouteService):
             session_id=kwargs["session_id"],
             auth=UploadAuthV1(upload_token=kwargs["upload_token"]),
         )
+        committed_bytes = 0
         async with self._session_factory() as db, db.begin():
             upload = await db.get(ArtifactUploadSession, kwargs["session_id"], with_for_update=True)
             if upload is None or upload.commit_kind != "checkpoint" or upload.state != "committed":
                 raise ArtifactCommitError("checkpoint_not_committed")
             if upload.checkpoint_envelope_json is None or upload.checkpoint_envelope_digest is None:
                 raise ArtifactCommitError("checkpoint_contract_mismatch")
-            attempt = await db.get(ExecutionAttempt, upload.execution_attempt_id, with_for_update=True)
-            stage = await db.get(PipelineStageRun, upload.pipeline_stage_run_id, with_for_update=True)
+            attempt = await db.get(
+                ExecutionAttempt, upload.execution_attempt_id, with_for_update=True
+            )
+            stage = await db.get(
+                PipelineStageRun, upload.pipeline_stage_run_id, with_for_update=True
+            )
             if attempt is None or stage is None or attempt.state not in {"claimed", "running"}:
                 raise ArtifactCommitError("claim_fenced")
             envelope = upload.checkpoint_envelope_json
@@ -843,7 +842,10 @@ class CheckpointRouteService(FinalOutputRouteService):
                     source_attempt_state=attempt.state,
                 )
                 db.add(checkpoint)
-                if previous is None or (attempt.attempt_number, cast(int, upload.checkpoint_sequence)) > (
+                if previous is None or (
+                    attempt.attempt_number,
+                    cast(int, upload.checkpoint_sequence),
+                ) > (
                     previous.attempt_number,
                     previous.sequence,
                 ):
@@ -879,8 +881,11 @@ class CheckpointRouteService(FinalOutputRouteService):
                 reservation.state = "settled"
                 reservation.settled_amount = actual
                 reservation.settled_at = datetime.now(UTC)
+                committed_bytes = actual
             elif reservation.state != "settled":
                 raise ArtifactCommitError("checkpoint_reservation_conflict")
+        if committed_bytes:
+            PIPELINE_ARTIFACT_BYTES_TOTAL.labels(artifact_class="checkpoint").inc(committed_bytes)
         return result.model_dump(mode="json")
 
 
@@ -891,7 +896,7 @@ class ExecutionAttemptCompletionService:
         attempt: ExecutionAttempt,
         report: ExecutionCompleteV1,
         session: AsyncSession,
-    ) -> None:
+    ) -> dict[str, int]:
         upload = (
             await session.execute(
                 select(ArtifactUploadSession)
@@ -905,7 +910,7 @@ class ExecutionAttemptCompletionService:
         if upload is None or upload.state not in {"committed_ready", "committed"}:
             raise ArtifactCommitError("session_not_committed_ready")
         if upload.state == "committed":
-            return
+            return {}
         manifest = cast(dict[str, Any], upload.canonical_manifest_json)
         if manifest.get("session_id") != str(upload.id):
             raise ArtifactCommitError("manifest_session_drift")
@@ -918,9 +923,14 @@ class ExecutionAttemptCompletionService:
             ).scalars()
         }
         lineage = [UUID(value) for value in manifest.get("input_lineage_artifact_ids", [])]
+        committed_bytes = {"final_output": 0, "control": 0}
         for record in manifest["artifacts"]:
             artifact_id = UUID(record["artifact_id"])
             stored_files = record["stored_files"]
+            artifact_class = (
+                "control" if producer_kind_by_id[artifact_id] == "platform" else "final_output"
+            )
+            committed_bytes[artifact_class] += sum(item["size_bytes"] for item in stored_files)
             session.add(
                 Artifact(
                     id=artifact_id,
@@ -954,6 +964,7 @@ class ExecutionAttemptCompletionService:
         upload.state = "committed"
         upload.committed_at = datetime.now(UTC)
         upload.updated_at = datetime.now(UTC)
+        return committed_bytes
 
 
 class SqlArtifactInputResolver:
@@ -995,7 +1006,9 @@ class SqlArtifactInputResolver:
             stage = await db.get(PipelineStageRun, attempt.stage_run_id)
             if stage is None or stage.resolved_input_bindings_json is None:
                 raise KeyError(attempt_id)
-            bindings = [BindingSetV1.model_validate(value) for value in stage.resolved_input_bindings_json]
+            bindings = [
+                BindingSetV1.model_validate(value) for value in stage.resolved_input_bindings_json
+            ]
             if (
                 binding_name == "loom_checkpoint"
                 and item_key == "singleton"
@@ -1028,7 +1041,9 @@ class SqlArtifactInputResolver:
                         ],
                     )
                 )
-            binding = next((value for value in bindings if value.binding_name == binding_name), None)
+            binding = next(
+                (value for value in bindings if value.binding_name == binding_name), None
+            )
             if binding is None:
                 raise KeyError(binding_name)
             item = next((value for value in binding.items if value.item_key == item_key), None)
@@ -1054,7 +1069,10 @@ class SqlArtifactInputResolver:
             ):
                 raise ArtifactCommitError("input_descriptor_drift")
             if artifact.safety_state != "verified_internal":
-                if artifact.producer_kind != "input_import" or artifact.pipeline_input_import_id is None:
+                if (
+                    artifact.producer_kind != "input_import"
+                    or artifact.pipeline_input_import_id is None
+                ):
                     raise KeyError(item.artifact_id)
                 imported = await db.get(PipelineInputImport, artifact.pipeline_input_import_id)
                 frozen = stage.resolved_execution_spec_json or {}
@@ -1063,13 +1081,10 @@ class SqlArtifactInputResolver:
                     and imported is not None
                     and imported.recipe_digest == frozen.get("recipe_digest")
                 )
-                prerequisite = await db.get(
-                    PipelineAcceptancePreflightPrerequisite, run.id
-                )
+                prerequisite = await db.get(PipelineAcceptancePreflightPrerequisite, run.id)
                 consumed_attempt = (
                     await db.get(ExecutionAttempt, prerequisite.consumed_attempt_id)
-                    if prerequisite is not None
-                    and prerequisite.consumed_attempt_id is not None
+                    if prerequisite is not None and prerequisite.consumed_attempt_id is not None
                     else None
                 )
                 consumed_stage = (
@@ -1115,7 +1130,11 @@ class SqlArtifactInputResolver:
                     raise KeyError(item.artifact_id)
             root = cast(dict[str, Any], upload.canonical_manifest_json)
             record = next(
-                (value for value in root.get("artifacts", []) if value["artifact_id"] == str(artifact.id)),
+                (
+                    value
+                    for value in root.get("artifacts", [])
+                    if value["artifact_id"] == str(artifact.id)
+                ),
                 None,
             )
             if record is None:
@@ -1143,9 +1162,7 @@ class SqlArtifactInputResolver:
             marker_digest = cast(str, upload.committed_marker_sha256)
         marker_valid = await self._object_matches(
             key=prefix + "_manifest.json", expected_digest=manifest_digest
-        ) and await self._object_matches(
-            key=prefix + "_COMMITTED", expected_digest=marker_digest
-        )
+        ) and await self._object_matches(key=prefix + "_COMMITTED", expected_digest=marker_digest)
         return ResolvedArtifactInput(
             artifact_id=artifact.id,
             manifest_bytes=manifest_bytes,

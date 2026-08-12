@@ -7,11 +7,32 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
+from loom_control_plane.metrics import PIPELINE_CONTROLLER_RECONCILE_ERRORS_TOTAL
 from loom_pipeline_orchestrator.repository import PipelineRepository, RunLease
 
 logger = logging.getLogger(__name__)
 
 Reconcile = Callable[[RunLease], Awaitable[None]]
+
+
+def reconcile_error_reason(error: Exception) -> str:
+    """Map exhausted operations to the fixed telemetry vocabulary."""
+
+    name = type(error).__name__.lower()
+    message = str(error).lower()
+    if "serialization" in name or "serialization" in message:
+        return "db_serialization"
+    if "dependency" in name or "dependency" in message:
+        return "dependency_closure"
+    if "budget" in name or "budget" in message:
+        return "budget_ledger"
+    if "renderer" in name or "renderer" in message:
+        return "renderer_contract"
+    if "artifact" in name or "artifact" in message:
+        return "artifact_commit"
+    if "invariant" in name or "invariant" in message:
+        return "controller_invariant"
+    return "unexpected"
 
 
 @dataclass(slots=True)
@@ -43,7 +64,7 @@ async def _reconcile_claimed(ctx: OrchestratorContext, original_lease: RunLease)
             if not done:
                 lease = await ctx.repository.renew(lease)
         await task
-    except Exception:
+    except Exception as exc:
         if not task.done():
             task.cancel()
             try:
@@ -55,6 +76,7 @@ async def _reconcile_claimed(ctx: OrchestratorContext, original_lease: RunLease)
             lease.pipeline_run_id,
             lease.lease_epoch,
         )
+        PIPELINE_CONTROLLER_RECONCILE_ERRORS_TOTAL.labels(reason=reconcile_error_reason(exc)).inc()
     finally:
         try:
             await ctx.repository.release(lease)

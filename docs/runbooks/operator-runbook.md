@@ -248,6 +248,7 @@ recent rollouts, queue/worker inventory, and dependency metrics.
 | workers | `LoomWorkerProcessDown`, `LoomWorkerHeartbeatFailing`, `LoomWorkerTrialFailureRateHigh`, `LoomWorkerTokenStaleness` | Host/process health, heartbeat age, Docker/Slurm capacity, token generation |
 | pooling/listen | `LoomPgbouncerClientWaiting`, `LoomPgbouncerScrapeDown`, `LoomListenWatcherPollFallback` | Pool saturation, exporter health, database reachability and LISTEN fallback |
 | object storage | `LoomMinioPVCUsageHigh`, `LoomMinioPVCUsageCritical`, `LoomMinioWriteLatencyHigh`, `LoomMinioRequestErrorRateHigh`, `LoomMinioNodeOffline` | PVC and bucket usage, node/quorum state, write latency, lifecycle rules |
+| Pipelines | `LoomPipelineStageQueueStuck`, `LoomPipelineStageDeadlineOverrun`, `LoomPipelineControllerReconcileErrors`, `LoomPipelineForcedCancellation`, `LoomPipelineCheckpointStale`, `LoomPipelineArtifactCommitFailures`, `LoomPipelineGpuAllocatedIdle` | Pipeline list/show/watch, Pipeline panels, scoped controller/worker logs, authority boundary |
 
 Silence an alert only for a bounded maintenance window with an owner and
 expiry. Record the sanitized incident timeline outside active reference docs.
@@ -276,6 +277,34 @@ At the high threshold, identify growth and validate retention. At the critical
 threshold, pause large submissions and protect write headroom. Never remove
 objects directly unless their retention and trial/artifact references have
 been verified.
+
+### Pipeline Stage queue stuck
+
+`loom_pipeline_stage_queue_age_seconds` means the maximum age by closed state and resource class. The alert requires ready/queued/retry_wait above 900 seconds or claimed above 300 seconds for 10 minutes. Use Grafana/Prometheus, `loom pipeline list`, `loom pipeline show RUN_ID`, and `loom pipeline watch RUN_ID`; then read only scoped logs with `kubectl -n NAMESPACE logs deploy/loom-control-plane --since=30m`. Cancel or retry only with submit authority; do not mutate database state or auto-remediate from the alert.
+
+### Pipeline Stage deadline overrun
+
+`loom_pipeline_stage_deadline_overrun_seconds` means time beyond the frozen Stage timeout plus 35-second cleanup grace. Any positive value for 5 minutes is critical. Correlate Grafana/Prometheus with `loom pipeline list/show/watch` and scoped `kubectl -n NAMESPACE logs -l app=loom-worker --since=30m`. Cancellation and worker remediation require the applicable operator authority; the alert grants none.
+
+### Pipeline controller reconcile errors
+
+`loom_pipeline_controller_reconcile_errors_total` counts exhausted operations, not successful transaction retries. Three increases in five minutes sustained for five minutes warn. Inspect its closed reason label, `loom pipeline list/show/watch`, and scoped controller logs. Do not bypass controller invariants, budgets, or durable leases; retry only through the authorized Pipeline API.
+
+### Pipeline forced cancellation
+
+`loom_pipeline_cancel_latency_seconds_count{outcome="forced"}` records positive forced-cleanup acknowledgement. Any increase over 15 minutes fires immediately. Inspect the run and Attempt lifecycle with `loom pipeline show/watch`, the cancellation Grafana panel, and scoped worker logs. Preserve committed Artifacts; follow worker cleanup authority before any remediation.
+
+### Pipeline checkpoint stale
+
+`loom_pipeline_checkpoint_oldest_age_seconds` is the age of the newest commit, or Attempt start before sequence zero, for active checkpoint-enabled Attempts. Above 300 seconds for 10 minutes warns. Use Grafana/Prometheus, `loom pipeline show/watch`, and scoped worker logs. Do not synthesize a checkpoint or enable checkpoint reuse; manual retry creates a full replay only when the API says eligible.
+
+### Pipeline Artifact commit failures
+
+`loom_pipeline_artifact_commit_failures_total` counts one returned operation failure by closed commit kind and reason. Any increase over 10 minutes sustained for five minutes warns. Inspect Grafana/Prometheus, `loom pipeline show/watch`, and scoped control-plane logs. Never retry individual multipart chunks manually, expose object keys, or weaken integrity/quota/fencing checks.
+
+### Pipeline GPU allocated idle
+
+`loom_pipeline_gpu_allocated_idle_seconds` measures a leased local GPU Attempt whose expected process group is absent or cleanup is pending; low utilization is intentionally excluded. More than 300 seconds for 10 minutes is critical. Inspect the closed cluster/reason series, `loom pipeline list/show/watch`, and scoped worker/Slurm logs. Drain or cancel only under worker/cluster authority; do not kill an unidentified process from metric labels.
 
 ## Incident handoff
 

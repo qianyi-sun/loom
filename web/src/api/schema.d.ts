@@ -440,6 +440,122 @@ export interface paths {
       responses: { 201: { content: { "application/json": unknown } } };
     };
   };
+  "/api/v1/pipeline-runs": {
+    get: {
+      parameters: {
+        query?: {
+          state?: components["schemas"]["PipelineRunState"];
+          result?: components["schemas"]["PipelineRunResult"];
+          recipe?: string;
+          created_after?: string;
+          created_before?: string;
+          cursor?: string;
+          limit?: number;
+        };
+      };
+      responses: {
+        200: {
+          content: {
+            "application/json": components["schemas"]["PipelineRunListResponseV1"];
+          };
+        };
+      };
+    };
+  };
+  "/api/v1/pipeline-runs/{run_id}": {
+    get: {
+      parameters: { path: { run_id: string } };
+      responses: {
+        200: {
+          content: {
+            "application/json": components["schemas"]["PipelineRunDetailV1"];
+          };
+        };
+      };
+    };
+  };
+  "/api/v1/pipeline-runs/{run_id}/cancel": {
+    post: {
+      parameters: { path: { run_id: string } };
+      requestBody: { content: { "application/json": { reason: string } } };
+      responses: {
+        200: {
+          content: {
+            "application/json": components["schemas"]["PipelineCancelResultV1"];
+          };
+        };
+        202: {
+          content: {
+            "application/json": components["schemas"]["PipelineCancelResultV1"];
+          };
+        };
+      };
+    };
+  };
+  "/api/v1/pipeline-runs/{run_id}/events": {
+    get: {
+      parameters: {
+        path: { run_id: string };
+        query: { after_seq: number; limit: number };
+      };
+      responses: {
+        200: {
+          content: {
+            "application/json": components["schemas"]["PipelineRunEventsResponseV1"];
+          };
+        };
+      };
+    };
+  };
+  "/api/v1/pipeline-stage-runs/{stage_run_id}": {
+    get: {
+      parameters: { path: { stage_run_id: string } };
+      responses: {
+        200: {
+          content: {
+            "application/json": components["schemas"]["PipelineStageRunDetailV1"];
+          };
+        };
+      };
+    };
+  };
+  "/api/v1/pipeline-stage-runs/{stage_run_id}/attempts": {
+    get: {
+      parameters: { path: { stage_run_id: string } };
+      responses: {
+        200: {
+          content: {
+            "application/json": components["schemas"]["PipelineExecutionAttemptListV1"];
+          };
+        };
+      };
+    };
+  };
+  "/api/v1/pipeline-stage-runs/{stage_run_id}/retry": {
+    post: {
+      parameters: {
+        path: { stage_run_id: string };
+        header: { "Idempotency-Key": string };
+      };
+      requestBody: {
+        content: {
+          "application/json": components["schemas"]["PipelineRunRetryRequestV1"];
+        };
+      };
+      responses: {
+        200: {
+          content: {
+            "application/json": components["schemas"]["PipelineMutationResultV1"];
+          };
+        };
+        201: {
+          content: {
+            "application/json": components["schemas"]["PipelineMutationResultV1"];
+          };
+        };
+      };
+    };
+  };
   "/api/v1/usage": {
     get: {
       parameters: {
@@ -1101,6 +1217,202 @@ export interface components {
     Usage: {
       buckets: components["schemas"]["UsageBucket"][];
       degraded: boolean;
+    };
+    PipelineRunState: "submitted" | "running" | "cancelling" | "finished";
+    PipelineRunResult:
+      | "succeeded"
+      | "partial_failed"
+      | "failed"
+      | "cancelled"
+      | "budget_exhausted";
+    PipelineStageState:
+      | "blocked"
+      | "ready"
+      | "queued"
+      | "claimed"
+      | "running"
+      | "retry_wait"
+      | "succeeded"
+      | "failed"
+      | "cancelled"
+      | "skipped";
+    PipelineAttemptState:
+      | "fault_pending"
+      | "queued"
+      | "claimed"
+      | "running"
+      | "succeeded"
+      | "failed"
+      | "cancelled"
+      | "lost";
+    PipelineRecipeIdentityV1: { name: string; version: number; digest: string };
+    PipelineBudgetCounterV1: {
+      limit: number;
+      reserved: number;
+      settled: number;
+      remaining: number;
+    };
+    PipelineBudgetLedgerProjectionV1: {
+      max_wall_seconds: components["schemas"]["PipelineBudgetCounterV1"];
+      max_gpu_seconds: components["schemas"]["PipelineBudgetCounterV1"];
+      max_provider_cost_usd: components["schemas"]["PipelineBudgetCounterV1"];
+      max_artifact_bytes: components["schemas"]["PipelineBudgetCounterV1"];
+      max_stage_runs: components["schemas"]["PipelineBudgetCounterV1"];
+      max_attempts_total: components["schemas"]["PipelineBudgetCounterV1"];
+      wall_deadline_at: string | null;
+      terminal_cause: string | null;
+    };
+    PipelineStageRunSummaryV1: {
+      id: string;
+      node_key: string;
+      shard_key: string;
+      node_kind: "container" | "gate";
+      topological_level: number;
+      upstream_node_keys: string[];
+      state: components["schemas"]["PipelineStageState"];
+      domain_outcome: string | null;
+      reason_code: string | null;
+      attempt_count: number;
+      resource_profile_name: string | null;
+      resource_class: "controller" | "cpu" | "gpu";
+      retry_allowed: boolean;
+      retry_ineligible_reason:
+        | "run_not_retryable"
+        | "stage_not_failed"
+        | "recipe_snapshot_unavailable"
+        | "input_drift"
+        | "input_not_reusable"
+        | "binding_drift"
+        | "budget_invalid"
+        | null;
+    };
+    PipelineArtifactSummaryV1: {
+      id: string;
+      name: string;
+      artifact_type: string;
+      content_sha256: string;
+      manifest_sha256: string | null;
+      stored_size_bytes: number | null;
+      file_count: number | null;
+      safety_state: string;
+      visibility: string;
+      share_status: string;
+      download_path: string;
+      pipeline_run_id: string | null;
+      pipeline_stage_run_id: string | null;
+      execution_attempt_id: string | null;
+      producer_kind: string | null;
+    };
+    PipelineRunListItemV1: {
+      id: string;
+      display_name: string | null;
+      recipe: components["schemas"]["PipelineRecipeIdentityV1"];
+      state: components["schemas"]["PipelineRunState"];
+      result: components["schemas"]["PipelineRunResult"] | null;
+      completed_stage_runs: number;
+      total_stage_runs: number;
+      domain_outcomes: Record<string, number>;
+      budget: components["schemas"]["PipelineBudgetLedgerProjectionV1"] | null;
+      created_at: string;
+      finished_at: string | null;
+    };
+    PipelineRunListResponseV1: {
+      items: components["schemas"]["PipelineRunListItemV1"][];
+      next_cursor: string | null;
+    };
+    PipelineRunDetailV1: {
+      id: string;
+      display_name: string | null;
+      recipe: components["schemas"]["PipelineRecipeIdentityV1"];
+      graph_digest: string;
+      control_binding_snapshots_digest: string;
+      parameters_digest: string;
+      request_digest: string;
+      state: components["schemas"]["PipelineRunState"];
+      result: components["schemas"]["PipelineRunResult"] | null;
+      reason: string | null;
+      created_by_user_id: string | null;
+      retry_of_pipeline_run_id: string | null;
+      retry_from_stage_run_id: string | null;
+      created_at: string;
+      started_at: string | null;
+      finished_at: string | null;
+      cancellation_requested_at: string | null;
+      source_budget: components["schemas"]["RunBudgetV1"];
+      stages: components["schemas"]["PipelineStageRunSummaryV1"][];
+      artifacts: components["schemas"]["PipelineArtifactSummaryV1"][];
+      budget: components["schemas"]["PipelineBudgetLedgerProjectionV1"] | null;
+    };
+    PipelineStageRunDetailV1: components["schemas"]["PipelineStageRunSummaryV1"] & {
+      pipeline_run_id: string;
+      execution_spec_digest: string | null;
+      input_bindings_digest: string | null;
+      resource_profile_digest: string | null;
+      request_renderer_digest: string | null;
+      latest_checkpoint_artifact_id: string | null;
+      artifacts: components["schemas"]["PipelineArtifactSummaryV1"][];
+    };
+    PipelineExecutionAttemptV1: {
+      id: string;
+      attempt_number: number;
+      state: components["schemas"]["PipelineAttemptState"];
+      worker_id: string | null;
+      worker_pool_class: string | null;
+      queued_at: string | null;
+      claimed_at: string | null;
+      started_at: string | null;
+      finished_at: string | null;
+      exit_code: number | null;
+      retry_class: string | null;
+      reason_code: string | null;
+      stage_request_digest: string | null;
+      result_manifest_digest: string | null;
+      resumed_checkpoint_artifact_id: string | null;
+      cancellation_observed_at: string | null;
+      cancellation_outcome: string | null;
+      cleanup_acknowledged_at: string | null;
+      cleanup_proof_digest: string | null;
+    };
+    PipelineExecutionAttemptListV1: {
+      items: components["schemas"]["PipelineExecutionAttemptV1"][];
+    };
+    PipelineRunEventV1: {
+      seq: number;
+      stage_run_id: string | null;
+      execution_attempt_id: string | null;
+      event_type: string;
+      payload: Record<string, unknown>;
+      created_at: string;
+    };
+    PipelineRunEventsResponseV1: {
+      events: components["schemas"]["PipelineRunEventV1"][];
+      next_after_seq: number;
+      terminal: boolean;
+      retry_after_ms: 1000 | null;
+    };
+    PipelineCancelResultV1: {
+      pipeline_run_id: string;
+      state: components["schemas"]["PipelineRunState"];
+      result: components["schemas"]["PipelineRunResult"] | null;
+      cancellation_requested_at: string | null;
+      terminal_cause: string | null;
+    };
+    PipelineMutationResultV1: {
+      pipeline_run_id: string;
+      request_digest: string;
+      idempotent_replay: boolean;
+    };
+    RunBudgetV1: {
+      max_provider_cost_usd: string;
+      max_gpu_seconds: number;
+      max_wall_seconds: number;
+      max_artifact_bytes: number;
+      max_stage_runs: number;
+      max_attempts_total: number;
+    };
+    PipelineRunRetryRequestV1: {
+      budget: components["schemas"]["RunBudgetV1"];
+      display_name: string | null;
     };
     TeamMember: {
       token_hash_prefix: string;
