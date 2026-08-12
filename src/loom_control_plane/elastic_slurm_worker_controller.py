@@ -84,7 +84,9 @@ class ElasticSlurmWorkerControllerConfig:
     slurm_qos: str = ""
     slurm_reservation: str = ""
     sinfo_path: str = "sinfo"
+    srun_path: str = "srun"
     resource_aware: bool = False
+    probe_mem_available: bool = False
     cpu_per_slot: int = 2
     memory_mib_per_slot: int = 8192
     reserved_cpus: int = 4
@@ -115,6 +117,7 @@ class SlurmNodeResource:
     free_memory_mib: int
     cpu_load: float | None
     idle_cpus: int | None = None
+    available_memory_mib: int | None = None
 
 
 @dataclass(frozen=True)
@@ -260,7 +263,9 @@ def build_controller_config(
     slurm_qos: str = "",
     slurm_reservation: str = "",
     sinfo_path: str = "sinfo",
+    srun_path: str = "srun",
     resource_aware: bool = False,
+    probe_mem_available: bool = False,
     cpu_per_slot: int = 2,
     memory_mib_per_slot: int = 8192,
     reserved_cpus: int = 4,
@@ -296,6 +301,7 @@ def build_controller_config(
     sacct_path = _require_nonempty(sacct_path, "sacct_path")
     scancel_path = _require_nonempty(scancel_path, "scancel_path")
     sinfo_path = _require_nonempty(sinfo_path, "sinfo_path")
+    srun_path = _require_nonempty(srun_path, "srun_path")
 
     _require_positive(requested_cpus, "requested_cpus")
     _require_positive(requested_memory_mib, "requested_memory_mib")
@@ -333,8 +339,7 @@ def build_controller_config(
     gpu_tres, requested_gpus = _parse_gpu_tres(gpu_tres)
     job_output_dir = job_output_dir.strip().rstrip("/")
     if job_output_dir and (
-        _SAFE_OUTPUT_DIR_RE.fullmatch(job_output_dir) is None
-        or ".." in Path(job_output_dir).parts
+        _SAFE_OUTPUT_DIR_RE.fullmatch(job_output_dir) is None or ".." in Path(job_output_dir).parts
     ):
         raise ValueError("job_output_dir must be a safe absolute directory")
     if exclusive:
@@ -388,7 +393,9 @@ def build_controller_config(
         slurm_qos=slurm_qos.strip(),
         slurm_reservation=slurm_reservation.strip(),
         sinfo_path=sinfo_path,
+        srun_path=srun_path,
         resource_aware=resource_aware,
+        probe_mem_available=probe_mem_available,
         cpu_per_slot=cpu_per_slot,
         memory_mib_per_slot=memory_mib_per_slot,
         reserved_cpus=reserved_cpus,
@@ -472,9 +479,12 @@ def compute_node_capacity_plan(
             safe_slots=0,
             reason="insufficient_cpu",
         )
-    memory_slots = (
-        resource.free_memory_mib - config.reserved_memory_mib
-    ) // config.memory_mib_per_slot
+    usable_memory_mib = (
+        resource.available_memory_mib
+        if resource.available_memory_mib is not None
+        else resource.free_memory_mib
+    )
+    memory_slots = (usable_memory_mib - config.reserved_memory_mib) // config.memory_mib_per_slot
     if memory_slots < 1:
         return SlurmNodeCapacityPlan(
             hostname=node,
@@ -645,7 +655,11 @@ def build_sbatch_request(
     candidate_sha = config.candidate_sha or "legacy"
     candidate_label = candidate_sha[:12]
     export_vars = [
-        "ALL",
+        # Only the executable search path crosses from the controller process.
+        # Worker credentials and release settings come from the protected env
+        # file or the explicit controller-owned values below. In particular,
+        # never propagate the controller-only HOME onto compute nodes.
+        "PATH",
         f"LOOM_WORKER_MAX_CONCURRENT={config.requested_concurrency}",
         f"LOOM_WORKER_POOL_NAME={config.pool_name}",
         # Bind the worker identity to the canonical Slurm node selected by the
@@ -718,6 +732,28 @@ set -euo pipefail
 : "${SLURM_JOB_ID:?SLURM_JOB_ID is required}"
 : "${LOOM_WORKER_SANDBOX_IDENTITY:?LOOM_WORKER_SANDBOX_IDENTITY is required}"
 : "${LOOM_WORKER_CANDIDATE_SHA:?LOOM_WORKER_CANDIDATE_SHA is required}"
+
+# The controller account's home is intentionally local to the controller and
+# may not exist on compute nodes. Give Docker/Compose and XDG consumers a
+# private per-allocation runtime instead of inheriting controller state.
+job_runtime_dir=""
+cleanup_runtime() {
+  if [[ -n "$job_runtime_dir" ]]; then
+    /usr/bin/rm -rf -- "$job_runtime_dir"
+    job_runtime_dir=""
+  fi
+}
+trap cleanup_runtime EXIT
+runtime_parent="${SLURM_TMPDIR:-${TMPDIR:-/tmp}}"
+job_runtime_dir="$(/usr/bin/mktemp -d "${runtime_parent%/}/loom-worker-${SLURM_JOB_ID}.XXXXXX")"
+umask 077
+export HOME="$job_runtime_dir/home"
+export DOCKER_CONFIG="$job_runtime_dir/docker"
+export XDG_CONFIG_HOME="$job_runtime_dir/xdg-config"
+export XDG_RUNTIME_DIR="$job_runtime_dir/xdg-runtime"
+export TMPDIR="$job_runtime_dir/tmp"
+/usr/bin/mkdir -p "$HOME" "$DOCKER_CONFIG" "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR" "$TMPDIR"
+
 export LOOM_WORKER_SLURM_JOB_ID="$SLURM_JOB_ID"
 export LOOM_WORKER_SLURM_GPU_DEVICE_IDS="${SLURM_JOB_GPUS:-}"
 if [[ "${LOOM_WORKER_SLURM_ALLOCATED_GPUS:?}" -gt 0 && -z "$LOOM_WORKER_SLURM_GPU_DEVICE_IDS" ]]; then
@@ -764,6 +800,7 @@ cleanup() {
   if [[ "$status" -eq 0 && "$cleanup_status" -ne 0 ]]; then
     status=$cleanup_status
   fi
+  cleanup_runtime
   exit "$status"
 }
 
@@ -876,7 +913,78 @@ class SubprocessSlurmCommandRunner:
             timeout=config.command_timeout_seconds,
         )
         resources = parse_sinfo_node_resources(sinfo.stdout)
+        if config.probe_mem_available:
+            for node in nodes:
+                resource = resources.get(node)
+                if resource is None or not _is_safe_node_state(resource.state):
+                    continue
+                if resource.cpu_load is None or (
+                    resource.cpu_load > resource.cpus_total * config.max_cpu_load_ratio
+                ):
+                    continue
+                available_cpus = (
+                    resource.idle_cpus if resource.idle_cpus is not None else resource.cpus_total
+                )
+                if available_cpus - config.reserved_cpus < config.cpu_per_slot:
+                    continue
+                try:
+                    available_memory_mib = await self._query_node_available_memory(node)
+                except (OSError, RuntimeError) as exc:
+                    logger.warning(
+                        "elastic_slurm_worker_node_memory_probe_failed",
+                        extra={
+                            "environment": config.environment,
+                            "pool_name": config.pool_name,
+                            "node": node,
+                            "err": str(exc),
+                        },
+                    )
+                    continue
+                resources[node] = replace(
+                    resource,
+                    available_memory_mib=available_memory_mib,
+                )
         return {node: resources[node] for node in nodes if node in resources}
+
+    async def _query_node_available_memory(self, node: str) -> int:
+        config = self._config
+        args = [
+            config.srun_path,
+            "--immediate=3",
+            "--nodes=1",
+            "--ntasks=1",
+            f"--nodelist={node}",
+            "--cpus-per-task=1",
+            "--mem=16M",
+            "--time=00:00:10",
+            "--job-name=loom-memory-probe",
+            "--kill-on-bad-exit=1",
+            "--chdir=/tmp",
+            "--export=NIL",
+        ]
+        if config.partition:
+            args.append(f"--partition={config.partition}")
+        if config.slurm_account:
+            args.append(f"--account={config.slurm_account}")
+        if config.slurm_qos:
+            args.append(f"--qos={config.slurm_qos}")
+        if config.slurm_reservation:
+            args.append(f"--reservation={config.slurm_reservation}")
+        args.extend(
+            (
+                "/usr/bin/awk",
+                '$1 == "MemAvailable:" { print int($2 / 1024); exit }',
+                "/proc/meminfo",
+            ),
+        )
+        result = await _run_command(
+            tuple(args),
+            timeout=config.command_timeout_seconds,
+        )
+        available_memory_mib = _parse_optional_int(result.stdout)
+        if available_memory_mib is None or available_memory_mib < 0:
+            raise RuntimeError("Slurm node memory probe returned no valid MemAvailable value")
+        return available_memory_mib
 
     async def resolve_node_names(self, nodes: tuple[str, ...]) -> dict[str, str]:
         """Map each requested node to its canonical Slurm NodeName.
@@ -1098,7 +1206,10 @@ async def with_node_resource_snapshot(
     if not config.resource_aware:
         return snapshot
     try:
-        resources = await runner.query_node_resources(config.allowed_nodes)
+        probe_nodes = tuple(
+            node for node in config.allowed_nodes if node not in snapshot.active_nodes
+        )
+        resources = await runner.query_node_resources(probe_nodes)
     except Exception as exc:
         logger.warning(
             "elastic_slurm_worker_node_resource_query_failed",

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import os
+import subprocess
+from pathlib import Path
+
 import pytest
 
 from loom_control_plane import elastic_slurm_worker_controller as controller
@@ -156,6 +160,49 @@ def test_resource_aware_decision_filters_unsafe_nodes_and_uses_safe_slots() -> N
     assert decision.node_capacity["oldlab-4"].reason == "cpu_load_high"
 
 
+def test_resource_aware_decision_uses_linux_available_memory_when_probed() -> None:
+    config = _config(
+        requested_concurrency=1,
+        resource_aware=True,
+        cpu_per_slot=2,
+        memory_mib_per_slot=8192,
+        reserved_cpus=4,
+        reserved_memory_mib=20_480,
+        max_concurrency_per_node=6,
+    )
+    snapshot = SlurmWorkerCapacitySnapshot(
+        queued_trials=6,
+        running_trials=0,
+        pending_jobs=0,
+        running_jobs=0,
+        active_slots=0,
+        pending_slots=0,
+        active_nodes=set(),
+        cancellable_pending_job_ids=(),
+        active_job_ids=(),
+        node_resources={
+            "oldlab-3": SlurmNodeResource(
+                hostname="oldlab-3",
+                state="mixed",
+                cpus_total=24,
+                free_memory_mib=27_500,
+                cpu_load=1.0,
+                idle_cpus=24,
+                available_memory_mib=122_915,
+            ),
+        },
+    )
+
+    decision = compute_controller_decision(config, snapshot)
+
+    assert decision.submit_nodes == ("oldlab-3",)
+    assert decision.node_capacity["oldlab-3"] == SlurmNodeCapacityPlan(
+        hostname="oldlab-3",
+        safe_slots=6,
+        reason="eligible",
+    )
+
+
 def test_resource_aware_decision_does_not_reuse_active_nodes() -> None:
     config = _config(
         resource_aware=True,
@@ -230,7 +277,7 @@ async def test_with_node_resource_snapshot_queries_runner_when_resource_aware() 
         running_jobs=0,
         active_slots=0,
         pending_slots=0,
-        active_nodes=set(),
+        active_nodes={"oldlab-2"},
         cancellable_pending_job_ids=(),
         active_job_ids=(),
     )
@@ -241,7 +288,7 @@ async def test_with_node_resource_snapshot_queries_runner_when_resource_aware() 
         runner=runner,
     )
 
-    assert runner.queried_nodes == ("oldlab-1", "oldlab-2")
+    assert runner.queried_nodes == ("oldlab-1",)
     assert updated.node_resources == {
         "oldlab-1": SlurmNodeResource("oldlab-1", "mixed", 24, 120_000, 1.0),
     }
@@ -293,7 +340,7 @@ def test_build_sbatch_request_uses_environment_specific_worker_settings() -> Non
         "--partition=cpu",
         "--cpus-per-task=12",
         "--mem=58000M",
-        "--export=ALL,LOOM_WORKER_MAX_CONCURRENT=6,LOOM_WORKER_POOL_NAME=oldlab,LOOM_WORKER_HOSTNAME=oldlab-4,LOOM_REMOTE_WORKER_ENV_FILE=/secure/.env.remote-worker,LOOM_REMOTE_WORKER_REPO_DIR=/opt/loom,LOOM_WORKER_SANDBOX_IDENTITY=production,LOOM_WORKER_CANDIDATE_SHA=legacy,LOOM_WORKER_SLURM_ALLOCATED_GPUS=0,LOOM_WORKER_RESTART_POLICY=no,LOOM_WORKER_REQUIRE_CGROUP_PARENT=1,LOOM_WORKER_JOB_PIDS_MAX=3072",
+        "--export=PATH,LOOM_WORKER_MAX_CONCURRENT=6,LOOM_WORKER_POOL_NAME=oldlab,LOOM_WORKER_HOSTNAME=oldlab-4,LOOM_REMOTE_WORKER_ENV_FILE=/secure/.env.remote-worker,LOOM_REMOTE_WORKER_REPO_DIR=/opt/loom,LOOM_WORKER_SANDBOX_IDENTITY=production,LOOM_WORKER_CANDIDATE_SHA=legacy,LOOM_WORKER_SLURM_ALLOCATED_GPUS=0,LOOM_WORKER_RESTART_POLICY=no,LOOM_WORKER_REQUIRE_CGROUP_PARENT=1,LOOM_WORKER_JOB_PIDS_MAX=3072",
     )
     assert "compose_files=(-f deploy/docker-compose.remote-worker.yml)" in (request.stdin)
     assert (
@@ -342,7 +389,6 @@ def test_build_sbatch_request_can_disable_exclusive_node_allocation() -> None:
     # The generated batch script must be valid shell (a stray quote in an error
     # message once broke `${var:?...}` parsing and failed the job in ~1s).
     import shutil
-    import subprocess
 
     bash = shutil.which("bash")
     if bash is not None:
@@ -354,6 +400,90 @@ def test_build_sbatch_request_can_disable_exclusive_node_allocation() -> None:
             check=False,
         )
         assert syntax.returncode == 0, syntax.stderr
+
+
+def test_build_sbatch_request_uses_private_compute_node_runtime(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    (repo / "deploy").mkdir(parents=True)
+    (repo / "deploy/docker-compose.remote-worker.yml").write_text(
+        "services: {}\n",
+        encoding="utf-8",
+    )
+    env_file = tmp_path / "worker.env"
+    env_file.write_text("LOOM_IMAGE_TAG=test\n", encoding="utf-8")
+    runtime_root = tmp_path / "node-tmp"
+    runtime_root.mkdir()
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker_log = tmp_path / "docker.log"
+    fake_docker = fake_bin / "docker"
+    fake_docker.write_text(
+        """#!/bin/sh
+set -eu
+case "$HOME" in
+  "$EXPECTED_RUNTIME_ROOT"/*/home) ;;
+  *) echo "unsafe HOME: $HOME" >&2; exit 91 ;;
+esac
+test -d "$HOME"
+test -d "$DOCKER_CONFIG"
+test -d "$XDG_CONFIG_HOME"
+test -d "$XDG_RUNTIME_DIR"
+printf '%s|%s|%s|%s\n' \
+  "$HOME" "$DOCKER_CONFIG" "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR" \
+  >> "$FAKE_DOCKER_LOG"
+""",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o755)
+    request = build_sbatch_request(
+        _config(
+            allowed_nodes=("oldlab-3",),
+            env_file=str(env_file),
+            repo_dir=str(repo),
+        ),
+        node="oldlab-3",
+    )
+    export_arg = next(arg for arg in request.args if arg.startswith("--export="))
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "HOME": "/var/lib/loom-staging-rollout",
+            "TMPDIR": str(runtime_root),
+            "SLURM_JOB_ID": "4242",
+            "LOOM_WORKER_SANDBOX_IDENTITY": "staging",
+            "LOOM_WORKER_CANDIDATE_SHA": "a" * 40,
+            "LOOM_WORKER_SLURM_ALLOCATED_GPUS": "0",
+            "LOOM_WORKER_REQUIRE_CGROUP_PARENT": "0",
+            "LOOM_REMOTE_WORKER_ENV_FILE": str(env_file),
+            "LOOM_REMOTE_WORKER_REPO_DIR": str(repo),
+            "FAKE_DOCKER_LOG": str(docker_log),
+            "EXPECTED_RUNTIME_ROOT": str(runtime_root),
+        },
+    )
+
+    result = subprocess.run(
+        ["/bin/bash"],
+        input=request.stdin,
+        cwd=repo,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert export_arg.startswith("--export=PATH,")
+    assert not export_arg.startswith("--export=ALL,")
+    assert result.returncode == 0, result.stderr
+    runtime_lines = docker_log.read_text(encoding="utf-8").splitlines()
+    assert len(runtime_lines) == 2
+    home, docker_config, xdg_config, xdg_runtime = runtime_lines[0].split("|")
+    job_runtime = Path(home).parent
+    assert job_runtime.parent == runtime_root
+    assert docker_config == str(job_runtime / "docker")
+    assert xdg_config == str(job_runtime / "xdg-config")
+    assert xdg_runtime == str(job_runtime / "xdg-runtime")
+    assert not job_runtime.exists()
 
 
 def test_nonexclusive_sbatch_rejects_missing_job_pids_max() -> None:
@@ -397,10 +527,7 @@ def test_build_sbatch_request_uses_shared_job_output_directory() -> None:
     assert config is not None
     assert config.job_output_dir == "/shared_work/loom/staging-rollout/job-output"
     request = build_sbatch_request(config, node="oldlab-1")
-    assert (
-        "--output=/shared_work/loom/staging-rollout/job-output/slurm-%j.out"
-        in request.args
-    )
+    assert "--output=/shared_work/loom/staging-rollout/job-output/slurm-%j.out" in request.args
 
 
 @pytest.mark.parametrize(
@@ -814,8 +941,7 @@ async def test_query_jobs_falls_back_to_sacct_when_squeue_rejects_terminal_id(
         commands.append(args)
         if args[0] == "squeue":
             raise RuntimeError(
-                "Slurm command failed (1): squeue "
-                "slurm_load_jobs error: Invalid job id specified",
+                "Slurm command failed (1): squeue slurm_load_jobs error: Invalid job id specified",
             )
         return controller._CommandResult(
             stdout="31619|FAILED|trt-eai-oldlab-5|NonZeroExitCode\n",
@@ -850,3 +976,140 @@ async def test_query_jobs_keeps_non_terminal_squeue_errors_fail_closed(
 
     with pytest.raises(RuntimeError, match="Unable to contact slurm controller"):
         await runner.query_jobs(("31619",))
+
+
+async def test_query_node_resources_probes_linux_available_memory_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[tuple[str, ...]] = []
+
+    async def fake_run_command(
+        args: tuple[str, ...],
+        *,
+        timeout: float,
+        stdin: str | None = None,
+    ) -> controller._CommandResult:
+        del timeout, stdin
+        commands.append(args)
+        if args[0] == "sinfo":
+            return controller._CommandResult(
+                stdout="oldlab-3|mixed|24|120000|50000|1.0|0/24/0/24\n",
+                stderr="",
+            )
+        return controller._CommandResult(stdout="122915\n", stderr="")
+
+    monkeypatch.setattr(controller, "_run_command", fake_run_command)
+    runner = SubprocessSlurmCommandRunner().bind_config(
+        _config(
+            allowed_nodes=("oldlab-3",),
+            partition="all",
+            resource_aware=True,
+            reserved_memory_mib=20_480,
+            memory_mib_per_slot=8192,
+            probe_mem_available=True,
+            srun_path="/usr/bin/srun",
+        ),
+    )
+
+    resources = await runner.query_node_resources(("oldlab-3",))
+
+    assert resources["oldlab-3"].free_memory_mib == 50_000
+    assert resources["oldlab-3"].available_memory_mib == 122_915
+    assert [command[0] for command in commands] == ["sinfo", "/usr/bin/srun"]
+    probe = commands[1]
+    assert "--nodelist=oldlab-3" in probe
+    assert "--partition=all" in probe
+    assert "--immediate=3" in probe
+    assert "--chdir=/tmp" in probe
+    assert "--export=NIL" in probe
+    assert probe[-1] == "/proc/meminfo"
+
+
+@pytest.mark.parametrize(
+    "probe_error",
+    [
+        RuntimeError("memory probe could not start immediately"),
+        FileNotFoundError("srun is unavailable"),
+    ],
+)
+async def test_query_node_resources_falls_back_to_slurm_free_memory_on_probe_error(
+    monkeypatch: pytest.MonkeyPatch,
+    probe_error: OSError | RuntimeError,
+) -> None:
+    async def fake_run_command(
+        args: tuple[str, ...],
+        *,
+        timeout: float,
+        stdin: str | None = None,
+    ) -> controller._CommandResult:
+        del timeout, stdin
+        if args[0] == "sinfo":
+            return controller._CommandResult(
+                stdout="oldlab-3|mixed|24|120000|27500|1.0|0/24/0/24\n",
+                stderr="",
+            )
+        raise probe_error
+
+    monkeypatch.setattr(controller, "_run_command", fake_run_command)
+    config = _config(
+        allowed_nodes=("oldlab-3",),
+        resource_aware=True,
+        reserved_memory_mib=20_480,
+        memory_mib_per_slot=8192,
+        probe_mem_available=True,
+    )
+    runner = SubprocessSlurmCommandRunner().bind_config(config)
+
+    resources = await runner.query_node_resources(("oldlab-3",))
+    decision = compute_controller_decision(
+        config,
+        SlurmWorkerCapacitySnapshot(
+            queued_trials=1,
+            running_trials=0,
+            pending_jobs=0,
+            running_jobs=0,
+            active_slots=0,
+            pending_slots=0,
+            active_nodes=set(),
+            cancellable_pending_job_ids=(),
+            active_job_ids=(),
+            node_resources=resources,
+        ),
+    )
+
+    assert resources["oldlab-3"].available_memory_mib is None
+    assert decision.submit_nodes == ()
+    assert decision.node_capacity["oldlab-3"].reason == "insufficient_memory"
+
+
+async def test_query_node_resources_does_not_probe_linux_memory_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[tuple[str, ...]] = []
+
+    async def fake_run_command(
+        args: tuple[str, ...],
+        *,
+        timeout: float,
+        stdin: str | None = None,
+    ) -> controller._CommandResult:
+        del timeout, stdin
+        commands.append(args)
+        return controller._CommandResult(
+            stdout="gb10-16|idle|20|115000|1000|0.0|0/20/0/20\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(controller, "_run_command", fake_run_command)
+    runner = SubprocessSlurmCommandRunner().bind_config(
+        _config(
+            allowed_nodes=("gb10-16",),
+            resource_aware=True,
+            probe_mem_available=False,
+        ),
+    )
+
+    resources = await runner.query_node_resources(("gb10-16",))
+
+    assert resources["gb10-16"].available_memory_mib is None
+    assert [command[0] for command in commands] == ["sinfo"]

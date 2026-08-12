@@ -15,9 +15,12 @@ The policy scales from zero to 18 slots on `trt-eai-oldlab-3`,
 Resource-aware admission reserves 4 CPUs and 20480 MiB per node for other
 services, permits at most one pending autoscaler job, and excludes nodes with
 unsafe Slurm state, an active Loom job, missing resource data, high load, or
-insufficient free CPU/memory. The worker setup guard also delays Docker setup
-and build work when I/O pressure, swap, or D-state process thresholds are
-unsafe.
+insufficient free CPU/memory. While sizing an inactive, otherwise-safe node,
+the OLDLAB policy uses a tiny immediate Slurm probe of Linux `MemAvailable`,
+which includes safely reclaimable page cache. A probe that cannot run or
+returns malformed data falls back to `FreeMem` and remains closed. The worker
+setup guard also delays Docker setup and build work when I/O pressure, swap, or
+D-state process thresholds are unsafe.
 
 The service-owned candidate checkout, worker env, and job output directories
 are under `/shared_work/loom/staging-rollout/` and must be visible on every
