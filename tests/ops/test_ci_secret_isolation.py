@@ -187,13 +187,20 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
     assert set(jobs) == {
         "plan",
         "image-route",
+        "trivy-binary",
         "build",
         "candidate-index",
         "publish",
         "publish-manifest",
         "images-gate",
     }
-    for job_name in ("plan", "build", "candidate-index", "images-gate"):
+    for job_name in (
+        "plan",
+        "trivy-binary",
+        "build",
+        "candidate-index",
+        "images-gate",
+    ):
         effective = jobs[job_name].get("permissions", workflow["permissions"])
         assert effective == {"contents": "read"}
         assert "environment" not in jobs[job_name]
