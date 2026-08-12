@@ -16,7 +16,11 @@ from loom_cli.rollout.external_supervisor_predecessor import (
     load_predecessor_manifest,
 )
 from loom_cli.rollout.external_supervisor_readiness import build_external_supervisor_artifact
-from loom_cli.rollout.gb10_readiness import GB10ProbeTarget, GB10SharedMountReadiness
+from loom_cli.rollout.gb10_readiness import (
+    ACTIVE_GB10_HOSTS,
+    GB10ProbeTarget,
+    GB10SharedMountReadiness,
+)
 from loom_cli.rollout.operator import installed_deep_preflight_factory
 from loom_cli.rollout.operator import protected_external_supervisor_transport as transport_module
 from loom_cli.rollout.operator.deep_preflight_authority import RuntimePurpose
@@ -78,6 +82,200 @@ def test_single_node_capacity_inputs_keep_exact_host_path_authority() -> None:
         (Path("/data/loom-staging/minio"),),
         None,
     )
+
+
+def test_installed_rehearsal_source_rebuilds_aggregate_supervisor_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    candidate = _candidate()
+    inputs = SimpleNamespace(
+        gb10_targets=tuple(SimpleNamespace(ssh_target=host) for host in ACTIVE_GB10_HOSTS),
+        gb10_ssh_config=tmp_path / "ssh-config",
+        gb10_identity=tmp_path / "identity",
+        gb10_ssh_config_sha256="1" * 64,
+        gb10_identity_metadata_fingerprint="2" * 64,
+    )
+    cluster = SimpleNamespace(
+        artifacts_bucket="artifacts",
+        container_registry="registry.invalid",
+        container_registry_push="registry-push.invalid",
+        k8s_worker=SimpleNamespace(enabled=True),
+        minio_replicas=1,
+        persistent_storage_host_path_root="/data/loom-staging",
+        topology=SimpleNamespace(multi_node=False, minio_replicas=1),
+        trajectories_bucket="trajectories",
+    )
+    readonly = SimpleNamespace(
+        baseline_probe_route="https://staging.example.invalid/staging",
+        baseline_probes=lambda _epoch: {},
+        capabilities=lambda: SimpleNamespace(),
+        capacity=lambda: StagingCapacity(0, 0, 100, 100),
+        route="https://staging.example.invalid/staging",
+    )
+    commands = SimpleNamespace(
+        candidate_source=lambda *_args: SimpleNamespace(),
+        executable=lambda *_args: "/fixed/tool",
+        final_gate_helper=lambda *_args: SimpleNamespace(),
+        gb10_fleet=lambda *_args: SimpleNamespace(),
+        gb10_supervisor_controller=lambda *_args: SimpleNamespace(),
+        git=lambda *_args: SimpleNamespace(),
+        image=lambda *_args: SimpleNamespace(),
+        manifest_schema_dry_run=lambda *_args: SimpleNamespace(),
+        manifest_server_dry_run=lambda *_args: SimpleNamespace(),
+        readonly_json=lambda *_args: SimpleNamespace(),
+        rehearsal_helper=lambda *_args: SimpleNamespace(),
+        simple=lambda *_args: SimpleNamespace(),
+        systemd_preflight=lambda *_args: SimpleNamespace(),
+    )
+    loaded = SimpleNamespace(
+        images=SimpleNamespace(),
+        manifests=SimpleNamespace(),
+        migration=SimpleNamespace(),
+        production_defaults=SimpleNamespace(),
+        publication=SimpleNamespace(
+            browser_report_schema_sha256="3" * 64,
+            migration_plan_sha256="4" * 64,
+            migration_target_revision="0074",
+        ),
+    )
+    captured: dict[str, object] = {}
+
+    class Source:
+        def __init__(self, **kwargs: object) -> None:
+            captured["source"] = kwargs
+
+        actions = "actions"
+        identity = "identity"
+
+    def composition(**kwargs: object) -> SimpleNamespace:
+        captured["composition"] = kwargs
+        return SimpleNamespace(**kwargs)
+
+    artifact = SimpleNamespace()
+    builds: list[dict[str, object]] = []
+
+    def build(candidate_root: Path, **kwargs: object) -> SimpleNamespace:
+        builds.append({"candidate_root": candidate_root, **kwargs})
+        return artifact
+
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "sanitized_child_environment",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "InstalledPreflightCommands",
+        lambda *_args, **_kwargs: commands,
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory.InstalledPreflightInputs,
+        "load",
+        lambda *_args, **_kwargs: inputs,
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "InstalledReadonlyDatabaseEvidenceSource",
+        lambda **_kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "InstalledReadonlyMutationEpochSource",
+        lambda **_kwargs: SimpleNamespace(
+            refresh=lambda: SimpleNamespace(mutation_epoch=8),
+            __call__=lambda: SimpleNamespace(schema_revision="0074"),
+        ),
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory, "load_cluster_config", lambda _path: cluster
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "InstalledReadonlyCapacitySource",
+        lambda **_kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "ReadonlyLifecycleInventoryProvider",
+        lambda *_args, **_kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "ReadonlyPreflightAuthority",
+        lambda *_args, **_kwargs: readonly,
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "PreflightArtifactStore",
+        lambda *_args, **_kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "PreflightAttestationStore",
+        lambda *_args, **_kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "staging_smoke_authority",
+        lambda _config: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "InstalledRehearsalStepRunner",
+        lambda **_kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "JournaledRehearsalBackend",
+        lambda **_kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(installed_deep_preflight_factory, "RehearsalActionSource", Source)
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "_external_supervisor_predecessor_source",
+        lambda **_kwargs: lambda *_args: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "_gb10_external_supervisor_observation_source",
+        lambda **_kwargs: lambda *_args: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory, "InstalledDeepPreflightComposition", composition
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory, "build_external_supervisor_artifact", build
+    )
+
+    installed_deep_preflight_factory.build_installed_deep_preflight_composition(
+        config,
+        service_uid=995,
+        service_gid=2007,
+        store=SimpleNamespace(),  # type: ignore[arg-type]
+        now=lambda: datetime(2026, 7, 19, 12, tzinfo=UTC),
+    )
+    rehearsal_factory = captured["composition"]["rehearsal_factory"]  # type: ignore[index]
+    assert callable(rehearsal_factory)
+    assert rehearsal_factory(candidate, 8, RuntimePurpose.DETACHED_REHEARSAL, loaded) == (  # type: ignore[operator]
+        "actions",
+        "identity",
+    )
+    source = captured["source"]
+    assert isinstance(source, dict)
+    external_supervisor_artifacts = source["external_supervisor_artifacts"]
+    assert callable(external_supervisor_artifacts)
+    assert external_supervisor_artifacts() is artifact
+    assert builds == [
+        {
+            "candidate_root": config.runner_repo,
+            "candidate_sha": candidate.resolved_sha,
+            "candidate_tree": candidate.resolved_tree,
+            "environment": config.environment,
+            "image_tag": candidate.image_tag,
+        }
+    ]
 
 
 class _Artifacts:

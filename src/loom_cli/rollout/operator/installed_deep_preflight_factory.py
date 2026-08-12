@@ -596,7 +596,6 @@ def build_installed_deep_preflight_composition(
                     candidate_tree=candidate.resolved_tree or "",
                     image_tag=candidate.image_tag,
                     environment=config.environment,
-                    execution_host=STAGING_ROLLOUT_EXECUTION_HOST,
                 ),
                 artifact_store=artifact_store,
                 migration_plan_sha256=loaded.publication.migration_plan_sha256,

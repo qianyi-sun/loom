@@ -26,7 +26,6 @@ from loom.data_lifecycle_capacity import CAPACITY_SOURCE
 from loom_cli.rollout.credential_authority import read_trusted_file
 from loom_cli.rollout.external_supervisor_readiness import (
     PROFILE_PATH,
-    STAGING_ROLLOUT_EXECUTION_HOST,
     ExternalSupervisorArtifact,
     ExternalSupervisorIdentity,
     build_external_supervisor_artifact,
@@ -302,7 +301,6 @@ def _default_external_supervisor_artifact(plan: RehearsalPlan) -> ExternalSuperv
         candidate_tree=plan.candidate_tree,
         image_tag=plan.image_tag,
         environment="staging",
-        execution_host=STAGING_ROLLOUT_EXECUTION_HOST,
     )
 
 
