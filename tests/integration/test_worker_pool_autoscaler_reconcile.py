@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import delete, insert, select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from loom.db.schema import (
     GB10WorkerNodeStatus,
@@ -24,7 +24,10 @@ from loom_control_plane.elastic_slurm_worker_controller import (
     SlurmNodeResource,
     SlurmWorkerCommandRunner,
 )
-from loom_control_plane.slurm_worker_jobs import SlurmWorkerJobObservation
+from loom_control_plane.slurm_worker_jobs import (
+    SlurmWorkerJobObservation,
+    reconcile_slurm_worker_jobs,
+)
 from loom_control_plane.worker_pool_autoscaler import (
     reconcile_worker_pool_autoscaler_once,
 )
@@ -40,8 +43,13 @@ class FakeSlurmRunner(SlurmWorkerCommandRunner):
         self.submitted_nodes: list[str] = []
         self.submitted_configs: list[ElasticSlurmWorkerControllerConfig] = []
         self.cancelled_job_ids: list[str] = []
+        self.pending_cancelled_job_ids: list[str] = []
+        self.pending_cancel_errors: set[str] = set()
         self.fail_submit_nodes: set[str] = set()
         self.job_observations: list[SlurmWorkerJobObservation] | None = None
+        self.job_observation_batches: list[
+            list[SlurmWorkerJobObservation] | Exception
+        ] = []
         self.queried_job_ids: list[tuple[str, ...]] = []
         self.node_resources: dict[str, SlurmNodeResource] = {}
 
@@ -50,6 +58,11 @@ class FakeSlurmRunner(SlurmWorkerCommandRunner):
         job_ids: tuple[str, ...],
     ) -> list[SlurmWorkerJobObservation]:
         self.queried_job_ids.append(job_ids)
+        if self.job_observation_batches:
+            result = self.job_observation_batches.pop(0)
+            if isinstance(result, Exception):
+                raise result
+            return result
         if self.job_observations is not None:
             return self.job_observations
         return [
@@ -72,11 +85,75 @@ class FakeSlurmRunner(SlurmWorkerCommandRunner):
     async def cancel_job(self, job_id: str) -> None:
         self.cancelled_job_ids.append(job_id)
 
+    async def cancel_pending_job(self, job_id: str) -> None:
+        self.pending_cancelled_job_ids.append(job_id)
+        if job_id in self.pending_cancel_errors:
+            raise RuntimeError(f"conditional scancel failed for {job_id}")
+
     async def query_node_resources(
         self,
         nodes: tuple[str, ...],
     ) -> dict[str, SlurmNodeResource]:
         return {node: resource for node, resource in self.node_resources.items() if node in nodes}
+
+
+async def _insert_gb10_pending_policy(
+    session: AsyncSession,
+    *,
+    now: datetime,
+    job_ids: tuple[str | None, ...],
+) -> None:
+    allowed_nodes = [f"trt-gb10-{index + 6}" for index in range(len(job_ids))]
+    for node, job_id in zip(allowed_nodes, job_ids, strict=True):
+        await session.execute(insert(SlurmWorkerJob).values(
+            environment="staging",
+            pool_name="gb10",
+            nodelist=node,
+            requested_cpus=2,
+            requested_memory_mib=11500,
+            requested_concurrency=1,
+            candidate_sha="a" * 40,
+            job_id=job_id,
+            slurm_state="PENDING",
+            state="pending",
+            redacted_env={
+                "LOOM_REMOTE_WORKER_ENV_FILE": "/secure/.env.remote-worker",
+                "LOOM_REMOTE_WORKER_REPO_DIR": "/opt/loom",
+            },
+            submitted_at=now - timedelta(seconds=60),
+        ))
+    await session.execute(insert(WorkerPoolAutoscalerPolicy).values(
+        environment="staging",
+        pool_name="gb10",
+        actuator="slurm",
+        enabled=True,
+        min_slots=0,
+        max_slots=150,
+        scale_up_threshold_slots=1,
+        scale_down_idle_seconds=600,
+        scale_up_cooldown_seconds=60,
+        scale_down_cooldown_seconds=300,
+        drain_timeout_seconds=600,
+        actuator_config={
+            "backend": "docker",
+            "cpu_arch": "arm64",
+            "allowed_nodes": allowed_nodes,
+            "env_file": "/secure/.env.remote-worker",
+            "exclusive": False,
+            "container_cpus": 2.0,
+            "container_memory_mib": 11500,
+            "container_pids": 512,
+            "candidate_sha": "a" * 40,
+            "job_pids_max": 5120,
+            "repo_dir": "/opt/loom",
+            "requested_cpus": 20,
+            "requested_memory_mib": 115000,
+            "requested_concurrency": 10,
+            "max_jobs": max(1, len(allowed_nodes)),
+            "pending_job_cap": max(1, len(allowed_nodes)),
+            "time_limit": "1-00:00:00",
+        },
+    ))
 
 
 @pytest.fixture(autouse=True)
@@ -214,6 +291,319 @@ async def test_reconcile_marks_one_idle_excess_worker_draining(
         assert policy.last_decision_reason == "idle_excess_capacity"
         assert policy.last_desired_slots == 6
         assert policy.last_actual_slots == 12
+    finally:
+        await engine.dispose()
+
+
+async def test_reconcile_cancels_pending_job_without_staling_foreign_pools(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    try:
+        async with session_factory() as s:
+            await _insert_gb10_pending_policy(s, now=now, job_ids=("11630",))
+            for environment, pool_name, job_id in (
+                ("production", "gb10", "21630"),
+                ("staging", "oldlab", "31630"),
+            ):
+                await s.execute(insert(SlurmWorkerJob).values(
+                    environment=environment,
+                    pool_name=pool_name,
+                    nodelist=f"foreign-{job_id}",
+                    requested_cpus=2,
+                    requested_memory_mib=4096,
+                    requested_concurrency=1,
+                    candidate_sha="b" * 40,
+                    job_id=job_id,
+                    slurm_state="PENDING",
+                    state="pending",
+                    redacted_env={},
+                    submitted_at=now - timedelta(seconds=600),
+                ))
+            await s.commit()
+
+        runner = FakeSlurmRunner()
+        runner.job_observation_batches = [
+            [SlurmWorkerJobObservation(
+                job_id="11630", slurm_state="PENDING",
+                pending_reason="(Resources)", observed_at=now,
+            )],
+            [SlurmWorkerJobObservation(
+                job_id="11630", slurm_state="CANCELLED",
+                pending_reason="Cancelled", observed_at=now,
+            )],
+        ]
+        async with session_factory() as s:
+            results = await reconcile_worker_pool_autoscaler_once(
+                s,
+                environment="staging",
+                now=now,
+                slurm_runner=runner,
+            )
+            await s.commit()
+
+        assert len(results) == 1
+        assert results[0].action == "cancel_pending"
+        assert results[0].reason == "idle_excess_pending_capacity"
+        assert results[0].desired_slots == 0
+        assert results[0].pending_slots == 0
+        assert runner.cancelled_job_ids == []
+        assert runner.pending_cancelled_job_ids == ["11630"]
+
+        async with session_factory() as s:
+            policy = (await s.execute(select(WorkerPoolAutoscalerPolicy))).scalar_one()
+            jobs = (await s.execute(
+                select(SlurmWorkerJob).order_by(SlurmWorkerJob.job_id),
+            )).scalars().all()
+
+        assert policy.last_decision == "cancel_pending"
+        assert policy.last_decision_reason == "idle_excess_pending_capacity"
+        assert policy.last_pending_slots == 0
+        assert policy.last_scale_down_at == now
+        assert [job.job_id for job in jobs] == ["11630", "21630", "31630"]
+        assert [job.state for job in jobs] == ["cancelled", "pending", "pending"]
+        assert jobs[0].slurm_state == "CANCELLED"
+        assert jobs[0].pending_reason == "cancelled after autoscaler demand returned to zero"
+        assert jobs[0].finished_at == now
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("environment", "pool_name"),
+    (("staging", None), (None, "gb10")),
+)
+async def test_slurm_reconcile_rejects_partial_pool_scope(
+    postgres_url: str,
+    environment: str | None,
+    pool_name: str | None,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            with pytest.raises(
+                ValueError,
+                match="environment and pool_name must be provided together",
+            ):
+                await reconcile_slurm_worker_jobs(
+                    session,
+                    [],
+                    stale_after_seconds=300,
+                    environment=environment,
+                    pool_name=pool_name,
+                )
+    finally:
+        await engine.dispose()
+
+
+async def test_reconcile_blocks_pending_cancel_when_slurm_refresh_fails(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    try:
+        async with session_factory() as s:
+            await _insert_gb10_pending_policy(s, now=now, job_ids=("11630",))
+            await s.commit()
+
+        runner = FakeSlurmRunner()
+        runner.job_observation_batches = [RuntimeError("squeue unavailable")]
+        async with session_factory() as s:
+            results = await reconcile_worker_pool_autoscaler_once(
+                s, environment="staging", now=now, slurm_runner=runner,
+            )
+            await s.commit()
+
+        assert len(results) == 1
+        assert results[0].action == "blocked"
+        assert results[0].reason == "slurm_job_refresh_failed"
+        assert results[0].blocked_reason == "slurm_job_refresh_failed"
+        assert results[0].error_message == "squeue unavailable"
+        assert results[0].pending_slots == 1
+        assert runner.pending_cancelled_job_ids == []
+
+        async with session_factory() as s:
+            policy = (await s.execute(select(WorkerPoolAutoscalerPolicy))).scalar_one()
+            job = (await s.execute(select(SlurmWorkerJob))).scalar_one()
+        assert policy.last_decision == "blocked"
+        assert policy.last_scale_down_at is None
+        assert policy.last_error == "squeue unavailable"
+        assert job.state == "pending"
+    finally:
+        await engine.dispose()
+
+
+async def test_reconcile_does_not_cancel_job_that_starts_after_pending_observation(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    try:
+        async with session_factory() as s:
+            await _insert_gb10_pending_policy(s, now=now, job_ids=("11630",))
+            await s.commit()
+
+        runner = FakeSlurmRunner()
+        runner.job_observation_batches = [
+            [SlurmWorkerJobObservation(
+                job_id="11630", slurm_state="PENDING", observed_at=now,
+            )],
+            [SlurmWorkerJobObservation(
+                job_id="11630", slurm_state="RUNNING", observed_at=now,
+            )],
+        ]
+        async with session_factory() as s:
+            results = await reconcile_worker_pool_autoscaler_once(
+                s, environment="staging", now=now, slurm_runner=runner,
+            )
+            await s.commit()
+
+        assert results[0].action == "blocked"
+        assert results[0].reason == "slurm_pending_cancel_failed"
+        assert results[0].blocked_reason == "slurm_pending_cancel_failed"
+        assert results[0].pending_slots == 0
+        assert runner.cancelled_job_ids == []
+        assert runner.pending_cancelled_job_ids == ["11630"]
+
+        async with session_factory() as s:
+            policy = (await s.execute(select(WorkerPoolAutoscalerPolicy))).scalar_one()
+            job = (await s.execute(select(SlurmWorkerJob))).scalar_one()
+        assert policy.last_scale_down_at is None
+        assert policy.last_error is not None
+        assert "11630" in policy.last_error
+        assert job.state == "running"
+        assert job.slurm_state == "RUNNING"
+        assert job.finished_at is None
+    finally:
+        await engine.dispose()
+
+
+async def test_reconcile_blocks_idless_pending_slurm_registry_row(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    try:
+        async with session_factory() as s:
+            await _insert_gb10_pending_policy(s, now=now, job_ids=(None,))
+            await s.commit()
+
+        runner = FakeSlurmRunner()
+        async with session_factory() as s:
+            results = await reconcile_worker_pool_autoscaler_once(
+                s, environment="staging", now=now, slurm_runner=runner,
+            )
+            await s.commit()
+
+        assert results[0].action == "blocked"
+        assert results[0].reason == "slurm_pending_observation_missing"
+        assert results[0].pending_slots == 1
+        assert runner.queried_job_ids == []
+        assert runner.pending_cancelled_job_ids == []
+
+        async with session_factory() as s:
+            policy = (await s.execute(select(WorkerPoolAutoscalerPolicy))).scalar_one()
+            job = (await s.execute(select(SlurmWorkerJob))).scalar_one()
+        assert policy.last_scale_down_at is None
+        assert policy.last_error is not None
+        assert job.state == "pending"
+    finally:
+        await engine.dispose()
+
+
+async def test_reconcile_blocks_when_pending_slurm_observation_is_incomplete(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    try:
+        async with session_factory() as s:
+            await _insert_gb10_pending_policy(
+                s, now=now, job_ids=("11630", "11631"),
+            )
+            await s.commit()
+
+        runner = FakeSlurmRunner()
+        runner.job_observation_batches = [[SlurmWorkerJobObservation(
+            job_id="11630", slurm_state="PENDING", observed_at=now,
+        )]]
+        async with session_factory() as s:
+            results = await reconcile_worker_pool_autoscaler_once(
+                s, environment="staging", now=now, slurm_runner=runner,
+            )
+            await s.commit()
+
+        assert results[0].action == "blocked"
+        assert results[0].reason == "slurm_pending_observation_missing"
+        assert results[0].pending_slots == 2
+        assert runner.pending_cancelled_job_ids == []
+
+        async with session_factory() as s:
+            policy = (await s.execute(select(WorkerPoolAutoscalerPolicy))).scalar_one()
+            jobs = (await s.execute(select(SlurmWorkerJob))).scalars().all()
+        assert policy.last_scale_down_at is None
+        assert policy.last_error is not None
+        assert {job.state for job in jobs} == {"pending"}
+    finally:
+        await engine.dispose()
+
+
+async def test_reconcile_reports_partial_pending_slurm_cancellation(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    try:
+        async with session_factory() as s:
+            await _insert_gb10_pending_policy(
+                s, now=now, job_ids=("11630", "11631"),
+            )
+            await s.commit()
+
+        runner = FakeSlurmRunner()
+        runner.pending_cancel_errors.add("11631")
+        runner.job_observation_batches = [
+            [
+                SlurmWorkerJobObservation(
+                    job_id="11630", slurm_state="PENDING", observed_at=now,
+                ),
+                SlurmWorkerJobObservation(
+                    job_id="11631", slurm_state="PENDING", observed_at=now,
+                ),
+            ],
+            [SlurmWorkerJobObservation(
+                job_id="11630", slurm_state="CANCELLED", observed_at=now,
+            )],
+        ]
+        async with session_factory() as s:
+            results = await reconcile_worker_pool_autoscaler_once(
+                s, environment="staging", now=now, slurm_runner=runner,
+            )
+            await s.commit()
+
+        assert results[0].action == "cancel_pending_partial"
+        assert results[0].reason == "slurm_pending_cancel_partial"
+        assert results[0].blocked_reason == "slurm_pending_cancel_partial"
+        assert results[0].pending_slots == 1
+        assert runner.pending_cancelled_job_ids == ["11630", "11631"]
+
+        async with session_factory() as s:
+            policy = (await s.execute(select(WorkerPoolAutoscalerPolicy))).scalar_one()
+            jobs = (await s.execute(
+                select(SlurmWorkerJob).order_by(SlurmWorkerJob.job_id),
+            )).scalars().all()
+        assert policy.last_scale_down_at == now
+        assert policy.last_error is not None
+        assert "11631" in policy.last_error
+        assert [job.state for job in jobs] == ["cancelled", "pending"]
     finally:
         await engine.dispose()
 

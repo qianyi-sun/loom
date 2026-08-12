@@ -178,7 +178,10 @@ class SlurmWorkerCommandRunner(Protocol):
         """Submit one worker job and return the Slurm job ID."""
 
     async def cancel_job(self, job_id: str) -> None:
-        """Cancel one pending Slurm job."""
+        """Cancel one Slurm job without a state condition."""
+
+    async def cancel_pending_job(self, job_id: str) -> None:
+        """Cancel a job only if Slurm still considers it pending."""
 
     async def query_node_resources(
         self,
@@ -894,6 +897,13 @@ class SubprocessSlurmCommandRunner:
             timeout=config.command_timeout_seconds,
         )
 
+    async def cancel_pending_job(self, job_id: str) -> None:
+        config = self._config
+        await _run_command(
+            (config.scancel_path, "--state=PENDING", job_id),
+            timeout=config.command_timeout_seconds,
+        )
+
     async def query_node_resources(
         self,
         nodes: tuple[str, ...],
@@ -1292,6 +1302,8 @@ async def run_elastic_slurm_worker_controller_once(
                 session,
                 observations,
                 stale_after_seconds=config.stale_after_seconds,
+                environment=config.environment,
+                pool_name=config.pool_name,
             )
         except Exception as exc:
             logger.warning(
@@ -1342,6 +1354,8 @@ async def run_elastic_slurm_worker_controller_once(
                     ),
                 ],
                 stale_after_seconds=config.stale_after_seconds,
+                environment=config.environment,
+                pool_name=config.pool_name,
             )
             cancelled_job_ids.append(job_id)
         except Exception as exc:
