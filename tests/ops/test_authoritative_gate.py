@@ -2601,6 +2601,96 @@ def test_natural_merge_after_terminal_patch_does_not_reopen_success() -> None:
     assert check["conclusion"] == "success"
 
 
+def test_terminal_success_survives_lagging_open_snapshot_after_merge() -> None:
+    class LaggingOpenSnapshotClient(FakeGitHubClient):
+        association_disappeared = False
+
+        def create_commit_status(
+            self, head_sha: str, payload: Mapping[str, Any]
+        ) -> Mapping[str, Any]:
+            response = super().create_commit_status(head_sha, payload)
+            if payload.get("state") == "success":
+                # GitHub can remove the commit's open-PR association as soon as
+                # auto-merge wins while the direct PR snapshot still says open.
+                self.association_disappeared = True
+            return response
+
+        def list_pull_requests_for_commit(
+            self, head_sha: str
+        ) -> Sequence[Mapping[str, Any]]:
+            if self.association_disappeared:
+                return []
+            return super().list_pull_requests_for_commit(head_sha)
+
+    client = LaggingOpenSnapshotClient()
+    current = generation()
+    seed_invalidation(client, current)
+    run = workflow_run(
+        run_id=9720,
+        generation=current,
+        status="completed",
+        conclusion="success",
+    )
+    spec = GATE_SPECS[0]
+    client.runs[spec.workflow_id] = [run]
+    client.jobs[9720] = [{"name": spec.attempt_job, "conclusion": "success"}]
+
+    result = process_event(workflow_event(run), client, context=spec.context)
+
+    assert result.outcome == "success"
+    check = client.checks[spec.context][0]
+    assert check["status"] == "completed"
+    assert check["conclusion"] == "success"
+    assert not check_payload_is_pending(check)
+    assert [
+        payload["state"]
+        for _, payload in client.statuses
+        if payload["context"] == spec.context
+    ] == ["pending", "success"]
+
+
+def test_terminal_result_does_not_survive_a_competing_open_pull_association() -> None:
+    class CompetingAssociationClient(FakeGitHubClient):
+        terminal_published = False
+
+        def create_commit_status(
+            self, head_sha: str, payload: Mapping[str, Any]
+        ) -> Mapping[str, Any]:
+            response = super().create_commit_status(head_sha, payload)
+            if payload.get("state") == "success":
+                self.terminal_published = True
+            return response
+
+        def list_pull_requests_for_commit(
+            self, head_sha: str
+        ) -> Sequence[Mapping[str, Any]]:
+            if not self.terminal_published:
+                return super().list_pull_requests_for_commit(head_sha)
+            competing = deepcopy(self.pull)
+            competing["number"] = 834
+            return [competing]
+
+    client = CompetingAssociationClient()
+    current = generation()
+    seed_invalidation(client, current)
+    run = workflow_run(
+        run_id=97201,
+        generation=current,
+        status="completed",
+        conclusion="success",
+    )
+    spec = GATE_SPECS[0]
+    client.runs[spec.workflow_id] = [run]
+    client.jobs[97201] = [{"name": spec.attempt_job, "conclusion": "success"}]
+
+    with pytest.raises(PublisherError, match="ambiguous open pull requests: 834"):
+        process_event(workflow_event(run), client, context=spec.context)
+
+    check = client.checks[spec.context][0]
+    assert_check_is_pending(check)
+    assert client.statuses[-1][1]["state"] == "pending"
+
+
 def test_merge_between_pull_snapshot_and_authority_read_preserves_success() -> None:
     class MergeDuringAuthorityReadClient(FakeGitHubClient):
         merge_on_authority_read = False

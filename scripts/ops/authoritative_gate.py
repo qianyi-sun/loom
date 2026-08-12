@@ -1936,11 +1936,10 @@ def _reconcile_pull_context(
             pull=fresh_pull,
             event_run_floor=observed_run_floor,
         )
-        if _pull_is_merged(fresh_pull):
-            associated = _open_pull_numbers_for_commit(client, generation.head)
-            if associated:
-                raise PullAuthorityError(generation.head, associated)
-            merged_match = _generation_authority_match(generation, fresh_events)
+
+        def exact_snapshot_is_current() -> bool:
+            nonlocal observed_run_floor
+            fresh_match = _generation_authority_match(generation, fresh_events)
             live_base_ref = _pull_ref(fresh_pull, "base")
             matching_snapshot = [
                 (candidate_run, candidate_generation)
@@ -1965,27 +1964,51 @@ def _reconcile_pull_context(
                 if latest_snapshot_run is not None
                 else None
             )
-            merged_is_current = (
+            return (
                 _generation_matches_pull_snapshot(generation, fresh_pull)
                 and bool(selected_base_ref)
                 and selected_base_ref == live_base_ref
-                and merged_match == authority_match
-                and _authority_match_is_live(merged_match, fresh_events)
+                and fresh_match == authority_match
+                and _authority_match_is_live(fresh_match, fresh_events)
                 and latest_snapshot_identity == selected_run_identity
                 and latest_snapshot_generation == generation
                 and _publisher_active_for_pull(client, generation, fresh_pull)
             )
+
+        if _pull_is_merged(fresh_pull):
+            associated = _open_pull_numbers_for_commit(client, generation.head)
+            if associated:
+                raise PullAuthorityError(generation.head, associated)
+            merged_is_current = exact_snapshot_is_current()
             if not merged_is_current:
                 observed_authority_pull = fresh_pull
                 observed_authority_events = fresh_events
             return merged_is_current
-        fresh_current = _current_pull_candidates(
-            client,
-            candidates=fresh_candidates,
-            pull_number=pull_number,
-            pull=fresh_pull,
-            authority_events=fresh_events,
-        )
+        try:
+            fresh_current = _current_pull_candidates(
+                client,
+                candidates=fresh_candidates,
+                pull_number=pull_number,
+                pull=fresh_pull,
+                authority_events=fresh_events,
+            )
+        except PullAuthorityError as exc:
+            # During auto-merge, GitHub can remove the commit's open-PR
+            # association before the direct PR snapshot reports `merged`. Do
+            # not revoke a result that this invocation has already published
+            # for the exact source occurrence. This never synthesizes success:
+            # a missing/pending result, a different run/generation, or any
+            # competing open association still fails closed.
+            existing = _existing_custom_check(client, generation.head, spec)
+            exact_outcome = _exact_terminal_source_outcome(
+                existing,
+                pull_number=pull_number,
+                generation=generation,
+                run=run,
+            )
+            if exc.associated or exact_outcome is None or not exact_snapshot_is_current():
+                raise
+            return True
         if fresh_current:
             observed_run_floor = _advance_run_floor(observed_run_floor, fresh_current[-1][0])
         is_current = (
