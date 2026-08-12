@@ -194,6 +194,49 @@ def test_existing_candidate_requires_exact_clean_hardened_root_owned_runtime(
     )
 
 
+def test_candidate_tree_accepts_standard_venv_interpreter_symlink_chain(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "candidate"
+    venv_bin = root / "venv/bin"
+    venv_bin.mkdir(parents=True)
+    root.chmod(0o755)
+    (root / "venv").chmod(0o755)
+    venv_bin.chmod(0o755)
+    system_python = tmp_path / "system-python"
+    system_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    system_python.chmod(0o755)
+    (venv_bin / "python").symlink_to(system_python)
+    (venv_bin / "python3").symlink_to("python")
+    (venv_bin / "python3.12").symlink_to("python")
+
+    broker._safe_tree(
+        root,
+        owner_uid=os.geteuid(),
+        owner_gid=os.getegid(),
+        system_python=system_python,
+    )
+
+
+def test_candidate_tree_rejects_direct_relative_symlink_escape(tmp_path: Path) -> None:
+    root = tmp_path / "candidate"
+    link_dir = root / "bin"
+    link_dir.mkdir(parents=True)
+    root.chmod(0o755)
+    link_dir.chmod(0o755)
+    outside = tmp_path / "outside"
+    outside.write_text("outside\n", encoding="utf-8")
+    (link_dir / "escaped").symlink_to("../../outside")
+
+    with pytest.raises(broker.BrokerError, match="escapes authority"):
+        broker._safe_tree(
+            root,
+            owner_uid=os.geteuid(),
+            owner_gid=os.getegid(),
+            system_python=outside,
+        )
+
+
 def test_candidate_inspection_disables_candidate_configured_executable_git_hooks(
     tmp_path: Path,
 ) -> None:
@@ -307,7 +350,10 @@ def test_candidate_hardening_rejects_external_hardlinked_symlink_before_mutation
     assert os.readlink(external) == "preserve-target"
 
 
-def test_absent_candidate_is_published_atomically_and_verified(tmp_path: Path) -> None:
+def test_absent_candidate_is_published_atomically_and_verified(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     source, sha, tree = _source_repo(tmp_path)
     candidates = tmp_path / "candidates"
     candidates.mkdir()
@@ -325,6 +371,15 @@ def test_absent_candidate_is_published_atomically_and_verified(tmp_path: Path) -
         encoding="utf-8",
     )
     fake_uv.chmod(0o700)
+    uv_timeouts: list[int] = []
+    original_run = broker._run
+
+    def recording_run(argv: list[str], **kwargs):
+        if argv[0] == str(fake_uv):
+            uv_timeouts.append(kwargs.get("timeout", 900))
+        return original_run(argv, **kwargs)
+
+    monkeypatch.setattr(broker, "_run", recording_run)
 
     published = broker.ensure_candidate(
         candidates,
@@ -355,6 +410,7 @@ def test_absent_candidate_is_published_atomically_and_verified(tmp_path: Path) -
     candidate_mode = (candidates / sha).stat().st_mode
     assert candidate_mode & 0o055 == 0o055
     assert (candidates / sha / "repo/payload.txt").stat().st_mode & 0o044 == 0o044
+    assert uv_timeouts == [1200]
 
 
 def test_candidate_publication_never_mutates_a_raced_external_inode(

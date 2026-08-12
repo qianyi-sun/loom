@@ -111,11 +111,17 @@ class InstalledPreflightCommands:
         argv: Sequence[str],
         payload: str,
     ) -> CommandResult:
-        """Run one typed read-only controller observation with bounded stdin."""
+        """Bound two cold attempts below the predecessor check's one-hour DAG limit.
+
+        The broker bounds uv synchronization at 1,200 seconds.  The outer
+        1,740-second process limit leaves nine minutes for Git, hardening, and
+        typed observation while two complete attempts still fit below the
+        3,600-second check deadline.
+        """
 
         if not payload or len(payload.encode()) > 4 * 1024 * 1024:
             raise ValueError("GB10 supervisor controller payload is invalid")
-        return self._execute(argv, input=payload, timeout=12)
+        return self._execute(argv, input=payload, timeout=1740)
 
     def systemd_preflight(self, argv: Sequence[str]) -> CommandResult:
         """Run only the fixed Tier 0 systemd probes with a short RPC bound."""

@@ -968,7 +968,9 @@ def build_external_supervisor_predecessor_check(
                 EvidenceField("pool-identity-digest", "sha256"),
                 EvidenceField("controller-bindings", "string-map"),
             ),
-            timeout_seconds=30,
+            # GB10 may need two 1,740-second controller observations: first to
+            # discover authority and a second explicit absent-bootstrap probe.
+            timeout_seconds=3600,
             freshness_ttl_seconds=120,
             remediation=(
                 "restore the checked-in #907 or active canonical supervisor authority, "
@@ -976,7 +978,7 @@ def build_external_supervisor_predecessor_check(
             ),
             secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
         ),
-        implementation_version="v2",
+        implementation_version="v3",
         operations={CheckOperation.PROBE: probe},
     )
 

@@ -229,7 +229,7 @@ def test_gb10_supervisor_controller_ssh_forwards_only_bounded_typed_stdin(
             "cwd": None,
             "env": _environment(),
             "input": '{"schema_version":1}\n',
-            "timeout": 12,
+            "timeout": 1740,
         }
     ]
     with pytest.raises(ValueError, match="payload is invalid"):

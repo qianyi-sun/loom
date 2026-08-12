@@ -305,8 +305,12 @@ def _safe_tree(
                     if resolved != system_python.resolve(strict=True):
                         raise BrokerError("candidate runtime symlink escapes authority")
                 else:
-                    resolved = (path.parent / target).resolve(strict=False)
-                    if not resolved.is_relative_to(root_resolved):
+                    # Validate the immediate lexical destination without
+                    # following a sibling link to its approved terminal.
+                    # Standard venvs use ``python3 -> python`` while ``python``
+                    # is the separately validated system-Python link.
+                    destination = Path(os.path.normpath(path.parent.resolve(strict=True) / target))
+                    if not destination.is_relative_to(root_resolved):
                         raise BrokerError("candidate runtime symlink escapes authority")
                 continue
             if not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)):
@@ -856,7 +860,7 @@ def _publish_candidate(
                 str(system_python),
             ],
             environment=environment,
-            timeout=1800,
+            timeout=1200,
             run_as=build_identity,
         )
         sealed_temporary = Path(

@@ -898,8 +898,8 @@ def test_installed_gb10_absent_retry_fits_inside_predecessor_check_deadline(
     )
 
     assert source(context) is expected
-    assert [attempt["timeout"] for attempt in attempts] == [12, 12]
-    assert sum(int(attempt["timeout"]) for attempt in attempts) < 30
+    assert [attempt["timeout"] for attempt in attempts] == [1740, 1740]
+    assert sum(int(attempt["timeout"]) for attempt in attempts) < 3600
 
 
 def test_installed_gb10_observation_binds_context_candidate_to_typed_transport(
