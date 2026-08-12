@@ -23,7 +23,9 @@ from loom.integrations.behavior.contracts import (
 from loom.integrations.behavior.errors import (
     BehaviorContractError,
     BehaviorExitCode,
+    BehaviorInfrastructureTransientError,
     BehaviorInterruptedError,
+    BehaviorProviderTransientError,
 )
 from loom.pipeline.spec import ContainerNodeV1
 from loom.pipeline.state import StageResultInputV1, StageResultV1
@@ -103,6 +105,10 @@ def _resolve_stage_adapter(request: StageRequestV1) -> StageAdapterBinding | Non
         from loom.integrations.behavior.stages.rollout import rollout_stage_binding
 
         return rollout_stage_binding()
+    if request.stage.value == "offline_judge":
+        raise BehaviorContractError(
+            "offline_judge requires the worker-injected frozen profile and Gateway runner"
+        )
     return None
 
 
@@ -189,6 +195,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run(args.request, args.output_dir)
     except BehaviorInterruptedError as exc:
         return 128 + exc.signum
+    except BehaviorProviderTransientError as exc:
+        print(f"provider transient: {exc}", file=sys.stderr)
+        return int(BehaviorExitCode.PROVIDER_TRANSIENT)
+    except BehaviorInfrastructureTransientError as exc:
+        print(f"infrastructure transient: {exc}", file=sys.stderr)
+        return int(BehaviorExitCode.INFRASTRUCTURE_TRANSIENT)
     except (BehaviorContractError, OSError, ValidationError, ValueError) as exc:
         print(f"contract error: {exc}", file=sys.stderr)
         return int(BehaviorExitCode.CONTRACT_ERROR)

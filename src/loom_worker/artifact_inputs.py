@@ -174,6 +174,7 @@ class MaterializedInputSet:
     root: Path | None = None
     input_view_digest: str | None = None
     stage_request_path: Path | None = None
+    control_binding_path: Path | None = None
     counters: MaterializationCounters = field(default_factory=MaterializationCounters)
     _entered: bool = False
     _closed: bool = False
@@ -512,9 +513,22 @@ class ArtifactInputMaterializer:
                     cas_rename_count=counters.cas_rename_count,
                 )
             result.stage_request_path = self._stage_request(root, claim.stage_request)
-            identity = [*view_records, {"stage_request_sha256": (
-                claim.stage_request.stage_request_sha256 if claim.stage_request else None
-            )}]
+            result.control_binding_path = self._control_binding_snapshot(
+                root, claim.control_binding_snapshot
+            )
+            identity = [
+                *view_records,
+                {
+                    "stage_request_sha256": (
+                        claim.stage_request.stage_request_sha256 if claim.stage_request else None
+                    ),
+                    "control_binding_snapshot_sha256": (
+                        digest_bytes(canonical_document(claim.control_binding_snapshot))
+                        if claim.control_binding_snapshot is not None
+                        else None
+                    ),
+                },
+            ]
             result.input_view_digest = digest_bytes(canonical_identity(identity))
             os.chmod(root, 0o555, follow_symlinks=False)
         except Exception:
@@ -878,6 +892,16 @@ class ArtifactInputMaterializer:
         raw = grant.canonical_jcs_lf.encode("utf-8")
         path = root / "stage-request.json"
         _write_immutable(path, raw)
+        return path
+
+    @staticmethod
+    def _control_binding_snapshot(
+        root: Path, snapshot: dict[str, object] | None
+    ) -> Path | None:
+        if snapshot is None:
+            return None
+        path = root / "control-binding.json"
+        _write_immutable(path, canonical_document(snapshot))
         return path
 
     async def _release(self, result: MaterializedInputSet) -> None:

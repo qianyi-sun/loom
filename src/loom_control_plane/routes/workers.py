@@ -247,13 +247,29 @@ async def claim_any_work(
                                w.capability_snapshot_json,
                                w.capability_snapshot_digest,
                                w.slurm_gpu_allocation_evidence_json,
-                               w.slurm_gpu_allocation_evidence_digest
+                               w.slurm_gpu_allocation_evidence_digest,
+                               frozen.snapshot_json AS control_binding_snapshot
                           FROM execution_attempts a
                           JOIN pipeline_stage_runs s ON s.id=a.stage_run_id
                           JOIN pipeline_runs r ON r.id=s.pipeline_run_id
                           JOIN workers w ON w.id=a.worker_id
                           LEFT JOIN pipeline_acceptance_preflight_prerequisites p
                             ON p.pipeline_run_id=r.id AND p.fence_state='active'
+                          LEFT JOIN pipeline_run_control_bindings frozen
+                            ON frozen.pipeline_run_id=r.id
+                           AND frozen.node_key=s.node_key
+                           AND frozen.source_object_id=(
+                               s.resolved_execution_spec_json
+                                 ->'control_binding_snapshots'->0->>'object_id'
+                           )::uuid
+                           AND frozen.source_version=(
+                               s.resolved_execution_spec_json
+                                 ->'control_binding_snapshots'->0->>'version'
+                           )::integer
+                           AND frozen.snapshot_sha256=(
+                               s.resolved_execution_spec_json
+                                 ->'control_binding_snapshots'->0->>'snapshot_sha256'
+                           )
                          WHERE a.id=(:attempt_id)::uuid
                     """),
                     {"attempt_id": row["id"]},
@@ -392,6 +408,7 @@ async def claim_any_work(
                     checkpoint=node["checkpoint"],
                     fanout_commit=node["fanout_commit"],
                     stage_request=stage_request,
+                    control_binding_snapshot=attempt_row["control_binding_snapshot"],
                     acceptance_preflight=acceptance,
                     provider_connection_ref=attempt_row["provider_connection_ref"],
                     secret_refs=list(attempt_row["secret_refs"]),

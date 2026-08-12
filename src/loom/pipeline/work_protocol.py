@@ -417,6 +417,7 @@ class ExecutionAttemptClaimV1(PipelineModel):
     checkpoint: CheckpointPolicyV1 | None
     fanout_commit: PlatformFanoutCommitV1 | None
     stage_request: StageRequestGrantV1 | None
+    control_binding_snapshot: dict[str, object] | None = None
     acceptance_preflight: AcceptancePreflightGrantV1 | None
     provider_connection_ref: UUID | None
     secret_refs: list[_OpaqueReference]
@@ -436,6 +437,36 @@ class ExecutionAttemptClaimV1(PipelineModel):
     def duplicated_claim_fields_are_exact(self) -> ExecutionAttemptClaimV1:
         spec = self.execution_spec_snapshot
         node = spec.container_node
+        refs = spec.control_binding_snapshots
+        if not refs:
+            if self.control_binding_snapshot is not None:
+                raise ValueError("claim cannot carry a control snapshot without a frozen ref")
+        else:
+            if len(refs) != 1 or self.control_binding_snapshot is None:
+                raise ValueError("claim requires the one frozen control snapshot")
+            from loom.pipeline.control_bindings import (
+                JudgeExecutionProfileV1,
+                RecipeProviderBindingV1,
+                control_snapshot_digest,
+            )
+
+            raw = self.control_binding_snapshot
+            snapshot = (
+                JudgeExecutionProfileV1.model_validate(raw)
+                if refs[0].kind == "judge_profile"
+                else RecipeProviderBindingV1.model_validate(raw)
+            )
+            object_id = (
+                snapshot.profile_id
+                if isinstance(snapshot, JudgeExecutionProfileV1)
+                else snapshot.binding_id
+            )
+            if (
+                refs[0].object_id != object_id
+                or refs[0].version != snapshot.version
+                or refs[0].snapshot_sha256 != control_snapshot_digest(snapshot)
+            ):
+                raise ValueError("claim control snapshot disagrees with its immutable ref")
         if canonical_digest(spec) != self.execution_spec_digest:
             raise ValueError("execution spec bytes and digest drift")
         if (

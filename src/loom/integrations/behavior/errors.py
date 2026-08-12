@@ -19,6 +19,14 @@ class BehaviorContractError(ValueError):
     """The persisted document violates the closed BEHAVIOR wire contract."""
 
 
+class BehaviorProviderTransientError(RuntimeError):
+    """A classified Gateway/provider failure eligible for Attempt retry."""
+
+
+class BehaviorInfrastructureTransientError(RuntimeError):
+    """A local shim/runner/MCP startup or crash eligible for Attempt retry."""
+
+
 class BehaviorInterruptedError(Exception):
     """A supervised adapter received SIGINT or SIGTERM."""
 

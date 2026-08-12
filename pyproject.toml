@@ -141,6 +141,12 @@ include = ["loom*", "loom_drivers*", "capacity_migrations*"]
 # spec; without this entry they'd be excluded from the wheel.
 "loom_cli.templates.k8s" = ["*.yaml.j2", "_env.j2"]
 "loom_cli.catalog_data" = ["*.json"]
+"loom.integrations.behavior" = [
+  "provider_assets/offline_judge/*.json",
+  "provider_assets/offline_judge/*.md",
+  "provider_assets/offline_judge/*.py",
+  "provider_assets/offline_judge/tools/*.py",
+]
 "capacity_migrations" = ["alembic.ini", "env.py", "script.py.mako"]
 "capacity_migrations.versions" = ["*.py"]
 
