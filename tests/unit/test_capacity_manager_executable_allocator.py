@@ -5,6 +5,7 @@ from __future__ import annotations
 from uuid import UUID
 
 import pytest
+from pydantic import ValidationError
 
 from loom_capacity_manager.allocator import (
     ExecutableAllocationError,
@@ -12,9 +13,9 @@ from loom_capacity_manager.allocator import (
     allocate_shadow,
     promote_shadow_epoch,
 )
-from loom_capacity_manager.contracts import ShadowEpochV1
+from loom_capacity_manager.contracts import ObservedCommitmentV1, ShadowEpochV1
 from loom_capacity_manager.executable_contracts import ExecutionAuthorityV2
-from tests.capacity_fixtures import allocator_input, allocator_subject
+from tests.capacity_fixtures import allocator_input, allocator_subject, resource_vector
 
 
 def execution_authority_fixture(
@@ -46,7 +47,7 @@ def shadow_epoch_fixture() -> ShadowEpochV1:
     return allocate_shadow(allocator_input((subject,), gb10_slots=1, oldlab_slots=1))
 
 
-def test_promotion_requires_active_authority() -> None:
+def test_allocation_promotion_requires_active_authority() -> None:
     with pytest.raises(ExecutableAllocationError, match="active execution authority"):
         promote_shadow_epoch(shadow_epoch_fixture(), None, allocation_epoch=7)
 
@@ -56,9 +57,15 @@ def test_promotion_requires_active_authority() -> None:
             execution_authority_fixture(execution_state="drain-only"),
             allocation_epoch=7,
         )
+    with pytest.raises(ValidationError, match="active execution authority"):
+        ExecutableEpochV2.from_shadow(
+            shadow_epoch_fixture(),
+            execution_authority_fixture(execution_state="drain-only"),
+            allocation_epoch=7,
+        )
 
 
-def test_promotion_preserves_exact_placement() -> None:
+def test_allocation_promotion_preserves_exact_placement() -> None:
     shadow = shadow_epoch_fixture()
     result = promote_shadow_epoch(shadow, execution_authority_fixture(), allocation_epoch=7)
 
@@ -72,7 +79,45 @@ def test_promotion_preserves_exact_placement() -> None:
     assert result.executable is True
 
 
-def test_promotion_rejects_a_changed_configuration_epoch() -> None:
+@pytest.mark.parametrize(
+    "update, message",
+    [
+        (
+            {
+                "execution": execution_authority_fixture(execution_state="drain-only").model_dump(
+                    mode="python"
+                )
+                | {"allocation_epoch": 7}
+            },
+            "active execution authority",
+        ),
+        ({"executable_new_capacity_ceiling": 0}, "execution ceiling"),
+        ({"executable_new_capacity_rate_per_minute": 0}, "execution rate"),
+        (
+            {
+                "configuration": shadow_epoch_fixture().configuration.model_copy(
+                    update={"configuration_epoch": 2}
+                )
+            },
+            "configuration epoch",
+        ),
+    ],
+)
+def test_allocation_epoch_rejects_contradictory_execution_bindings(
+    update: dict[str, object],
+    message: str,
+) -> None:
+    executable = promote_shadow_epoch(
+        shadow_epoch_fixture(),
+        execution_authority_fixture(),
+        allocation_epoch=7,
+    )
+
+    with pytest.raises(ValidationError, match=message):
+        ExecutableEpochV2.model_validate(executable.model_dump(mode="python") | update)
+
+
+def test_allocation_promotion_rejects_a_changed_configuration_epoch() -> None:
     with pytest.raises(ExecutableAllocationError, match="configuration epoch changed"):
         promote_shadow_epoch(
             shadow_epoch_fixture(),
@@ -81,7 +126,7 @@ def test_promotion_rejects_a_changed_configuration_epoch() -> None:
         )
 
 
-def test_global_cohort_promotion_covers_tiers_owners_architectures_and_neutral() -> None:
+def test_allocation_promotion_covers_tiers_owners_architectures_and_neutral() -> None:
     subjects = (
         allocator_subject(
             10,
@@ -136,23 +181,50 @@ def test_global_cohort_promotion_covers_tiers_owners_architectures_and_neutral()
     assert executable.allocations == shadow.allocations
     assert placements["production-x86"] == "oldlab"
     assert placements["staging-arm"] == "gb10"
-    assert set(placements) == {
-        "production-x86",
-        "staging-arm",
-        "shared-neutral",
-        "alice-neutral",
-        "bob-neutral",
+    assert placements == {
+        "alice-neutral": "gb10",
+        "bob-neutral": "gb10",
+        "production-x86": "oldlab",
+        "shared-neutral": "oldlab",
+        "staging-arm": "gb10",
     }
     assert executable.executable_new_capacity_ceiling == 1
     assert all(subject.configuration.min_slots == 0 for subject in subjects)
 
 
-def test_scale_to_zero_promotes_the_exact_empty_desired_plan() -> None:
+def test_allocation_scale_to_zero_preserves_draining_commitments_exactly() -> None:
     subjects = (
         allocator_subject(20, account_id="dev-alice", min_slots=0, max_slots=1),
         allocator_subject(21, account_id="dev-bob", min_slots=0, max_slots=1),
     )
-    shadow = allocate_shadow(allocator_input(subjects, gb10_slots=1, oldlab_slots=1))
+    commitments = tuple(
+        ObservedCommitmentV1(
+            kind="physical",
+            commitment_id=f"prior-{pool_id}",
+            physical_identity=f"worker-{pool_id}",
+            subject_id=subject.configuration.subject_id,
+            subject_incarnation=subject.configuration.subject_incarnation,
+            deployment_generation=subject.configuration.deployment_generation,
+            pool_id=pool_id,
+            pool_generation=1,
+            profile_id="one-slot",
+            profile_generation=1,
+            profile_digest="a" * 64,
+            shape_id="one-slot",
+            resources=resource_vector(),
+            state="live",
+            node_ids=(f"{pool_id}-node",),
+        )
+        for subject, pool_id in zip(subjects, ("gb10", "oldlab"), strict=True)
+    )
+    shadow = allocate_shadow(
+        allocator_input(
+            subjects,
+            gb10_slots=1,
+            oldlab_slots=1,
+            observed_commitments=commitments,
+        )
+    )
     executable = promote_shadow_epoch(
         shadow,
         execution_authority_fixture(),
@@ -161,14 +233,10 @@ def test_scale_to_zero_promotes_the_exact_empty_desired_plan() -> None:
 
     assert executable.allocations == shadow.allocations
     assert all(allocation.desired_slots == 0 for allocation in executable.allocations)
+    assert sum(allocation.retained_commitment_slots for allocation in executable.allocations) == 2
+    assert {
+        shape_id
+        for allocation in executable.allocations
+        for shape_id in allocation.draining_shape_ids
+    } == {"prior-gb10", "prior-oldlab"}
     assert executable.hypothetical_launch_rank == ()
-
-
-for _allocation_test in (
-    test_promotion_requires_active_authority,
-    test_promotion_preserves_exact_placement,
-    test_promotion_rejects_a_changed_configuration_epoch,
-    test_global_cohort_promotion_covers_tiers_owners_architectures_and_neutral,
-    test_scale_to_zero_promotes_the_exact_empty_desired_plan,
-):
-    _allocation_test.allocation = True  # type: ignore[attr-defined]

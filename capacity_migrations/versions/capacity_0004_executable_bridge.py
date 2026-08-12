@@ -381,6 +381,112 @@ def upgrade() -> None:
         ["allocation_epoch", "execution_epoch", "execution_manifest_sha256"],
         ondelete="RESTRICT",
     )
+    op.execute(
+        """
+        CREATE FUNCTION capacity_allocation_epoch_binding_guard()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          IF ROW(
+            NEW.status,
+            NEW.executable,
+            NEW.execution_epoch,
+            NEW.execution_manifest_sha256
+          ) IS DISTINCT FROM ROW(
+            OLD.status,
+            OLD.executable,
+            OLD.execution_epoch,
+            OLD.execution_manifest_sha256
+          ) THEN
+            RAISE EXCEPTION 'allocation epoch mode binding is immutable'
+              USING ERRCODE = '23514';
+          END IF;
+          RETURN NEW;
+        END;
+        $$
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER capacity_allocation_epoch_binding_guard
+        BEFORE UPDATE ON capacity_allocation_epochs
+        FOR EACH ROW EXECUTE FUNCTION capacity_allocation_epoch_binding_guard()
+        """
+    )
+    op.execute(
+        """
+        CREATE FUNCTION capacity_allocation_binding_guard()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        DECLARE
+          parent_status text;
+          parent_executable boolean;
+          parent_execution_epoch bigint;
+          parent_execution_manifest_sha256 text;
+        BEGIN
+          IF TG_OP = 'UPDATE' AND ROW(
+            NEW.mode,
+            NEW.executable,
+            NEW.execution_epoch,
+            NEW.execution_manifest_sha256
+          ) IS DISTINCT FROM ROW(
+            OLD.mode,
+            OLD.executable,
+            OLD.execution_epoch,
+            OLD.execution_manifest_sha256
+          ) THEN
+            RAISE EXCEPTION 'allocation mode binding is immutable'
+              USING ERRCODE = '23514';
+          END IF;
+          SELECT status, executable, execution_epoch, execution_manifest_sha256
+          INTO parent_status, parent_executable, parent_execution_epoch,
+               parent_execution_manifest_sha256
+          FROM capacity_allocation_epochs
+          WHERE allocation_epoch = NEW.allocation_epoch;
+          IF NOT FOUND OR parent_status = 'failed' OR (
+            parent_status = 'executable'
+            AND ROW(
+              NEW.mode,
+              NEW.executable,
+              NEW.execution_epoch,
+              NEW.execution_manifest_sha256
+            ) IS DISTINCT FROM ROW(
+              'executable'::text,
+              parent_executable,
+              parent_execution_epoch,
+              parent_execution_manifest_sha256
+            )
+          ) OR (
+            parent_status IN ('shadow', 'failed')
+            AND ROW(
+              NEW.mode,
+              NEW.executable,
+              NEW.execution_epoch,
+              NEW.execution_manifest_sha256
+            ) IS DISTINCT FROM ROW(
+              'shadow'::text,
+              parent_executable,
+              parent_execution_epoch,
+              parent_execution_manifest_sha256
+            )
+          ) THEN
+            RAISE EXCEPTION 'allocation binding must match its parent epoch'
+              USING ERRCODE = '23514';
+          END IF;
+          RETURN NEW;
+        END;
+        $$
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER capacity_allocation_binding_guard
+        BEFORE INSERT OR UPDATE ON capacity_allocations
+        FOR EACH ROW EXECUTE FUNCTION capacity_allocation_binding_guard()
+        """
+    )
     op.add_column(
         "capacity_authority_state",
         sa.Column(
@@ -857,6 +963,21 @@ def downgrade() -> None:
     )
     op.execute("DROP FUNCTION capacity_authority_execution_transition_guard()")
     op.execute(
+        """
+        DO $$
+        BEGIN
+          IF EXISTS (
+            SELECT 1 FROM capacity_allocation_epochs WHERE status = 'executable'
+          ) THEN
+            RAISE EXCEPTION
+              'cannot downgrade capacity_0004 with executable allocation history'
+              USING ERRCODE = '55000';
+          END IF;
+        END;
+        $$
+        """
+    )
+    op.execute(
         "DROP TRIGGER capacity_execution_executor_truncate_guard ON capacity_execution_executors"
     )
     op.execute(
@@ -868,6 +989,10 @@ def downgrade() -> None:
         "DROP TRIGGER capacity_execution_epoch_transition_guard ON capacity_execution_epochs"
     )
     op.execute("DROP FUNCTION capacity_execution_epoch_transition_guard()")
+    op.execute("DROP TRIGGER capacity_allocation_binding_guard ON capacity_allocations")
+    op.execute("DROP FUNCTION capacity_allocation_binding_guard()")
+    op.execute("DROP TRIGGER capacity_allocation_epoch_binding_guard ON capacity_allocation_epochs")
+    op.execute("DROP FUNCTION capacity_allocation_epoch_binding_guard()")
     op.drop_constraint(
         "capacity_allocation_execution_binding_fkey",
         "capacity_allocations",

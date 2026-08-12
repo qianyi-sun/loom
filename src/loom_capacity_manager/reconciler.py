@@ -105,6 +105,8 @@ async def _commit_reconciled_epoch(
             != authority_row.execution_manifest_sha256
         ):
             raise StaleWriterError("execution fence changed before commit")
+        if authority_row.increase_freeze:
+            raise CapacityStoreError("capacity increases are frozen")
 
         now = (await session.execute(select(func.clock_timestamp()))).scalar_one()
         row = CapacityAllocationEpoch(
@@ -286,17 +288,29 @@ async def _record_failure(
     ],
     reason: str,
     input_digest: str | None,
+    expected_authority: ExecutionAuthorityV2 | None,
     persist_failed_epoch: bool = True,
 ) -> int | None:
     async with session_factory() as session:
-        recorded = await store.record_shadow_failure(
-            session,
-            writer,
-            event_kind=event_kind,
-            reason=reason,
-            expected_input_digest=input_digest,
-            persist_failed_epoch=persist_failed_epoch,
-        )
+        if expected_authority is None:
+            recorded = await store.record_shadow_failure(
+                session,
+                writer,
+                event_kind=event_kind,
+                reason=reason,
+                expected_input_digest=input_digest,
+                persist_failed_epoch=persist_failed_epoch,
+            )
+        else:
+            recorded = await store.record_executable_reconcile_failure(
+                session,
+                writer,
+                expected_authority,
+                event_kind=event_kind,
+                reason=reason,
+                expected_input_digest=input_digest,
+                persist_failed_epoch=persist_failed_epoch,
+            )
         return recorded.allocation_epoch
 
 
@@ -321,10 +335,19 @@ async def reconcile_shadow_once(
         raise ValueError("allocation_timeout_seconds must be between 0 and 60")
     resolved_store = store or CapacityManagementStore()
     last_input_digest = "0" * 64
+    last_expected_authority: ExecutionAuthorityV2 | None = None
 
     for attempt_count in range(1, max_attempts + 1):
+        expected_authority: ExecutionAuthorityV2 | None = None
         try:
             async with session_factory() as session:
+                execution = await resolved_store.execution_authority(session)
+                if (
+                    isinstance(execution, ExecutionAuthorityV2)
+                    and execution.execution_state == "active"
+                ):
+                    expected_authority = execution
+                    last_expected_authority = execution
                 allocation_input = await resolved_store.load_allocation_input(
                     session,
                     writer,
@@ -348,6 +371,7 @@ async def reconcile_shadow_once(
                     event_kind="shadow_allocation_invalid",
                     reason=reason,
                     input_digest=None,
+                    expected_authority=expected_authority,
                 )
             except StaleWriterError:
                 allocation_epoch = None
@@ -379,6 +403,7 @@ async def reconcile_shadow_once(
                     event_kind="shadow_allocation_timeout",
                     reason=reason,
                     input_digest=last_input_digest,
+                    expected_authority=expected_authority,
                 )
             except StaleAllocationInputError:
                 continue
@@ -401,6 +426,7 @@ async def reconcile_shadow_once(
                     event_kind="shadow_allocation_invalid",
                     reason=reason,
                     input_digest=last_input_digest,
+                    expected_authority=expected_authority,
                 )
             except StaleAllocationInputError:
                 continue
@@ -423,6 +449,7 @@ async def reconcile_shadow_once(
                     event_kind="shadow_allocation_failure",
                     reason=reason,
                     input_digest=last_input_digest,
+                    expected_authority=expected_authority,
                 )
             except StaleAllocationInputError:
                 continue
@@ -486,6 +513,7 @@ async def reconcile_shadow_once(
                     event_kind="shadow_allocation_failure",
                     reason=reason,
                     input_digest=last_input_digest,
+                    expected_authority=expected_authority,
                 )
             except StaleAllocationInputError:
                 continue
@@ -508,9 +536,10 @@ async def reconcile_shadow_once(
             event_kind="shadow_allocation_input_contention",
             reason=reason,
             input_digest=None,
+            expected_authority=last_expected_authority,
             persist_failed_epoch=False,
         )
-    except StaleWriterError:
+    except (StaleAllocationInputError, StaleWriterError):
         pass
     return ShadowRunResult(
         status="input-contention",

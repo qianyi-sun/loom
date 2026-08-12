@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -21,7 +22,7 @@ from sqlalchemy import delete, select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from loom_capacity_manager.allocator import allocate_shadow
+from loom_capacity_manager.allocator import ShadowAllocatorError, allocate_shadow
 from loom_capacity_manager.api import RequestBodyLimitMiddleware, create_app
 from loom_capacity_manager.auth import CapacityPrincipalVerifier
 from loom_capacity_manager.config import CapacityManagerSettings, build_uvicorn_kwargs
@@ -31,11 +32,17 @@ from loom_capacity_manager.models import (
     Base,
     CapacityAllocation,
     CapacityAllocationEpoch,
+    CapacityAuditEvent,
     CapacityAuthorityState,
 )
 from loom_capacity_manager.ownership import public_key_fingerprint
 from loom_capacity_manager.reconciler import reconcile_shadow_once
-from loom_capacity_manager.store import CapacityManagementStore
+from loom_capacity_manager.store import CapacityManagementStore, StaleWriterError
+from tests.capacity_execution_fixtures import (
+    execution_policy,
+    register_execution_executors,
+    setup_execution,
+)
 from tests.capacity_fixtures import (
     AUTHORITY_ID,
     DEMAND_REPORTER_ID,
@@ -52,15 +59,6 @@ from tests.capacity_fixtures import (
     fleet_with_development_template,
     pool_observation,
     subject_configuration,
-)
-from tests.integration.test_capacity_manager_execution_epoch import (
-    _policy as execution_policy,
-)
-from tests.integration.test_capacity_manager_execution_epoch import (
-    _register_execution_executors as register_execution_executors,
-)
-from tests.integration.test_capacity_manager_execution_epoch import (
-    _setup as setup_execution,
 )
 
 OPERATOR_TOKEN = "operator-api-secret"
@@ -165,6 +163,36 @@ class BlockingAllocator:
         if not self.release.wait(timeout=5):
             raise TimeoutError("test allocator release timed out")
         return allocate_shadow(value)
+
+
+class ActiveTimeoutAllocator:
+    async def __call__(self, value):  # type: ignore[no-untyped-def]
+        del value
+        await asyncio.sleep(5)
+
+
+class ActiveInvalidAllocator:
+    def __call__(self, value):  # type: ignore[no-untyped-def]
+        del value
+        raise ShadowAllocatorError("synthetic invalid allocation")
+
+
+class ActiveUnexpectedAllocator:
+    def __call__(self, value):  # type: ignore[no-untyped-def]
+        del value
+        raise RuntimeError("synthetic unexpected allocation failure")
+
+
+class ActiveCommitFailureStore(CapacityManagementStore):
+    def __init__(self) -> None:
+        super().__init__(execution_policy=execution_policy())
+        self._input_loads = 0
+
+    async def load_allocation_input(self, session, writer):  # type: ignore[no-untyped-def]
+        self._input_loads += 1
+        if self._input_loads == 2:
+            raise RuntimeError("synthetic executable transaction failure")
+        return await super().load_allocation_input(session, writer)
 
 
 @pytest.fixture
@@ -829,6 +857,241 @@ async def test_allocation_reconcile_commits_fresh_plan_under_active_execution_fe
     with pytest.raises(DBAPIError):
         async with capacity_session.begin_nested():
             await capacity_session.execute(update(CapacityAllocation).values(mode="shadow"))
+
+    shadow_parent = CapacityAllocationEpoch(
+        writer_epoch=fixture.writer.writer_epoch,
+        configuration_epoch=active.configuration_epoch,
+        input_digest="9" * 64,
+        status="shadow",
+        failure_reason=None,
+        complete_payload={"schema_version": 1},
+        executable=False,
+        execution_epoch=None,
+        execution_manifest_sha256=None,
+        committed_at=None,
+    )
+    capacity_session.add(shadow_parent)
+    await capacity_session.flush()
+    shadow_child = CapacityAllocation(
+        allocation_epoch=shadow_parent.allocation_epoch,
+        subject_id=uuid4(),
+        subject_incarnation=uuid4(),
+        deployment_generation=1,
+        pool_id="gb10",
+        desired_shapes=[],
+        desired_resources={},
+        commitments=[],
+        drains=[],
+        allowances=[],
+        witness={},
+        mode="shadow",
+        executable=False,
+        execution_epoch=None,
+        execution_manifest_sha256=None,
+    )
+    capacity_session.add(shadow_child)
+    await capacity_session.flush()
+    with pytest.raises(DBAPIError, match="allocation epoch mode binding is immutable"):
+        async with capacity_session.begin_nested():
+            await capacity_session.execute(
+                update(CapacityAllocationEpoch)
+                .where(CapacityAllocationEpoch.allocation_epoch == shadow_parent.allocation_epoch)
+                .values(
+                    status="executable",
+                    executable=True,
+                    execution_epoch=active.execution_epoch,
+                    execution_manifest_sha256=active.execution_manifest_sha256,
+                )
+            )
+            await capacity_session.execute(
+                update(CapacityAllocation)
+                .where(CapacityAllocation.id == shadow_child.id)
+                .values(
+                    mode="executable",
+                    executable=True,
+                    execution_epoch=active.execution_epoch,
+                    execution_manifest_sha256=active.execution_manifest_sha256,
+                )
+            )
+
+    capacity_session.add(
+        CapacityAllocation(
+            allocation_epoch=epoch.allocation_epoch,
+            subject_id=uuid4(),
+            subject_incarnation=uuid4(),
+            deployment_generation=1,
+            pool_id="oldlab",
+            desired_shapes=[],
+            desired_resources={},
+            commitments=[],
+            drains=[],
+            allowances=[],
+            witness={},
+            mode="shadow",
+            executable=False,
+            execution_epoch=None,
+            execution_manifest_sha256=None,
+        )
+    )
+    with pytest.raises(DBAPIError, match="allocation binding must match its parent epoch"):
+        async with capacity_session.begin_nested():
+            await capacity_session.flush()
+
+
+async def _active_execution_fixture(capacity_session: AsyncSession):  # type: ignore[no-untyped-def]
+    fixture = await setup_execution(capacity_session, execution_policy=execution_policy())
+    prepared = await fixture.store.prepare_execution_epoch(
+        capacity_session,
+        fixture.request,
+        actor="activation-operator",
+        idempotency_key=uuid4(),
+    )
+    await register_execution_executors(capacity_session, fixture, prepared)
+    active = await fixture.store.activate_execution_epoch(
+        capacity_session,
+        ExecutionActivationV2(
+            authority_incarnation=AUTHORITY_ID,
+            expected_writer_epoch=fixture.writer.writer_epoch,
+            execution_epoch=prepared.execution_epoch,
+            execution_manifest_sha256=prepared.execution_manifest_sha256,
+            executable_new_capacity_ceiling=1,
+            executable_new_capacity_rate_per_minute=1,
+        ),
+        actor="activation-operator",
+        idempotency_key=uuid4(),
+    )
+    return fixture, active
+
+
+@pytest.mark.parametrize(
+    "allocator, timeout, store_factory, expected_event",
+    [
+        (
+            ActiveTimeoutAllocator(),
+            0.01,
+            None,
+            "shadow_allocation_timeout",
+        ),
+        (
+            ActiveInvalidAllocator(),
+            1.0,
+            None,
+            "shadow_allocation_invalid",
+        ),
+        (
+            ActiveUnexpectedAllocator(),
+            1.0,
+            None,
+            "shadow_allocation_failure",
+        ),
+        (
+            allocate_shadow,
+            1.0,
+            ActiveCommitFailureStore,
+            "shadow_allocation_failure",
+        ),
+    ],
+)
+async def test_allocation_active_failure_records_false_null_evidence_and_freezes(
+    capacity_session: AsyncSession,
+    allocator,  # type: ignore[no-untyped-def]
+    timeout: float,
+    store_factory,  # type: ignore[no-untyped-def]
+    expected_event: str,
+) -> None:
+    fixture, active = await _active_execution_fixture(capacity_session)
+    store = fixture.store if store_factory is None else store_factory()
+    session_factory = async_sessionmaker(
+        bind=capacity_session.bind,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+
+    result = await reconcile_shadow_once(
+        session_factory,
+        fixture.writer,
+        allocator=allocator,
+        allocation_timeout_seconds=timeout,
+        store=store,
+    )
+
+    assert result.status == "failed"
+    failed = (await capacity_session.execute(select(CapacityAllocationEpoch))).scalar_one()
+    authority = (await capacity_session.execute(select(CapacityAuthorityState))).scalar_one()
+    audit = (
+        (
+            await capacity_session.execute(
+                select(CapacityAuditEvent).order_by(CapacityAuditEvent.id.desc())
+            )
+        )
+        .scalars()
+        .first()
+    )
+    assert failed.status == "failed"
+    assert failed.executable is False
+    assert failed.execution_epoch is None
+    assert failed.execution_manifest_sha256 is None
+    assert authority.execution_epoch == active.execution_epoch
+    assert authority.execution_manifest_sha256 == active.execution_manifest_sha256
+    assert authority.increase_freeze is True
+    assert authority.increase_freeze_reason == expected_event
+    assert audit is not None and audit.event_kind == expected_event
+
+
+async def test_allocation_active_failure_rejects_a_stale_authority_fence(
+    capacity_session: AsyncSession,
+) -> None:
+    fixture, active = await _active_execution_fixture(capacity_session)
+    successor = await fixture.store.register_writer(
+        capacity_session,
+        AUTHORITY_ID,
+        expected_epoch=fixture.writer.writer_epoch,
+    )
+
+    with pytest.raises(StaleWriterError):
+        await fixture.store.record_executable_reconcile_failure(
+            capacity_session,
+            fixture.writer,
+            active,
+            event_kind="shadow_allocation_failure",
+            reason="synthetic stale active failure",
+            expected_input_digest=None,
+        )
+
+    assert successor.writer_epoch > fixture.writer.writer_epoch
+    assert (
+        await capacity_session.execute(select(CapacityAllocationEpoch))
+    ).scalar_one_or_none() is None
+
+
+async def test_allocation_active_failure_freeze_blocks_later_promotion(
+    capacity_session: AsyncSession,
+) -> None:
+    fixture, active = await _active_execution_fixture(capacity_session)
+    await fixture.store.record_executable_reconcile_failure(
+        capacity_session,
+        fixture.writer,
+        active,
+        event_kind="shadow_allocation_failure",
+        reason="synthetic active failure",
+        expected_input_digest=None,
+    )
+    session_factory = async_sessionmaker(
+        bind=capacity_session.bind,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+
+    result = await reconcile_shadow_once(
+        session_factory,
+        fixture.writer,
+        max_attempts=1,
+        store=fixture.store,
+    )
+
+    assert result.status == "failed"
+    statuses = (await capacity_session.execute(select(CapacityAllocationEpoch.status))).scalars()
+    assert set(statuses) == {"failed"}
 
 
 def test_body_limit_and_status_pagination_are_bounded(

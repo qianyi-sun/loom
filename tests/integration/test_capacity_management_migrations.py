@@ -566,6 +566,98 @@ def test_capacity_0004_preserves_populated_writer_and_journal_across_downgrade(
         engine.dispose()
 
 
+def test_capacity_0004_refuses_downgrade_with_executable_allocation_history(
+    isolated_capacity_migration_url: str,
+) -> None:
+    cfg = _capacity_config(isolated_capacity_migration_url)
+    engine = create_engine(isolated_capacity_migration_url)
+    try:
+        command.upgrade(cfg, "capacity_0004")
+        with engine.begin() as connection:
+            authority = connection.execute(
+                text(
+                    "UPDATE capacity_authority_state SET writer_epoch = 1 "
+                    "WHERE singleton_id = 1 RETURNING authority_incarnation"
+                )
+            ).scalar_one()
+            connection.execute(
+                text(
+                    "INSERT INTO capacity_configuration_epochs "
+                    "(configuration_epoch, fleet_generation, fleet_digest, "
+                    "subject_generation_manifest, canonical_digest, "
+                    "activation_idempotency_key, activation_actor, "
+                    "activation_request_digest) VALUES "
+                    "(1, 1, repeat('1', 64), '[]'::jsonb, repeat('2', 64), "
+                    ":configuration_key, 'migration-test', repeat('3', 64))"
+                ),
+                {"configuration_key": uuid4()},
+            )
+            execution_manifest = "4" * 64
+            connection.execute(
+                text(
+                    "INSERT INTO capacity_execution_epochs "
+                    "(execution_epoch, authority_incarnation, prepared_writer_epoch, "
+                    "current_writer_epoch, configuration_epoch, fleet_generation, "
+                    "fleet_digest, execution_manifest_sha256, manifest_payload, "
+                    "trusted_fleet_release_sha256, oldlab_executor_id, "
+                    "oldlab_executor_incarnation, oldlab_pool_id, "
+                    "oldlab_pool_generation, gb10_executor_id, "
+                    "gb10_executor_incarnation, gb10_pool_id, gb10_pool_generation, "
+                    "environment_acknowledgements_sha256, legacy_writer_manifest_sha256, "
+                    "rollback_evidence_sha256, requested_ceiling, effective_ceiling, "
+                    "requested_rate_per_minute, effective_rate_per_minute, state, actor, "
+                    "idempotency_key, request_digest) VALUES "
+                    "(1, :authority, 1, 1, 1, 1, repeat('1', 64), "
+                    ":execution_manifest, '{}'::jsonb, repeat('5', 64), "
+                    "'oldlab-executor', :oldlab_incarnation, 'oldlab', 1, "
+                    "'gb10-executor', :gb10_incarnation, 'gb10', 1, "
+                    "repeat('6', 64), repeat('7', 64), repeat('8', 64), "
+                    "1, 0, 1, 0, 'prepared', 'migration-test', :execution_key, "
+                    "repeat('9', 64))"
+                ),
+                {
+                    "authority": authority,
+                    "execution_manifest": execution_manifest,
+                    "oldlab_incarnation": uuid4(),
+                    "gb10_incarnation": uuid4(),
+                    "execution_key": uuid4(),
+                },
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO capacity_allocation_epochs "
+                    "(writer_epoch, configuration_epoch, input_digest, status, "
+                    "failure_reason, complete_payload, executable, execution_epoch, "
+                    "execution_manifest_sha256, committed_at) VALUES "
+                    "(1, 1, repeat('a', 64), 'executable', NULL, '{}'::jsonb, true, "
+                    "1, :execution_manifest, now())"
+                ),
+                {"execution_manifest": execution_manifest},
+            )
+
+        with pytest.raises(
+            sqlalchemy.exc.DBAPIError,
+            match="cannot downgrade capacity_0004 with executable allocation history",
+        ):
+            command.downgrade(cfg, "capacity_0003")
+
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == ("capacity_0004")
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT count(*) FROM capacity_allocation_epochs "
+                        "WHERE status = 'executable'"
+                    )
+                ).scalar_one()
+                == 1
+            )
+    finally:
+        engine.dispose()
+
+
 def test_fleet_configuration_generation_is_unique_despite_null_subject_binding(
     capacity_postgres_url: str,
 ) -> None:

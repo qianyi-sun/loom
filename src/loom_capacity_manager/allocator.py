@@ -12,6 +12,8 @@ from math import isfinite
 from typing import Literal
 from uuid import UUID
 
+from pydantic import model_validator
+
 from loom_capacity_manager.contracts import (
     AllocationInputV1,
     ClaimSlotMatchV1,
@@ -89,6 +91,25 @@ class ExecutableEpochV2(StrictV2Model):
     executable_new_capacity_ceiling: Quantity
     executable_new_capacity_rate_per_minute: Quantity
     executable: Literal[True] = True
+
+    @model_validator(mode="after")
+    def _exact_active_execution_binding(self) -> ExecutableEpochV2:
+        if (
+            self.execution.execution_state != "active"
+            or self.execution.executable_new_capacity_ceiling <= 0
+            or self.execution.executable_new_capacity_rate_per_minute <= 0
+        ):
+            raise ValueError("active execution authority is required")
+        if self.configuration.configuration_epoch != self.execution.configuration_epoch:
+            raise ValueError("configuration epoch changed")
+        if self.executable_new_capacity_ceiling != self.execution.executable_new_capacity_ceiling:
+            raise ValueError("execution ceiling binding changed")
+        if (
+            self.executable_new_capacity_rate_per_minute
+            != self.execution.executable_new_capacity_rate_per_minute
+        ):
+            raise ValueError("execution rate binding changed")
+        return self
 
     @classmethod
     def from_shadow(
