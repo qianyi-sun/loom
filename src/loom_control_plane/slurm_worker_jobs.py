@@ -142,6 +142,11 @@ def _normalize_slurm_state(raw_state: str | None) -> str:
     return "failed"
 
 
+def normalize_slurm_state(raw_state: str | None) -> str:
+    """Return Loom's registry state for one raw Slurm state token."""
+    return _normalize_slurm_state(raw_state)
+
+
 def summarize_jobs(rows: list[dict[str, Any]]) -> SlurmWorkerCapacitySummary:
     summary = SlurmWorkerCapacitySummary()
     for row in rows:
@@ -332,8 +337,12 @@ async def reconcile_slurm_worker_jobs(
     observations: list[SlurmWorkerJobObservation],
     *,
     stale_after_seconds: int,
+    environment: str | None = None,
+    pool_name: str | None = None,
     now: datetime | None = None,
 ) -> SlurmWorkerJobReconcileResult:
+    if (environment is None) != (pool_name is None):
+        raise ValueError("environment and pool_name must be provided together")
     now = now or datetime.now(UTC)
     cutoff = now - timedelta(seconds=stale_after_seconds)
     observed_job_ids = {obs.job_id for obs in observations}
@@ -341,10 +350,16 @@ async def reconcile_slurm_worker_jobs(
     stale = 0
     missing = 0
     for obs in observations:
-        job = (
-            await session.execute(
-                select(SlurmWorkerJob).where(SlurmWorkerJob.job_id == obs.job_id),
+        job_stmt = select(SlurmWorkerJob).where(
+            SlurmWorkerJob.job_id == obs.job_id,
+        )
+        if environment is not None and pool_name is not None:
+            job_stmt = job_stmt.where(
+                SlurmWorkerJob.environment == environment,
+                SlurmWorkerJob.pool_name == pool_name,
             )
+        job = (
+            await session.execute(job_stmt)
         ).scalar_one_or_none()
         if job is None:
             missing += 1
@@ -410,6 +425,11 @@ async def reconcile_slurm_worker_jobs(
             )
 
     active_stmt = select(SlurmWorkerJob).where(SlurmWorkerJob.state.in_(ACTIVE_STATES))
+    if environment is not None and pool_name is not None:
+        active_stmt = active_stmt.where(
+            SlurmWorkerJob.environment == environment,
+            SlurmWorkerJob.pool_name == pool_name,
+        )
     if observed_job_ids:
         active_stmt = active_stmt.where(
             or_(

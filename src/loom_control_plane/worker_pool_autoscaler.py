@@ -46,6 +46,7 @@ from loom_control_plane.elastic_slurm_worker_controller import (
 from loom_control_plane.shared_capacity_broker import AutoscalerGrantHandoff
 from loom_control_plane.slurm_worker_jobs import (
     ACTIVE_STATES,
+    normalize_slurm_state,
     reconcile_slurm_worker_jobs,
     record_slurm_worker_job,
 )
@@ -115,6 +116,21 @@ class AutoscalerDecision:
 
 @dataclass(frozen=True)
 class SlurmScaleUpActuatorResult:
+    error: str | None = None
+    blocked_reason: str | None = None
+    blocked_details: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class SlurmJobRegistryRefreshResult:
+    error: str | None = None
+    freshly_pending_job_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SlurmPendingCancelActuatorResult:
+    cancelled_job_ids: tuple[str, ...] = ()
+    failed_job_ids: tuple[str, ...] = ()
     error: str | None = None
     blocked_reason: str | None = None
     blocked_details: dict[str, Any] | None = None
@@ -400,6 +416,24 @@ def compute_autoscaler_decision(
             policy=policy,
             observation=observation,
             desired_slots=max(policy.min_slots, active_plus_pending),
+            idle_since_at=None,
+        )
+
+    # Pending Slurm jobs have not executed user work, so they do not need the
+    # running-worker idle window. Only cancel the whole pending set when active
+    # capacity already satisfies the configured floor; otherwise some pending
+    # capacity may still be needed to reach ``min_slots``.
+    if (
+        policy.actuator == "slurm"
+        and observation.pending_slots > 0
+        and observation.active_slots >= policy.min_slots
+    ):
+        return _base_decision(
+            action="cancel_pending",
+            reason="idle_excess_pending_capacity",
+            policy=policy,
+            observation=observation,
+            desired_slots=policy.min_slots,
             idle_since_at=None,
         )
 
@@ -1110,9 +1144,9 @@ async def _refresh_slurm_job_registry(
     *,
     runner: SlurmWorkerCommandRunner | None,
     now: datetime,
-) -> str | None:
+) -> SlurmJobRegistryRefreshResult:
     if row.actuator != "slurm":
-        return None
+        return SlurmJobRegistryRefreshResult()
     job_ids = tuple(
         str(job_id)
         for (job_id,) in (
@@ -1128,7 +1162,7 @@ async def _refresh_slurm_job_registry(
         if job_id is not None
     )
     if not job_ids:
-        return None
+        return SlurmJobRegistryRefreshResult()
     config = _slurm_config_from_policy(row)
     runner = runner or SubprocessSlurmCommandRunner().bind_config(config)
     try:
@@ -1137,6 +1171,8 @@ async def _refresh_slurm_job_registry(
             session,
             observations,
             stale_after_seconds=config.stale_after_seconds,
+            environment=row.environment,
+            pool_name=row.pool_name,
             now=now,
         )
     except Exception as exc:
@@ -1148,8 +1184,17 @@ async def _refresh_slurm_job_registry(
                 "err": str(exc),
             },
         )
-        return str(exc)
-    return None
+        return SlurmJobRegistryRefreshResult(error=str(exc))
+    requested_job_ids = set(job_ids)
+    freshly_pending_job_ids = tuple(sorted({
+        observation.job_id
+        for observation in observations
+        if observation.job_id in requested_job_ids
+        and normalize_slurm_state(observation.slurm_state) == "pending"
+    }))
+    return SlurmJobRegistryRefreshResult(
+        freshly_pending_job_ids=freshly_pending_job_ids,
+    )
 
 
 async def _request_worker_drain(
@@ -1196,7 +1241,12 @@ def _persist_decision(
     row.updated_at = now
     if decision.action == "scale_up":
         row.last_scale_up_at = now
-    if decision.action in {"request_drain", "release_drained"}:
+    if decision.action in {
+        "request_drain",
+        "release_drained",
+        "cancel_pending",
+        "cancel_pending_partial",
+    }:
         row.last_scale_down_at = now
 
 
@@ -1868,6 +1918,128 @@ async def _apply_slurm_capacity_authority_drain(
     return SlurmScaleUpActuatorResult()
 
 
+async def _apply_slurm_cancel_pending(
+    session: AsyncSession,
+    row: WorkerPoolAutoscalerPolicy,
+    *,
+    job_ids: tuple[str, ...],
+    runner: SlurmWorkerCommandRunner | None,
+    now: datetime,
+) -> SlurmPendingCancelActuatorResult:
+    """Conditionally cancel and confirm freshly observed pending jobs."""
+    try:
+        config = _slurm_config_from_policy(row)
+    except ValueError as exc:
+        blocked_reason, blocked_details = _slurm_config_blocker(row, exc)
+        return SlurmPendingCancelActuatorResult(
+            error=str(exc),
+            blocked_reason=blocked_reason,
+            blocked_details=blocked_details,
+        )
+    runner = runner or SubprocessSlurmCommandRunner().bind_config(config)
+    pending_jobs = (
+        (
+            await session.execute(
+                select(SlurmWorkerJob)
+                .where(
+                    SlurmWorkerJob.environment == row.environment,
+                    SlurmWorkerJob.pool_name == row.pool_name,
+                    SlurmWorkerJob.state == "pending",
+                )
+                .order_by(SlurmWorkerJob.job_id)
+                .with_for_update(),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    job_by_id = {str(job.job_id): job for job in pending_jobs if job.job_id is not None}
+    unobserved_rows = [
+        str(job.job_id or job.id)
+        for job in pending_jobs
+        if job.job_id is None or str(job.job_id) not in job_ids
+    ]
+    missing_registry_ids = [job_id for job_id in job_ids if job_id not in job_by_id]
+    if unobserved_rows or missing_registry_ids:
+        error = "pending Slurm registry does not match fresh pending observations"
+        return SlurmPendingCancelActuatorResult(
+            failed_job_ids=tuple(sorted({*unobserved_rows, *missing_registry_ids})),
+            error=error,
+            blocked_reason="slurm_pending_observation_missing",
+            blocked_details={
+                "reason": "slurm_pending_observation_missing",
+                "unobserved_pending_rows": sorted(unobserved_rows),
+                "missing_registry_job_ids": sorted(missing_registry_ids),
+            },
+        )
+    cancelled_job_ids: list[str] = []
+    failures: dict[str, str] = {}
+    for job_id in job_ids:
+        job = job_by_id.get(job_id)
+        if job is None:
+            continue
+        try:
+            await runner.cancel_pending_job(job_id)
+            observations = [
+                observation
+                for observation in await runner.query_jobs((job_id,))
+                if observation.job_id == job_id
+            ]
+            if len(observations) != 1:
+                raise RuntimeError("conditional cancellation state was not observed exactly once")
+            observation = observations[0]
+            state = normalize_slurm_state(observation.slurm_state)
+            job.slurm_state = observation.slurm_state
+            job.state = state
+            if observation.nodelist is not None:
+                job.nodelist = observation.nodelist
+            job.pending_reason = observation.pending_reason
+            if observation.worker_id is not None:
+                job.worker_id = observation.worker_id
+            if state == "running" and job.started_at is None:
+                job.started_at = now
+            if state in {"completed", "failed", "cancelled", "stale"}:
+                job.finished_at = job.finished_at or now
+            job.last_reconciled_at = observation.observed_at or now
+            job.updated_at = now
+            if state != "cancelled":
+                raise RuntimeError(
+                    f"conditional cancellation left Slurm job in {state} state",
+                )
+            job.pending_reason = "cancelled after autoscaler demand returned to zero"
+            job.finished_at = now
+            job.updated_at = now
+            cancelled_job_ids.append(job_id)
+        except Exception as exc:
+            failures[job_id] = str(exc)
+
+    if not failures:
+        return SlurmPendingCancelActuatorResult(
+            cancelled_job_ids=tuple(cancelled_job_ids),
+        )
+    failed_job_ids = tuple(sorted(failures))
+    cancelled = tuple(cancelled_job_ids)
+    blocked_reason = (
+        "slurm_pending_cancel_partial" if cancelled else "slurm_pending_cancel_failed"
+    )
+    error = "; ".join(
+        f"{job_id}: {failures[job_id]}" for job_id in failed_job_ids
+    )
+    return SlurmPendingCancelActuatorResult(
+        cancelled_job_ids=cancelled,
+        failed_job_ids=failed_job_ids,
+        error=error,
+        blocked_reason=blocked_reason,
+        blocked_details={
+            "reason": blocked_reason,
+            "cancelled_job_ids": list(cancelled),
+            "failed_jobs": {
+                job_id: failures[job_id] for job_id in failed_job_ids
+            },
+        },
+    )
+
+
 async def _apply_slurm_prod_pressure_drain(
     session: AsyncSession,
     row: WorkerPoolAutoscalerPolicy,
@@ -2201,13 +2373,17 @@ async def reconcile_worker_pool_autoscaler_once(
         actuator_error: str | None = None
         actuator_blocked_reason: str | None = None
         actuator_blocked_details: dict[str, Any] | None = None
+        freshly_pending_job_ids: tuple[str, ...] = ()
+        slurm_pending_cancel_attempted = False
         if row.actuator == "slurm":
-            actuator_error = await _refresh_slurm_job_registry(
+            refresh_result = await _refresh_slurm_job_registry(
                 session,
                 row,
                 runner=slurm_runner,
                 now=now,
             )
+            actuator_error = refresh_result.error
+            freshly_pending_job_ids = refresh_result.freshly_pending_job_ids
             # Prod-pressure reclaim takes precedence over normal scaling: if the
             # CP handler recorded an active drain intent, reclaim (or hold) this
             # tick and skip the scale-up/down decision entirely.
@@ -2265,6 +2441,63 @@ async def reconcile_worker_pool_autoscaler_once(
                     blocked_reason=actuator_blocked_reason,
                     blocked_details=actuator_blocked_details,
                 )
+        elif decision.action == "cancel_pending" and row.actuator == "slurm":
+            if actuator_error is not None:
+                actuator_blocked_reason = "slurm_job_refresh_failed"
+                actuator_blocked_details = {
+                    "reason": actuator_blocked_reason,
+                    "message": actuator_error,
+                }
+                decision = replace(
+                    decision,
+                    action="blocked",
+                    reason=actuator_blocked_reason,
+                    blocked_reason=actuator_blocked_reason,
+                    blocked_details=actuator_blocked_details,
+                    error_message=actuator_error,
+                )
+            elif not freshly_pending_job_ids:
+                actuator_error = (
+                    "pending Slurm capacity has no fresh pending job observation"
+                )
+                actuator_blocked_reason = "slurm_pending_observation_missing"
+                actuator_blocked_details = {
+                    "reason": actuator_blocked_reason,
+                    "message": actuator_error,
+                }
+                decision = replace(
+                    decision,
+                    action="blocked",
+                    reason=actuator_blocked_reason,
+                    blocked_reason=actuator_blocked_reason,
+                    blocked_details=actuator_blocked_details,
+                    error_message=actuator_error,
+                )
+            else:
+                slurm_pending_cancel_attempted = True
+                cancel_result = await _apply_slurm_cancel_pending(
+                    session,
+                    row,
+                    job_ids=freshly_pending_job_ids,
+                    runner=slurm_runner,
+                    now=now,
+                )
+                actuator_error = cancel_result.error
+                actuator_blocked_reason = cancel_result.blocked_reason
+                actuator_blocked_details = cancel_result.blocked_details
+                if actuator_blocked_reason is not None:
+                    decision = replace(
+                        decision,
+                        action=(
+                            "cancel_pending_partial"
+                            if cancel_result.cancelled_job_ids
+                            else "blocked"
+                        ),
+                        reason=actuator_blocked_reason,
+                        blocked_reason=actuator_blocked_reason,
+                        blocked_details=actuator_blocked_details,
+                        error_message=actuator_error,
+                    )
         elif decision.action == "request_drain":
             await _request_worker_drain(
                 session,
@@ -2348,8 +2581,9 @@ async def reconcile_worker_pool_autoscaler_once(
                 ),
             )
         if decision.action == "release_drained" or (
-            decision.action in {"scale_up", "drain_capacity"} and row.actuator == "slurm"
-        ):
+            decision.action in {"scale_up", "drain_capacity", "cancel_pending"}
+            and row.actuator == "slurm"
+        ) or slurm_pending_cancel_attempted:
             observation = await _load_observation(
                 session,
                 row,

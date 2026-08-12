@@ -1052,6 +1052,29 @@ async def test_query_jobs_keeps_non_terminal_squeue_errors_fail_closed(
         await runner.query_jobs(("31619",))
 
 
+async def test_cancel_pending_job_uses_scheduler_atomic_state_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[tuple[str, ...]] = []
+
+    async def fake_run_command(
+        args: tuple[str, ...],
+        *,
+        timeout: float,
+        stdin: str | None = None,
+    ) -> controller._CommandResult:
+        del timeout, stdin
+        commands.append(args)
+        return controller._CommandResult(stdout="", stderr="")
+
+    monkeypatch.setattr(controller, "_run_command", fake_run_command)
+    runner = SubprocessSlurmCommandRunner().bind_config(_config())
+
+    await runner.cancel_pending_job("31619")
+
+    assert commands == [("scancel", "--state=PENDING", "31619")]
+
+
 async def test_query_node_resources_probes_linux_available_memory_when_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

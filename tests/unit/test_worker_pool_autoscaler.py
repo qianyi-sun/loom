@@ -614,6 +614,45 @@ def test_decision_reports_at_min_capacity_when_no_excess_slots() -> None:
     assert decision.reason == "at_min_capacity"
 
 
+def test_decision_cancels_excess_pending_slurm_capacity_without_demand() -> None:
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+
+    decision = compute_autoscaler_decision(
+        _policy(min_slots=0),
+        _observation(active_slots=0, pending_slots=1),
+        now=now,
+    )
+
+    assert decision.action == "cancel_pending"
+    assert decision.reason == "idle_excess_pending_capacity"
+    assert decision.desired_slots == 0
+    assert decision.pending_slots == 1
+    assert decision.idle_since_at is None
+
+
+def test_decision_keeps_pending_slurm_capacity_needed_for_minimum() -> None:
+    decision = compute_autoscaler_decision(
+        _policy(min_slots=1),
+        _observation(active_slots=0, pending_slots=1),
+        now=datetime(2026, 6, 27, 12, 0, tzinfo=UTC),
+    )
+
+    assert decision.action == "noop"
+    assert decision.reason == "at_min_capacity"
+    assert decision.pending_slots == 1
+
+
+def test_decision_does_not_cancel_pending_non_slurm_capacity() -> None:
+    decision = compute_autoscaler_decision(
+        _policy(actuator="gb10", min_slots=0),
+        _observation(active_slots=0, pending_slots=1),
+        now=datetime(2026, 6, 27, 12, 0, tzinfo=UTC),
+    )
+
+    assert decision.action == "noop"
+    assert decision.reason == "at_min_capacity"
+
+
 def test_decision_blocks_on_release_drift_slurm_capacity() -> None:
     now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
 
