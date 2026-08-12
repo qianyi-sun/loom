@@ -512,6 +512,8 @@ class _SessionState:
     marker_sha256: str | None = None
     item_manifests: dict[UUID, ArtifactManifestV1] = field(default_factory=dict)
     committed: CommittedArtifactsV1 | None = None
+    checkpoint_envelope_json: dict[str, Any] | None = None
+    checkpoint_envelope_digest: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 

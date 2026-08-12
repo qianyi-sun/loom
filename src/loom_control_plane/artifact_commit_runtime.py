@@ -19,6 +19,9 @@ from loom.db.schema import (
     ArtifactUploadSession,
     ExecutionAttempt,
     PipelineAcceptancePreflightPrerequisite,
+    PipelineBudgetLedger,
+    PipelineBudgetReservation,
+    PipelineExecutionCheckpoint,
     PipelineInputImport,
     PipelineRun,
     PipelineStageRun,
@@ -30,6 +33,8 @@ from loom.pipeline.artifact_commit import (
     ArtifactCommitService,
     CheckpointProducerV1,
     CommitProducerV1,
+    CommittedArtifactsV1,
+    CommittedArtifactV1,
     FinalOutputProducerV1,
     InputImportProducerV1,
     InputMaterializationProducerV1,
@@ -41,9 +46,11 @@ from loom.pipeline.artifact_commit import (
     _FileState,
     _SessionState,
 )
+from loom.pipeline.budget import checkpoint_artifact_reservation_key
 from loom.pipeline.keys import canonical_digest, canonical_document, digest_bytes
 from loom.pipeline.spec import BindingItemV1, BindingSetV1
 from loom.pipeline.work_protocol import (
+    CheckpointPrepareRequestV1,
     ExecutionCompleteV1,
     FinalOutputFileCompleteV1,
     FinalOutputPrepareRequestV1,
@@ -81,6 +88,8 @@ def _session_values(state: _SessionState) -> dict[str, Any]:
         "committed_ready_at": state.updated_at if state.state == "committed_ready" else None,
         "committed_at": state.updated_at if state.state == "committed" else None,
         "aborted_at": state.updated_at if state.state == "aborted" else None,
+        "checkpoint_envelope_json": state.checkpoint_envelope_json,
+        "checkpoint_envelope_digest": state.checkpoint_envelope_digest,
     }
     if isinstance(producer, FinalOutputProducerV1 | CheckpointProducerV1):
         values.update(
@@ -303,6 +312,8 @@ class SqlArtifactCommitRepository(ArtifactCommitRepositoryV1):
             marker_sha256=row.committed_marker_sha256,
             created_at=row.created_at,
             updated_at=row.updated_at,
+            checkpoint_envelope_json=row.checkpoint_envelope_json,
+            checkpoint_envelope_digest=row.checkpoint_envelope_digest,
         )
         if row.canonical_manifest_json is not None:
             from loom.pipeline.artifact_commit import (
@@ -325,6 +336,26 @@ class SqlArtifactCommitRepository(ArtifactCommitRepositoryV1):
                     stored_files=record.stored_files,
                     lineage_artifact_ids=state.manifest.input_lineage_artifact_ids,
                     lineage_digests=state.manifest.input_lineage_digests,
+                )
+            if row.state == "committed":
+                state.committed = CommittedArtifactsV1(
+                    upload_session_id=row.id,
+                    state="committed",
+                    artifacts=[
+                        CommittedArtifactV1(
+                            id=item.artifact_id,
+                            name=item.artifact_name,
+                            artifact_type=item.artifact_type,
+                            content_sha256=item.content_sha256,
+                            manifest_sha256=digest_bytes(canonical_document(item)),
+                            stored_size_bytes=item.stored_size_bytes,
+                            file_count=item.file_count,
+                            safety_state="verified_internal",
+                        )
+                        for item in sorted(
+                            state.item_manifests.values(), key=lambda value: value.artifact_name.encode()
+                        )
+                    ],
                 )
         return state
 
@@ -576,6 +607,281 @@ class FinalOutputRouteService:
             reason=kwargs["request"].reason,
         )
         return {"upload_session_id": str(kwargs["session_id"]), "state": "aborted"}
+
+
+class CheckpointRouteService(FinalOutputRouteService):
+    """Claim-fenced checkpoint upload plus atomic Artifact/latest publication."""
+
+    async def prepare(self, **kwargs: Any) -> dict[str, Any]:
+        attempt = cast(ExecutionAttempt, kwargs["attempt"])
+        request = cast(CheckpointPrepareRequestV1, kwargs["request"])
+        async with self._session_factory() as db:
+            stage = await db.get(PipelineStageRun, attempt.stage_run_id)
+            if stage is None:
+                raise ArtifactCommitError("not_found")
+            run = await db.get(PipelineRun, stage.pipeline_run_id)
+            if run is None or stage.resolved_execution_spec_json is None:
+                raise ArtifactCommitError("execution_spec_not_frozen")
+            policy = stage.resolved_execution_spec_json["container_node"].get("checkpoint")
+        if policy is None:
+            raise ArtifactCommitError("checkpoints_disabled")
+        envelope = request.checkpoint
+        if (
+            envelope.pipeline_run_id != run.id
+            or envelope.stage_run_id != stage.id
+            or envelope.attempt_id != attempt.id
+            or envelope.recipe_digest != stage.resolved_execution_spec_json["recipe_digest"]
+            or envelope.execution_spec_digest != stage.execution_spec_digest
+            or envelope.resolved_input_bindings_digest != stage.resolved_input_bindings_digest
+            or envelope.image_digest
+            != stage.resolved_execution_spec_json["container_node"]["image"]
+        ):
+            raise ArtifactCommitError("checkpoint_contract_mismatch")
+        checkpoint_bytes = envelope.persisted_bytes()
+        exact_bytes = len(checkpoint_bytes) + sum(item.size_bytes for item in request.files)
+        if exact_bytes > int(policy["max_bytes"]):
+            raise ArtifactCommitError("checkpoint_too_large")
+        reservation_key = checkpoint_artifact_reservation_key(attempt.id, envelope.sequence)
+        request_digest = canonical_digest(request)
+        async with self._session_factory() as db, db.begin():
+            ledger = await db.get(PipelineBudgetLedger, run.id, with_for_update=True)
+            if ledger is None or (
+                ledger.terminal_cause is not None
+                and not (ledger.terminal_cause == "user_cancel" and request.cancel_drain)
+            ):
+                raise ArtifactCommitError("checkpoint_budget_unavailable")
+            if request.cancel_drain:
+                if attempt.cancellation_requested_at is None:
+                    raise ArtifactCommitError("checkpoint_cancel_drain_forbidden")
+                active_cancel_drain = await db.scalar(
+                    select(ArtifactUploadSession.id)
+                    .where(
+                        ArtifactUploadSession.execution_attempt_id == attempt.id,
+                        ArtifactUploadSession.commit_kind == "checkpoint",
+                        ArtifactUploadSession.created_at >= attempt.cancellation_requested_at,
+                        ArtifactUploadSession.state != "aborted",
+                    )
+                    .limit(1)
+                )
+                if active_cancel_drain is not None:
+                    raise ArtifactCommitError("checkpoint_cancel_drain_forbidden")
+            reservation = (
+                await db.execute(
+                    select(PipelineBudgetReservation)
+                    .where(
+                        PipelineBudgetReservation.pipeline_run_id == run.id,
+                        PipelineBudgetReservation.kind == "artifact",
+                        PipelineBudgetReservation.reservation_key == reservation_key,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if reservation is None:
+                amount = int(policy["max_bytes"])
+                if ledger.artifact_reserved_bytes + ledger.artifact_settled_bytes + amount > ledger.artifact_limit_bytes:
+                    raise ArtifactCommitError("checkpoint_budget_unavailable")
+                reservation = PipelineBudgetReservation(
+                    pipeline_run_id=run.id,
+                    execution_attempt_id=attempt.id,
+                    kind="artifact",
+                    reservation_key=reservation_key,
+                    request_digest=request_digest,
+                    reserved_amount=amount,
+                    metadata_json={"checkpoint_sequence": envelope.sequence},
+                )
+                db.add(reservation)
+                ledger.artifact_reserved_bytes += amount
+            elif reservation.request_digest != request_digest or reservation.state not in {
+                "active",
+                "settled",
+            }:
+                raise ArtifactCommitError("checkpoint_reservation_conflict")
+        producer = CheckpointProducerV1(
+            commit_kind="checkpoint",
+            team_id=run.team_id,
+            pipeline_run_id=run.id,
+            pipeline_stage_run_id=stage.id,
+            execution_attempt_id=attempt.id,
+            attempt_number=attempt.attempt_number,
+            checkpoint_sequence=envelope.sequence,
+        )
+        artifact_id = uuid4()
+        name = f"checkpoint-{envelope.sequence:012d}"
+        files = [
+            UploadFilePlanV1(
+                file_index=0,
+                preallocated_artifact_id=artifact_id,
+                relative_path="checkpoint.json",
+                artifact_name=name,
+                artifact_type="loom.execution-checkpoint.v1",
+                producer="platform",
+                media_type="application/json",
+                role="semantic_document",
+                archive_format="none",
+                expected_max_bytes=int(policy["max_bytes"]),
+                expected_sha256=request.checkpoint_sha256,
+                expected_size=len(checkpoint_bytes),
+            )
+        ]
+        for index, item in enumerate(request.files, start=1):
+            files.append(
+                UploadFilePlanV1(
+                    file_index=index,
+                    preallocated_artifact_id=artifact_id,
+                    relative_path=item.relative_path,
+                    artifact_name=name,
+                    artifact_type="loom.execution-checkpoint.v1",
+                    producer="platform",
+                    media_type="application/json"
+                    if item.relative_path.endswith(".json")
+                    else "application/octet-stream",
+                    role="payload",
+                    archive_format="none",
+                    expected_max_bytes=int(policy["max_bytes"]),
+                    expected_sha256=item.sha256,
+                    expected_size=item.size_bytes,
+                )
+            )
+        grant = await self._service.prepare_session(
+            producer=producer,
+            files=files,
+            idempotency_key=str(kwargs["request_id"]),
+            request_digest=request_digest,
+        )
+        async with self._session_factory() as db, db.begin():
+            upload = await db.get(ArtifactUploadSession, grant.upload_session_id, with_for_update=True)
+            if upload is None:
+                raise ArtifactCommitError("not_found")
+            upload.checkpoint_envelope_json = envelope.model_dump(mode="json")
+            upload.checkpoint_envelope_digest = request.checkpoint_sha256
+        return grant.model_dump(mode="json")
+
+    async def commit(self, **kwargs: Any) -> dict[str, Any]:
+        result = await self._service.commit_session(
+            session_id=kwargs["session_id"],
+            auth=UploadAuthV1(upload_token=kwargs["upload_token"]),
+        )
+        async with self._session_factory() as db, db.begin():
+            upload = await db.get(ArtifactUploadSession, kwargs["session_id"], with_for_update=True)
+            if upload is None or upload.commit_kind != "checkpoint" or upload.state != "committed":
+                raise ArtifactCommitError("checkpoint_not_committed")
+            if upload.checkpoint_envelope_json is None or upload.checkpoint_envelope_digest is None:
+                raise ArtifactCommitError("checkpoint_contract_mismatch")
+            attempt = await db.get(ExecutionAttempt, upload.execution_attempt_id, with_for_update=True)
+            stage = await db.get(PipelineStageRun, upload.pipeline_stage_run_id, with_for_update=True)
+            if attempt is None or stage is None or attempt.state not in {"claimed", "running"}:
+                raise ArtifactCommitError("claim_fenced")
+            envelope = upload.checkpoint_envelope_json
+            from loom.pipeline.checkpoint import ExecutionCheckpointV1
+
+            parsed_envelope = ExecutionCheckpointV1.model_validate(envelope)
+            if digest_bytes(parsed_envelope.persisted_bytes()) != upload.checkpoint_envelope_digest:
+                raise ArtifactCommitError("checkpoint_contract_mismatch")
+            existing = (
+                await db.execute(
+                    select(PipelineExecutionCheckpoint).where(
+                        PipelineExecutionCheckpoint.execution_attempt_id == attempt.id,
+                        PipelineExecutionCheckpoint.checkpoint_sequence
+                        == upload.checkpoint_sequence,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is None:
+                manifest = cast(dict[str, Any], upload.canonical_manifest_json)
+                record = manifest["artifacts"][0]
+                artifact_id = UUID(record["artifact_id"])
+                artifact = await db.get(Artifact, artifact_id)
+                if artifact is None:
+                    stored_files = record["stored_files"]
+                    artifact = Artifact(
+                        id=artifact_id,
+                        artifact_type="loom.execution-checkpoint.v1",
+                        name=f"checkpoint-{upload.checkpoint_sequence:012d}",
+                        team_id=upload.team_id,
+                        pipeline_run_id=upload.pipeline_run_id,
+                        pipeline_stage_run_id=upload.pipeline_stage_run_id,
+                        execution_attempt_id=attempt.id,
+                        producer_kind="checkpoint",
+                        content_hash=record["content_sha256"],
+                        storage={"session_id": str(upload.id), "files": stored_files},
+                        visibility="team",
+                        share_status="pending_scan",
+                        safety_state="verified_internal",
+                        artifact_upload_session_id=upload.id,
+                        manifest_sha256=record["manifest_sha256"],
+                        stored_size_bytes=sum(item["size_bytes"] for item in stored_files),
+                        unpacked_size_bytes=sum(item["size_bytes"] for item in stored_files),
+                        file_count=len(stored_files),
+                    )
+                    db.add(artifact)
+                    await db.flush()
+                previous = (
+                    await db.execute(
+                        select(PipelineExecutionCheckpoint)
+                        .where(PipelineExecutionCheckpoint.pipeline_stage_run_id == stage.id)
+                        .order_by(
+                            PipelineExecutionCheckpoint.attempt_number.desc(),
+                            PipelineExecutionCheckpoint.checkpoint_sequence.desc(),
+                        )
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                checkpoint = PipelineExecutionCheckpoint(
+                    artifact_id=artifact_id,
+                    pipeline_run_id=cast(UUID, upload.pipeline_run_id),
+                    pipeline_stage_run_id=stage.id,
+                    execution_attempt_id=attempt.id,
+                    attempt_number=attempt.attempt_number,
+                    checkpoint_sequence=cast(int, upload.checkpoint_sequence),
+                    recipe_digest=envelope["recipe_digest"],
+                    resolved_input_bindings_digest=envelope["resolved_input_bindings_digest"],
+                    execution_spec_digest=envelope["execution_spec_digest"],
+                    image_digest=envelope["image_digest"],
+                    resume_compatibility_key=envelope["resume_compatibility_key"],
+                    checkpoint_json=envelope,
+                    checkpoint_digest=upload.checkpoint_envelope_digest,
+                    source_attempt_state=attempt.state,
+                )
+                db.add(checkpoint)
+                if previous is None or (attempt.attempt_number, cast(int, upload.checkpoint_sequence)) > (
+                    previous.attempt_number,
+                    previous.sequence,
+                ):
+                    stage.latest_checkpoint_artifact_id = artifact_id
+                    stage.version += 1
+            reservation_key = checkpoint_artifact_reservation_key(
+                attempt.id, cast(int, upload.checkpoint_sequence)
+            )
+            reservation = (
+                await db.execute(
+                    select(PipelineBudgetReservation)
+                    .where(
+                        PipelineBudgetReservation.pipeline_run_id == stage.pipeline_run_id,
+                        PipelineBudgetReservation.kind == "artifact",
+                        PipelineBudgetReservation.reservation_key == reservation_key,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if reservation is None:
+                raise ArtifactCommitError("checkpoint_reservation_missing")
+            if reservation.state == "active":
+                actual = upload.actual_total_bytes
+                if actual > reservation.reserved_amount:
+                    raise ArtifactCommitError("checkpoint_reservation_exceeded")
+                ledger = await db.get(
+                    PipelineBudgetLedger, stage.pipeline_run_id, with_for_update=True
+                )
+                if ledger is None:
+                    raise ArtifactCommitError("checkpoint_budget_unavailable")
+                ledger.artifact_reserved_bytes -= reservation.reserved_amount
+                ledger.artifact_settled_bytes += actual
+                reservation.state = "settled"
+                reservation.settled_amount = actual
+                reservation.settled_at = datetime.now(UTC)
+            elif reservation.state != "settled":
+                raise ArtifactCommitError("checkpoint_reservation_conflict")
+        return result.model_dump(mode="json")
 
 
 class ExecutionAttemptCompletionService:
@@ -859,6 +1165,7 @@ class SqlArtifactInputResolver:
 
 
 __all__ = [
+    "CheckpointRouteService",
     "ExecutionAttemptCompletionService",
     "FinalOutputRouteService",
     "SqlArtifactCommitRepository",

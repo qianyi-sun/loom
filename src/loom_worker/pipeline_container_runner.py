@@ -8,6 +8,7 @@ representable at this boundary.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -125,6 +126,7 @@ class PipelineContainerSpec:
     host_ipc: Literal[False] = False
     devices: tuple[str, ...] = ()
     gpu_device_uuids: tuple[str, ...] = ()
+    environment: tuple[tuple[str, str], ...] = ()
     init: Literal[True] = True
 
     def __post_init__(self) -> None:
@@ -135,6 +137,19 @@ class PipelineContainerSpec:
         _non_root_id(self.gid, "gid")
         if self.cap_drop != ("ALL",):
             raise PipelineContainerContractError("Pipeline containers must drop every capability")
+        names = [name for name, _value in self.environment]
+        if names != sorted(names) or len(names) != len(set(names)):
+            raise PipelineContainerContractError("Pipeline environment must be sorted and unique")
+        if any(
+            name not in {"LOOM_RESUME_CHECKPOINT", "LOOM_RESUME_CHECKPOINT_ARTIFACT_ID"}
+            for name in names
+        ):
+            raise PipelineContainerContractError("unsupported Pipeline environment variable")
+        if self.environment and set(names) != {
+            "LOOM_RESUME_CHECKPOINT",
+            "LOOM_RESUME_CHECKPOINT_ARTIFACT_ID",
+        }:
+            raise PipelineContainerContractError("resume environment must be the exact two-variable set")
         if self.security_opt != ("no-new-privileges:true",):
             raise PipelineContainerContractError("no-new-privileges is mandatory")
         if not self.read_only_rootfs or self.seccomp_profile != "default":
@@ -218,6 +233,7 @@ class PipelineContainerSpec:
                 "nano_cpus": int(float(self.limits.cpus) * 1_000_000_000),
                 "volumes": volumes,
                 "init": True,
+                "environment": dict(self.environment),
         }
         if self.gpu_device_uuids:
             create_kwargs["device_requests"] = [
@@ -246,6 +262,7 @@ def build_pipeline_container_spec(
     scratch_bytes: int,
     runtime_secret_dir: Path | None = None,
     gpu_device_uuids: Sequence[str] = (),
+    resume_checkpoint_artifact_id: UUID | None = None,
 ) -> PipelineContainerSpec:
     """Build the sole supported container policy from immutable fields."""
 
@@ -308,6 +325,14 @@ def build_pipeline_container_spec(
             scratch_bytes=scratch_bytes,
         ),
         gpu_device_uuids=tuple(gpu_device_uuids),
+        environment=(
+            (
+                ("LOOM_RESUME_CHECKPOINT", "/inputs/loom_checkpoint"),
+                ("LOOM_RESUME_CHECKPOINT_ARTIFACT_ID", str(resume_checkpoint_artifact_id)),
+            )
+            if resume_checkpoint_artifact_id is not None
+            else ()
+        ),
     )
 
 
@@ -459,10 +484,11 @@ class PipelineContainerRunner:
     backend: PipelineContainerBackend
     preflight: PipelineExecutionPreflight | None = None
     cancellation_grace_seconds: int = 30
+    cancellation_poll_seconds: int = 5
 
     async def run(self, request: PipelineExecutionRequest) -> PipelineRunResult:
-        if self.cancellation_grace_seconds < 0:
-            raise PipelineContainerContractError("cancellation grace must be non-negative")
+        if self.cancellation_grace_seconds != 30 or self.cancellation_poll_seconds != 5:
+            raise PipelineContainerContractError("Pipeline cancellation cadence is fixed at 5s/30s")
         input_view: MaterializedInputView | None = None
         process_result: ContainerProcessResult | None = None
         backend_started = False
@@ -499,16 +525,10 @@ class PipelineContainerRunner:
                     input_view=input_view,
                 )
             backend_started = True
-            process_result = await self.backend.run(
-                attempt_id=request.attempt_id,
-                spec=self.spec,
-                input_view=input_view,
+            process_result, forced = await self._run_with_cancellation(
+                attempt_id=request.attempt_id, input_view=input_view
             )
-            if await self.cancellation.requested(attempt_id=request.attempt_id):
-                forced = await self.backend.terminate(
-                    attempt_id=request.attempt_id,
-                    grace_seconds=self.cancellation_grace_seconds,
-                )
+            if process_result is None:
                 await self.backend.teardown(attempt_id=request.attempt_id)
                 backend_started = False
                 backend_torn_down = True
@@ -562,6 +582,42 @@ class PipelineContainerRunner:
             teardown_observed=True,
         )
         raise PipelineCancelledError(f"ExecutionAttempt {attempt_id} was cancelled")
+
+    async def _run_with_cancellation(
+        self,
+        *,
+        attempt_id: UUID,
+        input_view: MaterializedInputView,
+    ) -> tuple[ContainerProcessResult | None, bool]:
+        process = asyncio.create_task(
+            self.backend.run(attempt_id=attempt_id, spec=self.spec, input_view=input_view)
+        )
+        try:
+            while True:
+                done, _pending = await asyncio.wait(
+                    {process}, timeout=self.cancellation_poll_seconds
+                )
+                if done:
+                    result = process.result()
+                    if await self.cancellation.requested(attempt_id=attempt_id):
+                        forced = await self.backend.terminate(
+                            attempt_id=attempt_id,
+                            grace_seconds=self.cancellation_grace_seconds,
+                        )
+                        return None, forced
+                    return result, False
+                if await self.cancellation.requested(attempt_id=attempt_id):
+                    forced = await self.backend.terminate(
+                        attempt_id=attempt_id,
+                        grace_seconds=self.cancellation_grace_seconds,
+                    )
+                    process.cancel()
+                    await asyncio.gather(process, return_exceptions=True)
+                    return None, forced
+        finally:
+            if not process.done():
+                process.cancel()
+                await asyncio.gather(process, return_exceptions=True)
 
 
 # Deterministic fakes used by focused #8 tests.  They deliberately implement

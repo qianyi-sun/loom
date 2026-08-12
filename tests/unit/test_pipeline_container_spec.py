@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import stat
 from pathlib import Path, PurePosixPath
+from uuid import UUID
 
 import pytest
 
@@ -124,6 +125,16 @@ def test_none_spec_has_no_runtime_secret_or_network(tmp_path: Path) -> None:
         PurePosixPath("/outputs"),
         PurePosixPath("/scratch"),
     ]
+
+
+def test_resume_checkpoint_adds_only_reserved_environment(tmp_path: Path) -> None:
+    artifact_id = UUID(int=9)
+    spec = _build(tmp_path, resume_checkpoint_artifact_id=artifact_id)
+    assert dict(spec.environment) == {
+        "LOOM_RESUME_CHECKPOINT": "/inputs/loom_checkpoint",
+        "LOOM_RESUME_CHECKPOINT_ARTIFACT_ID": str(artifact_id),
+    }
+    assert spec.docker_create_kwargs()["environment"] == dict(spec.environment)
 
 
 @pytest.mark.parametrize(

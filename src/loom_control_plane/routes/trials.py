@@ -353,6 +353,8 @@ _CANCEL_SQL = text("""
 UPDATE trials
    SET state = 'cancelled',
        cancellation_requested_at = NOW(),
+       cancellation_observed_at = CASE WHEN state = 'queued' THEN NOW()
+                                       ELSE cancellation_observed_at END,
        finished_at = COALESCE(finished_at, NOW())
  WHERE id = (:trial_id)::uuid
    AND ((:team_id)::uuid IS NULL OR team_id = (:team_id)::uuid)
