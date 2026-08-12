@@ -21,6 +21,7 @@ from loom.models.worker_capabilities import (
     SlurmGpuAllocationEvidenceV1,
     WorkerCapabilitySnapshotV1,
 )
+from loom.pipeline.checkpoint import ExecutionCheckpointV1
 from loom.pipeline.keys import MAX_SAFE_INTEGER, canonical_digest, canonical_document
 from loom.pipeline.spec import (
     IMAGE_PATTERN,
@@ -902,6 +903,30 @@ class FinalOutputPrepareRequestV1(PipelineModel):
         return self
 
 
+class CheckpointPrepareRequestV1(PipelineModel):
+    schema_version: Literal["loom.checkpoint-prepare.v1"]
+    checkpoint: ExecutionCheckpointV1
+    checkpoint_sha256: Digest
+    files: list[FinalOutputInventoryItemV1]
+    cancel_drain: bool = False
+
+    @model_validator(mode="after")
+    def exact_outer_document_and_inventory(self) -> CheckpointPrepareRequestV1:
+        if _canonical_sha256(self.checkpoint) != self.checkpoint_sha256:
+            raise ValueError("checkpoint envelope digest drift")
+        expected = {
+            item.relative_path: (item.size_bytes, item.sha256)
+            for item in self.checkpoint.files
+        }
+        actual = {
+            item.relative_path: (item.size_bytes, item.sha256)
+            for item in self.files
+        }
+        if expected != actual:
+            raise ValueError("checkpoint inventory drifts from outer envelope")
+        return self
+
+
 class UploadFilePlanV1(PipelineModel):
     file_index: NonNegativeSafeInt
     output_name: BindingName
@@ -1014,15 +1039,6 @@ class ExecutionFailedV1(PipelineModel):
         return self
 
 
-class ExecutionCancelAckV1(PipelineModel):
-    outcome: Literal["graceful", "forced"]
-    observed_at: datetime
-    last_committed_checkpoint_artifact_id: UUID | None
-    teardown_observed: Literal[True]
-
-    _observed_is_aware = field_validator("observed_at")(_aware)
-
-
 class WorkerCleanupProofV1(PipelineModel):
     container_absent: Literal[True]
     cgroup_empty: Literal[True]
@@ -1033,6 +1049,16 @@ class WorkerCleanupProofV1(PipelineModel):
     outputs_absent: Literal[True]
     input_views_absent: Literal[True]
     active_upload_session_ids: Annotated[list[UUID], Field(max_length=0)]
+
+
+class ExecutionCancelAckV1(PipelineModel):
+    outcome: Literal["graceful", "forced"]
+    observed_at: datetime
+    last_committed_checkpoint_artifact_id: UUID | None
+    teardown_observed: Literal[True]
+    resources: WorkerCleanupProofV1 | None = None
+
+    _observed_is_aware = field_validator("observed_at")(_aware)
 
 
 class WorkerLostCleanupAckV1(PipelineModel):

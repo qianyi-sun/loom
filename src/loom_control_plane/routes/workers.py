@@ -335,6 +335,8 @@ async def claim_any_work(
                     )
                 ):
                     raise HTTPException(status_code=409, detail="resume_checkpoint_drift")
+                if checkpoint_row["artifact_type"] != "loom.execution-checkpoint.v1":
+                    raise HTTPException(status_code=409, detail="resume_checkpoint_drift")
                 resume_checkpoint = ArtifactInputDescriptorV1(
                     artifact_id=checkpoint_row["id"],
                     artifact_type=checkpoint_row["artifact_type"],

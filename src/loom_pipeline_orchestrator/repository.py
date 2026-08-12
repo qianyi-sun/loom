@@ -19,6 +19,7 @@ from loom.pipeline.budget import (
     BudgetReservationConflictError,
     TerminalCause,
 )
+from loom.pipeline.checkpoint import checkpoint_is_resume_compatible
 from loom.pipeline.keys import canonical_digest, canonical_document, canonical_uuid5, digest_bytes
 from loom.pipeline.projection import StageTerminalProjection, project_pipeline_result
 from loom.pipeline.retry import retry_decision
@@ -1400,7 +1401,8 @@ class PipelineRepository:
                 (
                     await session.execute(
                         text("""
-                        SELECT state, attempt_count, execution_spec_digest
+                        SELECT state, attempt_count, execution_spec_digest,
+                               resolved_execution_spec_json, resolved_input_bindings_digest
                           FROM pipeline_stage_runs
                          WHERE id = :stage_id AND pipeline_run_id = :run_id FOR UPDATE
                     """),
@@ -1447,6 +1449,86 @@ class PipelineRepository:
                     if amount > ledger[limit_col] - ledger[reserved_col] - ledger[settled_col]:
                         exhausted = cause
                         break
+            resumed_checkpoint_artifact_id: UUID | None = None
+            if exhausted is None and attempt_number > 1:
+                previous_reason = (
+                    await session.execute(
+                        text("""
+                            SELECT reason_code FROM execution_attempts
+                             WHERE stage_run_id=:stage_id AND attempt_number=:number
+                        """),
+                        {"stage_id": stage_run_id, "number": attempt_number - 1},
+                    )
+                ).scalar_one_or_none()
+                if previous_reason is not None:
+                    frozen = stage["resolved_execution_spec_json"] or {}
+                    container = frozen.get("container_node") or {}
+                    recipe_digest = frozen.get("recipe_digest")
+                    image_digest = container.get("image")
+                    bindings_digest = stage["resolved_input_bindings_digest"]
+                    execution_digest = stage["execution_spec_digest"]
+                    if all(
+                        isinstance(value, str)
+                        for value in (
+                            recipe_digest,
+                            image_digest,
+                            bindings_digest,
+                            execution_digest,
+                        )
+                    ):
+                        checkpoint = (
+                            (
+                                await session.execute(
+                                    text("""
+                                        SELECT artifact_id, recipe_digest,
+                                               resolved_input_bindings_digest,
+                                               execution_spec_digest, image_digest,
+                                               resume_compatibility_key
+                                          FROM pipeline_checkpoints
+                                         WHERE pipeline_stage_run_id=:stage_id
+                                         ORDER BY attempt_number DESC, checkpoint_sequence DESC
+                                         LIMIT 1
+                                    """),
+                                    {"stage_id": stage_run_id},
+                                )
+                            )
+                            .mappings()
+                            .one_or_none()
+                        )
+                        if checkpoint is not None:
+                            if checkpoint_is_resume_compatible(
+                                previous_reason=previous_reason,
+                                recipe_digest=cast(str, recipe_digest),
+                                resolved_input_bindings_digest=bindings_digest,
+                                execution_spec_digest=execution_digest,
+                                image_digest=cast(str, image_digest),
+                                observed_recipe_digest=checkpoint["recipe_digest"],
+                                observed_input_bindings_digest=checkpoint[
+                                    "resolved_input_bindings_digest"
+                                ],
+                                observed_execution_spec_digest=checkpoint[
+                                    "execution_spec_digest"
+                                ],
+                                observed_image_digest=checkpoint["image_digest"],
+                                observed_resume_compatibility_key=checkpoint[
+                                    "resume_compatibility_key"
+                                ],
+                            ):
+                                resumed_checkpoint_artifact_id = checkpoint["artifact_id"]
+                            elif previous_reason in {
+                                "worker_lost",
+                                "node_setup_health",
+                                "object_store_transport",
+                                "container_start_transient",
+                                "stage_helper_transient",
+                            }:
+                                await self._append_event(
+                                    session,
+                                    lease,
+                                    event_type="checkpoint_incompatible",
+                                    payload={"reason_code": "checkpoint_identity_drift"},
+                                    stage_run_id=stage_run_id,
+                                )
             if exhausted is not None:
                 await self._latch_terminal_cause(session, lease, exhausted)
             else:
@@ -1455,10 +1537,11 @@ class PipelineRepository:
                     text("""
                         INSERT INTO execution_attempts (
                             id, stage_run_id, attempt_number, state,
-                            stage_request_json, stage_request_bytes, stage_request_digest, queued_at
+                            stage_request_json, stage_request_bytes, stage_request_digest,
+                            resumed_checkpoint_artifact_id, queued_at
                         ) VALUES (
                             :id, :stage_id, :number, :state, CAST(:request AS jsonb),
-                            :request_bytes, :request_digest,
+                            :request_bytes, :request_digest, :checkpoint_artifact_id,
                             CASE WHEN :state = 'queued' THEN clock_timestamp() ELSE NULL END
                         )
                     """),
@@ -1470,6 +1553,7 @@ class PipelineRepository:
                         "request": _json_text(stage_request_json),
                         "request_bytes": stage_request_bytes,
                         "request_digest": stage_request_digest,
+                        "checkpoint_artifact_id": resumed_checkpoint_artifact_id,
                     },
                 )
                 if provider_budget is not None:
@@ -1551,6 +1635,11 @@ class PipelineRepository:
                         "attempt_number": attempt_number,
                         "fault_pending": fault_pending,
                         "stage_request_digest": stage_request_digest,
+                        "resumed_checkpoint_artifact_id": (
+                            str(resumed_checkpoint_artifact_id)
+                            if resumed_checkpoint_artifact_id is not None
+                            else None
+                        ),
                     },
                     stage_run_id=stage_run_id,
                     execution_attempt_id=attempt_id,
@@ -1888,7 +1977,7 @@ class PipelineRepository:
         *,
         stage_run_id: UUID,
         max_attempts: int,
-        cleanup_acknowledged: bool = True,
+        cleanup_acknowledged: bool | None = None,
     ) -> bool:
         async with self._sessions() as session, session.begin():
             await self._lock_fence(session, lease)
@@ -1897,7 +1986,7 @@ class PipelineRepository:
                     await session.execute(
                         text("""
                         SELECT s.state, s.attempt_count, a.retry_class, a.reason_code,
-                               a.finished_at, l.terminal_cause
+                               a.finished_at, a.cleanup_acknowledged_at, l.terminal_cause
                           FROM pipeline_stage_runs s
                           JOIN execution_attempts a ON a.stage_run_id=s.id
                                                    AND a.attempt_number=s.attempt_count
@@ -1919,7 +2008,10 @@ class PipelineRepository:
                 retry_class=RetryClass(row["retry_class"]),
                 reason_code=row["reason_code"],
                 terminal_cause=row["terminal_cause"],
-                cleanup_acknowledged=cleanup_acknowledged,
+                cleanup_acknowledged=(
+                    row.get("cleanup_acknowledged_at") is not None
+                    and cleanup_acknowledged is not False
+                ),
             )
             if not decision.retry:
                 return False
@@ -2352,6 +2444,29 @@ class PipelineRepository:
                     "digest": request_digest,
                 },
             )
+            await session.execute(
+                text("""
+                    UPDATE execution_attempts
+                       SET cancellation_requested_at=COALESCE(
+                               cancellation_requested_at, clock_timestamp()),
+                           version=version+1
+                     WHERE id=:attempt_id AND state IN ('claimed','running')
+                """),
+                {"attempt_id": attempt_id},
+            )
+            await session.execute(
+                text("""
+                    INSERT INTO execution_attempt_control_commands (
+                        execution_attempt_id, seq, command
+                    ) VALUES (
+                        :attempt_id,
+                        COALESCE((SELECT max(seq)+1 FROM execution_attempt_control_commands
+                                  WHERE execution_attempt_id=:attempt_id), 1),
+                        'cancel_requested'
+                    ) ON CONFLICT DO NOTHING
+                """),
+                {"attempt_id": attempt_id},
+            )
         await session.execute(
             text("""
                 UPDATE pipeline_stage_runs
@@ -2429,13 +2544,21 @@ class PipelineRepository:
                        SET state='cancelled', cancellation_requested_at=clock_timestamp(),
                            cancellation_observed_at=clock_timestamp(),
                            cancellation_outcome='not_started', finished_at=clock_timestamp(),
+                           retry_class='cancelled', reason_code=:cause,
+                           cleanup_acknowledged_at=clock_timestamp(),
+                           cleanup_proof_json='{\"not_started\":true}'::jsonb,
+                           cleanup_proof_digest=:cleanup_digest,
                            version=a.version+1
                       FROM pipeline_stage_runs s
                      WHERE s.id=a.stage_run_id AND s.pipeline_run_id=:run_id
                        AND a.state IN ('fault_pending','queued')
                     RETURNING a.id
                 """),
-                    {"run_id": lease.pipeline_run_id},
+                {
+                    "run_id": lease.pipeline_run_id,
+                    "cause": cause.value,
+                    "cleanup_digest": canonical_digest({"not_started": True}),
+                },
                 )
             )
             .scalars()

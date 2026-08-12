@@ -3688,6 +3688,13 @@ class ExecutionAttempt(Base):
             "id",
         ),
         Index("execution_attempts_worker_state_idx", "worker_id", "state"),
+        CheckConstraint(
+            "(cleanup_acknowledged_at IS NULL AND cleanup_proof_json IS NULL "
+            "AND cleanup_proof_digest IS NULL) OR "
+            "(cleanup_acknowledged_at IS NOT NULL AND cleanup_proof_json IS NOT NULL "
+            "AND cleanup_proof_digest ~ '^sha256:[0-9a-f]{64}$')",
+            name="execution_attempts_cleanup_proof_group_check",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -3733,6 +3740,9 @@ class ExecutionAttempt(Base):
     cancellation_requested_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     cancellation_observed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     cancellation_outcome: Mapped[str | None] = mapped_column(Text)
+    cleanup_acknowledged_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    cleanup_proof_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    cleanup_proof_digest: Mapped[str | None] = mapped_column(Text)
     queued_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     claimed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     started_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
@@ -4518,6 +4528,13 @@ class ArtifactUploadSession(Base):
             name="artifact_upload_sessions_state_check",
         ),
         CheckConstraint(
+            "((checkpoint_envelope_json IS NULL) = (checkpoint_envelope_digest IS NULL)) "
+            "AND (checkpoint_envelope_json IS NULL OR commit_kind='checkpoint') "
+            "AND (checkpoint_envelope_digest IS NULL OR "
+            "checkpoint_envelope_digest ~ '^sha256:[0-9a-f]{64}$')",
+            name="artifact_upload_sessions_checkpoint_envelope_group_check",
+        ),
+        CheckConstraint(
             "control_producer_kind IS NULL AND control_producer_id IS NULL AND ("
             "(commit_kind='final_output' AND pipeline_run_id IS NOT NULL "
             "AND pipeline_stage_run_id IS NOT NULL AND execution_attempt_id IS NOT NULL "
@@ -4676,6 +4693,8 @@ class ArtifactUploadSession(Base):
     )
     attempt_number: Mapped[int | None] = mapped_column(Integer)
     checkpoint_sequence: Mapped[int | None] = mapped_column(BigInteger)
+    checkpoint_envelope_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    checkpoint_envelope_digest: Mapped[str | None] = mapped_column(Text)
     control_producer_kind: Mapped[str | None] = mapped_column(Text)
     control_producer_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
     pipeline_input_import_id: Mapped[UUID | None] = mapped_column(
@@ -4768,11 +4787,42 @@ class ArtifactUploadFile(Base):
     )
 
 
-class PipelineCheckpoint(Base):
+class PipelineExecutionCheckpoint(Base):
     __tablename__ = "pipeline_checkpoints"
     __table_args__ = (
         UniqueConstraint(
             "execution_attempt_id", "checkpoint_sequence", name="pipeline_checkpoints_sequence_uidx"
+        ),
+        CheckConstraint("attempt_number BETWEEN 1 AND 3", name="pipeline_checkpoints_attempt_check"),
+        CheckConstraint(
+            "source_attempt_state IN ('claimed','running')",
+            name="pipeline_checkpoints_source_state_check",
+        ),
+        CheckConstraint(
+            "recipe_digest ~ '^sha256:[0-9a-f]{64}$'",
+            name="pipeline_checkpoints_recipe_digest_check",
+        ),
+        CheckConstraint(
+            "resolved_input_bindings_digest ~ '^sha256:[0-9a-f]{64}$'",
+            name="pipeline_checkpoints_bindings_digest_check",
+        ),
+        CheckConstraint(
+            "execution_spec_digest ~ '^sha256:[0-9a-f]{64}$'",
+            name="pipeline_checkpoints_spec_digest_check",
+        ),
+        CheckConstraint(
+            "resume_compatibility_key ~ '^sha256:[0-9a-f]{64}$'",
+            name="pipeline_checkpoints_resume_digest_check",
+        ),
+        CheckConstraint(
+            "checkpoint_digest ~ '^sha256:[0-9a-f]{64}$'",
+            name="pipeline_checkpoints_document_digest_check",
+        ),
+        Index(
+            "pipeline_checkpoints_stage_latest_idx",
+            "pipeline_stage_run_id",
+            "attempt_number",
+            "checkpoint_sequence",
         ),
     )
 
@@ -4786,7 +4836,32 @@ class PipelineCheckpoint(Base):
         ForeignKey("artifacts.id", use_alter=True, name="pipeline_checkpoints_artifact_fk"),
         unique=True,
     )
-    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
+    pipeline_run_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("pipeline_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    pipeline_stage_run_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("pipeline_stage_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    recipe_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    resolved_input_bindings_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    execution_spec_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    image_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    resume_compatibility_key: Mapped[str] = mapped_column(Text, nullable=False)
+    checkpoint_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    checkpoint_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    source_attempt_state: Mapped[str] = mapped_column(Text, nullable=False)
+    committed_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    @property
+    def sequence(self) -> int:
+        return self.checkpoint_sequence
+
+
+# Additive compatibility for #1214 callers that imported the minimal row name.
+PipelineCheckpoint = PipelineExecutionCheckpoint
 
 
 class PipelineAcceptanceEvidenceRun(Base):

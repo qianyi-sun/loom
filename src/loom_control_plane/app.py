@@ -18,6 +18,7 @@ from loom.pipeline.artifact_commit import ArtifactCommitService
 from loom.storage_credentials import build_s3_client
 from loom.trajectory.storage import MinioObjectStore
 from loom_control_plane.artifact_commit_runtime import (
+    CheckpointRouteService,
     ExecutionAttemptCompletionService,
     FinalOutputRouteService,
     SqlArtifactCommitRepository,
@@ -117,6 +118,10 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
             repository=artifact_repository,
         )
         app.state.final_output_service = FinalOutputRouteService(
+            service=artifact_commit_service,
+            session_factory=session_factory,
+        )
+        app.state.checkpoint_service = CheckpointRouteService(
             service=artifact_commit_service,
             session_factory=session_factory,
         )

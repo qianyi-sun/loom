@@ -548,6 +548,131 @@ class HttpControlPlaneClient:
             payload=payload,
         )
 
+    async def prepare_checkpoint(
+        self,
+        *,
+        attempt_id: UUID,
+        claim: ExecutionAttemptClaimHeaders,
+        request_id: UUID,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return await self._post_internal_claim_bound(
+            path=f"/api/v1/internal/execution-attempts/{attempt_id}/checkpoint-sessions",
+            claim=claim,
+            request_id=request_id,
+            payload=payload,
+        )
+
+    async def commit_checkpoint_session(
+        self,
+        *,
+        attempt_id: UUID,
+        session_id: UUID,
+        claim: ExecutionAttemptClaimHeaders,
+        request_id: UUID,
+        upload_token: str,
+    ) -> dict[str, Any]:
+        return await self._post_internal_claim_bound(
+            path=(
+                f"/api/v1/internal/execution-attempts/{attempt_id}/"
+                f"checkpoint-sessions/{session_id}/commit"
+            ),
+            claim=claim,
+            request_id=request_id,
+            payload={"schema_version": "loom.final-output-session-commit.v1"},
+            extra_headers={"X-Loom-Upload-Token": upload_token},
+        )
+
+    async def renew_checkpoint_token(
+        self,
+        *,
+        attempt_id: UUID,
+        session_id: UUID,
+        claim: ExecutionAttemptClaimHeaders,
+    ) -> dict[str, Any]:
+        return await self._post_internal_claim_bound(
+            path=(
+                f"/api/v1/internal/execution-attempts/{attempt_id}/"
+                f"checkpoint-sessions/{session_id}/renew"
+            ),
+            claim=claim,
+            payload={"schema_version": "loom.upload-token-renew.v1"},
+        )
+
+    async def upload_checkpoint_part(
+        self,
+        *,
+        attempt_id: UUID,
+        session_id: UUID,
+        file_index: int,
+        part_number: int,
+        claim: ExecutionAttemptClaimHeaders,
+        request_id: UUID,
+        upload_token: str,
+        content_sha256: str,
+        content: bytes,
+    ) -> dict[str, Any]:
+        client, owned = self._http()
+        try:
+            response = await client.put(
+                f"/api/v1/internal/execution-attempts/{attempt_id}/"
+                f"checkpoint-sessions/{session_id}/files/{file_index}/parts/{part_number}",
+                headers={
+                    **self._headers,
+                    **claim.as_headers(request_id=request_id),
+                    "X-Loom-Upload-Token": upload_token,
+                    "X-Loom-Content-Sha256": content_sha256,
+                    "Content-Length": str(len(content)),
+                },
+                content=content,
+            )
+            response.raise_for_status()
+            return self._response_json(response)
+        finally:
+            if owned:
+                await client.aclose()
+
+    async def complete_checkpoint_file(
+        self,
+        *,
+        attempt_id: UUID,
+        session_id: UUID,
+        file_index: int,
+        claim: ExecutionAttemptClaimHeaders,
+        request_id: UUID,
+        upload_token: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return await self._post_internal_claim_bound(
+            path=(
+                f"/api/v1/internal/execution-attempts/{attempt_id}/"
+                f"checkpoint-sessions/{session_id}/files/{file_index}/complete"
+            ),
+            claim=claim,
+            request_id=request_id,
+            payload=payload,
+            extra_headers={"X-Loom-Upload-Token": upload_token},
+        )
+
+    async def abort_checkpoint_session(
+        self,
+        *,
+        attempt_id: UUID,
+        session_id: UUID,
+        claim: ExecutionAttemptClaimHeaders,
+        request_id: UUID,
+        reason: str,
+    ) -> dict[str, Any]:
+        return await self._post_internal_claim_bound(
+            path=(
+                f"/api/v1/internal/execution-attempts/{attempt_id}/"
+                f"checkpoint-sessions/{session_id}/abort"
+            ),
+            claim=claim,
+            request_id=request_id,
+            payload={"schema_version": "loom.final-output-abort.v1", "reason": reason},
+        )
+
     async def renew_final_output_token(
         self,
         *,

@@ -13,15 +13,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.auth import AuthContext, verify_bearer_token
 from loom.db.schema import (
+    ArtifactUploadSession,
     ExecutionAttempt,
     ExecutionAttemptControlCommand,
     ExecutionAttemptRequest,
     ExecutionAttemptWorkerEvent,
     PipelineBudgetLedger,
+    PipelineBudgetReservation,
+    PipelineCancellationOutbox,
     PipelineInputMaterializationEvidence,
     PipelineStageRun,
+    SlurmWorkerJob,
+    Worker,
 )
+from loom.pipeline.keys import canonical_digest
 from loom.pipeline.work_protocol import (
+    CheckpointPrepareRequestV1,
     ExecutionCancelAckV1,
     ExecutionCompleteV1,
     ExecutionControlCommandV1,
@@ -83,6 +90,45 @@ class FinalOutputServiceV1(Protocol):
     async def complete_file(self, **kwargs: Any) -> dict[str, Any]: ...
     async def commit(self, **kwargs: Any) -> dict[str, Any]: ...
     async def abort(self, **kwargs: Any) -> dict[str, Any]: ...
+
+
+class CheckpointServiceV1(FinalOutputServiceV1, Protocol):
+    pass
+
+
+async def _ack_cancellation_outbox(
+    session: AsyncSession,
+    *,
+    attempt: ExecutionAttempt,
+    observed_at: datetime,
+    outcome: str,
+    cleanup_proof: dict[str, Any],
+) -> None:
+    outbox = (
+        await session.execute(
+            select(PipelineCancellationOutbox)
+            .where(PipelineCancellationOutbox.execution_attempt_id == attempt.id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if outbox is None:
+        return
+    ack = {
+        "cleanup_proof": cleanup_proof,
+        "execution_attempt_id": str(attempt.id),
+        "observed_at": observed_at.isoformat(),
+        "outcome": outcome,
+    }
+    digest = canonical_digest(ack)
+    if outbox.state == "acked":
+        if outbox.ack_digest != digest:
+            raise HTTPException(status_code=409, detail="cancellation_ack_conflict")
+        return
+    outbox.state = "acked"
+    outbox.ack_json = ack
+    outbox.ack_digest = digest
+    outbox.acked_at = observed_at
+    outbox.version += 1
 
 
 async def _worker_auth(
@@ -506,18 +552,116 @@ async def report_attempt_cancelled(
     request_id: RequestIdHeader,
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    return await _terminal_report(
-        attempt_id=attempt_id,
-        payload=payload,
-        request=request,
-        claim_id=claim_id,
-        lease_epoch=lease_epoch,
-        lease_token=lease_token,
-        request_id=request_id,
-        route="cancel-ack",
-        state="cancelled",
-        authorization=authorization,
-    )
+    if payload.teardown_observed is not True:
+        raise HTTPException(status_code=409, detail="cleanup_not_observed")
+    ctx = await _worker_auth(request, authorization, scope="worker:report")
+    async with request.app.state.session_factory() as session:
+        attempt, replay = await _begin_mutation(
+            session,
+            attempt_id=attempt_id,
+            ctx=ctx,
+            claim_id=claim_id,
+            lease_epoch=lease_epoch,
+            lease_token=lease_token,
+            request_id=request_id,
+            route="cancel-ack",
+            payload=payload,
+        )
+        if replay is not None:
+            return replay
+        stage = await session.get(PipelineStageRun, attempt.stage_run_id)
+        if stage is None:
+            raise HTTPException(status_code=404, detail="not_found")
+        terminal_cause = (
+            await session.execute(
+                select(PipelineBudgetLedger.terminal_cause).where(
+                    PipelineBudgetLedger.pipeline_run_id == stage.pipeline_run_id
+                )
+            )
+        ).scalar_one_or_none()
+        if terminal_cause is None or attempt.cancellation_requested_at is None:
+            raise HTTPException(status_code=409, detail="cancellation_not_requested")
+        active_uploads = (
+            await session.execute(
+                select(func.count()).select_from(ArtifactUploadSession).where(
+                    ArtifactUploadSession.execution_attempt_id == attempt.id,
+                    ArtifactUploadSession.state.in_(
+                        ["preparing", "uploading", "uploaded", "committing", "committed_ready"]
+                    ),
+                )
+            )
+        ).scalar_one()
+        active_reservations = (
+            await session.execute(
+                select(func.count()).select_from(PipelineBudgetReservation).where(
+                    PipelineBudgetReservation.execution_attempt_id == attempt.id,
+                    PipelineBudgetReservation.state == "active",
+                )
+            )
+        ).scalar_one()
+        if active_uploads:
+            raise HTTPException(status_code=409, detail="cleanup_incomplete")
+        if active_reservations:
+            released = list(
+                (
+                    await session.execute(
+                        select(PipelineBudgetReservation).where(
+                            PipelineBudgetReservation.execution_attempt_id == attempt.id,
+                            PipelineBudgetReservation.state == "active",
+                        ).with_for_update()
+                    )
+                ).scalars()
+            )
+            ledger = await session.get(
+                PipelineBudgetLedger, stage.pipeline_run_id, with_for_update=True
+            )
+            if ledger is None:
+                raise HTTPException(status_code=409, detail="cleanup_incomplete")
+            for reservation in released:
+                if reservation.kind == "provider":
+                    ledger.provider_reserved_microusd -= reservation.reserved_amount
+                elif reservation.kind == "gpu":
+                    ledger.gpu_reserved_seconds -= reservation.reserved_amount
+                else:
+                    ledger.artifact_reserved_bytes -= reservation.reserved_amount
+                reservation.state = "released"
+                reservation.settled_at = datetime.now(UTC)
+        attempt.state = "cancelled"
+        attempt.finished_at = datetime.now(UTC)
+        attempt.retry_class = "cancelled"
+        attempt.reason_code = str(terminal_cause)
+        attempt.cancellation_observed_at = payload.observed_at
+        attempt.cancellation_outcome = payload.outcome
+        cleanup_proof = (
+            payload.resources.model_dump(mode="json")
+            if payload.resources is not None
+            else {"teardown_observed": True, "outcome": payload.outcome}
+        )
+        attempt.cleanup_acknowledged_at = payload.observed_at
+        attempt.cleanup_proof_json = cleanup_proof
+        attempt.cleanup_proof_digest = canonical_digest(cleanup_proof)
+        stage.state = "cancelled"
+        stage.reason_code = str(terminal_cause)
+        stage.finished_at = payload.observed_at
+        stage.version += 1
+        await _ack_cancellation_outbox(
+            session,
+            attempt=attempt,
+            observed_at=payload.observed_at,
+            outcome=payload.outcome,
+            cleanup_proof=cleanup_proof,
+        )
+        response = {"execution_attempt_id": str(attempt_id), "state": "cancelled"}
+        await _journal_response(
+            session,
+            attempt_id=attempt_id,
+            route="cancel-ack",
+            request_id=request_id,
+            payload=payload,
+            response=response,
+        )
+        await session.commit()
+        return response
 
 
 @router.post("/execution-attempts/{attempt_id}/complete")
@@ -650,6 +794,28 @@ async def report_worker_lost_cleanup(
             return replay
         if attempt.lease_expires_at is None or attempt.lease_expires_at > datetime.now(UTC):
             raise HTTPException(status_code=409, detail="claim_not_expired")
+        worker = await session.get(Worker, attempt.worker_id)
+        if worker is None:
+            raise HTTPException(status_code=409, detail="cleanup_authority_invalid")
+        allocation = worker.slurm_gpu_allocation_evidence_json
+        if payload.observer_kind == "worker_journal":
+            # verify_attempt_claim already bound this bearer hash to the exact
+            # durable Worker row recorded on the expired claim.
+            pass
+        else:
+            if allocation is None or allocation.get("allocation_id") != payload.allocation_id:
+                raise HTTPException(status_code=409, detail="cleanup_authority_invalid")
+            job = (
+                await session.execute(
+                    select(SlurmWorkerJob).where(
+                        SlurmWorkerJob.worker_id == attempt.worker_id,
+                        SlurmWorkerJob.slurm_cluster_id == allocation.get("slurm_cluster_id"),
+                        SlurmWorkerJob.job_id == allocation.get("job_id"),
+                    )
+                )
+            ).scalar_one_or_none()
+            if job is None or job.state not in {"completed", "failed", "cancelled", "stale"}:
+                raise HTTPException(status_code=409, detail="allocation_not_terminal")
         terminal_cause = (
             await session.execute(
                 select(PipelineBudgetLedger.terminal_cause)
@@ -666,6 +832,76 @@ async def report_worker_lost_cleanup(
         )
         attempt.reason_code = "worker_lost_cleanup" if terminal_cause is not None else "worker_lost"
         attempt.finished_at = datetime.now(UTC)
+        proof = payload.resources.model_dump(mode="json")
+        attempt.cleanup_acknowledged_at = payload.observed_at
+        attempt.cleanup_proof_json = proof
+        attempt.cleanup_proof_digest = canonical_digest(proof)
+        if terminal_cause is not None:
+            attempt.cancellation_observed_at = payload.observed_at
+            attempt.cancellation_outcome = "worker_lost_cleanup"
+        active_uploads = (
+            await session.execute(
+                select(func.count()).select_from(ArtifactUploadSession).where(
+                    ArtifactUploadSession.execution_attempt_id == attempt.id,
+                    ArtifactUploadSession.state.in_(
+                        ["preparing", "uploading", "uploaded", "committing", "committed_ready"]
+                    ),
+                )
+            )
+        ).scalar_one()
+        active_reservations = (
+            await session.execute(
+                select(func.count()).select_from(PipelineBudgetReservation).where(
+                    PipelineBudgetReservation.execution_attempt_id == attempt.id,
+                    PipelineBudgetReservation.state == "active",
+                )
+            )
+        ).scalar_one()
+        if active_uploads:
+            raise HTTPException(status_code=409, detail="cleanup_incomplete")
+        if active_reservations:
+            stage = await session.get(PipelineStageRun, attempt.stage_run_id)
+            if stage is None:
+                raise HTTPException(status_code=409, detail="cleanup_incomplete")
+            ledger = await session.get(
+                PipelineBudgetLedger, stage.pipeline_run_id, with_for_update=True
+            )
+            reservations = list(
+                (
+                    await session.execute(
+                        select(PipelineBudgetReservation).where(
+                            PipelineBudgetReservation.execution_attempt_id == attempt.id,
+                            PipelineBudgetReservation.state == "active",
+                        ).with_for_update()
+                    )
+                ).scalars()
+            )
+            if ledger is None:
+                raise HTTPException(status_code=409, detail="cleanup_incomplete")
+            for reservation in reservations:
+                if reservation.kind == "provider":
+                    ledger.provider_reserved_microusd -= reservation.reserved_amount
+                elif reservation.kind == "gpu":
+                    ledger.gpu_reserved_seconds -= reservation.reserved_amount
+                else:
+                    ledger.artifact_reserved_bytes -= reservation.reserved_amount
+                reservation.state = "released"
+                reservation.settled_at = payload.observed_at
+        if terminal_cause is not None:
+            stage = await session.get(PipelineStageRun, attempt.stage_run_id)
+            if stage is None:
+                raise HTTPException(status_code=409, detail="cleanup_incomplete")
+            stage.state = "cancelled"
+            stage.reason_code = str(terminal_cause)
+            stage.finished_at = payload.observed_at
+            stage.version += 1
+            await _ack_cancellation_outbox(
+                session,
+                attempt=attempt,
+                observed_at=payload.observed_at,
+                outcome="worker_lost_cleanup",
+                cleanup_proof=proof,
+            )
         response = {"execution_attempt_id": str(attempt_id), "state": attempt.state}
         await _journal_response(
             session,
@@ -818,10 +1054,248 @@ async def _output_context(
             )
         except AttemptFenceError as exc:
             _raise_fence(exc)
+        if attempt.cancellation_requested_at is not None:
+            raise HTTPException(status_code=409, detail="cancellation_requested")
     service: FinalOutputServiceV1 | None = getattr(request.app.state, "final_output_service", None)
     if service is None:
         raise HTTPException(status_code=503, detail="artifact_committer_unavailable")
     return attempt, service
+
+
+async def _checkpoint_context(
+    *,
+    attempt_id: UUID,
+    request: Request,
+    claim_id: UUID,
+    lease_epoch: int,
+    lease_token: str,
+    authorization: str | None,
+    allow_cancelling: bool = False,
+) -> tuple[ExecutionAttempt, CheckpointServiceV1]:
+    ctx = await _worker_auth(request, authorization, scope="worker:write_outputs")
+    async with request.app.state.session_factory() as session:
+        try:
+            attempt = await verify_attempt_claim(
+                session,
+                attempt_id=attempt_id,
+                auth=ctx,
+                claim_id=claim_id,
+                lease_epoch=lease_epoch,
+                lease_token=lease_token,
+                require_live_lease=True,
+                lock=False,
+            )
+        except AttemptFenceError as exc:
+            _raise_fence(exc)
+        if attempt.cancellation_requested_at is not None and not allow_cancelling:
+            raise HTTPException(status_code=409, detail="cancellation_requested")
+    service: CheckpointServiceV1 | None = getattr(request.app.state, "checkpoint_service", None)
+    if service is None:
+        raise HTTPException(status_code=503, detail="artifact_committer_unavailable")
+    return attempt, service
+
+
+@router.post("/api/v1/internal/execution-attempts/{attempt_id}/checkpoint-sessions")
+async def prepare_checkpoint(
+    attempt_id: UUID,
+    payload: CheckpointPrepareRequestV1,
+    request: Request,
+    claim_id: ClaimIdHeader,
+    lease_epoch: LeaseEpochHeader,
+    lease_token: LeaseTokenHeader,
+    request_id: RequestIdHeader,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    attempt, service = await _checkpoint_context(
+        attempt_id=attempt_id,
+        request=request,
+        claim_id=claim_id,
+        lease_epoch=lease_epoch,
+        lease_token=lease_token,
+        authorization=authorization,
+        allow_cancelling=payload.cancel_drain,
+    )
+    if payload.cancel_drain:
+        async with request.app.state.session_factory() as session:
+            stage = await session.get(PipelineStageRun, attempt.stage_run_id)
+            terminal_cause = None
+            if stage is not None:
+                terminal_cause = await session.scalar(
+                    select(PipelineBudgetLedger.terminal_cause).where(
+                        PipelineBudgetLedger.pipeline_run_id == stage.pipeline_run_id
+                    )
+                )
+        if attempt.cancellation_requested_at is None or terminal_cause != "user_cancel":
+            raise HTTPException(status_code=409, detail="checkpoint_cancel_drain_forbidden")
+    return await service.prepare(attempt=attempt, request_id=request_id, request=payload)
+
+
+@router.post(
+    "/api/v1/internal/execution-attempts/{attempt_id}/checkpoint-sessions/{session_id}/commit"
+)
+async def commit_checkpoint_session(
+    attempt_id: UUID,
+    session_id: UUID,
+    payload: FinalOutputSessionCommitV1,
+    request: Request,
+    claim_id: ClaimIdHeader,
+    lease_epoch: LeaseEpochHeader,
+    lease_token: LeaseTokenHeader,
+    request_id: RequestIdHeader,
+    upload_token: Annotated[str, Header(alias="X-Loom-Upload-Token")],
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    attempt, service = await _checkpoint_context(
+        attempt_id=attempt_id,
+        request=request,
+        claim_id=claim_id,
+        lease_epoch=lease_epoch,
+        lease_token=lease_token,
+        authorization=authorization,
+        allow_cancelling=True,
+    )
+    return await service.commit(
+        attempt=attempt,
+        session_id=session_id,
+        request_id=request_id,
+        upload_token=upload_token,
+        request=payload,
+    )
+
+
+@router.post(
+    "/api/v1/internal/execution-attempts/{attempt_id}/checkpoint-sessions/{session_id}/renew"
+)
+async def renew_checkpoint_token(
+    attempt_id: UUID,
+    session_id: UUID,
+    payload: UploadTokenRenewV1,
+    request: Request,
+    claim_id: ClaimIdHeader,
+    lease_epoch: LeaseEpochHeader,
+    lease_token: LeaseTokenHeader,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    attempt, service = await _checkpoint_context(
+        attempt_id=attempt_id,
+        request=request,
+        claim_id=claim_id,
+        lease_epoch=lease_epoch,
+        lease_token=lease_token,
+        authorization=authorization,
+        allow_cancelling=True,
+    )
+    return await service.renew(attempt=attempt, session_id=session_id, request=payload)
+
+
+@router.put(
+    "/api/v1/internal/execution-attempts/{attempt_id}/checkpoint-sessions/"
+    "{session_id}/files/{file_index}/parts/{part_number}"
+)
+async def put_checkpoint_part(
+    attempt_id: UUID,
+    session_id: UUID,
+    file_index: int,
+    part_number: int,
+    request: Request,
+    claim_id: ClaimIdHeader,
+    lease_epoch: LeaseEpochHeader,
+    lease_token: LeaseTokenHeader,
+    request_id: RequestIdHeader,
+    upload_token: Annotated[str, Header(alias="X-Loom-Upload-Token")],
+    content_sha256: Annotated[str, Header(alias="X-Loom-Content-Sha256")],
+    content_length: Annotated[int, Header(alias="Content-Length", ge=0)],
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    if file_index < 0 or part_number < 1:
+        raise HTTPException(status_code=400, detail="invalid_part")
+    attempt, service = await _checkpoint_context(
+        attempt_id=attempt_id,
+        request=request,
+        claim_id=claim_id,
+        lease_epoch=lease_epoch,
+        lease_token=lease_token,
+        authorization=authorization,
+        allow_cancelling=True,
+    )
+    return await service.put_part(
+        attempt=attempt,
+        session_id=session_id,
+        file_index=file_index,
+        part_number=part_number,
+        request_id=request_id,
+        upload_token=upload_token,
+        content_sha256=content_sha256,
+        content_length=content_length,
+        body=request.stream(),
+    )
+
+
+@router.post(
+    "/api/v1/internal/execution-attempts/{attempt_id}/checkpoint-sessions/"
+    "{session_id}/files/{file_index}/complete"
+)
+async def complete_checkpoint_file(
+    attempt_id: UUID,
+    session_id: UUID,
+    file_index: int,
+    payload: FinalOutputFileCompleteV1,
+    request: Request,
+    claim_id: ClaimIdHeader,
+    lease_epoch: LeaseEpochHeader,
+    lease_token: LeaseTokenHeader,
+    request_id: RequestIdHeader,
+    upload_token: Annotated[str, Header(alias="X-Loom-Upload-Token")],
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    attempt, service = await _checkpoint_context(
+        attempt_id=attempt_id,
+        request=request,
+        claim_id=claim_id,
+        lease_epoch=lease_epoch,
+        lease_token=lease_token,
+        authorization=authorization,
+        allow_cancelling=True,
+    )
+    return await service.complete_file(
+        attempt=attempt,
+        session_id=session_id,
+        file_index=file_index,
+        request_id=request_id,
+        upload_token=upload_token,
+        request=payload,
+    )
+
+
+@router.post(
+    "/api/v1/internal/execution-attempts/{attempt_id}/checkpoint-sessions/{session_id}/abort"
+)
+async def abort_checkpoint_session(
+    attempt_id: UUID,
+    session_id: UUID,
+    payload: FinalOutputAbortV1,
+    request: Request,
+    claim_id: ClaimIdHeader,
+    lease_epoch: LeaseEpochHeader,
+    lease_token: LeaseTokenHeader,
+    request_id: RequestIdHeader,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    attempt, service = await _checkpoint_context(
+        attempt_id=attempt_id,
+        request=request,
+        claim_id=claim_id,
+        lease_epoch=lease_epoch,
+        lease_token=lease_token,
+        authorization=authorization,
+        allow_cancelling=True,
+    )
+    return await service.abort(
+        attempt=attempt,
+        session_id=session_id,
+        request_id=request_id,
+        request=payload,
+    )
 
 
 @router.post("/api/v1/internal/execution-attempts/{attempt_id}/final-output-sessions")
