@@ -128,6 +128,7 @@ def _checks(
     baseline_digest: str = "6" * 64,
     credential_metadata: dict[str, str] | None = None,
     predecessor_live_digest: str = "d" * 64,
+    oldlab_predecessor_live_digest: str = "7" * 64,
     predecessor_pool_digest: str = "2" * 64,
     gb10_inventory_digest: str = "4" * 64,
     baseline_ready: bool = True,
@@ -135,6 +136,10 @@ def _checks(
     predecessor_units = {
         "loom-autoscaler-gb10-staging.service": "e" * 64,
         "loom-autoscaler-gb10-staging.timer": "f" * 64,
+    }
+    oldlab_predecessor_units = {
+        "loom-autoscaler-oldlab-staging.service": "3" * 64,
+        "loom-autoscaler-oldlab-staging.timer": "4" * 64,
     }
     tier0 = (
         _check(
@@ -151,9 +156,7 @@ def _checks(
             "credentials.metadata",
             {
                 "metadata-fingerprints": (
-                    {"admin": "abcd"}
-                    if credential_metadata is None
-                    else credential_metadata
+                    {"admin": "abcd"} if credential_metadata is None else credential_metadata
                 )
             },
             (EvidenceField("metadata-fingerprints", "string-map"),),
@@ -187,6 +190,36 @@ def _checks(
                 "transition-clear": True,
                 "runtime-ready": True,
                 "pool-identity-digest": predecessor_pool_digest,
+                "controller-bindings": {
+                    "gx10-01c7/authority-kind": "legacy-manifest",
+                    "gx10-01c7/authority-digest": "c" * 64,
+                    "gx10-01c7/pointer-digest": EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+                    "gx10-01c7/unit-set-digest": external_supervisor_unit_set_digest(
+                        predecessor_units
+                    ),
+                    "gx10-01c7/live-evidence-digest": predecessor_live_digest,
+                    "gx10-01c7/pending-transition-digest": "1" * 64,
+                    "gx10-01c7/unit-directory": "/var/lib/loom-rollout/.config/systemd/user",
+                    **{
+                        f"gx10-01c7/unit/{name}": digest
+                        for name, digest in predecessor_units.items()
+                    },
+                    "TRT-EAI-OLDLAB-1/authority-kind": "legacy-manifest",
+                    "TRT-EAI-OLDLAB-1/authority-digest": "6" * 64,
+                    "TRT-EAI-OLDLAB-1/pointer-digest": (EXTERNAL_SUPERVISOR_ABSENT_DIGEST),
+                    "TRT-EAI-OLDLAB-1/unit-set-digest": (
+                        external_supervisor_unit_set_digest(oldlab_predecessor_units)
+                    ),
+                    "TRT-EAI-OLDLAB-1/live-evidence-digest": (oldlab_predecessor_live_digest),
+                    "TRT-EAI-OLDLAB-1/pending-transition-digest": "1" * 64,
+                    "TRT-EAI-OLDLAB-1/unit-directory": (
+                        "/var/lib/loom-staging-rollout/.config/systemd/user"
+                    ),
+                    **{
+                        f"TRT-EAI-OLDLAB-1/unit/{name}": digest
+                        for name, digest in oldlab_predecessor_units.items()
+                    },
+                },
             },
             (
                 EvidenceField("authority-kind", "string"),
@@ -199,6 +232,7 @@ def _checks(
                 EvidenceField("transition-clear", "boolean"),
                 EvidenceField("runtime-ready", "boolean"),
                 EvidenceField("pool-identity-digest", "sha256"),
+                EvidenceField("controller-bindings", "string-map"),
             ),
         ),
     )
@@ -247,6 +281,10 @@ def _bindings() -> AttestationBindings:
         "loom-autoscaler-gb10-staging.service": "e" * 64,
         "loom-autoscaler-gb10-staging.timer": "f" * 64,
     }
+    oldlab_predecessor_units = {
+        "loom-autoscaler-oldlab-staging.service": "3" * 64,
+        "loom-autoscaler-oldlab-staging.timer": "4" * 64,
+    }
     return AttestationBindings(
         candidate_sha="a" * 40,
         candidate_tree="b" * 40,
@@ -284,6 +322,33 @@ def _bindings() -> AttestationBindings:
         supervisor_predecessor_live_evidence_digest="d" * 64,
         supervisor_predecessor_pending_transition_digest="1" * 64,
         supervisor_transition_digest="2" * 64,
+        supervisor_controller_bindings={
+            "gx10-01c7/authority-kind": "legacy-manifest",
+            "gx10-01c7/authority-digest": "c" * 64,
+            "gx10-01c7/pointer-digest": EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+            "gx10-01c7/unit-set-digest": external_supervisor_unit_set_digest(predecessor_units),
+            "gx10-01c7/live-evidence-digest": "d" * 64,
+            "gx10-01c7/pending-transition-digest": "1" * 64,
+            "gx10-01c7/unit-directory": "/var/lib/loom-rollout/.config/systemd/user",
+            "gx10-01c7/transition-digest": "2" * 64,
+            **{f"gx10-01c7/unit/{name}": digest for name, digest in predecessor_units.items()},
+            "TRT-EAI-OLDLAB-1/authority-kind": "legacy-manifest",
+            "TRT-EAI-OLDLAB-1/authority-digest": "6" * 64,
+            "TRT-EAI-OLDLAB-1/pointer-digest": EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+            "TRT-EAI-OLDLAB-1/unit-set-digest": external_supervisor_unit_set_digest(
+                oldlab_predecessor_units
+            ),
+            "TRT-EAI-OLDLAB-1/live-evidence-digest": "7" * 64,
+            "TRT-EAI-OLDLAB-1/pending-transition-digest": "1" * 64,
+            "TRT-EAI-OLDLAB-1/unit-directory": (
+                "/var/lib/loom-staging-rollout/.config/systemd/user"
+            ),
+            "TRT-EAI-OLDLAB-1/transition-digest": "8" * 64,
+            **{
+                f"TRT-EAI-OLDLAB-1/unit/{name}": digest
+                for name, digest in oldlab_predecessor_units.items()
+            },
+        },
     )
 
 
@@ -375,6 +440,20 @@ def test_final_admission_tolerates_pool_identity_drift() -> None:
     )
 
     assert all(execution.passed for execution in admission.tier0_executions)
+
+
+def test_final_admission_rejects_oldlab_controller_predecessor_drift() -> None:
+    attested_plan = _plan(_checks())
+    drifted_plan = _plan(_checks(oldlab_predecessor_live_digest="9" * 64))
+
+    with pytest.raises(ValueError, match="drift-sensitive evidence changed"):
+        validate_final_attestation(
+            attestation=_attestation(attested_plan),
+            candidate=_candidate(),
+            plan=drifted_plan,
+            current_mutation_epoch=7,
+            now=NOW,
+        )
 
 
 def test_final_admission_tolerates_gb10_inventory_drift() -> None:

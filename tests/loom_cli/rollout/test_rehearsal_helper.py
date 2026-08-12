@@ -8,7 +8,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from loom_cli.rollout.external_supervisor_readiness import STAGING_ROLLOUT_EXECUTION_HOST
 from loom_cli.rollout.rehearsal_action_source import (
     RehearsalPlan,
     RehearsalResources,
@@ -74,6 +73,8 @@ def _plan() -> RehearsalPlan:
         external_supervisor_unit_sha256={
             "loom-autoscaler-gb10-staging.service": "d" * 64,
             "loom-autoscaler-gb10-staging.timer": "e" * 64,
+            "loom-autoscaler-oldlab-staging.service": "1" * 64,
+            "loom-autoscaler-oldlab-staging.timer": "2" * 64,
         },
         migration_plan_sha256="3" * 64,
         migration_target_revision="0067",
@@ -300,7 +301,6 @@ def test_helper_rebuilds_and_binds_external_supervisor_before_action(
         "candidate_tree": plan.candidate_tree,
         "image_tag": plan.image_tag,
         "environment": "staging",
-        "execution_host": STAGING_ROLLOUT_EXECUTION_HOST,
     }
     _verify_external_supervisor_binding(plan)
     assert builds == [expected_build]

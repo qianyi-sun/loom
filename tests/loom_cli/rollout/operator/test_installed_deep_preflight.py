@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9,12 +10,17 @@ import pytest
 
 from loom.data_lifecycle import StagingCapacity
 from loom_cli.rollout.external_supervisor_predecessor import (
+    GB10_CANONICAL_UNIT_DIR,
     ExternalSupervisorCanonicalIdentity,
     ExternalSupervisorPoolIdentity,
     load_predecessor_manifest,
 )
 from loom_cli.rollout.external_supervisor_readiness import build_external_supervisor_artifact
-from loom_cli.rollout.gb10_readiness import GB10ProbeTarget, GB10SharedMountReadiness
+from loom_cli.rollout.gb10_readiness import (
+    ACTIVE_GB10_HOSTS,
+    GB10ProbeTarget,
+    GB10SharedMountReadiness,
+)
 from loom_cli.rollout.operator import installed_deep_preflight_factory
 from loom_cli.rollout.operator import protected_external_supervisor_transport as transport_module
 from loom_cli.rollout.operator.deep_preflight_authority import RuntimePurpose
@@ -34,6 +40,9 @@ from loom_cli.rollout.preflight_registered_checks import (
 )
 from loom_cli.rollout.readonly_authority import ReadonlyAuthorityEvidence
 from tests.loom_cli.rollout.operator.test_checkpoint_inventory_provider import _config
+from tests.loom_cli.rollout.operator.test_protected_external_supervisor_component import (
+    _observation,
+)
 
 
 def _candidate() -> CandidateBinding:
@@ -73,6 +82,200 @@ def test_single_node_capacity_inputs_keep_exact_host_path_authority() -> None:
         (Path("/data/loom-staging/minio"),),
         None,
     )
+
+
+def test_installed_rehearsal_source_rebuilds_aggregate_supervisor_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    candidate = _candidate()
+    inputs = SimpleNamespace(
+        gb10_targets=tuple(SimpleNamespace(ssh_target=host) for host in ACTIVE_GB10_HOSTS),
+        gb10_ssh_config=tmp_path / "ssh-config",
+        gb10_identity=tmp_path / "identity",
+        gb10_ssh_config_sha256="1" * 64,
+        gb10_identity_metadata_fingerprint="2" * 64,
+    )
+    cluster = SimpleNamespace(
+        artifacts_bucket="artifacts",
+        container_registry="registry.invalid",
+        container_registry_push="registry-push.invalid",
+        k8s_worker=SimpleNamespace(enabled=True),
+        minio_replicas=1,
+        persistent_storage_host_path_root="/data/loom-staging",
+        topology=SimpleNamespace(multi_node=False, minio_replicas=1),
+        trajectories_bucket="trajectories",
+    )
+    readonly = SimpleNamespace(
+        baseline_probe_route="https://staging.example.invalid/staging",
+        baseline_probes=lambda _epoch: {},
+        capabilities=lambda: SimpleNamespace(),
+        capacity=lambda: StagingCapacity(0, 0, 100, 100),
+        route="https://staging.example.invalid/staging",
+    )
+    commands = SimpleNamespace(
+        candidate_source=lambda *_args: SimpleNamespace(),
+        executable=lambda *_args: "/fixed/tool",
+        final_gate_helper=lambda *_args: SimpleNamespace(),
+        gb10_fleet=lambda *_args: SimpleNamespace(),
+        gb10_supervisor_controller=lambda *_args: SimpleNamespace(),
+        git=lambda *_args: SimpleNamespace(),
+        image=lambda *_args: SimpleNamespace(),
+        manifest_schema_dry_run=lambda *_args: SimpleNamespace(),
+        manifest_server_dry_run=lambda *_args: SimpleNamespace(),
+        readonly_json=lambda *_args: SimpleNamespace(),
+        rehearsal_helper=lambda *_args: SimpleNamespace(),
+        simple=lambda *_args: SimpleNamespace(),
+        systemd_preflight=lambda *_args: SimpleNamespace(),
+    )
+    loaded = SimpleNamespace(
+        images=SimpleNamespace(),
+        manifests=SimpleNamespace(),
+        migration=SimpleNamespace(),
+        production_defaults=SimpleNamespace(),
+        publication=SimpleNamespace(
+            browser_report_schema_sha256="3" * 64,
+            migration_plan_sha256="4" * 64,
+            migration_target_revision="0074",
+        ),
+    )
+    captured: dict[str, object] = {}
+
+    class Source:
+        def __init__(self, **kwargs: object) -> None:
+            captured["source"] = kwargs
+
+        actions = "actions"
+        identity = "identity"
+
+    def composition(**kwargs: object) -> SimpleNamespace:
+        captured["composition"] = kwargs
+        return SimpleNamespace(**kwargs)
+
+    artifact = SimpleNamespace()
+    builds: list[dict[str, object]] = []
+
+    def build(candidate_root: Path, **kwargs: object) -> SimpleNamespace:
+        builds.append({"candidate_root": candidate_root, **kwargs})
+        return artifact
+
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "sanitized_child_environment",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "InstalledPreflightCommands",
+        lambda *_args, **_kwargs: commands,
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory.InstalledPreflightInputs,
+        "load",
+        lambda *_args, **_kwargs: inputs,
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "InstalledReadonlyDatabaseEvidenceSource",
+        lambda **_kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "InstalledReadonlyMutationEpochSource",
+        lambda **_kwargs: SimpleNamespace(
+            refresh=lambda: SimpleNamespace(mutation_epoch=8),
+            __call__=lambda: SimpleNamespace(schema_revision="0074"),
+        ),
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory, "load_cluster_config", lambda _path: cluster
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "InstalledReadonlyCapacitySource",
+        lambda **_kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "ReadonlyLifecycleInventoryProvider",
+        lambda *_args, **_kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "ReadonlyPreflightAuthority",
+        lambda *_args, **_kwargs: readonly,
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "PreflightArtifactStore",
+        lambda *_args, **_kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "PreflightAttestationStore",
+        lambda *_args, **_kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "staging_smoke_authority",
+        lambda _config: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "InstalledRehearsalStepRunner",
+        lambda **_kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "JournaledRehearsalBackend",
+        lambda **_kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(installed_deep_preflight_factory, "RehearsalActionSource", Source)
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "_external_supervisor_predecessor_source",
+        lambda **_kwargs: lambda *_args: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "_gb10_external_supervisor_observation_source",
+        lambda **_kwargs: lambda *_args: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory, "InstalledDeepPreflightComposition", composition
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory, "build_external_supervisor_artifact", build
+    )
+
+    installed_deep_preflight_factory.build_installed_deep_preflight_composition(
+        config,
+        service_uid=995,
+        service_gid=2007,
+        store=SimpleNamespace(),  # type: ignore[arg-type]
+        now=lambda: datetime(2026, 7, 19, 12, tzinfo=UTC),
+    )
+    rehearsal_factory = captured["composition"]["rehearsal_factory"]  # type: ignore[index]
+    assert callable(rehearsal_factory)
+    assert rehearsal_factory(candidate, 8, RuntimePurpose.DETACHED_REHEARSAL, loaded) == (  # type: ignore[operator]
+        "actions",
+        "identity",
+    )
+    source = captured["source"]
+    assert isinstance(source, dict)
+    external_supervisor_artifacts = source["external_supervisor_artifacts"]
+    assert callable(external_supervisor_artifacts)
+    assert external_supervisor_artifacts() is artifact
+    assert builds == [
+        {
+            "candidate_root": config.runner_repo,
+            "candidate_sha": candidate.resolved_sha,
+            "candidate_tree": candidate.resolved_tree,
+            "environment": config.environment,
+            "image_tag": candidate.image_tag,
+        }
+    ]
 
 
 class _Artifacts:
@@ -478,6 +681,268 @@ def test_installed_predecessor_recognizes_exact_oldlab_activation_on_oldlab_host
     assert dict(snapshot.unit_sha256) == dict(store.manifest.unit_sha256)
     assert snapshot.transition_clear is True
     assert snapshot.runtime_ready is True
+
+
+def test_installed_gb10_predecessor_source_uses_remote_typed_observation_and_unit_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate_root = Path(__file__).resolve().parents[4]
+    candidate_sha = _git_run(["git", "-C", str(candidate_root), "rev-parse", "HEAD"]).stdout.strip()
+    candidate_tree = _git_run(
+        ["git", "-C", str(candidate_root), "rev-parse", "HEAD^{tree}"]
+    ).stdout.strip()
+    artifact = build_external_supervisor_artifact(
+        candidate_root,
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+        image_tag=f"staging-{candidate_sha[:7]}",
+        environment="staging",
+        execution_host="gx10-01c7",
+    )
+    observation = _observation(
+        artifact,
+        files="legacy",
+        runtime="exact",
+        unit_dir=Path(GB10_CANONICAL_UNIT_DIR),
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "AtomicUserUnitStore",
+        lambda **_kwargs: pytest.fail("remote source constructed a local unit store"),
+    )
+
+    source = installed_deep_preflight_factory._external_supervisor_predecessor_source(
+        candidate_root=candidate_root,
+        git_run=_git_run,
+        service_uid=501,
+        pool_identity_source=_pool_identity,
+        execution_host="gx10-01c7",
+        unit_dir=Path(GB10_CANONICAL_UNIT_DIR),
+        observation_source=lambda _context: observation,
+    )
+
+    snapshot = source(_installed_predecessor_context(candidate_root))
+
+    assert snapshot.kind == "legacy-manifest"
+    assert snapshot.runtime_ready is True
+
+
+def test_installed_gb10_canonical_predecessor_rejects_oldlab_unit_directory() -> None:
+    candidate_root = Path(__file__).resolve().parents[4]
+    candidate_sha = _git_run(["git", "-C", str(candidate_root), "rev-parse", "HEAD"]).stdout.strip()
+    candidate_tree = _git_run(
+        ["git", "-C", str(candidate_root), "rev-parse", "HEAD^{tree}"]
+    ).stdout.strip()
+    artifact = build_external_supervisor_artifact(
+        candidate_root,
+        candidate_sha=candidate_sha,
+        candidate_tree=candidate_tree,
+        image_tag=f"staging-{candidate_sha[:7]}",
+        environment="staging",
+        execution_host="gx10-01c7",
+    )
+    observation = _observation(
+        artifact,
+        files="exact",
+        runtime="exact",
+        unit_dir=PROTECTED_USER_UNIT_DIR,
+    )
+    source = installed_deep_preflight_factory._external_supervisor_predecessor_source(
+        candidate_root=candidate_root,
+        git_run=_git_run,
+        service_uid=501,
+        pool_identity_source=lambda: _pool_identity(
+            "0067",
+            legacy_count=0,
+            target_count=1,
+        ),
+        execution_host="gx10-01c7",
+        unit_dir=Path(GB10_CANONICAL_UNIT_DIR),
+        observation_source=lambda _context: observation,
+    )
+
+    snapshot = source(
+        _installed_predecessor_context(
+            candidate_root,
+            backup_schema_revision="0067",
+            database_schema_revision="0067",
+        )
+    )
+
+    assert snapshot.kind == "canonical"
+    assert snapshot.runtime_ready is False
+
+
+def test_installed_predecessor_sources_require_exact_two_controller_map() -> None:
+    snapshot = ExternalSupervisorPredecessorSnapshot(
+        kind="absent",
+        authority_digest=EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+        pointer_digest=EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+        unit_sha256={},
+        live_evidence_digest="a" * 64,
+        pending_transition_digest=hashlib.sha256(b"{}").hexdigest(),
+        transition_clear=True,
+        runtime_ready=True,
+        pool_identity_digest="c" * 64,
+    )
+    combined = installed_deep_preflight_factory._controller_predecessor_sources(
+        {
+            "gx10-01c7": lambda _context: snapshot,
+            "TRT-EAI-OLDLAB-1": lambda _context: snapshot,
+        }
+    )
+
+    assert combined(SimpleNamespace()) == {
+        "gx10-01c7": snapshot,
+        "TRT-EAI-OLDLAB-1": snapshot,
+    }
+
+    with pytest.raises(ValueError, match="controller coverage"):
+        installed_deep_preflight_factory._controller_predecessor_sources(
+            {"TRT-EAI-OLDLAB-1": lambda _context: snapshot}
+        )
+
+
+def test_installed_predecessor_sources_share_one_pool_identity_snapshot() -> None:
+    identity = _pool_identity()
+    calls = 0
+    seen: list[ExternalSupervisorPoolIdentity] = []
+
+    def pool_identity_source() -> ExternalSupervisorPoolIdentity:
+        nonlocal calls
+        calls += 1
+        return identity
+
+    def source(
+        _context: CheckContext,
+        pool_identity: ExternalSupervisorPoolIdentity,
+    ) -> ExternalSupervisorPredecessorSnapshot:
+        seen.append(pool_identity)
+        return ExternalSupervisorPredecessorSnapshot(
+            kind="absent",
+            authority_digest=EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+            pointer_digest=EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+            unit_sha256={},
+            live_evidence_digest="a" * 64,
+            pending_transition_digest=hashlib.sha256(b"{}").hexdigest(),
+            transition_clear=True,
+            runtime_ready=True,
+            pool_identity_digest=pool_identity.evidence_digest,
+        )
+
+    combined = installed_deep_preflight_factory._controller_predecessor_sources(
+        {
+            "gx10-01c7": source,
+            "TRT-EAI-OLDLAB-1": source,
+        },
+        pool_identity_source=pool_identity_source,
+    )
+
+    snapshots = combined(SimpleNamespace())
+
+    assert calls == 1
+    assert seen == [identity, identity]
+    assert {snapshot.pool_identity_digest for snapshot in snapshots.values()} == {
+        identity.evidence_digest
+    }
+
+
+def test_installed_gb10_absent_retry_fits_inside_predecessor_check_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    candidate_root = Path(__file__).resolve().parents[4]
+    context = _installed_predecessor_context(candidate_root)
+    expected = SimpleNamespace()
+    attempts: list[dict[str, object]] = []
+
+    def run_subprocess(argv, **kwargs):
+        attempts.append({"argv": tuple(argv), **kwargs})
+        return SimpleNamespace(
+            returncode=1 if len(attempts) == 1 else 0,
+            stdout="",
+            stderr="",
+        )
+
+    commands = installed_deep_preflight_factory.InstalledPreflightCommands(
+        _config(tmp_path),
+        {
+            "HOME": "/var/lib/loom-staging-rollout",
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "PATH": "/usr/bin:/bin",
+            "USER": "loom-rollout",
+        },
+        run_subprocess=run_subprocess,
+    )
+
+    class Transport:
+        def observe(self, _artifact, authority=None):
+            result = commands.gb10_supervisor_controller(
+                ("ssh", "fixed-controller"),
+                '{"schema_version":1}\n',
+            )
+            if result.returncode != 0:
+                raise RuntimeError("delayed first attempt failed")
+            assert authority is not None and authority.kind == "absent"
+            return expected
+
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "build_fixed_gb10_external_supervisor_transport",
+        lambda **_kwargs: Transport(),
+    )
+    source = installed_deep_preflight_factory._gb10_external_supervisor_observation_source(
+        candidate_root=candidate_root,
+        run=commands.gb10_supervisor_controller,
+    )
+
+    assert source(context) is expected
+    assert [attempt["timeout"] for attempt in attempts] == [12, 12]
+    assert sum(int(attempt["timeout"]) for attempt in attempts) < 30
+
+
+def test_installed_gb10_observation_binds_context_candidate_to_typed_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate_root = Path(__file__).resolve().parents[4]
+    context = _installed_predecessor_context(candidate_root)
+    expected = SimpleNamespace()
+    captured: dict[str, object] = {}
+
+    class Transport:
+        def observe(self, artifact, authority=None):
+            captured["artifact"] = artifact
+            captured["authority"] = authority
+            return expected
+
+    def build(**kwargs):
+        captured["builder"] = kwargs
+        return Transport()
+
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "build_fixed_gb10_external_supervisor_transport",
+        build,
+    )
+
+    def run(*_args):
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    source = installed_deep_preflight_factory._gb10_external_supervisor_observation_source(
+        candidate_root=candidate_root,
+        run=run,
+    )
+
+    assert source(context) is expected
+    assert captured["builder"] == {
+        "candidate_sha": context.bindings["candidate.sha"],
+        "candidate_tree": context.bindings["candidate.tree"],
+        "run": run,
+    }
+    artifact = captured["artifact"]
+    assert {item.execution_host for item in artifact.supervisors} == {"gx10-01c7"}
+    assert captured["authority"] is None
 
 
 def test_installed_external_supervisor_predecessor_uses_live_schema_after_migration(

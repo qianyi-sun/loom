@@ -1415,19 +1415,26 @@ class FixedUserSystemdControl:
     """Execute a closed set of fixed ``systemctl --user`` operations."""
 
     service_uid: int
+    service_home: Path = PROTECTED_USER_UNIT_ANCHOR
 
     def __post_init__(self) -> None:
-        if self.service_uid < 0 or self.service_uid != os.geteuid():
+        if (
+            self.service_uid < 0
+            or self.service_uid != os.geteuid()
+            or not self.service_home.is_absolute()
+            or ".." in self.service_home.parts
+            or self.service_home not in {PROTECTED_USER_UNIT_ANCHOR, Path("/var/lib/loom-rollout")}
+        ):
             raise ValueError("protected external supervisor systemd identity is invalid")
 
     @property
     def environment(self) -> Mapping[str, str]:
         return {
-            "HOME": "/var/lib/loom-staging-rollout",
+            "HOME": str(self.service_home),
             "LANG": "C.UTF-8",
             "LC_ALL": "C.UTF-8",
             "PATH": "/usr/local/bin:/usr/bin:/bin",
-            "XDG_CONFIG_HOME": "/var/lib/loom-staging-rollout/.config",
+            "XDG_CONFIG_HOME": str(self.service_home / ".config"),
             "XDG_RUNTIME_DIR": f"/run/user/{self.service_uid}",
         }
 
@@ -1602,6 +1609,11 @@ class FixedUserSystemdControl:
 class FixedExternalSupervisorTransport:
     store: UserUnitStore
     control: UserSystemdControl
+    unit_dir: Path = PROTECTED_USER_UNIT_DIR
+
+    def __post_init__(self) -> None:
+        if not self.unit_dir.is_absolute() or ".." in self.unit_dir.parts:
+            raise ValueError("protected external supervisor unit directory is invalid")
 
     def observe(
         self,
@@ -1678,7 +1690,12 @@ class FixedExternalSupervisorTransport:
         current = self.observe(artifact, expected.predecessor_authority)
         if (
             current != expected
-            or classify_external_supervisor_live_state(artifact, current) != "ready"
+            or classify_external_supervisor_live_state(
+                artifact,
+                current,
+                unit_dir=self.unit_dir,
+            )
+            != "ready"
         ):
             raise RuntimeError("protected external supervisor state changed before apply")
         transition_group_id = uuid4().hex
@@ -1687,9 +1704,16 @@ class FixedExternalSupervisorTransport:
             plan_digest=plan_digest,
             attestation_digest=attestation_digest,
             transition_group_id=transition_group_id,
-            runtime_evidence_digest=_expected_activation_runtime_digest(artifact),
+            runtime_evidence_digest=_expected_activation_runtime_digest(
+                artifact,
+                unit_dir=self.unit_dir,
+            ),
+            unit_dir=str(self.unit_dir),
         )
-        predecessor = self._predecessor_snapshot(current)
+        predecessor = self._predecessor_snapshot(
+            current,
+            unit_dir=self.unit_dir,
+        )
         authority = current.predecessor_authority
         assert authority is not None
         intents: list[TimerCompensationEvidence] = []
@@ -1856,16 +1880,11 @@ class FixedExternalSupervisorTransport:
                     self.control.disable_timer(timer_name)
                     self.control.stop_service(service_name)
                 self.store.restore_transition(
-                    {
-                        name: (current[name], desired_payloads[name])
-                        for name in target.unit_payloads
-                    }
+                    {name: (current[name], desired_payloads[name]) for name in target.unit_payloads}
                 )
                 self.control.daemon_reload()
                 for service_name in sorted(
-                    name
-                    for name in desired.unit_payloads
-                    if name.endswith(".service")
+                    name for name in desired.unit_payloads if name.endswith(".service")
                 ):
                     timer_name = f"{service_name.removesuffix('.service')}.timer"
                     if _identity_pair_desired_active(desired, service_name, timer_name):
@@ -1920,8 +1939,7 @@ class FixedExternalSupervisorTransport:
                     None,
                 )
                 for service_name in target.unit_payloads
-                if service_name.endswith(".service")
-                and service_name not in desired.unit_payloads
+                if service_name.endswith(".service") and service_name not in desired.unit_payloads
             )
         else:
             verified = all(
@@ -2154,6 +2172,8 @@ class FixedExternalSupervisorTransport:
     @staticmethod
     def _predecessor_snapshot(
         observation: ExternalSupervisorLiveObservation,
+        *,
+        unit_dir: Path = PROTECTED_USER_UNIT_DIR,
     ) -> ExternalSupervisorCanonicalIdentity | None:
         authority = observation.predecessor_authority
         assert authority is not None
@@ -2166,7 +2186,10 @@ class FixedExternalSupervisorTransport:
             legacy = observation.predecessor_manifest or load_predecessor_manifest()
             if legacy.manifest_digest != authority.authority_digest:
                 raise RuntimeError("protected external supervisor legacy snapshot drifted")
-            return ExternalSupervisorCanonicalIdentity.from_manifest(legacy)
+            return ExternalSupervisorCanonicalIdentity.from_manifest(
+                legacy,
+                unit_dir=str(unit_dir),
+            )
         return None
 
     def _verify_unit_bytes(self, identity: ExternalSupervisorCanonicalIdentity) -> None:
@@ -2180,9 +2203,14 @@ class FixedExternalSupervisorTransport:
         for supervisor in artifact.supervisors:
             timer = self.control.timer_status(supervisor.timer_name)
             service = self.control.service_status(supervisor.service_name)
-            if not _definition_is_fresh(supervisor.timer_name, timer) or not _definition_is_fresh(
+            if not _definition_is_fresh(
+                supervisor.timer_name,
+                timer,
+                unit_dir=self.unit_dir,
+            ) or not _definition_is_fresh(
                 supervisor.service_name,
                 service,
+                unit_dir=self.unit_dir,
             ):
                 raise RuntimeError("protected external supervisor loaded definition is stale")
 
@@ -2197,8 +2225,16 @@ class FixedExternalSupervisorTransport:
             service = self.control.service_status(supervisor.service_name)
             active = _supervisor_desired_active(supervisor)
             if active and (
-                not _definition_is_fresh(supervisor.timer_name, timer)
-                or not _definition_is_fresh(supervisor.service_name, service)
+                not _definition_is_fresh(
+                    supervisor.timer_name,
+                    timer,
+                    unit_dir=self.unit_dir,
+                )
+                or not _definition_is_fresh(
+                    supervisor.service_name,
+                    service,
+                    unit_dir=self.unit_dir,
+                )
                 or timer.unit_file_state != "enabled"
                 or timer.active_state != "active"
                 or service.result != "success"
@@ -2213,7 +2249,11 @@ class FixedExternalSupervisorTransport:
             ):
                 raise RuntimeError("protected external supervisor disable verification failed")
         if (
-            _observed_activation_runtime_digest(artifact, self.control)
+            _observed_activation_runtime_digest(
+                artifact,
+                self.control,
+                unit_dir=self.unit_dir,
+            )
             != target.runtime_evidence_digest
         ):
             raise RuntimeError("protected external supervisor runtime evidence drifted")
@@ -2247,10 +2287,10 @@ class FixedExternalSupervisorTransport:
                 return False
             if _identity_pair_desired_active(target, service_name, timer_name):
                 if (
-                    not _definition_is_fresh(service_name, service)
+                    not _definition_is_fresh(service_name, service, unit_dir=self.unit_dir)
                     or service.result != "success"
                     or service.exec_main_status != 0
-                    or not _definition_is_fresh(timer_name, timer)
+                    or not _definition_is_fresh(timer_name, timer, unit_dir=self.unit_dir)
                     or timer.unit_file_state != "enabled"
                     or timer.active_state != "active"
                 ):
@@ -2297,16 +2337,20 @@ class FixedExternalSupervisorTransport:
         no_result = service.result == "" and service.exec_main_status is None
         success = service.result == "success" and service.exec_main_status == 0
         return (
-            _definition_is_fresh(timer_name, timer)
-            and _definition_is_fresh(service_name, service)
+            _definition_is_fresh(timer_name, timer, unit_dir=self.unit_dir)
+            and _definition_is_fresh(service_name, service, unit_dir=self.unit_dir)
             and timer.unit_file_state == "disabled"
             and timer.active_state == "inactive"
             and (no_result or success)
         )
 
 
-def _expected_fragment_path(unit_name: str) -> str:
-    return str(PROTECTED_USER_UNIT_DIR / _unit_name(unit_name))
+def _expected_fragment_path(
+    unit_name: str,
+    *,
+    unit_dir: Path = PROTECTED_USER_UNIT_DIR,
+) -> str:
+    return str(unit_dir / _unit_name(unit_name))
 
 
 _DESIRED_ACTIVE_MARKER = "# LoomDesiredState=active"
@@ -2361,13 +2405,18 @@ def _normalized_disabled_service_status(
     )
 
 
-def _expected_activation_runtime_digest(artifact: ExternalSupervisorArtifact) -> str:
+def _expected_activation_runtime_digest(
+    artifact: ExternalSupervisorArtifact,
+    *,
+    unit_dir: Path = PROTECTED_USER_UNIT_DIR,
+) -> str:
     target = ExternalSupervisorCanonicalIdentity.build(
         artifact,
         plan_digest="0" * 64,
         attestation_digest="0" * 64,
         transition_group_id="0" * 32,
         runtime_evidence_digest="0" * 64,
+        unit_dir=str(unit_dir),
     )
     return _expected_identity_runtime_digest(target)
 
@@ -2386,14 +2435,20 @@ def _expected_identity_runtime_digest(
             load_state="loaded",
             result="success" if active else "",
             exec_main_status=0 if active else None,
-            fragment_path=_expected_fragment_path(service_name),
+            fragment_path=_expected_fragment_path(
+                service_name,
+                unit_dir=Path(identity.unit_dir),
+            ),
             need_daemon_reload="no",
         )
         timers[timer_name] = TimerRuntimeStatus(
             load_state="loaded",
             unit_file_state="enabled" if active else "disabled",
             active_state="active" if active else "inactive",
-            fragment_path=_expected_fragment_path(timer_name),
+            fragment_path=_expected_fragment_path(
+                timer_name,
+                unit_dir=Path(identity.unit_dir),
+            ),
             need_daemon_reload="no",
         )
     return _identity_runtime_digest(identity, services=services, timers=timers)
@@ -2432,6 +2487,8 @@ def _identity_runtime_digest(
 def _observed_activation_runtime_digest(
     artifact: ExternalSupervisorArtifact,
     control: UserSystemdControl,
+    *,
+    unit_dir: Path = PROTECTED_USER_UNIT_DIR,
 ) -> str:
     services: dict[str, ServiceRuntimeStatus] = {}
     timers: dict[str, TimerRuntimeStatus] = {}
@@ -2443,7 +2500,7 @@ def _observed_activation_runtime_digest(
         timers[supervisor.timer_name] = control.timer_status(supervisor.timer_name)
     return _hash_json(
         {
-            "unit_dir": str(PROTECTED_USER_UNIT_DIR),
+            "unit_dir": str(unit_dir),
             "services": {name: status.to_dict() for name, status in services.items()},
             "timers": {name: status.to_dict() for name, status in timers.items()},
             "unit_sha256": dict(artifact.unit_sha256),
@@ -2472,10 +2529,18 @@ def canonical_external_supervisor_runtime_ready(
         timer = timer_statuses[timer_name]
         if _identity_pair_desired_active(identity, service_name, timer_name):
             if (
-                not _definition_is_fresh(service_name, service)
+                not _definition_is_fresh(
+                    service_name,
+                    service,
+                    unit_dir=Path(identity.unit_dir),
+                )
                 or service.result != "success"
                 or service.exec_main_status != 0
-                or not _definition_is_fresh(timer_name, timer)
+                or not _definition_is_fresh(
+                    timer_name,
+                    timer,
+                    unit_dir=Path(identity.unit_dir),
+                )
                 or timer.unit_file_state != "enabled"
                 or timer.active_state != "active"
             ):
@@ -2484,9 +2549,17 @@ def canonical_external_supervisor_runtime_ready(
             no_result = service.result == "" and service.exec_main_status is None
             success = service.result == "success" and service.exec_main_status == 0
             if (
-                not _definition_is_fresh(service_name, service)
+                not _definition_is_fresh(
+                    service_name,
+                    service,
+                    unit_dir=Path(identity.unit_dir),
+                )
                 or not (no_result or success)
-                or not _definition_is_fresh(timer_name, timer)
+                or not _definition_is_fresh(
+                    timer_name,
+                    timer,
+                    unit_dir=Path(identity.unit_dir),
+                )
                 or timer.unit_file_state != "disabled"
                 or timer.active_state != "inactive"
             ):
@@ -2505,10 +2578,12 @@ def canonical_external_supervisor_runtime_ready(
 def _definition_is_fresh(
     unit_name: str,
     status: TimerRuntimeStatus | ServiceRuntimeStatus,
+    *,
+    unit_dir: Path = PROTECTED_USER_UNIT_DIR,
 ) -> bool:
     return (
         status.load_state == "loaded"
-        and status.fragment_path == _expected_fragment_path(unit_name)
+        and status.fragment_path == _expected_fragment_path(unit_name, unit_dir=unit_dir)
         and status.need_daemon_reload == "no"
     )
 
@@ -2516,19 +2591,26 @@ def _definition_is_fresh(
 def _definition_state_is_reachable(
     unit_name: str,
     status: TimerRuntimeStatus | ServiceRuntimeStatus,
+    *,
+    unit_dir: Path = PROTECTED_USER_UNIT_DIR,
 ) -> bool:
     if status.load_state == "not-found":
         return status.fragment_path == "" and status.need_daemon_reload == "no"
-    return status.fragment_path == _expected_fragment_path(unit_name)
+    return status.fragment_path == _expected_fragment_path(unit_name, unit_dir=unit_dir)
 
 
 def classify_external_supervisor_live_state(
     artifact: ExternalSupervisorArtifact,
     observation: ExternalSupervisorLiveObservation,
+    *,
+    unit_dir: Path = PROTECTED_USER_UNIT_DIR,
 ) -> str:
     """Classify only reachable apply prefixes; stale bytes/state fail closed."""
 
     expected_units: dict[str, bytes] = {}
+    execution_hosts = {supervisor.execution_host for supervisor in artifact.supervisors}
+    if len(execution_hosts) != 1:
+        return "drifted"
     for supervisor in artifact.supervisors:
         expected_units[supervisor.service_name] = supervisor.service_unit.encode("utf-8")
         expected_units[supervisor.timer_name] = supervisor.timer_unit.encode("utf-8")
@@ -2541,7 +2623,10 @@ def classify_external_supervisor_live_state(
         return "drifted"
 
     try:
-        predecessor = FixedExternalSupervisorTransport._predecessor_snapshot(observation)
+        predecessor = FixedExternalSupervisorTransport._predecessor_snapshot(
+            observation,
+            unit_dir=unit_dir,
+        )
     except (RuntimeError, ValueError):
         return "drifted"
     if predecessor is not None and not set(predecessor.unit_payloads).issubset(expected_units):
@@ -2555,14 +2640,12 @@ def classify_external_supervisor_live_state(
         expected_timer = expected_units[supervisor.timer_name]
         predecessor_service = (
             None
-            if predecessor is None
-            or supervisor.service_name not in predecessor.unit_payloads
+            if predecessor is None or supervisor.service_name not in predecessor.unit_payloads
             else predecessor.unit_payloads[supervisor.service_name].encode()
         )
         predecessor_timer = (
             None
-            if predecessor is None
-            or supervisor.timer_name not in predecessor.unit_payloads
+            if predecessor is None or supervisor.timer_name not in predecessor.unit_payloads
             else predecessor.unit_payloads[supervisor.timer_name].encode()
         )
         if service_bytes not in (predecessor_service, expected_service) or timer_bytes not in (
@@ -2575,8 +2658,16 @@ def classify_external_supervisor_live_state(
         timer = observation.timer_statuses[supervisor.timer_name]
         service = observation.service_statuses[supervisor.service_name]
         if (
-            not _definition_state_is_reachable(supervisor.timer_name, timer)
-            or not _definition_state_is_reachable(supervisor.service_name, service)
+            not _definition_state_is_reachable(
+                supervisor.timer_name,
+                timer,
+                unit_dir=unit_dir,
+            )
+            or not _definition_state_is_reachable(
+                supervisor.service_name,
+                service,
+                unit_dir=unit_dir,
+            )
             or (timer.load_state == "loaded") != (service.load_state == "loaded")
             or (timer.active_state == "active" and timer.unit_file_state != "enabled")
             or (
@@ -2602,20 +2693,24 @@ def classify_external_supervisor_live_state(
         and pointer.candidate_sha == artifact.candidate_sha
         and pointer.candidate_tree == artifact.candidate_tree
         and pointer.environment == artifact.environment
-        and pointer.unit_dir == str(PROTECTED_USER_UNIT_DIR)
+        and pointer.unit_dir == str(unit_dir)
         and dict(pointer.unit_sha256) == dict(artifact.unit_sha256)
-        and pointer.runtime_evidence_digest == _expected_activation_runtime_digest(artifact)
+        and pointer.runtime_evidence_digest
+        == _expected_activation_runtime_digest(artifact, unit_dir=unit_dir)
     )
     if (
         all_target
         and pointer_is_target
         and all(
             _definition_is_fresh(
-                supervisor.timer_name, observation.timer_statuses[supervisor.timer_name]
+                supervisor.timer_name,
+                observation.timer_statuses[supervisor.timer_name],
+                unit_dir=unit_dir,
             )
             and _definition_is_fresh(
                 supervisor.service_name,
                 observation.service_statuses[supervisor.service_name],
+                unit_dir=unit_dir,
             )
             and (
                 (
@@ -2667,6 +2762,7 @@ def build_fixed_external_supervisor_transport(
             creation_anchor=PROTECTED_USER_UNIT_ANCHOR,
         ),
         control=FixedUserSystemdControl(service_uid=service_uid),
+        unit_dir=PROTECTED_USER_UNIT_DIR,
     )
 
 

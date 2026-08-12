@@ -106,6 +106,17 @@ class InstalledPreflightCommands:
         """Keep two complete four-wave fleet attempts inside the 60s DAG bound."""
         return self._execute(argv, timeout=5)
 
+    def gb10_supervisor_controller(
+        self,
+        argv: Sequence[str],
+        payload: str,
+    ) -> CommandResult:
+        """Run one typed read-only controller observation with bounded stdin."""
+
+        if not payload or len(payload.encode()) > 4 * 1024 * 1024:
+            raise ValueError("GB10 supervisor controller payload is invalid")
+        return self._execute(argv, input=payload, timeout=12)
+
     def systemd_preflight(self, argv: Sequence[str]) -> CommandResult:
         """Run only the fixed Tier 0 systemd probes with a short RPC bound."""
         command = tuple(argv)

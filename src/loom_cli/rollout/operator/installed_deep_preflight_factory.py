@@ -18,6 +18,8 @@ from loom_cli.rollout.external_supervisor_predecessor import (
     ABSENT_PREDECESSOR_DIGEST,
     ExternalSupervisorCanonicalPointer,
     ExternalSupervisorPoolIdentity,
+    ExternalSupervisorPredecessorAuthority,
+    external_supervisor_unit_directory,
     load_predecessor_manifest,
 )
 from loom_cli.rollout.external_supervisor_readiness import (
@@ -68,6 +70,11 @@ from .protected_external_supervisor_transport import (
     ExternalSupervisorLiveObservation,
     FixedUserSystemdControl,
     canonical_external_supervisor_runtime_ready,
+)
+from .protected_gb10_external_supervisor_transport import (
+    GB10_CONTROLLER_EXECUTION_HOST,
+    CommandRunner,
+    build_fixed_gb10_external_supervisor_transport,
 )
 from .readonly_capacity_client import (
     CapacitySource,
@@ -193,15 +200,22 @@ def _external_supervisor_predecessor_source(
     service_uid: int,
     pool_identity_source: Callable[[], ExternalSupervisorPoolIdentity],
     execution_host: str | None = None,
-) -> ExternalSupervisorPredecessorSource:
+    unit_dir: Path = PROTECTED_USER_UNIT_DIR,
+    observation_source: Callable[[CheckContext], ExternalSupervisorLiveObservation] | None = None,
+) -> Callable[..., ExternalSupervisorPredecessorSnapshot]:
     """Return a no-write adapter over the fixed protected user-systemd store."""
 
-    store = AtomicUserUnitStore(
-        unit_dir=PROTECTED_USER_UNIT_DIR,
-        service_uid=service_uid,
-        creation_anchor=PROTECTED_USER_UNIT_ANCHOR,
-    )
-    control = FixedUserSystemdControl(service_uid=service_uid)
+    if not unit_dir.is_absolute() or ".." in unit_dir.parts:
+        raise ValueError("external supervisor predecessor unit directory is invalid")
+    store = None
+    control = None
+    if observation_source is None:
+        store = AtomicUserUnitStore(
+            unit_dir=unit_dir,
+            service_uid=service_uid,
+            creation_anchor=PROTECTED_USER_UNIT_ANCHOR,
+        )
+        control = FixedUserSystemdControl(service_uid=service_uid)
 
     def git_output(*arguments: str) -> str:
         # The root installer owns the candidate repo; git refuses to operate on
@@ -214,7 +228,10 @@ def _external_supervisor_predecessor_source(
             raise ValueError("external supervisor predecessor Git provenance is unavailable")
         return result.stdout
 
-    def source(context: CheckContext) -> ExternalSupervisorPredecessorSnapshot:
+    def source(
+        context: CheckContext,
+        pool_identity_override: ExternalSupervisorPoolIdentity | None = None,
+    ) -> ExternalSupervisorPredecessorSnapshot:
         legacy = load_predecessor_manifest(execution_host=execution_host)
         candidate_sha = context.bindings.get("candidate.sha")
         candidate_tree = context.bindings.get("candidate.tree")
@@ -249,32 +266,45 @@ def _external_supervisor_predecessor_source(
             or source_file_sha256 != dict(legacy.source_file_sha256)
         ):
             raise ValueError("external supervisor predecessor Git provenance drifted")
-        canonical = store.read_canonical()
-        unit_names = set(store.list_units()) | set(
-            legacy.unit_sha256 if canonical is None else canonical.unit_sha256
-        )
-        units = {name: store.read_unit(name) for name in sorted(unit_names)}
-        timers = {
-            name: control.timer_status(name)
-            for name in sorted(unit_names)
-            if name.endswith(".timer")
-        }
-        services = {
-            name: control.service_status(name)
-            for name in sorted(unit_names)
-            if name.endswith(".service")
-        }
-        observation = ExternalSupervisorLiveObservation(
-            unit_payloads=units,
-            timer_statuses=timers,
-            service_statuses=services,
-            canonical_identity=canonical,
-            predecessor_manifest=legacy,
-            compensation_blockers=store.compensation_blockers(),
-        )
+        if observation_source is None:
+            assert store is not None and control is not None
+            canonical = store.read_canonical()
+            unit_names = set(store.list_units()) | set(
+                legacy.unit_sha256 if canonical is None else canonical.unit_sha256
+            )
+            units = {name: store.read_unit(name) for name in sorted(unit_names)}
+            timers = {
+                name: control.timer_status(name)
+                for name in sorted(unit_names)
+                if name.endswith(".timer")
+            }
+            services = {
+                name: control.service_status(name)
+                for name in sorted(unit_names)
+                if name.endswith(".service")
+            }
+            observation = ExternalSupervisorLiveObservation(
+                unit_payloads=units,
+                timer_statuses=timers,
+                service_statuses=services,
+                canonical_identity=canonical,
+                predecessor_manifest=legacy,
+                compensation_blockers=store.compensation_blockers(),
+            )
+        else:
+            observation = observation_source(context)
+            canonical = observation.canonical_identity
+            units = dict(observation.unit_payloads)
+            timers = dict(observation.timer_statuses)
+            services = dict(observation.service_statuses)
         authority = observation.predecessor_authority
         assert authority is not None
-        pool_identity = pool_identity_source()
+        if (
+            authority.kind == "legacy-manifest"
+            and authority.authority_digest != legacy.manifest_digest
+        ):
+            raise ValueError("external supervisor predecessor authority drifted")
+        pool_identity = pool_identity_override or pool_identity_source()
         bound_schema_revision = context.bindings.get("database.schema.revision")
         if (
             not isinstance(bound_schema_revision, str)
@@ -287,7 +317,9 @@ def _external_supervisor_predecessor_source(
             else authority.kind
         )
         if canonical is not None:
-            runtime_ready = canonical_external_supervisor_runtime_ready(
+            runtime_ready = canonical.unit_dir == str(
+                unit_dir
+            ) and canonical_external_supervisor_runtime_ready(
                 canonical,
                 unit_payloads=units,
                 timer_statuses=timers,
@@ -319,7 +351,7 @@ def _external_supervisor_predecessor_source(
                             timer_status.load_state == "loaded"
                             and timer_status.unit_file_state == "enabled"
                             and timer_status.active_state == "active"
-                            and timer_status.fragment_path == str(PROTECTED_USER_UNIT_DIR / name)
+                            and timer_status.fragment_path == str(unit_dir / name)
                             and timer_status.need_daemon_reload == "no"
                         )
                 else:
@@ -338,7 +370,7 @@ def _external_supervisor_predecessor_source(
                             service_status.load_state == "loaded"
                             and service_status.result == "success"
                             and service_status.exec_main_status == 0
-                            and service_status.fragment_path == str(PROTECTED_USER_UNIT_DIR / name)
+                            and service_status.fragment_path == str(unit_dir / name)
                             and service_status.need_daemon_reload == "no"
                         )
             pointer_digest = ABSENT_PREDECESSOR_DIGEST
@@ -355,6 +387,72 @@ def _external_supervisor_predecessor_source(
         )
 
     return source
+
+
+def _controller_predecessor_sources(
+    sources: Mapping[str, Callable[..., ExternalSupervisorPredecessorSnapshot]],
+    *,
+    pool_identity_source: Callable[[], ExternalSupervisorPoolIdentity] | None = None,
+) -> ExternalSupervisorPredecessorSource:
+    expected = {GB10_CONTROLLER_EXECUTION_HOST, STAGING_ROLLOUT_EXECUTION_HOST}
+    if set(sources) != expected or any(not callable(source) for source in sources.values()):
+        raise ValueError("external supervisor controller coverage is invalid")
+
+    def combined(
+        context: CheckContext,
+    ) -> Mapping[str, ExternalSupervisorPredecessorSnapshot]:
+        snapshots: dict[str, ExternalSupervisorPredecessorSnapshot] = {}
+        pool_identity = None if pool_identity_source is None else pool_identity_source()
+        for host in sorted(sources):
+            snapshot = (
+                sources[host](context)
+                if pool_identity is None
+                else sources[host](context, pool_identity)
+            )
+            if not isinstance(snapshot, ExternalSupervisorPredecessorSnapshot):
+                raise ValueError("external supervisor controller snapshot is invalid")
+            snapshots[host] = snapshot
+        return snapshots
+
+    return combined
+
+
+def _gb10_external_supervisor_observation_source(
+    *,
+    candidate_root: Path,
+    run: CommandRunner,
+) -> Callable[[CheckContext], ExternalSupervisorLiveObservation]:
+    def observe(context: CheckContext) -> ExternalSupervisorLiveObservation:
+        candidate_sha = context.bindings.get("candidate.sha")
+        candidate_tree = context.bindings.get("candidate.tree")
+        if not isinstance(candidate_sha, str) or not isinstance(candidate_tree, str):
+            raise ValueError("GB10 predecessor candidate identity is missing")
+        artifact = build_external_supervisor_artifact(
+            candidate_root,
+            candidate_sha=candidate_sha,
+            candidate_tree=candidate_tree,
+            image_tag=f"staging-{candidate_sha[:7]}",
+            environment="staging",
+            execution_host=GB10_CONTROLLER_EXECUTION_HOST,
+        )
+        transport = build_fixed_gb10_external_supervisor_transport(
+            candidate_sha=candidate_sha,
+            candidate_tree=candidate_tree,
+            run=run,
+        )
+        try:
+            return transport.observe(artifact)
+        except (RuntimeError, ValueError):
+            return transport.observe(
+                artifact,
+                ExternalSupervisorPredecessorAuthority(
+                    kind="absent",
+                    authority_digest=ABSENT_PREDECESSOR_DIGEST,
+                    unit_sha256={},
+                ),
+            )
+
+    return observe
 
 
 def build_installed_deep_preflight_composition(
@@ -382,9 +480,7 @@ def build_installed_deep_preflight_composition(
         service_uid=service_uid,
     )
     cluster = load_cluster_config(config.cluster_config_path)
-    capacity_kind, capacity_paths, expected_drive_count = (
-        _readonly_capacity_probe_inputs(cluster)
-    )
+    capacity_kind, capacity_paths, expected_drive_count = _readonly_capacity_probe_inputs(cluster)
     capacity_source = InstalledReadonlyCapacitySource(
         service_uid=service_uid,
         capacity_source=capacity_kind,
@@ -500,7 +596,6 @@ def build_installed_deep_preflight_composition(
                     candidate_tree=candidate.resolved_tree or "",
                     image_tag=candidate.image_tag,
                     environment=config.environment,
-                    execution_host=STAGING_ROLLOUT_EXECUTION_HOST,
                 ),
                 artifact_store=artifact_store,
                 migration_plan_sha256=loaded.publication.migration_plan_sha256,
@@ -537,6 +632,9 @@ def build_installed_deep_preflight_composition(
 
         return unavailable_actions, unavailable_identity
 
+    def pool_identity_source() -> ExternalSupervisorPoolIdentity:
+        return _probe_installed_external_supervisor_pool_identity(service_uid=service_uid)
+
     return InstalledDeepPreflightComposition(
         config=config,
         service_uid=service_uid,
@@ -552,14 +650,37 @@ def build_installed_deep_preflight_composition(
         capacity_source=readonly.capacity,
         backup_authority_factory=backup_authority,
         external_supervisor_predecessor_source=(
-            _external_supervisor_predecessor_source(
-                candidate_root=config.runner_repo,
-                git_run=commands.git,
-                service_uid=service_uid,
-                pool_identity_source=lambda: _probe_installed_external_supervisor_pool_identity(
-                    service_uid=service_uid
-                ),
-                execution_host=STAGING_ROLLOUT_EXECUTION_HOST,
+            _controller_predecessor_sources(
+                {
+                    GB10_CONTROLLER_EXECUTION_HOST: (
+                        _external_supervisor_predecessor_source(
+                            candidate_root=config.runner_repo,
+                            git_run=commands.git,
+                            service_uid=service_uid,
+                            pool_identity_source=pool_identity_source,
+                            execution_host=GB10_CONTROLLER_EXECUTION_HOST,
+                            unit_dir=Path(
+                                external_supervisor_unit_directory(GB10_CONTROLLER_EXECUTION_HOST)
+                            ),
+                            observation_source=(
+                                _gb10_external_supervisor_observation_source(
+                                    candidate_root=config.runner_repo,
+                                    run=commands.gb10_supervisor_controller,
+                                )
+                            ),
+                        )
+                    ),
+                    STAGING_ROLLOUT_EXECUTION_HOST: (
+                        _external_supervisor_predecessor_source(
+                            candidate_root=config.runner_repo,
+                            git_run=commands.git,
+                            service_uid=service_uid,
+                            pool_identity_source=pool_identity_source,
+                            execution_host=STAGING_ROLLOUT_EXECUTION_HOST,
+                        )
+                    ),
+                },
+                pool_identity_source=pool_identity_source,
             )
         ),
         systemd_run=commands.systemd_preflight,

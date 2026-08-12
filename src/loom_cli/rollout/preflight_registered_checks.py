@@ -26,8 +26,11 @@ from loom_cli.rollout.credential_authority import (
 )
 from loom_cli.rollout.docker_readiness import CommandRunner as DockerCommandRunner
 from loom_cli.rollout.docker_readiness import probe_docker_runtime
+from loom_cli.rollout.external_supervisor_predecessor import (
+    EXTERNAL_SUPERVISOR_CONTROLLER_HOSTS,
+    external_supervisor_unit_directory,
+)
 from loom_cli.rollout.external_supervisor_readiness import (
-    STAGING_ROLLOUT_EXECUTION_HOST,
     build_external_supervisor_artifact,
     verify_external_supervisor_artifact,
 )
@@ -249,7 +252,8 @@ class ExternalSupervisorPredecessorSnapshot:
 
 
 ExternalSupervisorPredecessorSource = Callable[
-    [CheckContext], ExternalSupervisorPredecessorSnapshot
+    [CheckContext],
+    Mapping[str, ExternalSupervisorPredecessorSnapshot],
 ]
 
 
@@ -878,26 +882,59 @@ def build_external_supervisor_predecessor_check(
         ):
             return _empty_external_supervisor_predecessor_probe()
         try:
-            snapshot = source(context)
+            snapshots = dict(source(context))
+            if (
+                set(snapshots) != EXTERNAL_SUPERVISOR_CONTROLLER_HOSTS
+                or any(
+                    not isinstance(host, str)
+                    or not host
+                    or not isinstance(snapshot, ExternalSupervisorPredecessorSnapshot)
+                    for host, snapshot in snapshots.items()
+                )
+                or len({snapshot.pool_identity_digest for snapshot in snapshots.values()}) != 1
+            ):
+                raise ValueError("external supervisor controller snapshots are invalid")
         except Exception:
             return _empty_external_supervisor_predecessor_probe()
+        primary_host = "gx10-01c7" if "gx10-01c7" in snapshots else min(snapshots)
+        primary = snapshots[primary_host]
+        controller_bindings = {
+            key: value
+            for host, snapshot in sorted(snapshots.items())
+            for key, value in {
+                f"{host}/authority-kind": snapshot.kind,
+                f"{host}/authority-digest": snapshot.authority_digest,
+                f"{host}/pointer-digest": snapshot.pointer_digest,
+                f"{host}/unit-set-digest": snapshot.unit_set_digest,
+                f"{host}/live-evidence-digest": snapshot.live_evidence_digest,
+                f"{host}/pending-transition-digest": snapshot.pending_transition_digest,
+                f"{host}/unit-directory": external_supervisor_unit_directory(host),
+                **{f"{host}/unit/{name}": digest for name, digest in snapshot.unit_sha256.items()},
+            }.items()
+        }
         return CheckProbe(
             passed=(
-                snapshot.kind in {"legacy-manifest", "canonical", "absent"}
-                and snapshot.transition_clear
-                and snapshot.runtime_ready
+                all(
+                    snapshot.kind in {"legacy-manifest", "canonical", "absent"}
+                    and snapshot.transition_clear
+                    and snapshot.runtime_ready
+                    for snapshot in snapshots.values()
+                )
             ),
             evidence={
-                "authority-kind": snapshot.kind,
-                "authority-digest": snapshot.authority_digest,
-                "pointer-digest": snapshot.pointer_digest,
-                "unit-digests": dict(snapshot.unit_sha256),
-                "unit-set-digest": snapshot.unit_set_digest,
-                "live-evidence-digest": snapshot.live_evidence_digest,
-                "pending-transition-digest": snapshot.pending_transition_digest,
-                "transition-clear": snapshot.transition_clear,
-                "runtime-ready": snapshot.runtime_ready,
-                "pool-identity-digest": snapshot.pool_identity_digest,
+                "authority-kind": primary.kind,
+                "authority-digest": primary.authority_digest,
+                "pointer-digest": primary.pointer_digest,
+                "unit-digests": dict(primary.unit_sha256),
+                "unit-set-digest": primary.unit_set_digest,
+                "live-evidence-digest": primary.live_evidence_digest,
+                "pending-transition-digest": primary.pending_transition_digest,
+                "transition-clear": all(
+                    snapshot.transition_clear for snapshot in snapshots.values()
+                ),
+                "runtime-ready": all(snapshot.runtime_ready for snapshot in snapshots.values()),
+                "pool-identity-digest": primary.pool_identity_digest,
+                "controller-bindings": controller_bindings,
             },
         )
 
@@ -929,6 +966,7 @@ def build_external_supervisor_predecessor_check(
                 EvidenceField("transition-clear", "boolean"),
                 EvidenceField("runtime-ready", "boolean"),
                 EvidenceField("pool-identity-digest", "sha256"),
+                EvidenceField("controller-bindings", "string-map"),
             ),
             timeout_seconds=30,
             freshness_ttl_seconds=120,
@@ -938,7 +976,7 @@ def build_external_supervisor_predecessor_check(
             ),
             secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
         ),
-        implementation_version="v1",
+        implementation_version="v2",
         operations={CheckOperation.PROBE: probe},
     )
 
@@ -957,6 +995,7 @@ def _empty_external_supervisor_predecessor_probe() -> CheckProbe:
             "transition-clear": False,
             "runtime-ready": False,
             "pool-identity-digest": "0" * 64,
+            "controller-bindings": {},
         },
     )
 
@@ -1259,10 +1298,7 @@ def build_backup_rotation_capacity_check(
             # retires the prior active, restoring capacity. A genuine backlog
             # (stuck retirements) still leaves >= 2 payloads once the own
             # candidate is excluded and stays blocked.
-            if (
-                blockers.get("transient-limit") == "reached"
-                and state.payload_count - 1 < 2
-            ):
+            if blockers.get("transient-limit") == "reached" and state.payload_count - 1 < 2:
                 del blockers["transient-limit"]
         if state.evidence_digest != expected_rotation_digest:
             blockers["rotation-digest"] = "drifted"
@@ -2073,9 +2109,7 @@ def build_migration_manifest_check(
                 migration_target_revision=target_revision,
                 container_registry=container_registry,
                 registry_digest=(
-                    images.registry_digests["loom-control-plane"]
-                    if container_registry
-                    else ""
+                    images.registry_digests["loom-control-plane"] if container_registry else ""
                 ),
             )
         except (OSError, RuntimeError, ValueError):
@@ -2179,12 +2213,42 @@ def build_systemd_render_check(
                 candidate_tree=expected_candidate_tree,
                 image_tag=expected_image_tag,
                 environment=expected_environment,
-                execution_host=STAGING_ROLLOUT_EXECUTION_HOST,
             )
             supervisor = verify_external_supervisor_artifact(supervisor_artifact, run)
+            controller_artifacts = {
+                execution_host: build_external_supervisor_artifact(
+                    candidate_root,
+                    candidate_sha=expected_candidate_sha,
+                    candidate_tree=expected_candidate_tree,
+                    image_tag=expected_image_tag,
+                    environment=expected_environment,
+                    execution_host=execution_host,
+                )
+                for execution_host in sorted(
+                    {identity.execution_host for identity in supervisor_artifact.supervisors}
+                )
+            }
         except (OSError, RuntimeError, ValueError):
             return _empty_systemd_render_probe()
-        if set(fixed.unit_sha256) & set(supervisor_artifact.unit_sha256):
+        controller_units = {
+            f"{execution_host}/{name}": digest
+            for execution_host, artifact in controller_artifacts.items()
+            for name, digest in artifact.unit_sha256.items()
+        }
+        if (
+            set(fixed.unit_sha256) & set(supervisor_artifact.unit_sha256)
+            or any(
+                artifact.profile_sha256 != supervisor_artifact.profile_sha256
+                or dict(artifact.script_sha256) != dict(supervisor_artifact.script_sha256)
+                for artifact in controller_artifacts.values()
+            )
+            or {
+                name: digest
+                for artifact in controller_artifacts.values()
+                for name, digest in artifact.unit_sha256.items()
+            }
+            != dict(supervisor_artifact.unit_sha256)
+        ):
             return _empty_systemd_render_probe()
         unit_digests = {
             **fixed.unit_sha256,
@@ -2212,6 +2276,15 @@ def build_systemd_render_check(
                 "supervisor-script-digests": dict(supervisor_artifact.script_sha256),
                 "supervisor-unit-digests": dict(supervisor_artifact.unit_sha256),
                 "supervisor-unit-set-digest": supervisor_unit_set_digest,
+                "supervisor-controller-artifact-digests": {
+                    host: artifact.artifact_digest
+                    for host, artifact in controller_artifacts.items()
+                },
+                "supervisor-controller-unit-digests": controller_units,
+                "supervisor-controller-unit-set-digests": {
+                    host: external_supervisor_unit_set_digest(artifact.unit_sha256)
+                    for host, artifact in controller_artifacts.items()
+                },
                 "unit-digests": dict(unit_digests),
                 "failed-units": dict(failed_units),
                 "unit-count": len(unit_digests),
@@ -2240,6 +2313,9 @@ def build_systemd_render_check(
                 EvidenceField("supervisor-script-digests", "string-map"),
                 EvidenceField("supervisor-unit-digests", "string-map"),
                 EvidenceField("supervisor-unit-set-digest", "sha256"),
+                EvidenceField("supervisor-controller-artifact-digests", "string-map"),
+                EvidenceField("supervisor-controller-unit-digests", "string-map"),
+                EvidenceField("supervisor-controller-unit-set-digests", "string-map"),
                 EvidenceField("unit-digests", "string-map"),
                 EvidenceField("failed-units", "string-map"),
                 EvidenceField("unit-count", "integer"),
@@ -2253,7 +2329,7 @@ def build_systemd_render_check(
             ),
             secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
         ),
-        implementation_version="v3",
+        implementation_version="v4",
         operations={CheckOperation.PROBE: probe},
     )
 
@@ -2267,6 +2343,9 @@ def _empty_systemd_render_probe() -> CheckProbe:
             "supervisor-script-digests": {},
             "supervisor-unit-digests": {},
             "supervisor-unit-set-digest": "0" * 64,
+            "supervisor-controller-artifact-digests": {},
+            "supervisor-controller-unit-digests": {},
+            "supervisor-controller-unit-set-digests": {},
             "unit-digests": {},
             "failed-units": {"candidate-units": "unavailable"},
             "unit-count": 0,

@@ -204,3 +204,35 @@ def test_gb10_fleet_ssh_is_bounded_below_dag_timeout(tmp_path: Path) -> None:
 
     assert calls[0]["argv"] == ("ssh", "trt-gb10-1", "probe")
     assert calls[0]["timeout"] == 5
+
+
+def test_gb10_supervisor_controller_ssh_forwards_only_bounded_typed_stdin(
+    tmp_path: Path,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def run(argv, **kwargs):
+        calls.append({"argv": tuple(argv), **kwargs})
+        return SimpleNamespace(returncode=0, stdout="{}\n", stderr="")
+
+    commands = InstalledPreflightCommands(
+        _config(tmp_path),
+        _environment(),
+        run_subprocess=run,
+    )
+
+    commands.gb10_supervisor_controller(("ssh", "fixed-controller"), '{"schema_version":1}\n')
+
+    assert calls == [
+        {
+            "argv": ("ssh", "fixed-controller"),
+            "cwd": None,
+            "env": _environment(),
+            "input": '{"schema_version":1}\n',
+            "timeout": 12,
+        }
+    ]
+    with pytest.raises(ValueError, match="payload is invalid"):
+        commands.gb10_supervisor_controller(
+            ("ssh", "fixed-controller"), "x" * (4 * 1024 * 1024 + 1)
+        )

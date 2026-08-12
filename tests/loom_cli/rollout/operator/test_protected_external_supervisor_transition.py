@@ -26,6 +26,7 @@ from loom_cli.rollout.operator.protected_external_supervisor_transport import (
     ServiceRuntimeStatus,
     TimerCompensationEvidence,
     TimerRuntimeStatus,
+    canonical_external_supervisor_runtime_ready,
     classify_external_supervisor_live_state,
 )
 
@@ -177,13 +178,66 @@ def _target(
     artifact: ExternalSupervisorArtifact,
     *,
     transition_group_id: str = "f" * 32,
+    unit_dir: str = str(PROTECTED_USER_UNIT_DIR),
 ) -> ExternalSupervisorCanonicalIdentity:
     return ExternalSupervisorCanonicalIdentity.build(
         artifact,
         plan_digest="c" * 64,
         attestation_digest="d" * 64,
         transition_group_id=transition_group_id,
-        runtime_evidence_digest=transport_module._expected_activation_runtime_digest(artifact),
+        runtime_evidence_digest=transport_module._expected_activation_runtime_digest(
+            artifact,
+            unit_dir=Path(unit_dir),
+        ),
+        unit_dir=unit_dir,
+    )
+
+
+def test_gb10_canonical_identity_binds_the_controller_service_home(
+    tmp_path: Path,
+) -> None:
+    artifact = _artifact(tmp_path, execution_host="gx10-01c7")
+
+    target = _target(
+        artifact,
+        unit_dir="/var/lib/loom-rollout/.config/systemd/user",
+    )
+
+    assert target.unit_dir == "/var/lib/loom-rollout/.config/systemd/user"
+
+
+def test_gb10_canonical_runtime_proof_uses_the_controller_unit_directory(
+    tmp_path: Path,
+) -> None:
+    artifact = _artifact(tmp_path, execution_host="gx10-01c7")
+    target = _target(
+        artifact,
+        unit_dir="/var/lib/loom-rollout/.config/systemd/user",
+    )
+    supervisor = artifact.supervisors[0]
+    unit_dir = Path(target.unit_dir)
+
+    assert canonical_external_supervisor_runtime_ready(
+        target,
+        unit_payloads={name: payload.encode() for name, payload in target.unit_payloads.items()},
+        timer_statuses={
+            supervisor.timer_name: TimerRuntimeStatus(
+                load_state="loaded",
+                unit_file_state="enabled",
+                active_state="active",
+                fragment_path=str(unit_dir / supervisor.timer_name),
+                need_daemon_reload="no",
+            )
+        },
+        service_statuses={
+            supervisor.service_name: ServiceRuntimeStatus(
+                load_state="loaded",
+                result="success",
+                exec_main_status=0,
+                fragment_path=str(unit_dir / supervisor.service_name),
+                need_daemon_reload="no",
+            )
+        },
     )
 
 

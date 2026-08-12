@@ -35,7 +35,12 @@ from .protected_environment_state_component import (
     HttpxProtectedEnvironmentStateTransport,
 )
 from .protected_external_supervisor_transport import (
+    ProtectedExternalSupervisorTransport,
     build_fixed_external_supervisor_transport,
+)
+from .protected_gb10_external_supervisor_transport import (
+    GB10_CONTROLLER_EXECUTION_HOST,
+    build_fixed_gb10_external_supervisor_transport,
 )
 from .protected_gb10_transport import build_fixed_gb10_ssh_transport
 from .staging_smoke_authority import staging_smoke_authority
@@ -43,6 +48,7 @@ from .staging_smoke_authority import staging_smoke_authority
 _CONFIG_PATH = Path("/etc/loom/staging-rollout.toml")
 _MAX_HTTP_BODY = 1024 * 1024
 _MAX_COMMAND_OUTPUT = 64 * 1024
+_MAX_COMMAND_INPUT = 4 * 1024 * 1024
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -167,15 +173,22 @@ class InstalledFinalGateExecutor:
                 run=self._ssh_run,
                 max_concurrency=self.config.gb10_prep_concurrency,
             )
-            external_supervisors = build_fixed_external_supervisor_transport(
-                service_uid=self.service_uid
-            )
+            external_supervisors: dict[str, ProtectedExternalSupervisorTransport] = {
+                GB10_CONTROLLER_EXECUTION_HOST: (
+                    build_fixed_gb10_external_supervisor_transport(
+                        candidate_sha=plan.candidate_sha,
+                        candidate_tree=plan.candidate_tree,
+                        run=self._supervisor_ssh_run,
+                    )
+                ),
+                STAGING_ROLLOUT_EXECUTION_HOST: (
+                    build_fixed_external_supervisor_transport(service_uid=self.service_uid)
+                ),
+            }
             environment_state = HttpxProtectedEnvironmentStateTransport(
                 candidate_root=self.config.runner_repo,
                 admin_token_path=Path(self.config.admin_token_source.removeprefix("file:")),
-                worker_token_path=Path(
-                    self.config.worker_token_source.removeprefix("file:")
-                ),
+                worker_token_path=Path(self.config.worker_token_source.removeprefix("file:")),
                 expected_env_template_sha256=installed.attestation.asset_sha256[
                     "worker-env-template"
                 ],
@@ -190,8 +203,7 @@ class InstalledFinalGateExecutor:
                 gb10_transport=gb10,
                 environment_state_transport=environment_state,
                 candidate_root=self.config.runner_repo,
-                external_supervisor_transport=external_supervisors,
-                external_supervisor_execution_host=STAGING_ROLLOUT_EXECUTION_HOST,
+                external_supervisor_transports=external_supervisors,
                 container_registry=container_registry,
             )(check_id, operation, plan)
         if check_id == "final.convergence":
@@ -201,8 +213,7 @@ class InstalledFinalGateExecutor:
                 gb10_transport=gb10,
                 environment_state_transport=environment_state,
                 candidate_root=self.config.runner_repo,
-                external_supervisor_transport=external_supervisors,
-                external_supervisor_execution_host=STAGING_ROLLOUT_EXECUTION_HOST,
+                external_supervisor_transports=external_supervisors,
                 container_registry=container_registry,
             )(check_id, operation, plan)
         if check_id == "final.smoke":
@@ -271,6 +282,18 @@ class InstalledFinalGateExecutor:
         return _run_command(argv, timeout=180, capture_output=True)
 
     @staticmethod
+    def _supervisor_ssh_run(
+        argv: Sequence[str],
+        input_payload: str,
+    ) -> subprocess.CompletedProcess[str]:
+        return _run_command(
+            argv,
+            timeout=180,
+            capture_output=True,
+            input_payload=input_payload,
+        )
+
+    @staticmethod
     def _browser_run(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
         return _run_command(argv, timeout=900, capture_output=False)
 
@@ -280,6 +303,7 @@ def _run_command(
     *,
     timeout: int,
     capture_output: bool,
+    input_payload: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     command = tuple(argv)
     if (
@@ -294,6 +318,10 @@ def _run_command(
         or not 1 <= timeout <= 900
     ):
         raise ValueError("installed final command is invalid")
+    if input_payload is not None and (
+        type(input_payload) is not str or len(input_payload.encode()) > _MAX_COMMAND_INPUT
+    ):
+        raise ValueError("installed final command input is too large")
     environment = {
         "HOME": "/var/lib/loom-staging-rollout",
         "LANG": "C.UTF-8",
@@ -305,10 +333,12 @@ def _run_command(
     result = subprocess.run(
         command,
         check=False,
+        shell=False,
         capture_output=capture_output,
         stdout=None if capture_output else subprocess.DEVNULL,
         stderr=None if capture_output else subprocess.DEVNULL,
         text=True,
+        input=input_payload,
         timeout=timeout,
         env=environment,
     )

@@ -4,6 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 
+from loom_cli.rollout.external_supervisor_controller import (
+    ExternalSupervisorControllerBinding,
+    encode_external_supervisor_controller_bindings,
+)
+from loom_cli.rollout.external_supervisor_predecessor import (
+    EXTERNAL_SUPERVISOR_CONTROLLER_HOSTS,
+    GB10_CANONICAL_UNIT_DIR,
+)
 from loom_cli.rollout.operator.backup_lease import BackupLease, component_set_digest
 from loom_cli.rollout.preflight_contract import (
     AttestationBindings,
@@ -50,6 +58,50 @@ def _integer(value: object, label: str) -> int:
     if type(value) is not int or value < 0:
         raise ValueError(f"preflight binding evidence {label} is missing")
     return value
+
+
+def _controller_unit_maps(
+    values: Mapping[str, str],
+    *,
+    label: str,
+) -> dict[str, dict[str, str]]:
+    result: dict[str, dict[str, str]] = {}
+    for key, digest in values.items():
+        host, separator, unit_name = key.partition("/")
+        if not separator or not host or not unit_name:
+            raise ValueError(f"preflight binding evidence {label} is invalid")
+        result.setdefault(host, {})[unit_name] = digest
+    return result
+
+
+def _controller_predecessors(
+    values: Mapping[str, str],
+) -> dict[str, dict[str, object]]:
+    grouped: dict[str, dict[str, str]] = {}
+    for key, value in values.items():
+        host, separator, field = key.partition("/")
+        if not separator or not host or not field:
+            raise ValueError("external supervisor controller predecessor evidence is invalid")
+        grouped.setdefault(host, {})[field] = value
+    required = {
+        "authority-kind",
+        "authority-digest",
+        "pointer-digest",
+        "unit-set-digest",
+        "live-evidence-digest",
+        "pending-transition-digest",
+        "unit-directory",
+    }
+    result: dict[str, dict[str, object]] = {}
+    for host, fields in grouped.items():
+        unit_fields = {field: value for field, value in fields.items() if field.startswith("unit/")}
+        if set(fields) - set(unit_fields) != required:
+            raise ValueError("external supervisor controller predecessor evidence is invalid")
+        result[host] = {
+            **{field: fields[field] for field in required},
+            "units": {field.removeprefix("unit/"): value for field, value in unit_fields.items()},
+        }
+    return result
 
 
 def derive_attestation_bindings(
@@ -185,6 +237,7 @@ def derive_attestation_bindings(
     if external_supervisor_unit_set_digest(target_unit_sha256) != target_unit_set_digest:
         raise ValueError("external supervisor target unit evidence drifted")
     supervisor_transition = external_supervisor_transition_digest(
+        unit_directory=GB10_CANONICAL_UNIT_DIR,
         candidate_sha=candidate_sha,
         candidate_tree=candidate_tree,
         environment=_string(binding("environment"), "environment"),
@@ -201,6 +254,69 @@ def derive_attestation_bindings(
         target_unit_sha256=target_unit_sha256,
         target_unit_set_digest=target_unit_set_digest,
     )
+    controller_artifacts = _string_map(
+        evidence("systemd.render", "supervisor-controller-artifact-digests"),
+        "external supervisor controller artifacts",
+    )
+    controller_target_units = _controller_unit_maps(
+        _string_map(
+            evidence("systemd.render", "supervisor-controller-unit-digests"),
+            "external supervisor controller units",
+        ),
+        label="external supervisor controller units",
+    )
+    controller_target_unit_sets = _string_map(
+        evidence("systemd.render", "supervisor-controller-unit-set-digests"),
+        "external supervisor controller unit sets",
+    )
+    controller_predecessors = _controller_predecessors(
+        _string_map(
+            evidence("external-supervisor.predecessor", "controller-bindings"),
+            "external supervisor controller predecessors",
+        )
+    )
+    controller_hosts = set(controller_artifacts)
+    if (
+        controller_hosts != EXTERNAL_SUPERVISOR_CONTROLLER_HOSTS
+        or set(controller_target_units) != controller_hosts
+        or set(controller_target_unit_sets) != controller_hosts
+        or set(controller_predecessors) != controller_hosts
+    ):
+        raise ValueError("external supervisor controller coverage drifted")
+    controller_bindings: dict[str, ExternalSupervisorControllerBinding] = {}
+    for host in sorted(controller_hosts):
+        controller_predecessor = controller_predecessors[host]
+        controller_units = controller_target_units[host]
+        controller_unit_set = controller_target_unit_sets[host]
+        predecessor_controller_units = controller_predecessor["units"]
+        if (
+            not isinstance(predecessor_controller_units, Mapping)
+            or external_supervisor_unit_set_digest(controller_units) != controller_unit_set
+            or external_supervisor_unit_set_digest_or_empty(predecessor_controller_units)
+            != controller_predecessor["unit-set-digest"]
+        ):
+            raise ValueError("external supervisor controller unit evidence drifted")
+        controller_bindings[host] = ExternalSupervisorControllerBinding.build(
+            execution_host=host,
+            candidate_sha=candidate_sha,
+            candidate_tree=candidate_tree,
+            environment=_string(binding("environment"), "environment"),
+            predecessor_kind=str(controller_predecessor["authority-kind"]),
+            predecessor_digest=str(controller_predecessor["authority-digest"]),
+            predecessor_pointer_digest=str(controller_predecessor["pointer-digest"]),
+            predecessor_unit_sha256=predecessor_controller_units,
+            predecessor_unit_set_digest=str(controller_predecessor["unit-set-digest"]),
+            predecessor_live_evidence_digest=str(controller_predecessor["live-evidence-digest"]),
+            predecessor_pending_transition_digest=str(
+                controller_predecessor["pending-transition-digest"]
+            ),
+            unit_directory=str(controller_predecessor["unit-directory"]),
+            target_artifact_digest=controller_artifacts[host],
+            target_profile_sha256=target_profile_sha256,
+            target_script_sha256=target_script_sha256,
+            target_unit_sha256=controller_units,
+            target_unit_set_digest=controller_unit_set,
+        )
     if backup_lease is None:
         backup_lease_id = _string(
             evidence("backup.lease-eligibility", "source-request"),
@@ -289,6 +405,9 @@ def derive_attestation_bindings(
         supervisor_predecessor_live_evidence_digest=predecessor_live_evidence_digest,
         supervisor_predecessor_pending_transition_digest=(predecessor_pending_transition_digest),
         supervisor_transition_digest=supervisor_transition,
+        supervisor_controller_bindings=encode_external_supervisor_controller_bindings(
+            controller_bindings
+        ),
     )
 
 

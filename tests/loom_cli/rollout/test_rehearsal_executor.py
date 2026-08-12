@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import uuid
+from collections import Counter
 from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import replace
@@ -20,7 +21,6 @@ from loom_cli.rollout.external_supervisor_readiness import (
     REHEARSAL_KUBECONFIG as EXTERNAL_SUPERVISOR_REHEARSAL_KUBECONFIG,
 )
 from loom_cli.rollout.external_supervisor_readiness import (
-    STAGING_ROLLOUT_EXECUTION_HOST,
     ExternalSupervisorArtifact,
     staging_working_directory,
 )
@@ -1183,6 +1183,10 @@ def test_release_loads_exact_images_and_verifies_all_scoped_resources() -> None:
     validation_digest = outcome.details["external-supervisor-validation-sha256"]
     assert len(validation_digest) == 64
     assert set(validation_digest) <= set("0123456789abcdef")
+    assert {item.execution_host for item in supervisor_artifact.supervisors} == {
+        "TRT-EAI-OLDLAB-1",
+        "gx10-01c7",
+    }
     kind_load = next(command for command, _payload in calls if command[:2] == ("kind", "load"))
     assert kind_load[-2:] == ("--name", plan.cluster_name)
     assert set(kind_load[3:-2]) == {
@@ -1200,11 +1204,12 @@ def test_release_loads_exact_images_and_verifies_all_scoped_resources() -> None:
         for index, (command, _payload) in enumerate(calls)
         if "get" in command and "secret" in command
     ]
-    validation_index, validation_argv = next(
+    validation_calls = [
         (index, command)
         for index, (command, _payload) in enumerate(calls)
         if command[:4] == ("systemd-run", "--user", "--wait", "--collect")
-    )
+    ]
+    validation_index = validation_calls[0][0]
     release_apply_index = next(
         index for index, (_command, payload) in enumerate(calls) if payload == release.payload
     )
@@ -1216,31 +1221,36 @@ def test_release_loads_exact_images_and_verifies_all_scoped_resources() -> None:
         if payload == _external_supervisor_profile()
     )
     assert max(secret_readback_indexes) < policy_seed_index < validation_index < release_apply_index
+    assert len(validation_calls) == 2
     assert policy_seed_argv[policy_seed_argv.index("--container") + 1] == "migration"
     assert (
         f"LOOM_DB_URL=postgresql+psycopg://loom_rehearsal@127.0.0.1:5432/{plan.resources.database}"
         in policy_seed_argv
     )
 
-    supervisor = supervisor_artifact.supervisors[0]
     working_directory = staging_working_directory(plan.candidate_sha)
-    separator = validation_argv.index("--")
-    assert validation_argv[:4] == ("systemd-run", "--user", "--wait", "--collect")
-    assert f"--property=WorkingDirectory={working_directory}" in validation_argv
-    assert (
-        f"--property=Environment=PYTHONPATH={working_directory}/src PYTHONDONTWRITEBYTECODE=1"
-    ) in validation_argv
-    assert "--property=TimeoutStartSec=180s" in validation_argv
-    assert "--property=RuntimeMaxSec=180s" in validation_argv
-    assert "--property=KillMode=control-group" in validation_argv
-    assert (
-        validation_argv[separator + 1 :]
-        == supervisor_artifact.validation_argv(
+    actual_validation_commands: Counter[tuple[str, ...]] = Counter()
+    for _index, validation_argv in validation_calls:
+        separator = validation_argv.index("--")
+        assert validation_argv[:4] == ("systemd-run", "--user", "--wait", "--collect")
+        assert f"--property=WorkingDirectory={working_directory}" in validation_argv
+        assert (
+            f"--property=Environment=PYTHONPATH={working_directory}/src "
+            "PYTHONDONTWRITEBYTECODE=1"
+        ) in validation_argv
+        assert "--property=TimeoutStartSec=180s" in validation_argv
+        assert "--property=RuntimeMaxSec=180s" in validation_argv
+        assert "--property=KillMode=control-group" in validation_argv
+        assert validation_argv[-1] == "--validate-only"
+        actual_validation_commands[validation_argv[separator + 1 :]] += 1
+
+    expected_validation_commands = Counter(
+        supervisor_artifact.validation_argv(
             plan.resources.namespace,
             EXTERNAL_SUPERVISOR_REHEARSAL_KUBECONFIG,
-        )[supervisor.name]
+        ).values()
     )
-    assert validation_argv[-1] == "--validate-only"
+    assert actual_validation_commands == expected_validation_commands
 
 
 def test_external_supervisor_default_rebuilds_only_from_fixed_staging_root(
@@ -1267,7 +1277,6 @@ def test_external_supervisor_default_rebuilds_only_from_fixed_staging_root(
         "candidate_tree": plan.candidate_tree,
         "environment": "staging",
         "image_tag": plan.image_tag,
-        "execution_host": STAGING_ROLLOUT_EXECUTION_HOST,
     }
 
 
@@ -2144,6 +2153,10 @@ def test_cleanup_retires_only_exact_external_supervisor_validation_units() -> No
     validation_units = {
         _external_supervisor_validation_unit(plan, service_name): service_name
         for service_name in service_names
+    }
+    assert set(service_names) == {
+        "loom-autoscaler-gb10-staging.service",
+        "loom-autoscaler-oldlab-staging.service",
     }
     validation_active = dict.fromkeys(validation_units, True)
     calls: list[tuple[str, ...]] = []

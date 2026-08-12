@@ -28,9 +28,8 @@ from loom_cli.rollout.external_supervisor_predecessor import (
     ABSENT_PREDECESSOR_DIGEST as EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
 )
 from loom_cli.rollout.external_supervisor_predecessor import (
-    PROTECTED_CANONICAL_UNIT_DIR as EXTERNAL_SUPERVISOR_UNIT_DIRECTORY,
-)
-from loom_cli.rollout.external_supervisor_predecessor import (
+    GB10_CANONICAL_UNIT_DIR,
+    PROTECTED_CANONICAL_UNIT_DIR,
     external_supervisor_unit_set_digest,
     external_supervisor_unit_set_digest_or_empty,
 )
@@ -48,10 +47,15 @@ _SECRET_KEY_RE = re.compile(
 )
 _FATAL_TIMEOUT_EXIT_CODE = 70
 _DEFAULT_CANCELLATION_GRACE_SECONDS = 5.0
+EXTERNAL_SUPERVISOR_UNIT_DIRECTORY = PROTECTED_CANONICAL_UNIT_DIR
+_EXTERNAL_SUPERVISOR_UNIT_DIRECTORIES = frozenset(
+    {GB10_CANONICAL_UNIT_DIR, PROTECTED_CANONICAL_UNIT_DIR}
+)
 
 
 def external_supervisor_transition_digest(
     *,
+    unit_directory: str,
     candidate_sha: str,
     candidate_tree: str,
     environment: str,
@@ -76,6 +80,7 @@ def external_supervisor_transition_digest(
         or any(character not in "0123456789abcdef" for character in candidate_sha)
         or any(character not in "0123456789abcdef" for character in candidate_tree)
         or environment != "staging"
+        or unit_directory not in _EXTERNAL_SUPERVISOR_UNIT_DIRECTORIES
         or predecessor_kind not in {"legacy-manifest", "canonical", "absent"}
         or any(
             _SHA256_RE.fullmatch(value) is None
@@ -109,7 +114,7 @@ def external_supervisor_transition_digest(
             "candidate_sha": candidate_sha,
             "candidate_tree": candidate_tree,
             "environment": environment,
-            "unit_directory": EXTERNAL_SUPERVISOR_UNIT_DIRECTORY,
+            "unit_directory": unit_directory,
             "predecessor": {
                 "kind": predecessor_kind,
                 "authority_digest": predecessor_digest,
@@ -1178,6 +1183,7 @@ class AttestationBindings:
     supervisor_predecessor_live_evidence_digest: str
     supervisor_predecessor_pending_transition_digest: str
     supervisor_transition_digest: str
+    supervisor_controller_bindings: Mapping[str, str]
 
     def __post_init__(self) -> None:
         git_identities = (
@@ -1299,6 +1305,16 @@ class AttestationBindings:
             "supervisor_predecessor_unit_sha256",
             MappingProxyType(dict(sorted(predecessor_units.items()))),
         )
+        from loom_cli.rollout.external_supervisor_controller import (
+            parse_external_supervisor_controller_bindings,
+        )
+
+        parse_external_supervisor_controller_bindings(self.supervisor_controller_bindings)
+        object.__setattr__(
+            self,
+            "supervisor_controller_bindings",
+            MappingProxyType(dict(sorted(self.supervisor_controller_bindings.items()))),
+        )
 
     def to_dict(self) -> dict[str, object]:
         return _attestation_bindings_payload(self)
@@ -1371,6 +1387,7 @@ class AttestationBindings:
                 "supervisor_predecessor_pending_transition_digest"
             ),
             supervisor_transition_digest=require_string("supervisor_transition_digest"),
+            supervisor_controller_bindings=require_string_map("supervisor_controller_bindings"),
         )
 
 

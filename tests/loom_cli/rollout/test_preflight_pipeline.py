@@ -30,6 +30,10 @@ def _bindings(*, epoch: int = 7) -> AttestationBindings:
         "loom-autoscaler-gb10-staging.service": "d" * 64,
         "loom-autoscaler-gb10-staging.timer": "e" * 64,
     }
+    oldlab_predecessor_units = {
+        "loom-autoscaler-oldlab-staging.service": "6" * 64,
+        "loom-autoscaler-oldlab-staging.timer": "7" * 64,
+    }
     return AttestationBindings(
         candidate_sha="2" * 40,
         candidate_tree="3" * 40,
@@ -67,6 +71,33 @@ def _bindings(*, epoch: int = 7) -> AttestationBindings:
         supervisor_predecessor_live_evidence_digest="1" * 64,
         supervisor_predecessor_pending_transition_digest="2" * 64,
         supervisor_transition_digest="3" * 64,
+        supervisor_controller_bindings={
+            "gx10-01c7/authority-kind": "legacy-manifest",
+            "gx10-01c7/authority-digest": "f" * 64,
+            "gx10-01c7/pointer-digest": EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+            "gx10-01c7/unit-set-digest": external_supervisor_unit_set_digest(predecessor_units),
+            "gx10-01c7/live-evidence-digest": "1" * 64,
+            "gx10-01c7/pending-transition-digest": "2" * 64,
+            "gx10-01c7/unit-directory": "/var/lib/loom-rollout/.config/systemd/user",
+            "gx10-01c7/transition-digest": "3" * 64,
+            **{f"gx10-01c7/unit/{name}": digest for name, digest in predecessor_units.items()},
+            "TRT-EAI-OLDLAB-1/authority-kind": "legacy-manifest",
+            "TRT-EAI-OLDLAB-1/authority-digest": "8" * 64,
+            "TRT-EAI-OLDLAB-1/pointer-digest": EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+            "TRT-EAI-OLDLAB-1/unit-set-digest": external_supervisor_unit_set_digest(
+                oldlab_predecessor_units
+            ),
+            "TRT-EAI-OLDLAB-1/live-evidence-digest": "9" * 64,
+            "TRT-EAI-OLDLAB-1/pending-transition-digest": "a" * 64,
+            "TRT-EAI-OLDLAB-1/unit-directory": (
+                "/var/lib/loom-staging-rollout/.config/systemd/user"
+            ),
+            "TRT-EAI-OLDLAB-1/transition-digest": "b" * 64,
+            **{
+                f"TRT-EAI-OLDLAB-1/unit/{name}": digest
+                for name, digest in oldlab_predecessor_units.items()
+            },
+        },
     )
 
 

@@ -2,6 +2,8 @@
 # Install the non-secret runtime root and pinned kubectl on the GB10 controller.
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd -P)"
 CONTROLLER="gx10-01c7"
 CLUSTER="trt-gb10"
 SERVICE_USER="loom-rollout"
@@ -18,9 +20,32 @@ UV_VERSION="0.11.26"
 UV_SHA256="befa1a59c91e96eb601b0fd9a97c03dd666f17baba644b2b4db9c59a767e387e"
 UV_ARCHIVE="uv-aarch64-unknown-linux-gnu.tar.gz"
 UV_URL="https://github.com/astral-sh/uv/releases/download/$UV_VERSION/$UV_ARCHIVE"
+BROKER_SOURCE="$REPO_ROOT/scripts/ops/gb10_external_supervisor_broker.py"
+BROKER_PATH="/usr/local/libexec/loom-gb10-external-supervisor-broker"
+SUDOERS_PATH="/etc/sudoers.d/loom-gb10-external-supervisor"
+CONTROLLER_PUBLIC_KEY=""
 
-if [ "$#" -ne 0 ]; then
-  echo "usage: sudo $0" >&2
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --controller-public-key)
+      if [ "$#" -lt 2 ] || [ -n "$CONTROLLER_PUBLIC_KEY" ]; then
+        echo "error: controller public key argument is invalid" >&2
+        exit 2
+      fi
+      CONTROLLER_PUBLIC_KEY="$2"
+      shift 2
+      ;;
+    *)
+      echo "usage: sudo $0 --controller-public-key /absolute/path.pub" >&2
+      exit 2
+      ;;
+  esac
+done
+if [ -z "$CONTROLLER_PUBLIC_KEY" ] \
+  || [[ "$CONTROLLER_PUBLIC_KEY" != /* ]] \
+  || [ ! -f "$CONTROLLER_PUBLIC_KEY" ] \
+  || [ ! -f "$BROKER_SOURCE" ]; then
+  echo "error: controller broker installation input is unavailable" >&2
   exit 2
 fi
 if [ "$(id -u)" -ne 0 ]; then
@@ -63,6 +88,16 @@ tar --extract --gzip --file "$temporary_dir/$UV_ARCHIVE" \
   "uv-aarch64-unknown-linux-gnu/uv"
 install -o root -g root -m 0755 \
   "$temporary_dir/uv-aarch64-unknown-linux-gnu/uv" /usr/local/bin/uv
+
+install -d -o root -g root -m 0755 /usr/local/libexec /etc/sudoers.d
+install -o root -g root -m 0755 "$BROKER_SOURCE" "$BROKER_PATH"
+SUDOERS_RULE="qianyi ALL=(root) NOPASSWD:NOSETENV: $BROKER_PATH \"\""
+printf '%s\n' "$SUDOERS_RULE" >"$temporary_dir/loom-gb10-external-supervisor.sudoers"
+chmod 0440 "$temporary_dir/loom-gb10-external-supervisor.sudoers"
+/usr/sbin/visudo -cf "$temporary_dir/loom-gb10-external-supervisor.sudoers" >/dev/null
+install -o root -g root -m 0440 \
+  "$temporary_dir/loom-gb10-external-supervisor.sudoers" "$SUDOERS_PATH"
+"$BROKER_PATH" --install-authority "$CONTROLLER_PUBLIC_KEY"
 
 install -d -o root -g root -m 0755 "$RUNTIME_ROOT" "$RUNTIME_ROOT/candidates"
 install -d -o "$SERVICE_UID" -g "$SERVICE_GID" -m 0750 \
