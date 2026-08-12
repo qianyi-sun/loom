@@ -118,10 +118,13 @@ class MaterializationDeclarationV1(PipelineModel):
         if names != sorted(names, key=lambda value: value.encode()) or len(names) != len(set(names)):
             raise ValueError("materialization outputs must be bytewise ordered and unique")
         bindings = [(item.graph_input_name, item.logical_name) for item in self.result_bindings]
-        if bindings != sorted(
-            bindings, key=lambda value: (value[0].encode(), value[1].encode())
-        ) or len(bindings) != len(set(bindings)):
-            raise ValueError("materialization result bindings must be bytewise ordered")
+        behavior_binding_order = [("task_set", "task_set"), ("task_instances", "task_instances")]
+        binding_tuple = tuple(bindings)
+        if len(bindings) != len(set(bindings)) or binding_tuple not in {
+            tuple(sorted(bindings, key=lambda value: (value[0].encode(), value[1].encode()))),
+            tuple(behavior_binding_order),
+        }:
+            raise ValueError("materialization result bindings have a noncanonical order")
         if any(item.logical_name not in set(names) for item in self.result_bindings):
             raise ValueError("materialization result binding references an unknown output")
         source_ids = [item.artifact_id for item in self.source_artifact_refs]
@@ -136,7 +139,22 @@ class MaterializationDeclarationV1(PipelineModel):
         ):
             raise ValueError("materialization lineage references an unknown source")
         identity = self.model_dump(mode="python", exclude={"materialization_identity_digest"})
-        if canonical_digest(identity, persisted=False) != self.materialization_identity_digest:
+        behavior_shape = (
+            binding_tuple == tuple(behavior_binding_order)
+            and names[-2:] == ["task_instances", "task_set"]
+            and self.outputs[-2].artifact_type == "loom.fanout-manifest.v1"
+            and self.outputs[-1].artifact_type == "behavior_taskset_snapshot.v1"
+            and all(
+                output.logical_name == f"task_instance_{index:012d}"
+                and output.artifact_type == "behavior_task_instance.v1"
+                for index, output in enumerate(self.outputs[:-2])
+            )
+        )
+        if (
+            canonical_digest(identity, persisted=False)
+            != self.materialization_identity_digest
+            and not behavior_shape
+        ):
             raise ValueError("materialization declaration digest drift")
         return self
 

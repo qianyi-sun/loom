@@ -46,6 +46,7 @@ dependencies = [
   "zstandard>=0.23,<1.0",
   "argon2-cffi>=23.1,<26.0",
   "rfc8785>=0.1.4,<0.2",
+  "numpy>=2.0,<3.0",
 ]
 
 [project.optional-dependencies]
