@@ -85,9 +85,13 @@ class DatabasePortForwardConfig:
 
 
 @dataclass(frozen=True)
-class SlurmAuthority:
+class SlurmPolicyAuthority:
     cluster_name: str
     controller_host: str
+
+
+@dataclass(frozen=True)
+class SlurmAuthority(SlurmPolicyAuthority):
     local_hostname: str
 
 
@@ -530,7 +534,7 @@ async def _validate_requested_external_policies(
     *,
     environment: str,
     pool_names: tuple[str, ...],
-    authority: SlurmAuthority,
+    authority: SlurmPolicyAuthority,
 ) -> list[dict[str, object]]:
     result = await session.execute(
         select(WorkerPoolAutoscalerPolicy).where(
@@ -573,6 +577,41 @@ async def _validate_requested_external_policies(
     ]
 
 
+async def _validate_external_policies_once(
+    args: argparse.Namespace,
+    *,
+    authority: SlurmPolicyAuthority,
+) -> list[dict[str, object]]:
+    """Query exact external policies through the owned DB tunnel without mutation."""
+    environment = _scoped_environment(args.environment)
+    pool_names = _scoped_pool_names(args.pool_name)
+    port_forward = _database_port_forward_config(args)
+    db_connect_timeout_sec = _validated_timeout(
+        args.db_connect_timeout_sec,
+        "--db-connect-timeout-sec",
+        maximum=_MAX_PORT_FORWARD_READY_TIMEOUT_SEC,
+    )
+    db_url = _load_cp_db_url(args, timeout_sec=db_connect_timeout_sec)
+    url = _preflight_database_url(db_url, port_forward=port_forward)
+    with _database_port_forward(port_forward):
+        engine = create_async_engine(url, pool_pre_ping=True)
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with session_factory() as session:
+                async with asyncio.timeout(db_connect_timeout_sec):
+                    try:
+                        return await _validate_requested_external_policies(
+                            session,
+                            environment=environment,
+                            pool_names=pool_names,
+                            authority=authority,
+                        )
+                    finally:
+                        await session.rollback()
+        finally:
+            await engine.dispose()
+
+
 async def _main_async(args: argparse.Namespace) -> None:
     environment = _scoped_environment(args.environment)
     pool_names = _scoped_pool_names(args.pool_name)
@@ -590,6 +629,27 @@ async def _main_async(args: argparse.Namespace) -> None:
         maximum=_MAX_PORT_FORWARD_READY_TIMEOUT_SEC,
     )
     slurm_authority = _validate_local_slurm_authority(args)
+    if args.validate_only:
+        validation = await _validate_external_policies_once(
+            args,
+            authority=slurm_authority,
+        )
+        print(
+            json.dumps(
+                {
+                    "mode": "validate-only",
+                    "database_reachable": True,
+                    "slurm_authority": {
+                        "cluster_name": slurm_authority.cluster_name,
+                        "controller_host": slurm_authority.controller_host,
+                        "local_hostname": slurm_authority.local_hostname,
+                    },
+                    "pools": validation,
+                },
+                sort_keys=True,
+            )
+        )
+        return
     db_url = _load_cp_db_url(args, timeout_sec=db_connect_timeout_sec)
     url = _preflight_database_url(db_url, port_forward=port_forward)
     with _database_port_forward(port_forward):
@@ -607,23 +667,6 @@ async def _main_async(args: argparse.Namespace) -> None:
                         )
                     finally:
                         await session.rollback()
-                if args.validate_only:
-                    print(
-                        json.dumps(
-                            {
-                                "mode": "validate-only",
-                                "database_reachable": True,
-                                "slurm_authority": {
-                                    "cluster_name": slurm_authority.cluster_name,
-                                    "controller_host": slurm_authority.controller_host,
-                                    "local_hostname": slurm_authority.local_hostname,
-                                },
-                                "pools": validation,
-                            },
-                            sort_keys=True,
-                        )
-                    )
-                    return
                 reconcile_kwargs: dict[str, Any] = {
                     "environment": environment,
                     "freshness_sec": args.freshness_sec,

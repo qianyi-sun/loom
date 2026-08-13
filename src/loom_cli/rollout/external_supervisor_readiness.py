@@ -31,7 +31,9 @@ STAGING_CANDIDATE_RUNTIME_ROOT = f"{STAGING_RUNNER_ROOT}/candidates"
 STAGING_NAMESPACE = "loom-staging"
 STAGING_KUBECONFIG = "/var/lib/loom-staging-rollout/kubeconfig"
 STAGING_ROLLOUT_EXECUTION_HOST = "TRT-EAI-OLDLAB-1"
+STAGING_GB10_CONTROLLER_EXECUTION_HOST = "gx10-01c7"
 REHEARSAL_KUBECONFIG = "/var/lib/loom-staging-rollout/credentials/rehearsal-kubeconfig"
+REHEARSAL_POLICY_VALIDATION_MODULE = "loom_cli.rollout.rehearsal_external_supervisor_policy_probe"
 _REHEARSAL_DB_LOCAL_PORT_OFFSET = 10_000
 _MAX_REHEARSAL_SOURCE_PORT = 65_535 - _REHEARSAL_DB_LOCAL_PORT_OFFSET
 
@@ -49,7 +51,7 @@ _PROTECTED_SYSTEMD_UNIT_RE = re.compile(
 _KUBERNETES_NAME_RE = re.compile(r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$")
 _INTEGER_DURATION_RE = re.compile(r"^[1-9][0-9]{0,4}$")
 _STAGING_SLURM_AUTHORITIES = {
-    "gb10": ("trt-gb10", "gx10-01c7"),
+    "gb10": ("trt-gb10", STAGING_GB10_CONTROLLER_EXECUTION_HOST),
     "oldlab": ("trt-oldlab", "TRT-EAI-OLDLAB-1"),
 }
 _STAGING_DATABASE_SECRETS = {
@@ -388,11 +390,13 @@ class ExternalSupervisorIdentity:
             "--db-secret-key": "cp-db-url",
             "--scontrol": "/usr/bin/scontrol",
         }
-        if any(
-            flag in arguments and arguments[flag] != expected
-            for flag, expected in optional_authority.items()
-        ) or arguments.get("--db-secret-name", "loom-secrets") != (
-            _STAGING_DATABASE_SECRETS[self.pool_name]
+        if (
+            any(
+                flag in arguments and arguments[flag] != expected
+                for flag, expected in optional_authority.items()
+            )
+            or arguments.get("--db-secret-name", "loom-secrets")
+            != (_STAGING_DATABASE_SECRETS[self.pool_name])
         ):
             raise ValueError("external supervisor optional authority is not canonical")
         try:
@@ -469,9 +473,7 @@ class ExternalSupervisorIdentity:
         if "network-online.target" not in self.requires:
             raise ValueError("external supervisor network-online dependency is missing")
         _duration(self.timer_on_boot_sec, "timer_on_boot_sec")
-        timer_interval = int(
-            _duration(self.timer_on_unit_active_sec, "timer_on_unit_active_sec")
-        )
+        timer_interval = int(_duration(self.timer_on_unit_active_sec, "timer_on_unit_active_sec"))
         if timer_interval > self.freshness_sec:
             raise ValueError("external supervisor timer exceeds its freshness bound")
         _duration(self.timer_accuracy_sec, "timer_accuracy_sec")
@@ -535,6 +537,7 @@ class ExternalSupervisorIdentity:
             "--namespace": namespace,
             "--kubeconfig": kubeconfig,
             "--db-local-port": str(_rehearsal_db_local_port(self.db_local_port)),
+            "--db-secret-name": "loom-secrets",
         }
         while index < len(self.args):
             token = self.args[index]
@@ -546,7 +549,17 @@ class ExternalSupervisorIdentity:
             rewritten.append(token)
             rewritten.append(replacements.get(token, self.args[index + 1]))
             index += 2
-        return (self.python_path, self.script_path, *rewritten, "--validate-only")
+        execution_host = self.execution_host.split(".", 1)[0].casefold()
+        local_host = STAGING_ROLLOUT_EXECUTION_HOST.split(".", 1)[0].casefold()
+        gb10_host = STAGING_GB10_CONTROLLER_EXECUTION_HOST.split(".", 1)[0].casefold()
+        command: tuple[str, ...]
+        if execution_host == local_host:
+            command = (self.python_path, self.script_path)
+        elif execution_host == gb10_host and self.pool_name == "gb10":
+            command = (self.python_path, "-m", REHEARSAL_POLICY_VALIDATION_MODULE)
+        else:  # pragma: no cover - construction rejects unsupported authorities
+            raise ValueError("external supervisor rehearsal execution host is unsupported")
+        return (*command, *rewritten, "--validate-only")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -711,6 +724,43 @@ class ExternalSupervisorArtifact:
                 for supervisor in self.supervisors
                 if supervisor.enabled and supervisor.active
             }
+        )
+
+    def for_execution_host(self, execution_host: str) -> ExternalSupervisorArtifact:
+        """Return the same candidate artifact narrowed to one declared controller."""
+        desired = _clean_text(execution_host, "execution host", maximum=253)
+        desired_host = desired.split(".", 1)[0].casefold()
+        supervisors = tuple(
+            item
+            for item in self.supervisors
+            if item.execution_host.split(".", 1)[0].casefold() == desired_host
+        )
+        if not supervisors:
+            raise ValueError("external supervisor execution host is not present")
+        payload = {
+            "schema_version": self.schema_version,
+            "candidate_sha": self.candidate_sha,
+            "candidate_tree": self.candidate_tree,
+            "environment": self.environment,
+            "image_tag": self.image_tag,
+            "runtime_root": self.runtime_root,
+            "profile_path": self.profile_path,
+            "profile_sha256": self.profile_sha256,
+            "script_sha256": dict(self.script_sha256),
+            "supervisors": [supervisor.to_dict() for supervisor in supervisors],
+        }
+        return ExternalSupervisorArtifact(
+            schema_version=self.schema_version,
+            candidate_sha=self.candidate_sha,
+            candidate_tree=self.candidate_tree,
+            environment=self.environment,
+            image_tag=self.image_tag,
+            runtime_root=self.runtime_root,
+            profile_path=self.profile_path,
+            profile_sha256=self.profile_sha256,
+            script_sha256=self.script_sha256,
+            supervisors=supervisors,
+            artifact_digest=_hash_json(payload),
         )
 
     def payload(self) -> dict[str, object]:
@@ -972,10 +1022,7 @@ def build_external_supervisor_artifact(
         or _SHA_RE.fullmatch(candidate_tree) is None
         or _IMAGE_TAG_RE.fullmatch(image_tag) is None
         or environment != "staging"
-        or (
-            execution_host is not None
-            and _IDENTIFIER_RE.fullmatch(execution_host) is None
-        )
+        or (execution_host is not None and _IDENTIFIER_RE.fullmatch(execution_host) is None)
     ):
         raise ValueError("external supervisor candidate binding is invalid")
     try:
@@ -1009,9 +1056,7 @@ def build_external_supervisor_artifact(
         if isinstance(pool, str) and pool
     }
     desired_execution_host = (
-        execution_host.split(".", 1)[0].casefold()
-        if execution_host is not None
-        else None
+        execution_host.split(".", 1)[0].casefold() if execution_host is not None else None
     )
     supervisors = tuple(
         sorted(
@@ -1026,9 +1071,7 @@ def build_external_supervisor_artifact(
                     )
                     and (
                         desired_execution_host is None
-                        or str(raw.get("execution_host", ""))
-                        .split(".", 1)[0]
-                        .casefold()
+                        or str(raw.get("execution_host", "")).split(".", 1)[0].casefold()
                         == desired_execution_host
                     )
                 )
@@ -1137,8 +1180,10 @@ def verify_external_supervisor_artifact(
 __all__ = [
     "PROFILE_PATH",
     "REHEARSAL_KUBECONFIG",
+    "REHEARSAL_POLICY_VALIDATION_MODULE",
     "SCRIPT_PATH",
     "STAGING_CANDIDATE_RUNTIME_ROOT",
+    "STAGING_GB10_CONTROLLER_EXECUTION_HOST",
     "STAGING_KUBECONFIG",
     "STAGING_NAMESPACE",
     "STAGING_ROLLOUT_EXECUTION_HOST",

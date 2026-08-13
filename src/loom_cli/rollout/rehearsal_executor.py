@@ -13,7 +13,7 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
 from loom.data_lifecycle import (
     STAGING_ADMISSION_BYTES_LIMIT,
@@ -24,8 +24,13 @@ from loom.data_lifecycle import (
 )
 from loom.data_lifecycle_capacity import CAPACITY_SOURCE
 from loom_cli.rollout.credential_authority import read_trusted_file
+from loom_cli.rollout.external_supervisor_predecessor import (
+    ABSENT_PREDECESSOR_DIGEST,
+    ExternalSupervisorPredecessorAuthority,
+)
 from loom_cli.rollout.external_supervisor_readiness import (
     PROFILE_PATH,
+    STAGING_GB10_CONTROLLER_EXECUTION_HOST,
     ExternalSupervisorArtifact,
     ExternalSupervisorIdentity,
     build_external_supervisor_artifact,
@@ -40,6 +45,17 @@ from loom_cli.rollout.gb10_rehearsal import (
     GB10RehearsalEvidence,
 )
 from loom_cli.rollout.image_readiness import REHEARSAL_POSTGRES_IMAGE, _inspect_registry_manifest
+from loom_cli.rollout.operator.protected_external_supervisor_transport import (
+    ExternalSupervisorLiveObservation,
+    classify_external_supervisor_live_state,
+)
+from loom_cli.rollout.operator.protected_gb10_external_supervisor_transport import (
+    GB10_CONTROLLER_UNIT_DIR,
+    build_fixed_gb10_external_supervisor_transport,
+)
+from loom_cli.rollout.operator.protected_gb10_external_supervisor_transport import (
+    CommandResult as GB10ControllerCommandResult,
+)
 from loom_cli.rollout.preflight_credential_paths import REHEARSAL_KUBECONFIG_PATH
 from loom_cli.rollout.production_defaults_readiness import ProductionDefaultsArtifact
 from loom_cli.rollout.rehearsal_action_source import (
@@ -97,6 +113,7 @@ _REHEARSAL_DUMP_TRANSFER_TIMEOUT = 180
 _REHEARSAL_DUMP_DIGEST_TIMEOUT = 120
 _REHEARSAL_DUMP_RESTORE_TIMEOUT = 1470
 _EXTERNAL_SUPERVISOR_VALIDATION_TIMEOUT_SECONDS = 180
+_GB10_CONTROLLER_PROOF_TIMEOUT_SECONDS = 1740
 _API_SMOKE_REQUEST_IDS = frozenset(
     {
         "batch-readback",
@@ -181,6 +198,9 @@ BrowserArtifactBuilder = Callable[[RehearsalPlan, str, Sequence[str]], Rehearsal
 RuntimeImageResolver = Callable[[RehearsalPlan, Sequence[str]], Mapping[str, Sequence[str]] | None]
 ExternalSupervisorArtifactBuilder = Callable[[RehearsalPlan], ExternalSupervisorArtifact]
 ExternalSupervisorProfileBuilder = Callable[[RehearsalPlan], bytes]
+GB10ExternalSupervisorObserver = Callable[
+    [ExternalSupervisorArtifact], ExternalSupervisorLiveObservation
+]
 
 
 class GB10RehearsalTransport(Protocol):
@@ -358,6 +378,7 @@ class IsolatedRehearsalExecutor:
     monotonic: Callable[[], float] = time.monotonic
     sleep: Callable[[float], None] = time.sleep
     gb10_transport_factory: GB10TransportFactory | None = None
+    gb10_external_supervisor_observer: GB10ExternalSupervisorObserver | None = None
     runtime_image_resolver: RuntimeImageResolver | None = None
 
     def __post_init__(self) -> None:
@@ -1625,6 +1646,53 @@ class IsolatedRehearsalExecutor:
         ):
             return None, "external-supervisor-database-service-failed"
 
+        controller_proof_digests: dict[str, str] = {}
+        gb10_supervisors = tuple(
+            supervisor
+            for supervisor in active_supervisors
+            if supervisor.execution_host.split(".", 1)[0].casefold()
+            == STAGING_GB10_CONTROLLER_EXECUTION_HOST.casefold()
+        )
+        if gb10_supervisors:
+            try:
+                controller_artifact = artifact.for_execution_host(
+                    STAGING_GB10_CONTROLLER_EXECUTION_HOST
+                )
+                if (
+                    len(gb10_supervisors) != 1
+                    or tuple(
+                        item
+                        for item in controller_artifact.supervisors
+                        if item.enabled and item.active
+                    )
+                    != gb10_supervisors
+                ):
+                    raise ValueError("GB10 controller artifact drifted")
+                observer = self.gb10_external_supervisor_observer
+                observation = (
+                    observer(controller_artifact)
+                    if observer is not None
+                    else self._observe_gb10_external_supervisor(controller_artifact)
+                )
+                if not isinstance(
+                    observation, ExternalSupervisorLiveObservation
+                ) or classify_external_supervisor_live_state(
+                    controller_artifact,
+                    observation,
+                    unit_dir=GB10_CONTROLLER_UNIT_DIR,
+                ) not in {"ready", "exact"}:
+                    raise ValueError("GB10 controller observation is invalid")
+                controller_proof_digests[STAGING_GB10_CONTROLLER_EXECUTION_HOST] = hashlib.sha256(
+                    _json_bytes(
+                        {
+                            "artifact_sha256": controller_artifact.artifact_digest,
+                            "observation_sha256": observation.evidence_digest,
+                        }
+                    )
+                ).hexdigest()
+            except (OSError, RuntimeError, ValueError):
+                return None, "external-supervisor-controller-proof-failed"
+
         for _supervisor, unit, _description, _command in validations:
             load_state = self._external_supervisor_unit_load_state(unit)
             if load_state == "unavailable":
@@ -1666,6 +1734,7 @@ class IsolatedRehearsalExecutor:
                 {
                     "artifact_sha256": artifact.artifact_digest,
                     "command_sha256": command_digests,
+                    "controller_proof_sha256": controller_proof_digests,
                     "namespace": plan.resources.namespace,
                     "policy_seed_sha256": policy_evidence_digest,
                     "schema_version": 1,
@@ -1673,6 +1742,37 @@ class IsolatedRehearsalExecutor:
             )
         ).hexdigest()
         return evidence_digest, None
+
+    def _observe_gb10_external_supervisor(
+        self,
+        artifact: ExternalSupervisorArtifact,
+    ) -> ExternalSupervisorLiveObservation:
+        def run(argv: Sequence[str], payload: str) -> GB10ControllerCommandResult:
+            return cast(
+                GB10ControllerCommandResult,
+                self.run(
+                    argv,
+                    payload.encode("utf-8"),
+                    _GB10_CONTROLLER_PROOF_TIMEOUT_SECONDS,
+                ),
+            )
+
+        transport = build_fixed_gb10_external_supervisor_transport(
+            candidate_sha=artifact.candidate_sha,
+            candidate_tree=artifact.candidate_tree,
+            run=run,
+        )
+        try:
+            return transport.observe(artifact)
+        except (RuntimeError, ValueError):
+            return transport.observe(
+                artifact,
+                ExternalSupervisorPredecessorAuthority(
+                    kind="absent",
+                    authority_digest=ABSENT_PREDECESSOR_DIGEST,
+                    unit_sha256={},
+                ),
+            )
 
     def _seed_external_supervisor_policies(
         self,
