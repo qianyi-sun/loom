@@ -111,6 +111,10 @@ class _Common(TypedDict):
     tree_sha: str
     run_id: int
     run_attempt: int
+    event_name: str
+    repository_id: str
+    repository_owner_id: str
+    runner_environment: str
     image: str
     image_name: str
     dockerfile: str
@@ -125,6 +129,10 @@ def _common() -> _Common:
         "tree_sha": _TREE,
         "run_id": 123,
         "run_attempt": 2,
+        "event_name": "push",
+        "repository_id": "123456789",
+        "repository_owner_id": "987654321",
+        "runner_environment": "github-hosted",
         "image": "capacity-manager",
         "image_name": "loom-capacity-manager",
         "dockerfile": "deploy/Dockerfile.capacity-manager",
@@ -568,6 +576,14 @@ def _cli_common() -> list[str]:
         str(common["run_id"]),
         "--run-attempt",
         str(common["run_attempt"]),
+        "--event-name",
+        common["event_name"],
+        "--repository-id",
+        common["repository_id"],
+        "--repository-owner-id",
+        common["repository_owner_id"],
+        "--runner-environment",
+        common["runner_environment"],
         "--image",
         common["image"],
         "--image-name",

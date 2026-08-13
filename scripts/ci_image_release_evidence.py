@@ -49,6 +49,7 @@ _HEX64 = re.compile(r"[0-9a-f]{64}")
 _REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _COMPONENT = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?")
 _IMAGE_NAME = re.compile(r"[a-z0-9]+(?:[._-][a-z0-9]+)*")
+_NUMERIC_ID = re.compile(r"[1-9][0-9]*")
 _SUBJECT_NAME = re.compile(r"ghcr\.io/[a-z0-9](?:[a-z0-9-]{0,38})/[a-z0-9]+(?:[._-][a-z0-9]+)*")
 _PLATFORMS = {"amd64": "linux/amd64", "arm64": "linux/arm64"}
 _BUILD_MODES = {"trusted-rebuild"}
@@ -138,6 +139,10 @@ def _common_values(
     tree_sha: str,
     run_id: int,
     run_attempt: int,
+    event_name: str,
+    repository_id: str,
+    repository_owner_id: str,
+    runner_environment: str,
     image: str,
     image_name: str,
     dockerfile: str,
@@ -154,6 +159,12 @@ def _common_values(
     build_context = _relative_path(build_context, "build context", directory=True)
     run_id = _positive_integer(run_id, "workflow run id")
     run_attempt = _positive_integer(run_attempt, "workflow run attempt")
+    if event_name != "push":
+        raise EvidenceError("release event is invalid")
+    repository_id = _exact(_NUMERIC_ID, repository_id, "repository id")
+    repository_owner_id = _exact(_NUMERIC_ID, repository_owner_id, "repository owner id")
+    if runner_environment != "github-hosted":
+        raise EvidenceError("release runner environment is invalid")
     workflow_identity = f"https://github.com/{repository}/{_WORKFLOW_PATH}@refs/heads/{ref_name}"
     return {
         "repository": repository,
@@ -162,6 +173,10 @@ def _common_values(
         "tree_sha": tree_sha,
         "run_id": run_id,
         "run_attempt": run_attempt,
+        "event_name": event_name,
+        "repository_id": repository_id,
+        "repository_owner_id": repository_owner_id,
+        "runner_environment": runner_environment,
         "image": image,
         "image_name": image_name,
         "dockerfile": dockerfile,
@@ -184,6 +199,15 @@ def _workflow(common: Mapping[str, object]) -> dict[str, str]:
         "ref": f"refs/heads/{common['ref_name']}",
         "repository": f"https://github.com/{common['repository']}",
         "path": _WORKFLOW_PATH,
+    }
+
+
+def _internal_github(common: Mapping[str, object]) -> dict[str, str]:
+    return {
+        "event_name": str(common["event_name"]),
+        "repository_id": str(common["repository_id"]),
+        "repository_owner_id": str(common["repository_owner_id"]),
+        "runner_environment": str(common["runner_environment"]),
     }
 
 
@@ -289,6 +313,10 @@ def architecture_predicate(
     tree_sha: str,
     run_id: int,
     run_attempt: int,
+    event_name: str,
+    repository_id: str,
+    repository_owner_id: str,
+    runner_environment: str,
     image: str,
     image_name: str,
     dockerfile: str,
@@ -307,6 +335,10 @@ def architecture_predicate(
         tree_sha=tree_sha,
         run_id=run_id,
         run_attempt=run_attempt,
+        event_name=event_name,
+        repository_id=repository_id,
+        repository_owner_id=repository_owner_id,
+        runner_environment=runner_environment,
         image=image,
         image_name=image_name,
         dockerfile=dockerfile,
@@ -334,14 +366,14 @@ def architecture_predicate(
                 "scan": scan,
             },
             "internalParameters": {
-                "github": {
-                    "run_id": common["run_id"],
-                    "run_attempt": common["run_attempt"],
-                }
+                "github": _internal_github(common)
             },
             "resolvedDependencies": [
                 {
-                    "uri": f"git+https://github.com/{common['repository']}.git",
+                    "uri": (
+                        f"git+https://github.com/{common['repository']}@"
+                        f"refs/heads/{common['ref_name']}"
+                    ),
                     "digest": {
                         "gitCommit": common["head_sha"],
                         "gitTree": common["tree_sha"],
@@ -381,6 +413,10 @@ def manifest_predicate(
     tree_sha: str,
     run_id: int,
     run_attempt: int,
+    event_name: str,
+    repository_id: str,
+    repository_owner_id: str,
+    runner_environment: str,
     image: str,
     image_name: str,
     dockerfile: str,
@@ -398,6 +434,10 @@ def manifest_predicate(
         tree_sha=tree_sha,
         run_id=run_id,
         run_attempt=run_attempt,
+        event_name=event_name,
+        repository_id=repository_id,
+        repository_owner_id=repository_owner_id,
+        runner_environment=runner_environment,
         image=image,
         image_name=image_name,
         dockerfile=dockerfile,
@@ -432,14 +472,14 @@ def manifest_predicate(
                 },
             },
             "internalParameters": {
-                "github": {
-                    "run_id": common["run_id"],
-                    "run_attempt": common["run_attempt"],
-                }
+                "github": _internal_github(common)
             },
             "resolvedDependencies": [
                 {
-                    "uri": f"git+https://github.com/{common['repository']}.git",
+                    "uri": (
+                        f"git+https://github.com/{common['repository']}@"
+                        f"refs/heads/{common['ref_name']}"
+                    ),
                     "digest": {
                         "gitCommit": common["head_sha"],
                         "gitTree": common["tree_sha"],
@@ -508,6 +548,10 @@ def verify_architecture_attestation(
     tree_sha: str,
     run_id: int,
     run_attempt: int,
+    event_name: str,
+    repository_id: str,
+    repository_owner_id: str,
+    runner_environment: str,
     image: str,
     image_name: str,
     dockerfile: str,
@@ -539,6 +583,10 @@ def verify_architecture_attestation(
                 tree_sha=tree_sha,
                 run_id=run_id,
                 run_attempt=run_attempt,
+                event_name=event_name,
+                repository_id=repository_id,
+                repository_owner_id=repository_owner_id,
+                runner_environment=runner_environment,
                 image=image,
                 image_name=image_name,
                 dockerfile=dockerfile,
@@ -570,6 +618,10 @@ def verify_manifest_attestation(
     tree_sha: str,
     run_id: int,
     run_attempt: int,
+    event_name: str,
+    repository_id: str,
+    repository_owner_id: str,
+    runner_environment: str,
     image: str,
     image_name: str,
     dockerfile: str,
@@ -592,6 +644,10 @@ def verify_manifest_attestation(
         tree_sha=tree_sha,
         run_id=run_id,
         run_attempt=run_attempt,
+        event_name=event_name,
+        repository_id=repository_id,
+        repository_owner_id=repository_owner_id,
+        runner_environment=runner_environment,
         image=image,
         image_name=image_name,
         dockerfile=dockerfile,
@@ -621,6 +677,10 @@ def architecture_record(
     tree_sha: str,
     run_id: int,
     run_attempt: int,
+    event_name: str,
+    repository_id: str,
+    repository_owner_id: str,
+    runner_environment: str,
     image: str,
     image_name: str,
     dockerfile: str,
@@ -641,6 +701,10 @@ def architecture_record(
         tree_sha=tree_sha,
         run_id=run_id,
         run_attempt=run_attempt,
+        event_name=event_name,
+        repository_id=repository_id,
+        repository_owner_id=repository_owner_id,
+        runner_environment=runner_environment,
         image=image,
         image_name=image_name,
         dockerfile=dockerfile,
@@ -689,6 +753,10 @@ def validate_architecture_record(
     tree_sha: str,
     run_id: int,
     run_attempt: int,
+    event_name: str,
+    repository_id: str,
+    repository_owner_id: str,
+    runner_environment: str,
     image: str,
     image_name: str,
     dockerfile: str,
@@ -713,6 +781,10 @@ def validate_architecture_record(
             tree_sha=tree_sha,
             run_id=run_id,
             run_attempt=run_attempt,
+            event_name=event_name,
+            repository_id=repository_id,
+            repository_owner_id=repository_owner_id,
+            runner_environment=runner_environment,
             image=image,
             image_name=image_name,
             dockerfile=dockerfile,
@@ -740,6 +812,10 @@ def validate_architecture_records(
     tree_sha: str,
     run_id: int,
     run_attempt: int,
+    event_name: str,
+    repository_id: str,
+    repository_owner_id: str,
+    runner_environment: str,
     image: str,
     image_name: str,
     dockerfile: str,
@@ -775,6 +851,10 @@ def validate_architecture_records(
             tree_sha=tree_sha,
             run_id=run_id,
             run_attempt=run_attempt,
+            event_name=event_name,
+            repository_id=repository_id,
+            repository_owner_id=repository_owner_id,
+            runner_environment=runner_environment,
             image=image,
             image_name=image_name,
             dockerfile=dockerfile,
@@ -846,6 +926,10 @@ def _common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--tree-sha", required=True)
     parser.add_argument("--run-id", type=int, required=True)
     parser.add_argument("--run-attempt", type=int, required=True)
+    parser.add_argument("--event-name", required=True)
+    parser.add_argument("--repository-id", required=True)
+    parser.add_argument("--repository-owner-id", required=True)
+    parser.add_argument("--runner-environment", required=True)
     parser.add_argument("--image", required=True)
     parser.add_argument("--image-name", required=True)
     parser.add_argument("--dockerfile", required=True)
@@ -862,6 +946,10 @@ def _common_namespace(arguments: argparse.Namespace) -> dict[str, Any]:
             "tree_sha",
             "run_id",
             "run_attempt",
+            "event_name",
+            "repository_id",
+            "repository_owner_id",
+            "runner_environment",
             "image",
             "image_name",
             "dockerfile",
