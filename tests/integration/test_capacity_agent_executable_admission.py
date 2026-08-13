@@ -24,8 +24,10 @@ from loom_capacity_agent.admission import (
 )
 from loom_capacity_agent.claim_guard import (
     ExecutableClaimProposalV2,
+    ExecutableClaimReceiptV2,
     InertAttemptTransitionV1,
 )
+from loom_capacity_agent.contracts import AgentRegistrationV1
 from loom_capacity_agent.executable_admission import ExecutableAdmissionStore
 from loom_capacity_agent.lifecycle_store import CapacityAttemptLifecycleStore
 from loom_capacity_manager.contracts import ResourceVectorV1
@@ -108,6 +110,141 @@ async def _seed_protected_attempt(
                 "requirements_digest": requirements_digest,
             },
         )
+
+
+async def _prepare_claim_terminal_race(
+    database: dict[str, object],
+) -> tuple[
+    AgentRegistrationV1,
+    ExecutableWorkerRegistrationV2,
+    ExecutableClaimProposalV2,
+    InertAttemptTransitionV1,
+]:
+    _fence, registration = await _initialize_and_register(database)
+    request = _bootstrap(registration.subject_id, registration.subject_incarnation)
+    capability = "single-use-bootstrap-capability"
+    worker = _worker(request)
+    protected_attempt_id = UUID(int=149)
+    requirements_digest = "8" * 64
+    await _seed_protected_attempt(
+        database,
+        protected_attempt_id=protected_attempt_id,
+        execution_generation=14,
+        requirements_digest=requirements_digest,
+    )
+    async with _serializable_executor_session(database) as session:
+        store = ExecutableAdmissionStore(session, registration=registration)
+        await store.prepare_worker(
+            request,
+            bootstrap_sha256=hashlib.sha256(capability.encode("ascii")).hexdigest(),
+        )
+        await store.bind_slurm_job(_physical(request))
+        await store.register_worker(worker, bootstrap_capability=capability)
+    return (
+        registration,
+        worker,
+        ExecutableClaimProposalV2(
+            operation_id=UUID(int=150),
+            protected_attempt_id=protected_attempt_id,
+            execution_generation=14,
+            requirements_digest=requirements_digest,
+            worker_id=worker.worker_id,
+            worker_incarnation=worker.worker_incarnation,
+            expected_claim_high_water=0,
+        ),
+        InertAttemptTransitionV1(
+            **registration.model_dump(mode="python"),
+            transition_id=UUID(int=151),
+            protected_attempt_id=protected_attempt_id,
+            execution_generation=14,
+            requirements_digest=requirements_digest,
+            expected_transition_sequence=0,
+            operation="cancel",
+            expected_state="pending-unassigned",
+            target_state="cancelled-terminal",
+            transition_reason="claimed-attempt-terminal",
+        ),
+    )
+
+
+async def _run_claim_transaction(
+    database: dict[str, object],
+    registration: AgentRegistrationV1,
+    claim: ExecutableClaimProposalV2,
+    backend_pid: asyncio.Future[int],
+) -> ExecutableClaimReceiptV2 | None | DBAPIError:
+    try:
+        async with _serializable_executor_session(database) as session:
+            backend_pid.set_result(
+                (await session.execute(text("SELECT pg_backend_pid()"))).scalar_one()
+            )
+            return await ExecutableAdmissionStore(
+                session,
+                registration=registration,
+            ).admit_claim(claim)
+    except DBAPIError as exc:
+        return exc
+
+
+async def _run_terminal_transaction(
+    database: dict[str, object],
+    registration: AgentRegistrationV1,
+    terminal: InertAttemptTransitionV1,
+    backend_pid: asyncio.Future[int],
+) -> InertAttemptTransitionV1:
+    async with _agent_session(database) as session:
+        backend_pid.set_result(
+            (await session.execute(text("SELECT pg_backend_pid()"))).scalar_one()
+        )
+        return await CapacityAttemptLifecycleStore(
+            session,
+            registration=registration,
+        ).apply_transition(terminal)
+
+
+async def _backend_waited_for_lock(
+    database: dict[str, object],
+    *,
+    backend_pid: int,
+    task: asyncio.Task[object],
+) -> bool:
+    engine = create_async_engine(make_url(_value(database, "admin_url")))
+    try:
+        async with engine.connect() as connection, asyncio.timeout(10):
+            while not task.done():
+                wait_event_type = (
+                    await connection.execute(
+                        text(
+                            "SELECT wait_event_type FROM pg_stat_activity WHERE pid = :backend_pid"
+                        ),
+                        {"backend_pid": backend_pid},
+                    )
+                ).scalar_one_or_none()
+                if wait_event_type == "Lock":
+                    return True
+        return False
+    finally:
+        await engine.dispose()
+
+
+async def _claim_terminal_counts(
+    database: dict[str, object],
+) -> tuple[int, int, int]:
+    async with _owner_session(database) as (_, _, session):
+        row = (
+            await session.execute(
+                text(
+                    "SELECT count(lease.operation_id) AS admitted, "
+                    "count(terminal.admitted_operation_id) AS terminal, "
+                    "count(lease.operation_id) FILTER "
+                    "(WHERE terminal.admitted_operation_id IS NULL) AS live "
+                    "FROM loom_capacity_guard.executable_claim_leases AS lease "
+                    "LEFT JOIN loom_capacity_guard.executable_claim_terminal_events AS terminal "
+                    "ON terminal.admitted_operation_id = lease.operation_id"
+                )
+            )
+        ).one()
+    return row.admitted, row.terminal, row.live
 
 
 def _bootstrap(subject_id: UUID, subject_incarnation: UUID) -> ExecutableBootstrapRegistrationV2:
@@ -645,6 +782,103 @@ async def test_protected_terminal_lifecycle_closes_immutable_claim_and_allows_re
         )
         assert receipt.claim_high_water == 1
         assert receipt.live_claim_count == 0
+
+
+@pytest.mark.asyncio
+async def test_claim_first_serializes_terminal_projection_on_exact_attempt_head(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    """Catch a terminal trigger deciding no claim while admission is uncommitted."""
+
+    registration, _worker_registration, claim, terminal = await _prepare_claim_terminal_race(
+        capacity_guard_database
+    )
+    loop = asyncio.get_running_loop()
+    claim_pid: asyncio.Future[int] = loop.create_future()
+    terminal_pid: asyncio.Future[int] = loop.create_future()
+    claim_task: asyncio.Task[object]
+    terminal_task: asyncio.Task[object]
+    async with _owner_session(capacity_guard_database) as (_, _, blocker):
+        await blocker.execute(
+            text("LOCK TABLE loom_capacity_guard.executable_claim_leases IN SHARE MODE")
+        )
+        claim_task = asyncio.create_task(
+            _run_claim_transaction(
+                capacity_guard_database,
+                registration,
+                claim,
+                claim_pid,
+            )
+        )
+        assert await _backend_waited_for_lock(
+            capacity_guard_database,
+            backend_pid=await claim_pid,
+            task=claim_task,
+        )
+        terminal_task = asyncio.create_task(
+            _run_terminal_transaction(
+                capacity_guard_database,
+                registration,
+                terminal,
+                terminal_pid,
+            )
+        )
+        terminal_waited_for_claim = await _backend_waited_for_lock(
+            capacity_guard_database,
+            backend_pid=await terminal_pid,
+            task=terminal_task,
+        )
+
+    claim_result, terminal_result = await asyncio.gather(claim_task, terminal_task)
+    assert terminal_waited_for_claim is True
+    assert isinstance(claim_result, ExecutableClaimReceiptV2)
+    assert terminal_result == terminal
+    assert await _claim_terminal_counts(capacity_guard_database) == (1, 1, 0)
+
+
+@pytest.mark.asyncio
+async def test_terminal_first_serializes_claim_rejection_on_exact_attempt_head(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    """Catch admission seeing a stale nonterminal head during terminal commit."""
+
+    registration, _worker_registration, claim, terminal = await _prepare_claim_terminal_race(
+        capacity_guard_database
+    )
+    agent_engine = create_async_engine(make_url(_value(capacity_guard_database, "agent_url")))
+    agent_factory = async_sessionmaker(agent_engine, expire_on_commit=False)
+    loop = asyncio.get_running_loop()
+    claim_pid: asyncio.Future[int] = loop.create_future()
+    claim_task: asyncio.Task[object]
+    try:
+        async with agent_factory() as terminal_session, terminal_session.begin():
+            assert (
+                await CapacityAttemptLifecycleStore(
+                    terminal_session,
+                    registration=registration,
+                ).apply_transition(terminal)
+                == terminal
+            )
+            claim_task = asyncio.create_task(
+                _run_claim_transaction(
+                    capacity_guard_database,
+                    registration,
+                    claim,
+                    claim_pid,
+                )
+            )
+            claim_waited_for_terminal = await _backend_waited_for_lock(
+                capacity_guard_database,
+                backend_pid=await claim_pid,
+                task=claim_task,
+            )
+        claim_result = await claim_task
+    finally:
+        await agent_engine.dispose()
+
+    assert claim_waited_for_terminal is True
+    assert isinstance(claim_result, DBAPIError)
+    assert await _claim_terminal_counts(capacity_guard_database) == (0, 0, 0)
 
 
 @pytest.mark.asyncio

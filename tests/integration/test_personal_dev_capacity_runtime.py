@@ -175,7 +175,7 @@ async def test_capacity_role_convergence_removes_contaminated_executor_privilege
         await connection.execute(
             f'GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA "{schema_name}" TO "{executor}"'
         )
-        await connection.execute(f'GRANT USAGE ON SCHEMA "{schema_name}" TO "{identity.db_role}"')
+        await connection.execute(f'GRANT USAGE ON SCHEMA "{schema_name}" TO PUBLIC')
         await connection.execute(
             f'GRANT EXECUTE ON FUNCTION "{schema_name}".evidence_function() TO PUBLIC'
         )
@@ -225,6 +225,83 @@ async def test_capacity_role_convergence_removes_contaminated_executor_privilege
         ) as connection:
             await connection.execute(f'DROP SCHEMA IF EXISTS "{schema_name}" CASCADE')
             await connection.execute(f'DROP ROLE IF EXISTS "{identity.db_role}"')
+
+
+@pytest.mark.asyncio
+async def test_capacity_role_convergence_isolates_executor_from_public_functions(
+    postgres_url: str,
+) -> None:
+    """Catch PUBLIC schema usage bypassing direct executor function revocation."""
+
+    name = f"execpublic-{uuid4().hex[:8]}"
+    database_name = make_url(postgres_url).database
+    assert database_name is not None
+    identity = replace(derive_identity(name), database=database_name)
+    database = PsycopgPersonalDevCapacityDatabase(postgres_url)
+    function_name = f"executor_public_evidence_{uuid4().hex[:8]}"
+    connect_url = postgres_url.replace("postgresql+psycopg://", "postgresql://", 1)
+    async with await psycopg.AsyncConnection.connect(connect_url, autocommit=True) as connection:
+        await connection.execute(f'CREATE ROLE "{identity.db_role}" LOGIN')
+        await connection.execute("GRANT USAGE ON SCHEMA public TO PUBLIC")
+        await connection.execute(
+            f'CREATE FUNCTION public."{function_name}"() RETURNS bigint '
+            "LANGUAGE sql AS 'SELECT 1'"
+        )
+
+    executor = ""
+    try:
+        (
+            _owner,
+            _migrator,
+            _agent,
+            executor,
+            _migrator_url,
+            _agent_url,
+        ) = await database._converge_roles(identity, _new_credentials())
+        async with await psycopg.AsyncConnection.connect(
+            connect_url,
+            autocommit=True,
+        ) as connection:
+            privileges = await connection.execute(
+                "SELECT has_schema_privilege(%s, 'public', 'USAGE'), "
+                "has_function_privilege(%s, %s, 'EXECUTE'), "
+                "has_schema_privilege(%s, 'public', 'USAGE'), "
+                "has_function_privilege(%s, %s, 'EXECUTE')",
+                (
+                    identity.db_role,
+                    identity.db_role,
+                    f'public."{function_name}"()',
+                    executor,
+                    executor,
+                    f'public."{function_name}"()',
+                ),
+            )
+            assert await privileges.fetchone() == (True, True, False, True)
+            await connection.execute(f'SET ROLE "{identity.db_role}"')
+            application_result = await connection.execute(f'SELECT public."{function_name}"()')
+            assert await application_result.fetchone() == (1,)
+            await connection.execute("RESET ROLE")
+            await connection.execute(f'SET ROLE "{executor}"')
+            with pytest.raises(InsufficientPrivilege):
+                await connection.execute(f'SELECT public."{function_name}"()')
+            await connection.execute("RESET ROLE")
+            executor_role = await connection.execute(
+                "SELECT rolcanlogin, rolinherit, rolpassword IS NULL, "
+                "(SELECT count(*) FROM pg_auth_members membership "
+                "JOIN pg_roles member ON member.oid = membership.member "
+                "WHERE member.rolname = %s) FROM pg_authid WHERE rolname = %s",
+                (executor, executor),
+            )
+            assert await executor_role.fetchone() == (False, False, True, 0)
+    finally:
+        async with await psycopg.AsyncConnection.connect(
+            connect_url,
+            autocommit=True,
+        ) as connection:
+            await connection.execute(f'DROP FUNCTION IF EXISTS public."{function_name}"()')
+            await connection.execute(f'REVOKE USAGE ON SCHEMA public FROM "{identity.db_role}"')
+            await connection.execute(f'DROP ROLE IF EXISTS "{identity.db_role}"')
+            await connection.execute("GRANT USAGE ON SCHEMA public TO PUBLIC")
 
 
 @pytest.mark.asyncio

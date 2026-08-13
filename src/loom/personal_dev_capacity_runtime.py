@@ -344,13 +344,28 @@ class PsycopgPersonalDevCapacityDatabase:
                                 protected_roles,
                             )
                         )
+                    application_role_result = await connection.execute(
+                        "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = %s)",
+                        (identity.db_role,),
+                    )
+                    application_role_row = await application_role_result.fetchone()
+                    if application_role_row is None:
+                        raise PersonalDevCapacityInstallationError(
+                            "application database role lookup failed"
+                        )
+                    application_role_exists = bool(application_role_row[0])
                     schemas_result = await connection.execute(
-                        "SELECT nspname FROM pg_namespace "
+                        "SELECT namespace.nspname, EXISTS ("
+                        "SELECT 1 FROM aclexplode(COALESCE("
+                        "namespace.nspacl, acldefault('n', namespace.nspowner)"
+                        ")) AS privilege WHERE privilege.grantee = 0 "
+                        "AND privilege.privilege_type = 'USAGE'"
+                        ") AS public_usage FROM pg_namespace AS namespace "
                         "WHERE nspname <> 'information_schema' "
                         "AND nspname NOT LIKE 'pg\\_%' ESCAPE '\\' "
                         "ORDER BY nspname"
                     )
-                    for (schema_name,) in await schemas_result.fetchall():
+                    for schema_name, public_usage in await schemas_result.fetchall():
                         for object_kind in (
                             "SCHEMA {}",
                             "ALL TABLES IN SCHEMA {}",
@@ -365,6 +380,19 @@ class PsycopgPersonalDevCapacityDatabase:
                                     sql.Identifier(executor),
                                 )
                             )
+                        if public_usage:
+                            await connection.execute(
+                                sql.SQL("REVOKE USAGE ON SCHEMA {} FROM PUBLIC").format(
+                                    sql.Identifier(schema_name)
+                                )
+                            )
+                            if application_role_exists and schema_name != "loom_capacity_guard":
+                                await connection.execute(
+                                    sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(
+                                        sql.Identifier(schema_name),
+                                        sql.Identifier(identity.db_role),
+                                    )
+                                )
                     await connection.execute(
                         sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(sql.Identifier(owner))
                     )

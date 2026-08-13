@@ -1253,6 +1253,7 @@ def _install_claim_admission() -> None:
           v_executor_role text;
           v_operation_id uuid;
           v_current {SCHEMA}.executable_admission_events%ROWTYPE;
+          v_lifecycle {SCHEMA}.attempt_lifecycle_heads%ROWTYPE;
           v_state {SCHEMA}.executable_claim_state%ROWTYPE;
           v_existing {SCHEMA}.executable_claim_leases%ROWTYPE;
           v_receipt jsonb;
@@ -1355,6 +1356,15 @@ def _install_claim_admission() -> None:
              ) THEN
             RETURN NULL;
           END IF;
+          SELECT * INTO v_lifecycle FROM {SCHEMA}.attempt_lifecycle_heads
+           WHERE protected_attempt_id = (p_payload->>'protected_attempt_id')::uuid
+           FOR UPDATE;
+          IF NOT FOUND
+             OR v_lifecycle.lifecycle_state NOT IN ('pending-unassigned', 'assigned')
+             OR v_lifecycle.executable IS DISTINCT FROM false THEN
+            RAISE EXCEPTION 'executable claim differs from its protected attempt lifecycle'
+              USING ERRCODE = '55000';
+          END IF;
           SELECT * INTO v_state FROM {SCHEMA}.executable_claim_state
            WHERE intent_id = v_current.intent_id FOR UPDATE;
           IF NOT FOUND
@@ -1441,10 +1451,22 @@ def _install_claim_terminal_projection() -> None:
         AS $function$
         DECLARE
           v_claim {SCHEMA}.executable_claim_leases%ROWTYPE;
+          v_lifecycle {SCHEMA}.attempt_lifecycle_heads%ROWTYPE;
           v_state {SCHEMA}.executable_claim_state%ROWTYPE;
         BEGIN
           IF NEW.lifecycle_state <> 'cancelled-terminal' THEN
             RETURN NEW;
+          END IF;
+          SELECT * INTO v_lifecycle FROM {SCHEMA}.attempt_lifecycle_heads
+           WHERE protected_attempt_id = NEW.protected_attempt_id
+           FOR UPDATE;
+          IF NOT FOUND
+             OR v_lifecycle.transition_sequence IS DISTINCT FROM
+                NEW.transition_sequence - 1
+             OR v_lifecycle.lifecycle_state IS DISTINCT FROM NEW.previous_state
+             OR v_lifecycle.executable IS DISTINCT FROM false THEN
+            RAISE EXCEPTION 'executable terminal projection trigger order changed'
+              USING ERRCODE = '55000';
           END IF;
           SELECT * INTO v_claim FROM {SCHEMA}.executable_claim_leases
            WHERE protected_attempt_id = NEW.protected_attempt_id
