@@ -22,6 +22,10 @@ from loom_capacity_agent.admission import (
     PreparedExecutableAdmissionV2,
     RegisteredExecutableWorkerV2,
 )
+from loom_capacity_agent.claim_guard import (
+    ExecutableClaimProposalV2,
+    ExecutableClaimReceiptV2,
+)
 from loom_capacity_agent.contracts import AgentRegistrationV1
 from loom_capacity_agent.prepared_store import (
     CapacityPreparedAdmissionError,
@@ -258,13 +262,21 @@ class ExecutableAdmissionStore:
     async def acknowledge_release(
         self,
         request: ExecutableReleaseRequestV2,
+        *,
+        current_worker_credential: str,
     ) -> ExecutableReleaseReceiptV2:
         if not isinstance(request, ExecutableReleaseRequestV2):
             raise TypeError("worker release requires its schema-v2 contract")
+        credential = _clear_credential(
+            current_worker_credential,
+            label="current worker credential",
+        )
+        assert credential is not None
         receipt = await self._invoke(
             "acknowledge_executable_release",
             request,
             ExecutableReleaseReceiptV2,
+            extra={"current_worker_credential": credential},
         )
         if (
             receipt.binding != request.binding
@@ -280,26 +292,53 @@ class ExecutableAdmissionStore:
             raise ExecutableAdmissionError("protected release receipt changed")
         return receipt
 
-    async def worker_can_claim(self, worker_id: UUID, worker_incarnation: UUID) -> bool:
-        if not isinstance(worker_id, UUID) or not isinstance(worker_incarnation, UUID):
-            raise TypeError("worker claimability requires exact worker identities")
-        value = (
-            await self._session.execute(
-                text(
-                    f"SELECT {_SCHEMA}.executable_worker_can_claim("
-                    ":subject_id, :subject_incarnation, :worker_id, :worker_incarnation)"
-                ),
-                {
-                    "subject_id": self.subject_id,
-                    "subject_incarnation": self.subject_incarnation,
-                    "worker_id": worker_id,
-                    "worker_incarnation": worker_incarnation,
-                },
-            )
-        ).scalar_one()
-        if type(value) is not bool:
-            raise ExecutableAdmissionError("protected worker claimability is invalid")
-        return value
+    async def admit_claim(
+        self,
+        proposal: ExecutableClaimProposalV2,
+    ) -> ExecutableClaimReceiptV2 | None:
+        if not isinstance(proposal, ExecutableClaimProposalV2):
+            raise TypeError("executable claim requires its schema-v2 contract")
+        request_bytes = canonical_executable_bytes(proposal)
+        request_digest = canonical_executable_digest(proposal)
+        async with self._session.begin_nested():
+            returned = (
+                await self._session.execute(
+                    text(
+                        f"SELECT {_SCHEMA}.admit_executable_claim("
+                        ":subject_id, :subject_incarnation, CAST(:payload AS jsonb), "
+                        "CAST(:canonical_payload AS bytea), :request_digest)"
+                    ),
+                    {
+                        "subject_id": self.subject_id,
+                        "subject_incarnation": self.subject_incarnation,
+                        "payload": request_bytes.decode("ascii"),
+                        "canonical_payload": request_bytes,
+                        "request_digest": request_digest,
+                    },
+                )
+            ).scalar_one()
+            if returned is None:
+                return None
+            try:
+                receipt = parse_protected_response(
+                    returned,
+                    ExecutableClaimReceiptV2,
+                    label="executable claim procedure",
+                )
+            except CapacityPreparedAdmissionError as exc:
+                raise ExecutableAdmissionError(str(exc)) from exc
+            if (
+                receipt.operation_id != proposal.operation_id
+                or receipt.protected_attempt_id != proposal.protected_attempt_id
+                or receipt.execution_generation != proposal.execution_generation
+                or receipt.requirements_digest != proposal.requirements_digest
+                or receipt.worker_id != proposal.worker_id
+                or receipt.worker_incarnation != proposal.worker_incarnation
+                or receipt.claim_high_water != proposal.expected_claim_high_water + 1
+                or receipt.request_digest != request_digest
+            ):
+                raise ExecutableAdmissionError("protected executable claim receipt changed")
+        return receipt
 
 
 __all__ = ["ExecutableAdmissionError", "ExecutableAdmissionStore"]

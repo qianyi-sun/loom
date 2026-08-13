@@ -20,6 +20,10 @@ from loom_capacity_agent.admission import (
     PreparedExecutableAdmissionV2,
     RegisteredExecutableWorkerV2,
 )
+from loom_capacity_agent.claim_guard import (
+    ExecutableClaimProposalV2,
+    ExecutableClaimReceiptV2,
+)
 from loom_capacity_agent.client import read_owner_only_bytes
 from loom_capacity_agent.executable_admission import ExecutableAdmissionStore
 from loom_capacity_manager.executable_contracts import ExecutableBootstrapRegistrationV2
@@ -160,9 +164,23 @@ class DatabaseExecutableAdmissionClient:
     async def acknowledge_release(
         self,
         request: ExecutableReleaseRequestV2,
+        *,
+        current_worker_credential: str,
     ) -> ExecutableReleaseReceiptV2:
-        result = await self._store_call("acknowledge_release", request)
+        result = await self._store_call(
+            "acknowledge_release",
+            request,
+            current_worker_credential=current_worker_credential,
+        )
         assert isinstance(result, ExecutableReleaseReceiptV2)
+        return result
+
+    async def admit_claim(
+        self,
+        proposal: ExecutableClaimProposalV2,
+    ) -> ExecutableClaimReceiptV2 | None:
+        result = await self._store_call("admit_claim", proposal)
+        assert result is None or isinstance(result, ExecutableClaimReceiptV2)
         return result
 
     async def aclose(self) -> None:

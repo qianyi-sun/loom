@@ -107,9 +107,9 @@ def test_executor_role_is_distinct_and_has_only_guard_0011_procedures(
         }
         assert routines == {
             "acknowledge_executable_release",
+            "admit_executable_claim",
             "begin_executable_worker_drain",
             "bind_executable_slurm_job",
-            "executable_worker_can_claim",
             "prepare_executable_worker",
             "register_executable_worker",
         }

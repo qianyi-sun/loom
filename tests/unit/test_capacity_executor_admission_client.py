@@ -4,6 +4,8 @@ from pathlib import Path
 from uuid import UUID
 
 import pytest
+
+from loom_capacity_agent.claim_guard import ExecutableClaimProposalV2
 from loom_capacity_executor.admission_client import (
     DatabaseExecutableAdmissionClient,
     ExecutableAdmissionClientError,
@@ -110,3 +112,25 @@ def test_database_client_rejects_symlink_oversize_and_invalid_timeout(tmp_path: 
             subject_incarnation=UUID(int=2),
             timeout_seconds=0,
         )
+
+
+@pytest.mark.asyncio
+async def test_database_client_sends_complete_claim_to_protected_transaction() -> None:
+    proposal = ExecutableClaimProposalV2(
+        operation_id=UUID(int=10),
+        protected_attempt_id=UUID(int=11),
+        execution_generation=7,
+        requirements_digest="b" * 64,
+        worker_id=UUID(int=12),
+        worker_incarnation=UUID(int=13),
+        expected_claim_high_water=3,
+    )
+    client = object.__new__(DatabaseExecutableAdmissionClient)
+
+    async def store_call(method: str, value: object) -> None:
+        assert method == "admit_claim"
+        assert value is proposal
+
+    client._store_call = store_call  # type: ignore[method-assign]
+
+    assert await client.admit_claim(proposal) is None

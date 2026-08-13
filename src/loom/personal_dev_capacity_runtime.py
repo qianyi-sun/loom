@@ -45,6 +45,14 @@ from loom_capacity_guard.contracts import GuardFenceV1, canonical_bytes, canonic
 from loom_capacity_guard.schema_startup import capacity_guard_schema_head
 from loom_capacity_guard.store import CapacityGuardStore, GuardNotInitializedError
 
+_EXECUTABLE_ADMISSION_FUNCTIONS = (
+    "prepare_executable_worker(uuid,uuid,jsonb,bytea,text,text)",
+    "bind_executable_slurm_job(uuid,uuid,jsonb,bytea,text)",
+    "register_executable_worker(uuid,uuid,jsonb,bytea,text,text,text)",
+    "begin_executable_worker_drain(uuid,uuid,jsonb,bytea,text)",
+    "acknowledge_executable_release(uuid,uuid,jsonb,bytea,text,text)",
+    "admit_executable_claim(uuid,uuid,jsonb,bytea,text)",
+)
 _SECRET_NAME = "loom-capacity-agent"
 _CREDENTIALS_SECRET_NAME = "loom-capacity-agent-credentials"
 _DEPLOYMENT_NAME = "loom-capacity-agent"
@@ -336,6 +344,32 @@ class PsycopgPersonalDevCapacityDatabase:
                                 protected_roles,
                             )
                         )
+                    schemas_result = await connection.execute(
+                        "SELECT nspname FROM pg_namespace "
+                        "WHERE nspname <> 'information_schema' "
+                        "AND nspname NOT LIKE 'pg\\_%' ESCAPE '\\' "
+                        "ORDER BY nspname"
+                    )
+                    for (schema_name,) in await schemas_result.fetchall():
+                        for object_kind in (
+                            "SCHEMA {}",
+                            "ALL TABLES IN SCHEMA {}",
+                            "ALL SEQUENCES IN SCHEMA {}",
+                            "ALL FUNCTIONS IN SCHEMA {}",
+                        ):
+                            await connection.execute(
+                                sql.SQL(
+                                    "REVOKE ALL PRIVILEGES ON " + object_kind + " FROM {}"
+                                ).format(
+                                    sql.Identifier(schema_name),
+                                    sql.Identifier(executor),
+                                )
+                            )
+                        await connection.execute(
+                            sql.SQL(
+                                "REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA {} FROM PUBLIC"
+                            ).format(sql.Identifier(schema_name))
+                        )
                     await connection.execute(
                         sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(sql.Identifier(owner))
                     )
@@ -580,6 +614,46 @@ class PsycopgPersonalDevCapacityDatabase:
         if process.returncode != 0:
             raise PersonalDevCapacityInstallationError("protected capacity migration failed")
 
+    async def _converge_executor_surface(
+        self,
+        *,
+        migrator_url: str,
+        owner: str,
+        executor: str,
+    ) -> None:
+        engine = create_async_engine(migrator_url, isolation_level="SERIALIZABLE")
+        quoted_owner = engine.sync_engine.dialect.identifier_preparer.quote(owner)
+        quoted_executor = engine.sync_engine.dialect.identifier_preparer.quote(executor)
+        try:
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            async with factory() as session, session.begin():
+                await session.execute(text(f"SET LOCAL ROLE {quoted_owner}"))
+                await session.execute(
+                    text(
+                        "REVOKE ALL PRIVILEGES ON SCHEMA loom_capacity_guard "
+                        f"FROM {quoted_executor}"
+                    )
+                )
+                for object_kind in ("TABLES", "SEQUENCES", "FUNCTIONS"):
+                    await session.execute(
+                        text(
+                            f"REVOKE ALL PRIVILEGES ON ALL {object_kind} IN SCHEMA "
+                            f"loom_capacity_guard FROM {quoted_executor}"
+                        )
+                    )
+                await session.execute(
+                    text(f"GRANT USAGE ON SCHEMA loom_capacity_guard TO {quoted_executor}")
+                )
+                for function in _EXECUTABLE_ADMISSION_FUNCTIONS:
+                    await session.execute(
+                        text(
+                            "GRANT EXECUTE ON FUNCTION loom_capacity_guard."
+                            f"{function} TO {quoted_executor}"
+                        )
+                    )
+        finally:
+            await engine.dispose()
+
     async def converge(
         self,
         *,
@@ -601,6 +675,11 @@ class PsycopgPersonalDevCapacityDatabase:
                 migrator_url=migrator_url,
                 owner=owner,
                 agent=agent,
+                executor=executor,
+            )
+            await self._converge_executor_surface(
+                migrator_url=migrator_url,
+                owner=owner,
                 executor=executor,
             )
             fence = GuardFenceV1(

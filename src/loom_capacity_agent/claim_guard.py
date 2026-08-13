@@ -200,29 +200,44 @@ class ExecutableClaimProposalV2(StrictV2Model):
     executable: Literal[True] = True
 
 
-WorkerCanClaim = Callable[[UUID, UUID], Awaitable[bool]]
+class ExecutableClaimReceiptV2(StrictV2Model):
+    """Append-only receipt for one protected executable claim lease."""
+
+    operation_id: UUID
+    protected_attempt_id: UUID
+    execution_generation: PositiveGeneration
+    requirements_digest: Digest
+    intent_id: UUID
+    worker_id: UUID
+    worker_incarnation: UUID
+    claim_high_water: PositiveGeneration
+    request_digest: Digest
+    lease_state: Literal["live"] = "live"
+    admitted: Literal[True] = True
+    executable: Literal[True] = True
+
+
+AdmitExecutableClaim = Callable[
+    [ExecutableClaimProposalV2],
+    Awaitable[ExecutableClaimReceiptV2 | None],
+]
 
 
 class ExecutableClaimGate:
     """Stop a draining or revoked worker before a candidate claim transition."""
 
-    def __init__(self, *, worker_can_claim: WorkerCanClaim) -> None:
-        if not callable(worker_can_claim):
-            raise TypeError("executable claim gate requires a claimability reader")
-        self._worker_can_claim = worker_can_claim
+    def __init__(self, *, admit_claim: AdmitExecutableClaim) -> None:
+        if not callable(admit_claim):
+            raise TypeError("executable claim gate requires a protected transaction")
+        self._admit_claim = admit_claim
 
     async def evaluate(
         self,
         proposal: ExecutableClaimProposalV2,
-    ) -> ExecutableClaimProposalV2 | None:
+    ) -> ExecutableClaimReceiptV2 | None:
         if not isinstance(proposal, ExecutableClaimProposalV2):
             raise TypeError("executable claim proposal is invalid")
-        if not await self._worker_can_claim(
-            proposal.worker_id,
-            proposal.worker_incarnation,
-        ):
-            return None
-        return proposal
+        return await self._admit_claim(proposal)
 
 
 __all__ = [
@@ -232,5 +247,6 @@ __all__ = [
     "DisabledClaimGuard",
     "ExecutableClaimGate",
     "ExecutableClaimProposalV2",
+    "ExecutableClaimReceiptV2",
     "InertAttemptTransitionV1",
 ]

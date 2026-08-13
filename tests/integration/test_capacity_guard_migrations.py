@@ -51,6 +51,8 @@ EXPECTED_GUARD_TABLES = {
     "legacy_compatibility_freezes",
     "executable_admission_authority",
     "executable_admission_events",
+    "executable_claim_state",
+    "executable_claim_leases",
 }
 
 

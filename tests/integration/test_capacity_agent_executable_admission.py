@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from uuid import UUID, uuid4
@@ -20,6 +22,7 @@ from loom_capacity_agent.admission import (
     ExecutableWorkerRegistrationV2,
     PhysicalJobBindingV2,
 )
+from loom_capacity_agent.claim_guard import ExecutableClaimProposalV2
 from loom_capacity_agent.executable_admission import ExecutableAdmissionStore
 from loom_capacity_manager.contracts import ResourceVectorV1
 from loom_capacity_manager.executable_contracts import (
@@ -30,6 +33,8 @@ from loom_capacity_manager.executable_contracts import (
 )
 from tests.integration.test_capacity_agent_store import (
     _initialize_and_register,
+    _owner_session,
+    _seed_trial,
 )
 
 
@@ -52,6 +57,40 @@ async def _serializable_executor_session(
             yield session
     finally:
         await engine.dispose()
+
+
+async def _seed_protected_attempt(
+    database: dict[str, object],
+    *,
+    protected_attempt_id: UUID,
+    execution_generation: int,
+    requirements_digest: str,
+) -> None:
+    trial_id = _seed_trial(database)
+    async with _owner_session(database) as (_, _, session):
+        await session.execute(
+            text(
+                "INSERT INTO loom_capacity_guard.trial_requirements "
+                "(trial_id, schema_version, requirements_digest, requirements) "
+                "VALUES (:trial_id, 1, :requirements_digest, '{}'::jsonb)"
+            ),
+            {"trial_id": trial_id, "requirements_digest": requirements_digest},
+        )
+        await session.execute(
+            text(
+                "INSERT INTO loom_capacity_guard.trial_attempts "
+                "(protected_attempt_id, trial_id, execution_generation, "
+                "requirements_digest, claim_state) VALUES "
+                "(:protected_attempt_id, :trial_id, :execution_generation, "
+                ":requirements_digest, 'queued')"
+            ),
+            {
+                "protected_attempt_id": protected_attempt_id,
+                "trial_id": trial_id,
+                "execution_generation": execution_generation,
+                "requirements_digest": requirements_digest,
+            },
+        )
 
 
 def _bootstrap(subject_id: UUID, subject_incarnation: UUID) -> ExecutableBootstrapRegistrationV2:
@@ -140,6 +179,75 @@ def _worker(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "replacement"),
+    (
+        (("unexpected",), "field"),
+        (("binding", "unexpected"), "field"),
+        (("binding", "execution", "unexpected"), "field"),
+        (("binding", "candidate", "unexpected"), "field"),
+        (("binding", "resources", "unexpected"), "field"),
+        (("command_sequence",), None),
+        (("bootstrap_evidence_sha256",), None),
+        (("binding", "execution", "authority_incarnation"), None),
+        (("binding", "execution", "writer_epoch"), None),
+        (("binding", "execution", "configuration_epoch"), None),
+        (("binding", "execution", "allocation_epoch"), None),
+        (("binding", "execution", "execution_epoch"), None),
+        (("binding", "executor_incarnation"), None),
+        (("binding", "pool_generation"), None),
+        (("binding", "pool_generation"), "13"),
+        (("binding", "profile_generation"), None),
+        (("binding", "shape_id"), None),
+        (("binding", "resources", "memory_bytes"), None),
+        (("binding", "resources", "memory_bytes"), "1024"),
+        (("binding", "intent_id"), None),
+    ),
+)
+async def test_direct_sql_rejects_under_bound_or_extra_executable_payloads(
+    capacity_guard_database: dict[str, object],
+    path: tuple[str, ...],
+    replacement: object,
+) -> None:
+    _fence, registration = await _initialize_and_register(capacity_guard_database)
+    payload = _bootstrap(
+        registration.subject_id,
+        registration.subject_incarnation,
+    ).model_dump(mode="json", exclude_none=False)
+    target = payload
+    for segment in path[:-1]:
+        nested = target[segment]
+        assert isinstance(nested, dict)
+        target = nested
+    target[path[-1]] = replacement
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("ascii")
+
+    async with _serializable_executor_session(capacity_guard_database) as session:
+        with pytest.raises(DBAPIError, match=r"schema|binding|invalid"):
+            await session.execute(
+                text(
+                    "SELECT loom_capacity_guard.prepare_executable_worker("
+                    ":subject_id, :subject_incarnation, CAST(:payload AS jsonb), "
+                    "CAST(:canonical AS bytea), :digest, :bootstrap_sha256)"
+                ),
+                {
+                    "subject_id": registration.subject_id,
+                    "subject_incarnation": registration.subject_incarnation,
+                    "payload": canonical.decode("ascii"),
+                    "canonical": canonical,
+                    "digest": hashlib.sha256(canonical).hexdigest(),
+                    "bootstrap_sha256": "6" * 64,
+                },
+            )
+
+
+@pytest.mark.asyncio
 async def test_prepare_bind_register_is_ordered_exact_and_one_time(
     capacity_guard_database: dict[str, object],
 ) -> None:
@@ -199,6 +307,20 @@ async def test_requeue_revokes_predecessor_and_drain_blocks_new_claims(
         worker_credential="worker-credential-two",
         predecessor_worker_incarnation=first.worker_incarnation,
     )
+    predecessor_attempt = UUID(int=135)
+    drained_attempt = UUID(int=136)
+    await _seed_protected_attempt(
+        capacity_guard_database,
+        protected_attempt_id=predecessor_attempt,
+        execution_generation=9,
+        requirements_digest="c" * 64,
+    )
+    await _seed_protected_attempt(
+        capacity_guard_database,
+        protected_attempt_id=drained_attempt,
+        execution_generation=10,
+        requirements_digest="d" * 64,
+    )
 
     async with _serializable_executor_session(capacity_guard_database) as session:
         store = ExecutableAdmissionStore(session, registration=registration)
@@ -210,8 +332,20 @@ async def test_requeue_revokes_predecessor_and_drain_blocks_new_claims(
             predecessor_worker_credential="worker-credential-one",
         )
         assert requeued.predecessor_worker_incarnation == first.worker_incarnation
-        assert await store.worker_can_claim(first.worker_id, first.worker_incarnation) is False
-        assert await store.worker_can_claim(second.worker_id, second.worker_incarnation) is True
+        assert (
+            await store.admit_claim(
+                ExecutableClaimProposalV2(
+                    operation_id=UUID(int=137),
+                    protected_attempt_id=predecessor_attempt,
+                    execution_generation=9,
+                    requirements_digest="c" * 64,
+                    worker_id=first.worker_id,
+                    worker_incarnation=first.worker_incarnation,
+                    expected_claim_high_water=0,
+                )
+            )
+            is None
+        )
 
         drain = ExecutableDrainRequestV2(
             operation_id=UUID(int=112),
@@ -223,7 +357,125 @@ async def test_requeue_revokes_predecessor_and_drain_blocks_new_claims(
         )
         drained = await store.begin_drain(drain)
         assert drained.live_claim_count == 0
-        assert await store.worker_can_claim(second.worker_id, second.worker_incarnation) is False
+        assert (
+            await store.admit_claim(
+                ExecutableClaimProposalV2(
+                    operation_id=UUID(int=138),
+                    protected_attempt_id=drained_attempt,
+                    execution_generation=10,
+                    requirements_digest="d" * 64,
+                    worker_id=second.worker_id,
+                    worker_incarnation=second.worker_incarnation,
+                    expected_claim_high_water=0,
+                )
+            )
+            is None
+        )
+
+
+@pytest.mark.asyncio
+async def test_claim_and_drain_share_one_locked_protected_transaction(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    _fence, registration = await _initialize_and_register(capacity_guard_database)
+    request = _bootstrap(registration.subject_id, registration.subject_incarnation)
+    capability = "single-use-bootstrap-capability"
+    worker = _worker(request)
+    first_attempt = UUID(int=130)
+    second_attempt = UUID(int=131)
+    requirements_digest = "b" * 64
+    await _seed_protected_attempt(
+        capacity_guard_database,
+        protected_attempt_id=first_attempt,
+        execution_generation=7,
+        requirements_digest=requirements_digest,
+    )
+    await _seed_protected_attempt(
+        capacity_guard_database,
+        protected_attempt_id=second_attempt,
+        execution_generation=8,
+        requirements_digest=requirements_digest,
+    )
+    async with _serializable_executor_session(capacity_guard_database) as session:
+        store = ExecutableAdmissionStore(session, registration=registration)
+        await store.prepare_worker(
+            request,
+            bootstrap_sha256=hashlib.sha256(capability.encode("ascii")).hexdigest(),
+        )
+        await store.bind_slurm_job(_physical(request))
+        await store.register_worker(worker, bootstrap_capability=capability)
+
+    claim = ExecutableClaimProposalV2(
+        operation_id=UUID(int=132),
+        protected_attempt_id=first_attempt,
+        execution_generation=7,
+        requirements_digest=requirements_digest,
+        worker_id=worker.worker_id,
+        worker_incarnation=worker.worker_incarnation,
+        expected_claim_high_water=0,
+    )
+    drain = ExecutableDrainRequestV2(
+        operation_id=UUID(int=133),
+        binding=request.binding,
+        worker_id=worker.worker_id,
+        worker_incarnation=worker.worker_incarnation,
+        expected_claim_high_water=0,
+        drain_epoch=1,
+    )
+
+    async def attempt_claim() -> object:
+        async with _serializable_executor_session(capacity_guard_database) as session:
+            return await ExecutableAdmissionStore(
+                session,
+                registration=registration,
+            ).admit_claim(claim)
+
+    async def begin_drain() -> object:
+        async with _serializable_executor_session(capacity_guard_database) as session:
+            return await ExecutableAdmissionStore(
+                session,
+                registration=registration,
+            ).begin_drain(drain)
+
+    claim_result, drain_result = await asyncio.gather(
+        attempt_claim(),
+        begin_drain(),
+        return_exceptions=True,
+    )
+    claim_won = not isinstance(claim_result, BaseException) and claim_result is not None
+    drain_won = not isinstance(drain_result, BaseException)
+    assert claim_won != drain_won
+
+    if claim_won:
+        async with _serializable_executor_session(capacity_guard_database) as session:
+            drained = await ExecutableAdmissionStore(
+                session,
+                registration=registration,
+            ).begin_drain(drain.model_copy(update={"expected_claim_high_water": 1}))
+        assert drained.claim_high_water == 1
+        assert drained.live_claim_count == 1
+
+    second_claim = claim.model_copy(
+        update={
+            "operation_id": UUID(int=134),
+            "protected_attempt_id": second_attempt,
+            "execution_generation": 8,
+            "expected_claim_high_water": 1 if claim_won else 0,
+        }
+    )
+    async with _serializable_executor_session(capacity_guard_database) as session:
+        denied = await ExecutableAdmissionStore(
+            session,
+            registration=registration,
+        ).admit_claim(second_claim)
+    async with _owner_session(capacity_guard_database) as (_, _, session):
+        count = (
+            await session.execute(
+                text("SELECT count(*) FROM loom_capacity_guard.executable_claim_leases")
+            )
+        ).scalar_one()
+    assert denied is None
+    assert count == (1 if claim_won else 0)
 
 
 @pytest.mark.asyncio
@@ -255,6 +507,20 @@ async def test_claimability_is_independent_for_concurrent_intents(
         worker_incarnation=UUID(int=122),
         protected_registration_epoch=21,
         worker_credential="worker-credential-two",
+    )
+    first_attempt = UUID(int=139)
+    second_attempt = UUID(int=140)
+    await _seed_protected_attempt(
+        capacity_guard_database,
+        protected_attempt_id=first_attempt,
+        execution_generation=11,
+        requirements_digest="e" * 64,
+    )
+    await _seed_protected_attempt(
+        capacity_guard_database,
+        protected_attempt_id=second_attempt,
+        execution_generation=12,
+        requirements_digest="f" * 64,
     )
 
     async with _serializable_executor_session(capacity_guard_database) as session:
@@ -292,20 +558,32 @@ async def test_claimability_is_independent_for_concurrent_intents(
                 bootstrap_capability=capability,
             )
 
-        assert (
-            await store.worker_can_claim(
-                first_worker.worker_id,
-                first_worker.worker_incarnation,
+        first_claim = await store.admit_claim(
+            ExecutableClaimProposalV2(
+                operation_id=UUID(int=141),
+                protected_attempt_id=first_attempt,
+                execution_generation=11,
+                requirements_digest="e" * 64,
+                worker_id=first_worker.worker_id,
+                worker_incarnation=first_worker.worker_incarnation,
+                expected_claim_high_water=0,
             )
-            is True
         )
-        assert (
-            await store.worker_can_claim(
-                second_worker.worker_id,
-                second_worker.worker_incarnation,
+        second_claim = await store.admit_claim(
+            ExecutableClaimProposalV2(
+                operation_id=UUID(int=142),
+                protected_attempt_id=second_attempt,
+                execution_generation=12,
+                requirements_digest="f" * 64,
+                worker_id=second_worker.worker_id,
+                worker_incarnation=second_worker.worker_incarnation,
+                expected_claim_high_water=0,
             )
-            is True
         )
+        assert first_claim is not None
+        assert first_claim.intent_id == first_request.binding.intent_id
+        assert second_claim is not None
+        assert second_claim.intent_id == second_request.binding.intent_id
 
 
 @pytest.mark.asyncio
@@ -373,9 +651,42 @@ async def test_release_requires_revocation_newer_epoch_and_fences_delayed_regist
             release_epoch=1,
         )
         with pytest.raises(DBAPIError, match="newer protected registration epoch"):
-            await store.acknowledge_release(stale)
-        release = stale.model_copy(update={"protected_registration_epoch": 22})
-        receipt = await store.acknowledge_release(release)
+            await store.acknowledge_release(
+                stale,
+                current_worker_credential="worker-credential-one",
+            )
+        invented = stale.model_copy(update={"protected_registration_epoch": 22})
+        invented_bytes = json.dumps(
+            invented.model_dump(mode="json", exclude_none=False),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("ascii")
+        with pytest.raises(DBAPIError, match="registration evidence"):
+            async with session.begin_nested():
+                await session.execute(
+                    text(
+                        "SELECT loom_capacity_guard.acknowledge_executable_release("
+                        ":subject_id, :subject_incarnation, CAST(:payload AS jsonb), "
+                        "CAST(:canonical AS bytea), :digest, :worker_credential)"
+                    ),
+                    {
+                        "subject_id": registration.subject_id,
+                        "subject_incarnation": registration.subject_incarnation,
+                        "payload": invented_bytes.decode("ascii"),
+                        "canonical": invented_bytes,
+                        "digest": hashlib.sha256(invented_bytes).hexdigest(),
+                        "worker_credential": "worker-credential-one",
+                    },
+                )
+        release = stale.model_copy(
+            update={"protected_registration_epoch": worker.protected_registration_epoch}
+        )
+        receipt = await store.acknowledge_release(
+            release,
+            current_worker_credential="worker-credential-one",
+        )
         assert receipt.bootstrap_revoked is True
         assert receipt.worker_credentials_revoked is True
         assert receipt.live_claim_count == 0

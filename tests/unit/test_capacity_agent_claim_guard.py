@@ -172,12 +172,11 @@ def test_claim_contracts_contain_no_secret_or_token_field() -> None:
 
 
 @pytest.mark.asyncio
-async def test_executable_claim_gate_denies_a_draining_worker_without_mutating_attempt() -> None:
-    checked: list[tuple[object, object]] = []
+async def test_executable_claim_gate_delegates_the_complete_protected_transaction() -> None:
+    checked: list[ExecutableClaimProposalV2] = []
 
-    async def claimable(worker_id: object, worker_incarnation: object) -> bool:
-        checked.append((worker_id, worker_incarnation))
-        return False
+    async def admit_claim(proposal: ExecutableClaimProposalV2) -> None:
+        checked.append(proposal)
 
     proposal = ExecutableClaimProposalV2(
         operation_id=uuid4(),
@@ -188,6 +187,6 @@ async def test_executable_claim_gate_denies_a_draining_worker_without_mutating_a
         worker_incarnation=uuid4(),
         expected_claim_high_water=3,
     )
-    decision = await ExecutableClaimGate(worker_can_claim=claimable).evaluate(proposal)
+    decision = await ExecutableClaimGate(admit_claim=admit_claim).evaluate(proposal)
     assert decision is None
-    assert checked == [(proposal.worker_id, proposal.worker_incarnation)]
+    assert checked == [proposal]

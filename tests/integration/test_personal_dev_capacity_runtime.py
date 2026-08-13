@@ -108,9 +108,8 @@ async def test_capacity_role_convergence_grants_only_required_reference_columns(
     identity = replace(derive_identity(name), database=database_name)
     database = PsycopgPersonalDevCapacityDatabase(postgres_url)
 
-    owner, _migrator, _agent, _migrator_url, _agent_url = await database._converge_roles(
-        identity,
-        _new_credentials(),
+    owner, _migrator, _agent, _executor, _migrator_url, _agent_url = (
+        await database._converge_roles(identity, _new_credentials())
     )
 
     async with await psycopg.AsyncConnection.connect(
@@ -131,6 +130,79 @@ async def test_capacity_role_convergence_grants_only_required_reference_columns(
             (owner, owner, owner, owner, owner, owner, owner),
         )
         assert await privileges.fetchone() == (True, False, False, True, False, True, False)
+
+
+@pytest.mark.asyncio
+async def test_capacity_role_convergence_removes_contaminated_executor_privileges(
+    postgres_url: str,
+) -> None:
+    name = f"execcont-{uuid4().hex[:8]}"
+    database_name = make_url(postgres_url).database
+    assert database_name is not None
+    identity = replace(derive_identity(name), database=database_name)
+    database = PsycopgPersonalDevCapacityDatabase(postgres_url)
+    credentials = _new_credentials()
+    (
+        _owner,
+        _migrator,
+        _agent,
+        executor,
+        _migrator_url,
+        _agent_url,
+    ) = await database._converge_roles(identity, credentials)
+    schema_name = f"executor_contamination_{uuid4().hex[:8]}"
+    connect_url = postgres_url.replace("postgresql+psycopg://", "postgresql://", 1)
+    async with await psycopg.AsyncConnection.connect(connect_url, autocommit=True) as connection:
+        await connection.execute(f'CREATE SCHEMA "{schema_name}"')
+        await connection.execute(f'CREATE TABLE "{schema_name}".evidence (id bigint)')
+        await connection.execute(f'CREATE SEQUENCE "{schema_name}".evidence_sequence')
+        await connection.execute(
+            f'CREATE FUNCTION "{schema_name}".evidence_function() RETURNS bigint '
+            "LANGUAGE sql AS 'SELECT 1'"
+        )
+        await connection.execute(
+            f'GRANT ALL PRIVILEGES ON DATABASE "{database_name}" TO "{executor}"'
+        )
+        await connection.execute(f'GRANT ALL PRIVILEGES ON SCHEMA "{schema_name}" TO "{executor}"')
+        await connection.execute(
+            f'GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA "{schema_name}" TO "{executor}"'
+        )
+        await connection.execute(
+            f'GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA "{schema_name}" TO "{executor}"'
+        )
+        await connection.execute(
+            f'GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA "{schema_name}" TO "{executor}"'
+        )
+
+    try:
+        await database._converge_roles(identity, credentials)
+        async with await psycopg.AsyncConnection.connect(connect_url) as connection:
+            privileges = await connection.execute(
+                "SELECT has_database_privilege(%s, %s, 'CREATE'), "
+                "has_schema_privilege(%s, %s, 'USAGE'), "
+                "has_table_privilege(%s, %s, 'SELECT'), "
+                "has_sequence_privilege(%s, %s, 'USAGE'), "
+                "has_function_privilege(%s, %s, 'EXECUTE')",
+                (
+                    executor,
+                    database_name,
+                    executor,
+                    schema_name,
+                    executor,
+                    f"{schema_name}.evidence",
+                    executor,
+                    f"{schema_name}.evidence_sequence",
+                    executor,
+                    f"{schema_name}.evidence_function()",
+                ),
+            )
+            assert await privileges.fetchone() == (False, False, False, False, False)
+    finally:
+        async with await psycopg.AsyncConnection.connect(
+            connect_url,
+            autocommit=True,
+        ) as connection:
+            await connection.execute(f'DROP SCHEMA IF EXISTS "{schema_name}" CASCADE')
 
 
 @pytest.mark.asyncio
