@@ -358,7 +358,9 @@ def build_executable_ownership_metadata(
     )
 
 
-def _ownership_token(proof: SignedExecutableOwnershipProofV2) -> str:
+def executable_ownership_token(proof: SignedExecutableOwnershipProofV2) -> str:
+    """Return the scheduler-safe token committing one exact signed proof."""
+
     digest = hashlib.sha256(canonical_executable_bytes(proof)).digest()
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
 
@@ -407,7 +409,7 @@ def render_signed_launch(context: TrustedLaunchContextV2) -> RenderedTrustedLaun
         launcher=profile.launcher,
         launcher_release_sha256=profile.trusted_launcher_release_sha256,
         image_digest=profile.image_digest,
-        ownership_token=_ownership_token(proof),
+        ownership_token=executable_ownership_token(proof),
     )
     return RenderedTrustedLaunchV2(request=request, ownership_proof=proof)
 
@@ -427,6 +429,7 @@ __all__ = [
     "TrustedLaunchRenderError",
     "build_executable_ownership_metadata",
     "canonical_launch_policy_digest",
+    "executable_ownership_token",
     "render_launch_request",
     "render_signed_launch",
 ]

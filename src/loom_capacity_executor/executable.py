@@ -16,12 +16,17 @@ from loom_capacity_agent.admission import (
     ProtectedIntentObservationV2,
 )
 from loom_capacity_executor.client import ExecutorRejectedError
-from loom_capacity_executor.journal import ExecutorJournal, JournalRegressionError
+from loom_capacity_executor.journal import (
+    ExecutorJournal,
+    JournalRecord,
+    JournalRegressionError,
+)
 from loom_capacity_executor.keys import ExecutorOwnershipKey
 from loom_capacity_executor.launch_renderer import (
     OperatorLaunchProfileV2,
     RenderedTrustedLaunchV2,
     TrustedLaunchContextV2,
+    executable_ownership_token,
     render_signed_launch,
 )
 from loom_capacity_executor.slurm_contracts import (
@@ -43,12 +48,14 @@ from loom_capacity_manager.executable_contracts import (
     ExecutablePermitConsumptionV2,
     ExecutableReservationAcceptanceV2,
     ExecutableReservationProposalV2,
+    ExecutionFenceV2,
     PoolControllerAuthorityV2,
     SignedExecutableOwnershipProofV2,
     StrictV2Model,
     canonical_executable_bytes,
     canonical_executable_digest,
 )
+from loom_capacity_manager.ownership import OwnershipKeyring, verify_executable_ownership
 
 _OPERATION_NAMESPACE = UUID("cb359b0c-a844-4bc5-9592-a4c35e344f3d")
 _RECOVERY_LOOKBACK = timedelta(days=8)
@@ -113,6 +120,7 @@ class ExecutorTickResult:
         "idle",
         "inventory-published",
         "pending-cancelled",
+        "permit-consumed",
         "quarantined",
         "released",
         "submitted",
@@ -172,21 +180,20 @@ class ExecutablePoolExecutor:
         )
 
     def _assert_binding(self, binding: ExecutableIntentBindingV2) -> None:
-        execution = self.registration.execution
         if (
             binding.executor_id != self.registration.executor_id
             or binding.executor_incarnation != self.registration.executor_incarnation
             or binding.pool_id != self.registration.pool_id
             or binding.pool_generation != self.registration.pool_generation
-            or binding.execution.authority_incarnation != execution.authority_incarnation
-            or binding.execution.writer_epoch != execution.writer_epoch
-            or binding.execution.configuration_epoch != execution.configuration_epoch
-            or binding.execution.execution_epoch != execution.execution_epoch
-            or binding.execution.execution_manifest_sha256 != execution.execution_manifest_sha256
-            or binding.execution.trusted_fleet_release_sha256
-            != execution.trusted_fleet_release_sha256
         ):
             raise ValueError("manager work differs from exact executable binding")
+        self._assert_execution(binding.execution)
+
+    def _assert_execution(self, execution: ExecutionFenceV2) -> None:
+        actual = execution.model_dump(exclude={"allocation_epoch", "executable"})
+        expected = self.registration.execution.model_dump(exclude={"executable"})
+        if actual != expected:
+            raise ValueError("manager work differs from exact executable execution")
 
     async def _checkpoint(self) -> Any:
         checkpoint = await self.client.executable_checkpoint()
@@ -314,7 +321,7 @@ class ExecutablePoolExecutor:
         if payload is None:
             raise JournalRegressionError("signed launch envelope is absent from journal")
         value = json.loads(payload.decode("ascii"))
-        return _LaunchEnvelope(
+        envelope = _LaunchEnvelope(
             rendered=RenderedTrustedLaunchV2(
                 request=SlurmLaunchRequestV2.model_validate_json(json.dumps(value["request"])),
                 ownership_proof=SignedExecutableOwnershipProofV2.model_validate_json(
@@ -323,6 +330,47 @@ class ExecutablePoolExecutor:
             ),
             bootstrap_registration_epoch=int(value["bootstrap_registration_epoch"]),
         )
+        self._validate_stored_launch(intent_id, envelope)
+        return envelope
+
+    def _validate_stored_launch(self, intent_id: UUID, envelope: _LaunchEnvelope) -> None:
+        rendered = envelope.rendered
+        proof = rendered.ownership_proof
+        request = rendered.request
+        keyring = OwnershipKeyring(
+            {self.ownership_key.signing_key_id: (self.ownership_key.private_key.public_key())}
+        )
+        if not verify_executable_ownership(
+            proof,
+            keyring=keyring,
+            expected_public_key_sha256=self.registration.signing_key_sha256,
+        ):
+            raise JournalRegressionError("stored ownership proof is not authentic")
+        try:
+            self._assert_binding(proof.metadata.binding)
+            expected = render_signed_launch(
+                TrustedLaunchContextV2(
+                    binding=proof.metadata.binding,
+                    profile=self.profile,
+                    controller_authority=self.controller_authority,
+                    ownership_key=self.ownership_key,
+                    submitted_at=proof.metadata.submitted_at,
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            raise JournalRegressionError(
+                "stored ownership evidence differs from launch authority"
+            ) from exc
+        if (
+            request.operation_id != intent_id
+            or proof.signing_key_id != self.registration.signing_key_id
+            or proof.metadata.controller_authority_sha256
+            != self.registration.controller_authority_sha256
+            or executable_ownership_token(proof) != request.ownership_token
+            or proof != expected.ownership_proof
+            or request != expected.request
+        ):
+            raise JournalRegressionError("stored ownership request and proof are not coherent")
 
     def _bootstrap_registration(
         self,
@@ -353,10 +401,128 @@ class ExecutablePoolExecutor:
 
     async def tick(self) -> ExecutorTickResult:
         checkpoint = await self._checkpoint()
+        replayed = await self._replay_central_request(checkpoint)
+        if replayed is not None:
+            return replayed
         work = await self.client.next_executable_work(checkpoint.command_sequence)
         if work is None:
             return await self._publish_inventory(checkpoint)
         return await self._apply_one(work, checkpoint)
+
+    def _validate_central_replay(
+        self,
+        record: JournalRecord,
+        value: StrictV2Model,
+        checkpoint: Any,
+    ) -> None:
+        if self._event_object(value) != (record.object_kind, record.object_id):
+            raise JournalRegressionError("central request object binding changed")
+        command_sequence = getattr(value, "command_sequence", None)
+        if type(command_sequence) is not int or checkpoint.command_sequence not in {
+            command_sequence - 1,
+            command_sequence,
+        }:
+            raise JournalRegressionError("central request command sequence changed")
+        if isinstance(value, ExecutableReservationAcceptanceV2):
+            self._assert_execution(value.execution)
+            if (
+                value.executor_id != self.registration.executor_id
+                or value.executor_incarnation != self.registration.executor_incarnation
+                or value.pool_generation != self.registration.pool_generation
+            ):
+                raise JournalRegressionError("central acceptance binding changed")
+            return
+        if isinstance(
+            value,
+            (
+                ExecutableBootstrapRegistrationV2,
+                ExecutablePermitConsumptionV2,
+                ExecutableIntentCloseV2,
+            ),
+        ):
+            self._assert_binding(value.binding)
+            return
+        if isinstance(value, ExecutablePartialReleaseV2):
+            self._assert_execution(value.execution)
+            if (
+                value.executor_id != self.registration.executor_id
+                or value.executor_incarnation != self.registration.executor_incarnation
+            ):
+                raise JournalRegressionError("central release binding changed")
+            for release in value.releases:
+                self._assert_binding(release.binding)
+            return
+        raise JournalRegressionError("central request contract is unsupported")
+
+    async def _replay_central_request(self, checkpoint: Any) -> ExecutorTickResult | None:
+        central_events = {
+            "reservation-accept-requested",
+            "bootstrap-register-requested",
+            "permit-consume-requested",
+            "intent-close-requested",
+            "reservation-release-requested",
+        }
+        records = tuple(
+            record
+            for record in self.journal.pending_requests()
+            if record.event_kind in central_events
+        )
+        if not records:
+            return None
+        if len(records) != 1:
+            raise JournalRegressionError("multiple central commands remain unresolved")
+        record = records[0]
+        payload = record.durable_payload()
+        if payload is None:
+            raise JournalRegressionError("central request is absent from journal")
+        if record.event_kind == "reservation-accept-requested":
+            acceptance = ExecutableReservationAcceptanceV2.model_validate_json(payload)
+            self._validate_central_replay(record, acceptance, checkpoint)
+            await self._central_command(
+                acceptance,
+                event="reservation-accept",
+                operation=lambda: self.client.accept_executable_reservation(acceptance),
+            )
+            return ExecutorTickResult("accepted")
+        if record.event_kind == "bootstrap-register-requested":
+            registration = ExecutableBootstrapRegistrationV2.model_validate_json(payload)
+            self._validate_central_replay(record, registration, checkpoint)
+            await self._central_command(
+                registration,
+                event="bootstrap-register",
+                operation=lambda: self.client.register_executable_bootstrap(registration),
+            )
+            return ExecutorTickResult(
+                "bootstrap-registered",
+                registration.binding.intent_id,
+                str(registration.bootstrap_registration_epoch),
+            )
+        if record.event_kind == "permit-consume-requested":
+            consumption = ExecutablePermitConsumptionV2.model_validate_json(payload)
+            self._validate_central_replay(record, consumption, checkpoint)
+            await self._central_command(
+                consumption,
+                event="permit-consume",
+                operation=lambda: self.client.consume_executable_permit(consumption),
+            )
+            return ExecutorTickResult("permit-consumed", consumption.binding.intent_id)
+        if record.event_kind == "intent-close-requested":
+            close = ExecutableIntentCloseV2.model_validate_json(payload)
+            self._validate_central_replay(record, close, checkpoint)
+            await self._central_command(
+                close,
+                event="intent-close",
+                operation=lambda: self.client.close_executable_intent(close),
+            )
+            return ExecutorTickResult("draining", close.binding.intent_id)
+        release = ExecutablePartialReleaseV2.model_validate_json(payload)
+        self._validate_central_replay(record, release, checkpoint)
+        await self._central_command(
+            release,
+            event="reservation-release",
+            operation=lambda: self.client.release_executable_shapes(release),
+        )
+        return ExecutorTickResult("released")
 
     async def _apply_one(self, work: object, checkpoint: Any) -> ExecutorTickResult:
         if isinstance(work, ExecutableReservationProposalV2):
@@ -471,17 +637,37 @@ class ExecutablePoolExecutor:
             ),
         )
         payload = canonical_executable_bytes(request)
-        self.journal.append(
+        digest = canonical_executable_digest(request)
+        latest = self.journal.latest("intent", str(request.binding.intent_id))
+        if latest is not None and latest.event_kind in {
             "physical-bind-requested",
-            canonical_executable_digest(request),
-            object_kind="intent",
-            object_id=str(request.binding.intent_id),
-            payload=payload,
-        )
+            "physical-bind-confirmed",
+        }:
+            durable = latest.durable_payload()
+            if durable is None:
+                raise JournalRegressionError("physical binding request is absent from journal")
+            retained = PhysicalJobBindingV2.model_validate_json(durable)
+            if retained != request or latest.payload_digest != digest:
+                raise JournalRegressionError("physical binding request changed during recovery")
+            if latest.event_kind == "physical-bind-confirmed":
+                self._remember_launch(
+                    envelope.rendered,
+                    bootstrap_registration_epoch=envelope.bootstrap_registration_epoch,
+                    event="physical-bind-confirmed",
+                )
+                return
+        else:
+            self.journal.append(
+                "physical-bind-requested",
+                digest,
+                object_kind="intent",
+                object_id=str(request.binding.intent_id),
+                payload=payload,
+            )
         await self.admission.bind_slurm_job(request)
         self.journal.append(
             "physical-bind-confirmed",
-            canonical_executable_digest(request),
+            digest,
             object_kind="intent",
             object_id=str(request.binding.intent_id),
             payload=payload,
@@ -559,6 +745,12 @@ class ExecutablePoolExecutor:
                 return ExecutorTickResult("pending-cancelled", close.binding.intent_id)
             if matches:
                 return ExecutorTickResult("draining", close.binding.intent_id)
+        if matches:
+            return ExecutorTickResult(
+                "quarantined",
+                close.binding.intent_id,
+                "physical job exists without protected worker drain identity",
+            )
         await self._central_command(
             close,
             event="intent-close",
@@ -670,14 +862,23 @@ class ExecutablePoolExecutor:
     async def recover(self) -> ExecutorTickResult:
         checkpoint = await self._checkpoint()
         jobs = await self.slurm.inventory()
-        submitting = tuple(
+        recovering = tuple(
             record
-            for record in self.journal.latest_records("job")
-            if record.event_kind in {"slurm-submit-requested", "slurm-submit-unknown"}
+            for record in (
+                *self.journal.latest_records("job"),
+                *self.journal.latest_records("intent"),
+            )
+            if record.event_kind
+            in {
+                "slurm-submit-requested",
+                "slurm-submit-unknown",
+                "slurm-submit-confirmed",
+                "physical-bind-requested",
+            }
         )
-        if not submitting:
+        if not recovering:
             return await self._publish_inventory(checkpoint, jobs=jobs)
-        record = submitting[0]
+        record = min(recovering, key=lambda item: item.sequence)
         intent_id = UUID(record.object_id)
         envelope = self._load_launch(intent_id)
         matches = self._exact_matches(envelope, jobs)

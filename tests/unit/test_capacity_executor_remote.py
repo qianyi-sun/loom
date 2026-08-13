@@ -24,6 +24,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableLaunchPermitV2,
     ExecutablePartialReleaseV2,
     ExecutableReleasedShapeV2,
+    ExecutableReservationAcceptanceV2,
     ExecutableReservationProposalV2,
     ExecutionContextV2,
     StrictV2Model,
@@ -206,6 +207,100 @@ async def test_executable_client_validates_canonical_receipt_digest() -> None:
     )
     try:
         assert (await client.close_executable_intent(close)).intent_id == binding.intent_id
+    finally:
+        await http.aclose()
+
+
+# Production break caught: reservation acceptance has no pool_id field, so the
+# generic contract validator rejected a valid pool-routed request before HTTP.
+async def test_executable_client_transports_pool_routed_reservation_acceptance() -> None:
+    registration = _executable_registration()
+    binding = launch_context_fixture().binding
+    acceptance = ExecutableReservationAcceptanceV2(
+        execution=binding.execution,
+        tranche_id=binding.tranche_id,
+        proposal_digest="d" * 64,
+        pool_generation=binding.pool_generation,
+        executor_id=binding.executor_id,
+        executor_incarnation=binding.executor_incarnation,
+        command_sequence=1,
+    )
+    payload: dict[str, object] = {
+        "tranche_id": str(binding.tranche_id),
+        "intent_ids": [str(binding.intent_id)],
+        "executable": True,
+    }
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.url.path == (
+            f"/v2/executors/{registration.pool_id}/reservations/{binding.tranche_id}/accept"
+        )
+        assert request.headers["Authorization"] == "Bearer executor-secret"
+        assert json.loads(request.content) == acceptance.model_dump(mode="json")
+        return httpx.Response(
+            200,
+            json={
+                **payload,
+                "receipt_digest": _executable_receipt_digest(payload),
+                "replayed": False,
+            },
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = ExecutableCapacityExecutorClient(
+        registration,
+        manager_origin="https://capacity.example.test",
+        bearer_token="executor-secret",
+        http_client=http,
+    )
+    try:
+        receipt = await client.accept_executable_reservation(acceptance)
+        assert receipt.intent_ids == (binding.intent_id,)
+        assert requests != []
+    finally:
+        await http.aclose()
+
+
+# Production break caught: matching execution digests alone could hide a changed
+# drain-only/new-capacity authority in a pool-routed acceptance contract.
+async def test_executable_client_rejects_changed_acceptance_execution_authority() -> None:
+    registration = _executable_registration()
+    binding = launch_context_fixture().binding
+    changed_execution = binding.execution.model_copy(
+        update={
+            "execution_state": "drain-only",
+            "executable_new_capacity_ceiling": 0,
+            "executable_new_capacity_rate_per_minute": 0,
+        }
+    )
+    acceptance = ExecutableReservationAcceptanceV2(
+        execution=changed_execution,
+        tranche_id=binding.tranche_id,
+        proposal_digest="d" * 64,
+        pool_generation=binding.pool_generation,
+        executor_id=binding.executor_id,
+        executor_incarnation=binding.executor_incarnation,
+        command_sequence=1,
+    )
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(500)
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = ExecutableCapacityExecutorClient(
+        registration,
+        manager_origin="https://capacity.example.test",
+        bearer_token="executor-secret",
+        http_client=http,
+    )
+    try:
+        with pytest.raises(ExecutorTransportError, match="execution binding changed"):
+            await client.accept_executable_reservation(acceptance)
+        assert requests == []
     finally:
         await http.aclose()
 

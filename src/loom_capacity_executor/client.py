@@ -34,6 +34,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutablePermitConsumptionV2,
     ExecutableReservationAcceptanceV2,
     ExecutableReservationProposalV2,
+    ExecutionFenceV2,
     StrictV2Model,
     canonical_executable_bytes,
     canonical_executable_digest,
@@ -581,27 +582,24 @@ class ExecutableCapacityExecutorClient:
             raise ExecutorTransportError("executable executor contract binding changed")
         binding = self._binding(value)
         execution = binding.execution if binding is not None else getattr(value, "execution", None)
-        if execution is None:
+        if not isinstance(execution, ExecutionFenceV2):
             raise ExecutorTransportError("executable executor contract binding changed")
         checks = (
             ("executor_id", self.registration.executor_id),
             ("executor_incarnation", self.registration.executor_incarnation),
-            ("pool_id", self.registration.pool_id),
             ("pool_generation", self.registration.pool_generation),
+            *(
+                ()
+                if isinstance(value, ExecutableReservationAcceptanceV2)
+                else (("pool_id", self.registration.pool_id),)
+            ),
         )
         target = binding if binding is not None else value
         if any(getattr(target, field, None) != expected for field, expected in checks):
             raise ExecutorTransportError("executable executor contract binding changed")
-        expected_execution = self.registration.execution
-        if (
-            execution.authority_incarnation != expected_execution.authority_incarnation
-            or execution.writer_epoch != expected_execution.writer_epoch
-            or execution.configuration_epoch != expected_execution.configuration_epoch
-            or execution.execution_epoch != expected_execution.execution_epoch
-            or execution.execution_manifest_sha256 != expected_execution.execution_manifest_sha256
-            or execution.trusted_fleet_release_sha256
-            != expected_execution.trusted_fleet_release_sha256
-        ):
+        actual_execution = execution.model_dump(exclude={"allocation_epoch", "executable"})
+        expected_execution = self.registration.execution.model_dump(exclude={"executable"})
+        if actual_execution != expected_execution:
             raise ExecutorTransportError("executable execution binding changed")
 
     async def _request(

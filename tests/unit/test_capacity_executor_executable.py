@@ -40,10 +40,13 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableLaunchPermitV2,
     ExecutablePartialReleaseV2,
     ExecutablePermitConsumptionV2,
+    ExecutableReleasedShapeV2,
     ExecutableReservationAcceptanceV2,
     ExecutionContextV2,
     PoolControllerAuthorityV2,
     PreparedExecutorBindingV2,
+    StrictV2Model,
+    canonical_executable_bytes,
     canonical_executable_digest,
 )
 from tests.unit.test_capacity_executor_launch_renderer import launch_context_fixture
@@ -68,7 +71,9 @@ class FakeManager:
     def __post_init__(self) -> None:
         self.inventories: list[ExecutableExecutorInventoryV2] = []
         self.releases: list[ExecutablePartialReleaseV2] = []
+        self.central_requests: list[StrictV2Model] = []
         self.inventory_failure: Exception | None = None
+        self.reject_work_fetch = False
 
     async def executable_checkpoint(self) -> SimpleNamespace:
         return SimpleNamespace(
@@ -88,6 +93,8 @@ class FakeManager:
 
     async def next_executable_work(self, command_sequence: int) -> object | None:
         assert command_sequence == self.command_sequence
+        if self.reject_work_fetch:
+            raise AssertionError("durable central request must replay before work fetch")
         return self.work
 
     def _transition(self, command_sequence: int, payload: dict[str, object]) -> SimpleNamespace:
@@ -104,6 +111,7 @@ class FakeManager:
     async def accept_executable_reservation(
         self, value: ExecutableReservationAcceptanceV2
     ) -> SimpleNamespace:
+        self.central_requests.append(value)
         return self._transition(
             value.command_sequence,
             {"tranche_id": value.tranche_id, "intent_ids": (UUID(int=101),), "executable": True},
@@ -112,6 +120,7 @@ class FakeManager:
     async def register_executable_bootstrap(
         self, value: ExecutableBootstrapRegistrationV2
     ) -> SimpleNamespace:
+        self.central_requests.append(value)
         result = self._transition(
             value.command_sequence,
             {
@@ -126,6 +135,7 @@ class FakeManager:
     async def consume_executable_permit(
         self, value: ExecutablePermitConsumptionV2
     ) -> SimpleNamespace:
+        self.central_requests.append(value)
         result = self._transition(
             value.command_sequence,
             {
@@ -138,6 +148,7 @@ class FakeManager:
         return result
 
     async def close_executable_intent(self, value: ExecutableIntentCloseV2) -> SimpleNamespace:
+        self.central_requests.append(value)
         result = self._transition(
             value.command_sequence,
             {"intent_id": value.binding.intent_id, "executable": True},
@@ -146,6 +157,7 @@ class FakeManager:
         return result
 
     async def release_executable_shapes(self, value: ExecutablePartialReleaseV2) -> SimpleNamespace:
+        self.central_requests.append(value)
         released = tuple(item.binding.shape_instance_id for item in value.releases)
         result = self._transition(
             value.command_sequence,
@@ -178,6 +190,9 @@ class FakeAdmission:
         self.prepare_requests: list[ExecutableBootstrapRegistrationV2] = []
         self.crash_after_prepare = False
         self.bound: dict[UUID, BoundExecutableWorkerV2] = {}
+        self.bind_requests: list[PhysicalJobBindingV2] = []
+        self.bind_failure: Exception | None = None
+        self.bind_commits_before_failure = False
         self.observations: dict[UUID, ProtectedIntentObservationV2] = {}
 
     async def prepare_worker(
@@ -204,6 +219,9 @@ class FakeAdmission:
         return receipt
 
     async def bind_slurm_job(self, request: PhysicalJobBindingV2) -> BoundExecutableWorkerV2:
+        self.bind_requests.append(request)
+        if self.bind_failure is not None and not self.bind_commits_before_failure:
+            raise self.bind_failure
         digest = canonical_executable_digest(request)
         receipt = BoundExecutableWorkerV2(
             subject_id=request.binding.subject_id,
@@ -217,6 +235,8 @@ class FakeAdmission:
             protected_high_water=2,
         )
         self.bound[request.binding.intent_id] = receipt
+        if self.bind_failure is not None:
+            raise self.bind_failure
         return receipt
 
     async def observe_intent(
@@ -370,6 +390,129 @@ def permit_fixture(binding: ExecutableIntentBindingV2) -> ExecutableLaunchPermit
         launch_rank=1,
         expires_at=_NOW + timedelta(minutes=1),
     )
+
+
+def _durable_central_request(
+    event: str,
+    binding: ExecutableIntentBindingV2,
+) -> tuple[StrictV2Model, str, str, str]:
+    if event == "reservation-accept":
+        return (
+            ExecutableReservationAcceptanceV2(
+                execution=binding.execution,
+                tranche_id=binding.tranche_id,
+                proposal_digest="d" * 64,
+                pool_generation=binding.pool_generation,
+                executor_id=binding.executor_id,
+                executor_incarnation=binding.executor_incarnation,
+                command_sequence=1,
+            ),
+            "tranche",
+            str(binding.tranche_id),
+            "accepted",
+        )
+    if event == "bootstrap-register":
+        return (
+            ExecutableBootstrapRegistrationV2(
+                binding=binding,
+                command_sequence=1,
+                bootstrap_registration_epoch=1,
+                bootstrap_evidence_sha256="b" * 64,
+            ),
+            "intent",
+            str(binding.intent_id),
+            "bootstrap-registered",
+        )
+    if event == "permit-consume":
+        return (
+            ExecutablePermitConsumptionV2(
+                permit_id=UUID(int=200),
+                permit_digest="e" * 64,
+                binding=binding,
+                command_sequence=1,
+            ),
+            "intent",
+            str(binding.intent_id),
+            "permit-consumed",
+        )
+    if event == "intent-close":
+        return (
+            ExecutableIntentCloseV2(binding=binding, command_sequence=1),
+            "intent",
+            str(binding.intent_id),
+            "draining",
+        )
+    if event == "reservation-release":
+        return (
+            ExecutablePartialReleaseV2(
+                execution=binding.execution,
+                tranche_id=binding.tranche_id,
+                executor_id=binding.executor_id,
+                executor_incarnation=binding.executor_incarnation,
+                command_sequence=1,
+                releases=(
+                    ExecutableReleasedShapeV2(
+                        binding=binding,
+                        inventory_sequence=1,
+                        terminal_kind="slurm-job",
+                        terminal_identity="101",
+                        terminal_evidence_sha256="f" * 64,
+                        protected_registration_epoch=2,
+                        bootstrap_revoked=True,
+                        protected_release_sha256="1" * 64,
+                    ),
+                ),
+            ),
+            "tranche",
+            str(binding.tranche_id),
+            "released",
+        )
+    raise AssertionError(f"unexpected central event: {event}")
+
+
+@pytest.mark.parametrize(
+    "event",
+    (
+        "reservation-accept",
+        "bootstrap-register",
+        "permit-consume",
+        "intent-close",
+        "reservation-release",
+    ),
+)
+async def test_tick_replays_each_durable_central_request_before_fetching_work(
+    tmp_path: Path,
+    event: str,
+) -> None:
+    launch = launch_context_fixture()
+    executor, journal, manager, _admission, slurm, _launch = executor_fixture(
+        tmp_path,
+        work=None,
+    )
+    request, object_kind, object_id, expected_status = _durable_central_request(
+        event,
+        launch.binding,
+    )
+    payload = canonical_executable_bytes(request)
+    journal.append(
+        f"{event}-requested",
+        canonical_executable_digest(request),
+        object_kind=object_kind,
+        object_id=object_id,
+        payload=payload,
+    )
+    manager.reject_work_fetch = True
+
+    result = await executor.tick()
+
+    assert result.status == expected_status
+    assert manager.central_requests == [request]
+    assert slurm.submit_count == 0
+    confirmed = journal.latest(object_kind, object_id)
+    assert confirmed is not None
+    assert confirmed.event_kind == f"{event}-confirmed"
+    assert confirmed.durable_payload() == payload
+    journal.close()
 
 
 # Production break caught: a crash after protected preparation could leave no
@@ -592,6 +735,36 @@ async def test_ordinary_reclamation_never_signals_active_worker(tmp_path: Path) 
     assert result.status == "draining"
     assert slurm.jobs == [active]
     assert admission.observations[launch.binding.intent_id].drain is not None
+    journal.close()
+
+
+# Production break caught: acknowledging close for an exact pending job without
+# protected worker/drain identity could let that job register after central close.
+async def test_close_retains_pending_job_without_protected_worker_identity(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    executor, journal, manager, admission, slurm, _launch = executor_fixture(
+        tmp_path,
+        work=permit_fixture(launch.binding),
+    )
+    await executor.tick()
+    pending = slurm.jobs[0]
+    prior_requests = tuple(manager.central_requests)
+    close = ExecutableIntentCloseV2(binding=launch.binding, command_sequence=2)
+    manager.work = close
+
+    result = await executor.tick()
+
+    assert result.status == "quarantined"
+    assert result.operation_id == launch.binding.intent_id
+    assert manager.command_sequence == 1
+    assert manager.work == close
+    assert tuple(manager.central_requests) == prior_requests
+    assert slurm.jobs == [pending]
+    assert admission.observations == {}
+    retained = journal.latest("intent", str(launch.binding.intent_id))
+    assert retained is not None and retained.event_kind == "physical-bind-confirmed"
     journal.close()
 
 
