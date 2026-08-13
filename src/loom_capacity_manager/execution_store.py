@@ -439,6 +439,8 @@ class CapacityExecutionStore:
             state.last_inventory_digest = digest
             state.inventory_payload = inventory.model_dump(mode="json", exclude_none=False)
             state.last_inventory_at = now
+            state.retirement_safe = False
+            state.retirement_inventory_digest = None
             pool = (
                 await session.execute(
                     select(CapacityPool).where(
@@ -448,28 +450,52 @@ class CapacityExecutionStore:
                     )
                 )
             ).scalar_one()
-            for record in inventory.records:
-                proof = record.ownership_proof
-                if proof is None:
-                    continue
-                binding = proof.metadata.binding
-                intent = (
+            pool_intents = (
+                (
                     await session.execute(
                         select(CapacityExecutableIntent)
                         .where(
-                            CapacityExecutableIntent.intent_id == binding.intent_id,
-                            CapacityExecutableIntent.executor_incarnation
-                            == inventory.executor_incarnation,
+                            CapacityExecutableIntent.execution_epoch == epoch.execution_epoch,
                             CapacityExecutableIntent.pool_id == inventory.pool_id,
                         )
+                        .order_by(CapacityExecutableIntent.launch_rank)
                         .with_for_update()
                     )
-                ).scalar_one_or_none()
-                if intent is None or binding != ExecutableIntentBindingV2.model_validate_json(
-                    json.dumps(intent.binding_payload)
-                ):
+                )
+                .scalars()
+                .all()
+            )
+            intents_by_id = {intent.intent_id: intent for intent in pool_intents}
+            records_safe = True
+            observed_intent_ids: set[UUID] = set()
+            for record in inventory.records:
+                if record.authority_scope == "foreign":
                     continue
+                proof = record.ownership_proof
+                if proof is None:
+                    records_safe = False
+                    continue
+                binding = proof.metadata.binding
+                intent = intents_by_id.get(binding.intent_id)
+                try:
+                    stored_binding = (
+                        None
+                        if intent is None
+                        else ExecutableIntentBindingV2.model_validate_json(
+                            json.dumps(intent.binding_payload)
+                        )
+                    )
+                except ValueError:
+                    stored_binding = None
                 if (
+                    intent is None
+                    or intent.executor_incarnation != inventory.executor_incarnation
+                    or intent.pool_id != inventory.pool_id
+                    or binding != stored_binding
+                ):
+                    records_safe = False
+                    continue
+                ownership_invalid = (
                     not self._ownership_keyring.verify_executable(
                         proof,
                         expected_public_key_sha256=registration.signing_key_sha256,
@@ -483,18 +509,35 @@ class CapacityExecutionStore:
                     or proof.metadata.submitter_identity != "loom"
                     or record.resources != binding.resources
                     or record.node_ids != binding.node_ids
-                ):
-                    intent.state = "quarantined"
+                )
+                if ownership_invalid:
+                    records_safe = False
+                    if intent.state != "released":
+                        intent.state = "quarantined"
                     continue
+                if binding.intent_id in observed_intent_ids:
+                    records_safe = False
+                else:
+                    observed_intent_ids.add(binding.intent_id)
                 intent.inventory_sequence = inventory.inventory_sequence
                 intent.observed_state = record.state
                 intent.terminal_kind = record.physical_kind
                 intent.terminal_identity = record.physical_identity
                 if record.state == "terminal":
-                    intent.state = "terminal"
+                    if intent.state != "released":
+                        intent.state = "terminal"
                     intent.terminal_evidence_sha256 = record.terminal_evidence_sha256
                 elif intent.state == "submitting-unknown":
                     intent.state = "observed"
+                if record.state != "terminal" or intent.state != "released":
+                    records_safe = False
+            if (
+                records_safe
+                and observed_intent_ids == set(intents_by_id)
+                and all(intent.state == "released" for intent in pool_intents)
+            ):
+                state.retirement_safe = True
+                state.retirement_inventory_digest = digest
             return IngestedExecutableInventory(inventory.inventory_sequence, digest, False)
 
     async def next_pool_work(
@@ -1323,6 +1366,8 @@ class CapacityExecutionStore:
                     state="proposed",
                 )
             )
+            context.executor.retirement_safe = False
+            context.executor.retirement_inventory_digest = None
             return proposal
         return None
 

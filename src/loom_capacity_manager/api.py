@@ -276,6 +276,7 @@ def create_app(
     *,
     verifier: CapacityPrincipalVerifier | None = None,
     allocator: ShadowAllocator = allocate_shadow,
+    management_store: CapacityManagementStore | None = None,
     grant_store: CapacityGrantStore | None = None,
     execution_store: CapacityExecutionStore | None = None,
 ) -> FastAPI:
@@ -283,6 +284,11 @@ def create_app(
 
     resolved_verifier = verifier or CapacityPrincipalVerifier.from_file(settings.principals_file)
     metrics = CapacityMetrics()
+    resolved_management_store = (
+        CapacityManagementStore(freshness_seconds=settings.freshness_seconds)
+        if management_store is None
+        else management_store
+    )
     ownership_keyring = OwnershipKeyring()
     if settings.ownership_public_keys_file is not None:
         ownership_keyring = OwnershipKeyring.from_json(
@@ -314,7 +320,6 @@ def create_app(
             engine = create_async_engine(database_url, isolation_level="SERIALIZABLE")
             app.state.engine = engine
             session_factory = async_sessionmaker(engine, expire_on_commit=False)
-            store = CapacityManagementStore(freshness_seconds=settings.freshness_seconds)
             async with session_factory() as session:
                 await assert_capacity_schema_at_head(engine)
                 authority = (
@@ -326,7 +331,7 @@ def create_app(
                 ).scalar_one()
                 if authority.authority_incarnation != settings.expected_authority_incarnation:
                     raise RuntimeError("capacity authority incarnation mismatch")
-                writer = await store.register_writer(
+                writer = await resolved_management_store.register_writer(
                     session,
                     settings.expected_authority_incarnation,
                     expected_epoch=authority.writer_epoch,
@@ -334,7 +339,7 @@ def create_app(
                 await session.commit()
             app.state.engine = engine
             app.state.session_factory = session_factory
-            app.state.store = store
+            app.state.store = resolved_management_store
             app.state.grant_store = resolved_grant_store
             app.state.execution_store = resolved_execution_store
             app.state.writer = writer

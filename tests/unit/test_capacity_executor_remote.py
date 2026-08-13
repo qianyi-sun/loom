@@ -19,6 +19,7 @@ from loom_capacity_executor.dry_run import DryRunExecutorBinding
 from loom_capacity_executor.journal import ExecutorJournal, JournalRegressionError
 from loom_capacity_executor.remote import RemoteDryRunPoolExecutor
 from loom_capacity_manager.executable_contracts import (
+    ExecutableExecutorHeartbeatV2,
     ExecutableExecutorRegistrationV2,
     ExecutableIntentCloseV2,
     ExecutableLaunchPermitV2,
@@ -80,6 +81,20 @@ def _executable_registration() -> ExecutableExecutorRegistrationV2:
         signing_key_sha256=launch.ownership_key.public_key_sha256,
         local_authority_sha256="a" * 64,
         controller_authority_sha256=launch.controller_authority.controller_authority_sha256,
+    )
+
+
+def _executable_heartbeat(*, heartbeat_sequence: int = 1) -> ExecutableExecutorHeartbeatV2:
+    registration = _executable_registration()
+    return ExecutableExecutorHeartbeatV2(
+        execution=registration.execution,
+        executor_id=registration.executor_id,
+        executor_incarnation=registration.executor_incarnation,
+        pool_id=registration.pool_id,
+        pool_generation=registration.pool_generation,
+        heartbeat_sequence=heartbeat_sequence,
+        journal_sequence=0,
+        journal_digest="0" * 64,
     )
 
 
@@ -153,6 +168,151 @@ def _executable_receipt_digest(payload: dict[str, object]) -> str:
             default=str,
         ).encode("ascii")
     ).hexdigest()
+
+
+async def test_executable_heartbeat_client_sends_exact_request() -> None:
+    heartbeat = _executable_heartbeat(heartbeat_sequence=1)
+    seen_requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen_requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "heartbeat_sequence": 1,
+                "lease_expires_at": (datetime.now(UTC) + timedelta(minutes=1)).isoformat(),
+                "replayed": False,
+                "executable": True,
+            },
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = ExecutableCapacityExecutorClient(
+        _executable_registration(),
+        manager_origin="https://capacity.example.test",
+        bearer_token="executor-secret",
+        http_client=http,
+    )
+    try:
+        receipt = await client.heartbeat_executable_executor(heartbeat)
+    finally:
+        await http.aclose()
+
+    assert receipt.heartbeat_sequence == 1
+    assert len(seen_requests) == 1
+    assert seen_requests[0].url.path == "/v2/executors/oldlab/heartbeat"
+    assert json.loads(seen_requests[0].content) == heartbeat.model_dump(mode="json")
+
+
+@pytest.mark.parametrize(
+    "response",
+    (
+        {
+            "heartbeat_sequence": 2,
+            "lease_expires_at": (datetime.now(UTC) + timedelta(minutes=1)).isoformat(),
+            "replayed": False,
+            "executable": True,
+        },
+        {
+            "heartbeat_sequence": 1,
+            "lease_expires_at": datetime(2026, 8, 13, 12, 0).isoformat(),
+            "replayed": False,
+            "executable": True,
+        },
+        {
+            "heartbeat_sequence": 1,
+            "lease_expires_at": (datetime.now(UTC) + timedelta(minutes=1)).isoformat(),
+            "replayed": False,
+            "executable": False,
+        },
+        {
+            "heartbeat_sequence": 1,
+            "lease_expires_at": (datetime.now(UTC) + timedelta(minutes=1)).isoformat(),
+            "replayed": False,
+            "executable": True,
+            "executor_id": "oldlab-executor",
+        },
+    ),
+)
+async def test_executable_heartbeat_client_rejects_changed_receipt(
+    response: dict[str, object],
+) -> None:
+    heartbeat = _executable_heartbeat()
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=response)
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = ExecutableCapacityExecutorClient(
+        _executable_registration(),
+        manager_origin="https://capacity.example.test",
+        bearer_token="executor-secret",
+        http_client=http,
+    )
+    try:
+        with pytest.raises(ExecutorTransportError):
+            await client.heartbeat_executable_executor(heartbeat)
+    finally:
+        await http.aclose()
+
+
+async def test_executable_heartbeat_client_rejects_oversized_receipt() -> None:
+    heartbeat = _executable_heartbeat()
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"x" * (64 * 1024 + 1))
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = ExecutableCapacityExecutorClient(
+        _executable_registration(),
+        manager_origin="https://capacity.example.test",
+        bearer_token="executor-secret",
+        http_client=http,
+    )
+    try:
+        with pytest.raises(ExecutorTransportError, match="byte bound"):
+            await client.heartbeat_executable_executor(heartbeat)
+    finally:
+        await http.aclose()
+
+
+@pytest.mark.parametrize(
+    "changed",
+    (
+        {"executor_id": "changed-executor"},
+        {"executor_incarnation": UUID(int=999)},
+        {"pool_id": "gb10"},
+        {"pool_generation": 999},
+        {
+            "execution": _executable_registration().execution.model_copy(
+                update={"writer_epoch": 999}
+            )
+        },
+    ),
+)
+async def test_executable_heartbeat_client_rejects_changed_registration_binding(
+    changed: dict[str, object],
+) -> None:
+    heartbeat = _executable_heartbeat().model_copy(update=changed)
+    seen_requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen_requests.append(request)
+        return httpx.Response(500)
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = ExecutableCapacityExecutorClient(
+        _executable_registration(),
+        manager_origin="https://capacity.example.test",
+        bearer_token="executor-secret",
+        http_client=http,
+    )
+    try:
+        with pytest.raises(ExecutorTransportError, match="binding changed"):
+            await client.heartbeat_executable_executor(heartbeat)
+        assert seen_requests == []
+    finally:
+        await http.aclose()
 
 
 @pytest.mark.parametrize("expected", _executable_work())

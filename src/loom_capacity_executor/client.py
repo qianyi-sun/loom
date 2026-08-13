@@ -25,6 +25,7 @@ from loom_capacity_manager.auth import MAX_BEARER_TOKEN_BYTES
 from loom_capacity_manager.contracts import Digest, StrictV1Model, canonical_bytes
 from loom_capacity_manager.executable_contracts import (
     ExecutableBootstrapRegistrationV2,
+    ExecutableExecutorHeartbeatV2,
     ExecutableExecutorInventoryV2,
     ExecutableExecutorRegistrationV2,
     ExecutableIntentBindingV2,
@@ -34,6 +35,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutablePermitConsumptionV2,
     ExecutableReservationAcceptanceV2,
     ExecutableReservationProposalV2,
+    ExecutionContextV2,
     ExecutionFenceV2,
     StrictV2Model,
     canonical_executable_bytes,
@@ -149,6 +151,13 @@ class ExecutableCheckpointReceiptV2(_Receipt):
     journal_digest: Digest
     inventory_sequence: int
     lease_expires_at: datetime
+    executable: Literal[True]
+
+
+class ExecutableHeartbeatReceiptV2(_Receipt):
+    heartbeat_sequence: int
+    lease_expires_at: datetime
+    replayed: bool
     executable: Literal[True]
 
 
@@ -582,7 +591,11 @@ class ExecutableCapacityExecutorClient:
             raise ExecutorTransportError("executable executor contract binding changed")
         binding = self._binding(value)
         execution = binding.execution if binding is not None else getattr(value, "execution", None)
-        if not isinstance(execution, ExecutionFenceV2):
+        heartbeat = isinstance(value, ExecutableExecutorHeartbeatV2)
+        if heartbeat:
+            if not isinstance(execution, ExecutionContextV2):
+                raise ExecutorTransportError("executable executor contract binding changed")
+        elif not isinstance(execution, ExecutionFenceV2):
             raise ExecutorTransportError("executable executor contract binding changed")
         checks = (
             ("executor_id", self.registration.executor_id),
@@ -597,7 +610,8 @@ class ExecutableCapacityExecutorClient:
         target = binding if binding is not None else value
         if any(getattr(target, field, None) != expected for field, expected in checks):
             raise ExecutorTransportError("executable executor contract binding changed")
-        actual_execution = execution.model_dump(exclude={"allocation_epoch", "executable"})
+        execution_exclusions = {"executable"} if heartbeat else {"allocation_epoch", "executable"}
+        actual_execution = execution.model_dump(exclude=execution_exclusions)
         expected_execution = self.registration.execution.model_dump(exclude={"executable"})
         if actual_execution != expected_execution:
             raise ExecutorTransportError("executable execution binding changed")
@@ -662,6 +676,24 @@ class ExecutableCapacityExecutorClient:
             or receipt.pool_generation != self.registration.pool_generation
         ):
             raise ExecutorTransportError("capacity manager checkpoint binding changed")
+        return receipt
+
+    async def heartbeat_executable_executor(
+        self,
+        value: ExecutableExecutorHeartbeatV2,
+    ) -> ExecutableHeartbeatReceiptV2:
+        receipt = await self._request(
+            "PUT",
+            f"/v2/executors/{self.registration.pool_id}/heartbeat",
+            ExecutableHeartbeatReceiptV2,
+            contract=value,
+        )
+        if (
+            receipt.heartbeat_sequence != value.heartbeat_sequence
+            or receipt.lease_expires_at.tzinfo is None
+            or receipt.lease_expires_at.utcoffset() is None
+        ):
+            raise ExecutorTransportError("capacity manager heartbeat receipt changed")
         return receipt
 
     async def next_executable_work(
@@ -838,6 +870,7 @@ __all__ = [
     "ConsumedPermitReceiptV1",
     "ExecutableCapacityExecutorClient",
     "ExecutableCheckpointReceiptV2",
+    "ExecutableHeartbeatReceiptV2",
     "ExecutableInventoryReceiptV2",
     "ExecutablePoolWorkV2",
     "ExecutorCheckpointReceiptV1",

@@ -123,6 +123,22 @@ def upgrade() -> None:
         sa.Column("activation_actor", sa.Text(), nullable=True),
         sa.Column("activation_idempotency_key", sa.UUID(), nullable=True),
         sa.Column("activation_request_digest", sa.Text(), nullable=True),
+        sa.Column("drain_actor", sa.Text(), nullable=True),
+        sa.Column("drain_idempotency_key", sa.UUID(), nullable=True),
+        sa.Column("drain_request_digest", sa.Text(), nullable=True),
+        sa.Column(
+            "drain_request_payload",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=True,
+        ),
+        sa.Column("retirement_actor", sa.Text(), nullable=True),
+        sa.Column("retirement_idempotency_key", sa.UUID(), nullable=True),
+        sa.Column("retirement_request_digest", sa.Text(), nullable=True),
+        sa.Column(
+            "retirement_request_payload",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=True,
+        ),
         sa.Column(
             "prepared_at",
             postgresql.TIMESTAMP(timezone=True),
@@ -158,7 +174,11 @@ def upgrade() -> None:
             "AND rollback_evidence_sha256 ~ '^[0-9a-f]{64}$' "
             "AND request_digest ~ '^[0-9a-f]{64}$' "
             "AND (activation_request_digest IS NULL OR "
-            "activation_request_digest ~ '^[0-9a-f]{64}$')",
+            "activation_request_digest ~ '^[0-9a-f]{64}$') "
+            "AND (drain_request_digest IS NULL OR "
+            "drain_request_digest ~ '^[0-9a-f]{64}$') "
+            "AND (retirement_request_digest IS NULL OR "
+            "retirement_request_digest ~ '^[0-9a-f]{64}$')",
             name="capacity_execution_epoch_digest_check",
         ),
         sa.CheckConstraint(
@@ -173,6 +193,22 @@ def upgrade() -> None:
             name="capacity_execution_epoch_manifest_check",
         ),
         sa.CheckConstraint(
+            "(drain_actor IS NULL OR "
+            "octet_length(drain_actor) BETWEEN 1 AND 256) "
+            "AND (retirement_actor IS NULL OR "
+            "octet_length(retirement_actor) BETWEEN 1 AND 256)",
+            name="capacity_execution_epoch_lifecycle_actor_check",
+        ),
+        sa.CheckConstraint(
+            "(drain_request_payload IS NULL OR "
+            "(jsonb_typeof(drain_request_payload) = 'object' "
+            "AND octet_length(drain_request_payload::text) <= 8388608)) "
+            "AND (retirement_request_payload IS NULL OR "
+            "(jsonb_typeof(retirement_request_payload) = 'object' "
+            "AND octet_length(retirement_request_payload::text) <= 8388608))",
+            name="capacity_execution_epoch_lifecycle_payload_check",
+        ),
+        sa.CheckConstraint(
             "state IN ('prepared','active','drain-only','retired')",
             name="capacity_execution_epoch_state_check",
         ),
@@ -181,20 +217,50 @@ def upgrade() -> None:
             "AND effective_rate_per_minute = 0 "
             "AND activation_actor IS NULL AND activation_idempotency_key IS NULL "
             "AND activation_request_digest IS NULL AND activated_at IS NULL "
+            "AND drain_actor IS NULL AND drain_idempotency_key IS NULL "
+            "AND drain_request_digest IS NULL AND drain_request_payload IS NULL "
+            "AND retirement_actor IS NULL AND retirement_idempotency_key IS NULL "
+            "AND retirement_request_digest IS NULL "
+            "AND retirement_request_payload IS NULL "
             "AND drain_only_at IS NULL AND retired_at IS NULL) OR "
             "(state = 'active' AND effective_ceiling > 0 "
             "AND effective_rate_per_minute > 0 "
             "AND activation_actor IS NOT NULL AND activation_idempotency_key IS NOT NULL "
             "AND activation_request_digest IS NOT NULL AND activated_at IS NOT NULL "
+            "AND drain_actor IS NULL AND drain_idempotency_key IS NULL "
+            "AND drain_request_digest IS NULL AND drain_request_payload IS NULL "
+            "AND retirement_actor IS NULL AND retirement_idempotency_key IS NULL "
+            "AND retirement_request_digest IS NULL "
+            "AND retirement_request_payload IS NULL "
             "AND drain_only_at IS NULL AND retired_at IS NULL) OR "
             "(state = 'drain-only' AND effective_ceiling = 0 "
             "AND effective_rate_per_minute = 0 "
             "AND activation_actor IS NOT NULL AND activation_idempotency_key IS NOT NULL "
             "AND activation_request_digest IS NOT NULL AND activated_at IS NOT NULL "
+            "AND drain_actor IS NOT NULL AND drain_idempotency_key IS NOT NULL "
+            "AND drain_request_digest IS NOT NULL AND drain_request_payload IS NOT NULL "
+            "AND retirement_actor IS NULL AND retirement_idempotency_key IS NULL "
+            "AND retirement_request_digest IS NULL "
+            "AND retirement_request_payload IS NULL "
             "AND drain_only_at IS NOT NULL "
             "AND retired_at IS NULL) OR "
             "(state = 'retired' AND effective_ceiling = 0 "
-            "AND effective_rate_per_minute = 0 AND retired_at IS NOT NULL)",
+            "AND effective_rate_per_minute = 0 "
+            "AND retirement_actor IS NOT NULL "
+            "AND retirement_idempotency_key IS NOT NULL "
+            "AND retirement_request_digest IS NOT NULL "
+            "AND retirement_request_payload IS NOT NULL "
+            "AND retired_at IS NOT NULL AND ((activation_actor IS NULL "
+            "AND activation_idempotency_key IS NULL "
+            "AND activation_request_digest IS NULL AND activated_at IS NULL "
+            "AND drain_actor IS NULL AND drain_idempotency_key IS NULL "
+            "AND drain_request_digest IS NULL AND drain_request_payload IS NULL "
+            "AND drain_only_at IS NULL) OR (activation_actor IS NOT NULL "
+            "AND activation_idempotency_key IS NOT NULL "
+            "AND activation_request_digest IS NOT NULL AND activated_at IS NOT NULL "
+            "AND drain_actor IS NOT NULL AND drain_idempotency_key IS NOT NULL "
+            "AND drain_request_digest IS NOT NULL AND drain_request_payload IS NOT NULL "
+            "AND drain_only_at IS NOT NULL)))",
             name="capacity_execution_epoch_state_time_check",
         ),
         sa.ForeignKeyConstraint(
@@ -232,6 +298,14 @@ def upgrade() -> None:
         sa.UniqueConstraint(
             "activation_idempotency_key",
             name="capacity_execution_epoch_activation_idempotency_key",
+        ),
+        sa.UniqueConstraint(
+            "drain_idempotency_key",
+            name="capacity_execution_epoch_drain_idempotency_key",
+        ),
+        sa.UniqueConstraint(
+            "retirement_idempotency_key",
+            name="capacity_execution_epoch_retirement_idempotency_key",
         ),
         sa.UniqueConstraint("idempotency_key", name="capacity_execution_epoch_idempotency_key"),
         sa.UniqueConstraint(
@@ -415,6 +489,13 @@ def upgrade() -> None:
         sa.Column("last_inventory_digest", sa.Text(), nullable=True),
         sa.Column("inventory_payload", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
         sa.Column("last_inventory_at", postgresql.TIMESTAMP(timezone=True), nullable=True),
+        sa.Column(
+            "retirement_safe",
+            sa.Boolean(),
+            server_default=sa.text("false"),
+            nullable=False,
+        ),
+        sa.Column("retirement_inventory_digest", sa.Text(), nullable=True),
         sa.Column("lease_expires_at", postgresql.TIMESTAMP(timezone=True), nullable=False),
         sa.Column("last_heartbeat_at", postgresql.TIMESTAMP(timezone=True), nullable=False),
         sa.Column(
@@ -446,6 +527,12 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "state IN ('current','fenced','equivocal')",
             name="capacity_executable_executor_state_check",
+        ),
+        sa.CheckConstraint(
+            "(retirement_safe AND retirement_inventory_digest IS NOT NULL "
+            "AND retirement_inventory_digest ~ '^[0-9a-f]{64}$') OR "
+            "(NOT retirement_safe AND retirement_inventory_digest IS NULL)",
+            name="capacity_executable_executor_retirement_check",
         ),
         sa.ForeignKeyConstraint(
             [
@@ -890,11 +977,20 @@ def upgrade() -> None:
           IF TG_OP = 'INSERT' THEN
             IF NEW.state <> 'prepared'
                OR NEW.effective_ceiling <> 0
+               OR NEW.effective_rate_per_minute <> 0
                OR NEW.activation_actor IS NOT NULL
                OR NEW.activation_idempotency_key IS NOT NULL
                OR NEW.activation_request_digest IS NOT NULL
                OR NEW.activated_at IS NOT NULL
+               OR NEW.drain_actor IS NOT NULL
+               OR NEW.drain_idempotency_key IS NOT NULL
+               OR NEW.drain_request_digest IS NOT NULL
+               OR NEW.drain_request_payload IS NOT NULL
                OR NEW.drain_only_at IS NOT NULL
+               OR NEW.retirement_actor IS NOT NULL
+               OR NEW.retirement_idempotency_key IS NOT NULL
+               OR NEW.retirement_request_digest IS NOT NULL
+               OR NEW.retirement_request_payload IS NOT NULL
                OR NEW.retired_at IS NOT NULL THEN
               RAISE EXCEPTION 'capacity execution epoch must be inserted prepared'
                 USING ERRCODE = '23514';
@@ -995,7 +1091,15 @@ def upgrade() -> None:
               NEW.activation_idempotency_key,
               NEW.activation_request_digest,
               NEW.activated_at,
+              NEW.drain_actor,
+              NEW.drain_idempotency_key,
+              NEW.drain_request_digest,
+              NEW.drain_request_payload,
               NEW.drain_only_at,
+              NEW.retirement_actor,
+              NEW.retirement_idempotency_key,
+              NEW.retirement_request_digest,
+              NEW.retirement_request_payload,
               NEW.retired_at
             ) IS DISTINCT FROM ROW(
               OLD.effective_ceiling,
@@ -1004,7 +1108,15 @@ def upgrade() -> None:
               OLD.activation_idempotency_key,
               OLD.activation_request_digest,
               OLD.activated_at,
+              OLD.drain_actor,
+              OLD.drain_idempotency_key,
+              OLD.drain_request_digest,
+              OLD.drain_request_payload,
               OLD.drain_only_at,
+              OLD.retirement_actor,
+              OLD.retirement_idempotency_key,
+              OLD.retirement_request_digest,
+              OLD.retirement_request_payload,
               OLD.retired_at
             )
             OR (
@@ -1025,7 +1137,15 @@ def upgrade() -> None:
                OR NEW.activation_idempotency_key IS NULL
                OR NEW.activation_request_digest IS NULL
                OR NEW.activated_at IS NULL
+               OR NEW.drain_actor IS NOT NULL
+               OR NEW.drain_idempotency_key IS NOT NULL
+               OR NEW.drain_request_digest IS NOT NULL
+               OR NEW.drain_request_payload IS NOT NULL
                OR NEW.drain_only_at IS NOT NULL
+               OR NEW.retirement_actor IS NOT NULL
+               OR NEW.retirement_idempotency_key IS NOT NULL
+               OR NEW.retirement_request_digest IS NOT NULL
+               OR NEW.retirement_request_payload IS NOT NULL
                OR NEW.retired_at IS NOT NULL THEN
               RAISE EXCEPTION 'execution epoch activation evidence is incomplete'
                 USING ERRCODE = '23514';
@@ -1064,12 +1184,20 @@ def upgrade() -> None:
           ELSIF OLD.state = 'prepared' AND NEW.state = 'retired' THEN
             IF NEW.effective_ceiling <> 0
                OR NEW.effective_rate_per_minute <> 0
-               OR NEW.current_writer_epoch <> OLD.current_writer_epoch
+               OR NEW.current_writer_epoch <> OLD.current_writer_epoch + 1
                OR NEW.activation_actor IS NOT NULL
                OR NEW.activation_idempotency_key IS NOT NULL
                OR NEW.activation_request_digest IS NOT NULL
                OR NEW.activated_at IS NOT NULL
+               OR NEW.drain_actor IS NOT NULL
+               OR NEW.drain_idempotency_key IS NOT NULL
+               OR NEW.drain_request_digest IS NOT NULL
+               OR NEW.drain_request_payload IS NOT NULL
                OR NEW.drain_only_at IS NOT NULL
+               OR NEW.retirement_actor IS NULL
+               OR NEW.retirement_idempotency_key IS NULL
+               OR NEW.retirement_request_digest IS NULL
+               OR NEW.retirement_request_payload IS NULL
                OR NEW.retired_at IS NULL THEN
               RAISE EXCEPTION 'prepared execution retirement evidence is invalid'
                 USING ERRCODE = '23514';
@@ -1077,7 +1205,10 @@ def upgrade() -> None:
           ELSIF OLD.state = 'active' AND NEW.state = 'drain-only' THEN
             IF NEW.effective_ceiling <> 0
                OR NEW.effective_rate_per_minute <> 0
-               OR NEW.current_writer_epoch <> OLD.current_writer_epoch + 1
+               OR NEW.current_writer_epoch NOT IN (
+                 OLD.current_writer_epoch,
+                 OLD.current_writer_epoch + 1
+               )
                OR ROW(
                  NEW.activation_actor,
                  NEW.activation_idempotency_key,
@@ -1089,7 +1220,15 @@ def upgrade() -> None:
                  OLD.activation_request_digest,
                  OLD.activated_at
                )
+               OR NEW.drain_actor IS NULL
+               OR NEW.drain_idempotency_key IS NULL
+               OR NEW.drain_request_digest IS NULL
+               OR NEW.drain_request_payload IS NULL
                OR NEW.drain_only_at IS NULL
+               OR NEW.retirement_actor IS NOT NULL
+               OR NEW.retirement_idempotency_key IS NOT NULL
+               OR NEW.retirement_request_digest IS NOT NULL
+               OR NEW.retirement_request_payload IS NOT NULL
                OR NEW.retired_at IS NOT NULL THEN
               RAISE EXCEPTION 'execution drain-only evidence is invalid'
                 USING ERRCODE = '23514';
@@ -1103,14 +1242,26 @@ def upgrade() -> None:
                  NEW.activation_idempotency_key,
                  NEW.activation_request_digest,
                  NEW.activated_at,
+                 NEW.drain_actor,
+                 NEW.drain_idempotency_key,
+                 NEW.drain_request_digest,
+                 NEW.drain_request_payload,
                  NEW.drain_only_at
                ) IS DISTINCT FROM ROW(
                  OLD.activation_actor,
                  OLD.activation_idempotency_key,
                  OLD.activation_request_digest,
                  OLD.activated_at,
+                 OLD.drain_actor,
+                 OLD.drain_idempotency_key,
+                 OLD.drain_request_digest,
+                 OLD.drain_request_payload,
                  OLD.drain_only_at
                )
+               OR NEW.retirement_actor IS NULL
+               OR NEW.retirement_idempotency_key IS NULL
+               OR NEW.retirement_request_digest IS NULL
+               OR NEW.retirement_request_payload IS NULL
                OR NEW.retired_at IS NULL THEN
               RAISE EXCEPTION 'execution retirement evidence is invalid'
                 USING ERRCODE = '23514';

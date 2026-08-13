@@ -24,6 +24,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableBootstrapRegistrationV2,
     ExecutableExecutorHeartbeatV2,
     ExecutableExecutorInventoryV2,
+    ExecutableIntentBindingV2,
     ExecutableIntentCloseV2,
     ExecutableInventoryRecordV2,
     ExecutableOwnershipMetadataV2,
@@ -34,10 +35,14 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableReservationProposalV2,
     ExecutionActivationV2,
     ExecutionContextV2,
+    ExecutionDrainV2,
     ExecutionPreparationPolicyV2,
+    ExecutionRetirementExecutorCheckpointV2,
+    ExecutionRetirementV2,
     PoolControllerAuthorityV2,
     SignedExecutableOwnershipProofV2,
     canonical_executable_bytes,
+    canonical_executable_digest,
 )
 from loom_capacity_manager.execution_store import CapacityExecutionStore
 from loom_capacity_manager.models import (
@@ -166,6 +171,208 @@ async def _heartbeat(
             journal_sequence=0,
             journal_digest="0" * 64,
         ),
+    )
+
+
+def _drain_request(active):  # type: ignore[no-untyped-def]
+    return ExecutionDrainV2(
+        authority_incarnation=active.authority_incarnation,
+        expected_writer_epoch=active.writer_epoch,
+        execution_epoch=active.execution_epoch,
+        execution_manifest_sha256=active.execution_manifest_sha256,
+        expected_executable_new_capacity_ceiling=(active.executable_new_capacity_ceiling),
+        expected_executable_new_capacity_rate_per_minute=(
+            active.executable_new_capacity_rate_per_minute
+        ),
+    )
+
+
+async def _drain_active(
+    session: AsyncSession,
+    active,  # type: ignore[no-untyped-def]
+) -> tuple[CapacityManagementStore, ExecutionContextV2]:
+    manager = CapacityManagementStore(execution_policy=execution_policy())
+    drained = await manager.begin_execution_drain(
+        session,
+        _drain_request(active),
+        actor="activation-operator",
+        idempotency_key=UUID(int=12101),
+    )
+    return manager, drained
+
+
+async def _publish_pool_retirement_evidence(
+    store: CapacityExecutionStore,
+    session: AsyncSession,
+    drained: ExecutionContextV2,
+    *,
+    pool_id: str,
+    records: tuple[ExecutableInventoryRecordV2, ...] = (),
+    later_heartbeat: bool = True,
+) -> ExecutionRetirementExecutorCheckpointV2:
+    binding = executor_binding(pool_id)
+    state = (
+        await session.execute(
+            select(CapacityExecutableExecutorState).where(
+                CapacityExecutableExecutorState.execution_epoch == drained.execution_epoch,
+                CapacityExecutableExecutorState.pool_id == pool_id,
+            )
+        )
+    ).scalar_one_or_none()
+    heartbeat_sequence = 1 if state is None else state.heartbeat_high_water + 1
+    inventory_sequence = 1 if state is None else state.inventory_high_water + 1
+    journal_sequence = 0 if state is None else state.journal_high_water
+    journal_digest = "0" * 64 if state is None else state.journal_digest
+    common = {
+        "execution": drained,
+        "executor_id": binding.executor_id,
+        "executor_incarnation": binding.executor_incarnation,
+        "pool_id": binding.pool_id,
+        "pool_generation": binding.pool_generation,
+    }
+    await store.heartbeat_executor(
+        session,
+        ExecutableExecutorHeartbeatV2(
+            **common,
+            heartbeat_sequence=heartbeat_sequence,
+            journal_sequence=journal_sequence,
+            journal_digest=journal_digest,
+            journal_checkpoint_sequence=journal_sequence,
+            journal_checkpoint_digest=journal_digest,
+        ),
+    )
+    inventory = ExecutableExecutorInventoryV2(
+        **common,
+        inventory_sequence=inventory_sequence,
+        journal_sequence=journal_sequence,
+        journal_digest=journal_digest,
+        journal_checkpoint_sequence=journal_sequence,
+        journal_checkpoint_digest=journal_digest,
+        records=records,
+    )
+    await store.ingest_executor_inventory(session, inventory)
+    if later_heartbeat:
+        heartbeat_sequence += 1
+        await store.heartbeat_executor(
+            session,
+            ExecutableExecutorHeartbeatV2(
+                **common,
+                heartbeat_sequence=heartbeat_sequence,
+                journal_sequence=journal_sequence,
+                journal_digest=journal_digest,
+                journal_checkpoint_sequence=journal_sequence,
+                journal_checkpoint_digest=journal_digest,
+            ),
+        )
+    state = (
+        await session.execute(
+            select(CapacityExecutableExecutorState).where(
+                CapacityExecutableExecutorState.execution_epoch == drained.execution_epoch,
+                CapacityExecutableExecutorState.pool_id == pool_id,
+            )
+        )
+    ).scalar_one()
+    return ExecutionRetirementExecutorCheckpointV2(
+        executor_id=state.executor_id,
+        executor_incarnation=state.executor_incarnation,
+        pool_id=state.pool_id,
+        pool_generation=state.pool_generation,
+        heartbeat_sequence=state.heartbeat_high_water,
+        command_sequence=state.command_high_water,
+        journal_sequence=state.journal_high_water,
+        journal_digest=state.journal_digest,
+        inventory_sequence=state.inventory_high_water,
+        inventory_digest=canonical_executable_digest(inventory),
+    )
+
+
+async def _publish_retirement_evidence(
+    store: CapacityExecutionStore,
+    session: AsyncSession,
+    drained: ExecutionContextV2,
+    *,
+    records_by_pool: dict[str, tuple[ExecutableInventoryRecordV2, ...]] | None = None,
+) -> tuple[ExecutionRetirementExecutorCheckpointV2, ...]:
+    records_by_pool = records_by_pool or {}
+    return tuple(
+        [
+            await _publish_pool_retirement_evidence(
+                store,
+                session,
+                drained,
+                pool_id=pool_id,
+                records=records_by_pool.get(pool_id, ()),
+            )
+            for pool_id in ("gb10", "oldlab")
+        ]
+    )
+
+
+def _retirement_request(
+    drained: ExecutionContextV2,
+    checkpoints: tuple[ExecutionRetirementExecutorCheckpointV2, ...],
+) -> ExecutionRetirementV2:
+    return ExecutionRetirementV2(
+        authority_incarnation=drained.authority_incarnation,
+        expected_writer_epoch=drained.writer_epoch,
+        execution_epoch=drained.execution_epoch,
+        execution_manifest_sha256=drained.execution_manifest_sha256,
+        executor_checkpoints=checkpoints,
+    )
+
+
+async def _proposed_intent(
+    store: CapacityExecutionStore,
+    session: AsyncSession,
+    active,  # type: ignore[no-untyped-def]
+) -> tuple[ExecutableReservationProposalV2, CapacityExecutableIntent]:
+    await _heartbeat(store, session, active, pool_id="gb10")
+    proposal = await store.next_pool_work(session, executor_binding("gb10"))
+    assert isinstance(proposal, ExecutableReservationProposalV2)
+    intent = (
+        await session.execute(
+            select(CapacityExecutableIntent).where(
+                CapacityExecutableIntent.execution_epoch == active.execution_epoch
+            )
+        )
+    ).scalar_one()
+    return proposal, intent
+
+
+def _signed_inventory_record(
+    binding: ExecutableIntentBindingV2,
+    *,
+    state: str,
+    valid_signature: bool = True,
+) -> ExecutableInventoryRecordV2:
+    metadata = ExecutableOwnershipMetadataV2(
+        binding=binding,
+        controller_authority_sha256="c" * 64,
+        trusted_launcher_sha256="7" * 64,
+        slurm_cluster="gb10-controller",
+        submitter_identity="loom",
+        association="loom",
+        submitted_at=datetime.now(UTC),
+    )
+    signature = (
+        EXECUTOR_KEYS["gb10"].sign(canonical_executable_bytes(metadata))
+        if valid_signature
+        else b"\0" * 64
+    )
+    return ExecutableInventoryRecordV2(
+        physical_identity="job-final-gb10",
+        physical_kind="slurm-job",
+        authority_scope="dedicated-loom-association",
+        state=state,
+        resources=binding.resources,
+        node_ids=binding.node_ids,
+        controller_evidence_sha256="9" * 64,
+        ownership_proof=SignedExecutableOwnershipProofV2(
+            metadata=metadata,
+            signing_key_id="gb10-key",
+            signature_base64=base64.b64encode(signature).decode("ascii"),
+        ),
+        terminal_evidence_sha256="a" * 64 if state == "terminal" else None,
     )
 
 
@@ -935,3 +1142,529 @@ async def test_release_requires_matching_protected_and_physical_terminal_evidenc
     assert isinstance(release, ExecutablePartialReleaseV2)
     released = await store.release_shapes(capacity_session, release)
     assert released.released_shape_ids == (binding.shape_instance_id,)
+
+
+@pytest.mark.parametrize(
+    "intent_state",
+    (
+        "proposed",
+        "accepted",
+        "launch-ready",
+        "permitted",
+        "submitting-unknown",
+        "bound",
+        "observed",
+        "terminal",
+        "closing",
+        "quarantined",
+    ),
+)
+async def test_retirement_rejects_every_nonreleased_intent_without_reusing_charge(
+    capacity_session: AsyncSession,
+    intent_state: str,
+) -> None:
+    """No retained executable intent state may make its slot reusable."""
+
+    store = CapacityExecutionStore()
+    active, _allocation_epoch = await _active_plan(capacity_session)
+    _proposal, intent = await _proposed_intent(store, capacity_session, active)
+    intent.state = intent_state
+    await capacity_session.flush()
+    manager, drained = await _drain_active(capacity_session, active)
+    checkpoints = await _publish_retirement_evidence(
+        store,
+        capacity_session,
+        drained,
+    )
+
+    with pytest.raises(ExecutionConflictError):
+        await manager.retire_execution_epoch(
+            capacity_session,
+            _retirement_request(drained, checkpoints),
+            actor="activation-operator",
+            idempotency_key=UUID(int=12102),
+        )
+
+    await capacity_session.refresh(intent)
+    authority = (await capacity_session.execute(select(CapacityAuthorityState))).scalar_one()
+    assert (authority.execution_state, authority.executable_new_capacity_ceiling) == (
+        "drain-only",
+        0,
+    )
+    assert intent.state == intent_state
+    assert intent.binding_payload["concurrency_slots"] == 1
+
+
+@pytest.mark.parametrize(
+    "blocker",
+    (
+        "missing-executor",
+        "stale-lease",
+        "missing-inventory",
+        "old-inventory",
+        "heartbeat-before-inventory",
+        "fenced",
+        "equivocal",
+    ),
+)
+async def test_retirement_rejects_incomplete_or_stale_executor_evidence_atomically(
+    capacity_session: AsyncSession,
+    blocker: str,
+) -> None:
+    """One unavailable final executor must leave exact drain-only authority intact."""
+
+    store = CapacityExecutionStore()
+    active, _allocation_epoch = await _active_plan(capacity_session)
+    manager, drained = await _drain_active(capacity_session, active)
+    checkpoints = await _publish_retirement_evidence(store, capacity_session, drained)
+    state = (
+        await capacity_session.execute(
+            select(CapacityExecutableExecutorState).where(
+                CapacityExecutableExecutorState.pool_id == "gb10"
+            )
+        )
+    ).scalar_one()
+    if blocker == "missing-executor":
+        await capacity_session.delete(state)
+    elif blocker == "stale-lease":
+        state.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    elif blocker == "missing-inventory":
+        state.inventory_high_water = 0
+        state.last_inventory_digest = None
+        state.inventory_payload = None
+        state.last_inventory_at = None
+        state.retirement_safe = False
+        state.retirement_inventory_digest = None
+    elif blocker == "old-inventory":
+        state.last_inventory_at = datetime.now(UTC) - timedelta(minutes=10)
+    elif blocker == "heartbeat-before-inventory":
+        assert state.last_inventory_at is not None
+        state.last_heartbeat_at = state.last_inventory_at - timedelta(seconds=1)
+    else:
+        state.state = blocker
+    await capacity_session.flush()
+
+    with pytest.raises(ExecutionConflictError):
+        await manager.retire_execution_epoch(
+            capacity_session,
+            _retirement_request(drained, checkpoints),
+            actor="activation-operator",
+            idempotency_key=UUID(int=12103),
+        )
+
+    authority = (await capacity_session.execute(select(CapacityAuthorityState))).scalar_one()
+    assert (
+        authority.execution_state,
+        authority.executable_new_capacity_ceiling,
+        authority.increase_freeze,
+    ) == ("drain-only", 0, True)
+
+
+@pytest.mark.parametrize(
+    "checkpoint_change",
+    (
+        "executor",
+        "heartbeat",
+        "command",
+        "journal",
+        "inventory-sequence",
+        "inventory-digest",
+    ),
+)
+async def test_retirement_rejects_any_changed_final_checkpoint_binding(
+    capacity_session: AsyncSession,
+    checkpoint_change: str,
+) -> None:
+    """A request cannot substitute any executor, command, journal, or inventory head."""
+
+    store = CapacityExecutionStore()
+    active, _allocation_epoch = await _active_plan(capacity_session)
+    manager, drained = await _drain_active(capacity_session, active)
+    checkpoints = await _publish_retirement_evidence(store, capacity_session, drained)
+    changed_values: dict[str, object]
+    if checkpoint_change == "executor":
+        changed_values = {
+            "executor_id": "changed-gb10-executor",
+            "executor_incarnation": UUID(int=12109),
+        }
+    elif checkpoint_change == "heartbeat":
+        changed_values = {"heartbeat_sequence": checkpoints[0].heartbeat_sequence + 1}
+    elif checkpoint_change == "command":
+        changed_values = {"command_sequence": checkpoints[0].command_sequence + 1}
+    elif checkpoint_change == "journal":
+        changed_values = {"journal_sequence": 1, "journal_digest": "f" * 64}
+    elif checkpoint_change == "inventory-sequence":
+        changed_values = {"inventory_sequence": checkpoints[0].inventory_sequence + 1}
+    else:
+        changed_values = {"inventory_digest": "f" * 64}
+    changed_checkpoint = checkpoints[0].model_copy(update=changed_values)
+    changed_request = _retirement_request(
+        drained,
+        (changed_checkpoint, checkpoints[1]),
+    )
+
+    with pytest.raises(ExecutionConflictError):
+        await manager.retire_execution_epoch(
+            capacity_session,
+            changed_request,
+            actor="activation-operator",
+            idempotency_key=UUID(int=12104),
+        )
+
+    authority = (await capacity_session.execute(select(CapacityAuthorityState))).scalar_one()
+    assert (authority.execution_state, authority.executable_new_capacity_ceiling) == (
+        "drain-only",
+        0,
+    )
+
+
+async def test_proofless_loom_scoped_final_record_blocks_retirement(
+    capacity_session: AsyncSession,
+) -> None:
+    """A Loom-looking physical record without exact ownership proof stays ambiguous."""
+
+    store = CapacityExecutionStore()
+    active, _allocation_epoch = await _active_plan(capacity_session)
+    manager, drained = await _drain_active(capacity_session, active)
+    proofless = ExecutableInventoryRecordV2(
+        physical_identity="unproved-loom-job",
+        physical_kind="slurm-job",
+        authority_scope="registered-loom",
+        state="terminal",
+        resources=resource_vector(),
+        node_ids=("gb10-node",),
+        controller_evidence_sha256="9" * 64,
+        terminal_evidence_sha256="a" * 64,
+    )
+    checkpoints = await _publish_retirement_evidence(
+        store,
+        capacity_session,
+        drained,
+        records_by_pool={"gb10": (proofless,)},
+    )
+    state = (
+        await capacity_session.execute(
+            select(CapacityExecutableExecutorState).where(
+                CapacityExecutableExecutorState.pool_id == "gb10"
+            )
+        )
+    ).scalar_one()
+
+    assert state.retirement_safe is False
+    assert state.retirement_inventory_digest is None
+    with pytest.raises(ExecutionConflictError):
+        await manager.retire_execution_epoch(
+            capacity_session,
+            _retirement_request(drained, checkpoints),
+            actor="activation-operator",
+            idempotency_key=UUID(int=12105),
+        )
+
+
+@pytest.mark.parametrize(
+    ("valid_signature", "physical_state"),
+    ((False, "terminal"), (True, "active")),
+)
+async def test_invalid_or_nonterminal_loom_record_blocks_without_unreleasing_intent(
+    capacity_session: AsyncSession,
+    valid_signature: bool,
+    physical_state: str,
+) -> None:
+    """Ambiguous retained Loom work blocks but never regresses a released ledger row."""
+
+    store = CapacityExecutionStore(
+        ownership_keyring=OwnershipKeyring({"gb10-key": EXECUTOR_KEYS["gb10"].public_key()})
+    )
+    active, _allocation_epoch = await _active_plan(capacity_session)
+    _proposal, intent = await _proposed_intent(store, capacity_session, active)
+    binding = ExecutableIntentBindingV2.model_validate_json(json.dumps(intent.binding_payload))
+    intent.state = "released"
+    intent.released_at = datetime.now(UTC)
+    await capacity_session.flush()
+    manager, drained = await _drain_active(capacity_session, active)
+    record = _signed_inventory_record(
+        binding,
+        state=physical_state,
+        valid_signature=valid_signature,
+    )
+    checkpoints = await _publish_retirement_evidence(
+        store,
+        capacity_session,
+        drained,
+        records_by_pool={"gb10": (record,)},
+    )
+
+    await capacity_session.refresh(intent)
+    assert intent.state == "released"
+    gb10_state = (
+        await capacity_session.execute(
+            select(CapacityExecutableExecutorState).where(
+                CapacityExecutableExecutorState.pool_id == "gb10"
+            )
+        )
+    ).scalar_one()
+    assert gb10_state.retirement_safe is False
+    assert gb10_state.retirement_inventory_digest is None
+    with pytest.raises(ExecutionConflictError):
+        await manager.retire_execution_epoch(
+            capacity_session,
+            _retirement_request(drained, checkpoints),
+            actor="activation-operator",
+            idempotency_key=UUID(int=12106),
+        )
+
+
+async def test_later_terminal_inventory_keeps_released_intent_and_can_retire(
+    capacity_session: AsyncSession,
+) -> None:
+    """A final terminal observation must not regress release or strand authority."""
+
+    store = CapacityExecutionStore(
+        ownership_keyring=OwnershipKeyring({"gb10-key": EXECUTOR_KEYS["gb10"].public_key()})
+    )
+    active, _allocation_epoch = await _active_plan(capacity_session)
+    _proposal, intent = await _proposed_intent(store, capacity_session, active)
+    binding = ExecutableIntentBindingV2.model_validate_json(json.dumps(intent.binding_payload))
+    intent.state = "released"
+    intent.released_at = datetime.now(UTC)
+    await capacity_session.flush()
+    manager, drained = await _drain_active(capacity_session, active)
+    terminal = _signed_inventory_record(binding, state="terminal")
+    checkpoints = await _publish_retirement_evidence(
+        store,
+        capacity_session,
+        drained,
+        records_by_pool={"gb10": (terminal,)},
+    )
+
+    retired = await manager.retire_execution_epoch(
+        capacity_session,
+        _retirement_request(drained, checkpoints),
+        actor="activation-operator",
+        idempotency_key=UUID(int=12107),
+    )
+
+    await capacity_session.refresh(intent)
+    assert intent.state == "released"
+    assert retired.execution_epoch == drained.execution_epoch
+
+
+async def test_foreign_record_is_preserved_and_does_not_establish_loom_ownership(
+    capacity_session: AsyncSession,
+) -> None:
+    """A foreign job remains foreign and does not itself block safe retirement."""
+
+    store = CapacityExecutionStore()
+    active, _allocation_epoch = await _active_plan(capacity_session)
+    manager, drained = await _drain_active(capacity_session, active)
+    foreign = ExecutableInventoryRecordV2(
+        physical_identity="foreign-job-42",
+        physical_kind="slurm-job",
+        authority_scope="foreign",
+        state="active",
+        resources=resource_vector(),
+        node_ids=("gb10-node",),
+        controller_evidence_sha256="9" * 64,
+    )
+    checkpoints = await _publish_retirement_evidence(
+        store,
+        capacity_session,
+        drained,
+        records_by_pool={"gb10": (foreign,)},
+    )
+    gb10_state = (
+        await capacity_session.execute(
+            select(CapacityExecutableExecutorState).where(
+                CapacityExecutableExecutorState.pool_id == "gb10"
+            )
+        )
+    ).scalar_one()
+
+    assert gb10_state.inventory_payload["records"][0]["authority_scope"] == "foreign"
+    assert gb10_state.inventory_payload["records"][0]["physical_identity"] == "foreign-job-42"
+    assert gb10_state.retirement_safe is True
+    await manager.retire_execution_epoch(
+        capacity_session,
+        _retirement_request(drained, checkpoints),
+        actor="activation-operator",
+        idempotency_key=UUID(int=12108),
+    )
+
+
+async def test_empty_complete_inventory_is_unsafe_with_a_retained_released_intent(
+    capacity_session: AsyncSession,
+) -> None:
+    """An empty final inventory cannot stand in for one retained intent's evidence."""
+
+    store = CapacityExecutionStore()
+    active, _allocation_epoch = await _active_plan(capacity_session)
+    _proposal, intent = await _proposed_intent(store, capacity_session, active)
+    intent.state = "released"
+    intent.released_at = datetime.now(UTC)
+    await capacity_session.flush()
+    _manager, drained = await _drain_active(capacity_session, active)
+
+    await _publish_pool_retirement_evidence(
+        store,
+        capacity_session,
+        drained,
+        pool_id="gb10",
+    )
+    state = (
+        await capacity_session.execute(
+            select(CapacityExecutableExecutorState).where(
+                CapacityExecutableExecutorState.pool_id == "gb10"
+            )
+        )
+    ).scalar_one()
+
+    assert state.retirement_safe is False
+    assert state.retirement_inventory_digest is None
+
+
+async def test_duplicate_exact_records_for_one_intent_are_retirement_unsafe(
+    capacity_session: AsyncSession,
+) -> None:
+    """Two physical records claiming one intent are ambiguous final evidence."""
+
+    store = CapacityExecutionStore(
+        ownership_keyring=OwnershipKeyring({"gb10-key": EXECUTOR_KEYS["gb10"].public_key()})
+    )
+    active, _allocation_epoch = await _active_plan(capacity_session)
+    _proposal, intent = await _proposed_intent(store, capacity_session, active)
+    binding = ExecutableIntentBindingV2.model_validate_json(json.dumps(intent.binding_payload))
+    intent.state = "released"
+    intent.released_at = datetime.now(UTC)
+    await capacity_session.flush()
+    _manager, drained = await _drain_active(capacity_session, active)
+    first = _signed_inventory_record(binding, state="terminal")
+    duplicate = first.model_copy(
+        update={
+            "physical_identity": "job-final-gb10-duplicate",
+            "terminal_evidence_sha256": "b" * 64,
+        }
+    )
+
+    await _publish_pool_retirement_evidence(
+        store,
+        capacity_session,
+        drained,
+        pool_id="gb10",
+        records=(first, duplicate),
+    )
+    state = (
+        await capacity_session.execute(
+            select(CapacityExecutableExecutorState).where(
+                CapacityExecutableExecutorState.pool_id == "gb10"
+            )
+        )
+    ).scalar_one()
+
+    assert state.retirement_safe is False
+    assert state.retirement_inventory_digest is None
+
+
+async def test_retirement_needs_fresh_postrelease_inventory_and_later_pool_heartbeat(
+    capacity_session: AsyncSession,
+) -> None:
+    """An earlier inventory or heartbeat cannot be reused as final release evidence."""
+
+    store = CapacityExecutionStore(
+        ownership_keyring=OwnershipKeyring({"gb10-key": EXECUTOR_KEYS["gb10"].public_key()})
+    )
+    active, _allocation_epoch = await _active_plan(capacity_session)
+    _proposal, intent = await _proposed_intent(store, capacity_session, active)
+    binding = ExecutableIntentBindingV2.model_validate_json(json.dumps(intent.binding_payload))
+    intent.state = "released"
+    intent.released_at = datetime.now(UTC)
+    await capacity_session.flush()
+    manager, drained = await _drain_active(capacity_session, active)
+    oldlab = await _publish_pool_retirement_evidence(
+        store,
+        capacity_session,
+        drained,
+        pool_id="oldlab",
+    )
+    gb10_state = (
+        await capacity_session.execute(
+            select(CapacityExecutableExecutorState).where(
+                CapacityExecutableExecutorState.pool_id == "gb10"
+            )
+        )
+    ).scalar_one()
+    await store.heartbeat_executor(
+        capacity_session,
+        ExecutableExecutorHeartbeatV2(
+            execution=drained,
+            executor_id=gb10_state.executor_id,
+            executor_incarnation=gb10_state.executor_incarnation,
+            pool_id=gb10_state.pool_id,
+            pool_generation=gb10_state.pool_generation,
+            heartbeat_sequence=gb10_state.heartbeat_high_water + 1,
+            journal_sequence=gb10_state.journal_high_water,
+            journal_digest=gb10_state.journal_digest,
+            journal_checkpoint_sequence=gb10_state.journal_high_water,
+            journal_checkpoint_digest=gb10_state.journal_digest,
+        ),
+    )
+    await capacity_session.refresh(gb10_state)
+    stale_gb10 = ExecutionRetirementExecutorCheckpointV2(
+        executor_id=gb10_state.executor_id,
+        executor_incarnation=gb10_state.executor_incarnation,
+        pool_id=gb10_state.pool_id,
+        pool_generation=gb10_state.pool_generation,
+        heartbeat_sequence=gb10_state.heartbeat_high_water,
+        command_sequence=gb10_state.command_high_water,
+        journal_sequence=gb10_state.journal_high_water,
+        journal_digest=gb10_state.journal_digest,
+        inventory_sequence=gb10_state.inventory_high_water,
+        inventory_digest=gb10_state.last_inventory_digest,
+    )
+    with pytest.raises(ExecutionConflictError):
+        await manager.retire_execution_epoch(
+            capacity_session,
+            _retirement_request(drained, (stale_gb10, oldlab)),
+            actor="activation-operator",
+            idempotency_key=UUID(int=12110),
+        )
+
+    terminal = _signed_inventory_record(binding, state="terminal")
+    gb10 = await _publish_pool_retirement_evidence(
+        store,
+        capacity_session,
+        drained,
+        pool_id="gb10",
+        records=(terminal,),
+        later_heartbeat=False,
+    )
+    with pytest.raises(ExecutionConflictError):
+        await manager.retire_execution_epoch(
+            capacity_session,
+            _retirement_request(drained, (gb10, oldlab)),
+            actor="activation-operator",
+            idempotency_key=UUID(int=12111),
+        )
+    executor = executor_binding("gb10")
+    await store.heartbeat_executor(
+        capacity_session,
+        ExecutableExecutorHeartbeatV2(
+            execution=drained,
+            executor_id=executor.executor_id,
+            executor_incarnation=executor.executor_incarnation,
+            pool_id=executor.pool_id,
+            pool_generation=executor.pool_generation,
+            heartbeat_sequence=gb10.heartbeat_sequence + 1,
+            journal_sequence=gb10.journal_sequence,
+            journal_digest=gb10.journal_digest,
+            journal_checkpoint_sequence=gb10.journal_sequence,
+            journal_checkpoint_digest=gb10.journal_digest,
+        ),
+    )
+    fresh_gb10 = gb10.model_copy(update={"heartbeat_sequence": gb10.heartbeat_sequence + 1})
+    retired = await manager.retire_execution_epoch(
+        capacity_session,
+        _retirement_request(drained, (fresh_gb10, oldlab)),
+        actor="activation-operator",
+        idempotency_key=UUID(int=12112),
+    )
+    assert retired.execution_epoch == drained.execution_epoch

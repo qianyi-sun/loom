@@ -14,13 +14,20 @@ from threading import Event, Thread
 from uuid import UUID, uuid4
 
 import pytest
+from alembic import command
+from alembic.config import Config as AlembicConfig
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, select, text, update
+from sqlalchemy import create_engine, delete, select, text, update
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import (
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from loom_capacity_manager.allocator import ShadowAllocatorError, allocate_shadow
 from loom_capacity_manager.api import (
@@ -42,7 +49,12 @@ from loom_capacity_manager.models import (
 )
 from loom_capacity_manager.ownership import public_key_fingerprint
 from loom_capacity_manager.reconciler import reconcile_shadow_once
-from loom_capacity_manager.store import CapacityManagementStore, StaleWriterError, WriterFence
+from loom_capacity_manager.store import (
+    CapacityManagementStore,
+    ExecutionPreparationDisabledError,
+    StaleWriterError,
+    WriterFence,
+)
 from tests.capacity_execution_fixtures import (
     execution_policy,
     register_execution_executors,
@@ -441,10 +453,7 @@ def hold_reconciliation_open(
         assert responses and responses[0].status_code == 200  # type: ignore[union-attr]
 
 
-def test_shadow_api_exposes_exactly_the_approved_routes(
-    api_context: tuple[TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator],
-) -> None:
-    _client, app, _settings, _allocator = api_context
+def _assert_exact_approved_routes(app: FastAPI) -> None:
     routes = {(route.path, tuple(sorted(route.methods or ()))) for route in app.routes}
     assert routes == {
         ("/healthz", ("GET",)),
@@ -505,6 +514,154 @@ def test_shadow_api_exposes_exactly_the_approved_routes(
         ("/v1/audit-events", ("GET",)),
         ("/metrics", ("GET",)),
     }
+
+
+def test_shadow_api_exposes_exactly_the_approved_routes(
+    api_context: tuple[TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator],
+) -> None:
+    _client, app, _settings, _allocator = api_context
+    _assert_exact_approved_routes(app)
+
+
+@pytest.fixture
+def isolated_capacity_api_url(postgres_url: str) -> Iterator[str]:
+    source_url = make_url(postgres_url)
+    database_name = f"loom_capacity_api_{uuid4().hex}"
+    admin_engine = create_engine(
+        source_url.set(database="postgres"),
+        isolation_level="AUTOCOMMIT",
+    )
+    quoted_database = admin_engine.dialect.identifier_preparer.quote(database_name)
+    database_url = source_url.set(database=database_name).render_as_string(hide_password=False)
+    migration_engine = create_engine(database_url)
+    try:
+        with admin_engine.connect() as connection:
+            connection.exec_driver_sql(f"CREATE DATABASE {quoted_database} TEMPLATE template0")
+        root = Path(__file__).resolve().parents[2]
+        config = AlembicConfig(str(root / "capacity_migrations" / "alembic.ini"))
+        config.set_main_option("script_location", str(root / "capacity_migrations"))
+        with migration_engine.begin() as connection:
+            config.attributes["connection"] = connection
+            command.upgrade(config, "head")
+        yield database_url
+    finally:
+        migration_engine.dispose()
+        with admin_engine.connect() as connection:
+            connection.execute(
+                text(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                    "WHERE datname = :database_name AND pid <> pg_backend_pid()"
+                ),
+                {"database_name": database_name},
+            )
+            connection.exec_driver_sql(f"DROP DATABASE IF EXISTS {quoted_database}")
+        admin_engine.dispose()
+
+
+async def test_injected_management_store_is_exact_and_default_remains_disabled(
+    tmp_path: Path,
+    isolated_capacity_api_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Startup must use the exact owner-policy store without exposing mutation routes."""
+
+    registry_path = _owner_file(
+        tmp_path / "injected-principals.json",
+        json.dumps(
+            {
+                "schema_version": 1,
+                "principals": [
+                    _principal(
+                        "fleet-operator",
+                        OPERATOR_TOKEN,
+                        ["capacity:read", "capacity:reconcile"],
+                    )
+                ],
+            }
+        ),
+    )
+    settings = CapacityManagerSettings(
+        principals_file=registry_path,
+        db_url_file=_owner_file(tmp_path / "injected-database-url", isolated_capacity_api_url),
+        expected_authority_incarnation=AUTHORITY_ID,
+        tls_cert_file=_owner_file(tmp_path / "injected-server.crt", "test"),
+        tls_key_file=_owner_file(tmp_path / "injected-server.key", "test"),
+        tls_client_ca_file=_owner_file(tmp_path / "injected-client-ca.crt", "test"),
+    )
+    engine = create_async_engine(isolated_capacity_api_url, isolation_level="SERIALIZABLE")
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as capacity_session:
+            policy = execution_policy()
+            fixture = await setup_execution(capacity_session, execution_policy=policy)
+            await capacity_session.commit()
+            injected_store = fixture.store
+
+            default_app = create_app(
+                settings,
+                verifier=CapacityPrincipalVerifier.from_file(registry_path),
+            )
+            with TestClient(default_app) as client:
+                assert client.get("/healthz").status_code == 200
+                assert default_app.state.store is not injected_store
+                with pytest.raises(ExecutionPreparationDisabledError):
+                    await default_app.state.store.prepare_execution_epoch(
+                        capacity_session,
+                        fixture.request.model_copy(
+                            update={"expected_writer_epoch": default_app.state.writer.writer_epoch}
+                        ),
+                        actor="activation-operator",
+                        idempotency_key=UUID(int=12303),
+                    )
+
+            register_calls = 0
+            register_writer = injected_store.register_writer
+
+            async def tracked_register_writer(*args, **kwargs):  # type: ignore[no-untyped-def]
+                nonlocal register_calls
+                register_calls += 1
+                return await register_writer(*args, **kwargs)
+
+            monkeypatch.setattr(injected_store, "register_writer", tracked_register_writer)
+            app = create_app(
+                settings,
+                verifier=CapacityPrincipalVerifier.from_file(registry_path),
+                management_store=injected_store,
+            )
+            with TestClient(app) as client:
+                assert client.get("/healthz").status_code == 200
+                assert app.state.store is injected_store
+                assert register_calls == 1
+                assert await injected_store.execution_authority(capacity_session) is None
+                prepared = await injected_store.prepare_execution_epoch(
+                    capacity_session,
+                    fixture.request.model_copy(
+                        update={"expected_writer_epoch": app.state.writer.writer_epoch}
+                    ),
+                    actor="activation-operator",
+                    idempotency_key=UUID(int=12301),
+                )
+                await register_execution_executors(capacity_session, fixture, prepared)
+                active = await injected_store.activate_execution_epoch(
+                    capacity_session,
+                    ExecutionActivationV2(
+                        authority_incarnation=prepared.authority_incarnation,
+                        expected_writer_epoch=prepared.writer_epoch,
+                        execution_epoch=prepared.execution_epoch,
+                        execution_manifest_sha256=prepared.execution_manifest_sha256,
+                        executable_new_capacity_ceiling=1,
+                        executable_new_capacity_rate_per_minute=1,
+                    ),
+                    actor="activation-operator",
+                    idempotency_key=UUID(int=12302),
+                )
+                await capacity_session.commit()
+
+                assert active.execution_state == "active"
+                assert active.executable_new_capacity_ceiling == 1
+                _assert_exact_approved_routes(app)
+    finally:
+        await engine.dispose()
 
 
 def test_v2_executor_work_route_is_exactly_pool_bound(
