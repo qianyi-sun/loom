@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import json
 import os
 import stat
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
 from uuid import UUID
@@ -36,7 +37,22 @@ class ImmutablePoolManifest:
     """The retained pool-local facts consumed by Task 6/7/8 runtime binding."""
 
     pool_id: Literal["gb10", "oldlab"]
+    pool_generation: int
     controller_authority_sha256: str
+    executor_id: str
+    executor_incarnation: UUID
+    local_authority_sha256: str
+    signing_key_id: str
+    signing_key_sha256: str
+    ownership_key_file: Path
+    manager_origin: str
+    bearer_token_file: Path
+    tls_ca_file: Path
+    tls_certificate_file: Path
+    tls_private_key_file: Path
+    state_directory: Path
+    journal_file: Path
+    local_uid: int
     slurm_cluster: str
     controller_host: str
     partition: str
@@ -47,6 +63,20 @@ class ImmutablePoolManifest:
     profile_generation: int
     profile_digest: str
     slurm_executables: tuple[tuple[str, Path], ...]
+
+    def sha256(self) -> str:
+        value = asdict(self)
+        for name, item in tuple(value.items()):
+            if isinstance(item, Path):
+                value[name] = str(item)
+            elif isinstance(item, UUID):
+                value[name] = str(item)
+        value["slurm_executables"] = [(name, str(path)) for name, path in self.slurm_executables]
+        return hashlib.sha256(
+            json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(
+                "ascii"
+            )
+        ).hexdigest()
 
 
 def _absolute_path(value: object, *, label: str) -> Path:
@@ -173,10 +203,13 @@ class PoolExecutorConfig:
     profile_generation: int
     profile_digest: str
     manifest: ImmutablePoolManifest
+    expected_manifest_sha256: str | None
     execution: ExecutionContextV2
 
     @classmethod
-    def from_files(cls, config_file: Path) -> PoolExecutorConfig:
+    def from_files(
+        cls, config_file: Path, *, expected_manifest_sha256: str | None = None
+    ) -> PoolExecutorConfig:
         config_path = _absolute_path(str(config_file), label="configuration path")
         raw = _one_line_text(config_path, label="configuration file", maximum=_MAX_CONFIG_BYTES)
         try:
@@ -332,6 +365,39 @@ class PoolExecutorConfig:
             )
         except (TypeError, ValueError) as exc:
             raise ExecutorConfigError("zero-ceiling execution authority is invalid") from exc
+        manifest = ImmutablePoolManifest(
+            pool_id=pool,
+            pool_generation=pool_generation,
+            controller_authority_sha256=controller_digest,
+            executor_id=executor_id,
+            executor_incarnation=incarnation,
+            local_authority_sha256=local_digest,
+            signing_key_id=signing_key_id,
+            signing_key_sha256=signing_key_sha,
+            ownership_key_file=ownership_key,
+            manager_origin=manager_origin,
+            bearer_token_file=bearer,
+            tls_ca_file=tls_ca,
+            tls_certificate_file=tls_certificate,
+            tls_private_key_file=tls_private_key,
+            state_directory=state,
+            journal_file=journal,
+            local_uid=local_uid,
+            slurm_cluster=retained["slurm_cluster"],
+            controller_host=retained["controller_host"],
+            partition=retained["partition"],
+            association=retained["association"],
+            submitter=retained["submitter"],
+            qos=retained["qos"],
+            profile_id=retained["profile_id"],
+            profile_generation=profile_generation,
+            profile_digest=profile_digest,
+            slurm_executables=tuple(sorted(executable_paths)),
+        )
+        if expected_manifest_sha256 is not None and manifest.sha256() != _digest(
+            expected_manifest_sha256, label="expected manifest"
+        ):
+            raise ExecutorConfigError("configuration differs from pinned immutable manifest")
         return cls(
             pool_id=pool,
             pool_generation=pool_generation,
@@ -360,20 +426,8 @@ class PoolExecutorConfig:
             profile_id=retained["profile_id"],
             profile_generation=profile_generation,
             profile_digest=profile_digest,
-            manifest=ImmutablePoolManifest(
-                pool_id=pool,
-                controller_authority_sha256=controller_digest,
-                slurm_cluster=retained["slurm_cluster"],
-                controller_host=retained["controller_host"],
-                partition=retained["partition"],
-                association=retained["association"],
-                submitter=retained["submitter"],
-                qos=retained["qos"],
-                profile_id=retained["profile_id"],
-                profile_generation=profile_generation,
-                profile_digest=profile_digest,
-                slurm_executables=tuple(sorted(executable_paths)),
-            ),
+            manifest=manifest,
+            expected_manifest_sha256=expected_manifest_sha256,
             execution=execution,
         )
 

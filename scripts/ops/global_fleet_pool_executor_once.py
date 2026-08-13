@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import signal
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 import httpx
@@ -20,6 +21,7 @@ from loom_capacity_executor.client import ExecutableCapacityExecutorClient
 from loom_capacity_executor.config import ExecutorConfigError, PoolExecutorConfig
 from loom_capacity_executor.executable import ExecutablePoolExecutor
 from loom_capacity_executor.journal import ExecutorJournal
+from loom_capacity_executor.slurm_backend import AsyncSlurmBackend
 from loom_capacity_manager.executable_contracts import (
     ExecutableExecutorInventoryV2,
     ExecutionAuthorityV2,
@@ -223,6 +225,16 @@ def _assert_executable_runtime(
 ) -> None:
     expected_registration = config.registration.model_dump(exclude={"execution"})
     actual_registration = executor.registration.model_dump(exclude={"execution"})
+    backend = executor.slurm
+    if not isinstance(backend, AsyncSlurmBackend):
+        raise ExecutorConfigError("executable runtime requires typed Slurm backend")
+    slurm = backend.authority
+    executable_paths = tuple(
+        sorted(
+            (name, Path(getattr(slurm.executables, name).path))
+            for name in ("scontrol", "sacctmgr", "squeue", "sbatch", "scancel", "sacct")
+        )
+    )
     if (
         actual_registration != expected_registration
         or executor.registration.execution.model_dump()
@@ -242,6 +254,14 @@ def _assert_executable_runtime(
         or executor.controller_authority != config.controller_authority
         or executor.ownership_key != config.ownership_key
         or getattr(executor.client, "registration", None) != executor.registration
+        or slurm.cluster != config.manifest.slurm_cluster
+        or slurm.controller_host != config.manifest.controller_host
+        or slurm.partition != config.manifest.partition
+        or slurm.account != config.manifest.association
+        or slurm.submitter != config.manifest.submitter
+        or slurm.qos != config.manifest.qos
+        or slurm.local_uid != config.manifest.local_uid
+        or executable_paths != config.manifest.slurm_executables
     ):
         raise ExecutorConfigError("executable runtime differs from exact controller-local binding")
 
@@ -249,10 +269,13 @@ def _assert_executable_runtime(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
+    parser.add_argument("--expected-manifest-sha256", required=True)
     parser.add_argument("--pool", choices=("oldlab", "gb10"))
     parser.add_argument("--validate-only", action="store_true")
     args = parser.parse_args()
-    config = PoolExecutorConfig.from_files(args.config)
+    config = PoolExecutorConfig.from_files(
+        args.config, expected_manifest_sha256=args.expected_manifest_sha256
+    )
     asyncio.run(_run_with_signals(config, pool_id=args.pool, validate_only=args.validate_only))
     return 0
 

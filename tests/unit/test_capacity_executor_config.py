@@ -73,7 +73,7 @@ def executor_files(tmp_path: Path, *, pool_id: str = "oldlab") -> ExecutorFiles:
                 "qos": "loom",
                 "profile_id": f"{pool_id}-profile",
                 "profile_generation": 1,
-                "profile_digest": "9" * 64,
+                "profile_digest": "9" * 64 if pool_id == "oldlab" else "8" * 64,
                 "local_uid": os.geteuid(),
                 "slurm_executables": {
                     name: f"/usr/bin/{name}"
@@ -150,3 +150,38 @@ def test_config_rejects_private_key_that_does_not_match_registered_fingerprint(
     _private(files.config, json.dumps(payload))
     with pytest.raises(ExecutorConfigError, match="fingerprint"):
         PoolExecutorConfig.from_files(files.config)
+
+
+def test_pinned_manifest_rejects_one_field_mutation_before_registration(tmp_path: Path) -> None:
+    files = executor_files(tmp_path)
+    loaded = PoolExecutorConfig.from_files(files.config)
+    pinned = loaded.manifest.sha256()
+    payload = json.loads(files.config.read_text(encoding="utf-8"))
+    payload["tls_ca_file"] = payload["tls_certificate_file"]
+    _private(files.config, json.dumps(payload))
+    with pytest.raises(ExecutorConfigError, match="pinned immutable manifest"):
+        PoolExecutorConfig.from_files(files.config, expected_manifest_sha256=pinned)
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "controller_host",
+        "ownership_key_file",
+        "bearer_token_file",
+        "state_directory",
+        "profile_digest",
+    ),
+)
+def test_pinned_manifest_rejects_each_cross_pool_binding(tmp_path: Path, field: str) -> None:
+    oldlab_files = executor_files(tmp_path, pool_id="oldlab")
+    gb10_files = executor_files(tmp_path, pool_id="gb10")
+    pinned = PoolExecutorConfig.from_files(oldlab_files.config).manifest.sha256()
+    oldlab_payload = json.loads(oldlab_files.config.read_text(encoding="utf-8"))
+    gb10_payload = json.loads(gb10_files.config.read_text(encoding="utf-8"))
+    oldlab_payload[field] = gb10_payload[field]
+    if field == "state_directory":
+        oldlab_payload["journal_file"] = gb10_payload["journal_file"]
+    _private(oldlab_files.config, json.dumps(oldlab_payload))
+    with pytest.raises(ExecutorConfigError):
+        PoolExecutorConfig.from_files(oldlab_files.config, expected_manifest_sha256=pinned)
