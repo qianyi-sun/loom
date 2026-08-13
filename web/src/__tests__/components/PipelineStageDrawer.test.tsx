@@ -22,6 +22,7 @@ const detail = {
   input_bindings_digest: null,
   resource_profile_digest: null,
   request_renderer_digest: null,
+  live_preview_eligible: false,
   latest_checkpoint_artifact_id: null,
   artifacts: [{
     id: "artifact-1", name: "result.json", artifact_type: "result",

@@ -62,3 +62,9 @@ PIPELINE_GPU_ALLOCATED_IDLE_SECONDS = Gauge(
     "Maximum age of a leased local GPU Attempt without its expected process group",
     labelnames=("slurm_cluster", "reason"),
 )
+
+PIPELINE_LIVE_PREVIEW_EVENTS_TOTAL = Counter(
+    "loom_worker_pipeline_live_preview_events_total",
+    "Bounded Stage 1 preview producer and publisher outcomes",
+    labelnames=("result", "reason"),
+)

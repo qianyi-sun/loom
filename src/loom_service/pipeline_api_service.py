@@ -38,6 +38,7 @@ from loom.pipeline.public_api import (
 from loom.pipeline.recipes import OfficialRecipeRegistry
 from loom.pipeline.resource_profiles import ResourceProfileRegistry, ResourceProfileRegistryError
 from loom.pipeline.spec import RunGraphSpecV1
+from loom_control_plane.metrics import PIPELINE_LIVE_PREVIEW_PURGES_TOTAL
 
 
 class PipelineApiError(RuntimeError):
@@ -793,6 +794,28 @@ async def request_user_cancellation(
         """),
             {"attempt_id": attempt_id},
         )
+        deleted_preview = await session.execute(
+            text("""
+            DELETE FROM pipeline_live_preview_frames
+             WHERE execution_attempt_id=:attempt_id
+             RETURNING sequence
+        """),
+            {"attempt_id": attempt_id},
+        )
+        ended_preview = await session.execute(
+            text("""
+            UPDATE pipeline_live_preview_generations
+               SET state='ended', latest_sequence=NULL, latest_step_idx=NULL,
+                   received_at=NULL, frame_count=0, total_bytes=0,
+                   expires_at=clock_timestamp(), purge_reason='cancelled',
+                   purged_at=clock_timestamp(), updated_at=clock_timestamp()
+             WHERE execution_attempt_id=:attempt_id AND purged_at IS NULL
+         RETURNING execution_attempt_id
+        """),
+            {"attempt_id": attempt_id},
+        )
+        if ended_preview.first() is not None or deleted_preview.first() is not None:
+            PIPELINE_LIVE_PREVIEW_PURGES_TOTAL.labels(reason="cancelled").inc()
         await session.execute(
             text("""
             INSERT INTO execution_attempt_control_commands (

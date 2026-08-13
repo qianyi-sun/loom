@@ -54,7 +54,7 @@ def test_bundled_assets_are_exact_canonical_manifest_inventory() -> None:
     assert set(bundle.bytes_by_path) == {*ASSET_FILES, "manifest.json"}
     assert bundle.manifest_sha256 == digest_bytes(bundle.bytes_by_path["manifest.json"])
     assert bundle.manifest_sha256 == (
-        "sha256:dd92ca64a412dc67cc0fc51311b77a052fe485da69d6972bce7f9b563d5a2717"
+        "sha256:c09e1d6ac9a7299f354fd47951906722355dfb78fd78c8aed6d7c037494dfd3b"
     )
     assert bundle.bytes_by_path["manifest.json"] == canonical_document(bundle.manifest)
     assert bundle.bytes_by_path["runner-lock.json"] == canonical_document(bundle.runner_lock)

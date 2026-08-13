@@ -851,6 +851,59 @@ def test_engine_uses_signed_episode_index_not_range_one() -> None:
     ]
 
 
+def test_engine_offers_preview_only_through_additive_image_driver_seam() -> None:
+    task = _task_document()
+    request = _request(task, _dataset_document(b"task"), _policy_document(b"checkpoint"))
+    offered: list[tuple[int, bytes]] = []
+
+    class Preview:
+        def offer(self, *, step_idx: int, jpeg: bytes) -> None:
+            offered.append((step_idx, jpeg))
+
+    class Driver:
+        def load_task_instance(self, value: StageRequestV1) -> LoadedTaskInstance:
+            params = cast(BehaviorRolloutParametersV1, value.parameters)
+            return LoadedTaskInstance(
+                eval_instance_index=params.eval_instance_index,
+                engine_task_instance_id=37,
+                episode_index=params.episode_index,
+                seed=params.seed,
+            )
+
+        def reset_episode(self, _episode_index: int) -> None:
+            pass
+
+        def run_episode(self, _episode_index: int, **_kwargs: object) -> int:
+            pytest.fail("preview-capable driver must receive the explicit sink")
+
+        def run_episode_with_live_preview(
+            self,
+            _episode_index: int,
+            *,
+            live_preview: Preview,
+            **_kwargs: object,
+        ) -> int:
+            live_preview.offer(step_idx=7, jpeg=b"composite")
+            return 0
+
+        def close(self) -> None:
+            pass
+
+    authority = SimpleNamespace(apply=lambda _seed: None)
+    assert (
+        execute_one_episode(
+            request,
+            Driver(),
+            output_dir=Path("/outputs"),
+            scratch=Path("/scratch/rollout"),
+            seed_authority=authority,  # type: ignore[arg-type]
+            live_preview=Preview(),
+        )
+        == 0
+    )
+    assert offered == [(7, b"composite")]
+
+
 @pytest.mark.parametrize(
     ("success", "outcome"), [(True, "rollout_success"), (False, "rollout_failure")]
 )

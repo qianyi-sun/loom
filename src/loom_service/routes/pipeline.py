@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated, Any, Literal, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Header, HTTPException, Path, Query, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import Field, StringConstraints, model_validator
 from sqlalchemy import and_, or_, select
@@ -17,9 +17,12 @@ from loom.db.schema import (
     ExecutionAttempt,
     PipelineBudgetLedger,
     PipelineEvent,
+    PipelineLivePreviewFrame,
+    PipelineLivePreviewGeneration,
     PipelineRun,
     PipelineStageRun,
     TeamMembership,
+    Worker,
 )
 from loom.pipeline.artifact_commit import PartReceiptV1
 from loom.pipeline.behavior_input_import import BehaviorInputImportManifestV1
@@ -28,6 +31,7 @@ from loom.pipeline.control_bindings import (
     RecipeProviderBindingApplyV1,
 )
 from loom.pipeline.keys import canonical_digest
+from loom.pipeline.live_preview import LivePreviewMetadataV1, is_stage1_live_preview_eligible
 from loom.pipeline.public_api import (
     PipelineArtifactDetailV1,
     PipelineExecutionAttemptListV1,
@@ -46,6 +50,7 @@ from loom.pipeline.recipes import OfficialRecipeRegistry
 from loom.pipeline.spec import ArtifactType, Digest, PipelineModel
 from loom_service.auth_guards import is_admin, require_scope, require_submitting_user
 from loom_service.dependencies import SessionAndCtx
+from loom_service.metrics import PIPELINE_LIVE_PREVIEW_READS_TOTAL
 from loom_service.pipeline_api_service import (
     PipelineApiError,
     create_public_run,
@@ -95,6 +100,25 @@ _ARTIFACT_FILE_RESPONSES: dict[int | str, dict[str, Any]] = {
         "description": "Invalid, multiple, or unsatisfied byte range",
         "headers": _ARTIFACT_FILE_RESPONSE_HEADERS,
     },
+}
+
+_LIVE_PREVIEW_FRAME_HEADERS = {
+    "Cache-Control": {"schema": {"type": "string"}},
+    "Content-Length": {"schema": {"type": "integer"}},
+    "Content-Security-Policy": {"schema": {"type": "string"}},
+    "Content-Type": {"schema": {"type": "string"}},
+    "ETag": {"schema": {"type": "string"}},
+    "X-Content-Type-Options": {"schema": {"type": "string"}},
+}
+_LIVE_PREVIEW_FRAME_RESPONSES: dict[int | str, dict[str, Any]] = {
+    200: {
+        "description": "Latest bounded ephemeral JPEG preview",
+        "headers": _LIVE_PREVIEW_FRAME_HEADERS,
+        "content": {"image/jpeg": {}},
+    },
+    304: {"description": "Latest preview ETag has not changed"},
+    404: {"description": "Preview is absent, stale, or outside the current team"},
+    416: {"description": "Range reads are not supported"},
 }
 
 
@@ -609,13 +633,196 @@ async def list_pipeline_stage_attempts(sc: SessionAndCtx, stage_run_id: UUID) ->
     rows = list(
         (
             await sc[0].execute(
-                select(ExecutionAttempt)
+                select(ExecutionAttempt, Worker.pool_name)
+                .outerjoin(Worker, Worker.id == ExecutionAttempt.worker_id)
                 .where(ExecutionAttempt.stage_run_id == stage.id)
                 .order_by(ExecutionAttempt.attempt_number)
             )
-        ).scalars()
+        ).all()
     )
-    return {"items": [_attempt_projection(item) for item in rows]}
+    return {
+        "items": [
+            _attempt_projection(attempt, worker_pool_class=worker_pool_class)
+            for attempt, worker_pool_class in rows
+        ]
+    }
+
+
+async def _preview_for_team(
+    sc: SessionAndCtx,
+    *,
+    run_id: UUID,
+    stage_run_id: UUID,
+    attempt_id: UUID,
+) -> tuple[PipelineLivePreviewGeneration, ExecutionAttempt, PipelineStageRun]:
+    team_id, _ = _team_and_user(sc, mutation=False)
+    row = (
+        await sc[0].execute(
+            select(PipelineLivePreviewGeneration, ExecutionAttempt, PipelineStageRun)
+            .join(
+                ExecutionAttempt,
+                ExecutionAttempt.id == PipelineLivePreviewGeneration.execution_attempt_id,
+            )
+            .join(PipelineStageRun, PipelineStageRun.id == ExecutionAttempt.stage_run_id)
+            .join(PipelineRun, PipelineRun.id == PipelineStageRun.pipeline_run_id)
+            .where(
+                PipelineLivePreviewGeneration.execution_attempt_id == attempt_id,
+                PipelineLivePreviewGeneration.pipeline_run_id == run_id,
+                PipelineLivePreviewGeneration.pipeline_stage_run_id == stage_run_id,
+                PipelineLivePreviewGeneration.team_id == team_id,
+                PipelineRun.team_id == team_id,
+                PipelineStageRun.id == stage_run_id,
+                ExecutionAttempt.stage_run_id == stage_run_id,
+            )
+        )
+    ).one_or_none()
+    if row is None:
+        PIPELINE_LIVE_PREVIEW_READS_TOTAL.labels(result="rejected", reason="not_found").inc()
+        raise HTTPException(status_code=404, detail={"reason_code": "not_found"})
+    generation, attempt, stage = row
+    now = datetime.now(UTC)
+    invalid = (
+        generation.purged_at is not None
+        or generation.expires_at <= now
+        or generation.generation != attempt.id
+        or generation.worker_id != attempt.worker_id
+        or generation.claim_id != attempt.claim_id
+        or generation.lease_epoch != attempt.lease_epoch
+        or not is_stage1_live_preview_eligible(stage.resolved_execution_spec_json)
+    )
+    active_state = attempt.state == "running" and attempt.cancellation_requested_at is None
+    handoff_state = attempt.state == "succeeded" and generation.state == "handoff"
+    if invalid or not (active_state or handoff_state):
+        PIPELINE_LIVE_PREVIEW_READS_TOTAL.labels(result="rejected", reason="stale").inc()
+        raise HTTPException(status_code=404, detail={"reason_code": "not_found"})
+    return generation, attempt, stage
+
+
+@router.get(
+    "/pipeline-runs/{run_id}/stages/{stage_run_id}/attempts/{attempt_id}/live-preview",
+    response_model=LivePreviewMetadataV1,
+)
+async def get_pipeline_live_preview_metadata(
+    sc: SessionAndCtx,
+    run_id: UUID,
+    stage_run_id: UUID,
+    attempt_id: UUID,
+) -> dict[str, Any]:
+    generation, attempt, _stage = await _preview_for_team(
+        sc, run_id=run_id, stage_run_id=stage_run_id, attempt_id=attempt_id
+    )
+    state = "handoff" if attempt.state == "succeeded" else generation.state
+    PIPELINE_LIVE_PREVIEW_READS_TOTAL.labels(result="accepted", reason="metadata").inc()
+    return {
+        "schema_version": "loom.behavior-stage1-live-preview.v1",
+        "state": state,
+        "attempt_id": attempt_id,
+        "generation": generation.generation,
+        "latest_sequence": generation.latest_sequence,
+        "latest_step_idx": int(generation.latest_step_idx)
+        if generation.latest_step_idx is not None
+        else None,
+        "received_at": generation.received_at,
+        "retry_after_ms": 500,
+    }
+
+
+async def _read_pipeline_live_preview_frame(
+    *,
+    sc: SessionAndCtx,
+    run_id: UUID,
+    stage_run_id: UUID,
+    attempt_id: UUID,
+    sequence: int,
+    method: Literal["GET", "HEAD"],
+    if_none_match: str | None,
+    range_header: str | None,
+) -> Response:
+    if range_header is not None:
+        PIPELINE_LIVE_PREVIEW_READS_TOTAL.labels(result="rejected", reason="range").inc()
+        raise HTTPException(status_code=416, detail={"reason_code": "range_not_supported"})
+    generation, _attempt, _stage = await _preview_for_team(
+        sc, run_id=run_id, stage_run_id=stage_run_id, attempt_id=attempt_id
+    )
+    if sequence != generation.latest_sequence:
+        PIPELINE_LIVE_PREVIEW_READS_TOTAL.labels(result="rejected", reason="sequence").inc()
+        raise HTTPException(status_code=404, detail={"reason_code": "not_found"})
+    frame = await sc[0].get(PipelineLivePreviewFrame, (attempt_id, sequence))
+    if frame is None:
+        PIPELINE_LIVE_PREVIEW_READS_TOTAL.labels(result="rejected", reason="missing").inc()
+        raise HTTPException(status_code=404, detail={"reason_code": "not_found"})
+    etag = f'"{frame.jpeg_sha256}"'
+    headers = {
+        "Cache-Control": "private, no-store",
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Length": str(frame.jpeg_size_bytes),
+        "ETag": etag,
+    }
+    if if_none_match == etag:
+        PIPELINE_LIVE_PREVIEW_READS_TOTAL.labels(result="accepted", reason="not_modified").inc()
+        return Response(status_code=304, headers=headers)
+    PIPELINE_LIVE_PREVIEW_READS_TOTAL.labels(result="accepted", reason=method.lower()).inc()
+    return Response(
+        status_code=200,
+        content=b"" if method == "HEAD" else frame.jpeg_bytes,
+        media_type="image/jpeg",
+        headers=headers,
+    )
+
+
+@router.get(
+    "/pipeline-runs/{run_id}/stages/{stage_run_id}/attempts/{attempt_id}"
+    "/live-preview/frames/{sequence}",
+    response_class=Response,
+    responses=_LIVE_PREVIEW_FRAME_RESPONSES,
+)
+async def get_pipeline_live_preview_frame(
+    sc: SessionAndCtx,
+    run_id: UUID,
+    stage_run_id: UUID,
+    attempt_id: UUID,
+    sequence: Annotated[int, Path(ge=0)],
+    if_none_match: Annotated[str | None, Header(alias="If-None-Match")] = None,
+    range_header: Annotated[str | None, Header(alias="Range")] = None,
+) -> Response:
+    return await _read_pipeline_live_preview_frame(
+        sc=sc,
+        run_id=run_id,
+        stage_run_id=stage_run_id,
+        attempt_id=attempt_id,
+        sequence=sequence,
+        method="GET",
+        if_none_match=if_none_match,
+        range_header=range_header,
+    )
+
+
+@router.head(
+    "/pipeline-runs/{run_id}/stages/{stage_run_id}/attempts/{attempt_id}"
+    "/live-preview/frames/{sequence}",
+    response_class=Response,
+    responses=_LIVE_PREVIEW_FRAME_RESPONSES,
+)
+async def head_pipeline_live_preview_frame(
+    sc: SessionAndCtx,
+    run_id: UUID,
+    stage_run_id: UUID,
+    attempt_id: UUID,
+    sequence: Annotated[int, Path(ge=0)],
+    if_none_match: Annotated[str | None, Header(alias="If-None-Match")] = None,
+    range_header: Annotated[str | None, Header(alias="Range")] = None,
+) -> Response:
+    return await _read_pipeline_live_preview_frame(
+        sc=sc,
+        run_id=run_id,
+        stage_run_id=stage_run_id,
+        attempt_id=attempt_id,
+        sequence=sequence,
+        method="HEAD",
+        if_none_match=if_none_match,
+        range_header=range_header,
+    )
 
 
 @router.post("/pipeline-stage-runs/{stage_run_id}/retry")
@@ -1023,9 +1230,7 @@ async def _read_pipeline_artifact_file(
     if_range: Annotated[str | None, Header(alias="If-Range")] = None,
 ) -> Response:
     team_id, _ = _team_and_user(sc, mutation=False)
-    resolved = await resolve_public_artifact(
-        sc[0], team_id=team_id, artifact_id=artifact_id
-    )
+    resolved = await resolve_public_artifact(sc[0], team_id=team_id, artifact_id=artifact_id)
     return await stream_public_artifact_file(
         resolved,
         file_index=file_index,
@@ -1208,11 +1413,14 @@ def _stage_detail_projection(
         "latest_checkpoint_artifact_id": str(item.latest_checkpoint_artifact_id)
         if item.latest_checkpoint_artifact_id
         else None,
+        "live_preview_eligible": is_stage1_live_preview_eligible(item.resolved_execution_spec_json),
         "artifacts": [_artifact_projection(artifact) for artifact in artifacts],
     }
 
 
-def _attempt_projection(item: ExecutionAttempt) -> dict[str, Any]:
+def _attempt_projection(
+    item: ExecutionAttempt, *, worker_pool_class: str | None = None
+) -> dict[str, Any]:
     def iso(value: datetime | None) -> str | None:
         return value.isoformat() if value is not None else None
 
@@ -1221,7 +1429,7 @@ def _attempt_projection(item: ExecutionAttempt) -> dict[str, Any]:
         "attempt_number": item.attempt_number,
         "state": item.state,
         "worker_id": str(item.worker_id) if getattr(item, "worker_id", None) else None,
-        "worker_pool_class": None,
+        "worker_pool_class": worker_pool_class,
         "queued_at": iso(getattr(item, "queued_at", None)),
         "claimed_at": iso(getattr(item, "claimed_at", None)),
         "started_at": iso(getattr(item, "started_at", None)),
@@ -1257,8 +1465,7 @@ def _artifact_projection(item: Artifact) -> dict[str, Any]:
         "share_status": getattr(item, "share_status", "pending_scan"),
         "download_path": f"/api/v1/pipeline-artifacts/{item.id}/download",
         "detail_path": (
-            f"/pipelines/{pipeline_run_id}/stages/"
-            f"{pipeline_stage_run_id}/artifacts/{item.id}"
+            f"/pipelines/{pipeline_run_id}/stages/{pipeline_stage_run_id}/artifacts/{item.id}"
         ),
         "pipeline_run_id": str(pipeline_run_id) if pipeline_run_id else None,
         "pipeline_stage_run_id": str(pipeline_stage_run_id) if pipeline_stage_run_id else None,
