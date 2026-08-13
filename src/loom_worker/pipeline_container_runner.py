@@ -487,6 +487,15 @@ class PipelineExecutionPreflight(Protocol):
     ) -> None: ...
 
 
+@runtime_checkable
+class PipelineLivePreviewLifecycle(Protocol):
+    """Explicit Stage 1-only seam assembled from the server-owned claim."""
+
+    async def run_until(self, stop: asyncio.Event) -> None: ...
+
+    def stop(self, *, reason: str = "preview_lifecycle_ended") -> object: ...
+
+
 @dataclass(frozen=True)
 class PipelineExecutionRequest:
     attempt_id: UUID
@@ -508,6 +517,7 @@ class PipelineContainerRunner:
     cancellation_poll_seconds: int = 5
     gpu_cluster: PipelineGpuCluster | None = None
     gpu_lifecycle: PipelineGpuLifecycleTracker | None = None
+    live_preview: PipelineLivePreviewLifecycle | None = None
 
     async def run(self, request: PipelineExecutionRequest) -> PipelineRunResult:
         if self.cancellation_grace_seconds != 30 or self.cancellation_poll_seconds != 5:
@@ -517,6 +527,8 @@ class PipelineContainerRunner:
         backend_started = False
         backend_torn_down = False
         input_released = False
+        preview_stop = asyncio.Event()
+        preview_task: asyncio.Task[None] | None = None
         try:
             await self._raise_if_cancelled(request.attempt_id)
             input_view = await self.materializer.materialize(
@@ -556,6 +568,11 @@ class PipelineContainerRunner:
                     reason="pre_start",
                 )
             backend_started = True
+            if self.live_preview is not None:
+                preview_task = asyncio.create_task(
+                    self.live_preview.run_until(preview_stop),
+                    name=f"pipeline-live-preview-{request.attempt_id}",
+                )
             process_result, forced = await self._run_with_cancellation(
                 attempt_id=request.attempt_id, input_view=input_view
             )
@@ -602,6 +619,12 @@ class PipelineContainerRunner:
                 commit=commit,
             )
         finally:
+            preview_stop.set()
+            if preview_task is not None:
+                preview_task.cancel()
+                await asyncio.gather(preview_task, return_exceptions=True)
+            if self.live_preview is not None:
+                self.live_preview.stop()
             if backend_started and not backend_torn_down:
                 if self.spec.gpu_device_uuids and self.gpu_lifecycle is not None:
                     assert self.gpu_cluster is not None

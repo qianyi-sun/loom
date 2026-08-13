@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from uuid import UUID
 
@@ -20,6 +21,7 @@ from loom_worker.pipeline_container_runner import (
     PipelineContainerRunner,
     PipelineExecutionError,
     PipelineExecutionRequest,
+    PipelineLivePreviewLifecycle,
     PipelineProcessFailedError,
     build_pipeline_container_spec,
 )
@@ -117,6 +119,35 @@ async def test_runner_materializes_runs_commits_and_tears_down(tmp_path: Path) -
     assert backend.calls == ["run", "teardown"]
 
 
+async def test_preview_failure_is_isolated_and_runner_always_stops_it(tmp_path: Path) -> None:
+    runner, _, _, _, backend = _runner(tmp_path)
+
+    class _FailingPreview:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.stopped = 0
+
+        async def run_until(self, stop: asyncio.Event) -> None:
+            del stop
+            self.started.set()
+            raise RuntimeError("SECRET_CANARY preview failure")
+
+        def stop(self, *, reason: str = "preview_lifecycle_ended") -> object:
+            assert reason == "preview_lifecycle_ended"
+            self.stopped += 1
+            return None
+
+    preview = _FailingPreview()
+    assert isinstance(preview, PipelineLivePreviewLifecycle)
+    runner.live_preview = preview
+    result = await runner.run(_request())
+
+    assert result.attempt_id == ATTEMPT_ID
+    assert preview.started.is_set()
+    assert preview.stopped == 1
+    assert backend.calls == ["run", "teardown"]
+
+
 async def test_runner_attests_preflight_before_stage_argv(tmp_path: Path) -> None:
     runner, _, _, _, backend = _runner(tmp_path)
     calls: list[str] = []
@@ -207,9 +238,7 @@ async def test_cancellation_after_exit_terminates_and_acks_after_teardown(
 async def test_materializer_cannot_substitute_a_different_input_root(tmp_path: Path) -> None:
     other = tmp_path / "other"
     other.mkdir()
-    runner, materializer, committer, _, backend = _runner(
-        tmp_path, materialized_root=other
-    )
+    runner, materializer, committer, _, backend = _runner(tmp_path, materialized_root=other)
 
     with pytest.raises(PipelineExecutionError, match="different input root"):
         await runner.run(_request())

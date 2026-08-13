@@ -227,6 +227,11 @@ export type PipelineRetryBody =
   paths["/api/v1/pipeline-stage-runs/{stage_run_id}/retry"]["post"]["requestBody"]["content"]["application/json"];
 export type PipelineArtifactDetail =
   paths["/api/v1/pipeline-runs/{run_id}/stages/{stage_run_id}/artifacts/{artifact_id}"]["get"]["responses"][200]["content"]["application/json"];
+export type PipelineLivePreviewMetadata =
+  paths["/api/v1/pipeline-runs/{run_id}/stages/{stage_run_id}/attempts/{attempt_id}/live-preview"]["get"]["responses"][200]["content"]["application/json"];
+export type PipelineLivePreviewFrame =
+  | { status: "not_modified" }
+  | { status: "ready"; data_url: string; etag: string };
 
 export type PipelineRunListParams = {
   state?: PipelineRunListItem["state"];
@@ -307,6 +312,127 @@ export function pipelineArtifactFileUrl(
   fileIndex: number,
 ): string {
   return `${getApiBase()}/api/v1/pipeline-artifacts/${encodeURIComponent(artifactId)}/files/${fileIndex}`;
+}
+
+function livePreviewBasePath(
+  runId: string,
+  stageRunId: string,
+  attemptId: string,
+): string {
+  return `/api/v1/pipeline-runs/${encodeURIComponent(runId)}/stages/${encodeURIComponent(stageRunId)}/attempts/${encodeURIComponent(attemptId)}/live-preview`;
+}
+
+function isPreviewRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parsePipelineLivePreviewMetadata(value: unknown): PipelineLivePreviewMetadata {
+  const expectedKeys = [
+    "attempt_id",
+    "generation",
+    "latest_sequence",
+    "latest_step_idx",
+    "received_at",
+    "retry_after_ms",
+    "schema_version",
+    "state",
+  ];
+  if (
+    !isPreviewRecord(value) ||
+    Object.keys(value).sort().join(",") !== expectedKeys.join(",") ||
+    value.schema_version !== "loom.behavior-stage1-live-preview.v1" ||
+    !["waiting", "live", "handoff", "ended"].includes(String(value.state)) ||
+    typeof value.attempt_id !== "string" ||
+    typeof value.generation !== "string" ||
+    value.generation !== value.attempt_id ||
+    value.retry_after_ms !== 500 ||
+    !(value.latest_sequence === null || (Number.isSafeInteger(value.latest_sequence) && Number(value.latest_sequence) >= 0)) ||
+    !(value.latest_step_idx === null || (Number.isSafeInteger(value.latest_step_idx) && Number(value.latest_step_idx) >= 0)) ||
+    !(value.received_at === null || (typeof value.received_at === "string" && Number.isFinite(Date.parse(value.received_at))))
+  ) {
+    throw new Error("Live preview metadata response is invalid");
+  }
+  return value as PipelineLivePreviewMetadata;
+}
+
+export async function getPipelineLivePreviewMetadata(
+  runId: string,
+  stageRunId: string,
+  attemptId: string,
+  signal?: AbortSignal,
+): Promise<PipelineLivePreviewMetadata> {
+  const value = await apiFetch<unknown>(
+    livePreviewBasePath(runId, stageRunId, attemptId),
+    { cache: "no-store", signal },
+  );
+  return parsePipelineLivePreviewMetadata(value);
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  const chunkSize = 0x8000;
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
+export async function getPipelineLivePreviewFrame(
+  runId: string,
+  stageRunId: string,
+  attemptId: string,
+  sequence: number,
+  previousEtag: string | null,
+  signal?: AbortSignal,
+): Promise<PipelineLivePreviewFrame> {
+  const headers: Record<string, string> = { Accept: "image/jpeg" };
+  if (previousEtag) headers["If-None-Match"] = previousEtag;
+  const response = await fetch(
+    `${apiBase()}${livePreviewBasePath(runId, stageRunId, attemptId)}/frames/${sequence}`,
+    { cache: "no-store", credentials: "include", headers, redirect: "error", signal },
+  );
+  if (
+    response.status === 304 &&
+    previousEtag !== null &&
+    response.headers.get("ETag") === previousEtag &&
+    !response.redirected
+  ) return { status: "not_modified" };
+  await throwIfApiError(response, _onUnauthorized);
+  if (
+    response.redirected ||
+    response.headers.get("Content-Type") !== "image/jpeg" ||
+    response.headers.get("Cache-Control") !== "private, no-store" ||
+    response.headers.get("X-Content-Type-Options") !== "nosniff"
+  ) {
+    throw new Error("Live preview frame response is invalid");
+  }
+  const etag = response.headers.get("ETag");
+  const lengthText = response.headers.get("Content-Length");
+  const length = lengthText === null ? Number.NaN : Number(lengthText);
+  if (
+    !etag ||
+    !/^"sha256:[0-9a-f]{64}"$/u.test(etag) ||
+    !Number.isSafeInteger(length) ||
+    length < 1 ||
+    length > 524_288
+  ) {
+    throw new Error("Live preview frame response is invalid");
+  }
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.byteLength !== length) {
+    throw new Error("Live preview frame response is invalid");
+  }
+  const digest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)))
+    .map((value) => value.toString(16).padStart(2, "0"))
+    .join("");
+  if (etag !== `"sha256:${digest}"`) {
+    throw new Error("Live preview frame response is invalid");
+  }
+  return {
+    status: "ready",
+    data_url: `data:image/jpeg;base64,${bytesToBase64(bytes)}`,
+    etag,
+  };
 }
 
 export function cancelPipelineRun(
@@ -1107,6 +1233,8 @@ export const api = {
   listPipelineStageAttempts,
   listPipelineEvents,
   getPipelineArtifact,
+  getPipelineLivePreviewMetadata,
+  getPipelineLivePreviewFrame,
   cancelPipelineRun,
   retryPipelineStageRun,
   getOverview: () =>

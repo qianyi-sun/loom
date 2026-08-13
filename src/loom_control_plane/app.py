@@ -34,6 +34,7 @@ from loom_control_plane.elastic_slurm_worker_controller import (
 from loom_control_plane.input_materialization_evidence import (
     PipelineInputMaterializationEvidenceService,
 )
+from loom_control_plane.live_preview import run_live_preview_reconciler_loop
 from loom_control_plane.metrics_refresher import run_metrics_refresher_loop
 from loom_control_plane.retry_exhausted_sweeper import (
     run_retry_exhausted_sweeper_loop,
@@ -209,6 +210,13 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
             ),
             name="loom-cp-worker-pool-autoscaler",
         )
+        live_preview_reconciler_task = asyncio.create_task(
+            run_live_preview_reconciler_loop(
+                session_factory=session_factory,
+                interval_sec=30,
+            ),
+            name="loom-cp-live-preview-reconciler",
+        )
         slurm_controller_task: asyncio.Task[None] | None = None
         if slurm_controller_config is not None:
             slurm_controller_task = asyncio.create_task(
@@ -229,6 +237,7 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
             metrics_refresher_task.cancel()
             retry_exhausted_task.cancel()
             worker_pool_autoscaler_task.cancel()
+            live_preview_reconciler_task.cancel()
             if slurm_controller_task is not None:
                 slurm_controller_task.cancel()
             # Bound the await so a stuck task (e.g. mid-DB call when
@@ -242,6 +251,7 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
                 metrics_refresher_task,
                 retry_exhausted_task,
                 worker_pool_autoscaler_task,
+                live_preview_reconciler_task,
                 slurm_controller_task,
             ):
                 if t is None:

@@ -4005,6 +4005,123 @@ class ExecutionAttempt(Base):
     version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
 
 
+class PipelineLivePreviewGeneration(Base):
+    """Bounded ephemeral preview identity; never an Artifact or lineage row."""
+
+    __tablename__ = "pipeline_live_preview_generations"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('waiting','live','handoff','ended')",
+            name="pipeline_live_preview_generations_state_check",
+        ),
+        CheckConstraint(
+            "(latest_sequence IS NULL AND latest_step_idx IS NULL AND received_at IS NULL) OR "
+            "(latest_sequence BETWEEN 0 AND 9007199254740991 AND "
+            "latest_step_idx BETWEEN 0 AND 18446744073709551615 AND received_at IS NOT NULL)",
+            name="pipeline_live_preview_generations_latest_group_check",
+        ),
+        CheckConstraint(
+            "frame_count BETWEEN 0 AND 64 AND total_bytes BETWEEN 0 AND 33554432",
+            name="pipeline_live_preview_generations_bounds_check",
+        ),
+        CheckConstraint(
+            "(purged_at IS NULL) = (purge_reason IS NULL)",
+            name="pipeline_live_preview_generations_purge_group_check",
+        ),
+        CheckConstraint(
+            "generation = execution_attempt_id",
+            name="pipeline_live_preview_generations_attempt_generation_check",
+        ),
+        CheckConstraint(
+            "lease_epoch > 0",
+            name="pipeline_live_preview_generations_lease_epoch_positive_check",
+        ),
+        Index("pipeline_live_preview_generations_expiry_idx", "expires_at"),
+        Index("pipeline_live_preview_generations_team_state_idx", "team_id", "state"),
+    )
+
+    execution_attempt_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("execution_attempts.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    generation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False, unique=True)
+    team_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("teams.id", ondelete="CASCADE"), nullable=False
+    )
+    pipeline_run_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("pipeline_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    pipeline_stage_run_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("pipeline_stage_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    worker_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("workers.id", ondelete="RESTRICT"), nullable=False
+    )
+    claim_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    lease_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    state: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'waiting'"))
+    latest_sequence: Mapped[int | None] = mapped_column(BigInteger)
+    latest_step_idx: Mapped[Decimal | None] = mapped_column(Numeric(20, 0))
+    received_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    frame_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    total_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    purge_reason: Mapped[str | None] = mapped_column(Text)
+    purged_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class PipelineLivePreviewFrame(Base):
+    """One bounded preview JPEG kept only in the ephemeral relational backend."""
+
+    __tablename__ = "pipeline_live_preview_frames"
+    __table_args__ = (
+        CheckConstraint(
+            "sequence BETWEEN 0 AND 9007199254740991",
+            name="pipeline_live_preview_frames_sequence_check",
+        ),
+        CheckConstraint(
+            "step_idx BETWEEN 0 AND 18446744073709551615",
+            name="pipeline_live_preview_frames_step_check",
+        ),
+        CheckConstraint(
+            "jpeg_sha256 ~ '^sha256:[0-9a-f]{64}$'",
+            name="pipeline_live_preview_frames_digest_check",
+        ),
+        CheckConstraint(
+            "jpeg_size_bytes BETWEEN 1 AND 524288 AND octet_length(jpeg_bytes) = jpeg_size_bytes",
+            name="pipeline_live_preview_frames_size_check",
+        ),
+        UniqueConstraint(
+            "execution_attempt_id",
+            "idempotency_key",
+            name="pipeline_live_preview_frames_idempotency_uidx",
+        ),
+        Index("pipeline_live_preview_frames_received_idx", "received_at"),
+    )
+
+    execution_attempt_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("pipeline_live_preview_generations.execution_attempt_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    sequence: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    step_idx: Mapped[Decimal] = mapped_column(Numeric(20, 0), nullable=False)
+    jpeg_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    jpeg_size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    jpeg_bytes: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(Text, nullable=False)
+    received_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+
+
 class PipelineInputMaterializationEvidence(Base):
     __tablename__ = "pipeline_input_materialization_evidence"
     __table_args__ = (

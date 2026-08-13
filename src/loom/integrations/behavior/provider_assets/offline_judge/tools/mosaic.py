@@ -29,7 +29,7 @@ _FONTS = (
 
 
 def _font(size: int) -> Any:
-    from PIL import ImageFont  # type: ignore[import-not-found]
+    from PIL import ImageFont
 
     for path in _FONTS:
         if Path(path).is_file():

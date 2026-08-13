@@ -521,6 +521,52 @@ export interface paths {
       };
     };
   };
+  "/api/v1/pipeline-runs/{run_id}/stages/{stage_run_id}/attempts/{attempt_id}/live-preview": {
+    get: {
+      parameters: {
+        path: { run_id: string; stage_run_id: string; attempt_id: string };
+      };
+      responses: {
+        200: {
+          content: {
+            "application/json": components["schemas"]["LivePreviewMetadataV1"];
+          };
+        };
+      };
+    };
+  };
+  "/api/v1/pipeline-runs/{run_id}/stages/{stage_run_id}/attempts/{attempt_id}/live-preview/frames/{sequence}": {
+    get: {
+      parameters: {
+        path: {
+          run_id: string;
+          stage_run_id: string;
+          attempt_id: string;
+          sequence: number;
+        };
+        header?: { "If-None-Match"?: string };
+      };
+      responses: {
+        200: { content: { "image/jpeg": unknown } };
+        304: { content: never };
+      };
+    };
+    head: {
+      parameters: {
+        path: {
+          run_id: string;
+          stage_run_id: string;
+          attempt_id: string;
+          sequence: number;
+        };
+        header?: { "If-None-Match"?: string };
+      };
+      responses: {
+        200: { content: { "image/jpeg": unknown } };
+        304: { content: never };
+      };
+    };
+  };
   "/api/v1/pipeline-artifacts/{artifact_id}/files/{file_index}": {
     get: {
       parameters: { path: { artifact_id: string; file_index: number } };
@@ -1399,8 +1445,19 @@ export interface components {
       input_bindings_digest: string | null;
       resource_profile_digest: string | null;
       request_renderer_digest: string | null;
+      live_preview_eligible: boolean;
       latest_checkpoint_artifact_id: string | null;
       artifacts: components["schemas"]["PipelineArtifactSummaryV1"][];
+    };
+    LivePreviewMetadataV1: {
+      schema_version: "loom.behavior-stage1-live-preview.v1";
+      state: "waiting" | "live" | "handoff" | "ended";
+      attempt_id: string;
+      generation: string;
+      latest_sequence: number | null;
+      latest_step_idx: number | null;
+      received_at: string | null;
+      retry_after_ms: 500;
     };
     PipelineExecutionAttemptV1: {
       id: string;

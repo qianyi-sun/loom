@@ -27,6 +27,8 @@ from loom.resource_pools import get_resource_pool_summary
 from loom_control_plane.metrics import (
     EXECUTION_ATTEMPTS,
     PIPELINE_CHECKPOINT_OLDEST_AGE_SECONDS,
+    PIPELINE_LIVE_PREVIEW_ACTIVE_GENERATIONS,
+    PIPELINE_LIVE_PREVIEW_LAST_FRAME_AGE_SECONDS,
     PIPELINE_RUNS,
     PIPELINE_STAGE_DEADLINE_OVERRUN_SECONDS,
     PIPELINE_STAGE_QUEUE_AGE_SECONDS,
@@ -196,6 +198,15 @@ SELECT {_PIPELINE_STAGE_RESOURCE_CLASS_SQL} AS resource_class,
  GROUP BY resource_class
 """)
 
+_PIPELINE_LIVE_PREVIEW_SQL = text("""
+SELECT count(*) AS active_generations,
+       COALESCE(max(EXTRACT(EPOCH FROM (NOW() - received_at))), 0) AS last_frame_age_seconds
+  FROM pipeline_live_preview_generations
+ WHERE purged_at IS NULL
+   AND state IN ('waiting','live','handoff')
+   AND expires_at > NOW()
+""")
+
 _SLURM_WORKER_GAUGES = (
     SLURM_WORKER_DESIRED_SLOTS,
     SLURM_WORKER_ACTIVE_SLOTS,
@@ -233,6 +244,7 @@ async def refresh_pipeline_gauges(session: Any) -> None:
     queue_rows = (await session.execute(_PIPELINE_QUEUE_AGE_SQL)).all()
     deadline_rows = (await session.execute(_PIPELINE_DEADLINE_OVERRUN_SQL)).all()
     checkpoint_rows = (await session.execute(_PIPELINE_CHECKPOINT_AGE_SQL)).all()
+    preview_row = (await session.execute(_PIPELINE_LIVE_PREVIEW_SQL)).one()
 
     for gauge in (
         PIPELINE_RUNS,
@@ -261,6 +273,8 @@ async def refresh_pipeline_gauges(session: Any) -> None:
         PIPELINE_CHECKPOINT_OLDEST_AGE_SECONDS.labels(resource_class=resource_class).set(
             max(float(age_seconds or 0), 0)
         )
+    PIPELINE_LIVE_PREVIEW_ACTIVE_GENERATIONS.set(int(preview_row[0]))
+    PIPELINE_LIVE_PREVIEW_LAST_FRAME_AGE_SECONDS.set(max(float(preview_row[1] or 0), 0))
 
 
 async def refresh_once(session: Any, *, expiry_sec: int) -> None:

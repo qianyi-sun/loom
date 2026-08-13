@@ -6,7 +6,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Protocol, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Header, HTTPException, Path, Query, Request, Response
+from fastapi.responses import JSONResponse
 from sqlalchemy import func, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,12 +23,25 @@ from loom.db.schema import (
     PipelineBudgetReservation,
     PipelineCancellationOutbox,
     PipelineInputMaterializationEvidence,
+    PipelineLivePreviewFrame,
+    PipelineLivePreviewGeneration,
+    PipelineRun,
     PipelineStageRun,
     SlurmWorkerJob,
     Worker,
 )
 from loom.pipeline.artifact_commit import ArtifactCommitError
-from loom.pipeline.keys import canonical_digest
+from loom.pipeline.keys import canonical_digest, digest_bytes
+from loom.pipeline.live_preview import (
+    PREVIEW_GLOBAL_MAX_BYTES,
+    PREVIEW_GLOBAL_MAX_GENERATIONS,
+    PREVIEW_TEAM_MAX_BYTES,
+    PREVIEW_TEAM_MAX_GENERATIONS,
+    LivePreviewContractError,
+    LivePreviewRecordV1,
+    is_stage1_live_preview_eligible,
+    validate_preview_jpeg,
+)
 from loom.pipeline.work_protocol import (
     CheckpointPrepareRequestV1,
     ExecutionCancelAckV1,
@@ -53,10 +67,22 @@ from loom_control_plane.execution_attempt_fencing import (
     replay_or_conflict,
     verify_attempt_claim,
 )
+from loom_control_plane.live_preview import (
+    acquire_preview_capacity_locks,
+    active_global_preview_totals,
+    active_team_preview_totals,
+    enforce_generation_bounds,
+    generation_expiry,
+    global_preview_bound_exceeded,
+    publish_due,
+    purge_live_preview,
+)
 from loom_control_plane.metrics import (
     PIPELINE_ARTIFACT_BYTES_TOTAL,
     PIPELINE_ARTIFACT_COMMIT_FAILURES_TOTAL,
     PIPELINE_CANCEL_LATENCY_SECONDS,
+    PIPELINE_LIVE_PREVIEW_BYTES_TOTAL,
+    PIPELINE_LIVE_PREVIEW_FRAMES_TOTAL,
     PIPELINE_STAGE_DURATION_SECONDS,
 )
 
@@ -66,6 +92,12 @@ ClaimIdHeader = Annotated[UUID, Header(alias="X-Loom-Claim-Id")]
 LeaseEpochHeader = Annotated[int, Header(alias="X-Loom-Lease-Epoch", ge=1)]
 LeaseTokenHeader = Annotated[str, Header(alias="X-Loom-Lease-Token", min_length=32)]
 RequestIdHeader = Annotated[UUID, Header(alias="X-Loom-Request-Id")]
+PreviewIdempotencyHeader = Annotated[
+    str, Header(alias="Idempotency-Key", min_length=1, max_length=128)
+]
+PreviewStepHeader = Annotated[
+    int, Header(alias="X-Loom-Preview-Step", ge=0, le=18_446_744_073_709_551_615)
+]
 
 
 class ArtifactReadServiceV1(Protocol):
@@ -265,6 +297,222 @@ async def _journal_response(
                 response=response,
             )
         )
+    )
+
+
+async def _bounded_preview_body(request: Request) -> bytes:
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            declared_size = int(declared)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="preview_size_invalid") from exc
+        if not 1 <= declared_size <= 524_288:
+            raise HTTPException(status_code=413, detail="preview_size_invalid")
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > 524_288:
+            raise HTTPException(status_code=413, detail="preview_size_invalid")
+        chunks.append(chunk)
+    if total == 0:
+        raise HTTPException(status_code=422, detail="preview_size_invalid")
+    return b"".join(chunks)
+
+
+@router.put("/api/v1/execution-attempts/{attempt_id}/live-preview/frames/{sequence}")
+async def publish_live_preview_frame(
+    attempt_id: UUID,
+    sequence: Annotated[int, Path(ge=0)],
+    request: Request,
+    claim_id: ClaimIdHeader,
+    lease_epoch: LeaseEpochHeader,
+    lease_token: LeaseTokenHeader,
+    idempotency_key: PreviewIdempotencyHeader,
+    step_idx: PreviewStepHeader,
+    if_match: Annotated[str, Header(alias="If-Match")],
+    authorization: str | None = Header(default=None),
+) -> JSONResponse:
+    ctx = await _worker_auth(request, authorization, scope="worker:report")
+    if request.headers.get("content-type") != "image/jpeg":
+        raise HTTPException(status_code=415, detail="preview_content_type_invalid")
+    value = await _bounded_preview_body(request)
+    digest = digest_bytes(value)
+    if if_match != f'"{digest}"':
+        raise HTTPException(status_code=412, detail="preview_digest_mismatch")
+    try:
+        validate_preview_jpeg(value)
+    except LivePreviewContractError as exc:
+        PIPELINE_LIVE_PREVIEW_FRAMES_TOTAL.labels(result="rejected", reason=exc.reason).inc()
+        raise HTTPException(status_code=422, detail=exc.reason) from exc
+
+    observed = datetime.now(UTC)
+    async with request.app.state.session_factory() as session:
+        try:
+            attempt = await verify_attempt_claim(
+                session,
+                attempt_id=attempt_id,
+                auth=ctx,
+                claim_id=claim_id,
+                lease_epoch=lease_epoch,
+                lease_token=lease_token,
+                require_live_lease=True,
+            )
+        except AttemptFenceError as exc:
+            PIPELINE_LIVE_PREVIEW_FRAMES_TOTAL.labels(
+                result="rejected", reason="claim_fenced"
+            ).inc()
+            _raise_fence(exc)
+        stage = await session.get(PipelineStageRun, attempt.stage_run_id)
+        if stage is None:
+            raise HTTPException(status_code=404, detail="not_found")
+        run = await session.get(PipelineRun, stage.pipeline_run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="not_found")
+        if (
+            attempt.state != "running"
+            or attempt.started_at is None
+            or stage.state != "running"
+            or attempt.cancellation_requested_at is not None
+            or run.cancellation_requested_at is not None
+        ):
+            raise HTTPException(status_code=409, detail="preview_lifecycle_fenced")
+        if not is_stage1_live_preview_eligible(stage.resolved_execution_spec_json):
+            raise HTTPException(status_code=409, detail="preview_contract_ineligible")
+
+        await acquire_preview_capacity_locks(session, team_id=run.team_id)
+        generation = await session.get(
+            PipelineLivePreviewGeneration, attempt_id, with_for_update=True
+        )
+        if generation is None:
+            team_generations, _team_bytes = await active_team_preview_totals(
+                session, team_id=run.team_id
+            )
+            global_generations, _global_bytes = await active_global_preview_totals(session)
+            if team_generations >= PREVIEW_TEAM_MAX_GENERATIONS:
+                raise HTTPException(status_code=429, detail="preview_team_bound_exceeded")
+            if global_generations >= PREVIEW_GLOBAL_MAX_GENERATIONS:
+                raise HTTPException(status_code=429, detail="preview_global_bound_exceeded")
+            generation = PipelineLivePreviewGeneration(
+                execution_attempt_id=attempt_id,
+                generation=attempt_id,
+                team_id=run.team_id,
+                pipeline_run_id=run.id,
+                pipeline_stage_run_id=stage.id,
+                worker_id=attempt.worker_id,
+                claim_id=claim_id,
+                lease_epoch=lease_epoch,
+                state="waiting",
+                expires_at=generation_expiry(observed),
+            )
+            session.add(generation)
+            await session.flush()
+        elif (
+            generation.worker_id != attempt.worker_id
+            or generation.claim_id != claim_id
+            or generation.lease_epoch != lease_epoch
+            or generation.purged_at is not None
+        ):
+            raise HTTPException(status_code=409, detail="preview_generation_fenced")
+
+        prior = await session.get(PipelineLivePreviewFrame, (attempt_id, sequence))
+        if prior is not None:
+            if (
+                prior.idempotency_key != idempotency_key
+                or int(prior.step_idx) != step_idx
+                or prior.jpeg_sha256 != digest
+                or prior.jpeg_bytes != value
+            ):
+                raise HTTPException(status_code=409, detail="preview_replay_conflict")
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "schema_version": "loom.behavior-stage1-live-preview.v1",
+                    "attempt_id": str(attempt_id),
+                    "generation": str(generation.generation),
+                    "sequence": sequence,
+                    "accepted": True,
+                    "idempotent_replay": True,
+                },
+            )
+
+        # Capacity is charged only for new frames. Identical replays above are
+        # allowed at a full team/global budget and never double-charge bytes.
+        idempotency_prior = (
+            await session.execute(
+                select(PipelineLivePreviewFrame).where(
+                    PipelineLivePreviewFrame.execution_attempt_id == attempt_id,
+                    PipelineLivePreviewFrame.idempotency_key == idempotency_key,
+                )
+            )
+        ).scalar_one_or_none()
+        if idempotency_prior is not None:
+            raise HTTPException(status_code=409, detail="preview_idempotency_conflict")
+        expected_sequence = (
+            0 if generation.latest_sequence is None else generation.latest_sequence + 1
+        )
+        if sequence != expected_sequence:
+            raise HTTPException(status_code=409, detail="preview_sequence_gap")
+        if generation.latest_step_idx is not None and step_idx < int(generation.latest_step_idx):
+            raise HTTPException(status_code=409, detail="preview_step_regressed")
+        if not publish_due(last_received_at=generation.received_at, now=observed):
+            raise HTTPException(status_code=429, detail="preview_cadence_exceeded")
+
+        record = LivePreviewRecordV1(
+            schema_version="loom.behavior-stage1-live-preview.v1",
+            sequence=sequence,
+            step_idx=step_idx,
+            jpeg_sha256=digest,
+            jpeg_size_bytes=len(value),
+        )
+        await enforce_generation_bounds(
+            session,
+            generation=generation,
+            incoming_bytes=len(value),
+        )
+        await session.flush()
+        _team_generations, team_bytes = await active_team_preview_totals(
+            session, team_id=run.team_id
+        )
+        _global_generations, global_bytes = await active_global_preview_totals(session)
+        if team_bytes + len(value) > PREVIEW_TEAM_MAX_BYTES:
+            raise HTTPException(status_code=429, detail="preview_team_bound_exceeded")
+        if global_bytes + len(value) > PREVIEW_GLOBAL_MAX_BYTES:
+            raise HTTPException(status_code=429, detail="preview_global_bound_exceeded")
+        session.add(
+            PipelineLivePreviewFrame(
+                execution_attempt_id=attempt_id,
+                sequence=record.sequence,
+                step_idx=record.step_idx,
+                jpeg_sha256=record.jpeg_sha256,
+                jpeg_size_bytes=record.jpeg_size_bytes,
+                jpeg_bytes=value,
+                idempotency_key=idempotency_key,
+                received_at=observed,
+            )
+        )
+        generation.state = "live"
+        generation.latest_sequence = sequence
+        generation.latest_step_idx = step_idx
+        generation.received_at = observed
+        generation.frame_count += 1
+        generation.total_bytes += len(value)
+        generation.expires_at = generation_expiry(observed)
+        generation.updated_at = observed
+        await session.commit()
+    PIPELINE_LIVE_PREVIEW_FRAMES_TOTAL.labels(result="accepted", reason="ok").inc()
+    PIPELINE_LIVE_PREVIEW_BYTES_TOTAL.inc(len(value))
+    return JSONResponse(
+        status_code=201,
+        content={
+            "schema_version": "loom.behavior-stage1-live-preview.v1",
+            "attempt_id": str(attempt_id),
+            "generation": str(attempt_id),
+            "sequence": sequence,
+            "accepted": True,
+            "idempotent_replay": False,
+        },
     )
 
 
@@ -494,6 +742,41 @@ async def report_attempt_started(
         attempt.runtime_started_at = payload.runtime_started_at
         attempt.input_view_digest = payload.input_view_digest
         attempt.step_jwt_id = payload.step_jwt_id
+        if is_stage1_live_preview_eligible(stage.resolved_execution_spec_json):
+            run = await session.get(PipelineRun, stage.pipeline_run_id)
+            if run is None or attempt.worker_id is None:
+                raise HTTPException(status_code=409, detail="preview_identity_unavailable")
+            await acquire_preview_capacity_locks(session, team_id=run.team_id)
+            generation = await session.get(
+                PipelineLivePreviewGeneration, attempt.id, with_for_update=True
+            )
+            if generation is None:
+                team_generations, _team_bytes = await active_team_preview_totals(
+                    session, team_id=run.team_id
+                )
+                global_generations, global_bytes = await active_global_preview_totals(session)
+                if (
+                    team_generations < PREVIEW_TEAM_MAX_GENERATIONS
+                    and not global_preview_bound_exceeded(
+                        generations=global_generations,
+                        bytes_used=global_bytes,
+                        incoming=0,
+                    )
+                ):
+                    session.add(
+                        PipelineLivePreviewGeneration(
+                            execution_attempt_id=attempt.id,
+                            generation=attempt.id,
+                            team_id=run.team_id,
+                            pipeline_run_id=run.id,
+                            pipeline_stage_run_id=stage.id,
+                            worker_id=attempt.worker_id,
+                            claim_id=claim_id,
+                            lease_epoch=lease_epoch,
+                            state="waiting",
+                            expires_at=generation_expiry(datetime.now(UTC)),
+                        )
+                    )
         await session.execute(
             update(PipelineStageRun)
             .where(PipelineStageRun.id == attempt.stage_run_id)
@@ -556,6 +839,11 @@ async def _terminal_report(
             attempt.reason_code = "cancelled"
             attempt.cancellation_observed_at = payload.observed_at
             attempt.cancellation_outcome = payload.outcome
+        await purge_live_preview(
+            session,
+            attempt_id=attempt.id,
+            reason="attempt_failed" if state == "failed" else "attempt_cancelled",
+        )
         response = {"execution_attempt_id": str(attempt_id), "state": state}
         await _journal_response(
             session,
@@ -699,6 +987,7 @@ async def report_attempt_cancelled(
         attempt.cleanup_acknowledged_at = payload.observed_at
         attempt.cleanup_proof_json = cleanup_proof
         attempt.cleanup_proof_digest = canonical_digest(cleanup_proof)
+        await purge_live_preview(session, attempt_id=attempt.id, reason="cancelled")
         stage.state = "cancelled"
         stage.reason_code = str(terminal_cause)
         stage.finished_at = payload.observed_at
@@ -770,6 +1059,13 @@ async def report_attempt_complete(
         attempt.result_manifest_json = payload.stage_result.model_dump(mode="json")
         attempt.result_manifest_digest = payload.stage_result_sha256
         attempt.finished_at = datetime.now(UTC)
+        generation = await session.get(
+            PipelineLivePreviewGeneration, attempt.id, with_for_update=True
+        )
+        if generation is not None and generation.purged_at is None:
+            generation.state = "handoff"
+            generation.expires_at = generation_expiry(datetime.now(UTC))
+            generation.updated_at = datetime.now(UTC)
         response = {"execution_attempt_id": str(attempt_id), "state": "succeeded"}
         await _journal_response(
             session,
@@ -910,6 +1206,7 @@ async def report_worker_lost_cleanup(
         attempt.cleanup_acknowledged_at = payload.observed_at
         attempt.cleanup_proof_json = proof
         attempt.cleanup_proof_digest = canonical_digest(proof)
+        await purge_live_preview(session, attempt_id=attempt.id, reason="worker_lost")
         if terminal_cause is not None:
             attempt.cancellation_observed_at = payload.observed_at
             attempt.cancellation_outcome = "worker_lost_cleanup"

@@ -10,6 +10,7 @@ surface that as `False` from the corresponding methods so callers can log
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -18,6 +19,8 @@ from urllib.parse import quote
 from uuid import UUID
 
 import httpx
+
+from loom.pipeline.live_preview import LivePreviewRecordV1, validate_preview_jpeg
 
 
 class StepTokenClient(Protocol):
@@ -98,7 +101,8 @@ class HttpControlPlaneClient:
             return self._client, False
         return (
             httpx.AsyncClient(
-                base_url=self.base_url, timeout=self.timeout_sec,
+                base_url=self.base_url,
+                timeout=self.timeout_sec,
             ),
             True,
         )
@@ -139,9 +143,7 @@ class HttpControlPlaneClient:
         if capability_snapshot is not None:
             payload["capability_snapshot"] = dict(capability_snapshot)
         if slurm_gpu_allocation_evidence is not None:
-            payload["slurm_gpu_allocation_evidence"] = dict(
-                slurm_gpu_allocation_evidence
-            )
+            payload["slurm_gpu_allocation_evidence"] = dict(slurm_gpu_allocation_evidence)
         cache_values = (
             input_cache_capacity_bytes,
             input_cache_reserved_bytes,
@@ -158,7 +160,8 @@ class HttpControlPlaneClient:
         client, owned = self._http()
         try:
             r = await client.post(
-                "/workers/register", headers=self._headers,
+                "/workers/register",
+                headers=self._headers,
                 json=payload,
             )
             r.raise_for_status()
@@ -176,7 +179,8 @@ class HttpControlPlaneClient:
         client, owned = self._http()
         try:
             r = await client.post(
-                "/trials/claim", headers=self._headers,
+                "/trials/claim",
+                headers=self._headers,
                 json={"worker_id": str(worker_id), "caps": caps},
             )
             if r.status_code == 204:
@@ -539,10 +543,7 @@ class HttpControlPlaneClient:
         payload: Mapping[str, Any],
     ) -> dict[str, Any]:
         return await self._post_internal_claim_bound(
-            path=(
-                f"/api/v1/internal/execution-attempts/{attempt_id}/"
-                "final-output-sessions"
-            ),
+            path=(f"/api/v1/internal/execution-attempts/{attempt_id}/final-output-sessions"),
             claim=claim,
             request_id=request_id,
             payload=payload,
@@ -562,6 +563,51 @@ class HttpControlPlaneClient:
             request_id=request_id,
             payload=payload,
         )
+
+    async def publish_live_preview_frame(
+        self,
+        *,
+        attempt_id: UUID,
+        sequence: int,
+        step_idx: int,
+        jpeg_sha256: str,
+        jpeg: bytes,
+        claim: ExecutionAttemptClaimHeaders,
+    ) -> dict[str, Any]:
+        """Publish one bounded frame over the existing Attempt-fenced channel."""
+
+        record = LivePreviewRecordV1(
+            schema_version="loom.behavior-stage1-live-preview.v1",
+            sequence=sequence,
+            step_idx=step_idx,
+            jpeg_sha256=jpeg_sha256,
+            jpeg_size_bytes=len(jpeg),
+        )
+        validate_preview_jpeg(jpeg)
+        if record.jpeg_sha256 != "sha256:" + hashlib.sha256(jpeg).hexdigest():
+            raise ValueError("preview digest does not match bytes")
+        idempotency_key = f"live-preview:{attempt_id}:{sequence}"
+        client, owned = self._http()
+        try:
+            response = await client.put(
+                f"/api/v1/execution-attempts/{attempt_id}/live-preview/frames/{sequence}",
+                headers={
+                    **self._headers,
+                    **claim.as_headers(),
+                    "Idempotency-Key": idempotency_key,
+                    "Content-Type": "image/jpeg",
+                    "Content-Length": str(len(jpeg)),
+                    "If-Match": self._quoted_etag(jpeg_sha256),
+                    "X-Loom-Preview-Step": str(step_idx),
+                },
+                content=jpeg,
+                follow_redirects=False,
+            )
+            response.raise_for_status()
+            return self._response_json(response)
+        finally:
+            if owned:
+                await client.aclose()
 
     async def commit_checkpoint_session(
         self,
@@ -903,7 +949,8 @@ class HttpControlPlaneClient:
             if status is not None:
                 kwargs["json"] = {"status": status}
             r = await client.post(
-                f"/workers/{worker_id}/heartbeat", **kwargs,
+                f"/workers/{worker_id}/heartbeat",
+                **kwargs,
             )
             r.raise_for_status()
         finally:
@@ -931,7 +978,8 @@ class HttpControlPlaneClient:
             if failure_message is not None:
                 payload["failure_message"] = failure_message
             r = await client.patch(
-                f"/trials/{trial_id}/state", headers=self._headers,
+                f"/trials/{trial_id}/state",
+                headers=self._headers,
                 json=payload,
             )
             if r.status_code == 409:
@@ -962,7 +1010,8 @@ class HttpControlPlaneClient:
             if failure_message is not None:
                 payload["failure_message"] = failure_message
             r = await client.post(
-                f"/trials/{trial_id}/retry", headers=self._headers,
+                f"/trials/{trial_id}/retry",
+                headers=self._headers,
                 json=payload,
             )
             if r.status_code == 409:
@@ -1003,7 +1052,8 @@ class HttpControlPlaneClient:
         client, owned = self._http()
         try:
             r = await client.get(
-                f"/trials/{trial_id}", headers=self._headers,
+                f"/trials/{trial_id}",
+                headers=self._headers,
             )
             r.raise_for_status()
             body = r.json()
@@ -1018,7 +1068,8 @@ class HttpControlPlaneClient:
         try:
             encoded_task_id = quote(task_id, safe="/")
             r = await client.get(
-                f"/tasks/{encoded_task_id}/bundle", headers=self._headers,
+                f"/tasks/{encoded_task_id}/bundle",
+                headers=self._headers,
             )
             r.raise_for_status()
             return r.json()  # type: ignore[no-any-return]
@@ -1040,7 +1091,8 @@ class HttpControlPlaneClient:
         client, owned = self._http()
         try:
             r = await client.post(
-                "/admin/step-tokens", headers=self._headers,
+                "/admin/step-tokens",
+                headers=self._headers,
                 json={
                     "team_id": str(team_id),
                     "trial_id": str(trial_id),
@@ -1098,7 +1150,8 @@ class HttpControlPlaneClient:
         client, owned = self._http()
         try:
             r = await client.get(
-                f"/trials/{trial_id}/llm-calls", headers=self._headers,
+                f"/trials/{trial_id}/llm-calls",
+                headers=self._headers,
             )
             r.raise_for_status()
             body = r.json()
@@ -1131,7 +1184,8 @@ class HttpControlPlaneClient:
         client, owned = self._http()
         try:
             r = await client.patch(
-                f"/trials/{trial_id}/trajectory_index", headers=self._headers,
+                f"/trials/{trial_id}/trajectory_index",
+                headers=self._headers,
                 json={"worker_id": str(worker_id), **fields},
             )
             if r.status_code == 409:
@@ -1197,7 +1251,11 @@ class HttpControlPlaneClient:
     # ─── #317 trial-cache build coordination ────────────────────────
 
     async def claim_trial_cache_slot(
-        self, cache_key: str, worker_id: UUID, *, ttl_sec: float,
+        self,
+        cache_key: str,
+        worker_id: UUID,
+        *,
+        ttl_sec: float,
     ) -> bool:
         """Atomic claim. Returns True if THIS worker is now the builder."""
         client, owned = self._http()
@@ -1232,7 +1290,9 @@ class HttpControlPlaneClient:
                 await client.aclose()
 
     async def release_trial_cache_slot(
-        self, cache_key: str, worker_id: UUID,
+        self,
+        cache_key: str,
+        worker_id: UUID,
     ) -> None:
         """Release our slot. Idempotent: a stolen-by-TTL slot deletes nothing."""
         client, owned = self._http()
@@ -1248,7 +1308,11 @@ class HttpControlPlaneClient:
                 await client.aclose()
 
     async def refresh_trial_cache_slot(
-        self, cache_key: str, worker_id: UUID, *, ttl_sec: float,
+        self,
+        cache_key: str,
+        worker_id: UUID,
+        *,
+        ttl_sec: float,
     ) -> bool:
         """Heartbeat: extend our slot TTL. False = we no longer own the slot."""
         client, owned = self._http()

@@ -400,6 +400,7 @@ class PipelineStageRunDetailV1(PipelineStageRunSummaryV1):
     resource_profile_digest: str | None
     request_renderer_digest: str | None
     latest_checkpoint_artifact_id: UUID | None
+    live_preview_eligible: bool
     artifacts: list[PipelineArtifactSummaryV1]
 
 

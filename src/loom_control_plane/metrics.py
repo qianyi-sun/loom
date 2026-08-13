@@ -178,6 +178,29 @@ PIPELINE_CONTROLLER_RECONCILE_ERRORS_TOTAL = Counter(
     "Exhausted Pipeline reconcile failures",
     labelnames=("reason",),
 )
+
+PIPELINE_LIVE_PREVIEW_FRAMES_TOTAL = Counter(
+    "loom_pipeline_live_preview_frames_total",
+    "Bounded Stage 1 preview frame publish outcomes",
+    labelnames=("result", "reason"),
+)
+PIPELINE_LIVE_PREVIEW_BYTES_TOTAL = Counter(
+    "loom_pipeline_live_preview_bytes_total",
+    "Accepted Stage 1 preview JPEG bytes",
+)
+PIPELINE_LIVE_PREVIEW_ACTIVE_GENERATIONS = Gauge(
+    "loom_pipeline_live_preview_active_generations",
+    "Active ephemeral Stage 1 preview generations",
+)
+PIPELINE_LIVE_PREVIEW_LAST_FRAME_AGE_SECONDS = Gauge(
+    "loom_pipeline_live_preview_last_frame_age_seconds",
+    "Age of the oldest latest frame among active Stage 1 previews",
+)
+PIPELINE_LIVE_PREVIEW_PURGES_TOTAL = Counter(
+    "loom_pipeline_live_preview_purges_total",
+    "Ephemeral Stage 1 preview purge outcomes",
+    labelnames=("reason",),
+)
 PIPELINE_STAGE_QUEUE_AGE_SECONDS = Gauge(
     "loom_pipeline_stage_queue_age_seconds",
     "Maximum Pipeline StageRun queue age",

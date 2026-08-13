@@ -84,6 +84,12 @@ ARTIFACT_DOWNLOAD_BYTES = Counter(
     labelnames=("artifact_kind",),
 )
 
+PIPELINE_LIVE_PREVIEW_READS_TOTAL = Counter(
+    "loom_svc_pipeline_live_preview_reads_total",
+    "Bounded same-origin Pipeline live preview read outcomes",
+    labelnames=("result", "reason"),
+)
+
 TEAM_EMERGENCY_ACTIONS_TOTAL = Counter(
     "loom_svc_team_emergency_actions_total",
     "Emergency team controls invoked by staging operators",
