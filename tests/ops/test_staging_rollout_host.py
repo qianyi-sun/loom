@@ -1054,8 +1054,8 @@ def test_install_keeps_legacy_repo_and_venv_frozen_across_candidate_updates(
     legacy_venv = installer.filesystem.path(host.LEGACY_VENV)
     legacy_repo.mkdir(parents=True)
     legacy_venv.mkdir(parents=True)
-    repo_sentinel = legacy_repo / "active-pr907-script.py"
-    venv_sentinel = legacy_venv / "active-pr907-python"
+    repo_sentinel = legacy_repo / "active-predecessor-script.py"
+    venv_sentinel = legacy_venv / "active-predecessor-python"
     repo_sentinel.write_bytes(b"legacy-repo-exact-bytes\n")
     venv_sentinel.write_bytes(b"legacy-venv-exact-bytes\n")
 

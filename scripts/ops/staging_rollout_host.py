@@ -76,7 +76,7 @@ RUNNER_ROOT = Path("/opt/loom-staging-runner")
 INSTALL_SOURCE = RUNNER_ROOT / "source"
 SHARED_WORK2_MOUNT_HELPER = INSTALL_SOURCE / "scripts/ops/staging_rollout_shared_work2.py"
 SHARED_WORKER_REPO_HELPER = INSTALL_SOURCE / "scripts/ops/staging_rollout_shared_repo.py"
-# The pre-canonical #907 supervisor still executes from this checkout.  Keep it
+# A pre-canonical supervisor may still execute from this checkout.  Keep it
 # frozen while a replacement installer publishes and validates its own exact
 # source.  Canonical supervisors switch to the separately verified shared
 # candidate checkout during the protected transition.

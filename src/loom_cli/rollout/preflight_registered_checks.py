@@ -873,7 +873,7 @@ def _empty_readonly_authority_probe(policy_digest: str) -> CheckProbe:
 def build_external_supervisor_predecessor_check(
     source: ExternalSupervisorPredecessorSource,
 ) -> RegisteredCheck:
-    """Bind the live #907/canonical predecessor before any protected mutation."""
+    """Bind each reviewed-manifest/canonical predecessor before protected mutation."""
 
     def probe(context: CheckContext) -> CheckProbe:
         if (
@@ -974,12 +974,13 @@ def build_external_supervisor_predecessor_check(
             timeout_seconds=EXTERNAL_SUPERVISOR_PREDECESSOR_TIMEOUT_SECONDS,
             freshness_ttl_seconds=120,
             remediation=(
-                "restore the checked-in #907 or active canonical supervisor authority, "
+                "restore the checked-in reviewed predecessor or active canonical supervisor "
+                "authority, "
                 "clear every durable transition, and re-run read-only admission"
             ),
             secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
         ),
-        implementation_version="v4",
+        implementation_version="v5",
         operations={CheckOperation.PROBE: probe},
     )
 

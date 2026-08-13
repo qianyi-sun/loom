@@ -10,7 +10,6 @@ import pytest
 from loom_cli.rollout.external_supervisor_predecessor import (
     DEFAULT_PREDECESSOR_MANIFEST,
     OLDLAB_PREDECESSOR_MANIFEST,
-    PR907_PREDECESSOR_BYTES_SHA256,
     PR1197_PREDECESSOR_BYTES_SHA256,
     ExternalSupervisorCanonicalIdentity,
     ExternalSupervisorPoolIdentity,
@@ -41,17 +40,27 @@ def _pool_identity(
     )
 
 
-def test_checked_in_pr907_predecessor_is_canonical_and_source_reproducible() -> None:
+def test_checked_in_pr1342_gb10_predecessor_is_source_reproducible() -> None:
     manifest = load_predecessor_manifest()
 
     assert hashlib.sha256(DEFAULT_PREDECESSOR_MANIFEST.read_bytes()).hexdigest() == (
-        PR907_PREDECESSOR_BYTES_SHA256
+        "da532309565f9111f032debdc2d3e6677f9a85c89d077ebd45bc4b88117f6370"
     )
-    assert manifest.source_commit == "31714ff17797231236d0ccef8f8390d4a5e66028"
-    assert manifest.source_tree == "0f65994e8dfa0304e50f99f803af157faf00c3d4"
+    assert manifest.authority_id == "merged-pr-1342"
+    assert manifest.pool_identity_predecessor_kind == "canonical"
+    assert manifest.source_commit == "39bc56eb29b89c9c9da6247ec513cb619e356960"
+    assert manifest.source_tree == "3e936b139de1344e1a6120375b9e065a2c458c6b"
     assert manifest.manifest_digest == (
-        "debcf3a704b096c165d606eea8c26b732708f17856af124fac19fe504df7c2d2"
+        "217acbf8ceaecf7967bbb5da4bd6464fe252377fdc822319b3bd643387f9ffee"
     )
+    assert dict(manifest.unit_sha256) == {
+        "loom-autoscaler-gb10-staging.service": (
+            "b4172bb233fe6bae543169015deb8a5f443a720a3bcd7dacb5cf031a430eb3c9"
+        ),
+        "loom-autoscaler-gb10-staging.timer": (
+            "e4bd4fadfae96ef288972c1c1ff8b9693d7fc5ddace3984d2a61dcdf9af5aaf0"
+        ),
+    }
     assert manifest.unit_set_digest == external_supervisor_unit_set_digest(manifest.unit_sha256)
     assert DEFAULT_PREDECESSOR_MANIFEST.read_bytes() == manifest.to_bytes()
     assert {
