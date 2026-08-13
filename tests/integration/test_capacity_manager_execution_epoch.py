@@ -9,7 +9,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import delete, select, text, update
 from sqlalchemy.exc import DBAPIError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom_capacity_manager.contracts import (
     ConfigurationActivationV1,
@@ -21,11 +21,14 @@ from loom_capacity_manager.executable_contracts import (
     canonical_executable_digest,
 )
 from loom_capacity_manager.models import (
+    CapacityAllocationEpoch,
     CapacityAuthorityState,
     CapacityCandidate,
     CapacityExecutionEpoch,
     CapacityExecutionExecutor,
+    CapacityPoolReporter,
 )
+from loom_capacity_manager.reconciler import reconcile_shadow_once
 from loom_capacity_manager.store import (
     AuthorityRecoveryError,
     CapacityManagementStore,
@@ -423,6 +426,27 @@ async def test_active_fact_ingestion_preserves_bound_identity(
         )
         != before
     )
+    input_digest = canonical_digest(
+        await fixture.store.load_allocation_input(capacity_session, fixture.writer)
+    )
+    session_factory = async_sessionmaker(
+        bind=capacity_session.bind,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    result = await reconcile_shadow_once(
+        session_factory,
+        fixture.writer,
+        store=fixture.store,
+    )
+    committed = (await capacity_session.execute(select(CapacityAllocationEpoch))).scalar_one()
+    assert result.status == "committed"
+    assert result.input_digest == input_digest
+    assert (committed.status, committed.executable, committed.input_digest) == (
+        "executable",
+        True,
+        input_digest,
+    )
 
     with pytest.raises(AuthorityRecoveryError, match="shadow-only"):
         await fixture.store.propose_fleet_configuration(
@@ -468,6 +492,59 @@ async def test_active_fact_ingestion_preserves_bound_identity(
                 actor="environment-lifecycle",
                 idempotency_key=UUID(int=11906),
             )
+
+
+async def test_active_pool_fact_rejects_same_generation_replacement_reporter(
+    capacity_session: AsyncSession,
+) -> None:
+    """A current reporter outside the immutable fleet binding cannot add active facts."""
+
+    fixture = await _setup(capacity_session, execution_policy=_policy())
+    prepared = await fixture.store.prepare_execution_epoch(
+        capacity_session,
+        fixture.request,
+        actor="activation-operator",
+        idempotency_key=UUID(int=11920),
+    )
+    await _register_execution_executors(capacity_session, fixture, prepared)
+    await fixture.store.activate_execution_epoch(
+        capacity_session,
+        ExecutionActivationV2(
+            authority_incarnation=AUTHORITY_ID,
+            expected_writer_epoch=fixture.writer.writer_epoch,
+            execution_epoch=prepared.execution_epoch,
+            execution_manifest_sha256=prepared.execution_manifest_sha256,
+            executable_new_capacity_ceiling=1,
+            executable_new_capacity_rate_per_minute=1,
+        ),
+        actor="activation-operator",
+        idempotency_key=UUID(int=11921),
+    )
+    replacement = UUID(int=11922)
+    await capacity_session.execute(
+        update(CapacityPoolReporter)
+        .where(CapacityPoolReporter.pool_id == "oldlab")
+        .values(state="fenced")
+    )
+    capacity_session.add(
+        CapacityPoolReporter(
+            pool_id="oldlab",
+            reporter_incarnation=replacement,
+            pool_generation=1,
+            state="current",
+        )
+    )
+    await capacity_session.flush()
+
+    report = pool_observation(sequence=1, pool_id="oldlab").model_copy(
+        update={"reporter_incarnation": replacement}
+    )
+    with pytest.raises(AuthorityRecoveryError, match="pool reporter binding changed"):
+        await fixture.store.ingest_pool_observation(
+            capacity_session,
+            report,
+            actor="replacement-oldlab-reporter",
+        )
 
 
 async def test_prepared_fact_and_drain_only_fact_ingestion_are_rejected(

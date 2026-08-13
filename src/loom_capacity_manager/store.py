@@ -2558,6 +2558,45 @@ class CapacityManagementStore:
         ).scalar_one_or_none()
         if epoch is None:
             raise AuthorityRecoveryError("active execution epoch row is missing")
+        configuration = (
+            await session.execute(
+                select(CapacityConfigurationEpoch).where(
+                    CapacityConfigurationEpoch.configuration_epoch == configuration_epoch
+                )
+            )
+        ).scalar_one_or_none()
+        if configuration is None or (
+            configuration.fleet_generation != epoch.fleet_generation
+            or configuration.fleet_digest != epoch.fleet_digest
+        ):
+            raise AuthorityRecoveryError("active execution configuration binding changed")
+        fleet_row = (
+            await session.execute(
+                select(CapacityConfigGeneration)
+                .where(
+                    CapacityConfigGeneration.scope == "fleet",
+                    CapacityConfigGeneration.digest == configuration.fleet_digest,
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if fleet_row is None:
+            raise AuthorityRecoveryError("active execution fleet binding is missing")
+        try:
+            fleet = _parse_contract(FleetManifestV1, fleet_row.payload)
+        except ValueError as exc:
+            raise AuthorityRecoveryError("active execution fleet binding is invalid") from exc
+        expected_pool = next(
+            (item for item in fleet.pools if item.pool_id == report.pool_id),
+            None,
+        )
+        if expected_pool is None or (
+            expected_pool.pool_generation != report.pool_generation
+            or expected_pool.pool_digest != pool.pool_digest
+            or expected_pool.pool_reporter_incarnation != report.reporter_incarnation
+            or expected_pool.pool_reporter_incarnation != reporter.reporter_incarnation
+        ):
+            raise AuthorityRecoveryError("active pool reporter binding changed")
         expected_generation = {
             "oldlab": epoch.oldlab_pool_generation,
             "gb10": epoch.gb10_pool_generation,
