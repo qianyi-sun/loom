@@ -57,6 +57,7 @@ from loom.pipeline.behavior_materialization import (
     BehaviorMaterializationSourceSnapshotV1,
     behavior_materializer_registry,
 )
+from loom.pipeline.core_fixture import builtin_pipeline_core_fixture_registry
 from loom.pipeline.input_materialization import (
     InputMaterializationRequestV1,
     PipelineInputMaterializationService,
@@ -926,7 +927,7 @@ def install_behavior_pipeline_public_adapter(*, app: Any, settings: Any) -> None
 
     registry = getattr(app.state, "pipeline_recipe_registry", None)
     if not isinstance(registry, OfficialRecipeRegistry):
-        registry = OfficialRecipeRegistry()
+        registry = builtin_pipeline_core_fixture_registry(repo_root=Path.cwd())
         app.state.pipeline_recipe_registry = registry
     app.state.pipeline_public_adapter = build_behavior_pipeline_public_adapter(
         settings=settings,

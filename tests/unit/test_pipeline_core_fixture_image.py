@@ -8,7 +8,11 @@ from pathlib import Path
 import pytest
 
 from loom.pipeline.core_fixture import (
+    PIPELINE_CORE_FIXTURE_IMAGE,
+    PIPELINE_CORE_FIXTURE_IMAGE_DIGEST,
     PIPELINE_CORE_FIXTURE_IMAGE_REPOSITORY,
+    PIPELINE_CORE_FIXTURE_IMAGE_SOURCE_COMMIT,
+    pipeline_core_fixture_registration,
 )
 from loom.pipeline_fixture import FixtureContractError, run_stage
 
@@ -30,10 +34,28 @@ def test_image_build_inputs_are_minimal_pinned_and_closed() -> None:
     assert "pip install" not in dockerfile
     assert "curl " not in dockerfile
     assert "USER 65532:65532" in dockerfile
-    assert "ENTRYPOINT [\"python\", \"-I\", \"-m\", \"loom.pipeline_fixture\"]" in dockerfile
+    assert 'ENTRYPOINT ["python", "-I", "-m", "loom.pipeline_fixture"]' in dockerfile
     assert PIPELINE_CORE_FIXTURE_IMAGE_REPOSITORY == (
         "ghcr.io/qianyi-sun/loom-pipeline-core-fixture"
     )
+    assert PIPELINE_CORE_FIXTURE_IMAGE_DIGEST == (
+        "sha256:f207eb8a709584b29cb24d174327b3d7c89261896c9a985bb083a91a94c7fa0b"
+    )
+    assert PIPELINE_CORE_FIXTURE_IMAGE == (
+        f"{PIPELINE_CORE_FIXTURE_IMAGE_REPOSITORY}@{PIPELINE_CORE_FIXTURE_IMAGE_DIGEST}"
+    )
+    assert PIPELINE_CORE_FIXTURE_IMAGE_SOURCE_COMMIT == ("dcb570bfec15d5579ddc4e4cfe630bc52e0d5f5f")
+
+
+def test_official_registration_locks_published_image_and_sources() -> None:
+    registration = pipeline_core_fixture_registration()
+    assert registration.name == "pipeline-core-fixture"
+    assert registration.version == 1
+    assert registration.submission_policy == "ordinary"
+    graph = registration.resolve({}, repo_root=ROOT)
+    assert {node.image for node in graph.nodes if node.node_kind == "container"} == {
+        PIPELINE_CORE_FIXTURE_IMAGE
+    }
 
 
 def test_module_self_check_works_from_a_clean_python_process() -> None:
@@ -80,7 +102,9 @@ def test_fixture_runs_index_aggregate_and_readback_contracts(tmp_path: Path) -> 
         seed_inputs / "seed/artifact.json",
         {"files": [], "payload": {"value": {}}, "schema_version": "loom.pipeline-core-seed.v1"},
     )
-    assert run_stage("produce_index", inputs_root=seed_inputs, outputs_root=seed_outputs) == "indexed"
+    assert (
+        run_stage("produce_index", inputs_root=seed_inputs, outputs_root=seed_outputs) == "indexed"
+    )
     index = json.loads((seed_outputs / "index/artifact.json").read_bytes())
     assert [item["shard_key"] for item in index["items"]] == ["item-000", "item-001"]
 
@@ -111,6 +135,9 @@ def test_fixture_runs_index_aggregate_and_readback_contracts(tmp_path: Path) -> 
             "schema_version": "loom.pipeline-core-aggregate.v1",
         },
     )
-    assert run_stage(
-        "local_artifact_readback", inputs_root=receipt_inputs, outputs_root=receipt_outputs
-    ) == "verified"
+    assert (
+        run_stage(
+            "local_artifact_readback", inputs_root=receipt_inputs, outputs_root=receipt_outputs
+        )
+        == "verified"
+    )
