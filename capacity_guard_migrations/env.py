@@ -158,6 +158,7 @@ def run_migrations_online() -> None:
                 "attempt_count",
                 "submit_priority",
                 "submitted_at",
+                "lifecycle_authority_id",
             )
             missing_trial_columns = tuple(
                 column
@@ -175,6 +176,117 @@ def run_migrations_online() -> None:
                     "protected capacity owner requires direct SELECT privileges on "
                     "the demand-source columns of public.trials: "
                     + ", ".join(missing_trial_columns)
+                )
+            required_trial_insert_columns = (
+                "id",
+                "team_id",
+                "task_id",
+                "config",
+                "requires_caps",
+                "state",
+                "submit_priority",
+                "batch_id",
+                "idempotency_key",
+                "sample_idx",
+                "combination_idx",
+                "provider_connection_id",
+                "provider_model_id",
+                "submitted_by_user_id",
+                "usage_attributed_user_id",
+                "usage_attributed_actor",
+                "family_key",
+            )
+            missing_trial_insert_columns = tuple(
+                column
+                for column in required_trial_insert_columns
+                if not connection.execute(
+                    text(
+                        "SELECT has_column_privilege(current_user, "
+                        "'public.trials', :column, 'INSERT')"
+                    ),
+                    {"column": column},
+                ).scalar_one()
+            )
+            if missing_trial_insert_columns:
+                raise RuntimeError(
+                    "protected capacity owner requires direct INSERT privileges on "
+                    "the bounded projection columns of public.trials: "
+                    + ", ".join(missing_trial_insert_columns)
+                )
+            required_trial_update_columns = ("lifecycle_authority_id", "state")
+            missing_trial_update_columns = tuple(
+                column
+                for column in required_trial_update_columns
+                if not connection.execute(
+                    text(
+                        "SELECT has_column_privilege(current_user, "
+                        "'public.trials', :column, 'UPDATE')"
+                    ),
+                    {"column": column},
+                ).scalar_one()
+            )
+            if missing_trial_update_columns:
+                raise RuntimeError(
+                    "protected capacity owner requires direct UPDATE privileges on "
+                    "public.trials: " + ", ".join(missing_trial_update_columns)
+                )
+            if not connection.execute(
+                text(
+                    "SELECT has_column_privilege(current_user, 'public.trials', 'id', 'REFERENCES')"
+                )
+            ).scalar_one():
+                raise RuntimeError(
+                    "protected capacity owner requires direct REFERENCES privilege on "
+                    "public.trials.id"
+                )
+            if not connection.execute(
+                text(
+                    "SELECT has_column_privilege(current_user, "
+                    "'public.data_lifecycle_authorities', 'id', 'SELECT')"
+                )
+            ).scalar_one():
+                raise RuntimeError(
+                    "protected capacity owner requires direct SELECT privilege on "
+                    "public.data_lifecycle_authorities.id"
+                )
+            required_lifecycle_insert_columns = (
+                "environment",
+                "namespace",
+                "team_id",
+                "data_class",
+                "owner_kind",
+                "owner_id",
+                "created_at",
+                "expires_at",
+                "pinned",
+                "state",
+            )
+            missing_lifecycle_insert_columns = tuple(
+                column
+                for column in required_lifecycle_insert_columns
+                if not connection.execute(
+                    text(
+                        "SELECT has_column_privilege(current_user, "
+                        "'public.data_lifecycle_authorities', :column, 'INSERT')"
+                    ),
+                    {"column": column},
+                ).scalar_one()
+            )
+            if missing_lifecycle_insert_columns:
+                raise RuntimeError(
+                    "protected capacity owner requires direct INSERT privileges on "
+                    "public.data_lifecycle_authorities: "
+                    + ", ".join(missing_lifecycle_insert_columns)
+                )
+            if not connection.execute(
+                text(
+                    "SELECT has_column_privilege(current_user, "
+                    "'public.data_lifecycle_authorities', 'id', 'REFERENCES')"
+                )
+            ).scalar_one():
+                raise RuntimeError(
+                    "protected capacity owner requires direct REFERENCES privilege on "
+                    "public.data_lifecycle_authorities.id"
                 )
 
             connection.exec_driver_sql(

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import UTC, datetime
-from typing import Annotated, Literal
+from decimal import Decimal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, JsonValue, field_validator, model_validator
 
 from loom_capacity_guard.contracts import (
     Digest,
@@ -126,6 +129,124 @@ class InertTrialSubmissionV1(AgentRegistrationV1):
         if canonical_digest(self.requirements) != self.requirements_digest:
             raise ValueError("requirements digest does not match sealed requirements")
         return self
+
+
+class AtomicTrialSubmissionV1(InertTrialSubmissionV1):
+    """Agent-only request to create one public trial and protected attempt."""
+
+    team_id: UUID
+    task_id: Annotated[str, Field(min_length=1, max_length=1024)]
+    config: dict[str, JsonValue]
+    submit_priority: Annotated[int, Field(ge=0, le=(1 << 31) - 1)]
+    batch_id: UUID | None = None
+    idempotency_key: Annotated[str, Field(min_length=1, max_length=1024)] | None = None
+    sample_idx: Annotated[int, Field(ge=0, le=(1 << 31) - 1)] = 0
+    combination_idx: Annotated[int, Field(ge=0, le=(1 << 31) - 1)] = 0
+    provider_connection_id: UUID | None = None
+    provider_model_id: Annotated[str, Field(min_length=1, max_length=1024)] | None = None
+    submitted_by_user_id: UUID | None = None
+    usage_attributed_user_id: UUID | None = None
+    usage_attributed_actor: Annotated[str, Field(min_length=1, max_length=1024)] | None = None
+    family_key: Annotated[str, Field(min_length=1, max_length=1024)] | None = None
+
+    @field_validator("config")
+    @classmethod
+    def _canonically_encodable_config(cls, value: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        database_canonical_json_bytes(value)
+        return value
+
+
+class AtomicTrialSubmissionReceiptV1(StrictGuardModel):
+    """Exact result of one atomic, still non-executable trial submission."""
+
+    trial_id: UUID
+    protected_attempt_id: UUID
+    lifecycle_authority_id: UUID
+    requirements_digest: Digest
+    submitted_at: datetime
+    replayed: bool
+    executable: Literal[False] = False
+
+    @field_validator("submitted_at", mode="before")
+    @classmethod
+    def _parse_submitted_at(cls, value: datetime | str) -> datetime | str:
+        if isinstance(value, str):
+            timestamp = f"{value[:-1]}+00:00" if value.endswith("Z") else value
+            try:
+                return datetime.fromisoformat(timestamp)
+            except ValueError:
+                return value
+        return value
+
+    @field_validator("submitted_at")
+    @classmethod
+    def _submitted_at_utc(cls, value: datetime) -> datetime:
+        return _utc(value)
+
+
+def _postgres_jsonb_text(value: Any) -> str:
+    """Encode JSON exactly as PostgreSQL ``jsonb::text`` emits it."""
+
+    if value is None:
+        return "null"
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if isinstance(value, str):
+        if "\x00" in value:
+            raise ValueError("PostgreSQL JSONB cannot represent a null character")
+        return json.dumps(value, ensure_ascii=False, allow_nan=False)
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        number = Decimal(str(value))
+        if not number.is_finite():
+            raise ValueError("PostgreSQL JSONB requires a finite number")
+        if number.is_zero():
+            number = number.copy_abs()
+        return format(number, "f")
+    if isinstance(value, list):
+        return "[" + ", ".join(_postgres_jsonb_text(item) for item in value) + "]"
+    if isinstance(value, dict):
+        if any(not isinstance(key, str) for key in value):
+            raise TypeError("PostgreSQL JSONB object keys must be strings")
+        # PostgreSQL jsonb orders object keys by UTF-8 byte length and then
+        # byte value. Matching that stored representation lets the database
+        # independently reject alternate lexical encodings.
+        keys = sorted(value, key=lambda key: (len(key.encode("utf-8")), key.encode("utf-8")))
+        return (
+            "{"
+            + ", ".join(
+                f"{_postgres_jsonb_text(key)}: {_postgres_jsonb_text(value[key])}" for key in keys
+            )
+            + "}"
+        )
+    raise TypeError(f"unsupported JSON value {type(value).__name__}")
+
+
+def atomic_submission_bytes(submission: AtomicTrialSubmissionV1) -> bytes:
+    """Encode the outer request in the database-verifiable canonical form."""
+
+    if not isinstance(submission, AtomicTrialSubmissionV1):
+        raise TypeError("atomic encoding requires an atomic submission contract")
+    return database_canonical_json_bytes(submission.model_dump(mode="json"))
+
+
+def database_canonical_json_bytes(value: Any) -> bytes:
+    """Encode one JSON value exactly as PostgreSQL ``jsonb::text`` stores it."""
+
+    try:
+        encoded = _postgres_jsonb_text(value).encode("utf-8")
+    except (UnicodeEncodeError, TypeError, ValueError) as exc:
+        raise ValueError("atomic submission cannot be canonically encoded") from exc
+    if len(encoded) > 8 * 1024 * 1024:
+        raise ValueError("atomic submission canonical contract exceeds maximum byte size")
+    return encoded
+
+
+def atomic_submission_digest(submission: AtomicTrialSubmissionV1) -> str:
+    return hashlib.sha256(atomic_submission_bytes(submission)).hexdigest()
 
 
 class GuardDemandAttemptV1(StrictGuardModel):
@@ -324,10 +445,15 @@ class GuardLifecycleDemandObservationV2(AgentRegistrationV1):
 __all__ = [
     "AgentPoolCapabilityV1",
     "AgentRegistrationV1",
+    "AtomicTrialSubmissionReceiptV1",
+    "AtomicTrialSubmissionV1",
     "GuardDemandAttemptV1",
     "GuardDemandObservationV1",
     "GuardLifecycleDemandAttemptV2",
     "GuardLifecycleDemandObservationV2",
     "InertTrialSubmissionV1",
     "ReporterConfigurationV1",
+    "atomic_submission_bytes",
+    "atomic_submission_digest",
+    "database_canonical_json_bytes",
 ]

@@ -97,6 +97,10 @@ def test_agent_can_execute_only_the_bounded_agent_functions(
                         "'loom_capacity_guard.capture_lifecycle_demand_observation"
                         "(uuid,bigint,integer)', 'EXECUTE') AS lifecycle_capture_execute, "
                         "has_function_privilege(:agent, "
+                        "'loom_capacity_guard.capture_lifecycle_demand_observation_v2_queued"
+                        "(uuid,bigint,integer)', 'EXECUTE') "
+                        "AS queued_lifecycle_capture_execute, "
+                        "has_function_privilege(:agent, "
                         "'loom_capacity_guard.capture_demand_observation_v1_legacy"
                         "(uuid,bigint,integer)', 'EXECUTE') AS legacy_capture_execute, "
                         "has_function_privilege(:agent, "
@@ -152,7 +156,11 @@ def test_agent_can_execute_only_the_bounded_agent_functions(
                         "has_function_privilege(:agent, "
                         "'loom_capacity_guard.register_inert_trial_submission"
                         "(uuid,jsonb,bytea,text,bytea,text)', 'EXECUTE') "
-                        "AS submission_execute"
+                        "AS submission_execute, "
+                        "has_function_privilege(:agent, "
+                        "'loom_capacity_guard.submit_inert_trial_projection"
+                        "(uuid,jsonb,bytea,text,jsonb,bytea,text,bytea,text)', 'EXECUTE') "
+                        "AS atomic_submission_execute"
                     ),
                     {"agent": agent_role},
                 )
@@ -166,6 +174,7 @@ def test_agent_can_execute_only_the_bounded_agent_functions(
             "sequence_usage": False,
             "capture_execute": True,
             "lifecycle_capture_execute": True,
+            "queued_lifecycle_capture_execute": False,
             "legacy_capture_execute": False,
             "lifecycle_head_guard_execute": False,
             "lifecycle_head_project_execute": False,
@@ -184,6 +193,7 @@ def test_agent_can_execute_only_the_bounded_agent_functions(
             "legacy_freeze_execute": True,
             "cross_mode_guard_execute": False,
             "submission_execute": True,
+            "atomic_submission_execute": True,
         }
     finally:
         admin.dispose()
@@ -224,6 +234,7 @@ def test_agent_functions_have_fixed_search_paths_and_exact_definer_status(
                         "WHERE n.nspname = 'loom_capacity_guard' "
                         "AND p.proname IN ('capture_demand_observation', "
                         "'capture_lifecycle_demand_observation', "
+                        "'capture_lifecycle_demand_observation_v2_queued', "
                         "'capture_demand_observation_v1_legacy', "
                         "'enforce_attempt_lifecycle_head_transition', "
                         "'project_attempt_lifecycle_head', "
@@ -239,7 +250,8 @@ def test_agent_functions_have_fixed_search_paths_and_exact_definer_status(
                         "'prepare_inert_legacy_compatibility', "
                         "'freeze_inert_legacy_compatibility', "
                         "'reject_global_preparation_with_legacy', "
-                        "'register_inert_trial_submission')"
+                        "'register_inert_trial_submission', "
+                        "'submit_inert_trial_projection')"
                     )
                 )
                 .mappings()
@@ -249,6 +261,7 @@ def test_agent_functions_have_fixed_search_paths_and_exact_definer_status(
         assert set(functions) == {
             "capture_demand_observation",
             "capture_lifecycle_demand_observation",
+            "capture_lifecycle_demand_observation_v2_queued",
             "capture_demand_observation_v1_legacy",
             "enforce_attempt_lifecycle_head_transition",
             "project_attempt_lifecycle_head",
@@ -267,6 +280,7 @@ def test_agent_functions_have_fixed_search_paths_and_exact_definer_status(
             "freeze_inert_legacy_compatibility",
             "reject_global_preparation_with_legacy",
             "register_inert_trial_submission",
+            "submit_inert_trial_projection",
         }
         for name, row in functions.items():
             assert row["proconfig"] == ["search_path=pg_catalog"]
@@ -306,6 +320,61 @@ def test_guard_migration_rejects_missing_direct_demand_source_privilege(
             connection.exec_driver_sql(
                 f"GRANT SELECT (submit_priority) ON TABLE public.trials TO {quoted_owner}"
             )
+        engine.dispose()
+
+
+def test_guard_migration_rejects_missing_atomic_submission_privileges(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    engine = create_engine(_value(capacity_guard_database, "admin_url"))
+    owner = _value(capacity_guard_database, "owner_role")
+    quoted_owner = engine.dialect.identifier_preparer.quote(owner)
+    cases = (
+        (
+            f"REVOKE INSERT (config) ON TABLE public.trials FROM {quoted_owner}",
+            "config",
+            f"GRANT INSERT (config) ON TABLE public.trials TO {quoted_owner}",
+        ),
+        (
+            f"REVOKE UPDATE (lifecycle_authority_id) ON TABLE public.trials FROM {quoted_owner}",
+            "lifecycle_authority_id",
+            f"GRANT UPDATE (lifecycle_authority_id) ON TABLE public.trials TO {quoted_owner}",
+        ),
+        (
+            f"REVOKE UPDATE (state) ON TABLE public.trials FROM {quoted_owner}",
+            "state",
+            f"GRANT UPDATE (state) ON TABLE public.trials TO {quoted_owner}",
+        ),
+        (
+            "REVOKE INSERT (environment) ON TABLE public.data_lifecycle_authorities "
+            f"FROM {quoted_owner}",
+            "environment",
+            "GRANT INSERT (environment) ON TABLE public.data_lifecycle_authorities "
+            f"TO {quoted_owner}",
+        ),
+        (
+            f"REVOKE REFERENCES (id) ON TABLE public.trials FROM {quoted_owner}",
+            "public.trials.id",
+            f"GRANT REFERENCES (id) ON TABLE public.trials TO {quoted_owner}",
+        ),
+        (
+            "REVOKE REFERENCES (id) ON TABLE public.data_lifecycle_authorities "
+            f"FROM {quoted_owner}",
+            "public.data_lifecycle_authorities.id",
+            f"GRANT REFERENCES (id) ON TABLE public.data_lifecycle_authorities TO {quoted_owner}",
+        ),
+    )
+    try:
+        for revoke, expected, restore in cases:
+            with engine.begin() as connection:
+                connection.exec_driver_sql(revoke)
+            try:
+                with pytest.raises(RuntimeError, match=expected):
+                    command.current(_guard_config(capacity_guard_database))
+            finally:
+                with engine.begin() as connection:
+                    connection.exec_driver_sql(restore)
+    finally:
         engine.dispose()
 
 

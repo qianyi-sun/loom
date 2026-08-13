@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import pytest
 
+from loom_capacity_agent import runtime as runtime_module
 from loom_capacity_agent.contracts import (
     AgentPoolCapabilityV1,
     AgentRegistrationV1,
@@ -45,10 +46,7 @@ def _configuration() -> ReporterConfigurationV1:
 
 def _observation(configuration: ReporterConfigurationV1, sequence: int):
     return GuardLifecycleDemandObservationV2(
-        **{
-            field: getattr(configuration, field)
-            for field in AgentRegistrationV1.model_fields
-        },
+        **{field: getattr(configuration, field) for field in AgentRegistrationV1.model_fields},
         sequence=sequence,
         source_observed_at=datetime(2026, 8, 11, tzinfo=UTC),
         attempts=(),
@@ -200,3 +198,25 @@ def test_database_url_file_is_owner_only(tmp_path: Path) -> None:
     path.chmod(0o644)
     with pytest.raises(ValueError, match="0600"):
         load_database_url(path)
+
+
+def test_capacity_agent_engine_uses_serializable_isolation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    expected_engine = object()
+
+    def create(url: str, **kwargs: object) -> object:
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        return expected_engine
+
+    monkeypatch.setattr(runtime_module, "create_async_engine", create)
+    factory = getattr(runtime_module, "create_capacity_agent_engine", None)
+
+    assert callable(factory)
+    assert factory("postgresql+psycopg://agent:secret@postgres/loom") is expected_engine
+    assert captured == {
+        "url": "postgresql+psycopg://agent:secret@postgres/loom",
+        "kwargs": {"isolation_level": "SERIALIZABLE"},
+    }

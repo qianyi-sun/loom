@@ -91,9 +91,7 @@ def _retarget_database_url(
     password: str,
 ) -> str:
     parsed = make_url(fixture_database_url(admin_url, database))
-    return parsed.set(username=username, password=password).render_as_string(
-        hide_password=False
-    )
+    return parsed.set(username=username, password=password).render_as_string(hide_password=False)
 
 
 def _validate_kubernetes_label_key(value: str) -> None:
@@ -329,12 +327,10 @@ class PsycopgPersonalDevCapacityDatabase:
                             )
                         )
                     await connection.execute(
-                        sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(
-                            sql.Identifier(owner)
-                        )
+                        sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(sql.Identifier(owner))
                     )
                     await connection.execute(
-                        sql.SQL("GRANT REFERENCES ON TABLE public.trials TO {}").format(
+                        sql.SQL("GRANT REFERENCES (id) ON TABLE public.trials TO {}").format(
                             sql.Identifier(owner)
                         )
                     )
@@ -343,6 +339,38 @@ class PsycopgPersonalDevCapacityDatabase:
                             "GRANT SELECT (id, state, requires_caps, cancellation_requested_at, "
                             "next_attempt_at, autoscaler_pool_name, worker_id, attempt_count, "
                             "submit_priority, submitted_at) ON TABLE public.trials TO {}"
+                        ).format(sql.Identifier(owner))
+                    )
+                    await connection.execute(
+                        sql.SQL(
+                            "GRANT SELECT (lifecycle_authority_id), "
+                            "UPDATE (lifecycle_authority_id, state) ON TABLE public.trials TO {}"
+                        ).format(sql.Identifier(owner))
+                    )
+                    await connection.execute(
+                        sql.SQL(
+                            "GRANT INSERT (id, team_id, task_id, config, requires_caps, state, "
+                            "submit_priority, batch_id, idempotency_key, sample_idx, "
+                            "combination_idx, provider_connection_id, provider_model_id, "
+                            "submitted_by_user_id, usage_attributed_user_id, "
+                            "usage_attributed_actor, family_key) ON TABLE public.trials TO {}"
+                        ).format(sql.Identifier(owner))
+                    )
+                    await connection.execute(
+                        sql.SQL(
+                            "GRANT SELECT (id) ON TABLE public.data_lifecycle_authorities TO {}"
+                        ).format(sql.Identifier(owner))
+                    )
+                    await connection.execute(
+                        sql.SQL(
+                            "GRANT INSERT (environment, namespace, team_id, data_class, "
+                            "owner_kind, owner_id, created_at, expires_at, pinned, state) "
+                            "ON TABLE public.data_lifecycle_authorities TO {}"
+                        ).format(sql.Identifier(owner))
+                    )
+                    await connection.execute(
+                        sql.SQL(
+                            "GRANT REFERENCES (id) ON TABLE public.data_lifecycle_authorities TO {}"
                         ).format(sql.Identifier(owner))
                     )
         except asyncio.CancelledError:
@@ -379,9 +407,7 @@ class PsycopgPersonalDevCapacityDatabase:
                     )
                 )
                 await connection.execute(
-                    sql.SQL("ALTER ROLE {} NOLOGIN PASSWORD NULL").format(
-                        sql.Identifier(migrator)
-                    )
+                    sql.SQL("ALTER ROLE {} NOLOGIN PASSWORD NULL").format(sql.Identifier(migrator))
                 )
                 await connection.execute(
                     sql.SQL("REVOKE ALL PRIVILEGES ON DATABASE {} FROM {}").format(
@@ -434,11 +460,9 @@ class PsycopgPersonalDevCapacityDatabase:
                                 sql.Identifier(role)
                             )
                         )
-                database_exists = (
-                    await connection.execute(
-                        "SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = %s)",
-                        (identity.database,),
-                    )
+                database_exists = await connection.execute(
+                    "SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = %s)",
+                    (identity.database,),
                 )
                 database_row = await database_exists.fetchone()
                 if database_row is None:
@@ -476,9 +500,7 @@ class PsycopgPersonalDevCapacityDatabase:
                     (identity.database,),
                 )
                 await connection.execute(
-                    sql.SQL("DROP DATABASE IF EXISTS {}").format(
-                        sql.Identifier(identity.database)
-                    )
+                    sql.SQL("DROP DATABASE IF EXISTS {}").format(sql.Identifier(identity.database))
                 )
                 existing_result = await connection.execute(
                     "SELECT rolname FROM pg_roles WHERE rolname = ANY(%s)",
@@ -538,9 +560,7 @@ class PsycopgPersonalDevCapacityDatabase:
                 await process.wait()
             raise
         if process.returncode != 0:
-            raise PersonalDevCapacityInstallationError(
-                "protected capacity migration failed"
-            )
+            raise PersonalDevCapacityInstallationError("protected capacity migration failed")
 
     async def converge(
         self,
@@ -567,10 +587,7 @@ class PsycopgPersonalDevCapacityDatabase:
                 configuration_generation=configuration.configuration_generation,
             )
             registration = AgentRegistrationV1.model_validate(
-                {
-                    field: getattr(configuration, field)
-                    for field in AgentRegistrationV1.model_fields
-                }
+                {field: getattr(configuration, field) for field in AgentRegistrationV1.model_fields}
             )
             engine = create_async_engine(migrator_url, isolation_level="SERIALIZABLE")
             quoted_owner = engine.sync_engine.dialect.identifier_preparer.quote(owner)
@@ -653,9 +670,7 @@ def _decode_secret_text(data: dict[str, bytes], key: str) -> str:
             "protected capacity credential set is incomplete"
         ) from None
     if not value or value != value.strip() or any(item in value for item in ("\r", "\n", "\x00")):
-        raise PersonalDevCapacityInstallationError(
-            "protected capacity credential set is invalid"
-        )
+        raise PersonalDevCapacityInstallationError("protected capacity credential set is invalid")
     return value
 
 
@@ -783,9 +798,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
                 "labels": labels,
             },
             "type": "Opaque",
-            "data": {
-                key: base64.b64encode(value).decode("ascii") for key, value in data.items()
-            },
+            "data": {key: base64.b64encode(value).decode("ascii") for key, value in data.items()},
         }
 
     async def _persist_credentials(
@@ -835,9 +848,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
             seed_subject_incarnation = UUID(_decode_secret_text(seed, "subject-incarnation"))
             seed_operation_id = UUID(_decode_secret_text(seed, "operation-id"))
             seed_reporter_incarnation = UUID(_decode_secret_text(seed, "reporter-incarnation"))
-            runtime_subject_incarnation = UUID(
-                _decode_secret_text(runtime, "subject-incarnation")
-            )
+            runtime_subject_incarnation = UUID(_decode_secret_text(runtime, "subject-incarnation"))
             runtime_operation_id = UUID(_decode_secret_text(runtime, "operation-id"))
             runtime_reporter_incarnation = UUID(
                 _decode_secret_text(runtime, "reporter-incarnation")
@@ -850,9 +861,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
                 _decode_secret_text(runtime, "reporter-token"),
                 label="reporter",
             )
-            reporter_token_sha256 = hashlib.sha256(
-                runtime_token.encode("ascii")
-            ).hexdigest()
+            reporter_token_sha256 = hashlib.sha256(runtime_token.encode("ascii")).hexdigest()
             seed_agent_password = _opaque_credential(
                 _decode_secret_text(seed, "agent-password"),
                 label="agent database",
@@ -942,8 +951,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
             },
             "type": "Opaque",
             "data": {
-                key: base64.b64encode(value).decode("ascii")
-                for key, value in secret_data.items()
+                key: base64.b64encode(value).decode("ascii") for key, value in secret_data.items()
             },
         }
         command = [
@@ -1090,9 +1098,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
                 "labels": labels,
             },
             "spec": {
-                "podSelector": {
-                    "matchLabels": {"app.kubernetes.io/name": _DEPLOYMENT_NAME}
-                },
+                "podSelector": {"matchLabels": {"app.kubernetes.io/name": _DEPLOYMENT_NAME}},
                 "policyTypes": ["Egress"],
                 "egress": [
                     {
@@ -1114,9 +1120,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
                                 },
                             }
                         ],
-                        "ports": [
-                            {"protocol": "TCP", "port": self._config.manager_port}
-                        ],
+                        "ports": [{"protocol": "TCP", "port": self._config.manager_port}],
                     },
                     {
                         "to": [
@@ -1137,25 +1141,19 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
                                 },
                             }
                         ],
-                        "ports": [
-                            {"protocol": "TCP", "port": self._config.database_port}
-                        ],
+                        "ports": [{"protocol": "TCP", "port": self._config.database_port}],
                     },
                     {
                         "to": [
                             {
                                 "namespaceSelector": {
                                     "matchLabels": {
-                                        "kubernetes.io/metadata.name": (
-                                            self._config.dns_namespace
-                                        )
+                                        "kubernetes.io/metadata.name": (self._config.dns_namespace)
                                     }
                                 },
                                 "podSelector": {
                                     "matchLabels": {
-                                        self._config.dns_pod_label_key: (
-                                            self._config.dns_pod_label
-                                        )
+                                        self._config.dns_pod_label_key: (self._config.dns_pod_label)
                                     }
                                 },
                             }
@@ -1184,9 +1182,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
             "subject_incarnation": str(configuration.subject_incarnation),
         }
         stable_deployment = json.loads(json.dumps(deployment))
-        stable_annotations = stable_deployment["spec"]["template"]["metadata"][
-            "annotations"
-        ]
+        stable_annotations = stable_deployment["spec"]["template"]["metadata"]["annotations"]
         del stable_annotations["loom.dev/capacity-installation-input-sha256"]
         if not stable_annotations:
             del stable_deployment["spec"]["template"]["metadata"]["annotations"]
@@ -1244,20 +1240,19 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
             credentials=credentials,
             configuration=configuration,
         )
-        if _agent_password_from_secret(
-            {"database-url": database.agent_database_url.encode("utf-8")}
-        ) != credentials.agent_password:
+        if (
+            _agent_password_from_secret(
+                {"database-url": database.agent_database_url.encode("utf-8")}
+            )
+            != credentials.agent_password
+        ):
             raise PersonalDevCapacityInstallationError(
                 "protected capacity database returned a mismatched agent credential"
             )
         tls = {
             "ca.pem": read_owner_only_bytes(self._config.tls_files.ca_file),
-            "certificate.pem": read_owner_only_bytes(
-                self._config.tls_files.certificate_file
-            ),
-            "private-key.pem": read_owner_only_bytes(
-                self._config.tls_files.private_key_file
-            ),
+            "certificate.pem": read_owner_only_bytes(self._config.tls_files.certificate_file),
+            "private-key.pem": read_owner_only_bytes(self._config.tls_files.private_key_file),
         }
         documents, installation_sha256 = self._manifests(
             claim=claim,
@@ -1280,10 +1275,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
             ),
             supported_architectures=tuple(
                 sorted(
-                    {
-                        capability.cpu_architecture
-                        for capability in configuration.pool_capabilities
-                    }
+                    {capability.cpu_architecture for capability in configuration.pool_capabilities}
                 )
             ),
         )

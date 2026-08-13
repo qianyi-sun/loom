@@ -94,6 +94,41 @@ async def test_capacity_role_convergence_rejects_external_owner_membership(
 
 
 @pytest.mark.asyncio
+async def test_capacity_role_convergence_grants_only_required_reference_columns(
+    postgres_url: str,
+) -> None:
+    name = f"references-{uuid4().hex[:8]}"
+    database_name = make_url(postgres_url).database
+    assert database_name is not None
+    identity = replace(derive_identity(name), database=database_name)
+    database = PsycopgPersonalDevCapacityDatabase(postgres_url)
+
+    owner, _migrator, _agent, _migrator_url, _agent_url = await database._converge_roles(
+        identity,
+        _new_credentials(),
+    )
+
+    async with await psycopg.AsyncConnection.connect(
+        postgres_url.replace("postgresql+psycopg://", "postgresql://", 1),
+    ) as connection:
+        privileges = await connection.execute(
+            "SELECT "
+            "has_column_privilege(%s, 'public.trials', 'id', 'REFERENCES'), "
+            "has_column_privilege(%s, 'public.trials', 'config', 'REFERENCES'), "
+            "has_table_privilege(%s, 'public.trials', 'REFERENCES'), "
+            "has_column_privilege(%s, 'public.data_lifecycle_authorities', "
+            "'id', 'REFERENCES'), "
+            "has_column_privilege(%s, 'public.trials', 'config', 'SELECT'), "
+            "has_column_privilege(%s, 'public.data_lifecycle_authorities', "
+            "'id', 'SELECT'), "
+            "has_column_privilege(%s, 'public.data_lifecycle_authorities', "
+            "'environment', 'SELECT')",
+            (owner, owner, owner, owner, owner, owner, owner),
+        )
+        assert await privileges.fetchone() == (True, False, False, True, False, True, False)
+
+
+@pytest.mark.asyncio
 async def test_capacity_migrator_authority_is_sealed_between_reconciliations(
     postgres_url: str,
 ) -> None:
@@ -144,7 +179,7 @@ async def test_destroy_seal_disables_primary_and_capacity_database_logins(
         autocommit=True,
     ) as connection:
         await connection.execute(
-            f'CREATE ROLE "{identity.db_role}" LOGIN PASSWORD \'primary-password\''
+            f"CREATE ROLE \"{identity.db_role}\" LOGIN PASSWORD 'primary-password'"
         )
     owner, migrator, agent, _migrator_url, _agent_url = await database._converge_roles(
         identity,
