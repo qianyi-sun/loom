@@ -37,6 +37,7 @@ from loom_capacity_manager.contracts import (
     SubjectConfigurationV1,
     canonical_digest,
     canonical_digest_excluding,
+    checked_sum,
 )
 from loom_capacity_manager.executable_contracts import (
     ExecutableExecutorRegistrationV2,
@@ -282,11 +283,24 @@ async def _db_now(session: AsyncSession) -> datetime:
     return value.astimezone(UTC)
 
 
-async def _lock_authority(session: AsyncSession) -> CapacityAuthorityState:
+async def _lock_shadow_authority(session: AsyncSession) -> CapacityAuthorityState:
+    """Require the exact zero-ceiling shadow authority for identity mutation."""
+
     authority = await _lock_any_authority(session)
-    if authority.executable_new_capacity_ceiling != 0:
+    if (
+        authority.execution_state != "shadow"
+        or authority.execution_epoch != 0
+        or authority.execution_manifest_sha256 is not None
+        or authority.executable_new_capacity_ceiling != 0
+    ):
         raise AuthorityRecoveryError("capacity authority is not shadow-only")
     return authority
+
+
+async def _lock_authority(session: AsyncSession) -> CapacityAuthorityState:
+    """Compatibility alias for legacy shadow-only mutation stores."""
+
+    return await _lock_shadow_authority(session)
 
 
 async def _lock_any_authority(session: AsyncSession) -> CapacityAuthorityState:
@@ -300,6 +314,55 @@ async def _lock_any_authority(session: AsyncSession) -> CapacityAuthorityState:
     if authority is None:
         raise AuthorityRecoveryError("capacity authority row is missing")
     return authority
+
+
+async def _lock_fact_authority(
+    session: AsyncSession,
+) -> tuple[CapacityAuthorityState, int | None]:
+    """Lock shadow input authority or its exact immutable active configuration."""
+
+    authority = await _lock_any_authority(session)
+    if authority.execution_state == "shadow":
+        if (
+            authority.execution_epoch != 0
+            or authority.execution_manifest_sha256 is not None
+            or authority.executable_new_capacity_ceiling != 0
+        ):
+            raise AuthorityRecoveryError("shadow execution authority is contradictory")
+        return authority, None
+    if authority.execution_state != "active":
+        raise AuthorityRecoveryError("fact ingestion requires shadow or active authority")
+    if (
+        authority.execution_epoch <= 0
+        or authority.execution_manifest_sha256 is None
+        or authority.executable_new_capacity_ceiling <= 0
+    ):
+        raise AuthorityRecoveryError("active execution authority is incomplete")
+    epoch = (
+        await session.execute(
+            select(CapacityExecutionEpoch)
+            .where(CapacityExecutionEpoch.execution_epoch == authority.execution_epoch)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if epoch is None:
+        raise AuthorityRecoveryError("active execution epoch row is missing")
+    if (
+        epoch.state != "active"
+        or epoch.execution_manifest_sha256 != authority.execution_manifest_sha256
+        or epoch.current_writer_epoch != authority.writer_epoch
+        or epoch.effective_ceiling <= 0
+        or epoch.effective_rate_per_minute <= 0
+        or epoch.configuration_epoch <= 0
+    ):
+        raise AuthorityRecoveryError("active execution epoch does not match authority")
+    try:
+        context = CapacityManagementStore._execution_context(authority, epoch)
+    except ValueError as exc:
+        raise AuthorityRecoveryError("active execution authority is invalid") from exc
+    if not isinstance(context, ExecutionAuthorityV2) or context.execution_state != "active":
+        raise AuthorityRecoveryError("active execution authority is invalid")
+    return authority, epoch.configuration_epoch
 
 
 def _bounded_detail(detail: dict[str, Any]) -> dict[str, Any]:
@@ -444,7 +507,7 @@ class CapacityManagementStore:
         digest = canonical_digest(value)
         payload = value.model_dump(mode="json", exclude_none=False)
         async with _write_transaction(session):
-            await _lock_authority(session)
+            await _lock_shadow_authority(session)
             replay = (
                 await session.execute(
                     select(CapacityConfigGeneration).where(
@@ -538,7 +601,7 @@ class CapacityManagementStore:
     ) -> ActivatedConfiguration:
         request_digest = canonical_digest(proposal)
         async with _write_transaction(session):
-            authority = await _lock_authority(session)
+            authority = await _lock_shadow_authority(session)
             replay = (
                 await session.execute(
                     select(CapacityConfigurationEpoch).where(
@@ -719,7 +782,7 @@ class CapacityManagementStore:
         request_digest = canonical_digest(request)
         request_payload = request.model_dump(mode="json", exclude_none=False)
         async with _write_transaction(session):
-            await _lock_authority(session)
+            await _lock_shadow_authority(session)
             replays = (
                 (
                     await session.execute(
@@ -2278,23 +2341,36 @@ class CapacityManagementStore:
         ):
             raise ExecutionConflictError("executor controller authority changed")
 
-        pool_generation_rows = (
+        pools = (
             (
                 await session.execute(
-                    select(CapacityPool.pool_id, CapacityPool.pool_generation).where(
-                        CapacityPool.configuration_epoch == request.configuration_epoch
+                    select(CapacityPool)
+                    .where(
+                        CapacityPool.configuration_epoch == request.configuration_epoch,
+                        CapacityPool.pool_id.in_(("gb10", "oldlab")),
                     )
+                    .order_by(CapacityPool.pool_id)
+                    .with_for_update()
                 )
             )
-            .tuples()
+            .scalars()
             .all()
         )
-        active_pool_generations: dict[str, int] = dict(pool_generation_rows)
+        if len(pools) != 2 or {pool.pool_id for pool in pools} != {"gb10", "oldlab"}:
+            raise ExecutionConflictError("configured fleet capacity is incomplete")
+        executors = {item.pool_id: item for item in request.executors}
         if any(
-            active_pool_generations.get(item.pool_id) != item.pool_generation
-            for item in request.executors
+            pool.pool_generation
+            != executors[cast(Literal["gb10", "oldlab"], pool.pool_id)].pool_generation
+            for pool in pools
         ):
-            raise ExecutionConflictError("executor pool generation changed")
+            raise ExecutionConflictError("configured fleet pool generation changed")
+        try:
+            fleet_slots = checked_sum(tuple(pool.max_slots for pool in pools))
+        except ValueError as exc:
+            raise ExecutionConflictError("configured fleet capacity is invalid") from exc
+        if request.requested_ceiling > fleet_slots:
+            raise ExecutionConflictError("configured fleet capacity is below requested ceiling")
 
         subject_rows = (
             (
@@ -2378,6 +2454,120 @@ class CapacityManagementStore:
             return ExecutionContextV2.model_validate(values)
         raise AuthorityRecoveryError("execution epoch is not current authority")
 
+    async def _validate_active_demand_fact_binding(
+        self,
+        session: AsyncSession,
+        authority: CapacityAuthorityState,
+        configuration_epoch: int,
+        report: DemandSnapshotV1,
+        reporter: CapacityDemandReporter,
+    ) -> None:
+        subject = (
+            await session.execute(
+                select(CapacitySubject)
+                .where(
+                    CapacitySubject.configuration_epoch == configuration_epoch,
+                    CapacitySubject.subject_id == report.subject_id,
+                    CapacitySubject.subject_incarnation == report.subject_incarnation,
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if subject is None or (
+            subject.demand_reporter_incarnation != report.reporter_incarnation
+            or subject.configuration_generation != report.configuration_generation
+            or subject.deployment_generation != report.deployment_generation
+            or reporter.configuration_generation != subject.configuration_generation
+            or reporter.deployment_generation != subject.deployment_generation
+        ):
+            raise AuthorityRecoveryError("active demand reporter binding changed")
+        epoch = (
+            await session.execute(
+                select(CapacityExecutionEpoch).where(
+                    CapacityExecutionEpoch.execution_epoch == authority.execution_epoch
+                )
+            )
+        ).scalar_one_or_none()
+        if epoch is None:
+            raise AuthorityRecoveryError("active execution epoch row is missing")
+        try:
+            preparation = ExecutionPreparationV2.model_validate_json(
+                json.dumps(epoch.manifest_payload, sort_keys=True, separators=(",", ":"))
+            )
+        except ValueError as exc:
+            raise AuthorityRecoveryError("active execution manifest is invalid") from exc
+        acknowledgement = next(
+            (
+                item
+                for item in preparation.subject_acknowledgements
+                if item.subject_id == subject.subject_id
+            ),
+            None,
+        )
+        if acknowledgement is None or (
+            acknowledgement.subject_incarnation != subject.subject_incarnation
+            or acknowledgement.configuration_generation != subject.configuration_generation
+            or acknowledgement.deployment_generation != subject.deployment_generation
+            or acknowledgement.reporter_incarnation != reporter.reporter_incarnation
+        ):
+            raise AuthorityRecoveryError("active demand subject binding changed")
+        candidate = (
+            await session.execute(
+                select(CapacityCandidate).where(
+                    CapacityCandidate.subject_id == subject.subject_id,
+                    CapacityCandidate.subject_incarnation == subject.subject_incarnation,
+                    CapacityCandidate.candidate_generation == subject.candidate_generation,
+                )
+            )
+        ).scalar_one_or_none()
+        if (
+            candidate is None
+            or candidate.candidate_identity_algorithm != acknowledgement.candidate.algorithm
+            or candidate.candidate_identity != acknowledgement.candidate.identity
+            or candidate.source_payload.get("publication_sha256")
+            != acknowledgement.candidate.publication_sha256
+        ):
+            raise AuthorityRecoveryError("active demand candidate binding changed")
+
+    async def _validate_active_pool_fact_binding(
+        self,
+        session: AsyncSession,
+        authority: CapacityAuthorityState,
+        configuration_epoch: int,
+        report: PoolObservationV1,
+        reporter: CapacityPoolReporter,
+    ) -> None:
+        pool = (
+            await session.execute(
+                select(CapacityPool)
+                .where(
+                    CapacityPool.configuration_epoch == configuration_epoch,
+                    CapacityPool.pool_id == report.pool_id,
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if pool is None or pool.pool_generation != report.pool_generation:
+            raise AuthorityRecoveryError("active pool reporter binding changed")
+        epoch = (
+            await session.execute(
+                select(CapacityExecutionEpoch).where(
+                    CapacityExecutionEpoch.execution_epoch == authority.execution_epoch
+                )
+            )
+        ).scalar_one_or_none()
+        if epoch is None:
+            raise AuthorityRecoveryError("active execution epoch row is missing")
+        expected_generation = {
+            "oldlab": epoch.oldlab_pool_generation,
+            "gb10": epoch.gb10_pool_generation,
+        }.get(report.pool_id)
+        if expected_generation is None or (
+            reporter.pool_generation != expected_generation
+            or pool.pool_generation != expected_generation
+        ):
+            raise AuthorityRecoveryError("active execution pool binding changed")
+
     async def ingest_demand_snapshot(
         self,
         session: AsyncSession,
@@ -2389,7 +2579,7 @@ class CapacityManagementStore:
         equivocation = False
         result: IngestResult | None = None
         async with _write_transaction(session):
-            await _lock_authority(session)
+            authority, configuration_epoch = await _lock_fact_authority(session)
             reporter = (
                 await session.execute(
                     select(CapacityDemandReporter)
@@ -2408,6 +2598,14 @@ class CapacityManagementStore:
                 or reporter.deployment_generation != report.deployment_generation
             ):
                 raise UnknownReporterError("demand reporter binding is stale")
+            if configuration_epoch is not None:
+                await self._validate_active_demand_fact_binding(
+                    session,
+                    authority,
+                    configuration_epoch,
+                    report,
+                    reporter,
+                )
             if report.sequence < reporter.high_water:
                 raise StaleReportError("demand report sequence is below high-water")
             if report.sequence == reporter.high_water:
@@ -2541,7 +2739,7 @@ class CapacityManagementStore:
         equivocation = False
         result: IngestResult | None = None
         async with _write_transaction(session):
-            await _lock_authority(session)
+            authority, configuration_epoch = await _lock_fact_authority(session)
             reporter = (
                 await session.execute(
                     select(CapacityPoolReporter)
@@ -2556,6 +2754,14 @@ class CapacityManagementStore:
                 raise UnknownReporterError("pool reporter is not current")
             if reporter.pool_generation != report.pool_generation:
                 raise UnknownReporterError("pool reporter binding is stale")
+            if configuration_epoch is not None:
+                await self._validate_active_pool_fact_binding(
+                    session,
+                    authority,
+                    configuration_epoch,
+                    report,
+                    reporter,
+                )
             if report.sequence < reporter.high_water:
                 raise StaleReportError("pool report sequence is below high-water")
             if report.sequence == reporter.high_water:
@@ -3055,7 +3261,7 @@ class CapacityManagementStore:
         epoch: ShadowEpochV1,
     ) -> CommittedShadowEpoch:
         async with _write_transaction(session):
-            authority = await _lock_authority(session)
+            authority = await _lock_shadow_authority(session)
             if (
                 authority.authority_incarnation != writer.authority_incarnation
                 or authority.writer_epoch != writer.writer_epoch

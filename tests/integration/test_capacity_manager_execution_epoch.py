@@ -11,6 +11,11 @@ from sqlalchemy import delete, select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from loom_capacity_manager.contracts import (
+    ConfigurationActivationV1,
+    ConfigurationGenerationRefV1,
+    canonical_digest,
+)
 from loom_capacity_manager.executable_contracts import (
     ExecutionActivationV2,
     canonical_executable_digest,
@@ -43,6 +48,11 @@ from tests.capacity_execution_fixtures import (
 )
 from tests.capacity_fixtures import (
     AUTHORITY_ID,
+    demand_snapshot,
+    development_projection,
+    fleet_manifest,
+    pool_observation,
+    subject_configuration,
 )
 
 
@@ -331,6 +341,175 @@ async def test_activation_rechecks_freeze_and_exact_evidence(
             activation,
             actor="activation-operator",
             idempotency_key=UUID(int=724),
+        )
+
+
+async def test_preparation_rejects_ceiling_above_exact_fleet_slots(
+    capacity_session: AsyncSession,
+) -> None:
+    """A requested envelope larger than the two bound pools must not prepare."""
+
+    policy = _policy(ceiling=17)
+    fixture = await _setup(
+        capacity_session,
+        execution_policy=policy,
+        ceiling=17,
+    )
+    with pytest.raises(ExecutionConflictError, match="configured fleet capacity"):
+        await fixture.store.prepare_execution_epoch(
+            capacity_session,
+            fixture.request,
+            actor="activation-operator",
+            idempotency_key=UUID(int=11901),
+        )
+
+
+async def test_active_fact_ingestion_preserves_bound_identity(
+    capacity_session: AsyncSession,
+) -> None:
+    """Active authority accepts bound facts but rejects configuration mutation."""
+
+    fixture = await _setup(
+        capacity_session,
+        execution_policy=_policy(ceiling=2),
+        ceiling=2,
+    )
+    await fixture.store.ingest_demand_snapshot(
+        capacity_session, demand_snapshot(sequence=1), actor="dev-a"
+    )
+    for pool_id in ("oldlab", "gb10"):
+        await fixture.store.ingest_pool_observation(
+            capacity_session,
+            pool_observation(sequence=1, pool_id=pool_id),
+            actor=f"{pool_id}-reporter",
+        )
+    prepared = await fixture.store.prepare_execution_epoch(
+        capacity_session,
+        fixture.request,
+        actor="activation-operator",
+        idempotency_key=UUID(int=11902),
+    )
+    await _register_execution_executors(capacity_session, fixture, prepared)
+    await fixture.store.activate_execution_epoch(
+        capacity_session,
+        ExecutionActivationV2(
+            authority_incarnation=AUTHORITY_ID,
+            expected_writer_epoch=fixture.writer.writer_epoch,
+            execution_epoch=prepared.execution_epoch,
+            execution_manifest_sha256=prepared.execution_manifest_sha256,
+            executable_new_capacity_ceiling=2,
+            executable_new_capacity_rate_per_minute=1,
+        ),
+        actor="activation-operator",
+        idempotency_key=UUID(int=11903),
+    )
+
+    before = canonical_digest(
+        await fixture.store.load_allocation_input(capacity_session, fixture.writer)
+    )
+    demand = await fixture.store.ingest_demand_snapshot(
+        capacity_session, demand_snapshot(sequence=2), actor="dev-a"
+    )
+    oldlab = await fixture.store.ingest_pool_observation(
+        capacity_session, pool_observation(sequence=2, pool_id="oldlab"), actor="oldlab"
+    )
+    gb10 = await fixture.store.ingest_pool_observation(
+        capacity_session, pool_observation(sequence=2, pool_id="gb10"), actor="gb10"
+    )
+    assert (demand.sequence, oldlab.sequence, gb10.sequence) == (2, 2, 2)
+    assert (
+        canonical_digest(
+            await fixture.store.load_allocation_input(capacity_session, fixture.writer)
+        )
+        != before
+    )
+
+    with pytest.raises(AuthorityRecoveryError, match="shadow-only"):
+        await fixture.store.propose_fleet_configuration(
+            capacity_session,
+            fleet_manifest(fleet_generation=2),
+            actor="fleet-operator",
+            idempotency_key=UUID(int=11904),
+        )
+    with pytest.raises(AuthorityRecoveryError, match="shadow-only"):
+        await fixture.store.propose_subject_configuration(
+            capacity_session,
+            subject_configuration(
+                configuration_generation=2,
+                demand_reporter_incarnation=UUID(int=11905),
+            ),
+            actor="environment-state",
+            idempotency_key=UUID(int=11905),
+        )
+    with pytest.raises(AuthorityRecoveryError, match="shadow-only"):
+        await fixture.store.activate_configuration(
+            capacity_session,
+            ConfigurationActivationV1(
+                expected_configuration_epoch=1,
+                fleet=ConfigurationGenerationRefV1(scope="fleet", generation=2, digest="1" * 64),
+                subjects=(
+                    ConfigurationGenerationRefV1(
+                        scope="subject",
+                        generation=2,
+                        digest="2" * 64,
+                        subject_id=UUID(int=11905),
+                        subject_incarnation=UUID(int=11906),
+                    ),
+                ),
+            ),
+            actor="fleet-operator",
+            idempotency_key=UUID(int=11907),
+        )
+    for operation_kind in ("create", "update", "destroy"):
+        with pytest.raises(AuthorityRecoveryError, match="shadow-only"):
+            await fixture.store.project_development_subject(
+                capacity_session,
+                development_projection(operation_kind=operation_kind),
+                actor="environment-lifecycle",
+                idempotency_key=UUID(int=11906),
+            )
+
+
+async def test_prepared_fact_and_drain_only_fact_ingestion_are_rejected(
+    capacity_session: AsyncSession,
+) -> None:
+    """Only active authority may accept facts; zero-ceiling transitions cannot."""
+
+    fixture = await _setup(capacity_session, execution_policy=_policy())
+    prepared = await fixture.store.prepare_execution_epoch(
+        capacity_session,
+        fixture.request,
+        actor="activation-operator",
+        idempotency_key=UUID(int=11910),
+    )
+    with pytest.raises(AuthorityRecoveryError, match="fact ingestion"):
+        await fixture.store.ingest_demand_snapshot(
+            capacity_session, demand_snapshot(sequence=1), actor="dev-a"
+        )
+    await _register_execution_executors(capacity_session, fixture, prepared)
+    await fixture.store.activate_execution_epoch(
+        capacity_session,
+        ExecutionActivationV2(
+            authority_incarnation=AUTHORITY_ID,
+            expected_writer_epoch=fixture.writer.writer_epoch,
+            execution_epoch=prepared.execution_epoch,
+            execution_manifest_sha256=prepared.execution_manifest_sha256,
+            executable_new_capacity_ceiling=1,
+            executable_new_capacity_rate_per_minute=1,
+        ),
+        actor="activation-operator",
+        idempotency_key=UUID(int=11911),
+    )
+    await fixture.store.register_writer(
+        capacity_session,
+        AUTHORITY_ID,
+        expected_epoch=fixture.writer.writer_epoch,
+    )
+    with pytest.raises(AuthorityRecoveryError, match="fact ingestion"):
+        await fixture.store.ingest_pool_observation(
+            capacity_session,
+            pool_observation(sequence=1, pool_id="oldlab"),
+            actor="oldlab-reporter",
         )
 
 

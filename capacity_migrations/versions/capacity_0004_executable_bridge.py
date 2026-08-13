@@ -137,7 +137,7 @@ def upgrade() -> None:
             "AND current_writer_epoch > 0 "
             "AND configuration_epoch > 0 AND fleet_generation > 0 "
             "AND oldlab_pool_generation > 0 AND gb10_pool_generation > 0 "
-            "AND requested_ceiling = 1 AND effective_ceiling >= 0 "
+            "AND requested_ceiling > 0 AND effective_ceiling >= 0 "
             "AND effective_ceiling <= requested_ceiling "
             "AND requested_rate_per_minute > 0 AND effective_rate_per_minute >= 0 "
             "AND effective_rate_per_minute <= requested_rate_per_minute",

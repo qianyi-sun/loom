@@ -113,6 +113,7 @@ def executor_binding(
 def execution_policy(
     candidate: CandidateBindingV2 | None = None,
     *,
+    ceiling: int = 1,
     controller_digests: Mapping[str, str] | None = None,
 ) -> ExecutionPreparationPolicyV2:
     resolved_controller_digests = {
@@ -125,7 +126,7 @@ def execution_policy(
     }
     return ExecutionPreparationPolicyV2(
         trusted_fleet_release_sha256=TRUSTED_RELEASE,
-        executable_new_capacity_ceiling=1,
+        executable_new_capacity_ceiling=ceiling,
         executable_new_capacity_rate_per_minute=1,
         executors=tuple(
             executor_binding(
@@ -162,6 +163,7 @@ async def setup_execution(
     *,
     execution_policy: ExecutionPreparationPolicyV2 | None = None,
     candidate: CandidateBindingV2 | None = None,
+    ceiling: int = 1,
 ) -> PreparedExecutionFixture:
     controller_digests = dict(CONTROLLER_DIGESTS)
     if execution_policy is not None:
@@ -288,7 +290,7 @@ async def setup_execution(
         fleet_generation=fleet.fleet_generation,
         fleet_digest=fleet_proposal.digest,
         trusted_fleet_release_sha256=TRUSTED_RELEASE,
-        requested_ceiling=1,
+        requested_ceiling=ceiling,
         requested_rate_per_minute=1,
         executors=tuple(executors),
         subject_acknowledgements=(acknowledgement,),
