@@ -52,6 +52,7 @@ class GpuContainerPreflightPlan:
 class GpuContainerPreflightObservation:
     cpu_arch: str
     platform_manifest_digest: str
+    preflight_digest: str
     cuda_userspace_version: str
     egl_healthy: bool
     visible_device_uuids: tuple[str, ...]
@@ -202,6 +203,7 @@ def validate_gpu_container_preflight(
     if (
         observation.cpu_arch != expected_arch
         or observation.platform_manifest_digest != plan.platform_manifest_digest
+        or observation.preflight_digest != plan.preflight_digest
         or observation.cuda_userspace_version != plan.cuda_userspace_version
         or not observation.egl_healthy
         or observation.visible_device_uuids != plan.docker_device_uuids

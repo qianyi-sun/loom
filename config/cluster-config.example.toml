@@ -79,6 +79,11 @@ enabled = true
 default_pool_size = 25
 max_client_conn = 500
 min_pool_size = 5
+# Explicitly mount the protected Stage 1 operator public key into loom-service. Disabled profiles keep every live-smoke mutation fail-closed.
+
+[pipeline_stage1_smoke_authority]
+enabled = false
+public_key_secret_name = "loom-stage1-smoke-authority"
 # Postgres runtime tuning. max_connections leaves room for PgBouncer backend pools, LISTEN watchers, Alembic, and administrative connections.
 
 [postgres]

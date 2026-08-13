@@ -29,6 +29,7 @@ from loom.db.schema import (
 from loom.pipeline.artifact_commit import (
     AcceptanceEvidenceProducerV1,
     ArtifactCommitError,
+    ArtifactCommitManifestV1,
     ArtifactCommitRepositoryV1,
     ArtifactCommitService,
     CheckpointProducerV1,
@@ -49,6 +50,7 @@ from loom.pipeline.artifact_commit import (
 from loom.pipeline.budget import checkpoint_artifact_reservation_key
 from loom.pipeline.keys import canonical_digest, canonical_document, digest_bytes
 from loom.pipeline.spec import BindingItemV1, BindingSetV1
+from loom.pipeline.state import StageResultInputV1, StageResultProvenanceV1
 from loom.pipeline.work_protocol import (
     CheckpointPrepareRequestV1,
     ExecutionCompleteV1,
@@ -499,6 +501,10 @@ class FinalOutputRouteService:
             str(item["name"]): item
             for item in cast(list[dict[str, Any]], frozen_spec["container_node"]["outputs"])
         }
+        bindings = [
+            BindingSetV1.model_validate_json(canonical_document(item))
+            for item in (stage.resolved_input_bindings_json or [])
+        ]
         producer = FinalOutputProducerV1(
             commit_kind="final_output",
             team_id=run.team_id,
@@ -509,6 +515,12 @@ class FinalOutputRouteService:
             stage_result_json=request.stage_result.model_dump(mode="json"),
             stage_result_digest=request.stage_result_sha256,
             inventory_digest=canonical_digest(request.files),
+            input_lineage_artifact_ids=[
+                item.artifact_id for binding in bindings for item in binding.items
+            ],
+            input_lineage_digests=[
+                item.manifest_sha256 for binding in bindings for item in binding.items
+            ],
         )
         return producer, outputs
 
@@ -890,6 +902,180 @@ class CheckpointRouteService(FinalOutputRouteService):
 
 
 class ExecutionAttemptCompletionService:
+    @staticmethod
+    async def _validate_contract(
+        *,
+        attempt: ExecutionAttempt,
+        report: ExecutionCompleteV1,
+        upload: ArtifactUploadSession,
+        session: AsyncSession,
+    ) -> tuple[
+        PipelineStageRun,
+        ArtifactCommitManifestV1,
+        dict[UUID, str],
+        dict[str, int],
+    ]:
+        stage = await session.get(PipelineStageRun, attempt.stage_run_id, with_for_update=True)
+        if stage is None or stage.resolved_execution_spec_json is None:
+            raise ArtifactCommitError("execution_spec_not_frozen")
+        run = await session.get(PipelineRun, stage.pipeline_run_id)
+        if run is None:
+            raise ArtifactCommitError("not_found")
+        if (
+            upload.commit_kind != "final_output"
+            or upload.pipeline_run_id != run.id
+            or upload.pipeline_stage_run_id != stage.id
+            or upload.execution_attempt_id != attempt.id
+            or upload.attempt_number != attempt.attempt_number
+        ):
+            raise ArtifactCommitError("completion_identity_drift")
+        if (
+            upload.stage_result_digest != report.stage_result_sha256
+            or upload.stage_result_json != report.stage_result.model_dump(mode="json")
+        ):
+            raise ArtifactCommitError("stage_result_drift")
+        if upload.canonical_manifest_json is None:
+            raise ArtifactCommitError("manifest_missing")
+        manifest = ArtifactCommitManifestV1.model_validate_json(
+            canonical_document(upload.canonical_manifest_json)
+        )
+        if (
+            manifest.session_id != upload.id
+            or manifest.commit_kind != "final_output"
+            or manifest.request_digest != upload.request_digest
+            or manifest.total_bytes != upload.actual_total_bytes
+            or canonical_digest(manifest) != upload.manifest_sha256
+            or sum(item.size_bytes for record in manifest.artifacts for item in record.stored_files)
+            != manifest.total_bytes
+        ):
+            raise ArtifactCommitError("manifest_session_drift")
+
+        frozen = stage.resolved_execution_spec_json
+        node = cast(dict[str, Any], frozen.get("container_node"))
+        expected_inputs = [
+            StageResultInputV1(
+                binding_name=binding.binding_name,
+                item_key=item.item_key,
+                artifact_id=item.artifact_id,
+                artifact_type=binding.artifact_type,
+                manifest_sha256=item.manifest_sha256,
+            )
+            for binding in (
+                BindingSetV1.model_validate_json(canonical_document(value))
+                for value in (stage.resolved_input_bindings_json or [])
+            )
+            for item in binding.items
+        ]
+        expected_provenance = StageResultProvenanceV1(
+            pipeline_run_id=run.id,
+            stage_run_id=stage.id,
+            execution_attempt_id=attempt.id,
+            recipe_digest=run.recipe_digest,
+            execution_spec_digest=cast(str, stage.execution_spec_digest),
+            image_digest=cast(str, frozen.get("resolved_image_manifest_digest")),
+        )
+        result = report.stage_result
+        if result.inputs != expected_inputs or result.provenance != expected_provenance:
+            raise ArtifactCommitError("stage_result_claim_drift")
+        if result.domain_outcome is None or result.retry_class.value != "none" or result.error:
+            raise ArtifactCommitError("invalid_stage_result")
+
+        declarations = {
+            cast(str, item["name"]): item
+            for item in cast(list[dict[str, Any]], node.get("outputs", []))
+        }
+        fanout = cast(dict[str, Any] | None, node.get("fanout_commit"))
+        template_name = None if fanout is None else cast(str, fanout["item_binding_name"])
+        actual_outputs = {item.name: item for item in result.outputs}
+        for name, output in actual_outputs.items():
+            declaration = declarations.get(name)
+            if declaration is None and template_name is not None:
+                declaration = declarations.get(template_name)
+            if (
+                declaration is None
+                or declaration.get("producer") != "container"
+                or declaration.get("artifact_type") != output.artifact_type
+            ):
+                raise ArtifactCommitError("invalid_stage_result")
+        required = {
+            name
+            for name, declaration in declarations.items()
+            if declaration.get("producer") == "container"
+            and declaration.get("required") is True
+            and name != template_name
+        }
+        if not required.issubset(actual_outputs):
+            raise ArtifactCommitError("invalid_stage_result")
+
+        file_rows = list(
+            (
+                await session.execute(
+                    select(ArtifactUploadFile)
+                    .where(ArtifactUploadFile.session_id == upload.id)
+                    .order_by(ArtifactUploadFile.file_index)
+                )
+            ).scalars()
+        )
+        producer_kind_by_id = {row.preallocated_artifact_id: row.producer for row in file_rows}
+        if any(value != "container" for value in producer_kind_by_id.values()):
+            raise ArtifactCommitError("final_output_producer_invalid")
+        observed_files = {
+            (
+                row.preallocated_artifact_id,
+                row.artifact_name,
+                row.artifact_type,
+                row.file_index,
+                row.relative_path,
+                row.role,
+                row.archive_format,
+                row.media_type,
+                row.actual_size,
+                row.computed_sha256,
+            )
+            for row in file_rows
+            if row.state == "verified"
+        }
+        expected_files = {
+            (
+                record.artifact_id,
+                record.artifact_name,
+                record.artifact_type,
+                item.file_index,
+                item.relative_path,
+                item.role,
+                item.archive_format,
+                item.media_type,
+                item.size_bytes,
+                item.sha256,
+            )
+            for record in manifest.artifacts
+            for item in record.stored_files
+        }
+        if observed_files != expected_files or len(observed_files) != len(file_rows):
+            raise ArtifactCommitError("committed_output_drift")
+        records_by_name = {record.artifact_name: record for record in manifest.artifacts}
+        if len(records_by_name) != len(manifest.artifacts) or set(records_by_name) != set(
+            actual_outputs
+        ):
+            raise ArtifactCommitError("committed_output_drift")
+        committed_bytes = {"final_output": 0, "control": 0}
+        for name, record in records_by_name.items():
+            output = actual_outputs[name]
+            if (
+                record.artifact_type != output.artifact_type
+                or producer_kind_by_id.get(record.artifact_id) != "container"
+            ):
+                raise ArtifactCommitError("committed_output_drift")
+            committed_bytes["final_output"] += sum(item.size_bytes for item in record.stored_files)
+        expected_lineage = [item.artifact_id for item in expected_inputs]
+        expected_lineage_digests = [item.manifest_sha256 for item in expected_inputs]
+        if (
+            manifest.input_lineage_artifact_ids != expected_lineage
+            or manifest.input_lineage_digests != expected_lineage_digests
+        ):
+            raise ArtifactCommitError("output_lineage_drift")
+        return stage, manifest, producer_kind_by_id, committed_bytes
+
     async def complete(
         self,
         *,
@@ -909,47 +1095,61 @@ class ExecutionAttemptCompletionService:
         ).scalar_one_or_none()
         if upload is None or upload.state not in {"committed_ready", "committed"}:
             raise ArtifactCommitError("session_not_committed_ready")
+        _stage, manifest, producer_kind_by_id, committed_bytes = await self._validate_contract(
+            attempt=attempt,
+            report=report,
+            upload=upload,
+            session=session,
+        )
         if upload.state == "committed":
-            return {}
-        manifest = cast(dict[str, Any], upload.canonical_manifest_json)
-        if manifest.get("session_id") != str(upload.id):
-            raise ArtifactCommitError("manifest_session_drift")
-        producer_kind_by_id = {
-            row.preallocated_artifact_id: row.producer
-            for row in (
-                await session.execute(
-                    select(ArtifactUploadFile).where(ArtifactUploadFile.session_id == upload.id)
-                )
-            ).scalars()
-        }
-        lineage = [UUID(value) for value in manifest.get("input_lineage_artifact_ids", [])]
-        committed_bytes = {"final_output": 0, "control": 0}
-        for record in manifest["artifacts"]:
-            artifact_id = UUID(record["artifact_id"])
-            stored_files = record["stored_files"]
-            artifact_class = (
-                "control" if producer_kind_by_id[artifact_id] == "platform" else "final_output"
+            persisted = list(
+                (
+                    await session.execute(
+                        select(Artifact).where(Artifact.artifact_upload_session_id == upload.id)
+                    )
+                ).scalars()
             )
-            committed_bytes[artifact_class] += sum(item["size_bytes"] for item in stored_files)
+            expected = {
+                (
+                    record.artifact_id,
+                    record.artifact_name,
+                    record.artifact_type,
+                    record.manifest_sha256,
+                )
+                for record in manifest.artifacts
+            }
+            observed = {
+                (item.id, item.name, item.artifact_type, item.manifest_sha256) for item in persisted
+            }
+            if observed != expected:
+                raise ArtifactCommitError("committed_output_drift")
+            return committed_bytes
+        lineage = manifest.input_lineage_artifact_ids
+        for record in manifest.artifacts:
+            artifact_id = record.artifact_id
+            stored_files = record.stored_files
             session.add(
                 Artifact(
                     id=artifact_id,
-                    artifact_type=record["artifact_type"],
-                    name=record["artifact_name"],
+                    artifact_type=record.artifact_type,
+                    name=record.artifact_name,
                     team_id=upload.team_id,
                     pipeline_run_id=upload.pipeline_run_id,
                     pipeline_stage_run_id=upload.pipeline_stage_run_id,
                     execution_attempt_id=attempt.id,
                     producer_kind=producer_kind_by_id[artifact_id],
-                    content_hash=record["content_sha256"],
-                    storage={"session_id": str(upload.id), "files": stored_files},
+                    content_hash=record.content_sha256,
+                    storage={
+                        "session_id": str(upload.id),
+                        "files": [item.model_dump(mode="json") for item in stored_files],
+                    },
                     visibility="team",
                     share_status="pending_scan",
                     safety_state="verified_internal",
                     artifact_upload_session_id=upload.id,
-                    manifest_sha256=record["manifest_sha256"],
-                    stored_size_bytes=sum(item["size_bytes"] for item in stored_files),
-                    unpacked_size_bytes=sum(item["size_bytes"] for item in stored_files),
+                    manifest_sha256=record.manifest_sha256,
+                    stored_size_bytes=sum(item.size_bytes for item in stored_files),
+                    unpacked_size_bytes=sum(item.size_bytes for item in stored_files),
                     file_count=max(1, len(stored_files)),
                 )
             )
@@ -1007,7 +1207,8 @@ class SqlArtifactInputResolver:
             if stage is None or stage.resolved_input_bindings_json is None:
                 raise KeyError(attempt_id)
             bindings = [
-                BindingSetV1.model_validate(value) for value in stage.resolved_input_bindings_json
+                BindingSetV1.model_validate_json(canonical_document(value))
+                for value in stage.resolved_input_bindings_json
             ]
             if (
                 binding_name == "loom_checkpoint"
@@ -1141,7 +1342,10 @@ class SqlArtifactInputResolver:
                 raise ArtifactCommitError("input_descriptor_drift")
             from loom.pipeline.artifact_commit import ArtifactManifestV1, StoredFileV1
 
-            files = [StoredFileV1.model_validate(value) for value in record["stored_files"]]
+            files = [
+                StoredFileV1.model_validate_json(canonical_document(value))
+                for value in record["stored_files"]
+            ]
             item_manifest = ArtifactManifestV1(
                 artifact_id=artifact.id,
                 artifact_name=artifact.name,

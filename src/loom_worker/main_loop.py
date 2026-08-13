@@ -29,7 +29,7 @@ import socket
 import subprocess
 import tempfile
 import time
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -54,6 +54,8 @@ from loom.models.task import TaskConfig
 from loom.models.trial import RetryPolicy, RetryReason, TrialConfig
 from loom.models.types import ModelSpec
 from loom.models.worker_capabilities import GpuDeviceCapabilityV1
+from loom.pipeline.keys import canonical_document
+from loom.pipeline.work_protocol import ExecutionAttemptClaimV1, WorkClaimV1
 from loom.retry import next_attempt_at
 from loom.security.redaction import redact_text
 from loom.startup_retry import (
@@ -270,7 +272,11 @@ def _host_memory_bytes() -> int:
         raise RuntimeError("worker host memory cannot be measured") from None
 
 
-def _pipeline_registration_payload(settings: WorkerSettings) -> dict[str, Any]:
+def _pipeline_registration_payload(
+    settings: WorkerSettings,
+    *,
+    cache_fields: Mapping[str, int] | None = None,
+) -> dict[str, Any]:
     """Measure the canonical Pipeline identity; GPU pools fail before registration."""
 
     cpu_arch = _host_cpu_arch()
@@ -281,9 +287,7 @@ def _pipeline_registration_payload(settings: WorkerSettings) -> dict[str, Any]:
     gpu_pool = settings.pool_name in {"behavior-gpu-oldlab", "behavior-gpu-gb10"}
     cpu_data_pool = settings.pool_name == "behavior-cpu-data"
     if (gpu_pool or cpu_data_pool) and settings.max_concurrent != 1:
-        raise GpuCapabilityProbeError(
-            "Pipeline Slurm workers require concurrency exactly one"
-        )
+        raise GpuCapabilityProbeError("Pipeline Slurm workers require concurrency exactly one")
     if gpu_pool:
         if cluster_id not in {"oldlab", "gb10"}:
             raise GpuCapabilityProbeError("GPU pool has no policy-scoped Slurm cluster")
@@ -312,6 +316,12 @@ def _pipeline_registration_payload(settings: WorkerSettings) -> dict[str, Any]:
     runtime_features = ["loom-secret-tmpfs-v1"]
     if devices:
         runtime_features.extend(("egl", "nvidia-container-runtime"))
+    if gpu_pool:
+        from loom_worker.pipeline_execution import production_pipeline_enabled
+
+        if production_pipeline_enabled(settings):
+            runtime_features.append("loom-stage1-smoke-worker-v1")
+    cache = dict(cache_fields or {})
     snapshot = build_worker_capability_snapshot(
         cpu_arch=cpu_arch,
         cpu_cores=max(1, os.cpu_count() or 1),
@@ -319,9 +329,11 @@ def _pipeline_registration_payload(settings: WorkerSettings) -> dict[str, Any]:
         scratch_bytes=raw_filesystem_bytes,
         network_profiles=["gateway", "none"],
         container_runtime_features=runtime_features,
-        input_cache_capacity_bytes=allocatable_capacity(raw_filesystem_bytes),
-        input_cache_reserved_bytes=0,
-        input_cache_ready_bytes=0,
+        input_cache_capacity_bytes=cache.get(
+            "input_cache_capacity_bytes", allocatable_capacity(raw_filesystem_bytes)
+        ),
+        input_cache_reserved_bytes=cache.get("input_cache_reserved_bytes", 0),
+        input_cache_ready_bytes=cache.get("input_cache_ready_bytes", 0),
         gpu_devices=devices,
     )
     legacy_capabilities = [
@@ -464,7 +476,7 @@ def _log_docker_registry_auth_summary() -> None:
 async def run_worker(
     settings: WorkerSettings,
     *,
-    pipeline_run: Callable[[dict[str, Any]], Coroutine[Any, Any, None]] | None = None,
+    pipeline_run: Callable[[ExecutionAttemptClaimV1], Coroutine[Any, Any, None]] | None = None,
 ) -> None:
     state = ShutdownState()
     install_signal_handlers(state)
@@ -498,12 +510,32 @@ async def run_worker(
             _client=gw_http,
         )
 
+        production_runtime = None
+        if pipeline_run is None:
+            from loom_worker.pipeline_execution import (
+                PipelineWorkerRuntime,
+                production_pipeline_enabled,
+            )
+
+            if production_pipeline_enabled(settings):
+                production_runtime = PipelineWorkerRuntime(settings, cp_client)
+
+        pipeline_enabled = pipeline_run is not None or production_runtime is not None
+
         info = await _register_worker_with_retry(
             cp_client=cp_client,
             settings=settings,
-            pipeline_enabled=pipeline_run is not None,
+            pipeline_enabled=pipeline_enabled,
+            pipeline_cache_fields=(
+                production_runtime.registration_cache_fields()
+                if production_runtime is not None
+                else None
+            ),
         )
         worker_id = UUID(info["worker_id"])
+        if production_runtime is not None:
+            production_runtime.bind_worker(worker_id)
+            pipeline_run = production_runtime.run_claim
         capability_snapshot_digest = info.get("capability_snapshot_digest")
         logger.info("worker_registered worker_id=%s", worker_id)
 
@@ -642,6 +674,7 @@ async def _register_worker_with_retry(
     retry_config: StartupRetryConfig = DEFAULT_STARTUP_RETRY_CONFIG,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     pipeline_enabled: bool = False,
+    pipeline_cache_fields: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
     register_kwargs: dict[str, Any] = {
         "hostname": _worker_hostname(settings.hostname),
@@ -652,7 +685,15 @@ async def _register_worker_with_retry(
     }
     if pipeline_enabled:
         register_kwargs["supported_work_kinds"] = ["trial", "execution_attempt"]
-        register_kwargs.update(_pipeline_registration_payload(settings))
+        registration = (
+            _pipeline_registration_payload(settings)
+            if pipeline_cache_fields is None
+            else _pipeline_registration_payload(
+                settings,
+                cache_fields=pipeline_cache_fields,
+            )
+        )
+        register_kwargs.update(registration)
     return await retry_startup_dependency(
         lambda: cp_client.register(**register_kwargs),
         operation_name="worker control-plane registration",
@@ -850,7 +891,7 @@ async def _claim_available_work(
     object_store: ObjectStore,
     worker_id: UUID,
     capability_snapshot_digest: str | None,
-    pipeline_run: Callable[[dict[str, Any]], Coroutine[Any, Any, None]] | None,
+    pipeline_run: Callable[[ExecutionAttemptClaimV1], Coroutine[Any, Any, None]] | None,
     vllm_registry: WorkerVLLMRegistry,
     sandbox_allocator: SandboxNetworkAllocator | None = None,
     sandbox_singleton: SandboxSingletonManager | None = None,
@@ -912,8 +953,12 @@ async def _claim_available_work(
             break
         if envelope is None:
             break
-        payload = envelope["payload"]
-        if envelope["work_kind"] == "trial":
+        # The HTTP boundary contains JSON UUID and timestamp strings.  Validate
+        # through Pydantic's JSON path so strict in-process construction remains
+        # closed without rejecting the canonical transport representation.
+        parsed = WorkClaimV1.model_validate_json(canonical_document(envelope))
+        payload = parsed.payload
+        if parsed.work_kind == "trial":
             await _spawn_trial(
                 pool=pool,
                 settings=settings,
@@ -921,12 +966,14 @@ async def _claim_available_work(
                 gateway_client=gateway_client,
                 object_store=object_store,
                 worker_id=worker_id,
-                payload=payload,
+                payload=payload.model_dump(mode="json"),
                 vllm_registry=vllm_registry,
                 sandbox_allocator=sandbox_allocator,
                 sandbox_singleton=sandbox_singleton,
             )
-        elif envelope["work_kind"] == "execution_attempt":
+        elif parsed.work_kind == "execution_attempt":
+            if not isinstance(payload, ExecutionAttemptClaimV1):
+                raise RuntimeError("Control Plane returned a mismatched Pipeline claim")
             await pool.spawn(pipeline_run(payload))
         else:
             raise RuntimeError("Control Plane returned an unknown work kind")

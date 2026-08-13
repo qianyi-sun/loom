@@ -3639,6 +3639,251 @@ class PipelineRunGpuBackendSelection(Base):
     gpu_backend_selection_sha256: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+class PipelineStage1SmokeAuthorization(Base):
+    """One candidate-bound, two-phase Stage 1 live mutation authority."""
+
+    __tablename__ = "pipeline_stage1_smoke_authorizations"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('capacity_pending','capacity_draining','capacity_aborted',"
+            "'submitted','running','cleanup_required','cleanup_draining','accepted','rejected')",
+            name="pipeline_stage1_smoke_authorizations_state_check",
+        ),
+        CheckConstraint(
+            "candidate_sha256 ~ '^sha256:[0-9a-f]{64}$' AND "
+            "authorization_sha256 ~ '^sha256:[0-9a-f]{64}$' AND "
+            "nonce_sha256 ~ '^sha256:[0-9a-f]{64}$' AND "
+            "capacity_request_digest ~ '^sha256:[0-9a-f]{64}$' AND "
+            "capacity_signature_sha256 ~ '^sha256:[0-9a-f]{64}$' AND "
+            "(preflight_sha256 IS NULL OR preflight_sha256 ~ '^sha256:[0-9a-f]{64}$') AND "
+            "(execute_request_digest IS NULL OR "
+            "execute_request_digest ~ '^sha256:[0-9a-f]{64}$') AND "
+            "(execute_signature_sha256 IS NULL OR "
+            "execute_signature_sha256 ~ '^sha256:[0-9a-f]{64}$')",
+            name="pipeline_stage1_smoke_authorizations_digest_check",
+        ),
+        CheckConstraint(
+            "length(environment) BETWEEN 1 AND 256 AND "
+            "length(capacity_idempotency_key) BETWEEN 1 AND 128 AND "
+            "capacity_idempotency_key = btrim(capacity_idempotency_key) AND "
+            "capacity_idempotency_key ~ '^[ -~]+$' AND "
+            "(execute_idempotency_key IS NULL OR ("
+            "length(execute_idempotency_key) BETWEEN 1 AND 128 AND "
+            "execute_idempotency_key = btrim(execute_idempotency_key) AND "
+            "execute_idempotency_key ~ '^[ -~]+$')) AND "
+            "capacity_signature_key_id ~ '^[a-z][a-z0-9._-]{0,63}$' AND "
+            "(execute_signature_key_id IS NULL OR "
+            "execute_signature_key_id ~ '^[a-z][a-z0-9._-]{0,63}$') AND "
+            "(cleanup_begin_signature_key_id IS NULL OR "
+            "cleanup_begin_signature_key_id ~ '^[a-z][a-z0-9._-]{0,63}$') AND "
+            "(cleanup_signature_key_id IS NULL OR "
+            "cleanup_signature_key_id ~ '^[a-z][a-z0-9._-]{0,63}$')",
+            name="pipeline_stage1_smoke_authorizations_identity_check",
+        ),
+        CheckConstraint(
+            "octet_length(candidate_bytes) BETWEEN 2 AND 1048576 AND "
+            "get_byte(candidate_bytes, octet_length(candidate_bytes)-1)=10 AND "
+            "octet_length(authorization_bytes) > 1 AND "
+            "get_byte(authorization_bytes, octet_length(authorization_bytes)-1)=10 AND "
+            "((preflight_json IS NULL AND preflight_bytes IS NULL) OR "
+            "(jsonb_typeof(preflight_json) = 'object' AND octet_length(preflight_bytes) > 1 "
+            "AND get_byte(preflight_bytes, octet_length(preflight_bytes)-1)=10)) AND "
+            "((cleanup_begin_json IS NULL AND cleanup_begin_bytes IS NULL) OR "
+            "(jsonb_typeof(cleanup_begin_json) = 'object' AND "
+            "octet_length(cleanup_begin_bytes) > 1 AND "
+            "get_byte(cleanup_begin_bytes, octet_length(cleanup_begin_bytes)-1)=10))",
+            name="pipeline_stage1_smoke_authorizations_document_check",
+        ),
+        CheckConstraint(
+            "(state IN ('capacity_pending','capacity_draining','capacity_aborted') AND "
+            "preflight_json IS NULL AND "
+            "preflight_bytes IS NULL AND preflight_sha256 IS NULL AND "
+            "execute_idempotency_key IS NULL AND execute_request_digest IS NULL AND "
+            "execute_signature_key_id IS NULL AND execute_signature_sha256 IS NULL AND "
+            "pipeline_run_id IS NULL AND consumed_at IS NULL) OR "
+            "(state NOT IN ('capacity_pending','capacity_draining','capacity_aborted') AND "
+            "preflight_json IS NOT NULL AND "
+            "preflight_bytes IS NOT NULL AND preflight_sha256 IS NOT NULL AND "
+            "execute_idempotency_key IS NOT NULL AND execute_request_digest IS NOT NULL AND "
+            "execute_signature_key_id IS NOT NULL AND execute_signature_sha256 IS NOT NULL AND "
+            "pipeline_run_id IS NOT NULL AND consumed_at IS NOT NULL)",
+            name="pipeline_stage1_smoke_authorizations_execution_phase_check",
+        ),
+        CheckConstraint(
+            "(state IN ('capacity_pending','submitted','running','cleanup_required') AND "
+            "cleanup_begin_json IS NULL AND cleanup_begin_bytes IS NULL AND "
+            "cleanup_begin_sha256 IS NULL AND cleanup_begin_signature_key_id IS NULL AND "
+            "cleanup_begin_signature_sha256 IS NULL AND cleanup_began_at IS NULL) OR "
+            "(state IN ('capacity_draining','capacity_aborted','cleanup_draining',"
+            "'accepted','rejected') AND "
+            "cleanup_begin_json IS NOT NULL AND cleanup_begin_bytes IS NOT NULL AND "
+            "cleanup_begin_sha256 IS NOT NULL AND cleanup_begin_signature_key_id IS NOT NULL AND "
+            "cleanup_begin_signature_sha256 IS NOT NULL AND cleanup_began_at IS NOT NULL)",
+            name="pipeline_stage1_smoke_authorizations_cleanup_phase_check",
+        ),
+        CheckConstraint(
+            "expires_at > authorized_at AND cleanup_deadline > start_by",
+            name="pipeline_stage1_smoke_authorizations_window_check",
+        ),
+        CheckConstraint("version >= 0", name="pipeline_stage1_smoke_authorizations_version_check"),
+        CheckConstraint(
+            "(evidence_sha256 IS NULL OR evidence_sha256 ~ '^sha256:[0-9a-f]{64}$') AND "
+            "(cleanup_begin_sha256 IS NULL OR "
+            "cleanup_begin_sha256 ~ '^sha256:[0-9a-f]{64}$') AND "
+            "(cleanup_begin_signature_sha256 IS NULL OR "
+            "cleanup_begin_signature_sha256 ~ '^sha256:[0-9a-f]{64}$') AND "
+            "(cleanup_sha256 IS NULL OR cleanup_sha256 ~ '^sha256:[0-9a-f]{64}$') AND "
+            "(cleanup_signature_sha256 IS NULL OR "
+            "cleanup_signature_sha256 ~ '^sha256:[0-9a-f]{64}$')",
+            name="pipeline_stage1_smoke_authorizations_result_digest_check",
+        ),
+        CheckConstraint(
+            "(state IN ('capacity_pending','capacity_draining','capacity_aborted',"
+            "'submitted','running') AND "
+            "evidence_sha256 IS NULL) OR "
+            "(state IN ('cleanup_required','cleanup_draining','accepted','rejected') AND "
+            "evidence_sha256 IS NOT NULL)",
+            name="pipeline_stage1_smoke_authorizations_evidence_phase_check",
+        ),
+        CheckConstraint(
+            "(state IN ('capacity_aborted','accepted','rejected') AND cleanup_sha256 IS NOT NULL "
+            "AND cleanup_signature_key_id IS NOT NULL "
+            "AND cleanup_signature_sha256 IS NOT NULL AND finished_at IS NOT NULL) OR "
+            "(state NOT IN ('capacity_aborted','accepted','rejected') AND cleanup_sha256 IS NULL "
+            "AND cleanup_signature_key_id IS NULL "
+            "AND cleanup_signature_sha256 IS NULL AND finished_at IS NULL)",
+            name="pipeline_stage1_smoke_authorizations_terminal_check",
+        ),
+        UniqueConstraint(
+            "candidate_sha256", name="pipeline_stage1_smoke_authorizations_candidate_uidx"
+        ),
+        UniqueConstraint("nonce_sha256", name="pipeline_stage1_smoke_authorizations_nonce_uidx"),
+        UniqueConstraint(
+            "team_id",
+            "capacity_idempotency_key",
+            name="pipeline_stage1_smoke_authorizations_team_capacity_idempotency_uidx",
+        ),
+        UniqueConstraint(
+            "team_id",
+            "execute_idempotency_key",
+            name="pipeline_stage1_smoke_authorizations_team_execute_idempotency_uidx",
+        ),
+        Index(
+            "pipeline_stage1_smoke_authorizations_active_environment_uidx",
+            "environment",
+            unique=True,
+            postgresql_where=text(
+                "state IN ('capacity_pending','capacity_draining','submitted','running',"
+                "'cleanup_required','cleanup_draining')"
+            ),
+        ),
+    )
+
+    authorization_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    team_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("teams.id", ondelete="RESTRICT"), nullable=False
+    )
+    operator_user_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    environment: Mapped[str] = mapped_column(Text, nullable=False)
+    candidate_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    candidate_bytes: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    candidate_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    authorization_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    authorization_bytes: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    authorization_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    preflight_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    preflight_bytes: Mapped[bytes | None] = mapped_column(LargeBinary)
+    preflight_sha256: Mapped[str | None] = mapped_column(Text)
+    nonce_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    capacity_idempotency_key: Mapped[str] = mapped_column(Text, nullable=False)
+    capacity_request_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    capacity_signature_key_id: Mapped[str] = mapped_column(Text, nullable=False)
+    capacity_signature_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    execute_idempotency_key: Mapped[str | None] = mapped_column(Text)
+    execute_request_digest: Mapped[str | None] = mapped_column(Text)
+    execute_signature_key_id: Mapped[str | None] = mapped_column(Text)
+    execute_signature_sha256: Mapped[str | None] = mapped_column(Text)
+    policy_activation_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("pipeline_scoped_policy_activations.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+    )
+    pipeline_run_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("pipeline_runs.id", ondelete="RESTRICT"),
+        unique=True,
+    )
+    state: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_sha256: Mapped[str | None] = mapped_column(Text)
+    cleanup_begin_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    cleanup_begin_bytes: Mapped[bytes | None] = mapped_column(LargeBinary)
+    cleanup_begin_sha256: Mapped[str | None] = mapped_column(Text)
+    cleanup_begin_signature_key_id: Mapped[str | None] = mapped_column(Text)
+    cleanup_begin_signature_sha256: Mapped[str | None] = mapped_column(Text)
+    cleanup_began_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    cleanup_sha256: Mapped[str | None] = mapped_column(Text)
+    cleanup_signature_key_id: Mapped[str | None] = mapped_column(Text)
+    cleanup_signature_sha256: Mapped[str | None] = mapped_column(Text)
+    authorized_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    start_by: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    cleanup_deadline: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+
+
+class PipelineStage1SmokeEvent(Base):
+    """Append-only canonical evidence for one Stage 1 authority."""
+
+    __tablename__ = "pipeline_stage1_smoke_events"
+    __table_args__ = (
+        CheckConstraint("seq > 0", name="pipeline_stage1_smoke_events_seq_check"),
+        CheckConstraint(
+            "event_kind IN ('capacity_preflight_started','live_action_consumed',"
+            "'evidence_recorded','cleanup_started','cleanup_complete','capacity_aborted',"
+            "'accepted','rejected')",
+            name="pipeline_stage1_smoke_events_kind_check",
+        ),
+        CheckConstraint(
+            "payload_sha256 ~ '^sha256:[0-9a-f]{64}$'",
+            name="pipeline_stage1_smoke_events_digest_check",
+        ),
+        CheckConstraint(
+            "octet_length(payload_bytes) > 1 AND "
+            "get_byte(payload_bytes, octet_length(payload_bytes)-1)=10",
+            name="pipeline_stage1_smoke_events_document_check",
+        ),
+        UniqueConstraint(
+            "authorization_id", "event_kind", name="pipeline_stage1_smoke_events_kind_uidx"
+        ),
+    )
+
+    authorization_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("pipeline_stage1_smoke_authorizations.authorization_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    seq: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    event_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    payload_bytes: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    payload_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class PipelineStageRun(Base):
     __tablename__ = "pipeline_stage_runs"
     __table_args__ = (

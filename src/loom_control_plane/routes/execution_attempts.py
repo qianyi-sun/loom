@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Protocol, cast
 from uuid import UUID
@@ -22,6 +23,7 @@ from loom.db.schema import (
     PipelineBudgetLedger,
     PipelineBudgetReservation,
     PipelineCancellationOutbox,
+    PipelineEvent,
     PipelineInputMaterializationEvidence,
     PipelineLivePreviewFrame,
     PipelineLivePreviewGeneration,
@@ -42,6 +44,8 @@ from loom.pipeline.live_preview import (
     is_stage1_live_preview_eligible,
     validate_preview_jpeg,
 )
+from loom.pipeline.retry import retry_decision
+from loom.pipeline.state import RetryClass
 from loom.pipeline.work_protocol import (
     CheckpointPrepareRequestV1,
     ExecutionCancelAckV1,
@@ -81,6 +85,7 @@ from loom_control_plane.metrics import (
     PIPELINE_ARTIFACT_BYTES_TOTAL,
     PIPELINE_ARTIFACT_COMMIT_FAILURES_TOTAL,
     PIPELINE_CANCEL_LATENCY_SECONDS,
+    PIPELINE_GPU_SECONDS_TOTAL,
     PIPELINE_LIVE_PREVIEW_BYTES_TOTAL,
     PIPELINE_LIVE_PREVIEW_FRAMES_TOTAL,
     PIPELINE_STAGE_DURATION_SECONDS,
@@ -216,6 +221,166 @@ async def _ack_cancellation_outbox(
     outbox.ack_digest = digest
     outbox.acked_at = observed_at
     outbox.version += 1
+
+
+async def _append_terminal_event(
+    session: AsyncSession,
+    *,
+    run: PipelineRun,
+    stage: PipelineStageRun,
+    attempt: ExecutionAttempt,
+    event_type: str,
+    payload: dict[str, Any],
+) -> None:
+    """Append one event while holding the run's sequence fence."""
+
+    locked_run = (
+        await session.execute(select(PipelineRun).where(PipelineRun.id == run.id).with_for_update())
+    ).scalar_one_or_none()
+    if locked_run is None:
+        raise HTTPException(status_code=409, detail="pipeline_run_unavailable")
+    seq = locked_run.next_event_seq
+    locked_run.next_event_seq += 1
+    locked_run.version += 1
+    session.add(
+        PipelineEvent(
+            pipeline_run_id=run.id,
+            seq=seq,
+            stage_run_id=stage.id,
+            execution_attempt_id=attempt.id,
+            event_type=event_type,
+            actor_kind="worker",
+            actor_id=str(attempt.worker_id) if attempt.worker_id is not None else None,
+            payload_json=payload,
+        )
+    )
+
+
+def _attempt_gpu_seconds(attempt: ExecutionAttempt, *, observed_at: datetime) -> int:
+    """Return conservative integral GPU-seconds from the frozen StageRequest."""
+
+    request = attempt.stage_request_json or {}
+    budget = request.get("budget")
+    if not isinstance(budget, dict):
+        raise HTTPException(status_code=409, detail="attempt_budget_unavailable")
+    gpu_limit = budget.get("gpu_seconds_limit")
+    timeout = budget.get("timeout_seconds")
+    if not isinstance(gpu_limit, int) or not isinstance(timeout, int) or timeout <= 0:
+        raise HTTPException(status_code=409, detail="attempt_budget_unavailable")
+    if gpu_limit == 0:
+        return 0
+    gpu_count, remainder = divmod(gpu_limit, timeout + 35)
+    if gpu_count <= 0 or remainder:
+        raise HTTPException(status_code=409, detail="attempt_gpu_budget_invalid")
+    runtime = attempt.heartbeat_runtime_seconds
+    if runtime is None:
+        if attempt.runtime_started_at is None:
+            raise HTTPException(status_code=409, detail="attempt_runtime_unavailable")
+        runtime = max((observed_at - attempt.runtime_started_at).total_seconds(), 0.0)
+    return gpu_count * math.ceil(max(runtime, 0.0))
+
+
+async def _settle_attempt_reservations(
+    session: AsyncSession,
+    *,
+    stage: PipelineStageRun,
+    attempt: ExecutionAttempt,
+    observed_at: datetime,
+    final_output_bytes: int | None,
+) -> int:
+    """Settle success usage or release failed-attempt capacity exactly once."""
+
+    reservations = list(
+        (
+            await session.execute(
+                select(PipelineBudgetReservation)
+                .where(
+                    PipelineBudgetReservation.execution_attempt_id == attempt.id,
+                    PipelineBudgetReservation.state == "active",
+                )
+                .order_by(PipelineBudgetReservation.kind, PipelineBudgetReservation.reservation_key)
+                .with_for_update()
+            )
+        ).scalars()
+    )
+    if any(item.kind == "provider" for item in reservations):
+        raise HTTPException(status_code=409, detail="provider_reservation_active")
+    ledger = await session.get(PipelineBudgetLedger, stage.pipeline_run_id, with_for_update=True)
+    if ledger is None:
+        raise HTTPException(status_code=409, detail="pipeline_budget_unavailable")
+
+    final_key = f"artifact:final:{attempt.id}"
+    final_reservations = [
+        item
+        for item in reservations
+        if item.kind == "artifact" and item.reservation_key == final_key
+    ]
+    if final_output_bytes is not None and len(final_reservations) != 1:
+        raise HTTPException(status_code=409, detail="final_output_reservation_missing")
+    if final_output_bytes is not None and any(
+        item.kind == "artifact" and item.reservation_key != final_key for item in reservations
+    ):
+        raise HTTPException(status_code=409, detail="artifact_reservation_active")
+
+    gpu_actual = _attempt_gpu_seconds(attempt, observed_at=observed_at)
+    gpu_reservations = [item for item in reservations if item.kind == "gpu"]
+    if (gpu_actual > 0) != (len(gpu_reservations) == 1):
+        raise HTTPException(status_code=409, detail="gpu_reservation_mismatch")
+    if len(gpu_reservations) > 1:
+        raise HTTPException(status_code=409, detail="gpu_reservation_mismatch")
+
+    for reservation in reservations:
+        if reservation.kind == "provider":  # guarded above; keeps type narrowing explicit
+            continue
+        actual: int | None
+        if reservation.kind == "gpu":
+            actual = gpu_actual
+        else:
+            actual = final_output_bytes
+        if actual is not None and actual > reservation.reserved_amount:
+            raise HTTPException(status_code=409, detail="budget_settlement_exceeded")
+
+        if reservation.kind == "gpu":
+            ledger.gpu_reserved_seconds -= reservation.reserved_amount
+            if actual is not None:
+                ledger.gpu_settled_seconds += actual
+        else:
+            ledger.artifact_reserved_bytes -= reservation.reserved_amount
+            if actual is not None:
+                ledger.artifact_settled_bytes += actual
+        reservation.state = "released" if actual is None else "settled"
+        reservation.settled_amount = actual
+        reservation.settled_at = observed_at
+    ledger.version += 1
+    ledger.updated_at = observed_at
+    return gpu_actual
+
+
+def _gpu_metric_labels(stage: PipelineStageRun) -> tuple[str, str] | None:
+    frozen = stage.resolved_execution_spec_json or {}
+    variant = frozen.get("execution_variant_id")
+    if variant == "gb10-shared-1gpu":
+        return "gb10", "one"
+    if variant == "oldlab-rtx5080-2gpu":
+        return "oldlab", "two"
+    return None
+
+
+async def _require_no_active_uploads(session: AsyncSession, *, attempt_id: UUID) -> None:
+    active = (
+        await session.execute(
+            select(func.count())
+            .select_from(ArtifactUploadSession)
+            .where(
+                ArtifactUploadSession.execution_attempt_id == attempt_id,
+                ArtifactUploadSession.state.in_(
+                    ["preparing", "uploading", "uploaded", "committing", "committed_ready"]
+                ),
+            )
+        )
+    ).scalar_one()
+    if active:
+        raise HTTPException(status_code=409, detail="cleanup_incomplete")
 
 
 async def _worker_auth(
@@ -810,6 +975,8 @@ async def _terminal_report(
     state: str,
     authorization: str | None,
 ) -> dict[str, Any]:
+    if not isinstance(payload, ExecutionFailedV1) or state != "failed":
+        raise HTTPException(status_code=409, detail="terminal_report_invalid")
     ctx = await _worker_auth(request, authorization, scope="worker:report")
     async with request.app.state.session_factory() as session:
         attempt, replay = await _begin_mutation(
@@ -825,26 +992,87 @@ async def _terminal_report(
         )
         if replay is not None:
             return replay
-        attempt.state = state
-        attempt.finished_at = datetime.now(UTC)
-        if isinstance(payload, ExecutionFailedV1):
-            attempt.exit_code = payload.exit_code
-            attempt.retry_class = payload.retry_class.value
-            attempt.reason_code = payload.reason_code
-            if payload.stage_result is not None:
-                attempt.result_manifest_json = payload.stage_result.model_dump(mode="json")
-                attempt.result_manifest_digest = payload.stage_result_sha256
-        else:
-            attempt.retry_class = "cancelled"
-            attempt.reason_code = "cancelled"
-            attempt.cancellation_observed_at = payload.observed_at
-            attempt.cancellation_outcome = payload.outcome
+        observed_at = datetime.now(UTC)
+        await _require_no_active_uploads(session, attempt_id=attempt.id)
+        stage = await session.get(PipelineStageRun, attempt.stage_run_id, with_for_update=True)
+        if stage is None:
+            raise HTTPException(status_code=404, detail="not_found")
+        run = await session.get(PipelineRun, stage.pipeline_run_id)
+        if run is None:
+            raise HTTPException(status_code=409, detail="pipeline_run_unavailable")
+        ledger = await session.get(
+            PipelineBudgetLedger, stage.pipeline_run_id, with_for_update=True
+        )
+        if ledger is None:
+            raise HTTPException(status_code=409, detail="pipeline_budget_unavailable")
+        gpu_seconds = await _settle_attempt_reservations(
+            session,
+            stage=stage,
+            attempt=attempt,
+            observed_at=observed_at,
+            final_output_bytes=None,
+        )
+        request_budget = (attempt.stage_request_json or {}).get("budget")
+        max_attempts = (
+            request_budget.get("max_attempts") if isinstance(request_budget, dict) else None
+        )
+        if not isinstance(max_attempts, int) or max_attempts not in {1, 2, 3}:
+            raise HTTPException(status_code=409, detail="attempt_budget_unavailable")
+        decision = retry_decision(
+            completed_attempt_number=attempt.attempt_number,
+            max_attempts=max_attempts,
+            retry_class=RetryClass(payload.retry_class.value),
+            reason_code=payload.reason_code,
+            terminal_cause=ledger.terminal_cause,
+            cleanup_acknowledged=True,
+        )
+        cleanup_proof = payload.resources.model_dump(mode="json")
+        attempt.state = "failed"
+        attempt.finished_at = observed_at
+        attempt.exit_code = payload.exit_code
+        attempt.retry_class = payload.retry_class.value
+        attempt.reason_code = payload.reason_code
+        attempt.cleanup_acknowledged_at = observed_at
+        attempt.cleanup_proof_json = cleanup_proof
+        attempt.cleanup_proof_digest = canonical_digest(cleanup_proof)
+        attempt.version += 1
+        if payload.stage_result is not None:
+            attempt.result_manifest_json = payload.stage_result.model_dump(mode="json")
+            attempt.result_manifest_digest = payload.stage_result_sha256
         await purge_live_preview(
             session,
             attempt_id=attempt.id,
-            reason="attempt_failed" if state == "failed" else "attempt_cancelled",
+            reason="attempt_failed",
         )
-        response = {"execution_attempt_id": str(attempt_id), "state": state}
+        if decision.retry:
+            assert decision.delay_seconds is not None
+            stage.state = "retry_wait"
+            stage.next_attempt_at = observed_at + timedelta(seconds=decision.delay_seconds)
+            stage.domain_outcome = None
+            stage.reason_code = None
+            stage.finished_at = None
+        else:
+            stage.state = "failed"
+            stage.next_attempt_at = None
+            stage.domain_outcome = None
+            stage.reason_code = payload.reason_code
+            stage.finished_at = observed_at
+        stage.version += 1
+        await _append_terminal_event(
+            session,
+            run=run,
+            stage=stage,
+            attempt=attempt,
+            event_type="execution_attempt_failed",
+            payload={
+                "attempt_number": attempt.attempt_number,
+                "reason_code": payload.reason_code,
+                "retry": decision.retry,
+                "retry_delay_seconds": decision.delay_seconds,
+                "stage_state": stage.state,
+            },
+        )
+        response = {"execution_attempt_id": str(attempt_id), "state": "failed"}
         await _journal_response(
             session,
             attempt_id=attempt_id,
@@ -853,7 +1081,18 @@ async def _terminal_report(
             payload=payload,
             response=response,
         )
+        stage_duration = max((observed_at - stage.created_at).total_seconds(), 0)
+        resource_class = _stage_resource_class(stage)
         await session.commit()
+        gpu_labels = _gpu_metric_labels(stage)
+        if gpu_seconds and gpu_labels is not None:
+            PIPELINE_GPU_SECONDS_TOTAL.labels(
+                slurm_cluster=gpu_labels[0], gpu_count_class=gpu_labels[1]
+            ).inc(gpu_seconds)
+        PIPELINE_STAGE_DURATION_SECONDS.labels(
+            resource_class=resource_class,
+            result="retry_wait" if decision.retry else "failed",
+        ).observe(stage_duration)
         return response
 
 
@@ -979,11 +1218,7 @@ async def report_attempt_cancelled(
         attempt.reason_code = str(terminal_cause)
         attempt.cancellation_observed_at = payload.observed_at
         attempt.cancellation_outcome = payload.outcome
-        cleanup_proof = (
-            payload.resources.model_dump(mode="json")
-            if payload.resources is not None
-            else {"teardown_observed": True, "outcome": payload.outcome}
-        )
+        cleanup_proof = payload.resources.model_dump(mode="json")
         attempt.cleanup_acknowledged_at = payload.observed_at
         attempt.cleanup_proof_json = cleanup_proof
         attempt.cleanup_proof_digest = canonical_digest(cleanup_proof)
@@ -1054,18 +1289,53 @@ async def report_attempt_complete(
         if service is None:
             raise HTTPException(status_code=503, detail="artifact_committer_unavailable")
         committed_bytes = await service.complete(attempt=attempt, report=payload, session=session)
+        observed_at = datetime.now(UTC)
+        await _require_no_active_uploads(session, attempt_id=attempt.id)
+        stage = await session.get(PipelineStageRun, attempt.stage_run_id, with_for_update=True)
+        if stage is None:
+            raise HTTPException(status_code=404, detail="not_found")
+        run = await session.get(PipelineRun, stage.pipeline_run_id)
+        if run is None:
+            raise HTTPException(status_code=409, detail="pipeline_run_unavailable")
+        gpu_seconds = await _settle_attempt_reservations(
+            session,
+            stage=stage,
+            attempt=attempt,
+            observed_at=observed_at,
+            final_output_bytes=sum((committed_bytes or {}).values()),
+        )
         attempt.state = "succeeded"
         attempt.exit_code = 0
         attempt.result_manifest_json = payload.stage_result.model_dump(mode="json")
         attempt.result_manifest_digest = payload.stage_result_sha256
-        attempt.finished_at = datetime.now(UTC)
+        attempt.finished_at = observed_at
+        attempt.version += 1
+        stage.state = "succeeded"
+        stage.domain_outcome = payload.stage_result.domain_outcome
+        stage.reason_code = payload.stage_result.reason_code
+        stage.next_attempt_at = None
+        stage.finished_at = observed_at
+        stage.version += 1
         generation = await session.get(
             PipelineLivePreviewGeneration, attempt.id, with_for_update=True
         )
         if generation is not None and generation.purged_at is None:
             generation.state = "handoff"
-            generation.expires_at = generation_expiry(datetime.now(UTC))
-            generation.updated_at = datetime.now(UTC)
+            generation.expires_at = generation_expiry(observed_at)
+            generation.updated_at = observed_at
+        await _append_terminal_event(
+            session,
+            run=run,
+            stage=stage,
+            attempt=attempt,
+            event_type="execution_attempt_succeeded",
+            payload={
+                "attempt_number": attempt.attempt_number,
+                "domain_outcome": payload.stage_result.domain_outcome,
+                "reason_code": payload.stage_result.reason_code,
+                "stage_result_sha256": payload.stage_result_sha256,
+            },
+        )
         response = {"execution_attempt_id": str(attempt_id), "state": "succeeded"}
         await _journal_response(
             session,
@@ -1075,10 +1345,21 @@ async def report_attempt_complete(
             payload=payload,
             response=response,
         )
+        stage_duration = max((observed_at - stage.created_at).total_seconds(), 0)
+        resource_class = _stage_resource_class(stage)
         await session.commit()
         for artifact_class, byte_count in (committed_bytes or {}).items():
             if byte_count:
                 PIPELINE_ARTIFACT_BYTES_TOTAL.labels(artifact_class=artifact_class).inc(byte_count)
+        gpu_labels = _gpu_metric_labels(stage)
+        if gpu_seconds and gpu_labels is not None:
+            PIPELINE_GPU_SECONDS_TOTAL.labels(
+                slurm_cluster=gpu_labels[0], gpu_count_class=gpu_labels[1]
+            ).inc(gpu_seconds)
+        PIPELINE_STAGE_DURATION_SECONDS.labels(
+            resource_class=resource_class,
+            result="succeeded",
+        ).observe(stage_duration)
         return response
 
 

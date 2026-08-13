@@ -514,6 +514,21 @@
     "default": "''",
     "required": false
   },
+  "pipeline_stage1_smoke_key_id": {
+    "annotation": "<class 'str'>",
+    "default": "'pipeline-stage1-operator-v1'",
+    "required": false
+  },
+  "pipeline_stage1_smoke_public_key_file": {
+    "annotation": "pathlib.Path | None",
+    "default": "None",
+    "required": false
+  },
+  "pipeline_stage1_smoke_signature_max_age_sec": {
+    "annotation": "<class 'int'>",
+    "default": "300",
+    "required": false
+  },
   "public_base_url": {
     "annotation": "pydantic.networks.HttpUrl | None",
     "default": "None",

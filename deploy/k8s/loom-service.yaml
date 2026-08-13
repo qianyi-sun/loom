@@ -242,6 +242,10 @@ spec:
           value: '402653184'
         - name: LOOM_SVC_PERSONAL_DEV_TRUSTED_LAUNCHER_PROFILE_SHA256
           value: ''
+        - name: LOOM_SVC_PIPELINE_STAGE1_SMOKE_KEY_ID
+          value: pipeline-stage1-operator-v1
+        - name: LOOM_SVC_PIPELINE_STAGE1_SMOKE_SIGNATURE_MAX_AGE_SEC
+          value: '300'
         - name: LOOM_SVC_PUBLIC_BASE_URL
           value: https://loom.example.com
         - name: LOOM_SVC_SIGNED_URL_EXPIRY_SEC

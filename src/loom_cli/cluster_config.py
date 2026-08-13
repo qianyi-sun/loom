@@ -135,6 +135,11 @@ if TYPE_CHECKING:
         enabled: bool = False
 
     @dataclass(frozen=True)
+    class _PipelineStage1SmokeAuthorityConfig:
+        enabled: bool = False
+        public_key_secret_name: str = "loom-stage1-smoke-authority"
+
+    @dataclass(frozen=True)
     class _TopologyConfig:
         multi_node: bool = False
         storage_backend: str = "host_path"
@@ -177,6 +182,9 @@ if TYPE_CHECKING:
         k8s_worker: _K8sWorkerConfig = field(default_factory=_K8sWorkerConfig)
         llm_gateway_sandbox: _LlmGatewaySandboxConfig = field(
             default_factory=_LlmGatewaySandboxConfig
+        )
+        pipeline_stage1_smoke_authority: _PipelineStage1SmokeAuthorityConfig = field(
+            default_factory=_PipelineStage1SmokeAuthorityConfig
         )
         minio_image: str = "minio/minio"
         minio_storage_gi: int = 500

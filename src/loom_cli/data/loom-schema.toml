@@ -424,6 +424,21 @@ used_by     = ["loom-service"]
 python_type = "int"
 default     = 300
 
+[service_config.pipeline_stage1_smoke_public_key_file]
+used_by     = ["loom-service"]
+python_type = "Path"
+description = "Optional read-only Ed25519 public key for the hidden, separately authorized Stage 1 live-smoke route; absence keeps the mutation fail-closed."
+
+[service_config.pipeline_stage1_smoke_key_id]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "pipeline-stage1-operator-v1"
+
+[service_config.pipeline_stage1_smoke_signature_max_age_sec]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 300
+
 [service_config.personal_dev_capacity_manager_origin]
 used_by     = ["loom-service"]
 python_type = "str"
@@ -1682,6 +1697,11 @@ python_type = "table"
 # This provides per-node edge authentication rather than destination-only
 # routing.
 fields      = { enabled = false }
+
+[render_config.pipeline_stage1_smoke_authority]
+python_type = "table"
+description = "Explicitly mount the protected Stage 1 operator public key into loom-service. Disabled profiles keep every live-smoke mutation fail-closed."
+fields      = { enabled = false, public_key_secret_name = "loom-stage1-smoke-authority" }
 
 [render_config.pgbouncer]
 python_type = "table"

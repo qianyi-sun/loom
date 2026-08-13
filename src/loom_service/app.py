@@ -14,6 +14,7 @@ import os
 import socket
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, Request
@@ -61,6 +62,12 @@ from loom_service.personal_dev_lifecycle import (
     personal_dev_reconcile_run_loop,
 )
 from loom_service.pipeline_control_bindings import SqlPipelineRecipeBindingResolver
+from loom_service.pipeline_stage1_smoke_authority import (
+    build_stage1_candidate_authority_from_environment,
+)
+from loom_service.pipeline_stage1_smoke_service import (
+    load_stage1_smoke_signature_verifier,
+)
 from loom_service.routes import (
     admin_audit,
     agents,
@@ -79,6 +86,8 @@ from loom_service.routes import (
     overview,
     personal_dev_candidates,
     pipeline,
+    pipeline_stage1_smoke,
+    pipeline_stage1_smoke_prepare,
     provider_connections,
     rate_cards,
     run_library,
@@ -142,6 +151,8 @@ async def _assert_schema_startup(engine: AsyncEngine) -> int:
 
 def create_app(settings: LoomServiceSettings) -> FastAPI:
     workload_contract = _validated_v1_workload_contract(settings)
+    if settings.pipeline_stage1_smoke_signature_max_age_sec <= 0:
+        raise RuntimeError("Pipeline Stage 1 smoke signature max age must be positive")
     personal_dev_limits: PersonalDevLifecycleLimits | None = None
     personal_dev_candidate_limits: PersonalDevCandidateLimits | None = None
     if settings.dev_instances_enabled:
@@ -200,6 +211,12 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
             operation_name="service secret-store startup validation",
         )
         admin_secret_verifier = _load_admin_secret_verifier(settings)
+        if settings.pipeline_stage1_smoke_public_key_file is not None:
+            app.state.pipeline_stage1_smoke_verifier = load_stage1_smoke_signature_verifier(
+                settings.pipeline_stage1_smoke_public_key_file,
+                key_id=settings.pipeline_stage1_smoke_key_id,
+                max_age_seconds=(settings.pipeline_stage1_smoke_signature_max_age_sec),
+            )
 
         minio_client = create_minio_client(
             settings,
@@ -427,6 +444,11 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
 
     app = FastAPI(title="Loom Service", version="0.0.1", lifespan=lifespan)
     app.state.personal_dev_builder_available = False
+    stage1_candidate_authority = build_stage1_candidate_authority_from_environment(
+        repo_root=Path(__file__).resolve().parents[2]
+    )
+    if stage1_candidate_authority is not None:
+        app.state.pipeline_stage1_candidate_authority = stage1_candidate_authority
 
     @app.exception_handler(StagingAdmissionError)
     async def _staging_admission_error(
@@ -492,6 +514,8 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
     app.include_router(monitor.router, prefix="/api/v1")
     app.include_router(overview.router, prefix="/api/v1")
     app.include_router(pipeline.router, prefix="/api/v1")
+    app.include_router(pipeline_stage1_smoke.router, prefix="/api/v1/internal")
+    app.include_router(pipeline_stage1_smoke_prepare.router, prefix="/api/v1/internal")
     app.include_router(backends.router, prefix="/api/v1")
     app.include_router(local_servers.router, prefix="/api/v1")
     app.include_router(provider_connections.router, prefix="/api/v1")

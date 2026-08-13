@@ -8,11 +8,17 @@ import signal
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from loom.pipeline.image_runtime import ImageRuntimeRegistry
+from loom.pipeline.resource_profiles import ResourceProfileRegistry
 from loom_pipeline_orchestrator.health import start_health_server
 from loom_pipeline_orchestrator.main_loop import OrchestratorContext, run
 from loom_pipeline_orchestrator.reconciler import PipelineReconciler
 from loom_pipeline_orchestrator.repository import PipelineRepository
 from loom_pipeline_orchestrator.settings import PipelineOrchestratorSettings
+from loom_pipeline_orchestrator.stage1_runtime import (
+    Stage1ReadinessResolver,
+    Stage1RequestRenderer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +29,20 @@ async def _amain() -> None:
     engine = create_async_engine(settings.db_url, pool_pre_ping=True)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     repository = PipelineRepository(sessions)
-    reconciler = PipelineReconciler(repository)
+    repo_root = settings.repo_root.resolve()
+    resource_profiles = ResourceProfileRegistry.load(
+        repo_root / settings.resource_profiles_path
+    )
+    image_runtime = ImageRuntimeRegistry.load(repo_root / settings.image_runtime_contracts_path)
+    reconciler = PipelineReconciler(
+        repository,
+        readiness_resolver=Stage1ReadinessResolver(
+            repo_root=repo_root,
+            resource_profiles=resource_profiles,
+            image_runtime=image_runtime,
+        ),
+        request_renderer=Stage1RequestRenderer(),
+    )
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):

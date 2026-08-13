@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import httpx
 import pytest
 
+from loom.pipeline.keys import canonical_digest
+from loom.pipeline.stage1_smoke import Stage1SmokeAuthorizationV1
 from loom_cli.__main__ import main
 from loom_cli.pipeline_cmd import _build_bundle
+from tests.unit.test_pipeline_stage1_smoke import _candidate
 
 RUN_ID = "00000000-0000-0000-0000-000000000011"
 STAGE_ID = "00000000-0000-0000-0000-000000000022"
@@ -101,6 +106,104 @@ def _budget() -> dict[str, Any]:
         "max_provider_cost_usd": "0.000000",
         "max_stage_runs": 1,
         "max_wall_seconds": 1,
+    }
+
+
+def test_stage1_render_candidate_is_local_and_mutation_free(
+    server: MockServer, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    candidate = _candidate()
+    rc = main(
+        [
+            "pipeline",
+            "stage1-smoke",
+            "render-candidate",
+            "--candidate",
+            _write_json(tmp_path, "stage1-candidate.json", candidate.model_dump(mode="json")),
+            "--json",
+        ]
+    )
+    assert rc == 0
+    rendered = json.loads(capsys.readouterr().out)
+    assert rendered["candidate_sha256"] == candidate.candidate_sha256
+    assert rendered["recipe"] == "behavior-stage1-smoke@1"
+    assert rendered["stage_count"] == 1
+    assert rendered["network_profile"] == "none"
+    assert server.requests == []
+
+
+def test_stage1_two_phase_live_commands_use_exact_hidden_routes(
+    server: MockServer, tmp_path: Path
+) -> None:
+    candidate = _candidate()
+    now = datetime(2026, 8, 13, 16, tzinfo=UTC)
+    authorization = Stage1SmokeAuthorizationV1(
+        schema_version="loom.behavior-stage1-smoke-authorization.v1",
+        action="stage1",
+        authorization_id=UUID("00000000-0000-4000-8000-000000000099"),
+        candidate_sha256=candidate.candidate_sha256,
+        operator_user_id=candidate.operator_user_id,
+        team_id=candidate.team_id,
+        environment=candidate.environment,
+        loom_commit_sha=candidate.loom_commit_sha,
+        recipe_digest=candidate.recipe_digest,
+        image_index_digest=candidate.image_index_digest,
+        platform=candidate.platform,
+        platform_child_digest=candidate.platform_child_digest,
+        backend_variant_id=candidate.backend_variant_id,
+        policy_id=candidate.policy_id,
+        policy_config_sha256=candidate.policy_config_sha256,
+        policy_activation_epoch=candidate.policy_activation_epoch,
+        input_descriptor_set_sha256=canonical_digest(candidate.inputs),
+        run_budget_sha256=canonical_digest(candidate.run_budget),
+        start_by=candidate.start_by,
+        cleanup_deadline=candidate.cleanup_deadline,
+        live_mutation_authorized=True,
+        authorized_at=now,
+        expires_at=now + timedelta(minutes=5),
+        nonce_sha256="sha256:" + "9" * 64,
+    )
+    candidate_path = _write_json(
+        tmp_path, "stage1-candidate.json", candidate.model_dump(mode="json")
+    )
+    authorization_path = _write_json(
+        tmp_path, "stage1-authorization.json", authorization.model_dump(mode="json")
+    )
+    signature = tmp_path / "signature.hex"
+    signature.write_text("ab" * 64, encoding="ascii")
+    server.add(
+        "POST",
+        "/api/v1/internal/pipeline-stage1-smoke/capacity-preflight",
+        httpx.Response(201, json={"state": "capacity_pending"}),
+    )
+
+    assert main(
+        [
+            "pipeline",
+            "stage1-smoke",
+            "capacity-preflight",
+            "--candidate",
+            candidate_path,
+            "--authorization",
+            authorization_path,
+            "--confirm-candidate-sha",
+            candidate.candidate_sha256,
+            "--idempotency-key",
+            "stage1-capacity-1",
+            "--signature-key-id",
+            "pipeline-stage1-operator-v1",
+            "--signature",
+            f"@{signature}",
+            "--json",
+        ]
+    ) == 0
+
+    request = server.requests[-1]
+    assert request.url.path == "/api/v1/internal/pipeline-stage1-smoke/capacity-preflight"
+    assert request.headers["Idempotency-Key"] == "stage1-capacity-1"
+    assert json.loads(request.content) == {
+        "candidate": candidate.model_dump(mode="json"),
+        "authorization": authorization.model_dump(mode="json"),
     }
 
 

@@ -1724,6 +1724,63 @@ def test_default_config_disables_llm_gateway_sandbox() -> None:
     assert ClusterConfig().llm_gateway_sandbox.enabled is False
 
 
+def test_default_config_disables_pipeline_stage1_smoke_authority() -> None:
+    assert ClusterConfig().pipeline_stage1_smoke_authority.enabled is False
+
+
+def test_render_mounts_pipeline_stage1_public_key_only_when_enabled() -> None:
+    disabled_docs = _load_docs(render_manifests(_DEFAULT_CFG))
+    disabled = next(
+        document
+        for document in disabled_docs
+        if document["kind"] == "Deployment" and document["metadata"]["name"] == "loom-service"
+    )
+    disabled_pod = disabled["spec"]["template"]["spec"]
+    disabled_container = disabled_pod["containers"][0]
+    assert not any(
+        item["name"] == "LOOM_SVC_PIPELINE_STAGE1_SMOKE_PUBLIC_KEY_FILE"
+        for item in disabled_container["env"]
+    )
+    assert not any(
+        item["name"] == "pipeline-stage1-smoke-authority"
+        for item in disabled_pod["volumes"]
+    )
+
+    authority_cls = type(ClusterConfig().pipeline_stage1_smoke_authority)
+    config = _default_cfg(
+        pipeline_stage1_smoke_authority=authority_cls(
+            enabled=True,
+            public_key_secret_name="stage1-owner-public-key",
+        )
+    )
+    docs = _load_docs(render_manifests(config))
+    service = next(
+        document
+        for document in docs
+        if document["kind"] == "Deployment" and document["metadata"]["name"] == "loom-service"
+    )
+    pod = service["spec"]["template"]["spec"]
+    container = pod["containers"][0]
+    env = {item["name"]: item for item in container["env"]}
+    assert env["LOOM_SVC_PIPELINE_STAGE1_SMOKE_PUBLIC_KEY_FILE"] == {
+        "name": "LOOM_SVC_PIPELINE_STAGE1_SMOKE_PUBLIC_KEY_FILE",
+        "value": "/var/run/loom/stage1-authority/public-key",
+    }
+    assert {
+        "name": "pipeline-stage1-smoke-authority",
+        "mountPath": "/var/run/loom/stage1-authority",
+        "readOnly": True,
+    } in container["volumeMounts"]
+    assert {
+        "name": "pipeline-stage1-smoke-authority",
+        "secret": {
+            "secretName": "stage1-owner-public-key",
+            "defaultMode": 0o400,
+            "items": [{"key": "public-key", "path": "public-key", "mode": 0o400}],
+        },
+    } in pod["volumes"]
+
+
 def test_render_omits_llm_gateway_sandbox_when_disabled() -> None:
     docs = _load_docs(render_manifests(_DEFAULT_CFG))
     kinds_names = {(d["kind"], d["metadata"]["name"]) for d in docs}

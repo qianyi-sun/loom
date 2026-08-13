@@ -354,7 +354,11 @@ async def create_public_run(
         if registration.submission_policy != "ordinary":
             raise PermissionError
         graph = registry.resolve_ordinary(name, version, request.parameters)
-    except (KeyError, PermissionError, ValueError) as exc:
+    except KeyError as exc:
+        # Unknown identities are indistinguishable from controller-only Recipes.
+        # This keeps the hidden Stage 1 smoke surface 404 for every public role.
+        raise PipelineApiError(404, "not_found", "Official Recipe was not found") from exc
+    except (PermissionError, ValueError) as exc:
         raise PipelineApiError(
             422, "recipe_invalid", "Official Recipe is unavailable or invalid"
         ) from exc

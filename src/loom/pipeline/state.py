@@ -8,7 +8,7 @@ from enum import StrEnum
 from typing import Annotated, Literal, TypeVar
 from uuid import UUID
 
-from pydantic import StringConstraints, field_validator, model_validator
+from pydantic import Field, StringConstraints, field_validator, model_validator
 
 from loom.pipeline.spec import (
     ArtifactType,
@@ -190,9 +190,9 @@ class StageResultOutputV1(PipelineModel):
 
 
 class StageResultProvenanceV1(PipelineModel):
-    pipeline_run_id: UUID
-    stage_run_id: UUID
-    execution_attempt_id: UUID
+    pipeline_run_id: Annotated[UUID, Field(strict=False)]
+    stage_run_id: Annotated[UUID, Field(strict=False)]
+    execution_attempt_id: Annotated[UUID, Field(strict=False)]
     recipe_digest: Digest
     execution_spec_digest: Digest
     image_digest: Digest
@@ -214,7 +214,7 @@ class StageResultV1(PipelineModel):
     schema_version: Literal["loom.stage-result.v1"]
     domain_outcome: str | None
     reason_code: Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_]{0,127}$")]
-    retry_class: RetryClass
+    retry_class: Annotated[RetryClass, Field(strict=False)]
     inputs: list[StageResultInputV1]
     outputs: list[StageResultOutputV1]
     metrics: dict[str, int | float]
