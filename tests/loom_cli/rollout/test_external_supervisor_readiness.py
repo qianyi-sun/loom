@@ -90,9 +90,7 @@ def _args(
         "120",
     ]
     if pool_name == "gb10":
-        args.extend(
-            ["--db-secret-name", "loom-external-slurm-autoscaler-db"]
-        )
+        args.extend(["--db-secret-name", "loom-external-slurm-autoscaler-db"])
     return args
 
 
@@ -279,11 +277,11 @@ def test_artifact_omits_only_fully_disabled_supervisors(tmp_path: Path) -> None:
         tmp_path,
         supervisors=[
             _supervisor(),
-                _supervisor(
-                    name="disabled",
-                    service_name="loom-autoscaler-disabled.service",
-                    timer_name="loom-autoscaler-disabled.timer",
-                    pool_name="oldlab",
+            _supervisor(
+                name="disabled",
+                service_name="loom-autoscaler-disabled.service",
+                timer_name="loom-autoscaler-disabled.timer",
+                pool_name="oldlab",
                 port=15452,
                 enabled=False,
                 active=False,
@@ -334,7 +332,20 @@ def test_builder_rejects_split_enablement_state(
 def test_validation_argv_rewrites_isolated_authority_and_port_and_appends_mode(
     tmp_path: Path,
 ) -> None:
-    artifact = _build(_candidate(tmp_path))
+    artifact = _build(
+        _candidate(
+            tmp_path,
+            supervisors=[
+                _supervisor(
+                    name="oldlab-staging",
+                    service_name="loom-autoscaler-oldlab-staging.service",
+                    timer_name="loom-autoscaler-oldlab-staging.timer",
+                    pool_name="oldlab",
+                    port=15448,
+                )
+            ],
+        )
+    )
     live = artifact.supervisors[0]
 
     commands = artifact.validation_argv(
@@ -349,7 +360,7 @@ def test_validation_argv_rewrites_isolated_authority_and_port_and_appends_mode(
     expected = list(live.args)
     expected[expected.index("--namespace") + 1] = "loom-rehearsal-abc123"
     expected[expected.index("--kubeconfig") + 1] = REHEARSAL_KUBECONFIG
-    expected[expected.index("--db-local-port") + 1] = "25451"
+    expected[expected.index("--db-local-port") + 1] = "25448"
     assert list(command[2:-1]) == expected
     for flag in (
         "--pool-name",
@@ -398,6 +409,82 @@ def test_validation_ports_are_unique_and_disjoint_from_live_ports(tmp_path: Path
     assert live_ports == {15448, 15451}
     assert validation_ports == {25448, 25451}
     assert live_ports.isdisjoint(validation_ports)
+
+
+def test_rehearsal_validation_routes_remote_policy_without_local_slurm_probe(
+    tmp_path: Path,
+) -> None:
+    artifact = _build(
+        _candidate(
+            tmp_path,
+            supervisors=[
+                _supervisor(),
+                _supervisor(
+                    name="oldlab-staging",
+                    service_name="loom-autoscaler-oldlab-staging.service",
+                    timer_name="loom-autoscaler-oldlab-staging.timer",
+                    pool_name="oldlab",
+                    port=15448,
+                ),
+            ],
+        )
+    )
+
+    commands = artifact.validation_argv(
+        "loom-rehearsal-abc123",
+        REHEARSAL_KUBECONFIG,
+    )
+    gb10 = commands["gb10-staging"]
+    oldlab = commands["oldlab-staging"]
+
+    assert gb10[:3] == (
+        _PYTHON_PATH,
+        "-m",
+        "loom_cli.rollout.rehearsal_external_supervisor_policy_probe",
+    )
+    assert gb10[-1] == "--validate-only"
+    assert gb10[gb10.index("--pool-name") + 1] == "gb10"
+    assert gb10[gb10.index("--expected-slurm-cluster-name") + 1] == "trt-gb10"
+    assert gb10[gb10.index("--expected-slurm-controller-host") + 1] == "gx10-01c7"
+    assert gb10[gb10.index("--db-secret-name") + 1] == "loom-secrets"
+    assert "loom-external-slurm-autoscaler-db" not in gb10
+    assert _SCRIPT_PATH not in gb10
+
+    assert oldlab[:2] == (_PYTHON_PATH, _SCRIPT_PATH)
+    assert oldlab[-1] == "--validate-only"
+
+
+def test_artifact_selects_one_controller_without_losing_candidate_binding(
+    tmp_path: Path,
+) -> None:
+    artifact = _build(
+        _candidate(
+            tmp_path,
+            supervisors=[
+                _supervisor(),
+                _supervisor(
+                    name="oldlab-staging",
+                    service_name="loom-autoscaler-oldlab-staging.service",
+                    timer_name="loom-autoscaler-oldlab-staging.timer",
+                    pool_name="oldlab",
+                    port=15448,
+                ),
+            ],
+        )
+    )
+
+    selected = artifact.for_execution_host("gx10-01c7")
+
+    assert selected.candidate_sha == artifact.candidate_sha
+    assert selected.candidate_tree == artifact.candidate_tree
+    assert selected.profile_sha256 == artifact.profile_sha256
+    assert selected.script_sha256 == artifact.script_sha256
+    assert [item.name for item in selected.supervisors] == ["gb10-staging"]
+    assert selected.artifact_digest != artifact.artifact_digest
+    assert ExternalSupervisorArtifact.from_bytes(selected.to_bytes()) == selected
+
+    with pytest.raises(ValueError, match="execution host"):
+        artifact.for_execution_host("foreign-controller")
 
 
 def test_artifact_rejects_live_port_without_rehearsal_offset_capacity(

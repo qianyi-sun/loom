@@ -17,12 +17,21 @@ import yaml  # type: ignore[import-untyped]
 
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
 from loom.data_lifecycle_capacity import CAPACITY_SOURCE
+from loom_cli.rollout.external_supervisor_predecessor import (
+    ABSENT_PREDECESSOR_DIGEST,
+    ExternalSupervisorPredecessorAuthority,
+)
 from loom_cli.rollout.external_supervisor_readiness import (
     REHEARSAL_KUBECONFIG as EXTERNAL_SUPERVISOR_REHEARSAL_KUBECONFIG,
 )
 from loom_cli.rollout.external_supervisor_readiness import (
     ExternalSupervisorArtifact,
     staging_working_directory,
+)
+from loom_cli.rollout.operator.protected_external_supervisor_transport import (
+    ExternalSupervisorLiveObservation,
+    ServiceRuntimeStatus,
+    TimerRuntimeStatus,
 )
 from loom_cli.rollout.production_defaults_readiness import (
     ProductionDefaultsArtifact,
@@ -95,6 +104,43 @@ def _external_policy_seed_result(plan: RehearsalPlan) -> dict[str, object]:
         "schema_version": 1,
         "status": "ready",
     }
+
+
+def _absent_external_supervisor_observation(
+    artifact: ExternalSupervisorArtifact,
+) -> ExternalSupervisorLiveObservation:
+    return ExternalSupervisorLiveObservation(
+        unit_payloads={
+            name: None
+            for supervisor in artifact.supervisors
+            for name in (supervisor.service_name, supervisor.timer_name)
+        },
+        timer_statuses={
+            supervisor.timer_name: TimerRuntimeStatus(
+                load_state="not-found",
+                unit_file_state="not-found",
+                active_state="inactive",
+                fragment_path="",
+                need_daemon_reload="no",
+            )
+            for supervisor in artifact.supervisors
+        },
+        service_statuses={
+            supervisor.service_name: ServiceRuntimeStatus(
+                load_state="not-found",
+                result="",
+                exec_main_status=None,
+                fragment_path="",
+                need_daemon_reload="no",
+            )
+            for supervisor in artifact.supervisors
+        },
+        predecessor_authority=ExternalSupervisorPredecessorAuthority(
+            kind="absent",
+            authority_digest=ABSENT_PREDECESSOR_DIGEST,
+            unit_sha256={},
+        ),
+    )
 
 
 def _plan() -> RehearsalPlan:
@@ -1173,6 +1219,7 @@ def test_release_loads_exact_images_and_verifies_all_scoped_resources() -> None:
         secret_artifacts=lambda _plan: secrets,
         external_supervisor_artifacts=lambda _plan: supervisor_artifact,
         external_supervisor_profiles=lambda _plan: _external_supervisor_profile(),
+        gb10_external_supervisor_observer=_absent_external_supervisor_observation,
         runtime_image_resolver=_runtime_images,
     ).execute("rehearsal.release", plan)
 
@@ -1235,8 +1282,7 @@ def test_release_loads_exact_images_and_verifies_all_scoped_resources() -> None:
         assert validation_argv[:4] == ("systemd-run", "--user", "--wait", "--collect")
         assert f"--property=WorkingDirectory={working_directory}" in validation_argv
         assert (
-            f"--property=Environment=PYTHONPATH={working_directory}/src "
-            "PYTHONDONTWRITEBYTECODE=1"
+            f"--property=Environment=PYTHONPATH={working_directory}/src PYTHONDONTWRITEBYTECODE=1"
         ) in validation_argv
         assert "--property=TimeoutStartSec=180s" in validation_argv
         assert "--property=RuntimeMaxSec=180s" in validation_argv
@@ -1251,6 +1297,207 @@ def test_release_loads_exact_images_and_verifies_all_scoped_resources() -> None:
         ).values()
     )
     assert actual_validation_commands == expected_validation_commands
+
+
+def test_external_supervisor_validation_routes_gb10_controller_proof_remotely() -> None:
+    plan = _plan()
+    artifact = _external_supervisor_artifact()
+    calls: list[tuple[tuple[str, ...], bytes | None]] = []
+    controller_artifacts: list[ExternalSupervisorArtifact] = []
+
+    def run(argv, payload, _timeout):
+        command = tuple(argv)
+        calls.append((command, payload))
+        if "loom_cli.rollout.rehearsal_environment_state_probe" in command:
+            assert payload == _external_supervisor_profile()
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                json.dumps(_external_policy_seed_result(plan)),
+                "",
+            )
+        if command[0] == "kubectl" and "apply" in command:
+            return subprocess.CompletedProcess(argv, 0, "applied\n", "")
+        if command[:3] == ("systemctl", "--user", "show"):
+            return subprocess.CompletedProcess(argv, 0, "not-found\n", "")
+        if command[:4] == ("systemd-run", "--user", "--wait", "--collect"):
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        raise AssertionError(command)
+
+    def observe_controller(
+        controller_artifact: ExternalSupervisorArtifact,
+    ) -> ExternalSupervisorLiveObservation:
+        controller_artifacts.append(controller_artifact)
+        return _absent_external_supervisor_observation(controller_artifact)
+
+    digest, blocker = IsolatedRehearsalExecutor(
+        run=run,
+        external_supervisor_artifacts=lambda _plan: artifact,
+        external_supervisor_profiles=lambda _plan: _external_supervisor_profile(),
+        gb10_external_supervisor_observer=observe_controller,
+    )._validate_external_supervisors(plan)
+
+    assert blocker is None
+    assert digest is not None and len(digest) == 64
+    assert len(controller_artifacts) == 1
+    assert [item.name for item in controller_artifacts[0].supervisors] == ["gb10-staging"]
+    validation_commands = [
+        command[command.index("--") + 1 :]
+        for command, _payload in calls
+        if command[:4] == ("systemd-run", "--user", "--wait", "--collect")
+    ]
+    assert len(validation_commands) == 2
+    assert any(
+        command[:2] == (artifact.supervisors[1].python_path, artifact.supervisors[1].script_path)
+        and command[command.index("--pool-name") + 1] == "oldlab"
+        for command in validation_commands
+    )
+    assert any(
+        command[:3]
+        == (
+            artifact.supervisors[0].python_path,
+            "-m",
+            "loom_cli.rollout.rehearsal_external_supervisor_policy_probe",
+        )
+        and command[command.index("--pool-name") + 1] == "gb10"
+        for command in validation_commands
+    )
+    assert all(
+        not (
+            command[:2]
+            == (artifact.supervisors[0].python_path, artifact.supervisors[0].script_path)
+            and command[command.index("--pool-name") + 1] == "gb10"
+        )
+        for command in validation_commands
+    )
+
+
+def test_external_supervisor_validation_fails_closed_without_gb10_controller_proof() -> None:
+    plan = _plan()
+    artifact = _external_supervisor_artifact()
+
+    def run(argv, payload, _timeout):
+        command = tuple(argv)
+        if "loom_cli.rollout.rehearsal_environment_state_probe" in command:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                json.dumps(_external_policy_seed_result(plan)),
+                "",
+            )
+        if command[0] == "kubectl" and "apply" in command:
+            return subprocess.CompletedProcess(argv, 0, "applied\n", "")
+        raise AssertionError("local validation must not start without controller proof")
+
+    def unavailable(_artifact: ExternalSupervisorArtifact) -> ExternalSupervisorLiveObservation:
+        raise RuntimeError("remote detail must remain secret")
+
+    digest, blocker = IsolatedRehearsalExecutor(
+        run=run,
+        external_supervisor_artifacts=lambda _plan: artifact,
+        external_supervisor_profiles=lambda _plan: _external_supervisor_profile(),
+        gb10_external_supervisor_observer=unavailable,
+    )._validate_external_supervisors(plan)
+
+    assert digest is None
+    assert blocker == "external-supervisor-controller-proof-failed"
+
+
+def test_external_supervisor_validation_rejects_drifted_gb10_controller_state() -> None:
+    plan = _plan()
+    artifact = _external_supervisor_artifact()
+
+    def run(argv, payload, _timeout):
+        command = tuple(argv)
+        if "loom_cli.rollout.rehearsal_environment_state_probe" in command:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                json.dumps(_external_policy_seed_result(plan)),
+                "",
+            )
+        if command[0] == "kubectl" and "apply" in command:
+            return subprocess.CompletedProcess(argv, 0, "applied\n", "")
+        raise AssertionError("local validation must not start after controller drift")
+
+    def drifted(
+        controller_artifact: ExternalSupervisorArtifact,
+    ) -> ExternalSupervisorLiveObservation:
+        observation = _absent_external_supervisor_observation(controller_artifact)
+        service = controller_artifact.supervisors[0].service_name
+        return replace(
+            observation,
+            unit_payloads={**observation.unit_payloads, service: b"unreviewed-live-bytes\n"},
+        )
+
+    digest, blocker = IsolatedRehearsalExecutor(
+        run=run,
+        external_supervisor_artifacts=lambda _plan: artifact,
+        external_supervisor_profiles=lambda _plan: _external_supervisor_profile(),
+        gb10_external_supervisor_observer=drifted,
+    )._validate_external_supervisors(plan)
+
+    assert digest is None
+    assert blocker == "external-supervisor-controller-proof-failed"
+
+
+def test_default_gb10_controller_observer_uses_candidate_bound_fixed_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = _external_supervisor_artifact().for_execution_host("gx10-01c7")
+    expected = _absent_external_supervisor_observation(artifact)
+    captured: dict[str, object] = {}
+    authorities: list[ExternalSupervisorPredecessorAuthority | None] = []
+
+    class Transport:
+        def __init__(self, controller_run) -> None:
+            self.controller_run = controller_run
+
+        def observe(
+            self,
+            actual: ExternalSupervisorArtifact,
+            authority: ExternalSupervisorPredecessorAuthority | None = None,
+        ) -> ExternalSupervisorLiveObservation:
+            assert actual == artifact
+            authorities.append(authority)
+            result = self.controller_run(("ssh", "fixed-controller"), '{"request":1}\n')
+            assert result.returncode == 0
+            if authority is None:
+                raise ValueError("bootstrap authority required")
+            return expected
+
+    def build(*, candidate_sha: str, candidate_tree: str, run):
+        captured["candidate_sha"] = candidate_sha
+        captured["candidate_tree"] = candidate_tree
+        return Transport(run)
+
+    def run(argv, payload, timeout):
+        captured["argv"] = tuple(argv)
+        captured["payload"] = payload
+        captured["timeout"] = timeout
+        return subprocess.CompletedProcess(argv, 0, "ok\n", "")
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.rehearsal_executor.build_fixed_gb10_external_supervisor_transport",
+        build,
+    )
+
+    observed = IsolatedRehearsalExecutor(run=run)._observe_gb10_external_supervisor(artifact)
+
+    assert observed == expected
+    assert captured == {
+        "argv": ("ssh", "fixed-controller"),
+        "candidate_sha": artifact.candidate_sha,
+        "candidate_tree": artifact.candidate_tree,
+        "payload": b'{"request":1}\n',
+        "timeout": 1740,
+    }
+    assert authorities[0] is None
+    assert authorities[1] == ExternalSupervisorPredecessorAuthority(
+        kind="absent",
+        authority_digest=ABSENT_PREDECESSOR_DIGEST,
+        unit_sha256={},
+    )
 
 
 def test_external_supervisor_default_rebuilds_only_from_fixed_staging_root(
@@ -1373,6 +1620,7 @@ def test_release_external_supervisor_failure_is_secret_free_and_blocks_manifest(
         secret_artifacts=lambda _plan: secrets,
         external_supervisor_artifacts=lambda _plan: _external_supervisor_artifact(),
         external_supervisor_profiles=lambda _plan: _external_supervisor_profile(),
+        gb10_external_supervisor_observer=_absent_external_supervisor_observation,
         runtime_image_resolver=_runtime_images,
     ).execute("rehearsal.release", plan)
 

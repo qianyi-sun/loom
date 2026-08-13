@@ -19,7 +19,10 @@ from loom_cli.rollout.external_supervisor_predecessor import (
     ExternalSupervisorCanonicalIdentity,
     ExternalSupervisorPredecessorAuthority,
 )
-from loom_cli.rollout.external_supervisor_readiness import ExternalSupervisorArtifact
+from loom_cli.rollout.external_supervisor_readiness import (
+    STAGING_GB10_CONTROLLER_EXECUTION_HOST,
+    ExternalSupervisorArtifact,
+)
 
 from .protected_external_supervisor_transport import (
     AtomicUserUnitStore,
@@ -31,7 +34,7 @@ from .protected_external_supervisor_transport import (
     TimerRuntimeStatus,
 )
 
-GB10_CONTROLLER_EXECUTION_HOST = "gx10-01c7"
+GB10_CONTROLLER_EXECUTION_HOST = STAGING_GB10_CONTROLLER_EXECUTION_HOST
 GB10_CONTROLLER_SSH_HOST = "207.35.188.227"
 GB10_CONTROLLER_SSH_PORT = 2221
 GB10_CONTROLLER_SSH_USER = "qianyi"
