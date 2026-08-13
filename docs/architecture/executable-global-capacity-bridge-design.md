@@ -161,14 +161,20 @@ Executable capability has three independent gates:
 2. **Prepared authority:** a reviewed activation record binds the immutable
    fleet generation, all environment acknowledgements, both executor
    incarnations, the complete legacy-writer manifest, and rollback evidence.
-3. **Bounded execution:** an active activation epoch has a finite nonzero
-   executable-new-capacity ceiling and rate envelope.
+3. **Bounded execution:** an active activation epoch has an operator-pinned,
+   finite nonzero executable-new-capacity ceiling and rate envelope. The
+   ceiling cannot exceed the sum of the exact configured OLDLAB and GB10 pool
+   slot ceilings bound to that epoch.
 
 Protocol capability alone authorizes nothing. The manager database rejects a
 nonzero ceiling unless the activation record is active and all of its exact
-bindings are current. Any binding change returns the ceiling to zero before a
-new epoch can be prepared. The first future activation ceiling is one slot;
-expansion requires a later reviewed epoch.
+bindings are current. Any configuration, candidate, executor, controller, or
+owner-policy binding change requires the current epoch to drain and retire at
+ceiling zero before a new epoch can be prepared. The first live activation
+ceiling remains one slot; offline executable integration may use a larger
+finite fixture ceiling, and every live expansion requires a later reviewed
+epoch. The ceiling is operator-owned activation policy, not a subject, owner,
+or candidate setting.
 
 Package 5B adds the schema and validation needed to represent these states but
 ships only the bootstrap state: no activation record, allocation epoch zero
@@ -181,6 +187,46 @@ is replaced only by an activation-aware response validator: normal lifecycle
 operations accept zero or a valid active epoch, but never infer that application
 readiness means capacity readiness. Status reports the two conditions
 separately.
+
+### Active inputs and authority turnover
+
+An active execution epoch freezes configuration and identity, not facts. Exact
+monotonic demand snapshots and pool observations may continue while the
+authority is active because they retain the already-bound subject, reporter,
+candidate, deployment, pool, and configuration generations. Prepared and
+drain-only epochs reject those inputs. Configuration proposals and
+configuration activation, personal projection, candidate redeploy, subject
+deletion, reporter replacement, and pool/executor rebinding are accepted only
+in shadow state, even though prepared and drain-only also have ceiling zero.
+
+An exact operator drain request compare-and-sets authority incarnation, writer
+epoch, execution epoch, and manifest. It changes `active` to `drain-only`,
+sets both effective ceiling and rate to zero, records durable idempotent drain
+evidence, and preserves the incumbent writer. Writer replacement remains a
+separate fail-closed path: it advances the writer fence and also forces an
+active epoch to drain-only. Both paths reject all later increases while
+allowing only monotonic close, protected drain, inventory, terminal
+observation, and release work for retained commitments.
+
+Retirement is a second explicit compare-and-set. It is permitted only when:
+
+- the authority and epoch are still the exact drain-only writer and manifest;
+- both pool executors are current and provide fresh, complete inventories plus
+  exact heartbeat, command, journal, and inventory high-water evidence;
+- every executable intent in the epoch is released;
+- no quarantine, unresolved retained commitment, or nonterminal/ambiguous
+  Loom-scoped physical record remains; and
+- any record classified foreign remains foreign and is neither adopted nor
+  mutated.
+
+The retirement transaction locks and revalidates all of that evidence, records
+the operator request and final per-pool checkpoints, marks the epoch retired,
+and returns the global authority to shadow with ceiling and rate zero. The
+increase freeze stays set until a later exact preparation and activation.
+Failure or ambiguity leaves the epoch drain-only, its commitments unavailable
+for reuse, and its physical work untouched. Only after retirement may a
+personal redeploy, deletion, configuration change, or new execution epoch
+proceed.
 
 ## Executable state machine
 
@@ -278,6 +324,15 @@ An expired lease forbids acceptance and scale-up. The still-locally-locked
 incumbent may perform only explicitly defined monotonic drain actions during a
 manager outage; a fenced or replaced incarnation cannot mutate at all.
 
+The executable HTTP client carries the same exact v2 heartbeat contract as the
+store route. Initial runtime-state creation uses the canonical zero central
+journal checkpoint; every subsequent heartbeat names the last authenticated
+central checkpoint and the current fsynced local journal head. A changed
+receipt, sequence gap, regression, or equivocation fences the executor. Final
+retirement evidence requires a heartbeat after the last complete inventory, so
+an operator cannot retire against an executor journal that is merely assumed
+current.
+
 ## Ownership and foreign-workload protection
 
 Names and visible comments are diagnostic data, not ownership proof. Automatic
@@ -373,6 +428,10 @@ personal-development-only, and non-promotable.
   the operation before external side effects.
 - **Ceiling reduction:** stop increases immediately and converge drain-first;
   never reinterpret an expired authorization as physical release.
+- **Drain or retirement evidence incomplete:** remain drain-only with ceiling
+  and rate zero; do not return to shadow or make any retained slot reusable.
+- **Active fact update changes an immutable binding:** reject it as stale or
+  equivocal and freeze increases; never silently roll the execution manifest.
 
 ## Observability
 
@@ -400,7 +459,8 @@ Slurm mutation:
    v2 cannot omit or alter an authority, activation, candidate, pool, profile,
    resource, executor, or idempotency binding.
 2. Migration tests prove existing Package 5A databases upgrade
-   deterministically, reject a nonzero unprepared ceiling, and restore with
+   deterministically, reject a nonzero unprepared or fleet-exceeding ceiling,
+   enforce the explicit drain/retirement transitions, and restore with
    monotonic authority and journal high-water marks.
 3. Allocator tests cover multiple owners, all priority tiers, both pools,
    minima defaulting to zero, aggregate maxima, architecture-specific demand,
@@ -415,7 +475,8 @@ Slurm mutation:
 6. Two-controller integration tests run one manager, two executors, protected
    agents, production/staging subjects, and at least two personal owners. They
    prove global fairness, pinned x86, pinned ARM, neutral placement, no double
-   allocation, rollout fencing, deletion, and full scale-to-zero.
+   allocation, active demand/pool fact updates, rollout fencing, deletion,
+   drain/retire/reprepare lifecycle, and full scale-to-zero.
 7. Coexistence tests prove legacy writers refuse a prepared global epoch and
    the global manager refuses execution without the complete legacy fence
    manifest.
