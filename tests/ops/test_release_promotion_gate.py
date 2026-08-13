@@ -21,7 +21,7 @@ def _candidate_sha() -> str:
 def _image_digests() -> dict[str, str]:
     manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
     return {
-        image_name: f"ghcr.io/qianyi-sun/{image_name}@sha256:" + f"{index:x}" * 64
+        image_name: f"ghcr.io/qianyi-sun/{image_name}@sha256:{index:064x}"
         for index, image_name in enumerate(
             (
                 component.release_digest

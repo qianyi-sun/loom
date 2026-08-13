@@ -24,10 +24,16 @@ def test_checked_in_profiles_are_exact_and_have_no_unsuffixed_alias() -> None:
         "behavior-offline-none@1",
         "behavior-sim-local-gateway@1",
         "behavior-sim-local-none@1",
+        "pipeline-test-cpu-gateway@1",
+        "pipeline-test-cpu-none@1",
     ]
     assert INPUT_CACHE_ALLOCATABLE_BYTES_MIN == 1_649_267_441_664
     assert INPUT_CACHE_RAW_BYTES_MIN == 1_940_314_637_252
-    assert all(record.profile.input_cache_capacity_bytes_min == INPUT_CACHE_ALLOCATABLE_BYTES_MIN for record in registry.list())
+    assert all(
+        record.profile.input_cache_capacity_bytes_min == INPUT_CACHE_ALLOCATABLE_BYTES_MIN
+        for record in registry.list()
+        if record.identity.startswith("behavior-")
+    )
 
 
 def test_gpu_variants_encode_split_and_shared_device_roles_exactly() -> None:
@@ -39,6 +45,22 @@ def test_gpu_variants_encode_split_and_shared_device_roles_exactly() -> None:
     assert gb10.container_memory_bytes_override == 125_829_120_000
     assert (oldlab.device_roles.sim_gpu_index, oldlab.device_roles.vla_gpu_index) == (0, 1)  # type: ignore[union-attr]
     assert oldlab.memory_accounting_kind == "separate"
+
+
+def test_pipeline_test_profiles_have_an_unprovisioned_non_behavior_pool() -> None:
+    registry = load_resource_profiles()
+    for identity in (
+        "pipeline-test-cpu-gateway@1",
+        "pipeline-test-cpu-none@1",
+    ):
+        profile = registry.get(identity).profile
+        assert profile.required_image_features == ["pipeline-test-cpu"]
+        assert len(profile.execution_variants) == 1
+        variant = profile.execution_variants[0]
+        assert variant.variant_id == "pipeline-test-cpu-x86_64"
+        assert variant.pool_class == "pipeline-test-cpu"
+        assert variant.gpu_count_exact == 0
+        assert profile.input_cache_capacity_bytes_min == 0
 
 
 def test_profiles_reject_network_and_memory_accounting_overrides() -> None:
