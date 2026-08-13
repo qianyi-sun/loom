@@ -25,10 +25,11 @@ SLURM_ACCOUNT = "loom-staging"
 SLURM_QOS = "loom-staging"
 CLUSTER_NAME = "trt-gb10"
 CONTROLLER_HOST = "gx10-01c7"
-# The shared Slurm partition moved node 10 to ``debug`` for shard scheduling
-# and replaced it with node 16.  The retired direct-agent fleet remains the
-# original 1-15 host inventory, so keep those authorities distinct.
-SLURM_NODES = tuple(f"trt-gb10-{index}" for index in (*range(1, 10), *range(11, 17)))
+# The shared Slurm partition moved node 10 to ``debug`` for shard scheduling.
+# Node 16 remains outside Loom's accepted allocation boundary, so the staging
+# autoscaler owns nodes 1-9 and 11-15 only.  The retired direct-agent fleet is
+# still the original 1-15 inventory; keep those authorities distinct.
+SLURM_NODES = tuple(f"trt-gb10-{index}" for index in (*range(1, 10), *range(11, 16)))
 LEGACY_AGENT_NODES = tuple(f"trt-gb10-{index}" for index in range(1, 16))
 PRIVATE_WORKER_SERVICE_ENV = {
     pool_name: {
@@ -136,13 +137,14 @@ def _load_contract(candidate_sha: str, image_tag: str) -> dict[str, Any]:
         "slurm_account": SLURM_ACCOUNT,
         "qos_normal": SLURM_QOS,
         "candidate_sha": candidate_sha,
+        "max_jobs": len(SLURM_NODES),
     }
     if (
         profile.get("environment") != "staging"
         or policy.get("actuator") != "slurm"
         or policy.get("enabled") is not True
         or policy.get("min_slots") != 0
-        or policy.get("max_slots") != 150
+        or policy.get("max_slots") != 140
         or any(config.get(key) != value for key, value in expected_config.items())
         or config.get("allowed_nodes") != list(SLURM_NODES)
     ):

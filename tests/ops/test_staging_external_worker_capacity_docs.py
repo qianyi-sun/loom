@@ -29,7 +29,7 @@ def test_staging_external_pool_ceilings_match_current_policy() -> None:
     assert set(policies) == {"gb10", "oldlab"}
     assert policies["gb10"]["enabled"] is True
     assert policies["gb10"]["min_slots"] == 0
-    assert policies["gb10"]["max_slots"] == 150
+    assert policies["gb10"]["max_slots"] == 140
     assert policies["oldlab"]["enabled"] is True
     assert policies["oldlab"]["min_slots"] == 0
     assert policies["oldlab"]["max_slots"] == 18
