@@ -25,6 +25,7 @@ import tempfile
 import time
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +40,12 @@ from loom_control_plane.global_dev_fleet_autoscaler import (
     GlobalDevAutoscalerError,
     capacity_grants_from_report,
 )
-from loom_control_plane.global_execution_fence import load_global_execution_witness
+from loom_control_plane.global_execution_fence import (
+    GlobalExecutionFenceError,
+    assert_legacy_scale_up_allowed,
+    load_global_execution_witness,
+)
+from loom_control_plane.slurm_worker_jobs import slurm_cluster_for_pool
 from loom_control_plane.worker_pool_autoscaler import (
     reconcile_worker_pool_autoscaler_once,
 )
@@ -696,6 +702,17 @@ async def _main_async(args: argparse.Namespace) -> None:
                     witness_failed = True
                 else:
                     witness_failed = global_execution_witness is None
+                    if global_execution_witness is not None:
+                        try:
+                            for pool_name in pool_names:
+                                assert_legacy_scale_up_allowed(
+                                    global_execution_witness,
+                                    expected_authority="global-capacity-manager",
+                                    expected_pool_id=slurm_cluster_for_pool(pool_name),
+                                    now=datetime.now(UTC),
+                                )
+                        except GlobalExecutionFenceError:
+                            witness_failed = True
                 reconcile_kwargs: dict[str, Any] = {
                     "environment": environment,
                     "freshness_sec": args.freshness_sec,
