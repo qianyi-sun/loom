@@ -1020,7 +1020,7 @@ async def test_preparation_rejects_ceiling_above_exact_fleet_slots(
     with pytest.raises(ExecutionConflictError, match="configured fleet capacity"):
         await fixture.store.prepare_execution_epoch(
             capacity_session,
-            fixture.preparation.model_copy(update={"requested_ceiling": 17}),
+            fixture.request,
             actor="activation-operator",
             idempotency_key=UUID(int=11901),
         )
