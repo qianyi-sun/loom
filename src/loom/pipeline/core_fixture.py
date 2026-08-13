@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from loom.pipeline.keys import canonical_digest
+from loom.pipeline.recipes import (
+    ConditionalOutputContract,
+    OfficialRecipeRegistration,
+    OfficialRecipeRegistry,
+)
 from loom.pipeline.spec import (
     RecipeIdentityV1,
     RequestRendererLockFileV1,
@@ -14,8 +20,19 @@ from loom.pipeline.spec import (
 )
 
 PIPELINE_CORE_FIXTURE_IMAGE_REPOSITORY = "ghcr.io/qianyi-sun/loom-pipeline-core-fixture"
+PIPELINE_CORE_FIXTURE_IMAGE_DIGEST = (
+    "sha256:f207eb8a709584b29cb24d174327b3d7c89261896c9a985bb083a91a94c7fa0b"
+)
+PIPELINE_CORE_FIXTURE_IMAGE = (
+    f"{PIPELINE_CORE_FIXTURE_IMAGE_REPOSITORY}@{PIPELINE_CORE_FIXTURE_IMAGE_DIGEST}"
+)
+PIPELINE_CORE_FIXTURE_IMAGE_SOURCE_COMMIT = "dcb570bfec15d5579ddc4e4cfe630bc52e0d5f5f"
 _RENDERER_PATH = "src/loom/pipeline/renderers/core_fixture_aggregate.py"
 _RENDERER_FILE_SHA256 = "sha256:e04d9caa726b3af290a1f532147611b45e6c7605afac55c6aa6d0c6c9dd16161"
+_FIXTURE_MODULE_SHA256 = "sha256:0b23592f86d0128c95b8be3f8a648b356d1eddc7af7f2006c916e35cc849c932"
+_FIXTURE_DOCKERFILE_SHA256 = (
+    "sha256:8dcbda1d93499850a84bc4d6d4431d8472b7d488fbd7a5cbf369a139bdcad64a"
+)
 
 
 def _renderer_lock() -> RequestRendererLockV1:
@@ -232,7 +249,71 @@ def build_pipeline_core_fixture_graph(
     )
 
 
+def pipeline_core_fixture_registration() -> OfficialRecipeRegistration:
+    """Return the ordinary, immutable registration for the published CPU fixture."""
+
+    parameter_contract = {
+        "additionalProperties": False,
+        "properties": {},
+        "type": "object",
+    }
+    source_lock = {
+        "dockerfile": {
+            "path": "deploy/Dockerfile.pipeline-core-fixture",
+            "sha256": _FIXTURE_DOCKERFILE_SHA256,
+        },
+        "fixture_module": {
+            "path": "src/loom/pipeline_fixture.py",
+            "sha256": _FIXTURE_MODULE_SHA256,
+        },
+        "image": PIPELINE_CORE_FIXTURE_IMAGE,
+        "image_source_commit": PIPELINE_CORE_FIXTURE_IMAGE_SOURCE_COMMIT,
+        "renderer_lock": canonical_digest(_renderer_lock()),
+    }
+
+    def factory(identity: RecipeIdentityV1, parameters: Mapping[str, Any]) -> RunGraphSpecV1:
+        return build_pipeline_core_fixture_graph(
+            identity,
+            parameters,
+            image=PIPELINE_CORE_FIXTURE_IMAGE,
+        )
+
+    return OfficialRecipeRegistration(
+        name="pipeline-core-fixture",
+        version=1,
+        submission_policy="ordinary",
+        factory=factory,
+        parameter_contract_digest=canonical_digest(parameter_contract),
+        source_lock_digest=canonical_digest(source_lock),
+        renderer_locks=(_renderer_lock(),),
+        conditional_output_contracts=(
+            ConditionalOutputContract(
+                stage_key="transform",
+                outcomes=(("transformed", ("transformed",)),),
+            ),
+            ConditionalOutputContract(
+                stage_key="aggregate",
+                outcomes=(("pass", ("aggregate",)),),
+            ),
+        ),
+    )
+
+
+def builtin_pipeline_core_fixture_registry(*, repo_root: Path) -> OfficialRecipeRegistry:
+    """Build the startup registry only after renderer source-lock verification."""
+
+    return OfficialRecipeRegistry(
+        (pipeline_core_fixture_registration(),),
+        repo_root=repo_root,
+    )
+
+
 __all__ = [
+    "PIPELINE_CORE_FIXTURE_IMAGE",
+    "PIPELINE_CORE_FIXTURE_IMAGE_DIGEST",
     "PIPELINE_CORE_FIXTURE_IMAGE_REPOSITORY",
+    "PIPELINE_CORE_FIXTURE_IMAGE_SOURCE_COMMIT",
     "build_pipeline_core_fixture_graph",
+    "builtin_pipeline_core_fixture_registry",
+    "pipeline_core_fixture_registration",
 ]

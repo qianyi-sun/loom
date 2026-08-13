@@ -4,10 +4,11 @@ import pytest
 
 from loom.pipeline.core_acceptance import run_fault_scenario
 from loom.pipeline.core_fixture import (
+    PIPELINE_CORE_FIXTURE_IMAGE,
     PIPELINE_CORE_FIXTURE_IMAGE_REPOSITORY,
     build_pipeline_core_fixture_graph,
+    builtin_pipeline_core_fixture_registry,
 )
-from loom.pipeline.recipes import OfficialRecipeRegistry
 from loom.pipeline.spec import RecipeIdentityV1
 from loom.pipeline.state import PipelineRunResult
 
@@ -36,10 +37,7 @@ def test_cpu_fixture_graph_executes_two_item_success_program() -> None:
         "outcome_gate",
         "local_artifact_readback",
     ]
-    assert all(
-        getattr(node, "image", TEST_IMAGE) == TEST_IMAGE
-        for node in graph.nodes
-    )
+    assert all(getattr(node, "image", TEST_IMAGE) == TEST_IMAGE for node in graph.nodes)
     assert graph.budget.max_gpu_seconds == 0
     assert {getattr(node, "resource_profile", None) for node in graph.nodes} <= {
         None,
@@ -59,7 +57,7 @@ def test_cpu_fixture_graph_executes_two_item_success_program() -> None:
     assert actual.committed_artifacts[-1] == "transform-001"
 
 
-def test_unpublished_fixture_rejects_parameters_and_is_not_publicly_registered() -> None:
+def test_published_fixture_rejects_parameters_and_is_publicly_registered() -> None:
     identity = RecipeIdentityV1(
         name="pipeline-core-fixture",
         version=1,
@@ -67,8 +65,10 @@ def test_unpublished_fixture_rejects_parameters_and_is_not_publicly_registered()
     )
     with pytest.raises(ValueError, match="accepts no parameters"):
         build_pipeline_core_fixture_graph(identity, {"image": "override"}, image=TEST_IMAGE)
-    registry = OfficialRecipeRegistry(repo_root=Path.cwd())
-    with pytest.raises(KeyError, match="unknown official Recipe"):
-        registry.resolve_ordinary("pipeline-core-fixture", 1, {})
+    registry = builtin_pipeline_core_fixture_registry(repo_root=Path.cwd())
+    graph = registry.resolve_ordinary("pipeline-core-fixture", 1, {})
+    containers = [node for node in graph.nodes if node.node_kind == "container"]
+    assert containers
+    assert {node.image for node in containers} == {PIPELINE_CORE_FIXTURE_IMAGE}
     with pytest.raises(KeyError, match="unknown official Recipe"):
         registry.resolve_ordinary("caller-graph", 1, {})

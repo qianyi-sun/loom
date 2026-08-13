@@ -142,6 +142,11 @@ def test_startup_installs_one_explicit_pipeline_adapter(
     assert app.state.pipeline_public_adapter is marker
     assert observed["settings"] is settings
     assert observed["recipe_registry"] is app.state.pipeline_recipe_registry
+    registration = app.state.pipeline_recipe_registry.get("pipeline-core-fixture", 1)
+    assert registration.submission_policy == "ordinary"
+    assert [item.name for item in app.state.pipeline_recipe_registry.list_identities()] == [
+        "pipeline-core-fixture"
+    ]
 
 
 async def test_unknown_safety_exception_is_exactly_same_team_official_import() -> None:
