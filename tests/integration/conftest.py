@@ -131,13 +131,39 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
             with environment_admin_engine.begin() as connection:
                 connection.exec_driver_sql(f"GRANT USAGE ON SCHEMA public TO {quoted_owner}")
                 connection.exec_driver_sql(
-                    f"GRANT REFERENCES ON TABLE public.trials TO {quoted_owner}"
+                    f"GRANT REFERENCES (id) ON TABLE public.trials TO {quoted_owner}"
                 )
                 connection.exec_driver_sql(
                     "GRANT SELECT (id, state, requires_caps, cancellation_requested_at, "
                     "next_attempt_at, autoscaler_pool_name, worker_id, attempt_count, "
                     "submit_priority, submitted_at) "
                     f"ON TABLE public.trials TO {quoted_owner}"
+                )
+                connection.exec_driver_sql(
+                    "GRANT SELECT (lifecycle_authority_id), "
+                    "UPDATE (lifecycle_authority_id, state) ON TABLE public.trials "
+                    f"TO {quoted_owner}"
+                )
+                connection.exec_driver_sql(
+                    "GRANT INSERT (id, team_id, task_id, config, requires_caps, state, "
+                    "submit_priority, batch_id, idempotency_key, sample_idx, combination_idx, "
+                    "provider_connection_id, provider_model_id, submitted_by_user_id, "
+                    "usage_attributed_user_id, usage_attributed_actor, family_key) "
+                    f"ON TABLE public.trials TO {quoted_owner}"
+                )
+                connection.exec_driver_sql(
+                    "GRANT SELECT (id) ON TABLE public.data_lifecycle_authorities "
+                    f"TO {quoted_owner}"
+                )
+                connection.exec_driver_sql(
+                    "GRANT INSERT (environment, namespace, team_id, data_class, owner_kind, "
+                    "owner_id, created_at, expires_at, pinned, state) "
+                    "ON TABLE public.data_lifecycle_authorities "
+                    f"TO {quoted_owner}"
+                )
+                connection.exec_driver_sql(
+                    "GRANT REFERENCES (id) ON TABLE public.data_lifecycle_authorities "
+                    f"TO {quoted_owner}"
                 )
                 public_tables_before = frozenset(
                     inspect(connection).get_table_names(schema="public")
@@ -273,19 +299,13 @@ def capacity_database_urls(postgres_url: str) -> Iterator[tuple[str, str]]:
         with admin_engine.connect() as connection:
             connection.exec_driver_sql(f"DROP DATABASE IF EXISTS {quoted_capacity}")
             connection.exec_driver_sql(f"DROP DATABASE IF EXISTS {quoted_empty}")
-            connection.exec_driver_sql(
-                f"CREATE DATABASE {quoted_capacity} TEMPLATE template0"
-            )
+            connection.exec_driver_sql(f"CREATE DATABASE {quoted_capacity} TEMPLATE template0")
             connection.exec_driver_sql(f"CREATE DATABASE {quoted_empty} TEMPLATE template0")
 
-        capacity_url = source_url.set(database=capacity_name).render_as_string(
-            hide_password=False
-        )
+        capacity_url = source_url.set(database=capacity_name).render_as_string(hide_password=False)
         empty_url = source_url.set(database=empty_name).render_as_string(hide_password=False)
         cfg = AlembicConfig(str(repo_root / "capacity_migrations" / "alembic.ini"))
-        cfg.set_main_option(
-            "script_location", str(repo_root / "capacity_migrations")
-        )
+        cfg.set_main_option("script_location", str(repo_root / "capacity_migrations"))
         previous = os.environ.get("LOOM_CAPACITY_DB_URL")
         os.environ["LOOM_CAPACITY_DB_URL"] = capacity_url
         try:

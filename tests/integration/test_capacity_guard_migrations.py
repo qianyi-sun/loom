@@ -26,6 +26,7 @@ from loom_capacity_guard.schema_startup import assert_capacity_guard_schema_at_h
 EXPECTED_GUARD_TABLES = {
     "capacity_guard_alembic_version",
     "authority_state",
+    "atomic_trial_submissions",
     "trial_requirements",
     "trial_attempts",
     "audit_events",
@@ -63,7 +64,7 @@ async def test_guard_schema_startup_returns_numeric_head(
 ) -> None:
     engine = create_async_engine(_value(capacity_guard_database, "migrator_url"))
     try:
-        assert await assert_capacity_guard_schema_at_head(engine) == 10
+        assert await assert_capacity_guard_schema_at_head(engine) == 11
     finally:
         await engine.dispose()
 
@@ -190,7 +191,7 @@ def test_guard_schema_has_exact_owner_and_preserves_public_application_tables(
             revision = connection.execute(
                 text("SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version")
             ).scalar_one()
-            assert revision == "guard_0010"
+            assert revision == "guard_0011"
             public_before = capacity_guard_database["public_tables_before"]
             assert isinstance(public_before, frozenset)
             assert frozenset(inspect(connection).get_table_names(schema="public")) == public_before
@@ -492,6 +493,15 @@ def test_candidate_role_has_no_protected_privileges(
                 "SELECT loom_capacity_guard.register_inert_trial_submission("
                 "'00000000-0000-0000-0000-000000000001'::uuid, '{}'::jsonb, "
                 "'{}'::bytea, '" + "a" * 64 + "', '{}'::bytea, '" + "b" * 64 + "')",
+                "SELECT loom_capacity_guard.submit_inert_trial_projection("
+                "'00000000-0000-0000-0000-000000000001'::uuid, '{}'::jsonb, "
+                "'{}'::bytea, '"
+                + "a" * 64
+                + "', '{}'::jsonb, '{}'::bytea, '"
+                + "b" * 64
+                + "', '{}'::bytea, '"
+                + "c" * 64
+                + "')",
             ]
         )
         for statement in statements:
@@ -510,7 +520,7 @@ def test_candidate_role_has_no_protected_privileges(
         engine.dispose()
 
 
-def test_guard_owner_remains_read_only_on_public_trial_projection(
+def test_guard_owner_has_only_bounded_public_submission_privileges(
     capacity_guard_database: dict[str, object],
 ) -> None:
     engine = create_engine(_value(capacity_guard_database, "admin_url"))
@@ -525,7 +535,35 @@ def test_guard_owner_remains_read_only_on_public_trial_projection(
                         "has_table_privilege(:owner, 'public.trials', 'UPDATE') "
                         "AS can_update, "
                         "has_table_privilege(:owner, 'public.trials', 'DELETE') "
-                        "AS can_delete"
+                        "AS can_delete, "
+                        "has_column_privilege(:owner, 'public.trials', 'config', 'INSERT') "
+                        "AS can_insert_config, "
+                        "has_column_privilege(:owner, 'public.trials', 'config', 'SELECT') "
+                        "AS can_select_config, "
+                        "has_column_privilege(:owner, 'public.trials', "
+                        "'lifecycle_authority_id', 'UPDATE') AS can_bind_lifecycle, "
+                        "has_column_privilege(:owner, 'public.trials', 'state', 'UPDATE') "
+                        "AS can_fence_state, "
+                        "has_table_privilege(:owner, 'public.trials', 'REFERENCES') "
+                        "AS can_reference_trial_table, "
+                        "has_column_privilege(:owner, 'public.trials', 'id', 'REFERENCES') "
+                        "AS can_reference_trial_id, "
+                        "has_column_privilege(:owner, 'public.trials', 'worker_id', 'UPDATE') "
+                        "AS can_update_worker, "
+                        "has_table_privilege(:owner, 'public.data_lifecycle_authorities', "
+                        "'INSERT') AS can_insert_lifecycle_table, "
+                        "has_column_privilege(:owner, 'public.data_lifecycle_authorities', "
+                        "'environment', 'INSERT') AS can_insert_lifecycle_environment, "
+                        "has_column_privilege(:owner, 'public.data_lifecycle_authorities', "
+                        "'id', 'SELECT') AS can_select_lifecycle_id, "
+                        "has_column_privilege(:owner, 'public.data_lifecycle_authorities', "
+                        "'environment', 'SELECT') AS can_select_lifecycle_environment, "
+                        "has_column_privilege(:owner, 'public.data_lifecycle_authorities', "
+                        "'deletion_token', 'INSERT') AS can_insert_lifecycle_deletion_token, "
+                        "has_table_privilege(:owner, 'public.data_lifecycle_authorities', "
+                        "'REFERENCES') AS can_reference_lifecycle_table, "
+                        "has_column_privilege(:owner, 'public.data_lifecycle_authorities', "
+                        "'id', 'REFERENCES') AS can_reference_lifecycle_id"
                     ),
                     {"owner": owner},
                 )
@@ -536,6 +574,20 @@ def test_guard_owner_remains_read_only_on_public_trial_projection(
             "can_insert": False,
             "can_update": False,
             "can_delete": False,
+            "can_insert_config": True,
+            "can_select_config": False,
+            "can_bind_lifecycle": True,
+            "can_fence_state": True,
+            "can_reference_trial_table": False,
+            "can_reference_trial_id": True,
+            "can_update_worker": False,
+            "can_insert_lifecycle_table": False,
+            "can_insert_lifecycle_environment": True,
+            "can_select_lifecycle_id": True,
+            "can_select_lifecycle_environment": False,
+            "can_insert_lifecycle_deletion_token": False,
+            "can_reference_lifecycle_table": False,
+            "can_reference_lifecycle_id": True,
         }
     finally:
         engine.dispose()

@@ -286,7 +286,7 @@ async def test_agent_can_resume_from_protected_high_water_after_restart(
     capacity_guard_database: dict[str, object],
 ) -> None:
     _, registration = await _initialize_and_register(capacity_guard_database)
-    async with _agent_session(capacity_guard_database) as session:
+    async with _serializable_agent_session(capacity_guard_database) as session:
         observation = await capture_lifecycle_demand_observation(
             session,
             registration=registration,
@@ -316,7 +316,7 @@ async def test_owner_reconfigures_disabled_agent_monotonically_without_resetting
     capacity_guard_database: dict[str, object],
 ) -> None:
     fence, registration = await _initialize_and_register(capacity_guard_database)
-    async with _agent_session(capacity_guard_database) as session:
+    async with _serializable_agent_session(capacity_guard_database) as session:
         first_observation = await capture_lifecycle_demand_observation(
             session,
             registration=registration,
@@ -324,18 +324,19 @@ async def test_owner_reconfigures_disabled_agent_monotonically_without_resetting
             max_attempts=100,
         )
     capacity_fence = fence.model_copy(update={"configuration_generation": 12})
-    capacity_registration = registration.model_copy(
-        update={"configuration_generation": 12}
-    )
+    capacity_registration = registration.model_copy(update={"configuration_generation": 12})
     async with _owner_session(capacity_guard_database) as (agent_store, guard_store, _):
         await guard_store.reconfigure_disabled_authority(
             capacity_fence,
             expected_configuration_generation=11,
         )
-        assert await agent_store.reconfigure_agent(
-            capacity_registration,
-            expected_configuration_generation=11,
-        ) == capacity_registration
+        assert (
+            await agent_store.reconfigure_agent(
+                capacity_registration,
+                expected_configuration_generation=11,
+            )
+            == capacity_registration
+        )
     async with _agent_session(capacity_guard_database) as session:
         assert (
             await read_agent_lifecycle_demand_observation(
@@ -372,7 +373,7 @@ async def test_owner_reconfigures_disabled_agent_monotonically_without_resetting
             expected_configuration_generation=12,
         )
 
-    async with _agent_session(capacity_guard_database) as session:
+    async with _serializable_agent_session(capacity_guard_database) as session:
         assert (
             await read_agent_reporter_high_water(
                 session,
@@ -1462,7 +1463,7 @@ async def test_lifecycle_capture_reports_pending_then_assigned_and_fences_v1(
     capacity_guard_database: dict[str, object],
 ) -> None:
     registration, attempt, plan = await _initialize_prepared_plan(capacity_guard_database)
-    async with _agent_session(capacity_guard_database) as session:
+    async with _serializable_agent_session(capacity_guard_database) as session:
         pending = await capture_lifecycle_demand_observation(
             session,
             registration=registration,
@@ -1497,7 +1498,7 @@ async def test_lifecycle_capture_reports_pending_then_assigned_and_fences_v1(
                 max_attempts=100,
             )
 
-    async with _agent_session(capacity_guard_database) as session:
+    async with _serializable_agent_session(capacity_guard_database) as session:
         assigned = await capture_lifecycle_demand_observation(
             session,
             registration=registration,
@@ -1566,7 +1567,7 @@ async def test_lifecycle_capture_rejects_terminal_public_contradiction_without_a
         await lifecycle.apply_transition(cancellation)
 
     with pytest.raises(DBAPIError, match="terminal protected lifecycle contradicts"):
-        async with _agent_session(capacity_guard_database) as session:
+        async with _serializable_agent_session(capacity_guard_database) as session:
             await capture_lifecycle_demand_observation(
                 session,
                 registration=registration,
@@ -1602,7 +1603,7 @@ async def test_lifecycle_capture_rejects_terminal_public_contradiction_without_a
     finally:
         admin.dispose()
 
-    async with _agent_session(capacity_guard_database) as session:
+    async with _serializable_agent_session(capacity_guard_database) as session:
         resolved = await capture_lifecycle_demand_observation(
             session,
             registration=registration,
@@ -1648,7 +1649,7 @@ async def test_concurrent_lifecycle_capture_advances_exactly_once(
     _, registration = await _initialize_and_register(capacity_guard_database)
 
     async def capture_once() -> object:
-        async with _agent_session(capacity_guard_database) as session:
+        async with _serializable_agent_session(capacity_guard_database) as session:
             return await capture_lifecycle_demand_observation(
                 session,
                 registration=registration,
@@ -1700,7 +1701,7 @@ async def test_lifecycle_capture_rejects_incompatible_assigned_shape_without_adv
         )
 
     with pytest.raises(DBAPIError, match="invalid prepared binding"):
-        async with _agent_session(capacity_guard_database) as session:
+        async with _serializable_agent_session(capacity_guard_database) as session:
             await capture_lifecycle_demand_observation(
                 session,
                 registration=registration,
@@ -1742,7 +1743,7 @@ async def test_lifecycle_capture_omits_only_deferred_pending_demand(
     finally:
         admin.dispose()
 
-    async with _agent_session(capacity_guard_database) as session:
+    async with _serializable_agent_session(capacity_guard_database) as session:
         deferred = await capture_lifecycle_demand_observation(
             session,
             registration=registration,
@@ -1763,7 +1764,7 @@ async def test_lifecycle_capture_omits_only_deferred_pending_demand(
     finally:
         admin.dispose()
 
-    async with _agent_session(capacity_guard_database) as session:
+    async with _serializable_agent_session(capacity_guard_database) as session:
         ready = await capture_lifecycle_demand_observation(
             session,
             registration=registration,
@@ -1809,7 +1810,7 @@ async def test_lifecycle_capture_row_bound_includes_deferred_source_rows(
         admin.dispose()
 
     with pytest.raises(DBAPIError, match="source row bound"):
-        async with _agent_session(capacity_guard_database) as session:
+        async with _serializable_agent_session(capacity_guard_database) as session:
             await capture_lifecycle_demand_observation(
                 session,
                 registration=registration,

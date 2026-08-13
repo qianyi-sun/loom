@@ -12,7 +12,12 @@ from typing import Protocol
 
 from pydantic import ValidationError
 from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from loom_capacity_agent.client import (
     DemandReporterClient,
@@ -74,6 +79,12 @@ def load_database_url(path: Path) -> str:
     return value
 
 
+def create_capacity_agent_engine(database_url: str) -> AsyncEngine:
+    """Create the trusted agent engine with its required transaction isolation."""
+
+    return create_async_engine(database_url, isolation_level="SERIALIZABLE")
+
+
 class CapacityAgentRuntime:
     """Capture, durably replay, and publish one complete protected view at a time."""
 
@@ -92,10 +103,7 @@ class CapacityAgentRuntime:
             raise ValueError("capacity capture bound must be between 1 and 10000")
         self._configuration = configuration
         self._registration = AgentRegistrationV1.model_validate(
-            {
-                field: getattr(configuration, field)
-                for field in AgentRegistrationV1.model_fields
-            }
+            {field: getattr(configuration, field) for field in AgentRegistrationV1.model_fields}
         )
         self._session_factory = session_factory
         self._publisher = publisher
@@ -131,8 +139,7 @@ class CapacityAgentRuntime:
         self._pending = (
             build_lifecycle_demand_snapshot(observation, self._configuration)
             if observation is not None
-            and observation.configuration_generation
-            == self._configuration.configuration_generation
+            and observation.configuration_generation == self._configuration.configuration_generation
             and observation.deployment_generation == self._configuration.deployment_generation
             and observation.reporter_incarnation == self._configuration.reporter_incarnation
             and observation.candidate_digest == self._configuration.candidate_digest
@@ -236,7 +243,7 @@ def _parser() -> argparse.ArgumentParser:
 
 async def _main_async(arguments: argparse.Namespace) -> None:
     configuration = load_reporter_configuration(arguments.configuration_file)
-    engine = create_async_engine(load_database_url(arguments.database_url_file))
+    engine = create_capacity_agent_engine(load_database_url(arguments.database_url_file))
     publisher = DemandReporterClient.from_files(
         configuration,
         DemandReporterConnection(
@@ -280,6 +287,7 @@ if __name__ == "__main__":  # pragma: no cover - module entry point
 __all__ = [
     "CapacityAgentRuntime",
     "DemandPublisher",
+    "create_capacity_agent_engine",
     "load_database_url",
     "load_reporter_configuration",
     "main",

@@ -11,12 +11,18 @@ from pydantic import ValidationError
 from loom_capacity_agent.contracts import (
     AgentPoolCapabilityV1,
     AgentRegistrationV1,
+    AtomicTrialSubmissionV1,
     GuardDemandAttemptV1,
     GuardDemandObservationV1,
     InertTrialSubmissionV1,
     ReporterConfigurationV1,
 )
-from loom_capacity_guard.contracts import SealedRequirementsV1, canonical_digest
+from loom_capacity_guard.contracts import (
+    CapacityGuardContractError,
+    SealedRequirementsV1,
+    canonical_bytes,
+    canonical_digest,
+)
 
 
 def _registration() -> AgentRegistrationV1:
@@ -182,4 +188,65 @@ def test_inert_submission_is_initial_generation_bound_and_exactly_sealed() -> No
         with pytest.raises(ValidationError, match=pattern):
             InertTrialSubmissionV1.model_validate(
                 {**submission.model_dump(mode="python"), **changed}
+            )
+
+
+def test_atomic_submission_contract_bounds_every_public_projection_input() -> None:
+    registration = _registration()
+    requirements = _requirements()
+    submission = AtomicTrialSubmissionV1(
+        **registration.model_dump(mode="python"),
+        trial_id=uuid4(),
+        protected_attempt_id=uuid4(),
+        execution_generation=registration.deployment_generation,
+        requirements=requirements,
+        requirements_digest=canonical_digest(requirements),
+        team_id=uuid4(),
+        task_id="task-1",
+        config={"agent_name": "oracle"},
+        submit_priority=100,
+        idempotency_key="batch:task-1",
+    )
+    assert submission.executable is False
+    assert "lifecycle_environment" not in AtomicTrialSubmissionV1.model_fields
+    assert "lifecycle_namespace" not in AtomicTrialSubmissionV1.model_fields
+    for changed in (
+        {"task_id": ""},
+        {"config": []},
+        {"config": {"unsupported": object()}},
+        {"config": {"non_finite": float("inf")}},
+        {"config": {"invalid_unicode": "\ud800"}},
+        {"submit_priority": -1},
+        {"idempotency_key": ""},
+        {"provider_model_id": "x" * 1025},
+    ):
+        with pytest.raises(ValidationError):
+            AtomicTrialSubmissionV1.model_validate(
+                {**submission.model_dump(mode="python"), **changed}
+            )
+
+    oversized = submission.model_copy(update={"config": {"value": "x" * (8 * 1024 * 1024)}})
+    with pytest.raises(CapacityGuardContractError, match="maximum byte size"):
+        canonical_bytes(oversized)
+
+
+def test_atomic_submission_rejects_caller_controlled_lifecycle_scope() -> None:
+    registration = _registration()
+    requirements = _requirements()
+    for field in ("lifecycle_environment", "lifecycle_namespace"):
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            AtomicTrialSubmissionV1.model_validate(
+                {
+                    **registration.model_dump(mode="python"),
+                    "trial_id": uuid4(),
+                    "protected_attempt_id": uuid4(),
+                    "execution_generation": registration.deployment_generation,
+                    "requirements": requirements,
+                    "requirements_digest": canonical_digest(requirements),
+                    "team_id": uuid4(),
+                    "task_id": "task-1",
+                    "config": {"agent_name": "oracle"},
+                    "submit_priority": 100,
+                    field: "attacker-controlled",
+                }
             )
