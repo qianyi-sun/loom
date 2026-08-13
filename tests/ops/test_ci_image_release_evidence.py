@@ -168,6 +168,11 @@ def test_architecture_predicate_binds_source_build_scan_and_invocation() -> None
     build_definition: Any = predicate["buildDefinition"]
     assert build_definition["buildType"] == "https://actions.github.io/buildtypes/workflow/v1"
     external: Any = build_definition["externalParameters"]
+    assert external["workflow"] == {
+        "ref": "refs/heads/dev",
+        "repository": "https://github.com/qianyi-sun/loom",
+        "path": ".github/workflows/images.yml",
+    }
     assert external["source"] == {
         "repository": "qianyi-sun/loom",
         "ref": "refs/heads/dev",

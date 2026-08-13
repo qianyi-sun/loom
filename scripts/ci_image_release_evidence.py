@@ -179,6 +179,14 @@ def _source(common: Mapping[str, object]) -> dict[str, str]:
     }
 
 
+def _workflow(common: Mapping[str, object]) -> dict[str, str]:
+    return {
+        "ref": f"refs/heads/{common['ref_name']}",
+        "repository": f"https://github.com/{common['repository']}",
+        "path": _WORKFLOW_PATH,
+    }
+
+
 def _require_release_subject(*, repository: str, image_name: str, subject_name: str) -> None:
     repository = _exact(_REPOSITORY, repository, "repository")
     image_name = _exact(_IMAGE_NAME, image_name, "image name")
@@ -312,6 +320,7 @@ def architecture_predicate(
         "buildDefinition": {
             "buildType": _GITHUB_ACTIONS_BUILD_TYPE,
             "externalParameters": {
+                "workflow": _workflow(common),
                 "source": _source(common),
                 "image": {
                     "component": common["image"],
@@ -406,6 +415,7 @@ def manifest_predicate(
         "buildDefinition": {
             "buildType": _GITHUB_ACTIONS_BUILD_TYPE,
             "externalParameters": {
+                "workflow": _workflow(common),
                 "source": _source(common),
                 "image": {
                     "component": common["image"],
