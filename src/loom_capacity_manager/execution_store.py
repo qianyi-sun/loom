@@ -375,6 +375,19 @@ class CapacityExecutionStore:
                     "fenced",
                     "executor journal checkpoint diverged",
                 )
+            witnessed_inventory = state.inventory_payload
+            witnessed_journal_sequence = (
+                None if witnessed_inventory is None else witnessed_inventory.get("journal_sequence")
+            )
+            witnessed_journal_digest = (
+                None if witnessed_inventory is None else witnessed_inventory.get("journal_digest")
+            )
+            if state.retirement_safe and (
+                heartbeat.journal_sequence != witnessed_journal_sequence
+                or heartbeat.journal_digest != witnessed_journal_digest
+            ):
+                state.retirement_safe = False
+                state.retirement_inventory_digest = None
             now = await _database_now(session)
             state.heartbeat_high_water = heartbeat.heartbeat_sequence
             state.last_heartbeat_digest = digest
@@ -466,7 +479,10 @@ class CapacityExecutionStore:
                 .all()
             )
             intents_by_id = {intent.intent_id: intent for intent in pool_intents}
-            records_safe = True
+            records_safe = (
+                inventory.journal_sequence == state.journal_high_water
+                and inventory.journal_digest == state.journal_digest
+            )
             observed_intent_ids: set[UUID] = set()
             for record in inventory.records:
                 if record.authority_scope == "foreign":
@@ -978,13 +994,13 @@ class CapacityExecutionStore:
                     _payload_digest(replay_payload),
                     True,
                 )
-            row = await self._locked_intent(session, release.binding.intent_id)
             await self._locked_execution_context(
                 session,
                 release.binding.execution,
-                self._executor_binding_from_row(row),
+                self._executor_binding_from_contract(release.binding),
                 require_active=False,
             )
+            row = await self._locked_intent(session, release.binding.intent_id)
             if release.binding != ExecutableIntentBindingV2.model_validate_json(
                 json.dumps(row.binding_payload)
             ):
@@ -1024,17 +1040,33 @@ class CapacityExecutionStore:
     ) -> ReleasedExecutableShapes:
         digest = canonical_executable_digest(release)
         async with _write_transaction(session):
-            rows = [
-                (await self._locked_intent(session, item.binding.intent_id), item)
-                for item in release.releases
-            ]
-            first = rows[0][0]
+            first_binding = release.releases[0].binding
             await self._locked_execution_context(
                 session,
                 release.execution,
-                self._executor_binding_from_row(first),
+                self._executor_binding_from_contract(first_binding),
                 require_active=False,
             )
+            intent_ids = tuple(item.binding.intent_id for item in release.releases)
+            ordered_intent_ids = tuple(
+                (
+                    await session.execute(
+                        select(CapacityExecutableIntent.intent_id)
+                        .where(CapacityExecutableIntent.intent_id.in_(intent_ids))
+                        .order_by(CapacityExecutableIntent.launch_rank)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if set(ordered_intent_ids) != set(intent_ids):
+                raise ExecutionConflictError("executable intent is unknown")
+            rows_by_id = {
+                intent_id: await self._locked_intent(session, intent_id)
+                for intent_id in ordered_intent_ids
+            }
+            rows = [(rows_by_id[item.binding.intent_id], item) for item in release.releases]
+            first = rows[0][0]
             released_ids = tuple(sorted(item.binding.shape_instance_id for _, item in rows))
             payload = {
                 "tranche_id": str(release.tranche_id),
@@ -2000,6 +2032,20 @@ class CapacityExecutionStore:
             pool_generation=row.pool_generation,
             executor_id=row.executor_id,
             executor_incarnation=row.executor_incarnation,
+            signing_key_sha256="0" * 64,
+            local_authority_sha256="0" * 64,
+            controller_authority_sha256="0" * 64,
+        )
+
+    @staticmethod
+    def _executor_binding_from_contract(
+        binding: ExecutableIntentBindingV2,
+    ) -> PreparedExecutorBindingV2:
+        return PreparedExecutorBindingV2(
+            pool_id=cast(Literal["gb10", "oldlab"], binding.pool_id),
+            pool_generation=binding.pool_generation,
+            executor_id=binding.executor_id,
+            executor_incarnation=binding.executor_incarnation,
             signing_key_sha256="0" * 64,
             local_authority_sha256="0" * 64,
             controller_authority_sha256="0" * 64,

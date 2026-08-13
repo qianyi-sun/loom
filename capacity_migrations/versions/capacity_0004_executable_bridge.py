@@ -530,7 +530,25 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint(
             "(retirement_safe AND retirement_inventory_digest IS NOT NULL "
-            "AND retirement_inventory_digest ~ '^[0-9a-f]{64}$') OR "
+            "AND retirement_inventory_digest ~ '^[0-9a-f]{64}$' "
+            "AND retirement_inventory_digest = last_inventory_digest "
+            "AND inventory_high_water > 0 AND inventory_payload IS NOT NULL "
+            "AND jsonb_typeof(inventory_payload) = 'object' "
+            "AND last_inventory_at IS NOT NULL "
+            "AND inventory_payload -> 'schema_version' = '2'::jsonb "
+            "AND inventory_payload -> 'inventory_sequence' "
+            "= to_jsonb(inventory_high_water) "
+            "AND inventory_payload ->> 'executor_id' = executor_id "
+            "AND inventory_payload ->> 'executor_incarnation' "
+            "= executor_incarnation::text "
+            "AND inventory_payload ->> 'pool_id' = pool_id "
+            "AND inventory_payload -> 'pool_generation' = to_jsonb(pool_generation) "
+            "AND inventory_payload -> 'journal_sequence' = to_jsonb(journal_high_water) "
+            "AND inventory_payload ->> 'journal_digest' = journal_digest "
+            "AND inventory_payload -> 'execution' -> 'execution_epoch' "
+            "= to_jsonb(execution_epoch) "
+            "AND inventory_payload -> 'execution' ->> 'execution_manifest_sha256' "
+            "= execution_manifest_sha256) OR "
             "(NOT retirement_safe AND retirement_inventory_digest IS NULL)",
             name="capacity_executable_executor_retirement_check",
         ),
@@ -1264,6 +1282,127 @@ def upgrade() -> None:
                OR NEW.retirement_request_payload IS NULL
                OR NEW.retired_at IS NULL THEN
               RAISE EXCEPTION 'execution retirement evidence is invalid'
+                USING ERRCODE = '23514';
+            END IF;
+            IF jsonb_typeof(NEW.retirement_request_payload) IS DISTINCT FROM 'object'
+               OR (
+                 SELECT count(*)
+                 FROM jsonb_object_keys(NEW.retirement_request_payload)
+               ) <> 7
+               OR NOT (
+                 NEW.retirement_request_payload ?& ARRAY[
+                   'schema_version',
+                   'authority_incarnation',
+                   'expected_writer_epoch',
+                   'execution_epoch',
+                   'execution_manifest_sha256',
+                   'executor_checkpoints',
+                   'executable'
+                 ]
+               )
+               OR NEW.retirement_request_payload -> 'schema_version'
+                  IS DISTINCT FROM '2'::jsonb
+               OR NEW.retirement_request_payload ->> 'authority_incarnation'
+                  IS DISTINCT FROM NEW.authority_incarnation::text
+               OR NEW.retirement_request_payload -> 'expected_writer_epoch'
+                  IS DISTINCT FROM to_jsonb(NEW.current_writer_epoch)
+               OR NEW.retirement_request_payload -> 'execution_epoch'
+                  IS DISTINCT FROM to_jsonb(NEW.execution_epoch)
+               OR NEW.retirement_request_payload ->> 'execution_manifest_sha256'
+                  IS DISTINCT FROM NEW.execution_manifest_sha256
+               OR NEW.retirement_request_payload -> 'executable'
+                  IS DISTINCT FROM 'true'::jsonb
+               OR jsonb_typeof(
+                 NEW.retirement_request_payload -> 'executor_checkpoints'
+               ) IS DISTINCT FROM 'array'
+               OR jsonb_array_length(
+                 NEW.retirement_request_payload -> 'executor_checkpoints'
+               ) <> 2
+               OR NEW.retirement_request_payload
+                    -> 'executor_checkpoints' -> 0 ->> 'pool_id'
+                  IS DISTINCT FROM 'gb10'
+               OR NEW.retirement_request_payload
+                    -> 'executor_checkpoints' -> 1 ->> 'pool_id'
+                  IS DISTINCT FROM 'oldlab' THEN
+              RAISE EXCEPTION 'execution retirement request payload is invalid'
+                USING ERRCODE = '23514';
+            END IF;
+            PERFORM executor.id
+            FROM capacity_executable_executor_states executor
+            WHERE executor.execution_epoch = NEW.execution_epoch
+            ORDER BY executor.pool_id
+            FOR UPDATE;
+            IF (
+              SELECT count(*)
+              FROM jsonb_array_elements(
+                NEW.retirement_request_payload -> 'executor_checkpoints'
+              ) WITH ORDINALITY AS checkpoint(value, position)
+              JOIN capacity_executable_executor_states executor
+                ON executor.execution_epoch = NEW.execution_epoch
+               AND executor.execution_manifest_sha256 = NEW.execution_manifest_sha256
+               AND executor.pool_id = checkpoint.value ->> 'pool_id'
+               AND executor.executor_id = checkpoint.value ->> 'executor_id'
+               AND executor.executor_incarnation::text
+                   = checkpoint.value ->> 'executor_incarnation'
+               AND checkpoint.value -> 'pool_generation'
+                   = to_jsonb(executor.pool_generation)
+              WHERE jsonb_typeof(checkpoint.value) = 'object'
+                AND (
+                  SELECT count(*) FROM jsonb_object_keys(checkpoint.value)
+                ) = 11
+                AND checkpoint.value ?& ARRAY[
+                  'schema_version',
+                  'executor_id',
+                  'executor_incarnation',
+                  'pool_id',
+                  'pool_generation',
+                  'heartbeat_sequence',
+                  'command_sequence',
+                  'journal_sequence',
+                  'journal_digest',
+                  'inventory_sequence',
+                  'inventory_digest'
+                ]
+                AND checkpoint.value -> 'schema_version' = '2'::jsonb
+                AND (
+                  (checkpoint.position = 1 AND executor.pool_id = 'gb10')
+                  OR (checkpoint.position = 2 AND executor.pool_id = 'oldlab')
+                )
+                AND executor.state = 'current'
+                AND checkpoint.value -> 'heartbeat_sequence'
+                    = to_jsonb(executor.heartbeat_high_water)
+                AND checkpoint.value -> 'command_sequence'
+                    = to_jsonb(executor.command_high_water)
+                AND checkpoint.value -> 'journal_sequence'
+                    = to_jsonb(executor.journal_high_water)
+                AND executor.journal_digest = checkpoint.value ->> 'journal_digest'
+                AND checkpoint.value -> 'inventory_sequence'
+                    = to_jsonb(executor.inventory_high_water)
+                AND executor.last_inventory_digest
+                    = checkpoint.value ->> 'inventory_digest'
+                AND executor.retirement_safe
+                AND executor.retirement_inventory_digest
+                    = checkpoint.value ->> 'inventory_digest'
+                AND executor.inventory_payload IS NOT NULL
+                AND executor.last_inventory_at IS NOT NULL
+                AND executor.last_heartbeat_at > executor.last_inventory_at
+                AND executor.lease_expires_at > clock_timestamp()
+            ) <> 2 THEN
+              RAISE EXCEPTION 'execution retirement executor evidence is invalid'
+                USING ERRCODE = '23514';
+            END IF;
+            PERFORM intent.id
+            FROM capacity_executable_intents intent
+            WHERE intent.execution_epoch = NEW.execution_epoch
+            ORDER BY intent.launch_rank
+            FOR UPDATE;
+            IF EXISTS (
+              SELECT 1
+              FROM capacity_executable_intents intent
+              WHERE intent.execution_epoch = NEW.execution_epoch
+                AND intent.state <> 'released'
+            ) THEN
+              RAISE EXCEPTION 'execution retirement intent evidence is invalid'
                 USING ERRCODE = '23514';
             END IF;
           ELSE

@@ -50,6 +50,7 @@ from loom_capacity_manager.models import (
     CapacityAuthorityState,
     CapacityExecutableExecutorState,
     CapacityExecutableIntent,
+    CapacityExecutionEpoch,
     CapacityExecutionExecutor,
     CapacityPool,
     CapacityPoolObservation,
@@ -321,6 +322,103 @@ def _retirement_request(
     )
 
 
+async def _retirement_guard_snapshot(
+    session: AsyncSession,
+    execution_epoch: int,
+    *,
+    require_intents: bool,
+) -> tuple[dict[str, object], dict[str, object], tuple[dict[str, object], ...]]:
+    """Capture every authority, envelope, charge, and intent-evidence invariant."""
+
+    await session.flush()
+    authority = dict(
+        (
+            await session.execute(
+                select(CapacityAuthorityState.__table__).where(
+                    CapacityAuthorityState.singleton_id == 1
+                )
+            )
+        )
+        .mappings()
+        .one()
+    )
+    epoch = dict(
+        (
+            await session.execute(
+                select(CapacityExecutionEpoch.__table__).where(
+                    CapacityExecutionEpoch.execution_epoch == execution_epoch
+                )
+            )
+        )
+        .mappings()
+        .one()
+    )
+    intents = tuple(
+        dict(row)
+        for row in (
+            await session.execute(
+                select(CapacityExecutableIntent.__table__)
+                .where(CapacityExecutableIntent.execution_epoch == execution_epoch)
+                .order_by(CapacityExecutableIntent.launch_rank)
+            )
+        ).mappings()
+    )
+    assert (
+        authority["execution_state"],
+        authority["execution_epoch"],
+        authority["execution_manifest_sha256"],
+        authority["executable_new_capacity_ceiling"],
+        authority["increase_freeze"],
+    ) == (
+        "drain-only",
+        execution_epoch,
+        epoch["execution_manifest_sha256"],
+        0,
+        True,
+    )
+    assert (
+        epoch["state"],
+        epoch["effective_ceiling"],
+        epoch["effective_rate_per_minute"],
+        epoch["retirement_actor"],
+        epoch["retirement_idempotency_key"],
+        epoch["retirement_request_digest"],
+        epoch["retirement_request_payload"],
+        epoch["retired_at"],
+    ) == ("drain-only", 0, 0, None, None, None, None, None)
+    if require_intents:
+        assert intents
+    return authority, epoch, intents
+
+
+async def _assert_retirement_conflicts_without_mutation(
+    manager: CapacityManagementStore,
+    session: AsyncSession,
+    request: ExecutionRetirementV2,
+    *,
+    idempotency_key: UUID,
+    require_intents: bool = True,
+) -> None:
+    before = await _retirement_guard_snapshot(
+        session,
+        request.execution_epoch,
+        require_intents=require_intents,
+    )
+    with pytest.raises(ExecutionConflictError):
+        await manager.retire_execution_epoch(
+            session,
+            request,
+            actor="activation-operator",
+            idempotency_key=idempotency_key,
+        )
+    after = await _retirement_guard_snapshot(
+        session,
+        request.execution_epoch,
+        require_intents=require_intents,
+    )
+    assert after == before
+
+
 async def _proposed_intent(
     store: CapacityExecutionStore,
     session: AsyncSession,
@@ -374,6 +472,33 @@ def _signed_inventory_record(
         ),
         terminal_evidence_sha256="a" * 64 if state == "terminal" else None,
     )
+
+
+async def _released_intent_retirement_fixture(
+    session: AsyncSession,
+) -> tuple[
+    CapacityExecutionStore,
+    CapacityManagementStore,
+    ExecutionContextV2,
+    tuple[ExecutionRetirementExecutorCheckpointV2, ...],
+]:
+    store = CapacityExecutionStore(
+        ownership_keyring=OwnershipKeyring({"gb10-key": EXECUTOR_KEYS["gb10"].public_key()})
+    )
+    active, _allocation_epoch = await _active_plan(session)
+    _proposal, intent = await _proposed_intent(store, session, active)
+    binding = ExecutableIntentBindingV2.model_validate_json(json.dumps(intent.binding_payload))
+    intent.state = "released"
+    intent.released_at = datetime.now(UTC)
+    await session.flush()
+    manager, drained = await _drain_active(session, active)
+    checkpoints = await _publish_retirement_evidence(
+        store,
+        session,
+        drained,
+        records_by_pool={"gb10": (_signed_inventory_record(binding, state="terminal"),)},
+    )
+    return store, manager, drained, checkpoints
 
 
 async def _launch_ready(
@@ -1063,6 +1188,7 @@ async def test_drain_only_transition_emits_close_for_observed_worker(
 
 async def test_release_requires_matching_protected_and_physical_terminal_evidence(
     capacity_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = CapacityExecutionStore(
         ownership_keyring=OwnershipKeyring({"gb10-key": EXECUTOR_KEYS["gb10"].public_key()})
@@ -1140,7 +1266,55 @@ async def test_release_requires_matching_protected_and_physical_terminal_evidenc
     await store.begin_intent_close(capacity_session, close)
     release = await store.next_pool_work(capacity_session, executor_binding("gb10"))
     assert isinstance(release, ExecutablePartialReleaseV2)
+
+    lock_order: list[str] = []
+    original_lock_authority = store._lock_authority
+    original_lock_current_epoch = store._lock_current_epoch
+    original_exact_registration = store._exact_registration
+    original_runtime_state = store._runtime_state
+    original_locked_intent = store._locked_intent
+
+    async def record_authority(session):  # type: ignore[no-untyped-def]
+        lock_order.append("authority")
+        return await original_lock_authority(session)
+
+    async def record_epoch(session, authority):  # type: ignore[no-untyped-def]
+        lock_order.append("epoch")
+        return await original_lock_current_epoch(session, authority)
+
+    async def record_registration(session, epoch, executor):  # type: ignore[no-untyped-def]
+        lock_order.append("executor-registration")
+        return await original_exact_registration(session, epoch, executor)
+
+    async def record_state(  # type: ignore[no-untyped-def]
+        session,
+        registration,
+        epoch,
+        *,
+        create,
+    ):
+        lock_order.append("executor-state")
+        return await original_runtime_state(session, registration, epoch, create=create)
+
+    async def record_intent(session, intent_id):  # type: ignore[no-untyped-def]
+        lock_order.append("intent")
+        return await original_locked_intent(session, intent_id)
+
+    monkeypatch.setattr(store, "_lock_authority", record_authority)
+    monkeypatch.setattr(store, "_lock_current_epoch", record_epoch)
+    monkeypatch.setattr(store, "_exact_registration", record_registration)
+    monkeypatch.setattr(store, "_runtime_state", record_state)
+    monkeypatch.setattr(store, "_locked_intent", record_intent)
+
     released = await store.release_shapes(capacity_session, release)
+
+    assert lock_order[:5] == [
+        "authority",
+        "epoch",
+        "executor-registration",
+        "executor-state",
+        "intent",
+    ]
     assert released.released_shape_ids == (binding.shape_instance_id,)
 
 
@@ -1177,22 +1351,12 @@ async def test_retirement_rejects_every_nonreleased_intent_without_reusing_charg
         drained,
     )
 
-    with pytest.raises(ExecutionConflictError):
-        await manager.retire_execution_epoch(
-            capacity_session,
-            _retirement_request(drained, checkpoints),
-            actor="activation-operator",
-            idempotency_key=UUID(int=12102),
-        )
-
-    await capacity_session.refresh(intent)
-    authority = (await capacity_session.execute(select(CapacityAuthorityState))).scalar_one()
-    assert (authority.execution_state, authority.executable_new_capacity_ceiling) == (
-        "drain-only",
-        0,
+    await _assert_retirement_conflicts_without_mutation(
+        manager,
+        capacity_session,
+        _retirement_request(drained, checkpoints),
+        idempotency_key=UUID(int=12102),
     )
-    assert intent.state == intent_state
-    assert intent.binding_payload["concurrency_slots"] == 1
 
 
 @pytest.mark.parametrize(
@@ -1203,6 +1367,7 @@ async def test_retirement_rejects_every_nonreleased_intent_without_reusing_charg
         "missing-inventory",
         "old-inventory",
         "heartbeat-before-inventory",
+        "heartbeat-at-inventory",
         "fenced",
         "equivocal",
     ),
@@ -1213,10 +1378,9 @@ async def test_retirement_rejects_incomplete_or_stale_executor_evidence_atomical
 ) -> None:
     """One unavailable final executor must leave exact drain-only authority intact."""
 
-    store = CapacityExecutionStore()
-    active, _allocation_epoch = await _active_plan(capacity_session)
-    manager, drained = await _drain_active(capacity_session, active)
-    checkpoints = await _publish_retirement_evidence(store, capacity_session, drained)
+    _store, manager, drained, checkpoints = await _released_intent_retirement_fixture(
+        capacity_session
+    )
     state = (
         await capacity_session.execute(
             select(CapacityExecutableExecutorState).where(
@@ -1240,24 +1404,19 @@ async def test_retirement_rejects_incomplete_or_stale_executor_evidence_atomical
     elif blocker == "heartbeat-before-inventory":
         assert state.last_inventory_at is not None
         state.last_heartbeat_at = state.last_inventory_at - timedelta(seconds=1)
+    elif blocker == "heartbeat-at-inventory":
+        assert state.last_inventory_at is not None
+        state.last_heartbeat_at = state.last_inventory_at
     else:
         state.state = blocker
     await capacity_session.flush()
 
-    with pytest.raises(ExecutionConflictError):
-        await manager.retire_execution_epoch(
-            capacity_session,
-            _retirement_request(drained, checkpoints),
-            actor="activation-operator",
-            idempotency_key=UUID(int=12103),
-        )
-
-    authority = (await capacity_session.execute(select(CapacityAuthorityState))).scalar_one()
-    assert (
-        authority.execution_state,
-        authority.executable_new_capacity_ceiling,
-        authority.increase_freeze,
-    ) == ("drain-only", 0, True)
+    await _assert_retirement_conflicts_without_mutation(
+        manager,
+        capacity_session,
+        _retirement_request(drained, checkpoints),
+        idempotency_key=UUID(int=12103),
+    )
 
 
 @pytest.mark.parametrize(
@@ -1277,10 +1436,9 @@ async def test_retirement_rejects_any_changed_final_checkpoint_binding(
 ) -> None:
     """A request cannot substitute any executor, command, journal, or inventory head."""
 
-    store = CapacityExecutionStore()
-    active, _allocation_epoch = await _active_plan(capacity_session)
-    manager, drained = await _drain_active(capacity_session, active)
-    checkpoints = await _publish_retirement_evidence(store, capacity_session, drained)
+    _store, manager, drained, checkpoints = await _released_intent_retirement_fixture(
+        capacity_session
+    )
     changed_values: dict[str, object]
     if checkpoint_change == "executor":
         changed_values = {
@@ -1303,18 +1461,63 @@ async def test_retirement_rejects_any_changed_final_checkpoint_binding(
         (changed_checkpoint, checkpoints[1]),
     )
 
-    with pytest.raises(ExecutionConflictError):
-        await manager.retire_execution_epoch(
-            capacity_session,
-            changed_request,
-            actor="activation-operator",
-            idempotency_key=UUID(int=12104),
-        )
+    await _assert_retirement_conflicts_without_mutation(
+        manager,
+        capacity_session,
+        changed_request,
+        idempotency_key=UUID(int=12104),
+    )
 
-    authority = (await capacity_session.execute(select(CapacityAuthorityState))).scalar_one()
-    assert (authority.execution_state, authority.executable_new_capacity_ceiling) == (
-        "drain-only",
-        0,
+
+async def test_journal_advance_after_inventory_invalidates_retirement_safety(
+    capacity_session: AsyncSession,
+) -> None:
+    """A later journal head cannot reuse safety derived from an older inventory."""
+
+    store, manager, drained, checkpoints = await _released_intent_retirement_fixture(
+        capacity_session
+    )
+    gb10, oldlab = checkpoints
+    executor = executor_binding("gb10")
+
+    await store.heartbeat_executor(
+        capacity_session,
+        ExecutableExecutorHeartbeatV2(
+            execution=drained,
+            executor_id=executor.executor_id,
+            executor_incarnation=executor.executor_incarnation,
+            pool_id=executor.pool_id,
+            pool_generation=executor.pool_generation,
+            heartbeat_sequence=gb10.heartbeat_sequence + 1,
+            journal_sequence=1,
+            journal_digest="f" * 64,
+            journal_checkpoint_sequence=gb10.journal_sequence,
+            journal_checkpoint_digest=gb10.journal_digest,
+        ),
+    )
+    state = (
+        await capacity_session.execute(
+            select(CapacityExecutableExecutorState).where(
+                CapacityExecutableExecutorState.execution_epoch == drained.execution_epoch,
+                CapacityExecutableExecutorState.pool_id == "gb10",
+            )
+        )
+    ).scalar_one()
+
+    assert state.retirement_safe is False
+    assert state.retirement_inventory_digest is None
+    advanced = gb10.model_copy(
+        update={
+            "heartbeat_sequence": gb10.heartbeat_sequence + 1,
+            "journal_sequence": 1,
+            "journal_digest": "f" * 64,
+        }
+    )
+    await _assert_retirement_conflicts_without_mutation(
+        manager,
+        capacity_session,
+        _retirement_request(drained, (advanced, oldlab)),
+        idempotency_key=UUID(int=12113),
     )
 
 
@@ -1325,14 +1528,19 @@ async def test_proofless_loom_scoped_final_record_blocks_retirement(
 
     store = CapacityExecutionStore()
     active, _allocation_epoch = await _active_plan(capacity_session)
+    _proposal, intent = await _proposed_intent(store, capacity_session, active)
+    binding = ExecutableIntentBindingV2.model_validate_json(json.dumps(intent.binding_payload))
+    intent.state = "released"
+    intent.released_at = datetime.now(UTC)
+    await capacity_session.flush()
     manager, drained = await _drain_active(capacity_session, active)
     proofless = ExecutableInventoryRecordV2(
         physical_identity="unproved-loom-job",
         physical_kind="slurm-job",
         authority_scope="registered-loom",
         state="terminal",
-        resources=resource_vector(),
-        node_ids=("gb10-node",),
+        resources=binding.resources,
+        node_ids=binding.node_ids,
         controller_evidence_sha256="9" * 64,
         terminal_evidence_sha256="a" * 64,
     )
@@ -1352,13 +1560,12 @@ async def test_proofless_loom_scoped_final_record_blocks_retirement(
 
     assert state.retirement_safe is False
     assert state.retirement_inventory_digest is None
-    with pytest.raises(ExecutionConflictError):
-        await manager.retire_execution_epoch(
-            capacity_session,
-            _retirement_request(drained, checkpoints),
-            actor="activation-operator",
-            idempotency_key=UUID(int=12105),
-        )
+    await _assert_retirement_conflicts_without_mutation(
+        manager,
+        capacity_session,
+        _retirement_request(drained, checkpoints),
+        idempotency_key=UUID(int=12105),
+    )
 
 
 @pytest.mark.parametrize(
@@ -1405,13 +1612,12 @@ async def test_invalid_or_nonterminal_loom_record_blocks_without_unreleasing_int
     ).scalar_one()
     assert gb10_state.retirement_safe is False
     assert gb10_state.retirement_inventory_digest is None
-    with pytest.raises(ExecutionConflictError):
-        await manager.retire_execution_epoch(
-            capacity_session,
-            _retirement_request(drained, checkpoints),
-            actor="activation-operator",
-            idempotency_key=UUID(int=12106),
-        )
+    await _assert_retirement_conflicts_without_mutation(
+        manager,
+        capacity_session,
+        _retirement_request(drained, checkpoints),
+        idempotency_key=UUID(int=12106),
+    )
 
 
 async def test_later_terminal_inventory_keeps_released_intent_and_can_retire(

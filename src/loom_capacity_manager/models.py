@@ -1839,7 +1839,25 @@ class CapacityExecutableExecutorState(Base):
         ),
         CheckConstraint(
             "(retirement_safe AND retirement_inventory_digest IS NOT NULL "
-            "AND retirement_inventory_digest ~ '^[0-9a-f]{64}$') OR "
+            "AND retirement_inventory_digest ~ '^[0-9a-f]{64}$' "
+            "AND retirement_inventory_digest = last_inventory_digest "
+            "AND inventory_high_water > 0 AND inventory_payload IS NOT NULL "
+            "AND jsonb_typeof(inventory_payload) = 'object' "
+            "AND last_inventory_at IS NOT NULL "
+            "AND inventory_payload -> 'schema_version' = '2'::jsonb "
+            "AND inventory_payload -> 'inventory_sequence' "
+            "= to_jsonb(inventory_high_water) "
+            "AND inventory_payload ->> 'executor_id' = executor_id "
+            "AND inventory_payload ->> 'executor_incarnation' "
+            "= executor_incarnation::text "
+            "AND inventory_payload ->> 'pool_id' = pool_id "
+            "AND inventory_payload -> 'pool_generation' = to_jsonb(pool_generation) "
+            "AND inventory_payload -> 'journal_sequence' = to_jsonb(journal_high_water) "
+            "AND inventory_payload ->> 'journal_digest' = journal_digest "
+            "AND inventory_payload -> 'execution' -> 'execution_epoch' "
+            "= to_jsonb(execution_epoch) "
+            "AND inventory_payload -> 'execution' ->> 'execution_manifest_sha256' "
+            "= execution_manifest_sha256) OR "
             "(NOT retirement_safe AND retirement_inventory_digest IS NULL)",
             name="capacity_executable_executor_retirement_check",
         ),

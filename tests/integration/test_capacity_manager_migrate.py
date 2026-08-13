@@ -310,35 +310,114 @@ def test_retirement_lifecycle_schema_matches_model_and_migration(
     """Dropping lifecycle evidence or its database guards must create model drift."""
 
     lifecycle_columns = {
-        "drain_actor": True,
-        "drain_idempotency_key": True,
-        "drain_request_digest": True,
-        "drain_request_payload": True,
-        "retirement_actor": True,
-        "retirement_idempotency_key": True,
-        "retirement_request_digest": True,
-        "retirement_request_payload": True,
+        "drain_actor": ("TEXT", True),
+        "drain_idempotency_key": ("UUID", True),
+        "drain_request_digest": ("TEXT", True),
+        "drain_request_payload": ("JSONB", True),
+        "retirement_actor": ("TEXT", True),
+        "retirement_idempotency_key": ("UUID", True),
+        "retirement_request_digest": ("TEXT", True),
+        "retirement_request_payload": ("JSONB", True),
+        "drain_only_at": ("TIMESTAMP", True),
+        "retired_at": ("TIMESTAMP", True),
     }
     executor_columns = {
-        "retirement_safe": False,
-        "retirement_inventory_digest": True,
+        "retirement_safe": ("BOOLEAN", False),
+        "retirement_inventory_digest": ("TEXT", True),
     }
     expected_unique_constraints = {
         "capacity_execution_epoch_drain_idempotency_key": ("drain_idempotency_key",),
         "capacity_execution_epoch_retirement_idempotency_key": ("retirement_idempotency_key",),
     }
-    expected_checks = {
-        "capacity_execution_epoch_lifecycle_actor_check",
-        "capacity_execution_epoch_lifecycle_payload_check",
-        "capacity_executable_executor_retirement_check",
+    expected_model_checks = {
+        "capacity_execution_epoch_lifecycle_actor_check": (
+            "(drain_actor IS NULL OR "
+            "octet_length(drain_actor) BETWEEN 1 AND 256) "
+            "AND (retirement_actor IS NULL OR "
+            "octet_length(retirement_actor) BETWEEN 1 AND 256)"
+        ),
+        "capacity_execution_epoch_lifecycle_payload_check": (
+            "(drain_request_payload IS NULL OR "
+            "(jsonb_typeof(drain_request_payload) = 'object' "
+            "AND octet_length(drain_request_payload::text) <= 8388608)) "
+            "AND (retirement_request_payload IS NULL OR "
+            "(jsonb_typeof(retirement_request_payload) = 'object' "
+            "AND octet_length(retirement_request_payload::text) <= 8388608))"
+        ),
+        "capacity_executable_executor_retirement_check": (
+            "(retirement_safe AND retirement_inventory_digest IS NOT NULL "
+            "AND retirement_inventory_digest ~ '^[0-9a-f]{64}$' "
+            "AND retirement_inventory_digest = last_inventory_digest "
+            "AND inventory_high_water > 0 AND inventory_payload IS NOT NULL "
+            "AND jsonb_typeof(inventory_payload) = 'object' "
+            "AND last_inventory_at IS NOT NULL "
+            "AND inventory_payload -> 'schema_version' = '2'::jsonb "
+            "AND inventory_payload -> 'inventory_sequence' "
+            "= to_jsonb(inventory_high_water) "
+            "AND inventory_payload ->> 'executor_id' = executor_id "
+            "AND inventory_payload ->> 'executor_incarnation' "
+            "= executor_incarnation::text "
+            "AND inventory_payload ->> 'pool_id' = pool_id "
+            "AND inventory_payload -> 'pool_generation' = to_jsonb(pool_generation) "
+            "AND inventory_payload -> 'journal_sequence' = to_jsonb(journal_high_water) "
+            "AND inventory_payload ->> 'journal_digest' = journal_digest "
+            "AND inventory_payload -> 'execution' -> 'execution_epoch' "
+            "= to_jsonb(execution_epoch) "
+            "AND inventory_payload -> 'execution' ->> 'execution_manifest_sha256' "
+            "= execution_manifest_sha256) OR "
+            "(NOT retirement_safe AND retirement_inventory_digest IS NULL)"
+        ),
+    }
+    expected_database_checks = {
+        "capacity_execution_epoch_lifecycle_actor_check": (
+            "drain_actor IS NULL OR octet_length(drain_actor) >= 1 "
+            "AND octet_length(drain_actor) <= 256) AND (retirement_actor IS NULL "
+            "OR octet_length(retirement_actor) >= 1 "
+            "AND octet_length(retirement_actor) <= 256"
+        ),
+        "capacity_execution_epoch_lifecycle_payload_check": (
+            "drain_request_payload IS NULL OR "
+            "jsonb_typeof(drain_request_payload) = 'object'::text "
+            "AND octet_length(drain_request_payload::text) <= 8388608) AND "
+            "(retirement_request_payload IS NULL OR "
+            "jsonb_typeof(retirement_request_payload) = 'object'::text "
+            "AND octet_length(retirement_request_payload::text) <= 8388608"
+        ),
+        "capacity_executable_executor_retirement_check": (
+            "retirement_safe AND retirement_inventory_digest IS NOT NULL AND "
+            "retirement_inventory_digest ~ '^[0-9a-f]{64}$'::text AND "
+            "retirement_inventory_digest = last_inventory_digest AND "
+            "inventory_high_water > 0 AND inventory_payload IS NOT NULL AND "
+            "jsonb_typeof(inventory_payload) = 'object'::text AND "
+            "last_inventory_at IS NOT NULL AND "
+            "(inventory_payload -> 'schema_version'::text) = '2'::jsonb AND "
+            "(inventory_payload -> 'inventory_sequence'::text) "
+            "= to_jsonb(inventory_high_water) AND "
+            "(inventory_payload ->> 'executor_id'::text) = executor_id AND "
+            "(inventory_payload ->> 'executor_incarnation'::text) "
+            "= executor_incarnation::text AND "
+            "(inventory_payload ->> 'pool_id'::text) = pool_id AND "
+            "(inventory_payload -> 'pool_generation'::text) "
+            "= to_jsonb(pool_generation) AND "
+            "(inventory_payload -> 'journal_sequence'::text) "
+            "= to_jsonb(journal_high_water) AND "
+            "(inventory_payload ->> 'journal_digest'::text) = journal_digest AND "
+            "((inventory_payload -> 'execution'::text) -> "
+            "'execution_epoch'::text) = to_jsonb(execution_epoch) AND "
+            "((inventory_payload -> 'execution'::text) ->> "
+            "'execution_manifest_sha256'::text) = execution_manifest_sha256 OR "
+            "NOT retirement_safe AND retirement_inventory_digest IS NULL"
+        ),
     }
     model_epoch_columns = CapacityExecutionEpoch.__table__.columns
     model_executor_columns = CapacityExecutableExecutorState.__table__.columns
     assert {
-        name: model_epoch_columns[name].nullable for name in lifecycle_columns
+        name: (str(model_epoch_columns[name].type), model_epoch_columns[name].nullable)
+        for name in lifecycle_columns
     } == lifecycle_columns
     assert {
-        name: model_executor_columns[name].nullable for name in executor_columns
+        name: (str(model_executor_columns[name].type), model_executor_columns[name].nullable)
+        for name in executor_columns
     } == executor_columns
     model_uniques = {
         constraint.name: tuple(column.name for column in constraint.columns)
@@ -347,7 +426,7 @@ def test_retirement_lifecycle_schema_matches_model_and_migration(
     }
     assert expected_unique_constraints.items() <= model_uniques.items()
     model_checks = {
-        constraint.name
+        constraint.name: str(constraint.sqltext)
         for table in (
             CapacityExecutionEpoch.__table__,
             CapacityExecutableExecutorState.__table__,
@@ -355,7 +434,17 @@ def test_retirement_lifecycle_schema_matches_model_and_migration(
         for constraint in table.constraints
         if isinstance(constraint, CheckConstraint)
     }
-    assert expected_checks <= model_checks
+    assert expected_model_checks.items() <= model_checks.items()
+    state_time_sql = model_checks["capacity_execution_epoch_state_time_check"]
+    for exact_state_clause in (
+        "state = 'prepared' AND effective_ceiling = 0 ",
+        "state = 'active' AND effective_ceiling > 0 ",
+        "state = 'drain-only' AND effective_ceiling = 0 ",
+        "state = 'retired' AND effective_ceiling = 0 ",
+        "drain_request_payload IS NOT NULL ",
+        "retirement_request_payload IS NOT NULL ",
+    ):
+        assert exact_state_clause in state_time_sql
 
     engine = create_engine(capacity_postgres_url)
     try:
@@ -369,25 +458,43 @@ def test_retirement_lifecycle_schema_matches_model_and_migration(
                 for column in schema.get_columns("capacity_executable_executor_states")
             }
             assert {
-                name: database_epoch_columns[name]["nullable"] for name in lifecycle_columns
+                name: (
+                    str(database_epoch_columns[name]["type"]),
+                    database_epoch_columns[name]["nullable"],
+                )
+                for name in lifecycle_columns
             } == lifecycle_columns
             assert {
-                name: database_executor_columns[name]["nullable"] for name in executor_columns
+                name: (
+                    str(database_executor_columns[name]["type"]),
+                    database_executor_columns[name]["nullable"],
+                )
+                for name in executor_columns
             } == executor_columns
             database_uniques = {
                 constraint["name"]: tuple(constraint["column_names"])
                 for constraint in schema.get_unique_constraints("capacity_execution_epochs")
             }
             assert expected_unique_constraints.items() <= database_uniques.items()
+            database_indexes = {
+                index["name"]: (tuple(index["column_names"]), index["unique"])
+                for index in schema.get_indexes("capacity_execution_epochs")
+                if index["name"] in expected_unique_constraints
+            }
+            assert database_indexes == {
+                name: (columns, True) for name, columns in expected_unique_constraints.items()
+            }
             database_checks = {
-                constraint["name"]
+                constraint["name"]: constraint["sqltext"]
                 for table_name in (
                     "capacity_execution_epochs",
                     "capacity_executable_executor_states",
                 )
                 for constraint in schema.get_check_constraints(table_name)
             }
-            assert expected_checks <= database_checks
+            assert {
+                name: database_checks[name] for name in expected_database_checks
+            } == expected_database_checks
             trigger_body = connection.execute(
                 text(
                     "SELECT pg_get_functiondef("
@@ -397,19 +504,29 @@ def test_retirement_lifecycle_schema_matches_model_and_migration(
     finally:
         engine.dispose()
 
-    normalized_trigger = " ".join(trigger_body.lower().split())
-    for evidence_field in (
-        "drain_actor",
-        "drain_idempotency_key",
-        "drain_request_digest",
-        "drain_request_payload",
-        "retirement_actor",
-        "retirement_idempotency_key",
-        "retirement_request_digest",
-        "retirement_request_payload",
+    normalized_trigger = (
+        " ".join(trigger_body.lower().split()).replace("( ", "(").replace(" )", ")")
+    )
+    for exact_trigger_clause in (
+        "(select count(*) from jsonb_object_keys(new.retirement_request_payload)) <> 7",
+        "jsonb_array_length(new.retirement_request_payload -> 'executor_checkpoints') <> 2",
+        "new.retirement_request_payload ->> 'authority_incarnation' is distinct from new.authority_incarnation::text",
+        "new.retirement_request_payload -> 'expected_writer_epoch' is distinct from to_jsonb(new.current_writer_epoch)",
+        "new.retirement_request_payload -> 'execution_epoch' is distinct from to_jsonb(new.execution_epoch)",
+        "new.retirement_request_payload ->> 'execution_manifest_sha256' is distinct from new.execution_manifest_sha256",
+        "checkpoint.value -> 'pool_generation' = to_jsonb(executor.pool_generation)",
+        "checkpoint.value -> 'heartbeat_sequence' = to_jsonb(executor.heartbeat_high_water)",
+        "checkpoint.value -> 'command_sequence' = to_jsonb(executor.command_high_water)",
+        "checkpoint.value -> 'journal_sequence' = to_jsonb(executor.journal_high_water)",
+        "checkpoint.value -> 'inventory_sequence' = to_jsonb(executor.inventory_high_water)",
+        "checkpoint.value ->> 'inventory_digest'",
+        "executor.retirement_safe",
+        "executor.last_heartbeat_at > executor.last_inventory_at",
+        "order by executor.pool_id for update",
+        "order by intent.launch_rank for update",
+        "intent.state <> 'released'",
     ):
-        assert f"new.{evidence_field}" in normalized_trigger
-        assert f"old.{evidence_field}" in normalized_trigger
+        assert exact_trigger_clause in normalized_trigger
 
 
 @pytest.mark.parametrize(
@@ -500,9 +617,77 @@ def test_direct_sql_cannot_reactivate_or_retire_without_evidence(
         engine.dispose()
 
 
+def test_direct_sql_cannot_retire_with_fabricated_bounded_evidence(
+    capacity_postgres_url: str,
+) -> None:
+    """A coordinated authority reset still needs exact safe final checkpoints."""
+
+    engine = create_engine(capacity_postgres_url)
+    connection = engine.connect()
+    transaction = connection.begin()
+    try:
+        execution_epoch = _seed_active_execution(connection)
+        _drain_for_sql_guard(connection, execution_epoch)
+        connection.execute(
+            text(
+                "UPDATE capacity_authority_state SET writer_epoch = 2, "
+                "execution_epoch = :execution_epoch, execution_state = 'drain-only', "
+                "execution_manifest_sha256 = repeat('4', 64), "
+                "executable_new_capacity_ceiling = 0, increase_freeze = true "
+                "WHERE singleton_id = 1"
+            ),
+            {"execution_epoch": execution_epoch},
+        )
+
+        with pytest.raises(IntegrityError):
+            with connection.begin_nested():
+                connection.execute(
+                    text(
+                        "UPDATE capacity_execution_epochs SET state = 'retired', "
+                        "retirement_actor = 'fabricated-sql-retirement', "
+                        "retirement_idempotency_key = :retirement_key, "
+                        "retirement_request_digest = repeat('f', 64), "
+                        "retirement_request_payload = '{}'::jsonb, retired_at = now() "
+                        "WHERE execution_epoch = :execution_epoch"
+                    ),
+                    {
+                        "execution_epoch": execution_epoch,
+                        "retirement_key": uuid4(),
+                    },
+                )
+                connection.execute(
+                    text(
+                        "UPDATE capacity_authority_state SET execution_epoch = 0, "
+                        "execution_state = 'shadow', execution_manifest_sha256 = NULL, "
+                        "executable_new_capacity_ceiling = 0 "
+                        "WHERE singleton_id = 1"
+                    )
+                )
+                connection.execute(
+                    text("SET CONSTRAINTS capacity_authority_execution_epoch_fkey IMMEDIATE")
+                )
+
+        assert connection.execute(
+            text(
+                "SELECT state, effective_ceiling, effective_rate_per_minute "
+                "FROM capacity_execution_epochs WHERE execution_epoch = :execution_epoch"
+            ),
+            {"execution_epoch": execution_epoch},
+        ).one() == ("drain-only", 0, 0)
+    finally:
+        transaction.rollback()
+        connection.close()
+        engine.dispose()
+
+
 @pytest.mark.parametrize(
     ("retirement_safe", "retirement_inventory_digest"),
-    ((True, None), (False, "f" * 64), (True, "not-a-digest")),
+    (
+        (True, None),
+        (False, "f" * 64),
+        (True, "not-a-digest"),
+        (True, "f" * 64),
+    ),
 )
 def test_executor_retirement_safety_requires_exact_canonical_digest(
     capacity_postgres_url: str,
@@ -536,6 +721,55 @@ def test_executor_retirement_safety_requires_exact_canonical_digest(
                         "executor_incarnation": UUID(int=12011),
                         "retirement_safe": retirement_safe,
                         "retirement_inventory_digest": retirement_inventory_digest,
+                    },
+                )
+    finally:
+        transaction.rollback()
+        connection.close()
+        engine.dispose()
+
+
+def test_executor_retirement_safety_rejects_noncanonical_inventory_payload(
+    capacity_postgres_url: str,
+) -> None:
+    """Stringified numeric fields cannot impersonate an authenticated inventory."""
+
+    engine = create_engine(capacity_postgres_url)
+    connection = engine.connect()
+    transaction = connection.begin()
+    try:
+        execution_epoch = _seed_active_execution(connection)
+        with pytest.raises(IntegrityError):
+            with connection.begin_nested():
+                connection.execute(
+                    text(
+                        "INSERT INTO capacity_executable_executor_states "
+                        "(id, execution_epoch, execution_manifest_sha256, executor_id, "
+                        "executor_incarnation, pool_id, pool_generation, state, "
+                        "inventory_high_water, last_inventory_digest, inventory_payload, "
+                        "last_inventory_at, retirement_safe, retirement_inventory_digest, "
+                        "lease_expires_at, last_heartbeat_at) VALUES "
+                        "(:id, :execution_epoch, repeat('4', 64), 'gb10-executor', "
+                        ":executor_incarnation, 'gb10', 1, 'current', 1, repeat('f', 64), "
+                        "jsonb_build_object("
+                        "'schema_version', 2, "
+                        "'execution', jsonb_build_object("
+                        "'execution_epoch', :execution_epoch, "
+                        "'execution_manifest_sha256', repeat('4', 64)), "
+                        "'executor_id', 'gb10-executor', "
+                        "'executor_incarnation', CAST(:executor_incarnation AS text), "
+                        "'pool_id', 'gb10', 'pool_generation', 1, "
+                        "'inventory_sequence', '1', "
+                        "'journal_sequence', 0, 'journal_digest', repeat('0', 64), "
+                        "'journal_checkpoint_sequence', 0, "
+                        "'journal_checkpoint_digest', repeat('0', 64), "
+                        "'complete', true, 'records', '[]'::jsonb, 'executable', true), "
+                        "now(), true, repeat('f', 64), now() + interval '1 minute', now())"
+                    ),
+                    {
+                        "id": uuid4(),
+                        "execution_epoch": execution_epoch,
+                        "executor_incarnation": UUID(int=12011),
                     },
                 )
     finally:

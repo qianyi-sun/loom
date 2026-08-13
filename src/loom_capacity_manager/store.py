@@ -2407,7 +2407,7 @@ class CapacityManagementStore:
                     or state.inventory_payload is None
                     or state.last_inventory_at is None
                     or state.last_inventory_at < now - self._freshness
-                    or state.last_heartbeat_at < state.last_inventory_at
+                    or state.last_heartbeat_at <= state.last_inventory_at
                     or state.lease_expires_at <= now
                 ):
                     raise ExecutionConflictError(f"final {state.pool_id} executor evidence changed")
