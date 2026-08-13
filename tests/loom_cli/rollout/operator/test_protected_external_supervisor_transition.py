@@ -406,7 +406,7 @@ def _delete_transition_records(
             path.unlink()
 
 
-def test_pr907_bytes_are_a_reachable_upgrade_but_arbitrary_bytes_fail_closed(
+def test_reviewed_gb10_predecessor_is_reachable_but_arbitrary_bytes_fail_closed(
     tmp_path: Path,
 ) -> None:
     artifact = _artifact(tmp_path)

@@ -5,6 +5,7 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 
@@ -441,6 +442,51 @@ class _OldlabLegacyExternalSupervisorStore:
         return {}
 
 
+class _PR1342Gb10ExternalSupervisorStore:
+    """Exact live #1342 GB10 units installed before canonical identity existed."""
+
+    unit_payloads: ClassVar[dict[str, bytes]] = {
+        "loom-autoscaler-gb10-staging.service": b"""[Unit]
+Description=Loom gb10 external worker-pool autoscaler reconcile
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+TimeoutStartSec=180
+WorkingDirectory=/opt/loom-staging-runner/candidates/39bc56eb29b89c9c9da6247ec513cb619e356960/repo
+Environment=PYTHONPATH=/opt/loom-staging-runner/candidates/39bc56eb29b89c9c9da6247ec513cb619e356960/repo/src
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/loom-staging-runner/candidates/39bc56eb29b89c9c9da6247ec513cb619e356960/venv/bin/python /opt/loom-staging-runner/candidates/39bc56eb29b89c9c9da6247ec513cb619e356960/repo/scripts/ops/worker_pool_autoscaler_external_once.py --environment staging --pool-name gb10 --expected-slurm-cluster-name trt-gb10 --expected-slurm-controller-host gx10-01c7 --namespace loom-staging --kubeconfig /var/lib/loom-staging-rollout/kubeconfig --db-secret-name loom-external-slurm-autoscaler-db --db-local-host 127.0.0.1 --db-local-port 15451 --db-service service/loom-postgres-rw --db-remote-port 5432 --db-port-forward-ready-timeout-sec 10 --db-port-forward-stop-timeout-sec 5 --db-connect-timeout-sec 10 --freshness-sec 120
+""",
+        "loom-autoscaler-gb10-staging.timer": b"""[Unit]
+Description=Run Loom gb10 external autoscaler reconcile
+# LoomDesiredState=active
+
+[Timer]
+OnBootSec=45
+OnUnitActiveSec=30
+AccuracySec=5
+Unit=loom-autoscaler-gb10-staging.service
+
+[Install]
+WantedBy=timers.target
+""",
+    }
+
+    def list_units(self) -> tuple[str, ...]:
+        return tuple(self.unit_payloads)
+
+    def read_unit(self, name: str) -> bytes:
+        return self.unit_payloads[name]
+
+    def read_canonical(self):
+        return None
+
+    def compensation_blockers(self) -> dict[str, str]:
+        return {}
+
+
 class _ReadyLegacyExternalSupervisorControl:
     def timer_status(self, name: str) -> TimerRuntimeStatus:
         return TimerRuntimeStatus(
@@ -457,6 +503,26 @@ class _ReadyLegacyExternalSupervisorControl:
             result="success",
             exec_main_status=0,
             fragment_path=str(PROTECTED_USER_UNIT_DIR / name),
+            need_daemon_reload="no",
+        )
+
+
+class _ReadyGb10LegacyExternalSupervisorControl:
+    def timer_status(self, name: str) -> TimerRuntimeStatus:
+        return TimerRuntimeStatus(
+            load_state="loaded",
+            unit_file_state="enabled",
+            active_state="active",
+            fragment_path=str(Path(GB10_CANONICAL_UNIT_DIR) / name),
+            need_daemon_reload="no",
+        )
+
+    def service_status(self, name: str) -> ServiceRuntimeStatus:
+        return ServiceRuntimeStatus(
+            load_state="loaded",
+            result="success",
+            exec_main_status=0,
+            fragment_path=str(Path(GB10_CANONICAL_UNIT_DIR) / name),
             need_daemon_reload="no",
         )
 
@@ -632,9 +698,19 @@ def test_installed_external_supervisor_predecessor_source_binds_merged_provenanc
         candidate_root=candidate_root,
         git_run=_git_run,
         service_uid=501,
-        pool_identity_source=_pool_identity,
+        pool_identity_source=lambda: _pool_identity(
+            "0088",
+            legacy_count=0,
+            target_count=1,
+        ),
     )
-    snapshot = source(_installed_predecessor_context(candidate_root))
+    snapshot = source(
+        _installed_predecessor_context(
+            candidate_root,
+            backup_schema_revision="0088",
+            database_schema_revision="0088",
+        )
+    )
 
     assert snapshot.kind == "legacy-manifest"
     assert snapshot.authority_digest == store.manifest.manifest_digest
@@ -685,6 +761,54 @@ def test_installed_predecessor_recognizes_exact_oldlab_activation_on_oldlab_host
     assert snapshot.runtime_ready is True
 
 
+def test_installed_predecessor_recognizes_exact_pr1342_gb10_activation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate_root = Path(__file__).resolve().parents[4]
+    store = _PR1342Gb10ExternalSupervisorStore()
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "AtomicUserUnitStore",
+        lambda **_kwargs: store,
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "FixedUserSystemdControl",
+        lambda **_kwargs: _ReadyGb10LegacyExternalSupervisorControl(),
+    )
+
+    source = installed_deep_preflight_factory._external_supervisor_predecessor_source(
+        candidate_root=candidate_root,
+        git_run=_git_run,
+        service_uid=501,
+        pool_identity_source=lambda: _pool_identity(
+            "0088",
+            legacy_count=0,
+            target_count=1,
+        ),
+        execution_host="gx10-01c7",
+        unit_dir=Path(GB10_CANONICAL_UNIT_DIR),
+    )
+    snapshot = source(
+        _installed_predecessor_context(
+            candidate_root,
+            backup_schema_revision="0088",
+            database_schema_revision="0088",
+        )
+    )
+
+    assert snapshot.kind == "legacy-manifest"
+    assert snapshot.authority_digest == (
+        "217acbf8ceaecf7967bbb5da4bd6464fe252377fdc822319b3bd643387f9ffee"
+    )
+    assert dict(snapshot.unit_sha256) == {
+        name: hashlib.sha256(payload).hexdigest()
+        for name, payload in store.unit_payloads.items()
+    }
+    assert snapshot.transition_clear is True
+    assert snapshot.runtime_ready is True
+
+
 def test_installed_gb10_predecessor_source_uses_remote_typed_observation_and_unit_dir(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -717,13 +841,23 @@ def test_installed_gb10_predecessor_source_uses_remote_typed_observation_and_uni
         candidate_root=candidate_root,
         git_run=_git_run,
         service_uid=501,
-        pool_identity_source=_pool_identity,
+        pool_identity_source=lambda: _pool_identity(
+            "0088",
+            legacy_count=0,
+            target_count=1,
+        ),
         execution_host="gx10-01c7",
         unit_dir=Path(GB10_CANONICAL_UNIT_DIR),
         observation_source=lambda _context: observation,
     )
 
-    snapshot = source(_installed_predecessor_context(candidate_root))
+    snapshot = source(
+        _installed_predecessor_context(
+            candidate_root,
+            backup_schema_revision="0088",
+            database_schema_revision="0088",
+        )
+    )
 
     assert snapshot.kind == "legacy-manifest"
     assert snapshot.runtime_ready is True
@@ -1076,9 +1210,19 @@ def test_installed_external_supervisor_predecessor_source_declares_safe_director
         candidate_root=candidate_root,
         git_run=spy_git_run,
         service_uid=501,
-        pool_identity_source=_pool_identity,
+        pool_identity_source=lambda: _pool_identity(
+            "0088",
+            legacy_count=0,
+            target_count=1,
+        ),
     )
-    source(_installed_predecessor_context(candidate_root))
+    source(
+        _installed_predecessor_context(
+            candidate_root,
+            backup_schema_revision="0088",
+            database_schema_revision="0088",
+        )
+    )
 
     assert seen
     for argv in seen:
@@ -1187,7 +1331,7 @@ def test_external_supervisor_pool_identity_is_one_way_across_0067() -> None:
         )
 
 
-def test_installed_predecessor_source_rejects_legacy_after_0067(
+def test_installed_predecessor_source_rejects_pr1342_before_0067(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     candidate_root = Path(__file__).resolve().parents[4]
@@ -1205,21 +1349,11 @@ def test_installed_predecessor_source_rejects_legacy_after_0067(
         candidate_root=candidate_root,
         git_run=_git_run,
         service_uid=501,
-        pool_identity_source=lambda: _pool_identity(
-            "0067",
-            legacy_count=0,
-            target_count=1,
-        ),
+        pool_identity_source=_pool_identity,
     )
 
-    with pytest.raises(ValueError, match="post-0067 pool identity drifted"):
-        source(
-            _installed_predecessor_context(
-                candidate_root,
-                backup_schema_revision="0066",
-                database_schema_revision="0067",
-            )
-        )
+    with pytest.raises(ValueError, match="pre-0067 pool identity drifted"):
+        source(_installed_predecessor_context(candidate_root))
 
 
 def test_installed_pool_identity_probe_rejects_missing_or_duplicate_tables() -> None:

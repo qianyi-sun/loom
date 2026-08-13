@@ -40,17 +40,19 @@ _CONTROLLER_UNIT_DIRECTORIES = {
     "trt-eai-oldlab-1": PROTECTED_CANONICAL_UNIT_DIR,
 }
 
-# This is the exact canonical file reviewed and merged by PR #907.  The
+# This is the exact canonical file rendered from the merged PR #1342 tree.  The
 # self-describing digest inside the JSON proves internal consistency, but it
 # must not let a later candidate redefine which predecessor has authority.
-PR907_PREDECESSOR_BYTES_SHA256 = "06d32f853a36b981aeef85f334ab7bff268bf41f5897c63e412f22514b1b74bf"
-PR907_PREDECESSOR_SOURCE_COMMIT = "31714ff17797231236d0ccef8f8390d4a5e66028"
-PR907_PREDECESSOR_SOURCE_TREE = "0f65994e8dfa0304e50f99f803af157faf00c3d4"
-PR907_PREDECESSOR_MANIFEST_DIGEST = (
-    "debcf3a704b096c165d606eea8c26b732708f17856af124fac19fe504df7c2d2"
+PR1342_PREDECESSOR_BYTES_SHA256 = (
+    "da532309565f9111f032debdc2d3e6677f9a85c89d077ebd45bc4b88117f6370"
 )
-PR907_PREDECESSOR_UNIT_SET_DIGEST = (
-    "1b4435095ddb8b4da3cb2673ddf1c3e78ed5b562dd0c9c259d3c26dcaa1d6696"
+PR1342_PREDECESSOR_SOURCE_COMMIT = "39bc56eb29b89c9c9da6247ec513cb619e356960"
+PR1342_PREDECESSOR_SOURCE_TREE = "3e936b139de1344e1a6120375b9e065a2c458c6b"
+PR1342_PREDECESSOR_MANIFEST_DIGEST = (
+    "217acbf8ceaecf7967bbb5da4bd6464fe252377fdc822319b3bd643387f9ffee"
+)
+PR1342_PREDECESSOR_UNIT_SET_DIGEST = (
+    "6061630942ec642562306683b623286116370d7e16ef5be3a9e23fea019f071a"
 )
 PR1197_PREDECESSOR_BYTES_SHA256 = "2539d6d8f7bb3a8ef1e68dd915ddaeca8eb86fdd2e28673a5277f280305115bf"
 PR1197_PREDECESSOR_SOURCE_COMMIT = "78fbcbacb6dcdebb577692c1257f6e2226b73de6"
@@ -194,7 +196,7 @@ class ExternalSupervisorPredecessorManifest:
         if (
             self.schema_version != 1
             or type(self.authority_id) is not str
-            or self.authority_id not in {"merged-pr-907", "merged-pr-1197"}
+            or self.authority_id not in {"merged-pr-1197", "merged-pr-1342"}
             or type(self.source_commit) is not str
             or _SHA_RE.fullmatch(self.source_commit) is None
             or type(self.source_tree) is not str
@@ -256,9 +258,7 @@ class ExternalSupervisorPredecessorManifest:
     def pool_identity_predecessor_kind(self) -> str:
         """Return the GB10 rename authority expected for this supervisor snapshot."""
 
-        if self.authority_id == "merged-pr-907":
-            return "legacy-manifest"
-        if self.authority_id == "merged-pr-1197":
+        if self.authority_id in {"merged-pr-1197", "merged-pr-1342"}:
             return "canonical"
         raise ValueError("external supervisor predecessor authority is invalid")
 
@@ -677,12 +677,12 @@ def load_predecessor_manifest(
     normalized_host = None if execution_host is None else execution_host.split(".", 1)[0].casefold()
     if normalized_host in {None, "gx10-01c7"}:
         path = DEFAULT_PREDECESSOR_MANIFEST
-        expected_bytes = PR907_PREDECESSOR_BYTES_SHA256
-        expected_commit = PR907_PREDECESSOR_SOURCE_COMMIT
-        expected_tree = PR907_PREDECESSOR_SOURCE_TREE
-        expected_manifest = PR907_PREDECESSOR_MANIFEST_DIGEST
-        expected_units = PR907_PREDECESSOR_UNIT_SET_DIGEST
-        label = "PR #907"
+        expected_bytes = PR1342_PREDECESSOR_BYTES_SHA256
+        expected_commit = PR1342_PREDECESSOR_SOURCE_COMMIT
+        expected_tree = PR1342_PREDECESSOR_SOURCE_TREE
+        expected_manifest = PR1342_PREDECESSOR_MANIFEST_DIGEST
+        expected_units = PR1342_PREDECESSOR_UNIT_SET_DIGEST
+        label = "PR #1342"
     elif normalized_host == _OLDLAB_EXECUTION_HOST:
         path = OLDLAB_PREDECESSOR_MANIFEST
         expected_bytes = PR1197_PREDECESSOR_BYTES_SHA256
@@ -715,16 +715,16 @@ __all__ = [
     "GB10_CANONICAL_UNIT_DIR",
     "NO_TRANSITION_GROUP_ID",
     "OLDLAB_PREDECESSOR_MANIFEST",
-    "PR907_PREDECESSOR_BYTES_SHA256",
-    "PR907_PREDECESSOR_MANIFEST_DIGEST",
-    "PR907_PREDECESSOR_SOURCE_COMMIT",
-    "PR907_PREDECESSOR_SOURCE_TREE",
-    "PR907_PREDECESSOR_UNIT_SET_DIGEST",
     "PR1197_PREDECESSOR_BYTES_SHA256",
     "PR1197_PREDECESSOR_MANIFEST_DIGEST",
     "PR1197_PREDECESSOR_SOURCE_COMMIT",
     "PR1197_PREDECESSOR_SOURCE_TREE",
     "PR1197_PREDECESSOR_UNIT_SET_DIGEST",
+    "PR1342_PREDECESSOR_BYTES_SHA256",
+    "PR1342_PREDECESSOR_MANIFEST_DIGEST",
+    "PR1342_PREDECESSOR_SOURCE_COMMIT",
+    "PR1342_PREDECESSOR_SOURCE_TREE",
+    "PR1342_PREDECESSOR_UNIT_SET_DIGEST",
     "PROTECTED_CANONICAL_UNIT_DIR",
     "ExternalSupervisorCanonicalIdentity",
     "ExternalSupervisorCanonicalPointer",
