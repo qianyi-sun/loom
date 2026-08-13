@@ -19,11 +19,18 @@ from loom.models.worker_capabilities import (
     SlurmGpuAllocationEvidenceV1,
     WorkerCapabilitySnapshotV1,
 )
-from loom.pipeline.keys import canonical_digest
+from loom.pipeline.keys import canonical_digest, digest_bytes
+from loom.pipeline.stage1_smoke import (
+    Stage1SmokeAuthorizationV1,
+    Stage1SmokeCandidateV1,
+    Stage1SmokePreflightV1,
+    validate_stage1_smoke_authorization,
+)
 from loom.pipeline.work_protocol import (
     AcceptancePreflightGrantV1,
     ArtifactInputDescriptorV1,
     ExecutionAttemptClaimV1,
+    Stage1SmokeGrantV1,
     StageRequestGrantV1,
     TrialClaimV1,
     WorkClaimRequestV1,
@@ -93,23 +100,24 @@ async def claim_trial(
         caps = payload["caps"]
     except (KeyError, ValueError) as exc:
         raise HTTPException(
-            status_code=400, detail=f"worker_id + caps required: {exc}",
+            status_code=400,
+            detail=f"worker_id + caps required: {exc}",
         ) from exc
 
     worker_os = sorted({c["os"] for c in caps})
     worker_cpu_arches = sorted({c.get("cpu_arch", "x86_64") for c in caps})
     worker_gpu = sorted({c["gpu_vendor"] for c in caps})
-    worker_network = sorted({
-        p for c in caps for p in c["network_policies"]
-    })
+    worker_network = sorted({p for c in caps for p in c["network_policies"]})
 
     import time as _time
+
     t0 = _time.perf_counter()
     async with request.app.state.session_factory() as session:
         row = await claim_one(
             session,
             worker_id=worker_id,
-            worker_os=worker_os, worker_cpu_arches=worker_cpu_arches,
+            worker_os=worker_os,
+            worker_cpu_arches=worker_cpu_arches,
             worker_gpu_vendors=worker_gpu,
             worker_network_policies=worker_network,
             enforce_shared_slot=True,
@@ -126,23 +134,25 @@ async def claim_trial(
     # #672 family-runs: propagate the family gate so the worker can
     # bind-mount the resolved state_uri before starting the sandbox.
     family_run_spec = row.get("family_run_spec") if hasattr(row, "get") else row["family_run_spec"]
-    family_state_uri = row.get("family_state_uri") if hasattr(row, "get") else row["family_state_uri"]
+    family_state_uri = (
+        row.get("family_state_uri") if hasattr(row, "get") else row["family_state_uri"]
+    )
     family_key = row.get("family_key") if hasattr(row, "get") else row["family_key"]
-    return JSONResponse({
-        "trial_id": str(row["id"]),
-        "team_id": str(row["team_id"]),
-        "task_id": row["task_id"],
-        "config": row["config"],
-        "requires_caps": row["requires_caps"],
-        "attempt_count": row["attempt_count"],
-        "provider_connection_id": (
-            str(pc_id) if pc_id is not None else None
-        ),
-        "family_key": family_key,
-        "family_state_uri": family_state_uri,
-        "family_run_spec": family_run_spec,
-        "state": "claimed",
-    })
+    return JSONResponse(
+        {
+            "trial_id": str(row["id"]),
+            "team_id": str(row["team_id"]),
+            "task_id": row["task_id"],
+            "config": row["config"],
+            "requires_caps": row["requires_caps"],
+            "attempt_count": row["attempt_count"],
+            "provider_connection_id": (str(pc_id) if pc_id is not None else None),
+            "family_key": family_key,
+            "family_state_uri": family_state_uri,
+            "family_run_spec": family_run_spec,
+            "state": "claimed",
+        }
+    )
 
 
 @router.post("/work/claim")
@@ -156,20 +166,22 @@ async def claim_any_work(
         if ctx is None or "worker:claim" not in ctx.scopes:
             raise HTTPException(status_code=401, detail="not authorized to claim")
         worker = (
-            await session.execute(
-                text("SELECT capabilities FROM workers WHERE id=(:worker_id)::uuid"),
-                {"worker_id": payload.worker_id},
+            (
+                await session.execute(
+                    text("SELECT capabilities FROM workers WHERE id=(:worker_id)::uuid"),
+                    {"worker_id": payload.worker_id},
+                )
             )
-        ).mappings().one_or_none()
+            .mappings()
+            .one_or_none()
+        )
         if worker is None:
             raise HTTPException(status_code=409, detail="worker_unknown")
         caps = list(worker["capabilities"])
         worker_os = sorted({item["os"] for item in caps})
         worker_cpu_arches = sorted({item.get("cpu_arch", "x86_64") for item in caps})
         worker_gpu = sorted({item["gpu_vendor"] for item in caps})
-        worker_network = sorted(
-            {policy for item in caps for policy in item["network_policies"]}
-        )
+        worker_network = sorted({policy for item in caps for policy in item["network_policies"]})
         try:
             claimed = await claim_work(
                 session,
@@ -195,17 +207,21 @@ async def claim_any_work(
             family_row = None
             if row["batch_id"] is not None and row["family_key"] is not None:
                 family_row = (
-                    await session.execute(
-                        text("""
+                    (
+                        await session.execute(
+                            text("""
                             SELECT b.family_run_spec, bfs.state_uri
                               FROM batches b
                               LEFT JOIN batch_family_state bfs
                                 ON bfs.batch_id=b.id AND bfs.family_key=:family_key
                              WHERE b.id=(:batch_id)::uuid
                         """),
-                        {"batch_id": row["batch_id"], "family_key": row["family_key"]},
+                            {"batch_id": row["batch_id"], "family_key": row["family_key"]},
+                        )
                     )
-                ).mappings().one_or_none()
+                    .mappings()
+                    .one_or_none()
+                )
             claim_payload = TrialClaimV1(
                 trial_id=row["id"],
                 team_id=row["team_id"],
@@ -222,8 +238,9 @@ async def claim_any_work(
         else:
             assert lease_token is not None
             attempt_row = (
-                await session.execute(
-                    text("""
+                (
+                    await session.execute(
+                        text("""
                         SELECT a.id, a.attempt_number, a.claim_id, a.lease_epoch,
                                a.lease_expires_at, a.stage_request_bytes,
                                a.stage_request_digest, a.resumed_checkpoint_artifact_id,
@@ -244,6 +261,16 @@ async def claim_any_work(
                                p.policy_config_sha256, p.policy_activation_epoch,
                                p.slurm_cluster_id, p.slurm_cluster_config_sha256,
                                p.slurm_allocation_id,
+                               stage1.authorization_id AS stage1_authorization_id,
+                               stage1.candidate_sha256 AS stage1_candidate_sha256,
+                               stage1.authorization_sha256 AS stage1_authorization_sha256,
+                               stage1.preflight_sha256 AS stage1_preflight_sha256,
+                               stage1.candidate_json AS stage1_candidate_json,
+                               stage1.authorization_json AS stage1_authorization_json,
+                               stage1.preflight_json AS stage1_preflight_json,
+                               stage1.candidate_bytes AS stage1_candidate_bytes,
+                               stage1.authorization_bytes AS stage1_authorization_bytes,
+                               stage1.preflight_bytes AS stage1_preflight_bytes,
                                w.capability_snapshot_json,
                                w.capability_snapshot_digest,
                                w.slurm_gpu_allocation_evidence_json,
@@ -255,6 +282,10 @@ async def claim_any_work(
                           JOIN workers w ON w.id=a.worker_id
                           LEFT JOIN pipeline_acceptance_preflight_prerequisites p
                             ON p.pipeline_run_id=r.id AND p.fence_state='active'
+                          LEFT JOIN pipeline_stage1_smoke_authorizations stage1
+                            ON stage1.pipeline_run_id=r.id
+                           AND stage1.state IN ('submitted','running')
+                           AND r.official_submission_kind='behavior_stage1_smoke_v1'
                           LEFT JOIN pipeline_run_control_bindings frozen
                             ON frozen.pipeline_run_id=r.id
                            AND frozen.node_key=s.node_key
@@ -272,9 +303,12 @@ async def claim_any_work(
                            )
                          WHERE a.id=(:attempt_id)::uuid
                     """),
-                    {"attempt_id": row["id"]},
+                        {"attempt_id": row["id"]},
+                    )
                 )
-            ).mappings().one()
+                .mappings()
+                .one()
+            )
             spec = attempt_row["resolved_execution_spec_json"]
             node = spec["container_node"]
             renderer = attempt_row["request_renderer_json"]
@@ -293,14 +327,10 @@ async def claim_any_work(
             acceptance = None
             if attempt_row["exclusive_fence_id"] is not None:
                 phase = "cold" if node["node_key"].endswith("_cold") else "warm"
-                variant = node["node_key"].removesuffix(
-                    f"_acceptance_preflight_{phase}"
-                )
+                variant = node["node_key"].removesuffix(f"_acceptance_preflight_{phase}")
                 acceptance = AcceptancePreflightGrantV1(
                     authorization_id=attempt_row["authorization_id"],
-                    authorization_snapshot_sha256=(
-                        attempt_row["authorization_snapshot_sha256"]
-                    ),
+                    authorization_snapshot_sha256=(attempt_row["authorization_snapshot_sha256"]),
                     action="matrix",
                     candidate_sha256=attempt_row["candidate_sha256"],
                     preflight_input_set_id=attempt_row["preflight_input_set_id"],
@@ -318,29 +348,85 @@ async def claim_any_work(
                     policy_config_sha256=attempt_row["policy_config_sha256"],
                     policy_activation_epoch=attempt_row["policy_activation_epoch"],
                     slurm_cluster_id=attempt_row["slurm_cluster_id"],
-                    slurm_cluster_config_sha256=(
-                        attempt_row["slurm_cluster_config_sha256"]
-                    ),
+                    slurm_cluster_config_sha256=(attempt_row["slurm_cluster_config_sha256"]),
                     slurm_allocation_id=attempt_row["slurm_allocation_id"],
-                    image_runtime_contract_digest=(
-                        attempt_row["image_runtime_contract_digest"]
-                    ),
+                    image_runtime_contract_digest=(attempt_row["image_runtime_contract_digest"]),
                     resource_profile_digest=attempt_row["resource_profile_digest"],
                     network_profile="none",
+                    renderer_digest=renderer["digest"],
+                )
+            stage1_smoke = None
+            if attempt_row["stage1_authorization_id"] is not None:
+                candidate_bytes = bytes(attempt_row["stage1_candidate_bytes"])
+                authorization_bytes = bytes(attempt_row["stage1_authorization_bytes"])
+                preflight_bytes = bytes(attempt_row["stage1_preflight_bytes"])
+                try:
+                    candidate = Stage1SmokeCandidateV1.model_validate_json(candidate_bytes)
+                    stage1_authorization = Stage1SmokeAuthorizationV1.model_validate_json(
+                        authorization_bytes
+                    )
+                    preflight = Stage1SmokePreflightV1.model_validate_json(preflight_bytes)
+                    validate_stage1_smoke_authorization(candidate, stage1_authorization)
+                except (ValidationError, ValueError) as exc:
+                    raise HTTPException(
+                        status_code=409, detail="stage1_smoke_authority_drift"
+                    ) from exc
+                if (
+                    candidate.canonical_bytes != candidate_bytes
+                    or candidate.model_dump(mode="json") != attempt_row["stage1_candidate_json"]
+                    or candidate.candidate_sha256 != attempt_row["stage1_candidate_sha256"]
+                    or canonical_digest(stage1_authorization.model_dump(mode="json"))
+                    != attempt_row["stage1_authorization_sha256"]
+                    or canonical_digest(preflight.model_dump(mode="json"))
+                    != attempt_row["stage1_preflight_sha256"]
+                    or canonical_digest(attempt_row["stage1_authorization_json"])
+                    != attempt_row["stage1_authorization_sha256"]
+                    or canonical_digest(attempt_row["stage1_preflight_json"])
+                    != attempt_row["stage1_preflight_sha256"]
+                    or digest_bytes(authorization_bytes)
+                    != attempt_row["stage1_authorization_sha256"]
+                    or digest_bytes(preflight_bytes) != attempt_row["stage1_preflight_sha256"]
+                    or stage1_authorization.authorization_id
+                    != attempt_row["stage1_authorization_id"]
+                    or preflight.authorization_id != stage1_authorization.authorization_id
+                    or preflight.authorization_sha256 != stage1_authorization.authorization_sha256
+                    or preflight.candidate_sha256 != candidate.candidate_sha256
+                    or preflight.policy_activation_epoch != candidate.policy_activation_epoch
+                    or preflight.platform_child_digest != candidate.platform_child_digest
+                    or preflight.image_runtime_contract_sha256
+                    != candidate.image_runtime_contract_sha256
+                    or preflight.input_descriptor_set_sha256 != canonical_digest(candidate.inputs)
+                ):
+                    raise HTTPException(status_code=409, detail="stage1_smoke_authority_drift")
+                stage1_smoke = Stage1SmokeGrantV1(
+                    authorization_id=attempt_row["stage1_authorization_id"],
+                    pipeline_run_id=attempt_row["pipeline_run_id"],
+                    candidate_sha256=attempt_row["stage1_candidate_sha256"],
+                    authorization_sha256=attempt_row["stage1_authorization_sha256"],
+                    preflight_sha256=attempt_row["stage1_preflight_sha256"],
+                    policy_activation_epoch=candidate.policy_activation_epoch,
+                    recipe_digest=candidate.recipe_digest,
+                    platform_child_digest=candidate.platform_child_digest,
+                    image_runtime_contract_digest=(candidate.image_runtime_contract_sha256),
+                    resolved_input_bindings_digest=(spec["resolved_input_bindings_digest"]),
                     renderer_digest=renderer["digest"],
                 )
             resume_checkpoint = None
             if attempt_row["resumed_checkpoint_artifact_id"] is not None:
                 checkpoint_row = (
-                    await session.execute(
-                        text("""
+                    (
+                        await session.execute(
+                            text("""
                             SELECT id,artifact_type,content_hash,manifest_sha256,
                                    stored_size_bytes,unpacked_size_bytes,file_count
                               FROM artifacts WHERE id=(:artifact_id)::uuid
                         """),
-                        {"artifact_id": attempt_row["resumed_checkpoint_artifact_id"]},
+                            {"artifact_id": attempt_row["resumed_checkpoint_artifact_id"]},
+                        )
                     )
-                ).mappings().one_or_none()
+                    .mappings()
+                    .one_or_none()
+                )
                 if checkpoint_row is None or any(
                     checkpoint_row[name] is None
                     for name in (
@@ -385,21 +471,11 @@ async def claim_any_work(
                     resource_profile_snapshot=attempt_row["resource_profile_json"],
                     resource_profile_digest=attempt_row["resource_profile_digest"],
                     network_profile=node["network_profile"],
-                    image_runtime_contract_snapshot=(
-                        attempt_row["image_runtime_contract_json"]
-                    ),
-                    image_runtime_contract_digest=(
-                        attempt_row["image_runtime_contract_digest"]
-                    ),
-                    worker_capability_snapshot=attempt_row[
-                        "capability_snapshot_json"
-                    ],
-                    worker_capability_snapshot_digest=attempt_row[
-                        "capability_snapshot_digest"
-                    ],
-                    slurm_gpu_allocation_evidence=attempt_row[
-                        "slurm_gpu_allocation_evidence_json"
-                    ],
+                    image_runtime_contract_snapshot=(attempt_row["image_runtime_contract_json"]),
+                    image_runtime_contract_digest=(attempt_row["image_runtime_contract_digest"]),
+                    worker_capability_snapshot=attempt_row["capability_snapshot_json"],
+                    worker_capability_snapshot_digest=attempt_row["capability_snapshot_digest"],
+                    slurm_gpu_allocation_evidence=attempt_row["slurm_gpu_allocation_evidence_json"],
                     slurm_gpu_allocation_evidence_digest=attempt_row[
                         "slurm_gpu_allocation_evidence_digest"
                     ],
@@ -410,6 +486,7 @@ async def claim_any_work(
                     stage_request=stage_request,
                     control_binding_snapshot=attempt_row["control_binding_snapshot"],
                     acceptance_preflight=acceptance,
+                    stage1_smoke=stage1_smoke,
                     provider_connection_ref=attempt_row["provider_connection_ref"],
                     secret_refs=list(attempt_row["secret_refs"]),
                     resume_checkpoint=resume_checkpoint,
@@ -419,9 +496,7 @@ async def claim_any_work(
                 )
             except ValidationError as exc:
                 await session.rollback()
-                raise HTTPException(
-                    status_code=409, detail="claim_contract_mismatch"
-                ) from exc
+                raise HTTPException(status_code=409, detail="claim_contract_mismatch") from exc
         envelope = WorkClaimV1(
             schema_version="loom.work-claim.v1",
             work_kind=row["work_kind"],
@@ -447,7 +522,8 @@ async def requeue_trial_retry(
         worker_id = UUID(payload["worker_id"])
     except (KeyError, ValueError) as exc:
         raise HTTPException(
-            status_code=400, detail=f"worker_id required: {exc}",
+            status_code=400,
+            detail=f"worker_id required: {exc}",
         ) from exc
 
     failure_reason_str = payload.get("failure_reason")
@@ -486,26 +562,27 @@ async def requeue_trial_retry(
 
     async with request.app.state.session_factory() as session:
         row = (
-            await session.execute(
-                _REQUEUE_TRIAL_RETRY_SQL,
-                {
-                    "trial_id": trial_id,
-                    "worker_id": worker_id,
-                    "failure_reason": failure_reason.value,
-                    "failure_message": failure_message,
-                    "retry_after_sec": retry_after_sec,
-                },
+            (
+                await session.execute(
+                    _REQUEUE_TRIAL_RETRY_SQL,
+                    {
+                        "trial_id": trial_id,
+                        "worker_id": worker_id,
+                        "failure_reason": failure_reason.value,
+                        "failure_message": failure_message,
+                        "retry_after_sec": retry_after_sec,
+                    },
+                )
             )
-        ).mappings().one_or_none()
+            .mappings()
+            .one_or_none()
+        )
         await session.commit()
 
     if row is None:
         raise HTTPException(
             status_code=409,
-            detail=(
-                "worker lost claim, trial has started, or retry transition "
-                "is not allowed"
-            ),
+            detail=("worker lost claim, trial has started, or retry transition is not allowed"),
         )
     return {"trial_id": str(row["id"]), "state": "queued"}
 
@@ -526,16 +603,21 @@ async def pre_start_heartbeat(
         worker_id = UUID(payload["worker_id"])
     except (KeyError, ValueError) as exc:
         raise HTTPException(
-            status_code=400, detail=f"worker_id required: {exc}",
+            status_code=400,
+            detail=f"worker_id required: {exc}",
         ) from exc
 
     async with request.app.state.session_factory() as session:
         row = (
-            await session.execute(
-                _PRE_START_HEARTBEAT_SQL,
-                {"trial_id": trial_id, "worker_id": worker_id},
+            (
+                await session.execute(
+                    _PRE_START_HEARTBEAT_SQL,
+                    {"trial_id": trial_id, "worker_id": worker_id},
+                )
             )
-        ).mappings().one_or_none()
+            .mappings()
+            .one_or_none()
+        )
         await session.commit()
 
     if row is None:
@@ -571,13 +653,11 @@ async def register_worker(
             detail="capabilities must be a non-empty list",
         )
     try:
-        validated_caps = [
-            Capabilities.model_validate(c).model_dump(mode="json")
-            for c in raw_caps
-        ]
+        validated_caps = [Capabilities.model_validate(c).model_dump(mode="json") for c in raw_caps]
     except ValidationError as exc:
         raise HTTPException(
-            status_code=400, detail=f"invalid capabilities: {exc.errors()}",
+            status_code=400,
+            detail=f"invalid capabilities: {exc.errors()}",
         ) from exc
 
     raw_max_concurrent = payload.get("max_concurrent", 1)
@@ -610,10 +690,7 @@ async def register_worker(
     else:
         raise HTTPException(
             status_code=400,
-            detail=(
-                "supported_work_kinds must be ['trial'] or "
-                "['trial', 'execution_attempt']"
-            ),
+            detail=("supported_work_kinds must be ['trial'] or ['trial', 'execution_attempt']"),
         )
 
     cache_field_names = (
@@ -639,19 +716,16 @@ async def register_worker(
             raise HTTPException(
                 status_code=400, detail="input cache registration fields must be integers"
             ) from exc
-        if not (
-            0 <= reserved_bytes <= capacity_bytes
-            and 0 <= ready_bytes <= capacity_bytes
-        ):
+        if not (0 <= reserved_bytes <= capacity_bytes and 0 <= ready_bytes <= capacity_bytes):
             raise HTTPException(status_code=400, detail="input_cache_capacity_drift")
     else:
         capacity_bytes = reserved_bytes = ready_bytes = 0
 
     capability_identity: dict[str, Any] = {
-            "capabilities": validated_caps,
-            "max_concurrent": max_concurrent,
-            "pool_name": pool_name,
-            "supported_work_kinds": supported_work_kinds,
+        "capabilities": validated_caps,
+        "max_concurrent": max_concurrent,
+        "pool_name": pool_name,
+        "supported_work_kinds": supported_work_kinds,
     }
     if any(value is not None for value in raw_cache_values):
         capability_identity.update(
@@ -699,11 +773,14 @@ async def register_worker(
             "no-network" if profile == "none" else "allowlist"
             for profile in capability_snapshot.network_profiles
         }
-        if not any(
-            item.get("cpu_arch", "x86_64") == capability_snapshot.cpu_arch
-            and item["gpu_vendor"] == expected_gpu_vendor
-            for item in validated_caps
-        ) or not required_legacy_network_policies <= projected_network_policies:
+        if (
+            not any(
+                item.get("cpu_arch", "x86_64") == capability_snapshot.cpu_arch
+                and item["gpu_vendor"] == expected_gpu_vendor
+                for item in validated_caps
+            )
+            or not required_legacy_network_policies <= projected_network_policies
+        ):
             raise HTTPException(status_code=409, detail="legacy_capability_projection_drift")
         if pool_name.startswith("behavior-") and max_concurrent != 1:
             raise HTTPException(status_code=409, detail="pipeline_worker_concurrency_drift")
@@ -750,38 +827,40 @@ async def register_worker(
 
     worker_id = uuid4()
     async with request.app.state.session_factory() as session:
-        await session.execute(insert(Worker).values(
-            id=worker_id,
-            hostname=payload.get("hostname", "unknown"),
-            version=payload.get("version", "unknown"),
-            capabilities=validated_caps,
-            supported_work_kinds=supported_work_kinds,
-            capability_snapshot_digest=capability_snapshot_digest,
-            capability_snapshot_json=(
-                capability_snapshot.model_dump(mode="json")
-                if capability_snapshot is not None
-                else null()
-            ),
-            slurm_gpu_allocation_evidence_json=(
-                allocation_evidence.model_dump(mode="json")
-                if allocation_evidence is not None
-                else null()
-            ),
-            slurm_gpu_allocation_evidence_digest=(
-                canonical_digest(allocation_evidence)
-                if allocation_evidence is not None
-                else None
-            ),
-            auth_token_hash=ctx.token_hash,
-            max_concurrent=max_concurrent,
-            pool_name=pool_name,
-            input_cache_capacity_bytes=capacity_bytes,
-            input_cache_reserved_bytes=reserved_bytes,
-            input_cache_ready_bytes=ready_bytes,
-            registered_at=datetime.now(UTC),
-            last_seen_at=datetime.now(UTC),
-            status="active",
-        ))
+        await session.execute(
+            insert(Worker).values(
+                id=worker_id,
+                hostname=payload.get("hostname", "unknown"),
+                version=payload.get("version", "unknown"),
+                capabilities=validated_caps,
+                supported_work_kinds=supported_work_kinds,
+                capability_snapshot_digest=capability_snapshot_digest,
+                capability_snapshot_json=(
+                    capability_snapshot.model_dump(mode="json")
+                    if capability_snapshot is not None
+                    else null()
+                ),
+                slurm_gpu_allocation_evidence_json=(
+                    allocation_evidence.model_dump(mode="json")
+                    if allocation_evidence is not None
+                    else null()
+                ),
+                slurm_gpu_allocation_evidence_digest=(
+                    canonical_digest(allocation_evidence)
+                    if allocation_evidence is not None
+                    else None
+                ),
+                auth_token_hash=ctx.token_hash,
+                max_concurrent=max_concurrent,
+                pool_name=pool_name,
+                input_cache_capacity_bytes=capacity_bytes,
+                input_cache_reserved_bytes=reserved_bytes,
+                input_cache_ready_bytes=ready_bytes,
+                registered_at=datetime.now(UTC),
+                last_seen_at=datetime.now(UTC),
+                status="active",
+            )
+        )
         await session.commit()
 
     return {
@@ -819,10 +898,7 @@ async def heartbeat(
             if raw_status not in _WORKER_HEARTBEAT_STATUSES:
                 raise HTTPException(
                     status_code=400,
-                    detail=(
-                        "invalid worker heartbeat status: "
-                        f"{raw_status!r}"
-                    ),
+                    detail=(f"invalid worker heartbeat status: {raw_status!r}"),
                 )
             status = raw_status
 
@@ -830,8 +906,12 @@ async def heartbeat(
     if status is not None:
         values["status"] = status
     async with request.app.state.session_factory() as session:
-        await session.execute(update(Worker).where(Worker.id == worker_id).values(
-            **values,
-        ))
+        await session.execute(
+            update(Worker)
+            .where(Worker.id == worker_id)
+            .values(
+                **values,
+            )
+        )
         await session.commit()
     return {"status": "ok"}

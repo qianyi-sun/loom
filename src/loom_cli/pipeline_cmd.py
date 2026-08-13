@@ -28,6 +28,14 @@ from uuid import UUID, uuid4
 import httpx
 import zstandard
 
+from loom.pipeline.keys import canonical_digest, canonical_document
+from loom.pipeline.stage1_smoke import (
+    Stage1SmokeAuthorizationV1,
+    Stage1SmokeCandidateV1,
+    Stage1SmokeCleanupV1,
+    Stage1SmokePreflightV1,
+    build_stage1_smoke_graph,
+)
 from loom.security.redaction import redact_mapping, redact_text
 from loom_cli.server_client import NotLoggedInError, authed_client, require_logged_in
 
@@ -79,6 +87,31 @@ def _json_object(value: str, *, option: str) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         _fail("invalid_json_file", f"{option} must contain one JSON object")
     return cast(dict[str, Any], parsed)
+
+
+def _stage1_document(value: str, *, option: str, model: type[Any]) -> Any:
+    document = _json_object(value, option=option)
+    try:
+        parsed = model.model_validate_json(canonical_document(document))
+    except (TypeError, ValueError):
+        _fail("invalid_stage1_document", f"{option} does not match its closed Stage 1 schema")
+    if canonical_document(parsed.model_dump(mode="json", exclude_none=False)) != canonical_document(
+        document
+    ):
+        _fail("invalid_stage1_document", f"{option} is not the exact closed Stage 1 document")
+    return parsed
+
+
+def _signature_file(value: str) -> str:
+    if not value.startswith("@") or len(value) == 1:
+        _fail("invalid_cli_input", "--signature must be @path/to/signature.hex")
+    try:
+        signature = Path(value[1:]).read_text(encoding="ascii").strip()
+    except (OSError, UnicodeError):
+        _fail("invalid_signature", "signature file could not be read")
+    if re.fullmatch(r"[0-9a-f]{128}", signature) is None:
+        _fail("invalid_signature", "signature file must contain exactly 128 lowercase hex digits")
+    return signature
 
 
 def _strict_budget(value: str) -> dict[str, Any]:
@@ -251,6 +284,102 @@ def _emit(data: Mapping[str, Any], *, json_output: bool, heading: str | None = N
         value = safe[key]
         if isinstance(value, (str, int, float, bool)) or value is None:
             print(f"{key}: {value}")
+
+
+def _stage1_render(args: argparse.Namespace) -> int:
+    candidate = cast(
+        Stage1SmokeCandidateV1,
+        _stage1_document(args.candidate, option="--candidate", model=Stage1SmokeCandidateV1),
+    )
+    repo_root = Path(__file__).resolve().parents[2]
+    graph = build_stage1_smoke_graph(candidate, repo_root=repo_root)
+    node = graph.nodes[0]
+    if node.node_kind != "container":
+        _fail("invalid_stage1_document", "Stage 1 candidate did not resolve one container")
+    _emit(
+        {
+            "candidate_sha256": candidate.candidate_sha256,
+            "graph_sha256": canonical_digest(graph),
+            "recipe": f"{graph.recipe.name}@{graph.recipe.version}",
+            "stage_count": len(graph.nodes),
+            "network_profile": node.network_profile,
+        },
+        json_output=_json_mode(args),
+        heading="Stage 1 candidate rendered (no mutation)",
+    )
+    return 0
+
+
+def _stage1_execute(args: argparse.Namespace) -> int:
+    candidate = cast(
+        Stage1SmokeCandidateV1,
+        _stage1_document(args.candidate, option="--candidate", model=Stage1SmokeCandidateV1),
+    )
+    authorization = cast(
+        Stage1SmokeAuthorizationV1,
+        _stage1_document(
+            args.authorization,
+            option="--authorization",
+            model=Stage1SmokeAuthorizationV1,
+        ),
+    )
+    preflight = cast(
+        Stage1SmokePreflightV1,
+        _stage1_document(args.preflight, option="--preflight", model=Stage1SmokePreflightV1),
+    )
+    if args.confirm_candidate_sha != candidate.candidate_sha256:
+        _fail(
+            "stage1_candidate_confirmation_mismatch",
+            "--confirm-candidate-sha must exactly match the rendered candidate",
+        )
+    key = _idempotency_key(args.idempotency_key)
+    cfg = require_logged_in()
+    with authed_client(cfg) as client:
+        data = _request_json(
+            client,
+            "POST",
+            "/api/v1/internal/pipeline-stage1-smoke/execute",
+            action="execute the authorized Stage 1 smoke",
+            json={
+                "candidate": candidate.model_dump(mode="json"),
+                "authorization": authorization.model_dump(mode="json"),
+                "preflight": preflight.model_dump(mode="json"),
+            },
+            headers={
+                _IDEMPOTENCY_HEADER: key,
+                "X-Loom-Stage1-Signature-Key-Id": args.signature_key_id,
+                "X-Loom-Stage1-Signature": _signature_file(args.signature),
+            },
+        )
+    _emit(data, json_output=_json_mode(args), heading="Stage 1 live action submitted")
+    return 0
+
+
+def _stage1_cleanup(args: argparse.Namespace) -> int:
+    cleanup = cast(
+        Stage1SmokeCleanupV1,
+        _stage1_document(args.cleanup, option="--cleanup", model=Stage1SmokeCleanupV1),
+    )
+    if args.confirm_candidate_sha != cleanup.candidate_sha256:
+        _fail(
+            "stage1_candidate_confirmation_mismatch",
+            "--confirm-candidate-sha must exactly match the cleanup document",
+        )
+    cfg = require_logged_in()
+    with authed_client(cfg) as client:
+        data = _request_json(
+            client,
+            "POST",
+            "/api/v1/internal/pipeline-stage1-smoke/cleanup",
+            action="clean up the authorized Stage 1 smoke",
+            json=cleanup.model_dump(mode="json"),
+            headers={
+                "X-Loom-Stage1-Signature-Key-Id": args.signature_key_id,
+                "X-Loom-Stage1-Signature": _signature_file(args.signature),
+            },
+        )
+    _emit(data, json_output=_json_mode(args), heading="Stage 1 cleanup recorded")
+    return 0
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -843,6 +972,43 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Submit and inspect fixed official-Recipe Pipelines on a deployed Loom server.",
     )
     sub = parser.add_subparsers(dest="pipeline_cmd", required=True)
+
+    stage1 = sub.add_parser(
+        "stage1-smoke",
+        help="Render or explicitly execute the candidate-bound internal Stage 1 smoke",
+    )
+    stage1_sub = stage1.add_subparsers(dest="stage1_cmd", required=True)
+    stage1_render = stage1_sub.add_parser(
+        "render-candidate",
+        help="Validate and render a Stage 1 candidate locally without server mutation",
+    )
+    stage1_render.add_argument("--candidate", required=True)
+    _add_json(stage1_render)
+    stage1_render.set_defaults(handler=_stage1_render)
+
+    stage1_execute = stage1_sub.add_parser(
+        "execute",
+        help="Consume one separately signed Stage 1 live authorization",
+    )
+    stage1_execute.add_argument("--candidate", required=True)
+    stage1_execute.add_argument("--authorization", required=True)
+    stage1_execute.add_argument("--preflight", required=True)
+    stage1_execute.add_argument("--confirm-candidate-sha", required=True)
+    stage1_execute.add_argument("--idempotency-key", required=True)
+    stage1_execute.add_argument("--signature-key-id", required=True)
+    stage1_execute.add_argument("--signature", required=True)
+    _add_json(stage1_execute)
+    stage1_execute.set_defaults(handler=_stage1_execute)
+
+    stage1_cleanup = stage1_sub.add_parser(
+        "cleanup", help="Record independently verified zero-residue Stage 1 cleanup"
+    )
+    stage1_cleanup.add_argument("--cleanup", required=True)
+    stage1_cleanup.add_argument("--confirm-candidate-sha", required=True)
+    stage1_cleanup.add_argument("--signature-key-id", required=True)
+    stage1_cleanup.add_argument("--signature", required=True)
+    _add_json(stage1_cleanup)
+    stage1_cleanup.set_defaults(handler=_stage1_cleanup)
 
     run = sub.add_parser("run", help="Submit an ordinary official-Recipe PipelineRun")
     run.add_argument("--recipe", required=True)

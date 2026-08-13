@@ -15,6 +15,9 @@ if TYPE_CHECKING:
 
 
 class Resolver:
+    def supports(self, _candidate: object) -> bool:
+        return True
+
     async def resolve(self, _candidate: object) -> FrozenReadiness:
         bindings: list[dict[str, object]] = []
         spec = {"schema_version": "test.execution-spec.v1"}

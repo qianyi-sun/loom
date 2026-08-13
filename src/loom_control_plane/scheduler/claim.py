@@ -110,6 +110,12 @@ WITH next AS (
              WHERE fence.worker_id = w.id
                AND fence.fence_state = 'active'
           )
+          AND NOT (
+            COALESCE(
+              w.capability_snapshot_json->'container_runtime_features',
+              '[]'::jsonb
+            ) ? 'loom-stage1-smoke-worker-v1'
+          )
      )
    ORDER BY
        (q.in_flight_count * 1.0) / NULLIF(q.fair_share_weight, 0) ASC,
@@ -257,6 +263,12 @@ WITH candidates AS (
      AND NOT EXISTS (
        SELECT 1 FROM pipeline_acceptance_preflight_prerequisites fence
         WHERE fence.worker_id = w.id AND fence.fence_state = 'active'
+     )
+     AND NOT (
+       COALESCE(
+         w.capability_snapshot_json->'container_runtime_features',
+         '[]'::jsonb
+       ) ? 'loom-stage1-smoke-worker-v1'
      )
   UNION ALL
   SELECT 'execution_attempt'::text AS work_kind,
@@ -407,6 +419,21 @@ WITH candidates AS (
          (s.resource_profile_json->>'network_profile')
      AND (s.resource_profile_json->'required_host_runtime_features') <@
          (w.capability_snapshot_json->'container_runtime_features')
+     AND (
+       NOT (w.capability_snapshot_json->'container_runtime_features') ?
+           'loom-stage1-smoke-worker-v1'
+       OR (
+         r.official_submission_kind = 'behavior_stage1_smoke_v1'
+         AND EXISTS (
+           SELECT 1
+             FROM pipeline_stage1_smoke_authorizations stage1_authority
+            WHERE stage1_authority.pipeline_run_id = r.id
+              AND stage1_authority.authorization_id =
+                  r.official_submission_authority_id
+              AND stage1_authority.state IN ('submitted','running')
+         )
+       )
+     )
      AND (s.resource_profile_json->'required_image_features') <@
          (s.image_runtime_contract_json->'application_features')
      AND (
@@ -450,7 +477,10 @@ WITH candidates AS (
                AND activation.authority_kind = 'acceptance'
                AND activation.authority_id = r.acceptance_authorization_id)
               OR
-              (r.official_submission_kind = 'behavior_acceptance_scenario_v1'
+              (r.official_submission_kind IN (
+                 'behavior_acceptance_scenario_v1',
+                 'behavior_stage1_smoke_v1'
+               )
                AND activation.authority_kind = 'acceptance'
                AND activation.authority_id = r.official_submission_authority_id)
               OR
@@ -728,8 +758,10 @@ async def claim_work(
     """Atomically select one Trial or ExecutionAttempt from the shared queue."""
 
     guard = (
-        await session.execute(_WORKER_CLAIM_GUARD_SQL, {"worker_id": worker_id})
-    ).mappings().one_or_none()
+        (await session.execute(_WORKER_CLAIM_GUARD_SQL, {"worker_id": worker_id}))
+        .mappings()
+        .one_or_none()
+    )
     if guard is None:
         raise WorkClaimConflictError("worker_unknown")
     if guard["status"] != "active" or guard["drain_state"] != "active":
@@ -764,8 +796,9 @@ async def claim_work(
         return None
     if result["work_kind"] == "execution_attempt":
         event = (
-            await session.execute(
-                text("""
+            (
+                await session.execute(
+                    text("""
                     UPDATE pipeline_runs
                        SET state = CASE WHEN state = 'submitted' THEN 'running' ELSE state END,
                            started_at = COALESCE(started_at, NOW()),
@@ -774,9 +807,12 @@ async def claim_work(
                      WHERE id = (:run_id)::uuid
                  RETURNING next_event_seq - 1 AS seq
                 """),
-                {"run_id": result["pipeline_run_id"]},
+                    {"run_id": result["pipeline_run_id"]},
+                )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
         await session.execute(
             text("""
                 INSERT INTO pipeline_events (

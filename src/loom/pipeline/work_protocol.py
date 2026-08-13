@@ -179,6 +179,22 @@ class AcceptancePreflightGrantV1(PipelineModel):
         return self
 
 
+class Stage1SmokeGrantV1(PipelineModel):
+    """Server-owned proof that this claim consumes the one Stage 1 authority."""
+
+    authorization_id: UUID
+    pipeline_run_id: UUID
+    candidate_sha256: Digest
+    authorization_sha256: Digest
+    preflight_sha256: Digest
+    policy_activation_epoch: PositiveSafeInt
+    recipe_digest: Digest
+    platform_child_digest: Digest
+    image_runtime_contract_digest: Digest
+    resolved_input_bindings_digest: Digest
+    renderer_digest: Digest
+
+
 class ResourceDeviceRolesV1(PipelineModel):
     sim_gpu_index: NonNegativeSafeInt
     vla_gpu_index: NonNegativeSafeInt
@@ -424,6 +440,7 @@ class ExecutionAttemptClaimV1(PipelineModel):
     stage_request: StageRequestGrantV1 | None
     control_binding_snapshot: dict[str, object] | None = None
     acceptance_preflight: AcceptancePreflightGrantV1 | None
+    stage1_smoke: Stage1SmokeGrantV1 | None = None
     provider_connection_ref: UUID | None
     secret_refs: list[_OpaqueReference]
     resume_checkpoint: ArtifactInputDescriptorV1 | None
@@ -651,6 +668,25 @@ class ExecutionAttemptClaimV1(PipelineModel):
                 or self.secret_refs
             ):
                 raise ValueError("acceptance preflight grant drift")
+        if self.stage1_smoke is not None:
+            stage1_grant = self.stage1_smoke
+            if self.acceptance_preflight is not None or (
+                stage1_grant.pipeline_run_id != self.pipeline_run_id
+                or stage1_grant.recipe_digest != self.recipe_digest
+                or stage1_grant.platform_child_digest
+                != spec.resolved_image_manifest_digest
+                or stage1_grant.image_runtime_contract_digest
+                != self.image_runtime_contract_digest
+                or stage1_grant.resolved_input_bindings_digest
+                != spec.resolved_input_bindings_digest
+                or stage1_grant.renderer_digest != renderer_digest
+                or self.node_key != "rollout"
+                or self.shard_key != "singleton"
+                or self.network_profile != "none"
+                or self.provider_connection_ref is not None
+                or self.secret_refs
+            ):
+                raise ValueError("Stage 1 smoke grant drift")
         if self.network_profile == "none" and (
             self.provider_connection_ref is not None or self.secret_refs
         ):
@@ -890,7 +926,7 @@ class ExecutionCompleteV1(PipelineModel):
     exit_code: Literal[0]
     stage_result: StageResultV1
     stage_result_sha256: Digest
-    final_output_upload_session_id: UUID
+    final_output_upload_session_id: Annotated[UUID, Field(strict=False)]
 
     @model_validator(mode="after")
     def result_digest_is_exact(self) -> ExecutionCompleteV1:
@@ -1035,14 +1071,27 @@ class FinalOutputAbortV1(PipelineModel):
     _normalize_reason = field_validator("reason")(_nfc)
 
 
+class WorkerCleanupProofV1(PipelineModel):
+    container_absent: Literal[True]
+    cgroup_empty: Literal[True]
+    network_absent: Literal[True]
+    step_jwt_revoked: Literal[True]
+    runtime_secret_mount_absent: Literal[True]
+    scratch_absent: Literal[True]
+    outputs_absent: Literal[True]
+    input_views_absent: Literal[True]
+    active_upload_session_ids: Annotated[list[UUID], Field(max_length=0)]
+
+
 class ExecutionFailedV1(PipelineModel):
     exit_code: int
-    retry_class: RetryClass
+    retry_class: Annotated[RetryClass, Field(strict=False)]
     reason_code: Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_]{0,127}$")]
     redacted_message: str
     stage_result: StageResultV1 | None
     stage_result_sha256: Digest | None
     teardown_observed: Literal[True]
+    resources: WorkerCleanupProofV1
 
     @field_validator("exit_code")
     @classmethod
@@ -1075,24 +1124,12 @@ class ExecutionFailedV1(PipelineModel):
         return self
 
 
-class WorkerCleanupProofV1(PipelineModel):
-    container_absent: Literal[True]
-    cgroup_empty: Literal[True]
-    network_absent: Literal[True]
-    step_jwt_revoked: Literal[True]
-    runtime_secret_mount_absent: Literal[True]
-    scratch_absent: Literal[True]
-    outputs_absent: Literal[True]
-    input_views_absent: Literal[True]
-    active_upload_session_ids: Annotated[list[UUID], Field(max_length=0)]
-
-
 class ExecutionCancelAckV1(PipelineModel):
     outcome: Literal["graceful", "forced"]
     observed_at: datetime
-    last_committed_checkpoint_artifact_id: UUID | None
+    last_committed_checkpoint_artifact_id: Annotated[UUID, Field(strict=False)] | None
     teardown_observed: Literal[True]
-    resources: WorkerCleanupProofV1 | None = None
+    resources: WorkerCleanupProofV1
 
     _observed_is_aware = field_validator("observed_at")(_aware)
 

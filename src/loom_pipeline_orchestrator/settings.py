@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -20,3 +22,6 @@ class PipelineOrchestratorSettings(BaseSettings):
     renew_seconds: int = Field(default=10, ge=10, le=10)
     health_host: str = "0.0.0.0"
     health_port: int = Field(default=8092, ge=1, le=65535)
+    repo_root: Path = Path(".")
+    resource_profiles_path: Path = Path("config/resource-profiles.toml")
+    image_runtime_contracts_path: Path = Path("config/image-runtime-contracts.toml")

@@ -12,6 +12,7 @@ import pytest
 
 from loom_cli.__main__ import main
 from loom_cli.pipeline_cmd import _build_bundle
+from tests.unit.test_pipeline_stage1_smoke import _candidate
 
 RUN_ID = "00000000-0000-0000-0000-000000000011"
 STAGE_ID = "00000000-0000-0000-0000-000000000022"
@@ -102,6 +103,29 @@ def _budget() -> dict[str, Any]:
         "max_stage_runs": 1,
         "max_wall_seconds": 1,
     }
+
+
+def test_stage1_render_candidate_is_local_and_mutation_free(
+    server: MockServer, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    candidate = _candidate()
+    rc = main(
+        [
+            "pipeline",
+            "stage1-smoke",
+            "render-candidate",
+            "--candidate",
+            _write_json(tmp_path, "stage1-candidate.json", candidate.model_dump(mode="json")),
+            "--json",
+        ]
+    )
+    assert rc == 0
+    rendered = json.loads(capsys.readouterr().out)
+    assert rendered["candidate_sha256"] == candidate.candidate_sha256
+    assert rendered["recipe"] == "behavior-stage1-smoke@1"
+    assert rendered["stage_count"] == 1
+    assert rendered["network_profile"] == "none"
+    assert server.requests == []
 
 
 def test_run_posts_exact_body_and_idempotency_header(

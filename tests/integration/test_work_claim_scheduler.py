@@ -8,7 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.pipeline.keys import canonical_digest, canonical_document
-from loom_control_plane.scheduler.claim import WorkClaimConflictError, claim_work
+from loom_control_plane.scheduler.claim import WorkClaimConflictError, claim_one, claim_work
 
 
 def _contracts() -> tuple[dict[str, object], dict[str, object], list[dict[str, object]]]:
@@ -16,14 +16,23 @@ def _contracts() -> tuple[dict[str, object], dict[str, object], list[dict[str, o
     profile: dict[str, object] = {
         "name": "behavior-offline-none",
         "version": 1,
-        "execution_variants": [{
-            "variant_id": "cpu-data-x86_64", "cpu_arch": "x86_64",
-            "gpu_count_exact": 0, "gpu_vendor": None, "allowed_gpu_models": [],
-            "gpu_memory_kind": None, "gpu_memory_mb_min": None,
-            "gpu_unified_memory_mb_min": None, "memory_accounting_kind": "separate",
-            "container_memory_bytes_override": None, "same_gpu_model_required": False,
-            "pool_class": "behavior-cpu-data", "device_roles": None,
-        }],
+        "execution_variants": [
+            {
+                "variant_id": "cpu-data-x86_64",
+                "cpu_arch": "x86_64",
+                "gpu_count_exact": 0,
+                "gpu_vendor": None,
+                "allowed_gpu_models": [],
+                "gpu_memory_kind": None,
+                "gpu_memory_mb_min": None,
+                "gpu_unified_memory_mb_min": None,
+                "memory_accounting_kind": "separate",
+                "container_memory_bytes_override": None,
+                "same_gpu_model_required": False,
+                "pool_class": "behavior-cpu-data",
+                "device_roles": None,
+            }
+        ],
         "cpu_cores": 8,
         "memory_bytes": 17_179_869_184,
         "scratch_bytes": 53_687_091_200,
@@ -56,13 +65,23 @@ def _contracts() -> tuple[dict[str, object], dict[str, object], list[dict[str, o
         "node_key": "prepare",
         "shard_key": "singleton",
         "container_node": {
-            "node_kind": "container", "node_key": "prepare", "image": image,
-            "argv": ["python", "-m", "approved.prepare"], "workdir": "/workspace",
-            "resource_profile": "behavior-offline-none@1", "network_profile": "none",
+            "node_kind": "container",
+            "node_key": "prepare",
+            "image": image,
+            "argv": ["python", "-m", "approved.prepare"],
+            "workdir": "/workspace",
+            "resource_profile": "behavior-offline-none@1",
+            "network_profile": "none",
             "needs": [],
-            "inputs": [], "outputs": [], "request_renderer": None, "checkpoint": None,
-            "fanout": None, "fanout_commit": None, "timeout_seconds": 120,
-            "max_attempts": 2, "failure_policy": "fail_run",
+            "inputs": [],
+            "outputs": [],
+            "request_renderer": None,
+            "checkpoint": None,
+            "fanout": None,
+            "fanout_commit": None,
+            "timeout_seconds": 120,
+            "max_attempts": 2,
+            "failure_policy": "fail_run",
         },
         "image_runtime_contract_digest": canonical_digest(runtime),
         "resource_profile_digest": canonical_digest(profile),
@@ -95,7 +114,9 @@ async def test_attempt_and_trial_share_one_server_authoritative_slot(
         run_id,
         stage_id,
         attempt_id,
-    ) = (uuid4() for _ in range(9))
+        task_id,
+        trial_id,
+    ) = (uuid4() for _ in range(11))
     token_hash = b"w" * 32
     capability_digest = "sha256:" + "c" * 64
     spec, profile, runtime_list = _contracts()
@@ -107,6 +128,10 @@ async def test_attempt_and_trial_share_one_server_authoritative_slot(
         )
         await session.execute(
             text("INSERT INTO team_quotas(team_id) VALUES (:id)"), {"id": team_id}
+        )
+        await session.execute(
+            text("INSERT INTO tasks(id,config,checksum) VALUES (:id,'{}'::jsonb,:checksum)"),
+            {"id": str(task_id), "checksum": "sha256:" + "f" * 64},
         )
         await session.execute(
             text("""
@@ -127,19 +152,21 @@ async def test_attempt_and_trial_share_one_server_authoritative_slot(
                 "caps": '[{"os":"linux","gpu_vendor":"none",'
                 '"network_policies":["public","no-network"]}]',
                 "capability": capability_digest,
-                "snapshot": __import__("json").dumps({
-                    "schema_version": "loom.worker-capabilities.v1",
-                    "cpu_arch": "x86_64",
-                    "cpu_cores": 16,
-                    "memory_bytes": 68_719_476_736,
-                    "scratch_bytes": 824_633_720_832,
-                    "network_profiles": ["none"],
-                    "container_runtime_features": [],
-                    "gpu_devices": [],
-                    "input_cache_capacity_bytes": 1_649_267_441_664,
-                    "input_cache_reserved_bytes": 0,
-                    "input_cache_ready_bytes": 0,
-                }),
+                "snapshot": __import__("json").dumps(
+                    {
+                        "schema_version": "loom.worker-capabilities.v1",
+                        "cpu_arch": "x86_64",
+                        "cpu_cores": 16,
+                        "memory_bytes": 68_719_476_736,
+                        "scratch_bytes": 824_633_720_832,
+                        "network_profiles": ["none"],
+                        "container_runtime_features": [],
+                        "gpu_devices": [],
+                        "input_cache_capacity_bytes": 1_649_267_441_664,
+                        "input_cache_reserved_bytes": 0,
+                        "input_cache_ready_bytes": 0,
+                    }
+                ),
                 "token": token_hash,
             },
         )
@@ -258,6 +285,78 @@ async def test_attempt_and_trial_share_one_server_authoritative_slot(
             """),
             {"run": run_id, "deadline": datetime.now(UTC) + timedelta(hours=1)},
         )
+        await session.execute(
+            text("""
+                INSERT INTO trials (
+                    id,team_id,task_id,config,requires_caps,state,submit_priority
+                ) VALUES (
+                    :id,:team,:task,'{}'::jsonb,
+                    jsonb_build_object(
+                        'os','linux','cpu_arch','x86_64','gpu_vendor','none',
+                        'network_policies',jsonb_build_array('public'),
+                        'worker_pool','behavior-cpu-data'
+                    ),'queued',100
+                )
+            """),
+            {"id": trial_id, "team": team_id, "task": str(task_id)},
+        )
+    # A Stage1-only runtime must not consume unrelated Pipeline work from the
+    # same shared work-kind queue.  The scheduler enforces this before claim.
+    async with sessions() as session, session.begin():
+        await session.execute(
+            text("""
+                UPDATE workers
+                   SET capability_snapshot_json = jsonb_set(
+                         capability_snapshot_json,
+                         '{container_runtime_features}',
+                         '["loom-stage1-smoke-worker-v1"]'::jsonb
+                       )
+                 WHERE id=:worker
+            """),
+            {"worker": worker_id},
+        )
+    async with sessions() as session:
+        assert (
+            await claim_work(
+                session,
+                worker_id=worker_id,
+                capability_snapshot_digest=capability_digest,
+                worker_token_hash=token_hash,
+                supported_work_kinds=["trial", "execution_attempt"],
+                free_slots=1,
+                worker_os=["linux"],
+                worker_cpu_arches=["x86_64"],
+                worker_gpu_vendors=["none"],
+                worker_network_policies=["public"],
+            )
+            is None
+        )
+        assert (
+            await claim_one(
+                session,
+                worker_id=worker_id,
+                worker_os=["linux"],
+                worker_cpu_arches=["x86_64"],
+                worker_gpu_vendors=["none"],
+                worker_network_policies=["public"],
+                enforce_shared_slot=True,
+            )
+            is None
+        )
+    async with sessions() as session, session.begin():
+        await session.execute(text("DELETE FROM trials WHERE id=:id"), {"id": trial_id})
+        await session.execute(
+            text("""
+                UPDATE workers
+                   SET capability_snapshot_json = jsonb_set(
+                         capability_snapshot_json,
+                         '{container_runtime_features}',
+                         '[]'::jsonb
+                       )
+                 WHERE id=:worker
+            """),
+            {"worker": worker_id},
+        )
     async with sessions() as session:
         claimed = await claim_work(
             session,
@@ -290,6 +389,7 @@ async def test_attempt_and_trial_share_one_server_authoritative_slot(
             )
     async with engine.begin() as connection:
         await connection.execute(text("DELETE FROM pipeline_runs WHERE id=:id"), {"id": run_id})
+        await connection.execute(text("DELETE FROM tasks WHERE id=:id"), {"id": str(task_id)})
         await connection.execute(
             text("DELETE FROM slurm_worker_jobs WHERE id=:id"), {"id": job_row_id}
         )

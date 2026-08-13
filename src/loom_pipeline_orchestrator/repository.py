@@ -86,6 +86,12 @@ class FrozenReadiness:
     execution_spec_json: dict[str, Any]
     execution_spec_bytes: bytes
     execution_spec_digest: str
+    resource_profile_json: dict[str, Any] | None = None
+    resource_profile_digest: str | None = None
+    image_runtime_contract_json: dict[str, Any] | None = None
+    image_runtime_contract_digest: str | None = None
+    provider_connection_ref: UUID | None = None
+    secret_refs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,10 +117,30 @@ class AttemptRecord:
 
 @dataclass(frozen=True, slots=True)
 class ReadinessCandidate:
+    pipeline_run_id: UUID
     stage_run_id: UUID
     node_key: str
     shard_key: str
+    state: str
+    attempt_count: int
     graph_spec_json: dict[str, Any]
+    resolved_input_bindings_json: list[dict[str, Any]] | None
+    resolved_input_bindings_digest: str | None
+    resolved_execution_spec_json: dict[str, Any] | None
+    resolved_execution_spec_bytes: bytes | None
+    execution_spec_digest: str | None
+    resource_profile_json: dict[str, Any] | None
+    resource_profile_digest: str | None
+    image_runtime_contract_json: dict[str, Any] | None
+    image_runtime_contract_digest: str | None
+    recipe_digest: str
+    graph_spec_digest: str
+    parameters_json: dict[str, Any]
+    resolved_inputs_json: list[dict[str, Any]]
+    official_submission_kind: str | None
+    authority_candidate_json: dict[str, Any] | None
+    gpu_backend_selection_json: dict[str, Any] | None
+    gpu_backend_selection_digest: str | None
 
 
 _COUNTERS: dict[BudgetKind, tuple[str, str, str, TerminalCause]] = {
@@ -646,13 +672,35 @@ class PipelineRepository:
                 (
                     await session.execute(
                         text("""
-                        SELECT stage.id, stage.node_key, stage.shard_key, run.graph_spec_json
+                        SELECT run.id AS pipeline_run_id, stage.id, stage.node_key,
+                               stage.shard_key, stage.state, stage.attempt_count,
+                               run.graph_spec_json, stage.resolved_input_bindings_json,
+                               stage.resolved_input_bindings_digest,
+                               stage.resolved_execution_spec_json,
+                               stage.resolved_execution_spec_bytes,
+                               stage.execution_spec_digest, stage.resource_profile_json,
+                               stage.resource_profile_digest,
+                               stage.image_runtime_contract_json,
+                               stage.image_runtime_contract_digest,
+                               run.recipe_digest, run.graph_spec_digest,
+                               run.parameters_json, run.resolved_inputs_json,
+                               run.official_submission_kind,
+                               stage1.candidate_json AS authority_candidate_json,
+                               gpu.selection_json AS gpu_backend_selection_json,
+                               gpu.gpu_backend_selection_sha256 AS gpu_backend_selection_digest
                           FROM pipeline_stage_runs stage
                           JOIN pipeline_runs run ON run.id=stage.pipeline_run_id
                           JOIN pipeline_budget_ledgers ledger
                             ON ledger.pipeline_run_id=stage.pipeline_run_id
+                          LEFT JOIN pipeline_stage1_smoke_authorizations stage1
+                            ON stage1.pipeline_run_id=run.id
+                          LEFT JOIN pipeline_run_gpu_backend_selections gpu
+                            ON gpu.pipeline_run_id=run.id AND gpu.scope='all_gpu_nodes'
                          WHERE stage.pipeline_run_id=:run_id AND stage.node_kind='container'
-                           AND stage.state='blocked' AND ledger.terminal_cause IS NULL
+                           AND (stage.state='blocked' OR (
+                               stage.state='retry_wait'
+                               AND stage.next_attempt_at <= clock_timestamp()
+                           )) AND ledger.terminal_cause IS NULL
                            AND NOT EXISTS (
                                SELECT 1 FROM pipeline_stage_dependencies d
                                WHERE d.pipeline_run_id=stage.pipeline_run_id
@@ -669,10 +717,30 @@ class PipelineRepository:
             )
         return tuple(
             ReadinessCandidate(
+                pipeline_run_id=row["pipeline_run_id"],
                 stage_run_id=row["id"],
                 node_key=row["node_key"],
                 shard_key=row["shard_key"],
+                state=row["state"],
+                attempt_count=row["attempt_count"],
                 graph_spec_json=row["graph_spec_json"],
+                resolved_input_bindings_json=row["resolved_input_bindings_json"],
+                resolved_input_bindings_digest=row["resolved_input_bindings_digest"],
+                resolved_execution_spec_json=row["resolved_execution_spec_json"],
+                resolved_execution_spec_bytes=row["resolved_execution_spec_bytes"],
+                execution_spec_digest=row["execution_spec_digest"],
+                resource_profile_json=row["resource_profile_json"],
+                resource_profile_digest=row["resource_profile_digest"],
+                image_runtime_contract_json=row["image_runtime_contract_json"],
+                image_runtime_contract_digest=row["image_runtime_contract_digest"],
+                recipe_digest=row["recipe_digest"],
+                graph_spec_digest=row["graph_spec_digest"],
+                parameters_json=row["parameters_json"],
+                resolved_inputs_json=row["resolved_inputs_json"],
+                official_submission_kind=row["official_submission_kind"],
+                authority_candidate_json=row["authority_candidate_json"],
+                gpu_backend_selection_json=row["gpu_backend_selection_json"],
+                gpu_backend_selection_digest=row["gpu_backend_selection_digest"],
             )
             for row in rows
         )
@@ -1138,6 +1206,19 @@ class PipelineRepository:
     ) -> bool:
         """Phase 1: persist immutable bindings/spec and ready, but no Attempt."""
 
+        optional_runtime = (
+            frozen.image_runtime_contract_json,
+            frozen.image_runtime_contract_digest,
+        )
+        if (optional_runtime[0] is None) != (optional_runtime[1] is None):
+            raise ValueError("image runtime contract snapshot group is incomplete")
+        optional_profile = (
+            frozen.resource_profile_json,
+            frozen.resource_profile_digest,
+        )
+        if (optional_profile[0] is None) != (optional_profile[1] is None):
+            raise ValueError("resource profile snapshot group is incomplete")
+
         async with self._sessions() as session, session.begin():
             await self._lock_fence(session, lease)
             row = (
@@ -1145,6 +1226,7 @@ class PipelineRepository:
                     await session.execute(
                         text("""
                         SELECT state, resolved_input_bindings_digest, execution_spec_digest,
+                               resource_profile_digest, image_runtime_contract_digest,
                                attempt_count
                           FROM pipeline_stage_runs
                          WHERE id = :stage_id AND pipeline_run_id = :run_id
@@ -1160,6 +1242,15 @@ class PipelineRepository:
                 if (
                     row["resolved_input_bindings_digest"] != frozen.input_bindings_digest
                     or row["execution_spec_digest"] != frozen.execution_spec_digest
+                    or (
+                        frozen.resource_profile_digest is not None
+                        and row["resource_profile_digest"] != frozen.resource_profile_digest
+                    )
+                    or (
+                        frozen.image_runtime_contract_digest is not None
+                        and row["image_runtime_contract_digest"]
+                        != frozen.image_runtime_contract_digest
+                    )
                 ):
                     raise BudgetReservationConflictError("frozen readiness replay drift")
                 if terminal_snapshot is not None:
@@ -1211,6 +1302,16 @@ class PipelineRepository:
                            resolved_execution_spec_json = CAST(:spec AS jsonb),
                            resolved_execution_spec_bytes = :spec_bytes,
                            execution_spec_digest = :spec_digest,
+                           resource_profile_json = COALESCE(
+                               CAST(:resource_profile AS jsonb), resource_profile_json),
+                           resource_profile_digest = COALESCE(
+                               :resource_profile_digest, resource_profile_digest),
+                           image_runtime_contract_json = COALESCE(
+                               CAST(:image_contract AS jsonb), image_runtime_contract_json),
+                           image_runtime_contract_digest = COALESCE(
+                               :image_contract_digest, image_runtime_contract_digest),
+                           provider_connection_ref = :provider_connection_ref,
+                           secret_refs = CAST(:secret_refs AS text[]),
                            state = 'ready', ready_at = clock_timestamp(), version = version + 1
                      WHERE id = :stage_id AND pipeline_run_id = :run_id
                 """),
@@ -1220,6 +1321,20 @@ class PipelineRepository:
                     "spec": _json_text(frozen.execution_spec_json),
                     "spec_bytes": frozen.execution_spec_bytes,
                     "spec_digest": frozen.execution_spec_digest,
+                    "resource_profile": (
+                        _json_text(frozen.resource_profile_json)
+                        if frozen.resource_profile_json is not None
+                        else None
+                    ),
+                    "resource_profile_digest": frozen.resource_profile_digest,
+                    "image_contract": (
+                        _json_text(frozen.image_runtime_contract_json)
+                        if frozen.image_runtime_contract_json is not None
+                        else None
+                    ),
+                    "image_contract_digest": frozen.image_runtime_contract_digest,
+                    "provider_connection_ref": frozen.provider_connection_ref,
+                    "secret_refs": list(frozen.secret_refs),
                     "stage_id": stage_run_id,
                     "run_id": lease.pipeline_run_id,
                 },

@@ -1246,8 +1246,12 @@ async def _load_observation(
                             == PipelineRun.acceptance_authorization_id,
                         ),
                         and_(
-                            PipelineRun.official_submission_kind
-                            == "behavior_acceptance_scenario_v1",
+                            PipelineRun.official_submission_kind.in_(
+                                (
+                                    "behavior_acceptance_scenario_v1",
+                                    "behavior_stage1_smoke_v1",
+                                )
+                            ),
                             PipelineScopedPolicyActivation.authority_kind == "acceptance",
                             PipelineScopedPolicyActivation.authority_id
                             == PipelineRun.official_submission_authority_id,

@@ -392,6 +392,7 @@ class ContainerProcessResult:
 class ArtifactCommitResult:
     manifest_digest: str
     artifact_ids: tuple[UUID, ...] = ()
+    upload_session_id: UUID | None = None
 
     def __post_init__(self) -> None:
         _digest(self.manifest_digest, "manifest_digest")

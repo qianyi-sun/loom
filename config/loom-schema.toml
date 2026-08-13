@@ -424,6 +424,21 @@ used_by     = ["loom-service"]
 python_type = "int"
 default     = 300
 
+[service_config.pipeline_stage1_smoke_public_key_file]
+used_by     = ["loom-service"]
+python_type = "Path"
+description = "Optional read-only Ed25519 public key for the hidden, separately authorized Stage 1 live-smoke route; absence keeps the mutation fail-closed."
+
+[service_config.pipeline_stage1_smoke_key_id]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "pipeline-stage1-operator-v1"
+
+[service_config.pipeline_stage1_smoke_signature_max_age_sec]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 300
+
 [service_config.personal_dev_capacity_manager_origin]
 used_by     = ["loom-service"]
 python_type = "str"

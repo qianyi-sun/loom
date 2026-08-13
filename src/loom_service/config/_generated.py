@@ -123,6 +123,9 @@ class LoomServiceSettings(BaseSettings):
     personal_dev_reconciler_poll_interval_sec: float = 2.0
     personal_dev_source_max_archive_bytes: int = 402653184
     personal_dev_trusted_launcher_profile_sha256: str = ""
+    pipeline_stage1_smoke_key_id: str = "pipeline-stage1-operator-v1"
+    pipeline_stage1_smoke_public_key_file: Path | None = None
+    pipeline_stage1_smoke_signature_max_age_sec: int = 300
     public_base_url: HttpUrl | None = None
     signed_url_expiry_sec: int = 3600
     stale_running_trial_grace_sec: float = 900.0

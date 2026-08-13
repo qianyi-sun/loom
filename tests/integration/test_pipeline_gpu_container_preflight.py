@@ -130,6 +130,7 @@ def test_attested_gpu_preflight_binds_exact_platform_and_uuid_set(
     observation = GpuContainerPreflightObservation(
         cpu_arch=arch,
         platform_manifest_digest=DIGEST,
+        preflight_digest=DIGEST,
         cuda_userspace_version="13.0",
         egl_healthy=True,
         visible_device_uuids=uuids,
@@ -144,6 +145,16 @@ def test_attested_gpu_preflight_binds_exact_platform_and_uuid_set(
         concurrent_vla_isaac_healthy=True,
     )
     validate_gpu_container_preflight(plan, observation)
+    with pytest.raises(PipelineGpuPreflightError, match="gpu_preflight_incompatible"):
+        validate_gpu_container_preflight(
+            plan,
+            GpuContainerPreflightObservation(
+                **{
+                    **observation.__dict__,
+                    "preflight_digest": "sha256:" + "f" * 64,
+                }
+            ),
+        )
     with pytest.raises(PipelineGpuPreflightError, match="gpu_preflight_incompatible"):
         validate_gpu_container_preflight(
             plan,
@@ -171,6 +182,7 @@ def test_gb10_requires_concurrent_vla_but_primitive_starts_no_vla() -> None:
     observation = GpuContainerPreflightObservation(
         cpu_arch="arm64",
         platform_manifest_digest=DIGEST,
+        preflight_digest=DIGEST,
         cuda_userspace_version="13.0",
         egl_healthy=True,
         visible_device_uuids=("GPU-GB10",),

@@ -39,6 +39,8 @@ class RenderedAttempt:
 
 
 class ReadinessResolverV1(Protocol):
+    def supports(self, candidate: ReadinessCandidate) -> bool: ...
+
     async def resolve(self, candidate: ReadinessCandidate) -> FrozenReadiness: ...
 
 
@@ -73,12 +75,40 @@ class PipelineReconciler:
         if self._readiness_resolver is not None and self._request_renderer is not None:
             candidates = await self._repository.readiness_candidates(lease)
             for candidate in candidates:
-                frozen = await self._readiness_resolver.resolve(candidate)
-                await self._repository.freeze_readiness(
-                    lease,
-                    stage_run_id=candidate.stage_run_id,
-                    frozen=frozen,
-                )
+                if not self._readiness_resolver.supports(candidate):
+                    continue
+                if candidate.state == "blocked":
+                    frozen = await self._readiness_resolver.resolve(candidate)
+                    await self._repository.freeze_readiness(
+                        lease,
+                        stage_run_id=candidate.stage_run_id,
+                        frozen=frozen,
+                    )
+                else:
+                    if not all(
+                        value is not None
+                        for value in (
+                            candidate.resolved_input_bindings_json,
+                            candidate.resolved_input_bindings_digest,
+                            candidate.resolved_execution_spec_json,
+                            candidate.resolved_execution_spec_bytes,
+                            candidate.execution_spec_digest,
+                        )
+                    ):
+                        raise ValueError("retry readiness snapshot is incomplete")
+                    frozen = FrozenReadiness(
+                        input_bindings_json=candidate.resolved_input_bindings_json or [],
+                        input_bindings_digest=candidate.resolved_input_bindings_digest or "",
+                        execution_spec_json=candidate.resolved_execution_spec_json or {},
+                        execution_spec_bytes=candidate.resolved_execution_spec_bytes or b"",
+                        execution_spec_digest=candidate.execution_spec_digest or "",
+                        resource_profile_json=candidate.resource_profile_json,
+                        resource_profile_digest=candidate.resource_profile_digest,
+                        image_runtime_contract_json=candidate.image_runtime_contract_json,
+                        image_runtime_contract_digest=candidate.image_runtime_contract_digest,
+                        provider_connection_ref=None,
+                        secret_refs=(),
+                    )
                 try:
                     rendered = self._request_renderer.render(candidate, frozen)
                 except (TypeError, ValueError):

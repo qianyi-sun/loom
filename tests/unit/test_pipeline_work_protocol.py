@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -21,6 +22,7 @@ from loom.pipeline.work_protocol import (
     ExecutionHeartbeatV1,
     ExecutionStartedV1,
     PipelineInputMaterializationEvidenceReportV1,
+    Stage1SmokeGrantV1,
     StageRequestGrantV1,
     WorkClaimRequestV1,
     WorkClaimV1,
@@ -283,6 +285,10 @@ def test_work_claim_request_and_union_are_closed_and_discriminated() -> None:
         }
     )
     assert isinstance(claim.payload, ExecutionAttemptClaimV1)
+    transported = WorkClaimV1.model_validate_json(
+        canonical_document(claim.model_dump(mode="json", exclude_none=False))
+    )
+    assert transported == claim
 
     with pytest.raises(ValidationError, match="work_kind does not match"):
         WorkClaimV1.model_validate(
@@ -369,6 +375,25 @@ def test_acceptance_preflight_pins_variant_policy_cluster_node_and_cache_phase()
         AcceptancePreflightGrantV1.model_validate({**value, "cache_expectation": "warm_reuse_only"})
 
 
+def test_stage1_smoke_grant_is_closed_and_binds_the_selected_child() -> None:
+    value = {
+        "authorization_id": UUID(int=30),
+        "pipeline_run_id": RUN_ID,
+        "candidate_sha256": D0,
+        "authorization_sha256": D1,
+        "preflight_sha256": D2,
+        "policy_activation_epoch": 7,
+        "recipe_digest": D3,
+        "platform_child_digest": D0,
+        "image_runtime_contract_digest": D1,
+        "resolved_input_bindings_digest": D2,
+        "renderer_digest": D3,
+    }
+    assert Stage1SmokeGrantV1.model_validate(value).policy_activation_epoch == 7
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        Stage1SmokeGrantV1.model_validate({**value, "raw_image_override": IMAGE})
+
+
 def test_heartbeat_control_and_events_enforce_order_bounds_and_closed_fields() -> None:
     heartbeat = ExecutionHeartbeatV1.model_validate(
         {
@@ -442,6 +467,11 @@ def test_started_complete_failed_and_cancel_reports_are_strict() -> None:
         }
     )
     assert complete.exit_code == 0
+    round_tripped = ExecutionCompleteV1.model_validate_json(
+        json.dumps(complete.model_dump(mode="json"))
+    )
+    assert round_tripped.final_output_upload_session_id == SESSION_ID
+    assert round_tripped.stage_result.retry_class is RetryClass.NONE
     with pytest.raises(ValidationError, match="StageResult digest drift"):
         ExecutionCompleteV1.model_validate({**complete.model_dump(), "stage_result_sha256": D0})
 
@@ -464,6 +494,17 @@ def test_started_complete_failed_and_cancel_reports_are_strict() -> None:
             "stage_result": failed_result,
             "stage_result_sha256": canonical_digest(failed_result),
             "teardown_observed": True,
+            "resources": {
+                "container_absent": True,
+                "cgroup_empty": True,
+                "network_absent": True,
+                "step_jwt_revoked": True,
+                "runtime_secret_mount_absent": True,
+                "scratch_absent": True,
+                "outputs_absent": True,
+                "input_views_absent": True,
+                "active_upload_session_ids": [],
+            },
         }
     )
     assert failed.teardown_observed is True
@@ -474,6 +515,7 @@ def test_started_complete_failed_and_cancel_reports_are_strict() -> None:
             "observed_at": NOW,
             "last_committed_checkpoint_artifact_id": None,
             "teardown_observed": True,
+            "resources": failed.resources,
         }
     )
     assert cancel.outcome == "forced"
