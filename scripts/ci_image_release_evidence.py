@@ -42,6 +42,7 @@ else:  # pragma: no cover - direct workflow script entry point
 
 SLSA_PREDICATE_TYPE = "https://slsa.dev/provenance/v1"
 _STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
+_GITHUB_ACTIONS_BUILD_TYPE = "https://actions.github.io/buildtypes/workflow/v1"
 _WORKFLOW_PATH = ".github/workflows/images.yml"
 _HEX40 = re.compile(r"[0-9a-f]{40}")
 _HEX64 = re.compile(r"[0-9a-f]{64}")
@@ -309,7 +310,7 @@ def architecture_predicate(
     build = _build(build_mode=build_mode)
     return {
         "buildDefinition": {
-            "buildType": common["workflow_identity"],
+            "buildType": _GITHUB_ACTIONS_BUILD_TYPE,
             "externalParameters": {
                 "source": _source(common),
                 "image": {
@@ -403,7 +404,7 @@ def manifest_predicate(
         _exact(_HEX64, digest, "scan report digest")
     return {
         "buildDefinition": {
-            "buildType": common["workflow_identity"],
+            "buildType": _GITHUB_ACTIONS_BUILD_TYPE,
             "externalParameters": {
                 "source": _source(common),
                 "image": {

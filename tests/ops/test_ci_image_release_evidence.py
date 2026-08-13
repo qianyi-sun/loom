@@ -165,8 +165,9 @@ def test_architecture_predicate_binds_source_build_scan_and_invocation() -> None
         build_mode="trusted-rebuild",
     )
 
-    external: Any = predicate["buildDefinition"]
-    external = external["externalParameters"]
+    build_definition: Any = predicate["buildDefinition"]
+    assert build_definition["buildType"] == "https://actions.github.io/buildtypes/workflow/v1"
+    external: Any = build_definition["externalParameters"]
     assert external["source"] == {
         "repository": "qianyi-sun/loom",
         "ref": "refs/heads/dev",
@@ -203,6 +204,9 @@ def test_architecture_predicate_binds_source_build_scan_and_invocation() -> None
         "report_sha256": _SCAN,
     }
     run_details: Any = predicate["runDetails"]
+    assert run_details["builder"]["id"] == (
+        "https://github.com/qianyi-sun/loom/.github/workflows/images.yml@refs/heads/dev"
+    )
     assert run_details["metadata"]["invocationId"].endswith("/actions/runs/123/attempts/2")
 
 
