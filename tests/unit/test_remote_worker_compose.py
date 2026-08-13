@@ -65,6 +65,14 @@ def test_remote_worker_compose_uses_operator_supplied_endpoints() -> None:
     )
 
 
+def test_remote_worker_compose_passes_trial_cache_registry_to_worker() -> None:
+    env = _env_map(_worker_service(_COMPOSE)["environment"])
+
+    assert env["LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO"] == (
+        "${LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO:-}"
+    )
+
+
 def test_remote_worker_compose_container_caps_passthrough() -> None:
     # #896: the worker PROCESS reads the per-container caps so it can
     # re-apply them to the trial/sidecar containers it creates. Empty
