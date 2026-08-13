@@ -69,9 +69,15 @@ def _install_claim_state_guard() -> None:
              OR NEW.binding IS DISTINCT FROM OLD.binding
              OR NOT (
                (NEW.claim_high_water = OLD.claim_high_water + 1
+                AND NEW.terminal_high_water = OLD.terminal_high_water
                 AND OLD.draining = false AND NEW.draining = false)
                OR
                (NEW.claim_high_water = OLD.claim_high_water
+                AND NEW.terminal_high_water = OLD.terminal_high_water + 1
+                AND NEW.draining = OLD.draining)
+               OR
+               (NEW.claim_high_water = OLD.claim_high_water
+                AND NEW.terminal_high_water = OLD.terminal_high_water
                 AND OLD.draining = false AND NEW.draining = true)
              ) THEN
             RAISE EXCEPTION 'executable claim state transition is not monotonic'
@@ -979,10 +985,26 @@ def _install_drain() -> None:
            FOR KEY SHARE;
           SELECT * INTO v_state FROM {SCHEMA}.executable_claim_state
            WHERE intent_id = v_intent_id FOR UPDATE;
-          SELECT count(*), count(*) FILTER (WHERE lease_state = 'live')
+          SELECT count(lease.operation_id),
+                 count(lease.operation_id) FILTER (
+                   WHERE terminal.admitted_operation_id IS NULL
+                 )
             INTO v_claim_high_water, v_live_claims
-            FROM {SCHEMA}.executable_claim_leases
-           WHERE intent_id = v_intent_id;
+            FROM {SCHEMA}.executable_claim_leases AS lease
+            LEFT JOIN {SCHEMA}.executable_claim_terminal_events AS terminal
+              ON terminal.admitted_operation_id = lease.operation_id
+             AND terminal.protected_attempt_id = lease.protected_attempt_id
+             AND terminal.execution_generation = lease.execution_generation
+             AND terminal.requirements_digest = lease.requirements_digest
+             AND terminal.intent_id = lease.intent_id
+             AND terminal.subject_id = lease.subject_id
+             AND terminal.subject_incarnation = lease.subject_incarnation
+             AND terminal.worker_id = lease.worker_id
+             AND terminal.worker_incarnation = lease.worker_incarnation
+             AND terminal.claim_high_water = lease.claim_high_water
+             AND terminal.terminal_state = 'cancelled-terminal'
+             AND terminal.executable = true
+           WHERE lease.intent_id = v_intent_id;
           IF v_current.operation_id IS NULL
              OR v_state.intent_id IS NULL
              OR v_current.binding IS DISTINCT FROM p_payload->'binding'
@@ -1105,10 +1127,26 @@ def _install_release() -> None:
            ORDER BY drain_epoch DESC, event_id DESC LIMIT 1 FOR KEY SHARE;
           SELECT * INTO v_state FROM {SCHEMA}.executable_claim_state
            WHERE intent_id = v_intent_id FOR UPDATE;
-          SELECT count(*), count(*) FILTER (WHERE lease_state = 'live')
+          SELECT count(lease.operation_id),
+                 count(lease.operation_id) FILTER (
+                   WHERE terminal.admitted_operation_id IS NULL
+                 )
             INTO v_claim_high_water, v_live_claims
-            FROM {SCHEMA}.executable_claim_leases
-           WHERE intent_id = v_intent_id;
+            FROM {SCHEMA}.executable_claim_leases AS lease
+            LEFT JOIN {SCHEMA}.executable_claim_terminal_events AS terminal
+              ON terminal.admitted_operation_id = lease.operation_id
+             AND terminal.protected_attempt_id = lease.protected_attempt_id
+             AND terminal.execution_generation = lease.execution_generation
+             AND terminal.requirements_digest = lease.requirements_digest
+             AND terminal.intent_id = lease.intent_id
+             AND terminal.subject_id = lease.subject_id
+             AND terminal.subject_incarnation = lease.subject_incarnation
+             AND terminal.worker_id = lease.worker_id
+             AND terminal.worker_incarnation = lease.worker_incarnation
+             AND terminal.claim_high_water = lease.claim_high_water
+             AND terminal.terminal_state = 'cancelled-terminal'
+             AND terminal.executable = true
+           WHERE lease.intent_id = v_intent_id;
           v_bootstrap_revoked := v_current.bootstrap_revoked IS TRUE;
           v_worker_credentials_revoked :=
             v_current.operation_id IS NOT NULL
@@ -1336,12 +1374,16 @@ def _install_claim_admission() -> None:
           IF NOT EXISTS (
             SELECT 1 FROM {SCHEMA}.trial_attempts AS attempt
             JOIN public.trials AS trial ON trial.id = attempt.trial_id
+            JOIN {SCHEMA}.attempt_lifecycle_heads AS lifecycle
+              ON lifecycle.protected_attempt_id = attempt.protected_attempt_id
              WHERE attempt.protected_attempt_id =
                    (p_payload->>'protected_attempt_id')::uuid
                AND attempt.execution_generation =
                    (p_payload->>'execution_generation')::bigint
                AND attempt.requirements_digest = p_payload->>'requirements_digest'
                AND attempt.claim_state = 'queued'
+               AND lifecycle.lifecycle_state IN ('pending-unassigned', 'assigned')
+               AND lifecycle.executable = false
                AND trial.state = 'queued'
                AND trial.cancellation_requested_at IS NULL
                AND (trial.next_attempt_at IS NULL
@@ -1389,6 +1431,76 @@ def _install_claim_admission() -> None:
     )
 
 
+def _install_claim_terminal_projection() -> None:
+    op.execute(
+        f"""
+        CREATE FUNCTION {SCHEMA}.project_executable_claim_terminal()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        SET search_path = pg_catalog
+        AS $function$
+        DECLARE
+          v_claim {SCHEMA}.executable_claim_leases%ROWTYPE;
+          v_state {SCHEMA}.executable_claim_state%ROWTYPE;
+        BEGIN
+          IF NEW.lifecycle_state <> 'cancelled-terminal' THEN
+            RETURN NEW;
+          END IF;
+          SELECT * INTO v_claim FROM {SCHEMA}.executable_claim_leases
+           WHERE protected_attempt_id = NEW.protected_attempt_id
+             AND execution_generation = NEW.execution_generation
+             AND requirements_digest = NEW.requirements_digest
+           FOR KEY SHARE;
+          IF NOT FOUND THEN
+            RETURN NEW;
+          END IF;
+          SELECT * INTO v_state FROM {SCHEMA}.executable_claim_state
+           WHERE intent_id = v_claim.intent_id FOR UPDATE;
+          IF NOT FOUND
+             OR v_state.subject_id IS DISTINCT FROM v_claim.subject_id
+             OR v_state.subject_incarnation IS DISTINCT FROM v_claim.subject_incarnation THEN
+            RAISE EXCEPTION 'executable terminal evidence differs from claim state'
+              USING ERRCODE = '55000';
+          END IF;
+          IF EXISTS (
+            SELECT 1 FROM {SCHEMA}.executable_claim_terminal_events
+             WHERE admitted_operation_id = v_claim.operation_id
+                OR protected_attempt_id = v_claim.protected_attempt_id
+          ) THEN
+            RAISE EXCEPTION 'conflicting executable terminal evidence'
+              USING ERRCODE = '55000';
+          END IF;
+          UPDATE {SCHEMA}.executable_claim_state
+             SET terminal_high_water = terminal_high_water + 1
+           WHERE intent_id = v_claim.intent_id;
+          INSERT INTO {SCHEMA}.executable_claim_terminal_events
+            (terminal_operation_id, admitted_operation_id, protected_attempt_id,
+             execution_generation, requirements_digest, intent_id, subject_id,
+             subject_incarnation, worker_id, worker_incarnation,
+             terminal_transition_sequence, terminal_state,
+             terminal_evidence_sha256, claim_high_water, terminal_high_water,
+             executable)
+          VALUES
+            (NEW.transition_id, v_claim.operation_id, v_claim.protected_attempt_id,
+             v_claim.execution_generation, v_claim.requirements_digest,
+             v_claim.intent_id, v_claim.subject_id, v_claim.subject_incarnation,
+             v_claim.worker_id, v_claim.worker_incarnation,
+             NEW.transition_sequence, NEW.lifecycle_state, NEW.payload_digest,
+             v_claim.claim_high_water, v_state.terminal_high_water + 1, true);
+          RETURN NEW;
+        END
+        $function$
+        """
+    )
+    op.execute(
+        f"""
+        CREATE TRIGGER attempt_lifecycle_events_project_executable_terminal
+        AFTER INSERT ON {SCHEMA}.attempt_lifecycle_events
+        FOR EACH ROW EXECUTE FUNCTION {SCHEMA}.project_executable_claim_terminal()
+        """
+    )
+
+
 def upgrade() -> None:
     executor_role, quoted_executor = _executor_role()
     op.create_table(
@@ -1423,8 +1535,17 @@ def upgrade() -> None:
         sa.Column("subject_incarnation", sa.Uuid(), nullable=False),
         sa.Column("binding", postgresql.JSONB(), nullable=False),
         sa.Column("claim_high_water", sa.BigInteger(), nullable=False, server_default=sa.text("0")),
+        sa.Column(
+            "terminal_high_water",
+            sa.BigInteger(),
+            nullable=False,
+            server_default=sa.text("0"),
+        ),
         sa.Column("draining", sa.Boolean(), nullable=False, server_default=sa.false()),
-        sa.CheckConstraint("claim_high_water >= 0", name="guard_exec_claim_state_high_water_check"),
+        sa.CheckConstraint(
+            "claim_high_water >= 0 AND terminal_high_water >= 0",
+            name="guard_exec_claim_state_high_water_check",
+        ),
         sa.CheckConstraint(
             "jsonb_typeof(binding) = 'object'",
             name="guard_exec_claim_state_binding_check",
@@ -1652,9 +1773,83 @@ def upgrade() -> None:
         sa.UniqueConstraint("protected_attempt_id", name="guard_exec_claim_attempt_key"),
         schema=SCHEMA,
     )
+    op.create_table(
+        "executable_claim_terminal_events",
+        sa.Column("terminal_operation_id", sa.Uuid(), nullable=False),
+        sa.Column("admitted_operation_id", sa.Uuid(), nullable=False),
+        sa.Column("protected_attempt_id", sa.Uuid(), nullable=False),
+        sa.Column("execution_generation", sa.BigInteger(), nullable=False),
+        sa.Column("requirements_digest", sa.Text(), nullable=False),
+        sa.Column("intent_id", sa.Uuid(), nullable=False),
+        sa.Column("subject_id", sa.Uuid(), nullable=False),
+        sa.Column("subject_incarnation", sa.Uuid(), nullable=False),
+        sa.Column("worker_id", sa.Uuid(), nullable=False),
+        sa.Column("worker_incarnation", sa.Uuid(), nullable=False),
+        sa.Column("terminal_transition_sequence", sa.BigInteger(), nullable=False),
+        sa.Column("terminal_state", sa.Text(), nullable=False),
+        sa.Column("terminal_evidence_sha256", sa.Text(), nullable=False),
+        sa.Column("claim_high_water", sa.BigInteger(), nullable=False),
+        sa.Column("terminal_high_water", sa.BigInteger(), nullable=False),
+        sa.Column("executable", sa.Boolean(), nullable=False),
+        sa.Column(
+            "created_at",
+            postgresql.TIMESTAMP(timezone=True),
+            nullable=False,
+            server_default=sa.text("now()"),
+        ),
+        sa.CheckConstraint(
+            "execution_generation > 0 AND terminal_transition_sequence > 0 "
+            "AND claim_high_water > 0 AND terminal_high_water > 0",
+            name="guard_exec_terminal_generations_check",
+        ),
+        sa.CheckConstraint(
+            "requirements_digest ~ '^[0-9a-f]{64}$' "
+            "AND terminal_evidence_sha256 ~ '^[0-9a-f]{64}$'",
+            name="guard_exec_terminal_digest_check",
+        ),
+        sa.CheckConstraint(
+            "terminal_state = 'cancelled-terminal' AND executable = true",
+            name="guard_exec_terminal_state_check",
+        ),
+        sa.ForeignKeyConstraint(
+            ["terminal_operation_id"],
+            [f"{SCHEMA}.attempt_lifecycle_events.transition_id"],
+            ondelete="RESTRICT",
+            name="guard_exec_terminal_lifecycle_fk",
+        ),
+        sa.ForeignKeyConstraint(
+            ["admitted_operation_id"],
+            [f"{SCHEMA}.executable_claim_leases.operation_id"],
+            ondelete="RESTRICT",
+            name="guard_exec_terminal_admission_fk",
+        ),
+        sa.ForeignKeyConstraint(
+            ["protected_attempt_id", "execution_generation", "requirements_digest"],
+            [
+                f"{SCHEMA}.trial_attempts.protected_attempt_id",
+                f"{SCHEMA}.trial_attempts.execution_generation",
+                f"{SCHEMA}.trial_attempts.requirements_digest",
+            ],
+            ondelete="RESTRICT",
+            name="guard_exec_terminal_attempt_binding_fk",
+        ),
+        sa.ForeignKeyConstraint(
+            ["intent_id"],
+            [f"{SCHEMA}.executable_claim_state.intent_id"],
+            ondelete="RESTRICT",
+        ),
+        sa.PrimaryKeyConstraint("terminal_operation_id"),
+        sa.UniqueConstraint("admitted_operation_id", name="guard_exec_terminal_admission_key"),
+        sa.UniqueConstraint("protected_attempt_id", name="guard_exec_terminal_attempt_key"),
+        sa.UniqueConstraint(
+            "intent_id", "terminal_high_water", name="guard_exec_terminal_high_water_key"
+        ),
+        schema=SCHEMA,
+    )
     _append_only("executable_admission_authority")
     _append_only("executable_admission_events")
     _append_only("executable_claim_leases")
+    _append_only("executable_claim_terminal_events")
     _install_claim_state_guard()
     _install_binding_guard()
     _install_prepare()
@@ -1663,6 +1858,7 @@ def upgrade() -> None:
     _install_drain()
     _install_release()
     _install_claim_admission()
+    _install_claim_terminal_projection()
     op.execute(f"REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA {SCHEMA} FROM PUBLIC")
     op.execute(f"REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA {SCHEMA} FROM PUBLIC")
     op.execute(f"REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA {SCHEMA} FROM PUBLIC")
@@ -1694,7 +1890,13 @@ def downgrade() -> None:
     op.execute(
         f"DROP FUNCTION {SCHEMA}.assert_executable_admission_binding(uuid,uuid,text,jsonb,bytea,text)"
     )
+    op.execute(
+        f"DROP TRIGGER attempt_lifecycle_events_project_executable_terminal "
+        f"ON {SCHEMA}.attempt_lifecycle_events"
+    )
+    op.execute(f"DROP FUNCTION {SCHEMA}.project_executable_claim_terminal()")
     op.execute(f"DROP FUNCTION {SCHEMA}.enforce_executable_claim_state() CASCADE")
+    op.drop_table("executable_claim_terminal_events", schema=SCHEMA)
     op.drop_table("executable_claim_leases", schema=SCHEMA)
     op.drop_table("executable_admission_events", schema=SCHEMA)
     op.drop_table("executable_claim_state", schema=SCHEMA)

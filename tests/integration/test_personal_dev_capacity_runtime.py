@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import psycopg
 import pytest
+from psycopg.errors import InsufficientPrivilege
 from sqlalchemy.engine import make_url
 
 from loom.dev_instance import derive_identity
@@ -153,6 +154,7 @@ async def test_capacity_role_convergence_removes_contaminated_executor_privilege
     schema_name = f"executor_contamination_{uuid4().hex[:8]}"
     connect_url = postgres_url.replace("postgresql+psycopg://", "postgresql://", 1)
     async with await psycopg.AsyncConnection.connect(connect_url, autocommit=True) as connection:
+        await connection.execute(f'CREATE ROLE "{identity.db_role}" LOGIN')
         await connection.execute(f'CREATE SCHEMA "{schema_name}"')
         await connection.execute(f'CREATE TABLE "{schema_name}".evidence (id bigint)')
         await connection.execute(f'CREATE SEQUENCE "{schema_name}".evidence_sequence')
@@ -172,6 +174,10 @@ async def test_capacity_role_convergence_removes_contaminated_executor_privilege
         )
         await connection.execute(
             f'GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA "{schema_name}" TO "{executor}"'
+        )
+        await connection.execute(f'GRANT USAGE ON SCHEMA "{schema_name}" TO "{identity.db_role}"')
+        await connection.execute(
+            f'GRANT EXECUTE ON FUNCTION "{schema_name}".evidence_function() TO PUBLIC'
         )
 
     try:
@@ -196,13 +202,29 @@ async def test_capacity_role_convergence_removes_contaminated_executor_privilege
                     f"{schema_name}.evidence_function()",
                 ),
             )
-            assert await privileges.fetchone() == (False, False, False, False, False)
+            assert await privileges.fetchone() == (False, False, False, False, True)
+
+        async with await psycopg.AsyncConnection.connect(
+            connect_url,
+            autocommit=True,
+        ) as connection:
+            await connection.execute(f'SET ROLE "{identity.db_role}"')
+            application_result = await connection.execute(
+                f'SELECT "{schema_name}".evidence_function()'
+            )
+            assert await application_result.fetchone() == (1,)
+            await connection.execute("RESET ROLE")
+            await connection.execute(f'SET ROLE "{executor}"')
+            with pytest.raises(InsufficientPrivilege):
+                await connection.execute(f'SELECT "{schema_name}".evidence_function()')
+            await connection.execute("RESET ROLE")
     finally:
         async with await psycopg.AsyncConnection.connect(
             connect_url,
             autocommit=True,
         ) as connection:
             await connection.execute(f'DROP SCHEMA IF EXISTS "{schema_name}" CASCADE')
+            await connection.execute(f'DROP ROLE IF EXISTS "{identity.db_role}"')
 
 
 @pytest.mark.asyncio

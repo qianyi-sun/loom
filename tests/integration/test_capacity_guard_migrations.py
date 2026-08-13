@@ -53,6 +53,7 @@ EXPECTED_GUARD_TABLES = {
     "executable_admission_events",
     "executable_claim_state",
     "executable_claim_leases",
+    "executable_claim_terminal_events",
 }
 
 

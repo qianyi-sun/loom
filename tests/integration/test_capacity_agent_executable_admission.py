@@ -22,8 +22,12 @@ from loom_capacity_agent.admission import (
     ExecutableWorkerRegistrationV2,
     PhysicalJobBindingV2,
 )
-from loom_capacity_agent.claim_guard import ExecutableClaimProposalV2
+from loom_capacity_agent.claim_guard import (
+    ExecutableClaimProposalV2,
+    InertAttemptTransitionV1,
+)
 from loom_capacity_agent.executable_admission import ExecutableAdmissionStore
+from loom_capacity_agent.lifecycle_store import CapacityAttemptLifecycleStore
 from loom_capacity_manager.contracts import ResourceVectorV1
 from loom_capacity_manager.executable_contracts import (
     CandidateBindingV2,
@@ -51,6 +55,19 @@ async def _serializable_executor_session(
     engine = create_async_engine(
         make_url(_value(database, "executor_url")), isolation_level="SERIALIZABLE"
     )
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with factory() as session, session.begin():
+            yield session
+    finally:
+        await engine.dispose()
+
+
+@asynccontextmanager
+async def _agent_session(
+    database: dict[str, object],
+) -> AsyncIterator[AsyncSession]:
+    engine = create_async_engine(make_url(_value(database, "agent_url")))
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         async with factory() as session, session.begin():
@@ -476,6 +493,158 @@ async def test_claim_and_drain_share_one_locked_protected_transaction(
         ).scalar_one()
     assert denied is None
     assert count == (1 if claim_won else 0)
+
+
+@pytest.mark.asyncio
+async def test_protected_terminal_lifecycle_closes_immutable_claim_and_allows_release(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    """Catch release treating every immutable admission row as live forever."""
+
+    _fence, registration = await _initialize_and_register(capacity_guard_database)
+    request = _bootstrap(registration.subject_id, registration.subject_incarnation)
+    capability = "single-use-bootstrap-capability"
+    worker = _worker(request)
+    protected_attempt_id = UUID(int=143)
+    requirements_digest = "7" * 64
+    await _seed_protected_attempt(
+        capacity_guard_database,
+        protected_attempt_id=protected_attempt_id,
+        execution_generation=13,
+        requirements_digest=requirements_digest,
+    )
+    claim = ExecutableClaimProposalV2(
+        operation_id=UUID(int=144),
+        protected_attempt_id=protected_attempt_id,
+        execution_generation=13,
+        requirements_digest=requirements_digest,
+        worker_id=worker.worker_id,
+        worker_incarnation=worker.worker_incarnation,
+        expected_claim_high_water=0,
+    )
+    terminal = InertAttemptTransitionV1(
+        **registration.model_dump(mode="python"),
+        transition_id=UUID(int=145),
+        protected_attempt_id=protected_attempt_id,
+        execution_generation=13,
+        requirements_digest=requirements_digest,
+        expected_transition_sequence=0,
+        operation="cancel",
+        expected_state="pending-unassigned",
+        target_state="cancelled-terminal",
+        transition_reason="claimed-attempt-terminal",
+    )
+    drain = ExecutableDrainRequestV2(
+        operation_id=UUID(int=146),
+        binding=request.binding,
+        worker_id=worker.worker_id,
+        worker_incarnation=worker.worker_incarnation,
+        expected_claim_high_water=1,
+        drain_epoch=1,
+    )
+    release = ExecutableReleaseRequestV2(
+        operation_id=UUID(int=147),
+        binding=request.binding,
+        reporter_incarnation=registration.reporter_incarnation,
+        bootstrap_registration_epoch=request.bootstrap_registration_epoch,
+        expected_claim_high_water=1,
+        protected_registration_epoch=worker.protected_registration_epoch,
+        release_epoch=1,
+    )
+
+    async with _serializable_executor_session(capacity_guard_database) as session:
+        store = ExecutableAdmissionStore(session, registration=registration)
+        await store.prepare_worker(
+            request,
+            bootstrap_sha256=hashlib.sha256(capability.encode("ascii")).hexdigest(),
+        )
+        await store.bind_slurm_job(_physical(request))
+        await store.register_worker(worker, bootstrap_capability=capability)
+        admitted = await store.admit_claim(claim)
+        assert admitted is not None
+        drained = await store.begin_drain(drain)
+        assert drained.live_claim_count == 1
+        with pytest.raises(DBAPIError, match="zero live protected claims"):
+            await store.acknowledge_release(
+                release,
+                current_worker_credential="worker-credential-one",
+            )
+
+    async with _agent_session(capacity_guard_database) as session:
+        lifecycle = CapacityAttemptLifecycleStore(session, registration=registration)
+        mismatched = terminal.model_copy(update={"execution_generation": 14})
+        with pytest.raises(DBAPIError, match="compare-and-set"):
+            await lifecycle.apply_transition(mismatched)
+        assert await lifecycle.apply_transition(terminal) == terminal
+        conflicting = terminal.model_copy(update={"transition_reason": "conflicting-replay"})
+        with pytest.raises(DBAPIError, match="conflicting inert lifecycle replay"):
+            await lifecycle.apply_transition(conflicting)
+        delayed = terminal.model_copy(
+            update={"transition_id": UUID(int=148), "expected_transition_sequence": 0}
+        )
+        with pytest.raises(DBAPIError, match="compare-and-set"):
+            await lifecycle.apply_transition(delayed)
+
+    async with _serializable_executor_session(capacity_guard_database) as session:
+        with pytest.raises(DBAPIError) as forged:
+            await session.execute(
+                text(
+                    "INSERT INTO loom_capacity_guard.executable_claim_terminal_events "
+                    "DEFAULT VALUES"
+                )
+            )
+        assert isinstance(forged.value.orig, InsufficientPrivilege)
+
+    async with _owner_session(capacity_guard_database) as (_, _, session):
+        evidence = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT admitted_operation_id, protected_attempt_id, "
+                        "execution_generation, requirements_digest, intent_id, subject_id, "
+                        "subject_incarnation, worker_id, worker_incarnation, terminal_state, "
+                        "terminal_evidence_sha256, claim_high_water, terminal_high_water "
+                        "FROM loom_capacity_guard.executable_claim_terminal_events"
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
+        assert dict(evidence) == {
+            "admitted_operation_id": claim.operation_id,
+            "protected_attempt_id": claim.protected_attempt_id,
+            "execution_generation": claim.execution_generation,
+            "requirements_digest": claim.requirements_digest,
+            "intent_id": request.binding.intent_id,
+            "subject_id": registration.subject_id,
+            "subject_incarnation": registration.subject_incarnation,
+            "worker_id": worker.worker_id,
+            "worker_incarnation": worker.worker_incarnation,
+            "terminal_state": "cancelled-terminal",
+            "terminal_evidence_sha256": hashlib.sha256(
+                json.dumps(
+                    terminal.model_dump(mode="json", exclude_none=False),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                    allow_nan=False,
+                ).encode("ascii")
+            ).hexdigest(),
+            "claim_high_water": 1,
+            "terminal_high_water": 1,
+        }
+
+    async with _serializable_executor_session(capacity_guard_database) as session:
+        receipt = await ExecutableAdmissionStore(
+            session,
+            registration=registration,
+        ).acknowledge_release(
+            release,
+            current_worker_credential="worker-credential-one",
+        )
+        assert receipt.claim_high_water == 1
+        assert receipt.live_claim_count == 0
 
 
 @pytest.mark.asyncio

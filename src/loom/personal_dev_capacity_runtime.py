@@ -365,11 +365,6 @@ class PsycopgPersonalDevCapacityDatabase:
                                     sql.Identifier(executor),
                                 )
                             )
-                        await connection.execute(
-                            sql.SQL(
-                                "REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA {} FROM PUBLIC"
-                            ).format(sql.Identifier(schema_name))
-                        )
                     await connection.execute(
                         sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(sql.Identifier(owner))
                     )
