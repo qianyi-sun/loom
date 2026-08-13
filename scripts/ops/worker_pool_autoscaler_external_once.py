@@ -39,6 +39,7 @@ from loom_control_plane.global_dev_fleet_autoscaler import (
     GlobalDevAutoscalerError,
     capacity_grants_from_report,
 )
+from loom_control_plane.global_execution_fence import load_global_execution_witness
 from loom_control_plane.worker_pool_autoscaler import (
     reconcile_worker_pool_autoscaler_once,
 )
@@ -138,6 +139,11 @@ def _parser() -> argparse.ArgumentParser:
         "--deployment-generation",
         type=int,
         help="Exact deployment generation bound to the capacity grant.",
+    )
+    parser.add_argument(
+        "--global-execution-witness-json",
+        type=Path,
+        help="Authenticated manager witness; absence permits drain only.",
     )
     parser.add_argument(
         "--validate-only",
@@ -616,6 +622,9 @@ async def _main_async(args: argparse.Namespace) -> None:
     environment = _scoped_environment(args.environment)
     pool_names = _scoped_pool_names(args.pool_name)
     capacity_grants = _load_capacity_grants(args)
+    global_execution_witness = load_global_execution_witness(
+        args.global_execution_witness_json,
+    )
     if capacity_grants is None and any(
         dev_pool_instance_name(pool_name) is not None for pool_name in pool_names
     ):
@@ -673,6 +682,8 @@ async def _main_async(args: argparse.Namespace) -> None:
                     "include_external_policies": True,
                     "external_only": True,
                     "pool_names": pool_names,
+                    "global_execution_witness": global_execution_witness,
+                    "global_execution_witness_required": True,
                 }
                 if capacity_grants is not None:
                     reconcile_kwargs["capacity_grants"] = capacity_grants

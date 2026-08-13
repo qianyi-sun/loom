@@ -173,8 +173,7 @@ def test_slurm_authority_probe_rejects_foreign_or_non_controller_host(
         lambda *_args, **_kwargs: SimpleNamespace(
             returncode=0,
             stdout=(
-                f"ClusterName = {cluster_name}\n"
-                f"SlurmctldHost[0] = {controller_host}(192.0.2.10)\n"
+                f"ClusterName = {cluster_name}\nSlurmctldHost[0] = {controller_host}(192.0.2.10)\n"
             ),
         ),
     )
@@ -601,6 +600,8 @@ def test_normal_reconcile_validates_db_before_actuation_and_owns_tunnel(
             "include_external_policies": True,
             "external_only": True,
             "pool_names": ("gb10",),
+            "global_execution_witness": None,
+            "global_execution_witness_required": True,
         }
         events.append("reconcile")
         return [SimpleNamespace(action="noop")]

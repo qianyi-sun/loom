@@ -15,6 +15,10 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
+from loom_control_plane.global_execution_fence import (
+    GlobalExecutionWitness,
+    assert_legacy_scale_up_allowed,
+)
 from loom_control_plane.shared_capacity_broker import (
     AutoscalerGrantHandoff,
     BrokerBudgets,
@@ -23,6 +27,7 @@ from loom_control_plane.shared_capacity_broker import (
     RequestState,
     SharedCapacityBroker,
 )
+from loom_control_plane.slurm_worker_jobs import slurm_cluster_for_pool
 
 _ENVIRONMENT_RE = re.compile(r"[a-z][a-z0-9-]{0,62}")
 _POOL_RE = re.compile(r"[a-z][a-z0-9-]{0,31}")
@@ -179,10 +184,25 @@ class GlobalDevFleetAutoscaler:
         budgets: BrokerBudgets,
         *,
         observations: Sequence[LeaseObservation] = (),
+        execution_witness: GlobalExecutionWitness | None = None,
+        execution_witness_required: bool = False,
     ) -> dict[str, object]:
         """Converge the complete dynamic cohort and return environment grants."""
         now = _utc(self._clock())
         normalized = tuple(demands)
+        if execution_witness_required:
+            # A single witness is bound to one physical pool.  Refuse an
+            # equivocal mixed-pool legacy request instead of calculating even
+            # one new grant against a possibly active manager epoch.
+            pool_ids = {slurm_cluster_for_pool(item.pool_name) for item in normalized}
+            for pool_id in pool_ids or {"oldlab"}:
+                assert_legacy_scale_up_allowed(
+                    execution_witness,
+                    expected_authority="global-capacity-manager",
+                    expected_pool_id=pool_id,
+                    now=now,
+                    required=True,
+                )
         status = self.broker.status()
         self._prevalidate(normalized, observations, budgets, status=status, now=now)
 

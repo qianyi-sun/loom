@@ -48,6 +48,11 @@ from loom_control_plane.elastic_slurm_worker_controller import (
     slurm_sandbox_identity,
     slurm_submission_config_for_node,
 )
+from loom_control_plane.global_execution_fence import (
+    GlobalExecutionFenceError,
+    GlobalExecutionWitness,
+    assert_legacy_scale_up_allowed,
+)
 from loom_control_plane.shared_capacity_broker import AutoscalerGrantHandoff
 from loom_control_plane.slurm_worker_jobs import (
     ACTIVE_STATES,
@@ -200,6 +205,54 @@ def apply_global_dev_capacity_grant(
             else "global_dev_capacity_grant_zero"
         ),
     )
+
+
+def apply_global_execution_fence(
+    policy: AutoscalerPolicyConfig,
+    witness: GlobalExecutionWitness | None,
+    *,
+    expected_authority: str,
+    expected_pool_id: str,
+    now: datetime | None = None,
+    required: bool,
+) -> AutoscalerPolicyConfig:
+    """Clamp a legacy writer to drain-safe zero on any manager ambiguity."""
+
+    try:
+        assert_legacy_scale_up_allowed(
+            witness,
+            expected_authority=expected_authority,
+            expected_pool_id=expected_pool_id,
+            now=now,
+            required=required,
+        )
+    except GlobalExecutionFenceError as exc:
+        message = str(exc)
+        reason = next(
+            (
+                value
+                for value in (
+                    "unavailable",
+                    "authenticated",
+                    "authority",
+                    "pool",
+                    "stale",
+                    "state",
+                    "epoch",
+                    "ceiling",
+                )
+                if value in message
+            ),
+            "invalid",
+        )
+        return replace(
+            policy,
+            enabled=policy.enabled,
+            min_slots=0,
+            max_slots=0,
+            disabled_reason=f"global_execution_fence_{reason}",
+        )
+    return policy
 
 
 def select_slurm_qos(
@@ -1259,8 +1312,7 @@ async def _load_observation(
                         and_(
                             PipelineRun.official_submission_kind
                             == "behavior_profile_calibration_run_v1",
-                            PipelineScopedPolicyActivation.authority_kind
-                            == "profile_calibration",
+                            PipelineScopedPolicyActivation.authority_kind == "profile_calibration",
                             PipelineScopedPolicyActivation.authority_id
                             == PipelineRun.official_submission_authority_id,
                         ),
@@ -1371,12 +1423,16 @@ async def _refresh_slurm_job_registry(
         )
         return SlurmJobRegistryRefreshResult(error=str(exc))
     requested_job_ids = set(job_ids)
-    freshly_pending_job_ids = tuple(sorted({
-        observation.job_id
-        for observation in observations
-        if observation.job_id in requested_job_ids
-        and normalize_slurm_state(observation.slurm_state) == "pending"
-    }))
+    freshly_pending_job_ids = tuple(
+        sorted(
+            {
+                observation.job_id
+                for observation in observations
+                if observation.job_id in requested_job_ids
+                and normalize_slurm_state(observation.slurm_state) == "pending"
+            }
+        )
+    )
     return SlurmJobRegistryRefreshResult(
         freshly_pending_job_ids=freshly_pending_job_ids,
     )
@@ -2204,12 +2260,8 @@ async def _apply_slurm_cancel_pending(
         )
     failed_job_ids = tuple(sorted(failures))
     cancelled = tuple(cancelled_job_ids)
-    blocked_reason = (
-        "slurm_pending_cancel_partial" if cancelled else "slurm_pending_cancel_failed"
-    )
-    error = "; ".join(
-        f"{job_id}: {failures[job_id]}" for job_id in failed_job_ids
-    )
+    blocked_reason = "slurm_pending_cancel_partial" if cancelled else "slurm_pending_cancel_failed"
+    error = "; ".join(f"{job_id}: {failures[job_id]}" for job_id in failed_job_ids)
     return SlurmPendingCancelActuatorResult(
         cancelled_job_ids=cancelled,
         failed_job_ids=failed_job_ids,
@@ -2218,9 +2270,7 @@ async def _apply_slurm_cancel_pending(
         blocked_details={
             "reason": blocked_reason,
             "cancelled_job_ids": list(cancelled),
-            "failed_jobs": {
-                job_id: failures[job_id] for job_id in failed_job_ids
-            },
+            "failed_jobs": {job_id: failures[job_id] for job_id in failed_job_ids},
         },
     )
 
@@ -2509,6 +2559,8 @@ async def reconcile_worker_pool_autoscaler_once(
     pool_names: tuple[str, ...] | None = None,
     capacity_grants: Mapping[tuple[str, str], AutoscalerGrantHandoff] | None = None,
     deployment_generation: int | None = None,
+    global_execution_witness: GlobalExecutionWitness | None = None,
+    global_execution_witness_required: bool = False,
 ) -> list[AutoscalerDecision]:
     now = now or datetime.now(UTC)
     scoped_environment = _exact_autoscaler_environment(environment)
@@ -2565,6 +2617,15 @@ async def reconcile_worker_pool_autoscaler_once(
         effective_policy = _apply_pipeline_scoped_activation(
             _policy_to_config(row), row, active_activations.get(row.pool_name)
         )
+        if global_execution_witness_required:
+            effective_policy = apply_global_execution_fence(
+                effective_policy,
+                global_execution_witness,
+                expected_authority="global-capacity-manager",
+                expected_pool_id=slurm_cluster_for_pool(row.pool_name),
+                now=now,
+                required=True,
+            )
         if capacity_grants is not None and dev_pool_instance_name(row.pool_name) is not None:
             effective_policy = apply_global_dev_capacity_grant(
                 effective_policy,
@@ -2664,9 +2725,7 @@ async def reconcile_worker_pool_autoscaler_once(
                     error_message=actuator_error,
                 )
             elif not freshly_pending_job_ids:
-                actuator_error = (
-                    "pending Slurm capacity has no fresh pending job observation"
-                )
+                actuator_error = "pending Slurm capacity has no fresh pending job observation"
                 actuator_blocked_reason = "slurm_pending_observation_missing"
                 actuator_blocked_details = {
                     "reason": actuator_blocked_reason,
@@ -2787,10 +2846,14 @@ async def reconcile_worker_pool_autoscaler_once(
                     drain_owner="worker-pool-autoscaler",
                 ),
             )
-        if decision.action == "release_drained" or (
-            decision.action in {"scale_up", "drain_capacity", "cancel_pending"}
-            and row.actuator == "slurm"
-        ) or slurm_pending_cancel_attempted:
+        if (
+            decision.action == "release_drained"
+            or (
+                decision.action in {"scale_up", "drain_capacity", "cancel_pending"}
+                and row.actuator == "slurm"
+            )
+            or slurm_pending_cancel_attempted
+        ):
             observation = await _load_observation(
                 session,
                 row,

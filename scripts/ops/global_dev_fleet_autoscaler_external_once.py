@@ -36,6 +36,12 @@ from loom_control_plane.global_dev_fleet_autoscaler import (
     GlobalDevFleetAutoscaler,
     capacity_grants_from_report,
 )
+from loom_control_plane.global_execution_fence import (
+    GlobalExecutionFenceError,
+    GlobalExecutionWitness,
+    assert_legacy_scale_up_allowed,
+    load_global_execution_witness,
+)
 from loom_control_plane.shared_capacity_broker import (
     BrokerBudgets,
     BrokerError,
@@ -43,7 +49,7 @@ from loom_control_plane.shared_capacity_broker import (
     RequestState,
     SharedCapacityBroker,
 )
-from loom_control_plane.slurm_worker_jobs import ACTIVE_STATES
+from loom_control_plane.slurm_worker_jobs import ACTIVE_STATES, slurm_cluster_for_pool
 from loom_control_plane.worker_pool_autoscaler import (
     AutoscalerObservation,
     _load_observation,
@@ -114,6 +120,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--kube-context", default="")
     parser.add_argument("--snapshot-freshness-seconds", type=int, default=120)
     parser.add_argument("--lease-ttl-seconds", type=int, default=300)
+    parser.add_argument(
+        "--global-execution-witness-json",
+        type=Path,
+        help="Authenticated manager witness; absence permits drain only.",
+    )
     return parser
 
 
@@ -420,6 +431,8 @@ async def _reconcile_instance(
     admin_url: str,
     snapshot: InstanceSnapshot,
     grants: dict[tuple[str, str], Any],
+    *,
+    global_execution_witness: GlobalExecutionWitness | None,
 ) -> None:
     url = fixture_database_url(admin_url, snapshot.database)
     engine = create_async_engine(_sqlalchemy_url(url), pool_pre_ping=True)
@@ -433,6 +446,8 @@ async def _reconcile_instance(
                 pool_names=(snapshot.pool_name,),
                 capacity_grants=grants,
                 deployment_generation=snapshot.deployment_generation,
+                global_execution_witness=global_execution_witness,
+                global_execution_witness_required=True,
             )
             await session.commit()
     except Exception as exc:
@@ -455,6 +470,9 @@ async def _main(args: argparse.Namespace) -> dict[str, object]:
         raise GlobalDevExternalError("global pending budget must be non-negative")
     management_url = _read_secret_file(args.management_db_url_file, "management DB URL file")
     admin_url = _read_secret_file(args.fixture_admin_db_url_file, "fixture admin DB URL file")
+    global_execution_witness = load_global_execution_witness(
+        args.global_execution_witness_json,
+    )
     _validate_owner_only_directory(args.worker_env_dir, "worker environment directory")
     _validate_owner_only_directory(args.output_json.parent, "grant report directory")
     rows = await _registry_rows(management_url)
@@ -489,16 +507,40 @@ async def _main(args: argparse.Namespace) -> dict[str, object]:
         global_pending_slots=pending_budget,
         pool_pending_slots={pool: pending_budget for pool in pools},
     )
-    broker = SharedCapacityBroker(args.state_db)
-    report = GlobalDevFleetAutoscaler(
-        broker,
-        snapshot_freshness_seconds=args.snapshot_freshness_seconds,
-        lease_ttl_seconds=args.lease_ttl_seconds,
-    ).reconcile(
-        demands,
-        budgets,
-        observations=_lease_observations(broker, snapshots),
-    )
+    try:
+        for pool_id in {slurm_cluster_for_pool(item.pool_name) for item in demands} or {"oldlab"}:
+            assert_legacy_scale_up_allowed(
+                global_execution_witness,
+                expected_authority="global-capacity-manager",
+                expected_pool_id=pool_id,
+                now=now,
+                required=True,
+            )
+        broker = SharedCapacityBroker(args.state_db)
+        report = GlobalDevFleetAutoscaler(
+            broker,
+            snapshot_freshness_seconds=args.snapshot_freshness_seconds,
+            lease_ttl_seconds=args.lease_ttl_seconds,
+        ).reconcile(
+            demands,
+            budgets,
+            observations=_lease_observations(broker, snapshots),
+            execution_witness=global_execution_witness,
+            execution_witness_required=True,
+        )
+    except GlobalExecutionFenceError:
+        # Do not touch the legacy broker or mint worker credentials.  The
+        # local policy path receives an empty grant set and its own reciprocal
+        # fence, retaining the established drain-safe behavior for workers
+        # already running under a prior legacy grant.
+        report = {
+            "schema_version": 1,
+            "authority": "global-dev-fleet-autoscaler",
+            "generated_at": now.isoformat().replace("+00:00", "Z"),
+            "demands": [demand.public_dict() for demand in demands],
+            "grants": [],
+            "aggregate": {"legacy_scale_up_fenced": True},
+        }
     _write_report(args.output_json, report)
     grants = capacity_grants_from_report(report)
     kubectl = KubectlClient(args.kubectl, context=args.kube_context)
@@ -507,9 +549,14 @@ async def _main(args: argparse.Namespace) -> dict[str, object]:
         # never mint fresh worker credentials. Existing deleting credentials
         # stay on disk just long enough for the external actuator to drain and
         # are pruned once the registry row becomes deleted.
-        if snapshot.status == "ready":
+        if snapshot.status == "ready" and report["grants"]:
             await _ensure_worker_env(args, kubectl, snapshot)
-        await _reconcile_instance(admin_url, snapshot, grants)
+        await _reconcile_instance(
+            admin_url,
+            snapshot,
+            grants,
+            global_execution_witness=global_execution_witness,
+        )
     return {
         "authority": report["authority"],
         "aggregate": report["aggregate"],
