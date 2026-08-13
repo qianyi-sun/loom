@@ -1216,14 +1216,18 @@ def test_manifest_digest_is_captured_once_and_tags_follow_verification() -> None
     script = join["run"]
 
     assert '--tag "${image}:manifest-${HEAD_SHA}"' in script
-    assert "create_output=$(docker buildx imagetools create" in script
+    assert "docker buildx imagetools create" in script
     assert "--progress plain" in script
-    assert "pushing manifest for .*@(sha256:[0-9a-f]{64})" in script
+    assert "create_output=" not in script
+    assert "pushing manifest for" not in script
+    assert "imagetools inspect --raw" in script
+    assert '"${image}:manifest-${HEAD_SHA}" > "$tag_manifest"' in script
+    assert 'manifest_digest="sha256:$(sha256sum "$tag_manifest"' in script
     assert 'imagetools inspect --raw "${image}@${manifest_digest}"' in script
+    assert 'cmp --silent "$tag_manifest" "$digest_manifest"' in script
     assert "ci_image_release_evidence.py validate-manifest" in script
     assert '--manifest "/tmp/loom-image-manifest.json"' in script
     assert "python3 - <<'PY'" not in script
-    assert 'imagetools inspect --raw "${image}:manifest-${HEAD_SHA}"' not in script
     assert 'imagetools inspect "${image}:manifest-${HEAD_SHA}"' not in script
     assert names.index("Verify published manifest attestation") < names.index(
         "Publish verified manifest tags"

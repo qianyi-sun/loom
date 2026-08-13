@@ -1330,24 +1330,23 @@ jobs:
           image="ghcr.io/${owner_lower}/${IMAGE_DIGEST_NAME}"
           amd64_digest="$AMD64_DIGEST"
           arm64_digest="$ARM64_DIGEST"
-          create_output=$(docker buildx imagetools create \
+          docker buildx imagetools create \
             --progress plain \
             --tag "${image}:manifest-${HEAD_SHA}" \
             "${image}@${amd64_digest}" \
-            "${image}@${arm64_digest}" 2>&1)
-          printf '%s\n' "$create_output"
-          mapfile -t manifest_digests < <(
-            sed -nE \
-              's/^.*pushing manifest for .*@(sha256:[0-9a-f]{64}).*$/\1/p' \
-              <<< "$create_output"
-          )
-          [[ ${#manifest_digests[@]} -eq 1 ]] || {
-            echo "FAIL: manifest creation did not emit exactly one digest" >&2
+            "${image}@${arm64_digest}"
+          tag_manifest=/tmp/loom-image-manifest-by-tag.json
+          digest_manifest=/tmp/loom-image-manifest-by-digest.json
+          docker buildx imagetools inspect --raw \
+            "${image}:manifest-${HEAD_SHA}" > "$tag_manifest"
+          manifest_digest="sha256:$(sha256sum "$tag_manifest" | awk '{print $1}')"
+          docker buildx imagetools inspect --raw "${image}@${manifest_digest}" \
+            > "$digest_manifest"
+          cmp --silent "$tag_manifest" "$digest_manifest" || {
+            echo "FAIL: manifest digest readback did not match the tagged bytes" >&2
             exit 1
           }
-          manifest_digest="${manifest_digests[0]}"
-          docker buildx imagetools inspect --raw "${image}@${manifest_digest}" \
-            > /tmp/loom-image-manifest.json
+          mv "$digest_manifest" /tmp/loom-image-manifest.json
           python3 scripts/ci_image_release_evidence.py validate-manifest \
             --manifest "/tmp/loom-image-manifest.json" \
             --architecture-digest "linux/amd64=${AMD64_DIGEST}" \
