@@ -34,6 +34,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableReservationProposalV2,
     ExecutionActivationV2,
     ExecutionContextV2,
+    ExecutionPreparationPolicyV2,
     PoolControllerAuthorityV2,
     SignedExecutableOwnershipProofV2,
     canonical_executable_bytes,
@@ -44,6 +45,7 @@ from loom_capacity_manager.models import (
     CapacityAuthorityState,
     CapacityExecutableExecutorState,
     CapacityExecutableIntent,
+    CapacityExecutionExecutor,
     CapacityPool,
     CapacityPoolObservation,
     CapacityWorkerProfile,
@@ -53,12 +55,19 @@ from loom_capacity_manager.reconciler import reconcile_shadow_once
 from loom_capacity_manager.store import CapacityManagementStore, ExecutionConflictError
 from tests.capacity_execution_fixtures import (
     EXECUTOR_KEYS,
+    TRUSTED_RELEASE,
     execution_policy,
     executor_binding,
     register_execution_executors,
     setup_execution,
 )
-from tests.capacity_fixtures import demand_snapshot, pool_observation, resource_vector, shape
+from tests.capacity_fixtures import (
+    demand_snapshot,
+    pool_observation,
+    profile_reference,
+    resource_vector,
+    shape,
+)
 
 
 def test_execution_store_is_a_distinct_v2_ledger() -> None:
@@ -67,8 +76,15 @@ def test_execution_store_is_a_distinct_v2_ledger() -> None:
     assert CapacityExecutionStore.__module__ == "loom_capacity_manager.execution_store"
 
 
-async def _active_plan(session: AsyncSession):  # type: ignore[no-untyped-def]
-    fixture = await setup_execution(session, execution_policy=execution_policy())
+async def _active_plan(
+    session: AsyncSession,
+    *,
+    policy: ExecutionPreparationPolicyV2 | None = None,
+):  # type: ignore[no-untyped-def]
+    fixture = await setup_execution(
+        session,
+        execution_policy=execution_policy() if policy is None else policy,
+    )
     await fixture.store.ingest_demand_snapshot(
         session,
         demand_snapshot(sequence=1, pending_attempt_ids=("attempt-pending",)),
@@ -156,9 +172,15 @@ async def _heartbeat(
 async def _launch_ready(
     store: CapacityExecutionStore,
     session: AsyncSession,
+    *,
+    policy: ExecutionPreparationPolicyV2 | None = None,
+    controller_authority_sha256: str | None = None,
 ):
-    active, _allocation_epoch = await _active_plan(session)
-    binding = executor_binding("gb10")
+    active, _allocation_epoch = await _active_plan(session, policy=policy)
+    binding = executor_binding(
+        "gb10",
+        controller_authority_sha256=controller_authority_sha256,
+    )
     await _heartbeat(store, session, active, pool_id="gb10")
     proposal = await store.next_pool_work(session, binding)
     assert isinstance(proposal, ExecutableReservationProposalV2)
@@ -195,8 +217,52 @@ async def _launch_ready(
 async def test_real_manager_profile_digest_is_not_reinterpreted_as_launch_policy(
     capacity_session: AsyncSession,
 ) -> None:
+    manager_profile = profile_reference()
+    manager_shape = manager_profile.worker_shapes[0]
+    unsigned_profile = OperatorLaunchProfileV2(
+        pool_id=manager_profile.pool_id,
+        pool_generation=manager_profile.pool_generation,
+        profile_id=manager_shape.shape_id,
+        profile_generation=manager_profile.profile_generation,
+        profile_digest=manager_profile.profile_digest,
+        shape_id=manager_shape.shape_id,
+        concurrency_slots=manager_shape.concurrency_slots,
+        controller_authority_sha256="0" * 64,
+        slurm_cluster="gb10-controller",
+        controller_host="ctl.gb10.internal",
+        partition="loom",
+        association="loom",
+        submitter="loom",
+        qos="loom",
+        job_name_prefix="loom-worker",
+        resource_domains=(
+            OperatorResourceDomainV2(
+                domain_id="gb10-arm",
+                node_ids=("gb10-node",),
+                features=("arm64",),
+            ),
+        ),
+        cpus=1,
+        resources=manager_shape.total_resources,
+        time_limit_seconds=3_600,
+        launcher=SlurmExecutableIdentityV2(
+            path="/opt/loom/bin/trusted-worker-launcher",
+            sha256="a" * 64,
+            owner_uid=0,
+        ),
+        trusted_launcher_release_sha256=TRUSTED_RELEASE,
+        image_digest="registry.internal/loom/worker@sha256:" + "b" * 64,
+    )
+    controller_digest = canonical_launch_policy_digest(unsigned_profile)
+    profile = unsigned_profile.model_copy(update={"controller_authority_sha256": controller_digest})
+    policy = execution_policy(controller_digests={"gb10": controller_digest})
     store = CapacityExecutionStore()
-    permit = await _launch_ready(store, capacity_session)
+    permit = await _launch_ready(
+        store,
+        capacity_session,
+        policy=policy,
+        controller_authority_sha256=controller_digest,
+    )
     binding = permit.binding
     persisted_profile = (
         await capacity_session.execute(
@@ -209,48 +275,21 @@ async def test_real_manager_profile_digest_is_not_reinterpreted_as_launch_policy
             )
         )
     ).scalar_one()
-    profile = OperatorLaunchProfileV2(
-        pool_id=binding.pool_id,
-        pool_generation=binding.pool_generation,
-        profile_id=binding.profile_id,
-        profile_generation=binding.profile_generation,
-        profile_digest=persisted_profile.profile_digest,
-        shape_id=binding.shape_id,
-        concurrency_slots=binding.concurrency_slots,
-        controller_authority_sha256="c" * 64,
-        slurm_cluster="gb10-controller",
-        controller_host="ctl.gb10.internal",
-        partition="loom",
-        association="loom",
-        submitter="loom",
-        qos="loom",
-        job_name_prefix="loom-worker",
-        resource_domains=(
-            OperatorResourceDomainV2(
-                domain_id="gb10-arm",
-                node_ids=binding.node_ids,
-                features=("arm64",),
-            ),
-        ),
-        cpus=1,
-        resources=binding.resources,
-        time_limit_seconds=3_600,
-        launcher=SlurmExecutableIdentityV2(
-            path="/opt/loom/bin/trusted-worker-launcher",
-            sha256="a" * 64,
-            owner_uid=0,
-        ),
-        trusted_launcher_release_sha256=binding.execution.trusted_fleet_release_sha256,
-        image_digest="registry.internal/loom/worker@sha256:" + "b" * 64,
-    )
-    launch_policy_sha256 = canonical_launch_policy_digest(profile)
+    registered_executor = (
+        await capacity_session.execute(
+            select(CapacityExecutionExecutor).where(
+                CapacityExecutionExecutor.execution_epoch == binding.execution.execution_epoch,
+                CapacityExecutionExecutor.pool_id == binding.pool_id,
+            )
+        )
+    ).scalar_one()
     private_key = EXECUTOR_KEYS["gb10"]
     context = TrustedLaunchContextV2(
         binding=binding,
         profile=profile,
         controller_authority=PoolControllerAuthorityV2(
             pool_id="gb10",
-            controller_authority_sha256="c" * 64,
+            controller_authority_sha256=(registered_executor.controller_authority_sha256),
         ),
         ownership_key=ExecutorOwnershipKey(
             signing_key_id="gb10-key",
@@ -258,15 +297,18 @@ async def test_real_manager_profile_digest_is_not_reinterpreted_as_launch_policy
             public_key_sha256=public_key_fingerprint(private_key.public_key()),
         ),
         submitted_at=datetime.now(UTC),
-        launch_policy_sha256=launch_policy_sha256,
     )
 
     rendered = render_signed_launch(context)
 
     assert persisted_profile.profile_digest == binding.profile_digest
-    assert launch_policy_sha256 != binding.profile_digest
+    assert profile.profile_digest == binding.profile_digest
+    assert profile.resources == binding.resources
+    assert profile.resource_domains[0].node_ids == binding.node_ids
+    assert controller_digest != binding.profile_digest
+    assert registered_executor.controller_authority_sha256 == controller_digest
     assert rendered.ownership_proof.metadata.binding == binding
-    assert rendered.ownership_proof.metadata.launch_policy_sha256 == launch_policy_sha256
+    assert rendered.ownership_proof.metadata.controller_authority_sha256 == controller_digest
 
 
 async def test_queue_never_crosses_pool(capacity_session: AsyncSession) -> None:
@@ -756,7 +798,6 @@ async def test_release_requires_matching_protected_and_physical_terminal_evidenc
         binding=binding,
         controller_authority_sha256="c" * 64,
         trusted_launcher_sha256="7" * 64,
-        launch_policy_sha256="f" * 64,
         slurm_cluster="gb10-controller",
         submitter_identity="loom",
         association="loom",

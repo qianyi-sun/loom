@@ -540,7 +540,6 @@ class ExecutableOwnershipMetadataV2(StrictV2Model):
     binding: ExecutableIntentBindingV2
     controller_authority_sha256: Digest
     trusted_launcher_sha256: Digest
-    launch_policy_sha256: Digest
     slurm_cluster: Identifier
     submitter_identity: Identifier
     association: Identifier

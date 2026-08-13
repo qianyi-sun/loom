@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -39,7 +40,7 @@ _SUBMITTED_AT = datetime(2026, 8, 13, 16, 0, tzinfo=UTC)
 
 
 def operator_profile_fixture() -> OperatorLaunchProfileV2:
-    return OperatorLaunchProfileV2(
+    profile = OperatorLaunchProfileV2(
         pool_id="oldlab",
         pool_generation=8,
         profile_id="oldlab-a100",
@@ -47,7 +48,7 @@ def operator_profile_fixture() -> OperatorLaunchProfileV2:
         profile_digest="8" * 64,
         shape_id="oldlab-a100-one-slot",
         concurrency_slots=1,
-        controller_authority_sha256="1" * 64,
+        controller_authority_sha256="0" * 64,
         slurm_cluster="oldlab",
         controller_host="ctl.oldlab.internal",
         partition="loom",
@@ -88,6 +89,11 @@ def operator_profile_fixture() -> OperatorLaunchProfileV2:
         ),
         trusted_launcher_release_sha256="3" * 64,
         image_digest="registry.internal/loom/worker@sha256:" + "4" * 64,
+    )
+    return profile.model_copy(
+        update={
+            "controller_authority_sha256": canonical_launch_policy_digest(profile),
+        }
     )
 
 
@@ -153,7 +159,6 @@ def launch_context_fixture(
             public_key_sha256=public_key_fingerprint(private_key.public_key()),
         ),
         submitted_at=_SUBMITTED_AT,
-        launch_policy_sha256=canonical_launch_policy_digest(profile),
         candidate_diagnostic=candidate_diagnostic,
         display_diagnostic=display_diagnostic,
     )
@@ -210,9 +215,11 @@ def test_render_returns_task6_request_and_signed_complete_ownership_evidence() -
 
     assert render_launch_request(context) == rendered.request
     assert rendered.ownership_proof.metadata.binding == context.binding
-    assert rendered.ownership_proof.metadata.controller_authority_sha256 == "1" * 64
+    assert (
+        rendered.ownership_proof.metadata.controller_authority_sha256
+        == canonical_launch_policy_digest(context.profile)
+    )
     assert rendered.ownership_proof.metadata.trusted_launcher_sha256 == "2" * 64
-    assert rendered.ownership_proof.metadata.launch_policy_sha256 == context.launch_policy_sha256
     assert rendered.ownership_proof.metadata.slurm_cluster == "oldlab"
     assert rendered.ownership_proof.metadata.submitter_identity == "loom-oldlab"
     assert rendered.ownership_proof.metadata.association == "loom-executor"
@@ -313,7 +320,6 @@ def test_proof_verification_rejects_every_changed_binding_group_and_unregistered
         (
             proof.metadata.model_copy(update={"controller_authority_sha256": "9" * 64}),
             proof.metadata.model_copy(update={"trusted_launcher_sha256": "9" * 64}),
-            proof.metadata.model_copy(update={"launch_policy_sha256": "9" * 64}),
             proof.metadata.model_copy(update={"slurm_cluster": "other"}),
             proof.metadata.model_copy(update={"submitter_identity": "other"}),
             proof.metadata.model_copy(update={"association": "other"}),
@@ -392,26 +398,124 @@ def test_launcher_content_and_trusted_release_cannot_substitute_for_each_other()
     )
 
 
-def test_existing_profile_digest_and_launch_policy_commitment_remain_distinct() -> None:
+def test_existing_profile_digest_and_controller_commitment_remain_distinct() -> None:
     context = launch_context_fixture()
 
     assert context.binding.profile_digest == "8" * 64
     assert context.profile.profile_digest == "8" * 64
-    assert context.launch_policy_sha256 != context.binding.profile_digest
-    assert canonical_launch_policy_digest(context.profile) == context.launch_policy_sha256
+    assert context.controller_authority.controller_authority_sha256 != (
+        context.binding.profile_digest
+    )
+    assert canonical_launch_policy_digest(context.profile) == (
+        context.controller_authority.controller_authority_sha256
+    )
     assert render_launch_request(context).operation_id == context.binding.intent_id
 
 
-def test_every_operator_scheduler_field_is_committed_by_launch_policy_digest() -> None:
+def test_caller_cannot_replace_policy_under_registered_controller_authority() -> None:
+    context = launch_context_fixture()
+    changed_profile = context.profile.model_copy(update={"partition": "attacker"})
+    changed_context = replace(
+        context,
+        profile=changed_profile,
+    )
+
+    with pytest.raises(TrustedLaunchRenderError, match="controller authority"):
+        render_launch_request(changed_context)
+
+
+def test_profile_scoped_fields_must_match_manager_binding() -> None:
     context = launch_context_fixture()
     profile = context.profile
-    other_slot_resources = profile.resources.model_copy(update={"slots": 2})
-    other_cpu_resources = profile.resources.model_copy(update={"cpu_millicores": 8_000})
-    other_memory_resources = profile.resources.model_copy(update={"memory_bytes": 1_073_741_824})
-    other_gpu_resources = profile.resources.model_copy(update={"gpu_count": 1})
-    other_generic_resources = profile.resources.model_copy(
-        update={"generic": {"fpga": 2, "gpu_a100": 2}}
+    two_slot_resources = profile.resources.model_copy(update={"slots": 2})
+    changed_profiles = (
+        profile.model_copy(update={"profile_id": "other-profile"}),
+        profile.model_copy(update={"profile_generation": 90}),
+        profile.model_copy(update={"profile_digest": "9" * 64}),
+        profile.model_copy(update={"shape_id": "other-shape"}),
+        profile.model_copy(update={"concurrency_slots": 2, "resources": two_slot_resources}),
+        profile.model_copy(
+            update={
+                "resources": profile.resources.model_copy(update={"memory_bytes": 34_359_738_368})
+            }
+        ),
     )
+
+    for changed_profile in changed_profiles:
+        with pytest.raises(TrustedLaunchRenderError, match="profile identity"):
+            render_launch_request(replace(context, profile=changed_profile))
+
+
+def test_controller_commitment_field_and_execution_release_are_cross_checked() -> None:
+    context = launch_context_fixture()
+    changed_commitment = context.profile.model_copy(
+        update={"controller_authority_sha256": "9" * 64}
+    )
+    with pytest.raises(TrustedLaunchRenderError, match="controller authority"):
+        render_launch_request(replace(context, profile=changed_commitment))
+
+    changed_release = context.profile.model_copy(
+        update={"trusted_launcher_release_sha256": "9" * 64}
+    )
+    changed_policy_digest = canonical_launch_policy_digest(changed_release)
+    changed_release = changed_release.model_copy(
+        update={"controller_authority_sha256": changed_policy_digest}
+    )
+    changed_authority = context.controller_authority.model_copy(
+        update={"controller_authority_sha256": changed_policy_digest}
+    )
+    with pytest.raises(TrustedLaunchRenderError, match="execution fence"):
+        render_launch_request(
+            replace(
+                context,
+                profile=changed_release,
+                controller_authority=changed_authority,
+            )
+        )
+
+
+def test_launch_policy_digest_excludes_controller_commitment() -> None:
+    profile = operator_profile_fixture()
+    changed_commitment = profile.model_copy(update={"controller_authority_sha256": "9" * 64})
+
+    assert canonical_launch_policy_digest(changed_commitment) == (
+        canonical_launch_policy_digest(profile)
+    )
+
+
+def test_distinct_profiles_and_shapes_share_one_pool_controller_authority() -> None:
+    context = launch_context_fixture()
+    second_resources = context.profile.resources.model_copy(
+        update={"slots": 2, "cpu_millicores": 8_000}
+    )
+    second_profile = context.profile.model_copy(
+        update={
+            "profile_id": "oldlab-a100-batch",
+            "profile_generation": 10,
+            "profile_digest": "9" * 64,
+            "shape_id": "oldlab-a100-two-slot",
+            "concurrency_slots": 2,
+            "cpus": 8,
+            "resources": second_resources,
+        }
+    )
+    second_context = replace(
+        context,
+        binding=intent_fixture(second_profile),
+        profile=second_profile,
+    )
+
+    assert canonical_launch_policy_digest(second_profile) == (
+        context.controller_authority.controller_authority_sha256
+    )
+    request = render_launch_request(second_context)
+    assert request.cpus == 8
+    assert request.operation_id == second_context.binding.intent_id
+
+
+def test_every_pool_wide_scheduler_field_is_committed_by_launch_policy_digest() -> None:
+    context = launch_context_fixture()
+    profile = context.profile
     other_domain_features = (
         profile.resource_domains[0].model_copy(update={"features": ("x86_64",)}),
     )
@@ -432,12 +536,6 @@ def test_every_operator_scheduler_field_is_committed_by_launch_policy_digest() -
     changed_fields: tuple[tuple[str, object], ...] = (
         ("pool_id", "gb10"),
         ("pool_generation", 90),
-        ("profile_id", "other-profile"),
-        ("profile_generation", 90),
-        ("profile_digest", "9" * 64),
-        ("shape_id", "other-shape"),
-        ("concurrency_slots", 2),
-        ("controller_authority_sha256", "9" * 64),
         ("slurm_cluster", "other"),
         ("controller_host", "other.internal"),
         ("partition", "other"),
@@ -448,12 +546,6 @@ def test_every_operator_scheduler_field_is_committed_by_launch_policy_digest() -
         ("resource_domains", other_domain_features),
         ("resource_domains", other_domain_id),
         ("resource_domains", other_domain_nodes),
-        ("cpus", 8),
-        ("resources", other_slot_resources),
-        ("resources", other_cpu_resources),
-        ("resources", other_memory_resources),
-        ("resources", other_gpu_resources),
-        ("resources", other_generic_resources),
         ("generic_tres", other_tres_name),
         ("generic_tres", other_resource_name),
         ("time_limit_seconds", 7_200),
@@ -467,7 +559,9 @@ def test_every_operator_scheduler_field_is_committed_by_launch_policy_digest() -
         ("image_digest", "registry.internal/loom/worker@sha256:" + "9" * 64),
     )
 
-    assert canonical_launch_policy_digest(profile) == context.launch_policy_sha256
+    assert canonical_launch_policy_digest(profile) == (
+        context.controller_authority.controller_authority_sha256
+    )
     for field, value in changed_fields:
         changed = profile.model_copy(update={field: value})
         with pytest.raises(TrustedLaunchRenderError, match="launch policy digest"):
@@ -478,7 +572,6 @@ def test_every_operator_scheduler_field_is_committed_by_launch_policy_digest() -
                     controller_authority=context.controller_authority,
                     ownership_key=context.ownership_key,
                     submitted_at=context.submitted_at,
-                    launch_policy_sha256=context.launch_policy_sha256,
                     candidate_diagnostic=context.candidate_diagnostic,
                     display_diagnostic=context.display_diagnostic,
                 )

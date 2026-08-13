@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 import posixpath
 import re
 from dataclasses import dataclass
@@ -23,6 +24,7 @@ from loom_capacity_executor.slurm_contracts import (
     SlurmTresValueV2,
 )
 from loom_capacity_manager.contracts import (
+    MAX_CONTRACT_BYTES,
     MAX_DOMAINS_PER_POOL,
     Digest,
     Identifier,
@@ -35,7 +37,6 @@ from loom_capacity_manager.executable_contracts import (
     SignedExecutableOwnershipProofV2,
     StrictV2Model,
     canonical_executable_bytes,
-    canonical_executable_digest,
 )
 from loom_capacity_manager.ownership import sign_executable_ownership
 
@@ -49,6 +50,16 @@ _IMAGE_DIGEST_PATTERN = (
 )
 _MAX_DIAGNOSTIC_BYTES = 64 * 1024
 _DIAGNOSTIC_HEX_LENGTH = 12
+_PROFILE_SCOPED_POLICY_FIELDS = {
+    "controller_authority_sha256",
+    "profile_id",
+    "profile_generation",
+    "profile_digest",
+    "shape_id",
+    "concurrency_slots",
+    "cpus",
+    "resources",
+}
 
 SlurmIdentifier = Annotated[
     str,
@@ -104,7 +115,7 @@ class OperatorGenericTresMappingV2(StrictV2Model):
 
 
 class OperatorLaunchProfileV2(StrictV2Model):
-    """Immutable operator-owned launch policy committed by profile digest."""
+    """Operator launch policy joined to an immutable manager profile binding."""
 
     pool_id: Identifier
     pool_generation: Annotated[int, Field(gt=0, le=(1 << 63) - 1)]
@@ -221,7 +232,6 @@ class TrustedLaunchContextV2:
     controller_authority: PoolControllerAuthorityV2
     ownership_key: ExecutorOwnershipKey
     submitted_at: datetime
-    launch_policy_sha256: str
     candidate_diagnostic: str = ""
     display_diagnostic: str = ""
 
@@ -236,8 +246,6 @@ class TrustedLaunchContextV2:
             raise TrustedLaunchRenderError("controller ownership key is invalid")
         if self.submitted_at.tzinfo is None or self.submitted_at.utcoffset() is None:
             raise TrustedLaunchRenderError("launch submission time must be timezone-aware")
-        if re.fullmatch(r"[0-9a-f]{64}", self.launch_policy_sha256) is None:
-            raise TrustedLaunchRenderError("launch policy digest is invalid")
         _diagnostic_digest(self.candidate_diagnostic, label="candidate")
         _diagnostic_digest(self.display_diagnostic, label="display")
 
@@ -251,11 +259,24 @@ class RenderedTrustedLaunchV2:
 
 
 def canonical_launch_policy_digest(profile: OperatorLaunchProfileV2) -> str:
-    """Commit every operator-owned scheduler and trusted-launch field."""
+    """Commit pool-wide launch policy without profile-scoped or self-reference fields."""
 
     if not isinstance(profile, OperatorLaunchProfileV2):
         raise TrustedLaunchRenderError("operator launch profile is invalid")
-    return canonical_executable_digest(profile)
+    payload = profile.model_dump(
+        mode="json",
+        exclude=_PROFILE_SCOPED_POLICY_FIELDS,
+    )
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("ascii")
+    if len(encoded) > MAX_CONTRACT_BYTES:
+        raise TrustedLaunchRenderError("canonical launch policy exceeds maximum byte size")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _diagnostic_digest(value: str, *, label: str) -> str:
@@ -270,9 +291,12 @@ def _diagnostic_digest(value: str, *, label: str) -> str:
 def _assert_profile_binding(context: TrustedLaunchContextV2) -> OperatorResourceDomainV2:
     binding = context.binding
     profile = context.profile
+    authority = context.controller_authority
     digest = canonical_launch_policy_digest(profile)
-    if not hmac.compare_digest(digest, context.launch_policy_sha256):
-        raise TrustedLaunchRenderError("operator launch policy digest does not match authority")
+    if not hmac.compare_digest(digest, authority.controller_authority_sha256):
+        raise TrustedLaunchRenderError(
+            "operator launch policy digest does not match controller authority"
+        )
 
     # Revalidate after the digest check so model_copy cannot bypass profile invariants.
     OperatorLaunchProfileV2.model_validate(profile.model_dump(mode="python"))
@@ -287,7 +311,6 @@ def _assert_profile_binding(context: TrustedLaunchContextV2) -> OperatorResource
         or binding.resources != profile.resources
     ):
         raise TrustedLaunchRenderError("operator profile identity does not match intent")
-    authority = context.controller_authority
     if (
         authority.pool_id != profile.pool_id
         or authority.pool_id != binding.pool_id
@@ -320,7 +343,7 @@ def _assert_profile_binding(context: TrustedLaunchContextV2) -> OperatorResource
 def build_executable_ownership_metadata(
     context: TrustedLaunchContextV2,
 ) -> ExecutableOwnershipMetadataV2:
-    """Build direct cross-checks around the digest-committed intent/profile pair."""
+    """Build direct cross-checks around the bound intent and controller policy."""
 
     _assert_profile_binding(context)
     profile = context.profile
@@ -328,7 +351,6 @@ def build_executable_ownership_metadata(
         binding=context.binding,
         controller_authority_sha256=context.controller_authority.controller_authority_sha256,
         trusted_launcher_sha256=profile.launcher.sha256,
-        launch_policy_sha256=context.launch_policy_sha256,
         slurm_cluster=profile.slurm_cluster,
         submitter_identity=profile.submitter,
         association=profile.association,

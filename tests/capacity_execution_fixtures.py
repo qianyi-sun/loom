@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -88,7 +89,11 @@ def execution_acknowledgement(
     )
 
 
-def executor_binding(pool_id: str) -> PreparedExecutorBindingV2:
+def executor_binding(
+    pool_id: str,
+    *,
+    controller_authority_sha256: str | None = None,
+) -> PreparedExecutorBindingV2:
     private_key = EXECUTOR_KEYS[pool_id]
     return PreparedExecutorBindingV2(
         pool_id=pool_id,
@@ -97,24 +102,44 @@ def executor_binding(pool_id: str) -> PreparedExecutorBindingV2:
         executor_incarnation=EXECUTOR_INCARNATIONS[pool_id],
         signing_key_sha256=public_key_fingerprint(private_key.public_key()),
         local_authority_sha256=("a" if pool_id == "gb10" else "b") * 64,
-        controller_authority_sha256=CONTROLLER_DIGESTS[pool_id],
+        controller_authority_sha256=(
+            CONTROLLER_DIGESTS[pool_id]
+            if controller_authority_sha256 is None
+            else controller_authority_sha256
+        ),
     )
 
 
 def execution_policy(
     candidate: CandidateBindingV2 | None = None,
+    *,
+    controller_digests: Mapping[str, str] | None = None,
 ) -> ExecutionPreparationPolicyV2:
+    resolved_controller_digests = {
+        pool_id: (
+            CONTROLLER_DIGESTS[pool_id]
+            if controller_digests is None
+            else controller_digests.get(pool_id, CONTROLLER_DIGESTS[pool_id])
+        )
+        for pool_id in ("gb10", "oldlab")
+    }
     return ExecutionPreparationPolicyV2(
         trusted_fleet_release_sha256=TRUSTED_RELEASE,
         executable_new_capacity_ceiling=1,
         executable_new_capacity_rate_per_minute=1,
-        executors=tuple(executor_binding(pool_id) for pool_id in ("gb10", "oldlab")),
+        executors=tuple(
+            executor_binding(
+                pool_id,
+                controller_authority_sha256=resolved_controller_digests[pool_id],
+            )
+            for pool_id in ("gb10", "oldlab")
+        ),
         subject_acknowledgements=(execution_acknowledgement(candidate),),
         rollback_evidence_sha256="6" * 64,
         controller_authorities=tuple(
             PoolControllerAuthorityV2(
                 pool_id=pool_id,
-                controller_authority_sha256=CONTROLLER_DIGESTS[pool_id],
+                controller_authority_sha256=resolved_controller_digests[pool_id],
             )
             for pool_id in ("gb10", "oldlab")
         ),
@@ -138,6 +163,14 @@ async def setup_execution(
     execution_policy: ExecutionPreparationPolicyV2 | None = None,
     candidate: CandidateBindingV2 | None = None,
 ) -> PreparedExecutionFixture:
+    controller_digests = dict(CONTROLLER_DIGESTS)
+    if execution_policy is not None:
+        controller_digests.update(
+            {
+                authority.pool_id: authority.controller_authority_sha256
+                for authority in execution_policy.controller_authorities
+            }
+        )
     for table in reversed(Base.metadata.sorted_tables):
         if table.name != CapacityAuthorityState.__tablename__:
             await session.execute(delete(table))
@@ -244,7 +277,7 @@ async def setup_execution(
                 executor_incarnation=registration.executor_incarnation,
                 signing_key_sha256=registration.signing_key_sha256,
                 local_authority_sha256=registration.local_authority_sha256,
-                controller_authority_sha256=CONTROLLER_DIGESTS[pool_id],
+                controller_authority_sha256=controller_digests[pool_id],
             )
         )
 
