@@ -9,7 +9,6 @@ from scripts.ops.global_dev_fleet_autoscaler_external_once import (
     GlobalDevExternalError,
     InstanceSnapshot,
     _atomic_write,
-    _main,
     _parser,
     _prune_worker_env_files,
     _read_secret_file,
@@ -159,72 +158,16 @@ def test_parser_accepts_the_manager_execution_witness(tmp_path: Path) -> None:
             "dev-aaaaaaaa",
             "--global-execution-witness-json",
             str(witness),
+            "--manager-public-key",
+            "/run/loom/global-execution-manager.pub",
+            "--expected-manager-public-key-sha256",
+            "a" * 64,
         ]
     )
 
     assert args.global_execution_witness_json == witness
 
 
-@pytest.mark.asyncio
-async def test_missing_witness_skips_the_legacy_broker_and_reports_a_fenced_tick(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    protected = tmp_path / "protected"
-    protected.mkdir(mode=0o700)
-    protected.chmod(0o700)
-    management = protected / "management-db-url"
-    admin = protected / "admin-db-url"
-    for path in (management, admin):
-        path.write_text("postgresql://loom:secret@db/loom\n", encoding="utf-8")
-        path.chmod(0o600)
-    worker_env = protected / "worker-env"
-    worker_env.mkdir(mode=0o700)
-    worker_env.chmod(0o700)
-
-    class _Broker:
-        def __init__(self, _path: Path) -> None:
-            pass
-
-        def status(self) -> object:
-            raise AssertionError("missing witness must fence before broker mutation")
-
-    async def _no_rows(_url: str) -> list[object]:
-        return []
-
-    monkeypatch.setattr(
-        "scripts.ops.global_dev_fleet_autoscaler_external_once._registry_rows",
-        _no_rows,
-    )
-    monkeypatch.setattr(
-        "scripts.ops.global_dev_fleet_autoscaler_external_once.SharedCapacityBroker",
-        _Broker,
-    )
-    args = _parser().parse_args(
-        [
-            "--management-db-url-file",
-            str(management),
-            "--fixture-admin-db-url-file",
-            str(admin),
-            "--state-db",
-            str(protected / "state.sqlite3"),
-            "--output-json",
-            str(protected / "report.json"),
-            "--global-budget",
-            "0",
-            "--worker-env-dir",
-            str(worker_env),
-            "--worker-minio-endpoint",
-            "https://minio.example",
-            "--image-tag",
-            "dev-aaaaaaaa",
-        ]
-    )
-
-    result = await _main(args)
-
-    assert result == {
-        "authority": "global-dev-fleet-autoscaler",
-        "aggregate": {"legacy_scale_up_fenced": True},
-        "instances": 0,
-    }
+def test_external_parser_requires_independent_manager_trust_inputs() -> None:
+    with pytest.raises(SystemExit):
+        _parser().parse_args([])

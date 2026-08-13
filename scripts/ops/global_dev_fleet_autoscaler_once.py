@@ -15,6 +15,10 @@ from loom_control_plane.global_dev_fleet_autoscaler import (
     GlobalDevAutoscalerError,
     GlobalDevFleetAutoscaler,
 )
+from loom_control_plane.global_execution_fence import (
+    GlobalExecutionFenceError,
+    load_global_execution_witness,
+)
 from loom_control_plane.shared_capacity_broker import (
     BrokerBudgets,
     BrokerError,
@@ -53,6 +57,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--pool-pending-budget", action="append", default=[])
     parser.add_argument("--snapshot-freshness-seconds", type=int, default=120)
     parser.add_argument("--lease-ttl-seconds", type=int, default=300)
+    parser.add_argument("--global-execution-witness-json", type=Path, required=True)
+    parser.add_argument("--manager-public-key", type=Path, required=True)
+    parser.add_argument("--expected-manager-public-key-sha256", required=True)
     return parser
 
 
@@ -131,11 +138,16 @@ def main() -> int:
                 pool_pending_slots=pending_slots,
             ),
             observations=observations,
+            execution_witness=load_global_execution_witness(
+                args.global_execution_witness_json,
+                manager_public_key_path=args.manager_public_key,
+                expected_manager_public_key_sha256=args.expected_manager_public_key_sha256,
+            ),
         )
         _atomic_write(args.output_json, report)
         print(json.dumps({"authority": report["authority"], "aggregate": report["aggregate"]}))
-        return 0
-    except (BrokerError, GlobalDevAutoscalerError) as exc:
+        return 0 if report["status"] == "ok" else 2
+    except (BrokerError, GlobalDevAutoscalerError, GlobalExecutionFenceError) as exc:
         sys.stderr.write(f"error: {exc}\n")
         return 2
 

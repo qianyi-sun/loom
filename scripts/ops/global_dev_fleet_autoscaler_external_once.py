@@ -123,8 +123,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--global-execution-witness-json",
         type=Path,
+        required=True,
         help="Authenticated manager witness; absence permits drain only.",
     )
+    parser.add_argument("--manager-public-key", type=Path, required=True)
+    parser.add_argument("--expected-manager-public-key-sha256", required=True)
     return parser
 
 
@@ -447,7 +450,6 @@ async def _reconcile_instance(
                 capacity_grants=grants,
                 deployment_generation=snapshot.deployment_generation,
                 global_execution_witness=global_execution_witness,
-                global_execution_witness_required=True,
             )
             await session.commit()
     except Exception as exc:
@@ -472,6 +474,8 @@ async def _main(args: argparse.Namespace) -> dict[str, object]:
     admin_url = _read_secret_file(args.fixture_admin_db_url_file, "fixture admin DB URL file")
     global_execution_witness = load_global_execution_witness(
         args.global_execution_witness_json,
+        manager_public_key_path=args.manager_public_key,
+        expected_manager_public_key_sha256=args.expected_manager_public_key_sha256,
     )
     _validate_owner_only_directory(args.worker_env_dir, "worker environment directory")
     _validate_owner_only_directory(args.output_json.parent, "grant report directory")
@@ -514,7 +518,6 @@ async def _main(args: argparse.Namespace) -> dict[str, object]:
                 expected_authority="global-capacity-manager",
                 expected_pool_id=pool_id,
                 now=now,
-                required=True,
             )
         broker = SharedCapacityBroker(args.state_db)
         report = GlobalDevFleetAutoscaler(
@@ -526,7 +529,6 @@ async def _main(args: argparse.Namespace) -> dict[str, object]:
             budgets,
             observations=_lease_observations(broker, snapshots),
             execution_witness=global_execution_witness,
-            execution_witness_required=True,
         )
     except GlobalExecutionFenceError:
         # Do not touch the legacy broker or mint worker credentials.  The
@@ -536,13 +538,14 @@ async def _main(args: argparse.Namespace) -> dict[str, object]:
         report = {
             "schema_version": 1,
             "authority": "global-dev-fleet-autoscaler",
+            "status": "fenced",
             "generated_at": now.isoformat().replace("+00:00", "Z"),
             "demands": [demand.public_dict() for demand in demands],
             "grants": [],
             "aggregate": {"legacy_scale_up_fenced": True},
         }
     _write_report(args.output_json, report)
-    grants = capacity_grants_from_report(report)
+    grants = capacity_grants_from_report(report) if report["status"] == "ok" else {}
     kubectl = KubectlClient(args.kubectl, context=args.kube_context)
     for snapshot in snapshots:
         # Provisioning/failed/deleting instances publish zero demand and must
@@ -561,6 +564,7 @@ async def _main(args: argparse.Namespace) -> dict[str, object]:
         "authority": report["authority"],
         "aggregate": report["aggregate"],
         "instances": len(snapshots),
+        "status": report["status"],
     }
 
 
@@ -568,7 +572,7 @@ def main() -> int:
     try:
         result = asyncio.run(_main(_parser().parse_args()))
         print(json.dumps(result, sort_keys=True))
-        return 0
+        return 0 if result["status"] == "ok" else 2
     except (BrokerError, GlobalDevAutoscalerError, GlobalDevExternalError):
         sys.stderr.write("error: global development fleet reconcile failed safely\n")
         return 2

@@ -143,8 +143,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--global-execution-witness-json",
         type=Path,
-        help="Authenticated manager witness; absence permits drain only.",
+        required=True,
+        help="Pinned-key manager witness required before local scale-up.",
     )
+    parser.add_argument("--manager-public-key", type=Path, required=True)
+    parser.add_argument("--expected-manager-public-key-sha256", required=True)
     parser.add_argument(
         "--validate-only",
         action="store_true",
@@ -622,9 +625,6 @@ async def _main_async(args: argparse.Namespace) -> None:
     environment = _scoped_environment(args.environment)
     pool_names = _scoped_pool_names(args.pool_name)
     capacity_grants = _load_capacity_grants(args)
-    global_execution_witness = load_global_execution_witness(
-        args.global_execution_witness_json,
-    )
     if capacity_grants is None and any(
         dev_pool_instance_name(pool_name) is not None for pool_name in pool_names
     ):
@@ -661,6 +661,11 @@ async def _main_async(args: argparse.Namespace) -> None:
         return
     db_url = _load_cp_db_url(args, timeout_sec=db_connect_timeout_sec)
     url = _preflight_database_url(db_url, port_forward=port_forward)
+    global_execution_witness = load_global_execution_witness(
+        args.global_execution_witness_json,
+        manager_public_key_path=args.manager_public_key,
+        expected_manager_public_key_sha256=args.expected_manager_public_key_sha256,
+    )
     with _database_port_forward(port_forward):
         engine = create_async_engine(url, pool_pre_ping=True)
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -683,7 +688,6 @@ async def _main_async(args: argparse.Namespace) -> None:
                     "external_only": True,
                     "pool_names": pool_names,
                     "global_execution_witness": global_execution_witness,
-                    "global_execution_witness_required": True,
                 }
                 if capacity_grants is not None:
                     reconcile_kwargs["capacity_grants"] = capacity_grants

@@ -11,11 +11,15 @@ Covers the three collaborators of the Slurm prod-pressure drain that share the
 
 from __future__ import annotations
 
+import base64
+import hashlib
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import delete, insert, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -34,6 +38,10 @@ from loom_control_plane.elastic_slurm_worker_controller import (
     ElasticSlurmWorkerControllerConfig,
     SlurmNodeResource,
     SlurmWorkerCommandRunner,
+)
+from loom_control_plane.global_execution_fence import (
+    GlobalExecutionWitness,
+    canonical_global_execution_witness_bytes,
 )
 from loom_control_plane.prod_pressure_control import (
     ProdPressureSignal,
@@ -69,6 +77,30 @@ _SLURM_ACTUATOR_CONFIG = {
 }
 
 
+def _witness(now: datetime) -> GlobalExecutionWitness:
+    private_key = Ed25519PrivateKey.from_private_bytes(bytes([11]) * 32)
+    public_key = private_key.public_key()
+    payload: dict[str, object] = {
+        "authority": "global-capacity-manager",
+        "pool_id": "oldlab",
+        "execution_epoch": 0,
+        "execution_state": "shadow",
+        "executable_new_capacity_ceiling": 0,
+        "expires_at": (now + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
+        "signing_key_id": "integration-test-manager",
+    }
+    canonical = canonical_global_execution_witness_bytes(payload)
+    payload["canonical_digest"] = hashlib.sha256(canonical).hexdigest()
+    payload["signature_base64"] = base64.b64encode(private_key.sign(canonical)).decode("ascii")
+    return GlobalExecutionWitness.from_mapping(
+        payload,
+        public_key=public_key,
+        expected_public_key_sha256=hashlib.sha256(
+            public_key.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+        ).hexdigest(),
+    )
+
+
 class FakeSlurmRunner(SlurmWorkerCommandRunner):
     def __init__(self) -> None:
         self.submitted_nodes: list[str] = []
@@ -87,8 +119,7 @@ class FakeSlurmRunner(SlurmWorkerCommandRunner):
         if self.job_observations is not None:
             return self.job_observations
         return [
-            SlurmWorkerJobObservation(job_id=job_id, slurm_state="RUNNING")
-            for job_id in job_ids
+            SlurmWorkerJobObservation(job_id=job_id, slurm_state="RUNNING") for job_id in job_ids
         ]
 
     async def submit_worker(
@@ -164,9 +195,11 @@ async def test_handler_slurm_pool_records_drain_intent_without_gb10_state(
     now = datetime(2026, 7, 21, 12, 0, tzinfo=UTC)
     try:
         async with session_factory() as s:
-            await s.execute(insert(WorkerPoolAutoscalerPolicy).values(
-                **_slurm_policy_values(),
-            ))
+            await s.execute(
+                insert(WorkerPoolAutoscalerPolicy).values(
+                    **_slurm_policy_values(),
+                )
+            )
             await s.commit()
 
         async with session_factory() as s:
@@ -193,9 +226,11 @@ async def test_handler_slurm_pool_records_drain_intent_without_gb10_state(
         assert result["new_staging_claims_allowed"] is False
 
         async with session_factory() as s:
-            policy = (await s.execute(
-                select(WorkerPoolAutoscalerPolicy),
-            )).scalar_one()
+            policy = (
+                await s.execute(
+                    select(WorkerPoolAutoscalerPolicy),
+                )
+            ).scalar_one()
         assert policy.prod_pressure_state is not None
         assert policy.prod_pressure_state["state"] == "draining"
     finally:
@@ -210,9 +245,11 @@ async def test_handler_slurm_pool_recovers_and_clears_intent(
     now = datetime(2026, 7, 21, 12, 0, tzinfo=UTC)
     try:
         async with session_factory() as s:
-            await s.execute(insert(WorkerPoolAutoscalerPolicy).values(
-                **_slurm_policy_values(),
-            ))
+            await s.execute(
+                insert(WorkerPoolAutoscalerPolicy).values(
+                    **_slurm_policy_values(),
+                )
+            )
             await s.commit()
 
         async with session_factory() as s:
@@ -244,9 +281,11 @@ async def test_handler_slurm_pool_recovers_and_clears_intent(
         assert result["new_staging_claims_allowed"] is True
 
         async with session_factory() as s:
-            policy = (await s.execute(
-                select(WorkerPoolAutoscalerPolicy),
-            )).scalar_one()
+            policy = (
+                await s.execute(
+                    select(WorkerPoolAutoscalerPolicy),
+                )
+            ).scalar_one()
         assert policy.prod_pressure_state is None
     finally:
         await engine.dispose()
@@ -260,9 +299,11 @@ async def test_handler_slurm_grace_progresses_from_wait_to_cancel_retryable(
     start = datetime(2026, 7, 21, 12, 0, tzinfo=UTC)
     try:
         async with session_factory() as s:
-            await s.execute(insert(WorkerPoolAutoscalerPolicy).values(
-                **_slurm_policy_values(),
-            ))
+            await s.execute(
+                insert(WorkerPoolAutoscalerPolicy).values(
+                    **_slurm_policy_values(),
+                )
+            )
             await s.commit()
 
         async with session_factory() as s:
@@ -279,9 +320,11 @@ async def test_handler_slurm_grace_progresses_from_wait_to_cancel_retryable(
         assert first["grace"]["action"] == "wait"
 
         async with session_factory() as s:
-            policy = (await s.execute(
-                select(WorkerPoolAutoscalerPolicy),
-            )).scalar_one()
+            policy = (
+                await s.execute(
+                    select(WorkerPoolAutoscalerPolicy),
+                )
+            ).scalar_one()
             started_at = policy.prod_pressure_state["started_at"]
 
         async with session_factory() as s:
@@ -298,9 +341,11 @@ async def test_handler_slurm_grace_progresses_from_wait_to_cancel_retryable(
         assert second["grace"]["action"] == "cancel_retryable"
 
         async with session_factory() as s:
-            policy = (await s.execute(
-                select(WorkerPoolAutoscalerPolicy),
-            )).scalar_one()
+            policy = (
+                await s.execute(
+                    select(WorkerPoolAutoscalerPolicy),
+                )
+            ).scalar_one()
         # started_at is preserved across ticks (grace clock is not reset).
         assert policy.prod_pressure_state["started_at"] == started_at
         assert policy.prod_pressure_state["last_grace_action"] == "cancel_retryable"
@@ -316,13 +361,15 @@ async def test_handler_gb10_pool_still_requires_desired_state(
     now = datetime(2026, 7, 21, 12, 0, tzinfo=UTC)
     try:
         async with session_factory() as s:
-            await s.execute(insert(WorkerPoolAutoscalerPolicy).values(
-                **_slurm_policy_values(
-                    pool_name="gb10",
-                    actuator="gb10",
-                    actuator_config={"backend": "docker", "cpu_arch": "arm64"},
-                ),
-            ))
+            await s.execute(
+                insert(WorkerPoolAutoscalerPolicy).values(
+                    **_slurm_policy_values(
+                        pool_name="gb10",
+                        actuator="gb10",
+                        actuator_config={"backend": "docker", "cpu_arch": "arm64"},
+                    ),
+                )
+            )
             await s.commit()
 
         # GB10 dispatch is unchanged: without a desired state it raises.
@@ -359,50 +406,61 @@ def _running_job_observation(
 
 
 async def _seed_running_slurm_worker(
-    session_factory, *, now: datetime, prod_pressure_state: dict | None,
+    session_factory,
+    *,
+    now: datetime,
+    prod_pressure_state: dict | None,
 ) -> tuple[object, str]:
     worker_id = uuid4()
     job_id = "9001"
     async with session_factory() as s:
-        await s.execute(insert(Worker).values(
-            id=worker_id,
-            hostname="oldlab-1",
-            version="test",
-            capabilities=[{
-                "backend": "docker",
-                "os": "linux",
-                "cpu_arch": "x86_64",
-                "gpu_vendor": "none",
-                "network_policies": ["none"],
-            }],
-            max_concurrent=6,
-            pool_name="oldlab",
-            drain_state="active",
-            registered_at=now,
-            last_seen_at=now,
-            status="active",
-        ))
-        await s.execute(insert(SlurmWorkerJob).values(
-            environment="staging",
-            pool_name="oldlab",
-            nodelist="oldlab-1",
-            requested_cpus=12,
-            requested_memory_mib=58000,
-            requested_concurrency=6,
-            job_id=job_id,
-            slurm_state="RUNNING",
-            state="running",
-            worker_id=worker_id,
-            redacted_env={
-                "LOOM_REMOTE_WORKER_ENV_FILE": "/secure/.env.remote-worker",
-                "LOOM_REMOTE_WORKER_REPO_DIR": "/opt/loom",
-            },
-            submitted_at=now - timedelta(seconds=900),
-            started_at=now - timedelta(seconds=800),
-        ))
-        await s.execute(insert(WorkerPoolAutoscalerPolicy).values(
-            **_slurm_policy_values(prod_pressure_state=prod_pressure_state),
-        ))
+        await s.execute(
+            insert(Worker).values(
+                id=worker_id,
+                hostname="oldlab-1",
+                version="test",
+                capabilities=[
+                    {
+                        "backend": "docker",
+                        "os": "linux",
+                        "cpu_arch": "x86_64",
+                        "gpu_vendor": "none",
+                        "network_policies": ["none"],
+                    }
+                ],
+                max_concurrent=6,
+                pool_name="oldlab",
+                drain_state="active",
+                registered_at=now,
+                last_seen_at=now,
+                status="active",
+            )
+        )
+        await s.execute(
+            insert(SlurmWorkerJob).values(
+                environment="staging",
+                pool_name="oldlab",
+                nodelist="oldlab-1",
+                requested_cpus=12,
+                requested_memory_mib=58000,
+                requested_concurrency=6,
+                job_id=job_id,
+                slurm_state="RUNNING",
+                state="running",
+                worker_id=worker_id,
+                redacted_env={
+                    "LOOM_REMOTE_WORKER_ENV_FILE": "/secure/.env.remote-worker",
+                    "LOOM_REMOTE_WORKER_REPO_DIR": "/opt/loom",
+                },
+                submitted_at=now - timedelta(seconds=900),
+                started_at=now - timedelta(seconds=800),
+            )
+        )
+        await s.execute(
+            insert(WorkerPoolAutoscalerPolicy).values(
+                **_slurm_policy_values(prod_pressure_state=prod_pressure_state),
+            )
+        )
         await s.commit()
     return worker_id, job_id
 
@@ -426,12 +484,19 @@ async def test_actor_cancels_jobs_when_grace_is_cancel_retryable(
         runner = FakeSlurmRunner()
         runner.job_observations = [
             _running_job_observation(
-                job_id=job_id, nodelist="oldlab-1", worker_id=worker_id, now=now,
+                job_id=job_id,
+                nodelist="oldlab-1",
+                worker_id=worker_id,
+                now=now,
             ),
         ]
         async with session_factory() as s:
             results = await reconcile_worker_pool_autoscaler_once(
-                s, environment="staging", now=now, slurm_runner=runner,
+                s,
+                environment="staging",
+                now=now,
+                slurm_runner=runner,
+                global_execution_witness=_witness(now),
             )
             await s.commit()
 
@@ -443,9 +508,11 @@ async def test_actor_cancels_jobs_when_grace_is_cancel_retryable(
         async with session_factory() as s:
             worker = await s.get(Worker, worker_id)
             job = (await s.execute(select(SlurmWorkerJob))).scalar_one()
-            policy = (await s.execute(
-                select(WorkerPoolAutoscalerPolicy),
-            )).scalar_one()
+            policy = (
+                await s.execute(
+                    select(WorkerPoolAutoscalerPolicy),
+                )
+            ).scalar_one()
 
         assert worker is not None
         assert worker.drain_state == "drained"
@@ -476,12 +543,19 @@ async def test_actor_holds_without_cancel_when_grace_is_wait(
         runner = FakeSlurmRunner()
         runner.job_observations = [
             _running_job_observation(
-                job_id=job_id, nodelist="oldlab-1", worker_id=worker_id, now=now,
+                job_id=job_id,
+                nodelist="oldlab-1",
+                worker_id=worker_id,
+                now=now,
             ),
         ]
         async with session_factory() as s:
             results = await reconcile_worker_pool_autoscaler_once(
-                s, environment="staging", now=now, slurm_runner=runner,
+                s,
+                environment="staging",
+                now=now,
+                slurm_runner=runner,
+                global_execution_witness=_witness(now),
             )
             await s.commit()
 
@@ -512,24 +586,32 @@ async def test_actor_scales_normally_when_no_drain_intent(
             await s.execute(insert(Team).values(id=team_id, name="team-a"))
             await s.execute(insert(Task).values(id="task-a", checksum="0" * 64, config={}))
             for idx in range(3):
-                await s.execute(insert(Trial).values(
-                    id=uuid4(),
-                    team_id=team_id,
-                    task_id="task-a",
-                    config={},
-                    requires_caps={"backend": "docker", "cpu_arch": "x86_64"},
-                    state="queued",
-                    idempotency_key=f"no-intent-{idx}",
-                ))
-            await s.execute(insert(WorkerPoolAutoscalerPolicy).values(
-                **_slurm_policy_values(prod_pressure_state=None),
-            ))
+                await s.execute(
+                    insert(Trial).values(
+                        id=uuid4(),
+                        team_id=team_id,
+                        task_id="task-a",
+                        config={},
+                        requires_caps={"backend": "docker", "cpu_arch": "x86_64"},
+                        state="queued",
+                        idempotency_key=f"no-intent-{idx}",
+                    )
+                )
+            await s.execute(
+                insert(WorkerPoolAutoscalerPolicy).values(
+                    **_slurm_policy_values(prod_pressure_state=None),
+                )
+            )
             await s.commit()
 
         runner = FakeSlurmRunner()
         async with session_factory() as s:
             results = await reconcile_worker_pool_autoscaler_once(
-                s, environment="staging", now=now, slurm_runner=runner,
+                s,
+                environment="staging",
+                now=now,
+                slurm_runner=runner,
+                global_execution_witness=_witness(now),
             )
             await s.commit()
 
@@ -558,35 +640,50 @@ async def test_claim_is_fenced_while_slurm_pool_is_draining(
             await s.execute(insert(Team).values(id=team_id, name=f"a-{team_id}"))
             await s.execute(insert(TeamQuota).values(team_id=team_id))
             await s.execute(insert(Task).values(id="t", checksum="0" * 64, config={}))
-            await s.execute(insert(Trial).values(
-                id=uuid4(), team_id=team_id, task_id="t",
-                config={},
-                requires_caps={
-                    "os": "linux", "gpu_vendor": "none",
-                    "network_policies": ["public"],
-                    "worker_pool": "oldlab",
-                },
-                state="queued",
-            ))
-            await s.execute(insert(Worker).values(
-                id=worker_id, hostname="oldlab-1", version="v",
-                capabilities=[{
-                    "os": "linux", "gpu_vendor": "none",
-                    "network_policies": ["public"],
-                    "dynamic_network_policy": True, "mounted_fs": True,
-                    "resource_modes": ["auto"],
-                }],
-                pool_name="oldlab",
-                drain_state="active",
-                registered_at=now,
-                last_seen_at=now,
-                status="active",
-            ))
-            await s.execute(insert(WorkerPoolAutoscalerPolicy).values(
-                **_slurm_policy_values(
-                    prod_pressure_state={"state": "draining"},
-                ),
-            ))
+            await s.execute(
+                insert(Trial).values(
+                    id=uuid4(),
+                    team_id=team_id,
+                    task_id="t",
+                    config={},
+                    requires_caps={
+                        "os": "linux",
+                        "gpu_vendor": "none",
+                        "network_policies": ["public"],
+                        "worker_pool": "oldlab",
+                    },
+                    state="queued",
+                )
+            )
+            await s.execute(
+                insert(Worker).values(
+                    id=worker_id,
+                    hostname="oldlab-1",
+                    version="v",
+                    capabilities=[
+                        {
+                            "os": "linux",
+                            "gpu_vendor": "none",
+                            "network_policies": ["public"],
+                            "dynamic_network_policy": True,
+                            "mounted_fs": True,
+                            "resource_modes": ["auto"],
+                        }
+                    ],
+                    pool_name="oldlab",
+                    drain_state="active",
+                    registered_at=now,
+                    last_seen_at=now,
+                    status="active",
+                )
+            )
+            await s.execute(
+                insert(WorkerPoolAutoscalerPolicy).values(
+                    **_slurm_policy_values(
+                        prod_pressure_state={"state": "draining"},
+                    ),
+                )
+            )
             await s.commit()
 
         claim_kwargs = {
@@ -605,9 +702,11 @@ async def test_claim_is_fenced_while_slurm_pool_is_draining(
 
         # Clear the drain intent; the same claim now succeeds.
         async with session_factory() as s:
-            policy = (await s.execute(
-                select(WorkerPoolAutoscalerPolicy),
-            )).scalar_one()
+            policy = (
+                await s.execute(
+                    select(WorkerPoolAutoscalerPolicy),
+                )
+            ).scalar_one()
             policy.prod_pressure_state = None
             await s.commit()
 

@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from loom_control_plane.global_execution_fence import (
+    GlobalExecutionFenceError,
     GlobalExecutionWitness,
     assert_legacy_scale_up_allowed,
 )
@@ -117,8 +118,10 @@ def capacity_grants_from_report(
     document: Mapping[str, object],
 ) -> dict[tuple[str, str], AutoscalerGrantHandoff]:
     """Parse the versioned global report into exact local handoffs."""
-    if document.get("schema_version") != 1 or document.get("authority") != (
-        "global-dev-fleet-autoscaler"
+    if (
+        document.get("schema_version") != 1
+        or document.get("authority") != "global-dev-fleet-autoscaler"
+        or document.get("status") != "ok"
     ):
         raise GlobalDevAutoscalerError("capacity grant report authority is invalid")
     raw_grants = document.get("grants")
@@ -185,24 +188,33 @@ class GlobalDevFleetAutoscaler:
         *,
         observations: Sequence[LeaseObservation] = (),
         execution_witness: GlobalExecutionWitness | None = None,
-        execution_witness_required: bool = False,
     ) -> dict[str, object]:
         """Converge the complete dynamic cohort and return environment grants."""
         now = _utc(self._clock())
         normalized = tuple(demands)
-        if execution_witness_required:
-            # A single witness is bound to one physical pool.  Refuse an
-            # equivocal mixed-pool legacy request instead of calculating even
-            # one new grant against a possibly active manager epoch.
-            pool_ids = {slurm_cluster_for_pool(item.pool_name) for item in normalized}
-            for pool_id in pool_ids or {"oldlab"}:
+        # A single witness is bound to one physical pool. Refuse an equivocal
+        # mixed-pool legacy request before observing or mutating the broker.
+        try:
+            for pool_id in {slurm_cluster_for_pool(item.pool_name) for item in normalized} or {
+                "oldlab"
+            }:
                 assert_legacy_scale_up_allowed(
                     execution_witness,
                     expected_authority="global-capacity-manager",
                     expected_pool_id=pool_id,
                     now=now,
-                    required=True,
                 )
+        except GlobalExecutionFenceError as exc:
+            return {
+                "schema_version": 1,
+                "authority": "global-dev-fleet-autoscaler",
+                "status": "fenced",
+                "reason": str(exc),
+                "generated_at": _timestamp(now),
+                "demands": [demand.public_dict() for demand in normalized],
+                "grants": [],
+                "aggregate": {"legacy_scale_up_fenced": True},
+            }
         status = self.broker.status()
         self._prevalidate(normalized, observations, budgets, status=status, now=now)
 
@@ -262,6 +274,7 @@ class GlobalDevFleetAutoscaler:
         return {
             "schema_version": 1,
             "authority": "global-dev-fleet-autoscaler",
+            "status": "ok",
             "generated_at": _timestamp(now),
             "demands": [demand.public_dict() for demand in normalized],
             "budgets": ledger["budgets"],

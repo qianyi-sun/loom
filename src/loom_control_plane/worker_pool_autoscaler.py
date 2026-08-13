@@ -214,7 +214,6 @@ def apply_global_execution_fence(
     expected_authority: str,
     expected_pool_id: str,
     now: datetime | None = None,
-    required: bool,
 ) -> AutoscalerPolicyConfig:
     """Clamp a legacy writer to drain-safe zero on any manager ambiguity."""
 
@@ -224,7 +223,6 @@ def apply_global_execution_fence(
             expected_authority=expected_authority,
             expected_pool_id=expected_pool_id,
             now=now,
-            required=required,
         )
     except GlobalExecutionFenceError as exc:
         message = str(exc)
@@ -2560,16 +2558,9 @@ async def reconcile_worker_pool_autoscaler_once(
     capacity_grants: Mapping[tuple[str, str], AutoscalerGrantHandoff] | None = None,
     deployment_generation: int | None = None,
     global_execution_witness: GlobalExecutionWitness | None = None,
-    global_execution_witness_required: bool = False,
 ) -> list[AutoscalerDecision]:
     now = now or datetime.now(UTC)
     scoped_environment = _exact_autoscaler_environment(environment)
-    if not external_only:
-        await assign_neutral_queued_trials(
-            session,
-            environment=scoped_environment,
-            now=now,
-        )
     stmt = select(WorkerPoolAutoscalerPolicy).where(
         WorkerPoolAutoscalerPolicy.environment == scoped_environment,
         or_(
@@ -2597,6 +2588,24 @@ async def reconcile_worker_pool_autoscaler_once(
         .scalars()
         .all()
     )
+    legacy_scale_up_allowed = True
+    for row in policies:
+        try:
+            assert_legacy_scale_up_allowed(
+                global_execution_witness,
+                expected_authority="global-capacity-manager",
+                expected_pool_id=slurm_cluster_for_pool(row.pool_name),
+                now=now,
+            )
+        except GlobalExecutionFenceError:
+            legacy_scale_up_allowed = False
+            break
+    if not external_only and legacy_scale_up_allowed:
+        await assign_neutral_queued_trials(
+            session,
+            environment=scoped_environment,
+            now=now,
+        )
     active_activations = {
         activation.policy_id: activation
         for activation in (
@@ -2617,15 +2626,13 @@ async def reconcile_worker_pool_autoscaler_once(
         effective_policy = _apply_pipeline_scoped_activation(
             _policy_to_config(row), row, active_activations.get(row.pool_name)
         )
-        if global_execution_witness_required:
-            effective_policy = apply_global_execution_fence(
-                effective_policy,
-                global_execution_witness,
-                expected_authority="global-capacity-manager",
-                expected_pool_id=slurm_cluster_for_pool(row.pool_name),
-                now=now,
-                required=True,
-            )
+        effective_policy = apply_global_execution_fence(
+            effective_policy,
+            global_execution_witness,
+            expected_authority="global-capacity-manager",
+            expected_pool_id=slurm_cluster_for_pool(row.pool_name),
+            now=now,
+        )
         if capacity_grants is not None and dev_pool_instance_name(row.pool_name) is not None:
             effective_policy = apply_global_dev_capacity_grant(
                 effective_policy,

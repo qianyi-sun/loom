@@ -49,6 +49,12 @@ def _args(module: Any, *extra: str):
             "loom-staging",
             "--kubeconfig",
             "/etc/loom/kubeconfig/staging.yaml",
+            "--global-execution-witness-json",
+            "/run/loom/global-execution-witness.json",
+            "--manager-public-key",
+            "/run/loom/global-execution-manager.pub",
+            "--expected-manager-public-key-sha256",
+            "a" * 64,
             *extra,
         ]
     )
@@ -108,6 +114,12 @@ def test_parser_defaults_follow_service_home_and_concrete_database_service(
             "trt-oldlab",
             "--expected-slurm-controller-host",
             "TRT-EAI-OLDLAB-1",
+            "--global-execution-witness-json",
+            "/run/loom/global-execution-witness.json",
+            "--manager-public-key",
+            "/run/loom/global-execution-manager.pub",
+            "--expected-manager-public-key-sha256",
+            "a" * 64,
         ]
     )
 
@@ -601,7 +613,6 @@ def test_normal_reconcile_validates_db_before_actuation_and_owns_tunnel(
             "external_only": True,
             "pool_names": ("gb10",),
             "global_execution_witness": None,
-            "global_execution_witness_required": True,
         }
         events.append("reconcile")
         return [SimpleNamespace(action="noop")]
@@ -624,6 +635,7 @@ def test_normal_reconcile_validates_db_before_actuation_and_owns_tunnel(
         lambda _engine, *, expire_on_commit: lambda: _Session(),
     )
     monkeypatch.setattr(module, "reconcile_worker_pool_autoscaler_once", _reconcile)
+    monkeypatch.setattr(module, "load_global_execution_witness", lambda *_args, **_kwargs: None)
 
     asyncio.run(module._main_async(_args(module, "--db-local-port", "15451")))
 
@@ -735,6 +747,7 @@ def test_validate_only_uses_exact_tunnel_and_read_only_policy_query(
         lambda _engine, *, expire_on_commit: lambda: _Session(),
     )
     monkeypatch.setattr(module, "reconcile_worker_pool_autoscaler_once", _unexpected_reconcile)
+    monkeypatch.setattr(module, "load_global_execution_witness", lambda *_args, **_kwargs: None)
 
     asyncio.run(module._main_async(_args(module, "--db-local-port", "15451", "--validate-only")))
 
