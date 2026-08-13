@@ -227,14 +227,22 @@ def test_removed_registry_environment_is_cancelled(tmp_path: Path) -> None:
     report = coordinator.reconcile((), _budgets(), execution_witness=_witness(clock))
 
     assert report["grants"] == []
-    assert report["status"] == "fenced"
+    assert report["status"] == "ok"
+    requests = coordinator.broker.status()["requests"]
+    assert len(requests) == 1
+    assert requests[0]["request"]["pool"] == "gb10"
+    assert requests[0]["request"]["state"] == "draining"
+    assert requests[0]["request"]["cancel_requested"] is True
 
 
 def test_fenced_report_has_a_safe_aggregate_and_cannot_be_parsed_as_grants(
     tmp_path: Path,
 ) -> None:
     clock = Clock()
-    report = _coordinator(tmp_path, clock).reconcile((), _budgets())
+    report = _coordinator(tmp_path, clock).reconcile(
+        (_demand(clock, "dev-alice"),),
+        _budgets(),
+    )
 
     assert report["status"] == "fenced"
     assert report["aggregate"] == {"legacy_scale_up_fenced": True}

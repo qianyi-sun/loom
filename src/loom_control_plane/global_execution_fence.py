@@ -22,6 +22,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 _MAX_WITNESS_BYTES = 64 * 1024
 _MAX_PUBLIC_KEY_BYTES = 32
+_MAX_PUBLIC_KEY_FINGERPRINT_BYTES = 65
 _IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,127}$")
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _STATES = frozenset({"shadow", "prepared", "active", "drain-only"})
@@ -82,6 +83,36 @@ def canonical_global_execution_witness_bytes(value: Mapping[str, object]) -> byt
     ).encode("ascii")
 
 
+def _security_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    """Return every security-relevant file attribute that must remain stable."""
+
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        stat.S_IFMT(metadata.st_mode),
+        stat.S_IMODE(metadata.st_mode),
+        metadata.st_uid,
+        metadata.st_nlink,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _owner_only_regular_file(
+    metadata: os.stat_result,
+    *,
+    maximum_bytes: int,
+) -> bool:
+    return (
+        stat.S_ISREG(metadata.st_mode)
+        and metadata.st_nlink == 1
+        and metadata.st_uid == os.geteuid()
+        and stat.S_IMODE(metadata.st_mode) == 0o600
+        and 0 < metadata.st_size <= maximum_bytes
+    )
+
+
 def _read_owner_only_bounded(path: Path, *, label: str, maximum_bytes: int) -> bytes:
     """Read a stable current-UID 0600 file through its parent descriptor."""
 
@@ -102,14 +133,7 @@ def _read_owner_only_bounded(path: Path, *, label: str, maximum_bytes: int) -> b
         parent = os.fstat(parent_fd)
         if not stat.S_ISDIR(parent.st_mode):
             raise GlobalExecutionFenceError(f"{label} is unavailable")
-        if (
-            not stat.S_ISREG(before.st_mode)
-            or before.st_nlink != 1
-            or before.st_uid != os.geteuid()
-            or stat.S_IMODE(before.st_mode) != 0o600
-            or before.st_size <= 0
-            or before.st_size > maximum_bytes
-        ):
+        if not _owner_only_regular_file(before, maximum_bytes=maximum_bytes):
             raise GlobalExecutionFenceError(f"{label} metadata is unsafe")
         try:
             descriptor = os.open(
@@ -121,15 +145,9 @@ def _read_owner_only_bounded(path: Path, *, label: str, maximum_bytes: int) -> b
             raise GlobalExecutionFenceError(f"{label} is unavailable") from exc
         try:
             opened = os.fstat(descriptor)
-            if (
-                (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
-                or not stat.S_ISREG(opened.st_mode)
-                or opened.st_nlink != 1
-                or opened.st_uid != os.geteuid()
-                or stat.S_IMODE(opened.st_mode) != 0o600
-                or opened.st_size <= 0
-                or opened.st_size > maximum_bytes
-            ):
+            if _security_identity(opened) != _security_identity(
+                before
+            ) or not _owner_only_regular_file(opened, maximum_bytes=maximum_bytes):
                 raise GlobalExecutionFenceError(f"{label} metadata changed while opening")
             payload = bytearray()
             while len(payload) <= maximum_bytes:
@@ -138,23 +156,15 @@ def _read_owner_only_bounded(path: Path, *, label: str, maximum_bytes: int) -> b
                     break
                 payload.extend(chunk)
             after = os.fstat(descriptor)
-            if len(payload) != opened.st_size or (
-                after.st_dev,
-                after.st_ino,
-                after.st_size,
-                after.st_mtime_ns,
-            ) != (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns):
+            if len(payload) != opened.st_size or _security_identity(after) != _security_identity(
+                opened
+            ):
                 raise GlobalExecutionFenceError(f"{label} changed during validation")
             try:
                 current = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
             except OSError as exc:
                 raise GlobalExecutionFenceError(f"{label} changed during validation") from exc
-            if (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns) != (
-                opened.st_dev,
-                opened.st_ino,
-                opened.st_size,
-                opened.st_mtime_ns,
-            ):
+            if _security_identity(current) != _security_identity(opened):
                 raise GlobalExecutionFenceError(f"{label} changed during validation")
             return bytes(payload)
         finally:
@@ -183,6 +193,33 @@ def _load_pinned_public_key(
         return Ed25519PublicKey.from_public_bytes(raw)
     except ValueError as exc:  # pragma: no cover - backend validation
         raise GlobalExecutionFenceError("manager public key is invalid") from exc
+
+
+def _expected_public_key_fingerprint(
+    value: str | None,
+    *,
+    path: Path | None,
+) -> str:
+    if (value is None) == (path is None):
+        raise GlobalExecutionFenceError("manager public key fingerprint is unavailable")
+    if path is None:
+        if not isinstance(value, str) or _DIGEST.fullmatch(value) is None:
+            raise GlobalExecutionFenceError("manager public key fingerprint is invalid")
+        return value
+    raw = _read_owner_only_bounded(
+        path,
+        label="manager public key fingerprint",
+        maximum_bytes=_MAX_PUBLIC_KEY_FINGERPRINT_BYTES,
+    )
+    if raw.endswith(b"\n"):
+        raw = raw[:-1]
+    try:
+        fingerprint = raw.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise GlobalExecutionFenceError("manager public key fingerprint is invalid") from exc
+    if _DIGEST.fullmatch(fingerprint) is None:
+        raise GlobalExecutionFenceError("manager public key fingerprint is invalid")
+    return fingerprint
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,6 +305,7 @@ def load_global_execution_witness(
     *,
     manager_public_key_path: Path | None,
     expected_manager_public_key_sha256: str | None,
+    expected_manager_public_key_sha256_file: Path | None = None,
 ) -> GlobalExecutionWitness | None:
     """Load a bounded envelope only after independently pinning its signer."""
 
@@ -275,20 +313,21 @@ def load_global_execution_witness(
         path is None
         and manager_public_key_path is None
         and expected_manager_public_key_sha256 is None
+        and expected_manager_public_key_sha256_file is None
     ):
         return None
-    if (
-        path is None
-        or manager_public_key_path is None
-        or expected_manager_public_key_sha256 is None
-    ):
+    if path is None or manager_public_key_path is None:
         raise GlobalExecutionFenceError("global execution witness is unavailable")
     raw = _read_owner_only_bounded(
         path, label="global execution witness", maximum_bytes=_MAX_WITNESS_BYTES
     )
+    expected_fingerprint = _expected_public_key_fingerprint(
+        expected_manager_public_key_sha256,
+        path=expected_manager_public_key_sha256_file,
+    )
     public_key = _load_pinned_public_key(
         manager_public_key_path,
-        expected_sha256=expected_manager_public_key_sha256,
+        expected_sha256=expected_fingerprint,
     )
     try:
         decoded = json.loads(raw)
@@ -299,7 +338,7 @@ def load_global_execution_witness(
     return GlobalExecutionWitness.from_mapping(
         cast(Mapping[str, object], decoded),
         public_key=public_key,
-        expected_public_key_sha256=expected_manager_public_key_sha256,
+        expected_public_key_sha256=expected_fingerprint,
     )
 
 

@@ -147,7 +147,9 @@ def _parser() -> argparse.ArgumentParser:
         help="Pinned-key manager witness required before local scale-up.",
     )
     parser.add_argument("--manager-public-key", type=Path, required=True)
-    parser.add_argument("--expected-manager-public-key-sha256", required=True)
+    manager_pin = parser.add_mutually_exclusive_group(required=True)
+    manager_pin.add_argument("--expected-manager-public-key-sha256")
+    manager_pin.add_argument("--expected-manager-public-key-sha256-file", type=Path)
     parser.add_argument(
         "--validate-only",
         action="store_true",
@@ -661,11 +663,6 @@ async def _main_async(args: argparse.Namespace) -> None:
         return
     db_url = _load_cp_db_url(args, timeout_sec=db_connect_timeout_sec)
     url = _preflight_database_url(db_url, port_forward=port_forward)
-    global_execution_witness = load_global_execution_witness(
-        args.global_execution_witness_json,
-        manager_public_key_path=args.manager_public_key,
-        expected_manager_public_key_sha256=args.expected_manager_public_key_sha256,
-    )
     with _database_port_forward(port_forward):
         engine = create_async_engine(url, pool_pre_ping=True)
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -681,6 +678,24 @@ async def _main_async(args: argparse.Namespace) -> None:
                         )
                     finally:
                         await session.rollback()
+                try:
+                    global_execution_witness = load_global_execution_witness(
+                        args.global_execution_witness_json,
+                        manager_public_key_path=args.manager_public_key,
+                        expected_manager_public_key_sha256=(
+                            args.expected_manager_public_key_sha256
+                        ),
+                        expected_manager_public_key_sha256_file=(
+                            args.expected_manager_public_key_sha256_file
+                        ),
+                    )
+                except Exception:
+                    # Evidence failure is not allowed to skip the reciprocal
+                    # zero-capacity drain/release reconciliation below.
+                    global_execution_witness = None
+                    witness_failed = True
+                else:
+                    witness_failed = global_execution_witness is None
                 reconcile_kwargs: dict[str, Any] = {
                     "environment": environment,
                     "freshness_sec": args.freshness_sec,
@@ -700,6 +715,8 @@ async def _main_async(args: argparse.Namespace) -> None:
             print(json.dumps([decision.__dict__ for decision in decisions], default=str))
         finally:
             await engine.dispose()
+    if witness_failed:
+        raise ExternalAutoscalerError("global execution witness is unavailable")
 
 
 def main() -> None:

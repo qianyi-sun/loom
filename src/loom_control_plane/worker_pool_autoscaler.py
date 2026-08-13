@@ -2588,7 +2588,7 @@ async def reconcile_worker_pool_autoscaler_once(
         .scalars()
         .all()
     )
-    legacy_scale_up_allowed = True
+    verified_policy_ids: set[Any] = set()
     for row in policies:
         try:
             assert_legacy_scale_up_allowed(
@@ -2598,9 +2598,9 @@ async def reconcile_worker_pool_autoscaler_once(
                 now=now,
             )
         except GlobalExecutionFenceError:
-            legacy_scale_up_allowed = False
-            break
-    if not external_only and legacy_scale_up_allowed:
+            continue
+        verified_policy_ids.add(row.id)
+    if not external_only and policies and len(verified_policy_ids) == len(policies):
         await assign_neutral_queued_trials(
             session,
             environment=scoped_environment,
@@ -2623,17 +2623,27 @@ async def reconcile_worker_pool_autoscaler_once(
     }
     decisions: list[AutoscalerDecision] = []
     for row in policies:
-        effective_policy = _apply_pipeline_scoped_activation(
-            _policy_to_config(row), row, active_activations.get(row.pool_name)
-        )
-        effective_policy = apply_global_execution_fence(
-            effective_policy,
-            global_execution_witness,
-            expected_authority="global-capacity-manager",
-            expected_pool_id=slurm_cluster_for_pool(row.pool_name),
-            now=now,
-        )
-        if capacity_grants is not None and dev_pool_instance_name(row.pool_name) is not None:
+        base_policy = _policy_to_config(row)
+        if row.id in verified_policy_ids:
+            effective_policy = _apply_pipeline_scoped_activation(
+                base_policy, row, active_activations.get(row.pool_name)
+            )
+        else:
+            # Do not let a pipeline activation or global grant create capacity
+            # until the exact physical-pool shadow state is independently
+            # verified. The zero-clamped policy still reaches drain/release.
+            effective_policy = apply_global_execution_fence(
+                base_policy,
+                global_execution_witness,
+                expected_authority="global-capacity-manager",
+                expected_pool_id=slurm_cluster_for_pool(row.pool_name),
+                now=now,
+            )
+        if (
+            row.id in verified_policy_ids
+            and capacity_grants is not None
+            and dev_pool_instance_name(row.pool_name) is not None
+        ):
             effective_policy = apply_global_dev_capacity_grant(
                 effective_policy,
                 capacity_grants.get((row.environment, row.pool_name)),

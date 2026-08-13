@@ -637,7 +637,8 @@ def test_normal_reconcile_validates_db_before_actuation_and_owns_tunnel(
     monkeypatch.setattr(module, "reconcile_worker_pool_autoscaler_once", _reconcile)
     monkeypatch.setattr(module, "load_global_execution_witness", lambda *_args, **_kwargs: None)
 
-    asyncio.run(module._main_async(_args(module, "--db-local-port", "15451")))
+    with pytest.raises(module.ExternalAutoscalerError, match="witness is unavailable"):
+        asyncio.run(module._main_async(_args(module, "--db-local-port", "15451")))
 
     assert json.loads(capsys.readouterr().out) == [{"action": "noop"}]
     assert events == [

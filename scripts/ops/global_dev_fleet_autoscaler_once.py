@@ -59,7 +59,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--lease-ttl-seconds", type=int, default=300)
     parser.add_argument("--global-execution-witness-json", type=Path, required=True)
     parser.add_argument("--manager-public-key", type=Path, required=True)
-    parser.add_argument("--expected-manager-public-key-sha256", required=True)
+    manager_pin = parser.add_mutually_exclusive_group(required=True)
+    manager_pin.add_argument("--expected-manager-public-key-sha256")
+    manager_pin.add_argument("--expected-manager-public-key-sha256-file", type=Path)
     return parser
 
 
@@ -142,6 +144,9 @@ def main() -> int:
                 args.global_execution_witness_json,
                 manager_public_key_path=args.manager_public_key,
                 expected_manager_public_key_sha256=args.expected_manager_public_key_sha256,
+                expected_manager_public_key_sha256_file=(
+                    args.expected_manager_public_key_sha256_file
+                ),
             ),
         )
         _atomic_write(args.output_json, report)

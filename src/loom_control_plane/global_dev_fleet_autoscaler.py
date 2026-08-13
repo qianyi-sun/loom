@@ -192,12 +192,17 @@ class GlobalDevFleetAutoscaler:
         """Converge the complete dynamic cohort and return environment grants."""
         now = _utc(self._clock())
         normalized = tuple(demands)
-        # A single witness is bound to one physical pool. Refuse an equivocal
-        # mixed-pool legacy request before observing or mutating the broker.
+        # A single witness is bound to one physical pool. The read-only broker
+        # status supplies the scope for final cancellation/drain work after a
+        # demand disappears; no empty request invents an OLDLAB scope.
+        status = self.broker.status()
+        pool_ids = {slurm_cluster_for_pool(item.pool_name) for item in normalized}
+        for raw_record in cast(list[dict[str, object]], status["requests"]):
+            request, _lease = _record_parts(raw_record)
+            if request["state"] != RequestState.TERMINAL.value:
+                pool_ids.add(slurm_cluster_for_pool(str(request["pool"])))
         try:
-            for pool_id in {slurm_cluster_for_pool(item.pool_name) for item in normalized} or {
-                "oldlab"
-            }:
+            for pool_id in pool_ids:
                 assert_legacy_scale_up_allowed(
                     execution_witness,
                     expected_authority="global-capacity-manager",
@@ -215,7 +220,6 @@ class GlobalDevFleetAutoscaler:
                 "grants": [],
                 "aggregate": {"legacy_scale_up_fenced": True},
             }
-        status = self.broker.status()
         self._prevalidate(normalized, observations, budgets, status=status, now=now)
 
         # Apply observations against their current epochs before lifecycle

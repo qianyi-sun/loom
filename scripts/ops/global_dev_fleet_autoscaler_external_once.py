@@ -39,7 +39,6 @@ from loom_control_plane.global_dev_fleet_autoscaler import (
 from loom_control_plane.global_execution_fence import (
     GlobalExecutionFenceError,
     GlobalExecutionWitness,
-    assert_legacy_scale_up_allowed,
     load_global_execution_witness,
 )
 from loom_control_plane.shared_capacity_broker import (
@@ -49,7 +48,7 @@ from loom_control_plane.shared_capacity_broker import (
     RequestState,
     SharedCapacityBroker,
 )
-from loom_control_plane.slurm_worker_jobs import ACTIVE_STATES, slurm_cluster_for_pool
+from loom_control_plane.slurm_worker_jobs import ACTIVE_STATES
 from loom_control_plane.worker_pool_autoscaler import (
     AutoscalerObservation,
     _load_observation,
@@ -127,7 +126,9 @@ def _parser() -> argparse.ArgumentParser:
         help="Authenticated manager witness; absence permits drain only.",
     )
     parser.add_argument("--manager-public-key", type=Path, required=True)
-    parser.add_argument("--expected-manager-public-key-sha256", required=True)
+    manager_pin = parser.add_mutually_exclusive_group(required=True)
+    manager_pin.add_argument("--expected-manager-public-key-sha256")
+    manager_pin.add_argument("--expected-manager-public-key-sha256-file", type=Path)
     return parser
 
 
@@ -476,6 +477,7 @@ async def _main(args: argparse.Namespace) -> dict[str, object]:
         args.global_execution_witness_json,
         manager_public_key_path=args.manager_public_key,
         expected_manager_public_key_sha256=args.expected_manager_public_key_sha256,
+        expected_manager_public_key_sha256_file=args.expected_manager_public_key_sha256_file,
     )
     _validate_owner_only_directory(args.worker_env_dir, "worker environment directory")
     _validate_owner_only_directory(args.output_json.parent, "grant report directory")
@@ -512,13 +514,6 @@ async def _main(args: argparse.Namespace) -> dict[str, object]:
         pool_pending_slots={pool: pending_budget for pool in pools},
     )
     try:
-        for pool_id in {slurm_cluster_for_pool(item.pool_name) for item in demands} or {"oldlab"}:
-            assert_legacy_scale_up_allowed(
-                global_execution_witness,
-                expected_authority="global-capacity-manager",
-                expected_pool_id=pool_id,
-                now=now,
-            )
         broker = SharedCapacityBroker(args.state_db)
         report = GlobalDevFleetAutoscaler(
             broker,

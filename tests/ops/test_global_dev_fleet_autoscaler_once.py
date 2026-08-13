@@ -21,7 +21,23 @@ def test_fenced_execution_writes_non_success_report_and_exits_nonzero(
     input_path = tmp_path / "input.json"
     output_path = tmp_path / "output.json"
     input_path.write_text(
-        json.dumps({"schema_version": 1, "demands": [], "observations": []}),
+        json.dumps(
+            {
+                "schema_version": 1,
+                "demands": [
+                    {
+                        "environment": "dev-alice",
+                        "deployment_generation": 1,
+                        "candidate_sha": "a" * 40,
+                        "pool_name": "oldlab",
+                        "min_slots": 0,
+                        "requested_slots": 1,
+                        "observed_at": "2026-08-13T12:00:00Z",
+                    }
+                ],
+                "observations": [],
+            }
+        ),
         encoding="utf-8",
     )
     monkeypatch.setattr(executable, "load_global_execution_witness", lambda *_args, **_kwargs: None)

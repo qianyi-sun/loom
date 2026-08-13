@@ -12,6 +12,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import delete, insert, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+import loom_control_plane.worker_pool_autoscaler as autoscaler
 from loom.db.schema import (
     GB10WorkerNodeStatus,
     GB10WorkerPoolDesiredState,
@@ -35,10 +36,9 @@ from loom_control_plane.global_execution_fence import (
 from loom_control_plane.slurm_worker_jobs import (
     SlurmWorkerJobObservation,
     reconcile_slurm_worker_jobs,
-    slurm_cluster_for_pool,
 )
 from loom_control_plane.worker_pool_autoscaler import (
-    reconcile_worker_pool_autoscaler_once as _reconcile_worker_pool_autoscaler_once,
+    reconcile_worker_pool_autoscaler_once,
 )
 
 _MATCHING_SLURM_RELEASE_ENV = {
@@ -68,42 +68,6 @@ def _witness(now: datetime, *, pool_id: str) -> GlobalExecutionWitness:
         expected_public_key_sha256=hashlib.sha256(
             public_key.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
         ).hexdigest(),
-    )
-
-
-async def reconcile_worker_pool_autoscaler_once(
-    session: AsyncSession,
-    *,
-    environment: str,
-    now: datetime,
-    **kwargs: object,
-):
-    """Run existing positive-path regressions with a single bound witness."""
-
-    if "global_execution_witness" not in kwargs:
-        scoped_pool_names = kwargs.get("pool_names")
-        if isinstance(scoped_pool_names, tuple):
-            pool_names = scoped_pool_names
-        else:
-            pool_names = (
-                (
-                    await session.execute(
-                        select(WorkerPoolAutoscalerPolicy.pool_name).where(
-                            WorkerPoolAutoscalerPolicy.environment == environment,
-                        )
-                    )
-                )
-                .scalars()
-                .all()
-            )
-        pool_ids = {slurm_cluster_for_pool(pool_name) for pool_name in pool_names}
-        if len(pool_ids) == 1:
-            kwargs["global_execution_witness"] = _witness(now, pool_id=pool_ids.pop())
-    return await _reconcile_worker_pool_autoscaler_once(
-        session,
-        environment=environment,
-        now=now,
-        **kwargs,
     )
 
 
@@ -245,6 +209,93 @@ async def _cleanup_db(postgres_url: str) -> Iterator[None]:
     await engine.dispose()
 
 
+async def test_reconcile_without_selected_policy_never_assigns_neutral_work(
+    postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+
+    async def unexpected_assignment(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("neutral work must not be assigned without a selected policy")
+
+    monkeypatch.setattr(autoscaler, "assign_neutral_queued_trials", unexpected_assignment)
+    try:
+        async with session_factory() as session:
+            decisions = await reconcile_worker_pool_autoscaler_once(
+                session,
+                environment="staging",
+                now=now,
+            )
+            await session.commit()
+        assert decisions == []
+    finally:
+        await engine.dispose()
+
+
+async def test_denied_execution_evidence_skips_pipeline_activation_calculation(
+    postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+
+    def unexpected_activation(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("denied execution evidence must clamp before activation calculation")
+
+    monkeypatch.setattr(autoscaler, "_apply_pipeline_scoped_activation", unexpected_activation)
+    try:
+        async with session_factory() as session:
+            await session.execute(
+                insert(WorkerPoolAutoscalerPolicy).values(
+                    environment="staging",
+                    pool_name="oldlab",
+                    actuator="slurm",
+                    enabled=True,
+                    min_slots=1,
+                    max_slots=1,
+                    scale_up_threshold_slots=1,
+                    scale_down_idle_seconds=60,
+                    scale_up_cooldown_seconds=0,
+                    scale_down_cooldown_seconds=0,
+                    drain_timeout_seconds=60,
+                    actuator_config={
+                        "backend": "docker",
+                        "cpu_arch": "x86_64",
+                        "allowed_nodes": ["oldlab-1"],
+                        "env_file": "/secure/.env.remote-worker",
+                        "exclusive": False,
+                        "container_cpus": 1.0,
+                        "container_memory_mib": 1024,
+                        "container_pids": 64,
+                        "candidate_sha": "a" * 40,
+                        "job_pids_max": 64,
+                        "repo_dir": "/opt/loom",
+                        "requested_cpus": 1,
+                        "requested_memory_mib": 1024,
+                        "requested_concurrency": 1,
+                        "max_jobs": 1,
+                        "pending_job_cap": 1,
+                        "time_limit": "01:00:00",
+                    },
+                )
+            )
+            await session.commit()
+        async with session_factory() as session:
+            decisions = await reconcile_worker_pool_autoscaler_once(
+                session,
+                environment="staging",
+                now=now,
+            )
+            await session.commit()
+        assert len(decisions) == 1
+        assert decisions[0].desired_slots == 0
+    finally:
+        await engine.dispose()
+
+
 async def test_reconcile_marks_one_idle_excess_worker_draining(
     postgres_url: str,
 ) -> None:
@@ -345,7 +396,11 @@ async def test_reconcile_marks_one_idle_excess_worker_draining(
         ]
         async with session_factory() as s:
             results = await reconcile_worker_pool_autoscaler_once(
-                s, environment="production", now=now, slurm_runner=runner
+                s,
+                environment="production",
+                now=now,
+                slurm_runner=runner,
+                global_execution_witness=_witness(now, pool_id="oldlab"),
             )
             await s.commit()
 
@@ -437,6 +492,7 @@ async def test_reconcile_cancels_pending_job_without_staling_foreign_pools(
                 environment="staging",
                 now=now,
                 slurm_runner=runner,
+                global_execution_witness=_witness(now, pool_id="gb10"),
             )
             await s.commit()
 
@@ -520,6 +576,7 @@ async def test_reconcile_blocks_pending_cancel_when_slurm_refresh_fails(
                 environment="staging",
                 now=now,
                 slurm_runner=runner,
+                global_execution_witness=_witness(now, pool_id="gb10"),
             )
             await s.commit()
 
@@ -576,6 +633,7 @@ async def test_reconcile_does_not_cancel_job_that_starts_after_pending_observati
                 environment="staging",
                 now=now,
                 slurm_runner=runner,
+                global_execution_witness=_witness(now, pool_id="gb10"),
             )
             await s.commit()
 
@@ -617,6 +675,7 @@ async def test_reconcile_blocks_idless_pending_slurm_registry_row(
                 environment="staging",
                 now=now,
                 slurm_runner=runner,
+                global_execution_witness=_witness(now, pool_id="gb10"),
             )
             await s.commit()
 
@@ -667,6 +726,7 @@ async def test_reconcile_blocks_when_pending_slurm_observation_is_incomplete(
                 environment="staging",
                 now=now,
                 slurm_runner=runner,
+                global_execution_witness=_witness(now, pool_id="gb10"),
             )
             await s.commit()
 
@@ -729,6 +789,7 @@ async def test_reconcile_reports_partial_pending_slurm_cancellation(
                 environment="staging",
                 now=now,
                 slurm_runner=runner,
+                global_execution_witness=_witness(now, pool_id="gb10"),
             )
             await s.commit()
 
@@ -824,6 +885,7 @@ async def test_reconcile_submits_slurm_jobs_for_scale_up_deficit(
                 environment="production",
                 now=now,
                 slurm_runner=runner,
+                global_execution_witness=_witness(now, pool_id="oldlab"),
             )
             await s.commit()
 
@@ -924,6 +986,7 @@ async def test_reconcile_clamps_scale_up_slots_to_max_slots(
                 environment="production",
                 now=now,
                 slurm_runner=runner,
+                global_execution_witness=_witness(now, pool_id="oldlab"),
             )
             await s.commit()
 
@@ -1011,7 +1074,11 @@ async def test_reconcile_clamp_uses_ceiling_not_bankers_rounding(
         runner = FakeSlurmRunner()
         async with session_factory() as s:
             results = await reconcile_worker_pool_autoscaler_once(
-                s, environment="production", now=now, slurm_runner=runner
+                s,
+                environment="production",
+                now=now,
+                slurm_runner=runner,
+                global_execution_witness=_witness(now, pool_id="oldlab"),
             )
             await s.commit()
 
@@ -1094,7 +1161,11 @@ async def test_reconcile_qos_is_per_submission_and_prefers_qos_normal(
         runner = FakeSlurmRunner()
         async with session_factory() as s:
             results = await reconcile_worker_pool_autoscaler_once(
-                s, environment="production", now=now, slurm_runner=runner
+                s,
+                environment="production",
+                now=now,
+                slurm_runner=runner,
+                global_execution_witness=_witness(now, pool_id="oldlab"),
             )
             await s.commit()
 
@@ -1185,6 +1256,7 @@ async def test_reconcile_clamps_resource_aware_scale_up_to_max_slots(
                 environment="production",
                 now=now,
                 slurm_runner=runner,
+                global_execution_witness=_witness(now, pool_id="oldlab"),
             )
             await s.commit()
 
@@ -1258,6 +1330,7 @@ async def test_reconcile_persists_no_safe_slurm_node_blocker(
                 environment="production",
                 now=now,
                 slurm_runner=runner,
+                global_execution_witness=_witness(now, pool_id="oldlab"),
             )
             await s.commit()
 
@@ -1386,6 +1459,7 @@ async def test_reconcile_submits_gb10_capacity_through_slurm_partition(
                 environment="production",
                 now=now,
                 slurm_runner=runner,
+                global_execution_witness=_witness(now, pool_id="gb10"),
             )
             await s.commit()
 
@@ -1486,6 +1560,7 @@ async def test_control_plane_reconcile_skips_external_slurm_runner_policies(
                 environment="production",
                 now=now,
                 slurm_runner=runner,
+                global_execution_witness=_witness(now, pool_id="oldlab"),
             )
             await s.commit()
 
@@ -1570,6 +1645,7 @@ async def test_submit_host_reconcile_processes_external_slurm_runner_policies(
                 now=now,
                 slurm_runner=runner,
                 include_external_policies=True,
+                global_execution_witness=_witness(now, pool_id="oldlab"),
             )
             await s.commit()
 
@@ -1647,6 +1723,7 @@ async def test_external_slurm_runner_reconcile_can_be_scoped_to_one_pool(
                 include_external_policies=True,
                 external_only=True,
                 pool_names=("oldlab",),
+                global_execution_witness=_witness(now, pool_id="oldlab"),
             )
             await s.commit()
 
@@ -1827,6 +1904,7 @@ async def test_external_reconcile_never_executes_same_pool_from_foreign_environm
                 include_external_policies=True,
                 external_only=True,
                 pool_names=("oldlab",),
+                global_execution_witness=_witness(now, pool_id="oldlab"),
             )
             await s.commit()
 
@@ -1859,6 +1937,7 @@ async def test_external_reconcile_never_executes_same_pool_from_foreign_environm
                 include_external_policies=True,
                 external_only=True,
                 pool_names=("oldlab",),
+                global_execution_witness=_witness(now, pool_id="oldlab"),
             )
             await s.commit()
 
@@ -1991,6 +2070,7 @@ async def test_external_slurm_runner_reconcile_refreshes_known_job_state(
                 slurm_runner=runner,
                 include_external_policies=True,
                 external_only=True,
+                global_execution_witness=_witness(now, pool_id="oldlab"),
             )
             await s.commit()
 
@@ -2106,6 +2186,7 @@ async def test_reconcile_releases_drained_slurm_worker_job(
                 environment="production",
                 now=now,
                 slurm_runner=runner,
+                global_execution_witness=_witness(now, pool_id="oldlab"),
             )
             await s.commit()
 
@@ -2220,6 +2301,7 @@ async def test_reconcile_cancels_unlinked_slurm_job_by_unique_hostname(
                 environment="production",
                 now=now,
                 slurm_runner=runner,
+                global_execution_witness=_witness(now, pool_id="oldlab"),
             )
             await s.commit()
 
@@ -2331,6 +2413,7 @@ async def test_reconcile_drains_and_cancels_running_job_outside_allowed_nodes(
                 environment="staging",
                 now=now,
                 slurm_runner=runner,
+                global_execution_witness=_witness(now, pool_id="gb10"),
             )
             await s.commit()
 
@@ -2354,6 +2437,7 @@ async def test_reconcile_drains_and_cancels_running_job_outside_allowed_nodes(
                 environment="staging",
                 now=now + timedelta(seconds=1),
                 slurm_runner=runner,
+                global_execution_witness=_witness(now + timedelta(seconds=1), pool_id="gb10"),
             )
             await s.commit()
 
@@ -2459,7 +2543,10 @@ async def test_reconcile_sets_gb10_host_intent_to_draining(
 
         async with session_factory() as s:
             results = await reconcile_worker_pool_autoscaler_once(
-                s, environment="production", now=now
+                s,
+                environment="production",
+                now=now,
+                global_execution_witness=_witness(now, pool_id="gb10"),
             )
             await s.commit()
 
@@ -2559,7 +2646,10 @@ async def test_reconcile_sets_gb10_host_intent_by_hostname_when_worker_id_missin
 
         async with session_factory() as s:
             results = await reconcile_worker_pool_autoscaler_once(
-                s, environment="production", now=now
+                s,
+                environment="production",
+                now=now,
+                global_execution_witness=_witness(now, pool_id="gb10"),
             )
             await s.commit()
 
@@ -2643,7 +2733,10 @@ async def test_reconcile_sets_gb10_stopped_hosts_active_for_scale_up(
 
         async with session_factory() as s:
             results = await reconcile_worker_pool_autoscaler_once(
-                s, environment="production", now=now
+                s,
+                environment="production",
+                now=now,
+                global_execution_witness=_witness(now, pool_id="gb10"),
             )
             await s.commit()
 
@@ -2741,7 +2834,10 @@ async def test_reconcile_only_marks_selected_gb10_hosts_active_for_scale_up(
 
         async with session_factory() as s:
             results = await reconcile_worker_pool_autoscaler_once(
-                s, environment="production", now=now
+                s,
+                environment="production",
+                now=now,
+                global_execution_witness=_witness(now, pool_id="gb10"),
             )
             await s.commit()
 
@@ -2842,6 +2938,7 @@ async def test_reconcile_records_slurm_actuator_failure_on_policy(
                 environment="production",
                 now=now,
                 slurm_runner=runner,
+                global_execution_witness=_witness(now, pool_id="oldlab"),
             )
             await s.commit()
 

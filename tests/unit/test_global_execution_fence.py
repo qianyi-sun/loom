@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -158,6 +159,34 @@ def test_signed_witness_rejects_a_self_asserted_signature(tmp_path: Path) -> Non
         )
 
 
+def test_witness_loader_accepts_an_independently_protected_fingerprint_file(
+    tmp_path: Path,
+) -> None:
+    private_key = Ed25519PrivateKey.from_private_bytes(bytes([9]) * 32)
+    raw_key = private_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    key_path = tmp_path / "manager.pub"
+    key_path.write_bytes(raw_key)
+    key_path.chmod(0o600)
+    pin_path = tmp_path / "manager.pub.sha256"
+    pin_path.write_text(f"{hashlib.sha256(raw_key).hexdigest()}\n", encoding="ascii")
+    pin_path.chmod(0o600)
+    witness = tmp_path / "witness.json"
+    witness.write_text(json.dumps(_signed_payload(private_key)), encoding="utf-8")
+    witness.chmod(0o600)
+
+    loaded = load_global_execution_witness(
+        witness,
+        manager_public_key_path=key_path,
+        expected_manager_public_key_sha256=None,
+        expected_manager_public_key_sha256_file=pin_path,
+    )
+
+    assert loaded.pool_id == "oldlab"
+
+
 @pytest.mark.parametrize("unsafe", ["symlink", "mode", "oversized"])
 def test_witness_loader_rejects_unsafe_or_oversized_files(tmp_path: Path, unsafe: str) -> None:
     key_path = tmp_path / "manager.pub"
@@ -186,6 +215,85 @@ def test_witness_loader_rejects_unsafe_or_oversized_files(tmp_path: Path, unsafe
             witness,
             manager_public_key_path=key_path,
             expected_manager_public_key_sha256=hashlib.sha256(key_path.read_bytes()).hexdigest(),
+        )
+
+
+@pytest.mark.parametrize("unsafe", ["symlink", "mode", "oversized", "owner"])
+def test_witness_loader_rejects_unsafe_manager_public_key_files(
+    tmp_path: Path,
+    unsafe: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_key = Ed25519PrivateKey.from_private_bytes(bytes([4]) * 32)
+    key_path = tmp_path / "manager.pub"
+    key_path.write_bytes(
+        private_key.public_key().public_bytes(
+            serialization.Encoding.Raw,
+            serialization.PublicFormat.Raw,
+        ),
+    )
+    key_path.chmod(0o600)
+    witness = tmp_path / "witness.json"
+    witness.write_text(json.dumps(_signed_payload(private_key)), encoding="utf-8")
+    witness.chmod(0o600)
+    if unsafe == "symlink":
+        link = tmp_path / "manager-link.pub"
+        link.symlink_to(key_path)
+        key_path = link
+    elif unsafe == "mode":
+        key_path.chmod(0o640)
+    elif unsafe == "oversized":
+        key_path.write_bytes(b"x" * 33)
+    else:
+        monkeypatch.setattr(os, "geteuid", lambda: os.getuid() + 1)
+
+    with pytest.raises(GlobalExecutionFenceError):
+        load_global_execution_witness(
+            witness,
+            manager_public_key_path=key_path,
+            expected_manager_public_key_sha256=hashlib.sha256(
+                private_key.public_key().public_bytes(
+                    serialization.Encoding.Raw,
+                    serialization.PublicFormat.Raw,
+                )
+            ).hexdigest(),
+        )
+
+
+def test_witness_loader_rejects_a_file_whose_security_identity_changes_during_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_key = Ed25519PrivateKey.from_private_bytes(bytes([6]) * 32)
+    key_path = tmp_path / "manager.pub"
+    raw_key = private_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    key_path.write_bytes(raw_key)
+    key_path.chmod(0o600)
+    witness = tmp_path / "witness.json"
+    witness.write_text(json.dumps(_signed_payload(private_key)), encoding="utf-8")
+    witness.chmod(0o600)
+    original_read = os.read
+    changed = False
+
+    def read_and_change_security_identity(descriptor: int, amount: int) -> bytes:
+        nonlocal changed
+        if not changed:
+            changed = True
+            transient_link = tmp_path / "witness-transient-link.json"
+            os.link(witness, transient_link)
+            transient_link.unlink()
+        return original_read(descriptor, amount)
+
+    monkeypatch.setattr(os, "read", read_and_change_security_identity)
+
+    with pytest.raises(GlobalExecutionFenceError, match="changed during validation"):
+        load_global_execution_witness(
+            witness,
+            manager_public_key_path=key_path,
+            expected_manager_public_key_sha256=hashlib.sha256(raw_key).hexdigest(),
         )
 
 
@@ -232,6 +340,16 @@ def test_nonshadow_witness_clamps_legacy_policy_before_scale_up() -> None:
 def test_global_development_grants_are_fenced_before_ledger_mutation() -> None:
     class _Broker:
         def status(self) -> object:
+            return {
+                "requests": [
+                    {
+                        "request": {"state": "active", "pool": "oldlab"},
+                        "lease": {},
+                    }
+                ]
+            }
+
+        def reconcile(self, *_args: object, **_kwargs: object) -> object:
             raise AssertionError("legacy fence must run before development grant calculation")
 
     report = GlobalDevFleetAutoscaler(_Broker(), clock=lambda: NOW).reconcile(
