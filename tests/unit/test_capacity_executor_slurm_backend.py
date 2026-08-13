@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from datetime import UTC, datetime
@@ -9,6 +10,7 @@ from uuid import UUID
 import pytest
 from pydantic import ValidationError
 
+import loom_capacity_executor.slurm_backend as slurm_backend
 from loom_capacity_executor.slurm_backend import (
     SlurmAuthorityError,
     SlurmOutputError,
@@ -19,6 +21,8 @@ from loom_capacity_executor.slurm_contracts import (
     SlurmCancelRequestV2,
     SlurmExecutableIdentityV2,
     SlurmLaunchRequestV2,
+    SlurmResourceV2,
+    SlurmTresValueV2,
 )
 from tests.support.fake_slurm import FakeSlurm, assert_secure_evidence
 
@@ -46,7 +50,7 @@ def slurm_launch_request_fixture(fake_slurm: FakeSlurm) -> SlurmLaunchRequestV2:
         launcher=SlurmExecutableIdentityV2(
             path=str(fake_slurm.launcher),
             sha256=fake_slurm.launcher_sha256,
-            owner_uid=os.geteuid(),
+            owner_uid=fake_slurm.launcher.stat().st_uid,
         ),
         launcher_release_sha256="b" * 64,
         image_digest="registry.internal/loom/worker@sha256:" + "c" * 64,
@@ -75,6 +79,12 @@ def test_launch_contract_has_no_candidate_script_or_freeform_argv(
         SlurmLaunchRequestV2.model_validate({**payload, "nodes": ("oldlab-5", "oldlab-5")})
     with pytest.raises(ValidationError):
         SlurmLaunchRequestV2.model_validate({**payload, "job_name": "a;scancel-1"})
+
+
+@pytest.mark.parametrize("name", ("billing", "cpu", "mem", "node", "gres/gpu"))
+def test_generic_tres_rejects_reserved_scheduler_aggregates(name: str) -> None:
+    with pytest.raises(ValidationError, match="reserved"):
+        SlurmTresValueV2(name=name, value=1)
 
 
 @pytest.mark.asyncio
@@ -106,6 +116,7 @@ async def test_submit_uses_absolute_argv_without_shell_or_inherited_environment(
         "--time=0-01:00:00",
         "--comment=" + "A" * 43,
         str(fake_slurm.launcher),
+        "--launcher-sha256=" + fake_slurm.launcher_sha256,
         "--operation-id=00000000-0000-0000-0000-000000000101",
         "--image-digest=registry.internal/loom/worker@sha256:" + "c" * 64,
         "--release-sha256=" + "b" * 64,
@@ -128,6 +139,37 @@ async def test_submit_validates_controller_and_cluster_before_mutation(
 
 
 @pytest.mark.asyncio
+async def test_authority_accepts_standard_config_envelope_and_indexed_controller_list(
+    fake_slurm: FakeSlurm,
+) -> None:
+    authority = await fake_slurm.backend().validate_authority()
+    assert authority.cluster == "oldlab"
+    assert authority.controller_host == "ctl.oldlab.internal"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "output",
+    (
+        "ClusterName = oldlab\nClusterName = oldlab\n"
+        "SlurmctldHost[0] = ctl.oldlab.internal(192.0.2.10)\n",
+        "ClusterName = oldlab\n"
+        "SlurmctldHost[0] = ctl.oldlab.internal(192.0.2.10)\n"
+        "SlurmctldHost[0] = ctl.oldlab.internal(192.0.2.10)\n",
+        "ClusterName oldlab\nSlurmctldHost[0] = ctl.oldlab.internal(192.0.2.10)\n",
+        "ClusterName = oldlab\nSlurmctldHost[0] ctl.oldlab.internal(192.0.2.10)\n",
+    ),
+)
+async def test_authority_rejects_duplicate_or_malformed_target_facts(
+    fake_slurm: FakeSlurm,
+    output: str,
+) -> None:
+    fake_slurm.set_output("scontrol", output)
+    with pytest.raises(SlurmAuthorityError):
+        await fake_slurm.backend().validate_authority()
+
+
+@pytest.mark.asyncio
 async def test_authority_uses_fixed_native_association_query(fake_slurm: FakeSlurm) -> None:
     await fake_slurm.backend().validate_authority()
     call = next(item for item in fake_slurm.calls if Path(item.executable).name == "sacctmgr")
@@ -147,11 +189,57 @@ async def test_authority_uses_fixed_native_association_query(fake_slurm: FakeSlu
 @pytest.mark.asyncio
 async def test_submit_rechecks_executable_identity_before_mutation(fake_slurm: FakeSlurm) -> None:
     backend = fake_slurm.backend()
-    request = slurm_launch_request_fixture(fake_slurm)
-    fake_slurm.launcher.write_text("#!/bin/sh\nexit 7\n", encoding="utf-8")
-    fake_slurm.launcher.chmod(0o700)
+    launcher = SlurmExecutableIdentityV2(
+        path=str(fake_slurm.mutable_launcher),
+        sha256=fake_slurm._digest(fake_slurm.mutable_launcher),
+        owner_uid=os.geteuid(),
+    )
+    request = slurm_launch_request_fixture(fake_slurm).model_copy(update={"launcher": launcher})
+    fake_slurm.mutable_launcher.write_text("#!/bin/sh\nexit 7\n", encoding="utf-8")
+    fake_slurm.mutable_launcher.chmod(0o700)
     with pytest.raises(SlurmAuthorityError, match="digest"):
         await backend.submit(request)
+    assert fake_slurm.sbatch_calls == ()
+
+
+@pytest.mark.asyncio
+async def test_command_executes_verified_open_inode_when_path_is_replaced(
+    fake_slurm: FakeSlurm,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_create = asyncio.create_subprocess_exec
+    scontrol = fake_slurm.bin / "scontrol"
+    replacement = fake_slurm.bin / "replacement"
+    replacement.write_text("#!/usr/bin/python3\nprint('ClusterName = foreign')\n", encoding="utf-8")
+    replacement.chmod(0o700)
+    replaced = False
+
+    async def replace_before_exec(*argv: str, **kwargs: object) -> asyncio.subprocess.Process:
+        nonlocal replaced
+        if not replaced and argv[0] == str(scontrol):
+            replaced = True
+            os.replace(replacement, scontrol)
+        return await real_create(*argv, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        "loom_capacity_executor.slurm_backend.asyncio.create_subprocess_exec",
+        replace_before_exec,
+    )
+    authority = await fake_slurm.backend().validate_authority()
+    assert replaced is True
+    assert authority.cluster == "oldlab"
+
+
+@pytest.mark.asyncio
+async def test_submit_rejects_launcher_mutable_by_executor_identity(fake_slurm: FakeSlurm) -> None:
+    launcher = SlurmExecutableIdentityV2(
+        path=str(fake_slurm.mutable_launcher),
+        sha256=fake_slurm._digest(fake_slurm.mutable_launcher),
+        owner_uid=os.geteuid(),
+    )
+    request = slurm_launch_request_fixture(fake_slurm).model_copy(update={"launcher": launcher})
+    with pytest.raises(SlurmAuthorityError, match=r"launcher.*immutable"):
+        await fake_slurm.backend().submit(request)
     assert fake_slurm.sbatch_calls == ()
 
 
@@ -183,6 +271,15 @@ async def test_subprocess_timeout_and_output_are_bounded(fake_slurm: FakeSlurm) 
 
 
 @pytest.mark.asyncio
+async def test_command_deadline_bounds_descendant_held_pipes(fake_slurm: FakeSlurm) -> None:
+    fake_slurm.set_fault("scontrol", "descendant_pipe")
+    started = time.monotonic()
+    with pytest.raises(SlurmAuthorityError, match="timed out"):
+        await fake_slurm.backend(command_timeout_seconds=0.1).validate_authority()
+    assert time.monotonic() - started < 2.0
+
+
+@pytest.mark.asyncio
 async def test_inventory_parses_complete_fixed_fields_and_rejects_unknown_data(
     fake_slurm: FakeSlurm,
 ) -> None:
@@ -200,6 +297,27 @@ async def test_inventory_parses_complete_fixed_fields_and_rejects_unknown_data(
         await fake_slurm.backend().inventory()
     fake_slurm.set_output("squeue", "101|PENDING|too|few\n")
     with pytest.raises(SlurmOutputError, match="field"):
+        await fake_slurm.backend().inventory()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ("RUNNING", "CONFIGURING"))
+async def test_inventory_cross_checks_nonpending_reason_field_as_nodes(
+    fake_slurm: FakeSlurm,
+    state: str,
+) -> None:
+    fake_slurm.add_job(state=state)
+    observation = (await fake_slurm.backend().inventory())[0]
+    assert observation.state == state
+    assert observation.nodes == ("oldlab-5",)
+    assert observation.pending_reason is None
+
+    fake_slurm.set_output(
+        "squeue",
+        f"101|{state}|loom-oldlab|loom-executor|loom|16|65536M|gpu:2|"
+        f"oldlab-5|foreign-node|{'A' * 43}\n",
+    )
+    with pytest.raises(SlurmOutputError, match="resource"):
         await fake_slurm.backend().inventory()
 
 
@@ -245,6 +363,17 @@ async def test_cancel_pending_uses_scheduler_predicates_after_exact_reobservatio
 
 
 @pytest.mark.asyncio
+async def test_cancel_pending_treats_unexpected_success_output_as_uncertain(
+    fake_slurm: FakeSlurm,
+) -> None:
+    fake_slurm.add_job()
+    fake_slurm.set_output("scancel", "unexpected-success-output\n")
+    with pytest.raises(slurm_backend.SlurmCancellationUncertainError):
+        await fake_slurm.backend().cancel_pending(cancel_request())
+    assert len(fake_slurm.scancel_calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_accounting_high_water_returns_only_exact_terminal_evidence(
     fake_slurm: FakeSlurm,
 ) -> None:
@@ -276,6 +405,65 @@ async def test_accounting_rejects_incomplete_tres_even_with_known_extra_fields(
         "99|COMPLETED|loom-oldlab|loom-executor|oldlab|"
         "2026-08-13T12:00:00Z|2026-08-13T12:01:00Z|2026-08-13T12:03:00Z|"
         "120|0:0|16|65536M|billing=16,cpu=16,mem=65536M|oldlab-5|" + "A" * 43 + "\n",
+    )
+    with pytest.raises(SlurmOutputError, match="terminal"):
+        await fake_slurm.backend().accounting_high_water(
+            since=datetime(2026, 8, 13, 0, 0, tzinfo=UTC)
+        )
+
+
+@pytest.mark.asyncio
+async def test_typed_gpu_and_generic_tres_round_trip_submission_inventory_and_accounting(
+    fake_slurm: FakeSlurm,
+) -> None:
+    tres = (
+        SlurmTresValueV2(name="gres/fpga:vu9p", value=1),
+        SlurmTresValueV2(name="gres/gpu:a100", value=2),
+    )
+    ceiling = SlurmResourceV2(
+        cpus=64,
+        memory_bytes=512 * 1024 * 1024 * 1024,
+        gpus=8,
+        generic_tres=tres,
+    )
+    request = slurm_launch_request_fixture(fake_slurm).model_copy(update={"generic_tres": tres})
+    backend = fake_slurm.backend(resource_ceiling=ceiling)
+
+    submitted = await backend.submit(request)
+    observed = (await backend.inventory())[0]
+    assert submitted.job_id == observed.job_id
+    assert (observed.cpus, observed.memory_bytes, observed.gpus, observed.nodes) == (
+        request.cpus,
+        request.memory_bytes,
+        request.gpus,
+        request.nodes,
+    )
+    assert observed.generic_tres == tres
+
+    fake_slurm.terminalize_job(submitted.job_id)
+    terminal = (
+        await backend.accounting_high_water(since=datetime(2026, 8, 13, 0, 0, tzinfo=UTC))
+    ).terminal_jobs[0]
+    assert (terminal.cpus, terminal.memory_bytes, terminal.gpus, terminal.nodes) == (
+        request.cpus,
+        request.memory_bytes,
+        request.gpus,
+        request.nodes,
+    )
+    assert terminal.generic_tres == tres
+    assert "--gpus=a100:2" in fake_slurm.sbatch_calls[0].argv
+    assert "--gres=fpga:vu9p:1" in fake_slurm.sbatch_calls[0].argv
+
+
+@pytest.mark.asyncio
+async def test_accounting_rejects_reqmem_allocated_tres_memory_disagreement(
+    fake_slurm: FakeSlurm,
+) -> None:
+    fake_slurm.set_output(
+        "sacct",
+        "99|COMPLETED|loom-oldlab|loom-executor|oldlab|"
+        "2026-08-13T12:00:00Z|2026-08-13T12:01:00Z|2026-08-13T12:03:00Z|"
+        "120|0:0|16|65536M|cpu=16,gres/gpu=2,mem=32768M,node=1|oldlab-5|" + "A" * 43 + "\n",
     )
     with pytest.raises(SlurmOutputError, match="terminal"):
         await fake_slurm.backend().accounting_high_water(

@@ -22,10 +22,13 @@ import sys
 import time
 from pathlib import Path
 
-root = Path(sys.argv[0]).parent.parent
+invoked_path = sys.argv[0]
+if invoked_path.startswith("/proc/self/fd/"):
+    invoked_path = os.readlink(invoked_path).removesuffix(" (deleted)")
+root = Path(invoked_path).parent.parent
 state_path = root / "state.json"
 calls_path = root / "calls.jsonl"
-command = Path(sys.argv[0]).name
+command = Path(invoked_path).name
 
 
 def secure_append(path: Path, payload: bytes) -> None:
@@ -57,7 +60,7 @@ secure_append(
     calls_path,
     json.dumps(
         {
-            "executable": sys.argv[0],
+            "executable": invoked_path,
             "argv": sys.argv[1:],
             "environment": dict(os.environ),
             "shell": False,
@@ -69,6 +72,12 @@ secure_append(
 fault = state.get("faults", {}).get(command)
 if fault == "timeout":
     time.sleep(5)
+if fault == "descendant_pipe":
+    child = os.fork()
+    if child == 0:
+        time.sleep(5)
+        os._exit(0)
+    raise SystemExit(0)
 if fault == "oversize":
     sys.stdout.write("x" * 1048576)
     raise SystemExit(0)
@@ -82,8 +91,15 @@ if override is not None:
 
 if command == "scontrol":
     sys.stdout.write(
+        "Configuration data as of 2026-08-13T12:00:00\n"
+        "AccountingStorageType = accounting_storage/slurmdbd\n"
+        "AuthType = auth/munge\n"
         "ClusterName = " + state["cluster"] + "\n"
-        "SlurmctldHost = " + state["controller"] + "\n"
+        "ControlMachine = (null)\n"
+        "SlurmctldHost[0] = " + state["controller"] + "(192.0.2.10)\n"
+        "SlurmctldHost[1] = ctl-backup.oldlab.internal(192.0.2.11)\n"
+        "SlurmctldPort = 6817\n"
+        "SlurmUser = slurm(64030)\n"
     )
 elif command == "sacctmgr":
     sys.stdout.write("|".join((
@@ -102,16 +118,41 @@ elif command == "squeue":
     if requested is not None:
         jobs = (job for job in jobs if job["job_id"] == requested)
     for job in jobs:
+        reason_or_nodes = (
+            job["pending_reason"] if job["state"] == "PENDING" else ",".join(job["nodes"])
+        )
         sys.stdout.write("|".join((
             job["job_id"], job["state"], job["submitter"], job["account"],
             job["partition"], str(job["cpus"]), str(job["memory_bytes"] // 1048576) + "M",
-            "gpu:" + str(job["gpus"]) if job["gpus"] else "N/A",
-            ",".join(job["nodes"]), job["pending_reason"],
+            job.get("gres", "gpu:" + str(job["gpus"]) if job["gpus"] else "N/A"),
+            ",".join(job["nodes"]), reason_or_nodes,
             job["ownership_token"],
         )) + "\n")
 elif command == "sbatch":
     def option(prefix: str, default: str = "") -> str:
         return next((item.split("=", 1)[1] for item in sys.argv[1:] if item.startswith(prefix)), default)
+    generic_tres = {}
+    gres_records = []
+    gpu_spec = option("--gpus=", "0")
+    if gpu_spec.isdigit():
+        gpus = int(gpu_spec)
+        if gpus:
+            gres_records.append("gpu:" + str(gpus))
+    else:
+        gpus = 0
+        for record in gpu_spec.split(","):
+            gpu_type, count_text = record.rsplit(":", 1)
+            count = int(count_text)
+            gpus += count
+            generic_tres["gres/gpu:" + gpu_type] = count
+            gres_records.append("gpu:" + gpu_type + ":" + str(count))
+    gres_spec = option("--gres=")
+    if gres_spec:
+        for record in gres_spec.split(","):
+            name, count_text = record.rsplit(":", 1)
+            count = int(count_text)
+            generic_tres["gres/" + name] = count
+            gres_records.append(name + ":" + str(count))
     job_id = str(state["next_job_id"])
     state["next_job_id"] += 1
     state["jobs"][job_id] = {
@@ -122,7 +163,9 @@ elif command == "sbatch":
         "partition": option("--partition="),
         "cpus": int(option("--cpus-per-task=")),
         "memory_bytes": int(option("--mem=")[:-1]) * 1024 * 1024,
-        "gpus": int(option("--gpus=", "0")),
+        "gpus": gpus,
+        "generic_tres": generic_tres,
+        "gres": ",".join(gres_records) if gres_records else "N/A",
         "nodes": option("--nodelist=").split(","),
         "pending_reason": "Resources",
         "ownership_token": option("--comment="),
@@ -137,13 +180,23 @@ elif command == "scancel":
         secure_write(state_path, state)
 elif command == "sacct":
     for job in state["terminal_jobs"]:
+        allocated_tres = [
+            "cpu=" + str(job["cpus"]),
+            "mem=" + str(job["memory_bytes"] // 1048576) + "M",
+            "node=" + str(len(job["nodes"])),
+        ]
+        if job["gpus"]:
+            allocated_tres.append("gres/gpu=" + str(job["gpus"]))
+        allocated_tres.extend(
+            name + "=" + str(value)
+            for name, value in sorted(job.get("generic_tres", {}).items())
+        )
         sys.stdout.write("|".join((
             job["job_id"], job["state"], job["submitter"], job["account"],
             state["cluster"], job["submitted_at"], job["started_at"],
             job["ended_at"], str(job["elapsed_seconds"]), job["exit_code"],
             str(job["cpus"]), str(job["memory_bytes"] // 1048576) + "M",
-            "cpu=" + str(job["cpus"]) + ",gres/gpu=" + str(job["gpus"]) +
-            ",mem=" + str(job["memory_bytes"] // 1048576) + "M,node=" + str(len(job["nodes"])),
+            ",".join(allocated_tres),
             ",".join(job["nodes"]), job["ownership_token"],
         )) + "\n")
 else:
@@ -186,9 +239,10 @@ class FakeSlurm:
             path = self.bin / command
             path.write_text(_FAKE_PROCESS, encoding="utf-8")
             path.chmod(0o700)
-        self.launcher = self.bin / "trusted-launcher"
-        self.launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        self.launcher.chmod(0o700)
+        self.mutable_launcher = self.bin / "trusted-launcher"
+        self.mutable_launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        self.mutable_launcher.chmod(0o700)
+        self.launcher = Path("/usr/bin/true")
 
     def _write_state(self) -> None:
         descriptor = os.open(
@@ -201,6 +255,9 @@ class FakeSlurm:
             os.write(descriptor, json.dumps(self._state, sort_keys=True).encode("utf-8"))
         finally:
             os.close(descriptor)
+
+    def _load_state(self) -> None:
+        self._state = json.loads(self._state_path.read_text(encoding="utf-8"))
 
     @staticmethod
     def _digest(path: Path) -> str:
@@ -293,6 +350,8 @@ class FakeSlurm:
             "cpus": 16,
             "memory_bytes": 64 * 1024 * 1024 * 1024,
             "gpus": 2,
+            "generic_tres": {},
+            "gres": "gpu:2",
             "nodes": ["oldlab-5"],
             "pending_reason": "Resources" if state == "PENDING" else "",
             "ownership_token": "A" * 43,
@@ -334,10 +393,27 @@ class FakeSlurm:
                 "cpus": 16,
                 "memory_bytes": 64 * 1024 * 1024 * 1024,
                 "gpus": 2,
+                "generic_tres": {},
                 "nodes": ["oldlab-5"],
                 "ownership_token": "A" * 43,
             }
         )
+        self._write_state()
+
+    def terminalize_job(self, job_id: str) -> None:
+        self._load_state()
+        job = dict(self._state["jobs"][job_id])
+        job.update(
+            {
+                "state": "COMPLETED",
+                "submitted_at": "2026-08-13T12:00:00Z",
+                "started_at": "2026-08-13T12:01:00Z",
+                "ended_at": "2026-08-13T12:03:00Z",
+                "elapsed_seconds": 120,
+                "exit_code": "0:0",
+            }
+        )
+        self._state["terminal_jobs"].append(job)
         self._write_state()
 
     def evidence_paths(self) -> tuple[Path, ...]:

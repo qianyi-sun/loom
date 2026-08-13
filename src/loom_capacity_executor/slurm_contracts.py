@@ -103,9 +103,36 @@ class SlurmExecutablesV2(StrictSlurmV2Model):
 class SlurmTresValueV2(StrictSlurmV2Model):
     name: Annotated[
         str,
-        Field(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9_.-]*(?:/[a-z0-9_.-]+)?$"),
+        Field(
+            min_length=1,
+            max_length=128,
+            pattern=r"^[a-z][a-z0-9_.-]*(?:/[a-z0-9_.-]+(?::[a-z0-9_.-]+)?)?$",
+        ),
     ]
     value: PositiveSlurmQuantity
+
+    @field_validator("name")
+    @classmethod
+    def _generic_name(cls, value: str) -> str:
+        if value in {"billing", "cpu", "mem", "node", "gres/gpu"}:
+            raise ValueError("reserved Slurm TRES name")
+        if not value.startswith("gres/"):
+            raise ValueError("generic Slurm TRES must name a GRES")
+        return value
+
+
+def _canonical_tres(
+    value: tuple[SlurmTresValueV2, ...],
+) -> tuple[SlurmTresValueV2, ...]:
+    names = [item.name for item in value]
+    if len(names) != len(set(names)):
+        raise ValueError("duplicate Slurm TRES name")
+    return tuple(sorted(value, key=lambda item: item.name))
+
+
+def _typed_gpu_total(value: tuple[SlurmTresValueV2, ...]) -> int | None:
+    typed = tuple(item for item in value if item.name.startswith("gres/gpu:"))
+    return sum(item.value for item in typed) if typed else None
 
 
 class SlurmResourceV2(StrictSlurmV2Model):
@@ -117,10 +144,14 @@ class SlurmResourceV2(StrictSlurmV2Model):
     @field_validator("generic_tres")
     @classmethod
     def _unique_tres(cls, value: tuple[SlurmTresValueV2, ...]) -> tuple[SlurmTresValueV2, ...]:
-        names = [item.name for item in value]
-        if len(names) != len(set(names)):
-            raise ValueError("duplicate Slurm TRES name")
-        return tuple(sorted(value, key=lambda item: item.name))
+        return _canonical_tres(value)
+
+    @model_validator(mode="after")
+    def _typed_gpu_ceiling(self) -> SlurmResourceV2:
+        typed_total = _typed_gpu_total(self.generic_tres)
+        if typed_total is not None and typed_total > self.gpus:
+            raise ValueError("typed GPU TRES exceeds aggregate GPU ceiling")
+        return self
 
 
 class SlurmAuthorityV2(StrictSlurmV2Model):
@@ -198,16 +229,21 @@ class SlurmLaunchRequestV2(StrictSlurmV2Model):
     @field_validator("generic_tres")
     @classmethod
     def _unique_tres(cls, value: tuple[SlurmTresValueV2, ...]) -> tuple[SlurmTresValueV2, ...]:
-        names = [item.name for item in value]
-        if len(names) != len(set(names)):
-            raise ValueError("duplicate Slurm TRES name")
-        return tuple(sorted(value, key=lambda item: item.name))
+        return _canonical_tres(value)
+
+    @model_validator(mode="after")
+    def _typed_gpu_request(self) -> SlurmLaunchRequestV2:
+        typed_total = _typed_gpu_total(self.generic_tres)
+        if typed_total is not None and typed_total != self.gpus:
+            raise ValueError("typed GPU TRES must equal aggregate GPU request")
+        return self
 
     def trusted_launcher_argv(self) -> tuple[str, ...]:
         """Render only typed, digest-bound arguments for the trusted wrapper."""
 
         return (
             self.launcher.path,
+            f"--launcher-sha256={self.launcher.sha256}",
             f"--operation-id={self.operation_id}",
             f"--image-digest={self.image_digest}",
             f"--release-sha256={self.launcher_release_sha256}",
@@ -237,6 +273,7 @@ class SlurmJobObservationV2(StrictSlurmV2Model):
     cpus: Annotated[int, Field(gt=0, le=65_536)]
     memory_bytes: PositiveSlurmQuantity
     gpus: Annotated[int, Field(ge=0, le=1_024)]
+    generic_tres: Annotated[tuple[SlurmTresValueV2, ...], Field(max_length=64)] = ()
     nodes: Annotated[tuple[str, ...], Field(max_length=MAX_SLURM_NODES)]
     pending_reason: Annotated[str | None, Field(max_length=256)] = None
     ownership_token: OwnershipToken
@@ -246,10 +283,18 @@ class SlurmJobObservationV2(StrictSlurmV2Model):
     def _nodes(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         return _canonical_nodes(value, allow_empty=True)
 
+    @field_validator("generic_tres")
+    @classmethod
+    def _unique_tres(cls, value: tuple[SlurmTresValueV2, ...]) -> tuple[SlurmTresValueV2, ...]:
+        return _canonical_tres(value)
+
     @model_validator(mode="after")
     def _pending_reason_state(self) -> SlurmJobObservationV2:
         if self.pending_reason is not None and self.state != "PENDING":
             raise ValueError("pending reason requires PENDING state")
+        typed_total = _typed_gpu_total(self.generic_tres)
+        if typed_total is not None and typed_total != self.gpus:
+            raise ValueError("typed GPU TRES conflicts with aggregate GPU observation")
         return self
 
 
@@ -273,6 +318,7 @@ class SlurmTerminalEvidenceV2(StrictSlurmV2Model):
     cpus: Annotated[int, Field(gt=0, le=65_536)]
     memory_bytes: PositiveSlurmQuantity
     gpus: Annotated[int, Field(ge=0, le=1_024)]
+    generic_tres: Annotated[tuple[SlurmTresValueV2, ...], Field(max_length=64)] = ()
     nodes: Annotated[tuple[str, ...], Field(max_length=MAX_SLURM_NODES)]
     ownership_token: OwnershipToken
 
@@ -286,12 +332,20 @@ class SlurmTerminalEvidenceV2(StrictSlurmV2Model):
     def _nodes(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         return _canonical_nodes(value, allow_empty=True)
 
+    @field_validator("generic_tres")
+    @classmethod
+    def _unique_tres(cls, value: tuple[SlurmTresValueV2, ...]) -> tuple[SlurmTresValueV2, ...]:
+        return _canonical_tres(value)
+
     @model_validator(mode="after")
     def _ordered_times(self) -> SlurmTerminalEvidenceV2:
         if self.started_at is not None and self.started_at < self.submitted_at:
             raise ValueError("Slurm start precedes submission")
         if self.ended_at < (self.started_at or self.submitted_at):
             raise ValueError("Slurm end precedes start")
+        typed_total = _typed_gpu_total(self.generic_tres)
+        if typed_total is not None and typed_total != self.gpus:
+            raise ValueError("typed GPU TRES conflicts with aggregate terminal GPU evidence")
         return self
 
 

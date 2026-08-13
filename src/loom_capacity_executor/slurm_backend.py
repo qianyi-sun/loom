@@ -10,6 +10,7 @@ import os
 import re
 import signal
 import stat
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -26,12 +27,15 @@ from loom_capacity_executor.slurm_contracts import (
     SlurmLaunchRequestV2,
     SlurmSubmissionV2,
     SlurmTerminalEvidenceV2,
+    SlurmTresValueV2,
     strict_datetime,
 )
 
 _MAX_EXECUTABLE_BYTES = 64 * 1024 * 1024
 _MAX_INVENTORY_RECORDS = 10_000
+_MAX_CONFIG_RECORDS = 4_096
 _READ_CHUNK_BYTES = 64 * 1024
+_PROCESS_CLEANUP_GRACE_SECONDS = 0.5
 _TRUSTED_ENVIRONMENT = {
     "LANG": "C",
     "LC_ALL": "C",
@@ -40,6 +44,12 @@ _TRUSTED_ENVIRONMENT = {
     "PYTHONUTF8": "1",
 }
 _MEMORY_PATTERN = re.compile(r"^([1-9][0-9]{0,18})([KMGTP])([cn]?)$")
+_CLUSTER_CONFIG_PATTERN = re.compile(r"^ClusterName\s*=\s*(\S+)\s*$")
+_CONTROLLER_CONFIG_PATTERN = re.compile(
+    r"^SlurmctldHost(?:\[([0-9]{1,3})\])?\s*=\s*"
+    r"([A-Za-z0-9][A-Za-z0-9.-]{0,252}[A-Za-z0-9])"
+    r"(?:\([^()\s]{1,255}\))?\s*$"
+)
 
 
 class SlurmBackendError(RuntimeError):
@@ -66,6 +76,10 @@ class SlurmSubmissionUncertainError(SlurmBackendError):
     """An sbatch invocation began but no exact physical identity was proved."""
 
 
+class SlurmCancellationUncertainError(SlurmBackendError):
+    """A scancel invocation began but no exact clean result was proved."""
+
+
 async def _read_bounded(
     stream: asyncio.StreamReader,
     *,
@@ -84,15 +98,33 @@ async def _read_bounded(
 
 
 def _signal_process(process: asyncio.subprocess.Process) -> None:
-    if process.returncode is not None:
-        return
     with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(process.pid, signal.SIGKILL)
-    with contextlib.suppress(ProcessLookupError):
-        process.kill()
+    if process.returncode is None:
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
 
 
-def _validate_executable(identity: SlurmExecutableIdentityV2) -> None:
+async def _bounded_process_cleanup(
+    process: asyncio.subprocess.Process,
+    tasks: tuple[asyncio.Task[bytes], asyncio.Task[bytes], asyncio.Task[int]],
+) -> None:
+    _signal_process(process)
+    _completed, pending = await asyncio.wait(
+        tasks,
+        timeout=_PROCESS_CLEANUP_GRACE_SECONDS,
+    )
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.wait(pending, timeout=_PROCESS_CLEANUP_GRACE_SECONDS)
+    for task in tasks:
+        if task.done() and not task.cancelled():
+            task.exception()
+
+
+@contextlib.contextmanager
+def _open_verified_executable(identity: SlurmExecutableIdentityV2) -> Iterator[int]:
     flags = os.O_RDONLY | os.O_CLOEXEC
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -115,15 +147,48 @@ def _validate_executable(identity: SlurmExecutableIdentityV2) -> None:
         while chunk := os.read(descriptor, _READ_CHUNK_BYTES):
             digest.update(chunk)
         after = os.fstat(descriptor)
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ) or not hmac.compare_digest(digest.hexdigest(), identity.sha256):
+            raise SlurmAuthorityError("Slurm executable digest or file identity changed")
+        yield descriptor
     finally:
         os.close(descriptor)
-    if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
-        after.st_dev,
-        after.st_ino,
-        after.st_size,
-        after.st_mtime_ns,
-    ) or not hmac.compare_digest(digest.hexdigest(), identity.sha256):
-        raise SlurmAuthorityError("Slurm executable digest or file identity changed")
+
+
+def _validate_executable(identity: SlurmExecutableIdentityV2) -> None:
+    with _open_verified_executable(identity):
+        pass
+
+
+def _validate_immutable_launcher(
+    identity: SlurmExecutableIdentityV2,
+    *,
+    executor_uid: int,
+) -> None:
+    with _open_verified_executable(identity):
+        pass
+    if identity.owner_uid == executor_uid:
+        raise SlurmAuthorityError("trusted launcher path is not immutable to executor identity")
+    path = Path(identity.path)
+    for directory in reversed(path.parents):
+        try:
+            info = directory.lstat()
+        except OSError:
+            raise SlurmAuthorityError(
+                "trusted launcher directory authority is unavailable"
+            ) from None
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or info.st_uid not in {0, identity.owner_uid}
+            or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            or (info.st_uid == executor_uid and info.st_mode & stat.S_IWUSR)
+        ):
+            raise SlurmAuthorityError("trusted launcher directory is not immutable")
 
 
 def _decode_output(payload: bytes, *, command: str) -> str:
@@ -145,6 +210,45 @@ def _lines(value: str, *, command: str, maximum: int, allow_empty: bool) -> tupl
     if any(not record for record in records):
         raise SlurmOutputError(f"{command} output contains an empty record")
     return records
+
+
+def _controller_config_facts(value: str) -> tuple[str, str]:
+    records = tuple(value.splitlines())
+    if not records:
+        raise SlurmOutputError("scontrol output is missing")
+    if len(records) > _MAX_CONFIG_RECORDS:
+        raise SlurmOutputError("scontrol output has too many records")
+    cluster: str | None = None
+    primary_controller: str | None = None
+    controller_indexes: set[int] = set()
+    for line in records:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        cluster_match = _CLUSTER_CONFIG_PATTERN.fullmatch(stripped)
+        if cluster_match is not None:
+            if cluster is not None:
+                raise SlurmOutputError("scontrol cluster authority record is duplicate")
+            cluster = cluster_match.group(1)
+            continue
+        controller_match = _CONTROLLER_CONFIG_PATTERN.fullmatch(stripped)
+        if controller_match is not None:
+            index = int(controller_match.group(1) or "0")
+            if index in controller_indexes:
+                raise SlurmOutputError("scontrol controller authority record is duplicate")
+            controller_indexes.add(index)
+            if index == 0:
+                if primary_controller is not None:
+                    raise SlurmOutputError(
+                        "scontrol primary controller authority record is duplicate"
+                    )
+                primary_controller = controller_match.group(2)
+            continue
+        if stripped.startswith("ClusterName") or stripped.startswith("SlurmctldHost"):
+            raise SlurmOutputError("scontrol authority record is malformed")
+    if cluster is None or primary_controller is None:
+        raise SlurmOutputError("scontrol authority record is missing")
+    return cluster, primary_controller
 
 
 def _time_argument(seconds: int) -> str:
@@ -176,47 +280,97 @@ def _memory_bytes(value: str, *, cpus: int, nodes: int) -> int:
     return result
 
 
-def _gpu_count(value: str) -> int:
+def _gres_values(
+    value: str,
+    *,
+    allowed_generic: set[str],
+) -> tuple[int, tuple[SlurmTresValueV2, ...]]:
     if value in {"N/A", "(null)"}:
-        return 0
-    total = 0
+        return 0, ()
+    aggregate_gpu: int | None = None
+    generic: list[SlurmTresValueV2] = []
+    seen: set[str] = set()
     records = value.split(",")
     if len(records) > 64:
         raise ValueError("Slurm GRES value exceeds its bound")
     for record in records:
         fields = record.split(":")
-        if len(fields) not in {2, 3} or fields[0] != "gpu":
-            raise ValueError("Slurm GRES value is unknown")
-        count = int(fields[-1])
-        if count <= 0:
-            raise ValueError("Slurm GPU count is invalid")
-        total += count
-    if total > 1_024:
+        if len(fields) == 2:
+            resource, count_text = fields
+            resource_type = None
+        elif len(fields) == 3:
+            resource, resource_type, count_text = fields
+        else:
+            raise ValueError("Slurm GRES value is malformed")
+        if not resource or resource_type == "":
+            raise ValueError("Slurm GRES name is malformed")
+        count = int(count_text)
+        if not 0 < count <= (1 << 63) - 1:
+            raise ValueError("Slurm GRES count is invalid")
+        if resource == "gpu" and resource_type is None:
+            if aggregate_gpu is not None:
+                raise ValueError("Slurm aggregate GPU value is duplicate")
+            aggregate_gpu = count
+            continue
+        name = f"gres/{resource}"
+        if resource_type is not None:
+            name += f":{resource_type}"
+        if name not in allowed_generic:
+            raise ValueError("Slurm GRES value is not configured")
+        if name in seen:
+            raise ValueError("Slurm GRES value is duplicate")
+        seen.add(name)
+        generic.append(SlurmTresValueV2(name=name, value=count))
+    typed_gpu_total = sum(item.value for item in generic if item.name.startswith("gres/gpu:"))
+    if aggregate_gpu is not None and typed_gpu_total and aggregate_gpu != typed_gpu_total:
+        raise ValueError("Slurm aggregate and typed GPU values conflict")
+    gpus = aggregate_gpu if aggregate_gpu is not None else typed_gpu_total
+    if gpus > 1_024:
         raise ValueError("Slurm GPU count exceeds its bound")
-    return total
+    return gpus, tuple(sorted(generic, key=lambda item: item.name))
 
 
-def _allocated_gpu_count(value: str, *, cpus: int, nodes: int) -> int:
+def _allocated_resources(
+    value: str,
+    *,
+    cpus: int,
+    nodes: int,
+    requested_memory_bytes: int,
+    allowed_generic: set[str],
+) -> tuple[int, tuple[SlurmTresValueV2, ...]]:
     records = value.split(",")
     if not records or len(records) > 64:
         raise ValueError("Slurm allocated TRES value is malformed")
     parsed: dict[str, str] = {}
+    fixed_names = {"billing", "cpu", "gres/gpu", "mem", "node"}
     for record in records:
         fields = record.split("=", maxsplit=1)
         if len(fields) != 2 or fields[0] in parsed:
             raise ValueError("Slurm allocated TRES value is malformed or duplicate")
-        if fields[0] not in {"billing", "cpu", "gres/gpu", "mem", "node"}:
+        if fields[0] not in fixed_names and fields[0] not in allowed_generic:
             raise ValueError("Slurm allocated TRES value is unknown")
         parsed[fields[0]] = fields[1]
     if not {"cpu", "mem", "node"} <= set(parsed):
         raise ValueError("Slurm allocated TRES value is incomplete")
     if int(parsed["cpu"]) != cpus or int(parsed["node"]) != nodes:
         raise ValueError("Slurm allocated TRES value conflicts with fixed fields")
-    _memory_bytes(parsed["mem"], cpus=cpus, nodes=nodes)
-    gpus = int(parsed.get("gres/gpu", "0"))
+    allocated_memory_bytes = _memory_bytes(parsed["mem"], cpus=cpus, nodes=nodes)
+    if allocated_memory_bytes != requested_memory_bytes:
+        raise ValueError("Slurm requested and allocated memory values conflict")
+    generic: list[SlurmTresValueV2] = []
+    for name in sorted(set(parsed) & allowed_generic):
+        count = int(parsed[name])
+        if count <= 0:
+            raise ValueError("Slurm allocated generic TRES count is invalid")
+        generic.append(SlurmTresValueV2(name=name, value=count))
+    aggregate_gpu = int(parsed.get("gres/gpu", "0"))
+    typed_gpu_total = sum(item.value for item in generic if item.name.startswith("gres/gpu:"))
+    if typed_gpu_total and ("gres/gpu" not in parsed or aggregate_gpu != typed_gpu_total):
+        raise ValueError("Slurm allocated aggregate and typed GPU values conflict")
+    gpus = aggregate_gpu if "gres/gpu" in parsed else typed_gpu_total
     if not 0 <= gpus <= 1_024:
         raise ValueError("Slurm allocated GPU value is invalid")
-    return gpus
+    return gpus, tuple(generic)
 
 
 class AsyncSlurmBackend:
@@ -232,7 +386,6 @@ class AsyncSlurmBackend:
         identity: SlurmExecutableIdentityV2,
         argv: tuple[str, ...],
     ) -> tuple[bytes, bytes]:
-        _validate_executable(identity)
         if (
             not argv
             or argv[0] != identity.path
@@ -242,15 +395,20 @@ class AsyncSlurmBackend:
             )
         ):
             raise SlurmAuthorityError("Slurm argv is not bound to its executable")
+        if not Path("/proc/self/fd").is_dir():
+            raise SlurmAuthorityError("fd-bound Slurm execution is unavailable")
         try:
-            process = await asyncio.create_subprocess_exec(
-                *argv,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=_TRUSTED_ENVIRONMENT,
-                start_new_session=True,
-            )
+            with _open_verified_executable(identity) as descriptor:
+                process = await asyncio.create_subprocess_exec(
+                    *argv,
+                    executable=f"/proc/self/fd/{descriptor}",
+                    pass_fds=(descriptor,),
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=_TRUSTED_ENVIRONMENT,
+                    start_new_session=True,
+                )
         except OSError:
             raise SlurmCommandError("Slurm command could not start") from None
         assert process.stdout is not None
@@ -275,25 +433,38 @@ class AsyncSlurmBackend:
         stdout_limit_task = asyncio.create_task(stdout_exceeded.wait())
         stderr_limit_task = asyncio.create_task(stderr_exceeded.wait())
         process_tasks = (stdout_task, stderr_task, wait_task)
-        watch_tasks = (wait_task, stdout_limit_task, stderr_limit_task)
+        limit_tasks = (stdout_limit_task, stderr_limit_task)
+        deadline = asyncio.get_running_loop().time() + self.authority.command_timeout_seconds
+        failure: SlurmBackendError | None = None
         try:
-            completed, _pending = await asyncio.wait(
-                watch_tasks,
-                timeout=self.authority.command_timeout_seconds,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if not completed:
-                _signal_process(process)
-                await asyncio.gather(*process_tasks, return_exceptions=True)
-                raise SlurmCommandError("Slurm command timed out")
-            if stdout_limit_task in completed or stderr_limit_task in completed:
-                _signal_process(process)
-                await asyncio.gather(*process_tasks, return_exceptions=True)
-                raise SlurmOutputError("Slurm command output exceeded its bound")
-            stdout, stderr, return_code = await asyncio.gather(*process_tasks)
+            while not all(task.done() for task in process_tasks):
+                if stdout_exceeded.is_set() or stderr_exceeded.is_set():
+                    failure = SlurmOutputError("Slurm command output exceeded its bound")
+                    break
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    failure = SlurmCommandError("Slurm command timed out")
+                    break
+                active = tuple(task for task in (*process_tasks, *limit_tasks) if not task.done())
+                completed, _pending = await asyncio.wait(
+                    active,
+                    timeout=remaining,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not completed:
+                    failure = SlurmCommandError("Slurm command timed out")
+                    break
+            if failure is not None:
+                await _bounded_process_cleanup(process, process_tasks)
+            if stdout_exceeded.is_set() or stderr_exceeded.is_set():
+                failure = SlurmOutputError("Slurm command output exceeded its bound")
+            if failure is not None:
+                raise failure
+            stdout = stdout_task.result()
+            stderr = stderr_task.result()
+            return_code = wait_task.result()
         except asyncio.CancelledError:
-            _signal_process(process)
-            await asyncio.gather(*process_tasks, return_exceptions=True)
+            await _bounded_process_cleanup(process, process_tasks)
             raise
         finally:
             for task in (stdout_limit_task, stderr_limit_task):
@@ -336,18 +507,8 @@ class AsyncSlurmBackend:
                 self.authority.executables.scontrol,
                 ("show", "config"),
             )
-            facts: dict[str, str] = {}
-            for line in _lines(config, command="scontrol", maximum=2, allow_empty=False):
-                parts = line.split(" = ")
-                if len(parts) != 2 or parts[0] not in {"ClusterName", "SlurmctldHost"}:
-                    raise SlurmOutputError("scontrol authority record is malformed or unknown")
-                if parts[0] in facts:
-                    raise SlurmOutputError("scontrol authority record is duplicate")
-                facts[parts[0]] = parts[1]
-            if facts != {
-                "ClusterName": self.authority.cluster,
-                "SlurmctldHost": self.authority.controller_host,
-            }:
+            cluster, controller = _controller_config_facts(config)
+            if cluster != self.authority.cluster or controller != self.authority.controller_host:
                 raise SlurmAuthorityError("Slurm controller or cluster authority does not match")
 
             association = await self._run_text(
@@ -431,6 +592,18 @@ class AsyncSlurmBackend:
             try:
                 cpus = int(fields[5])
                 nodes = tuple(fields[8].split(",")) if fields[8] else ()
+                gpus, generic_tres = _gres_values(
+                    fields[7],
+                    allowed_generic={
+                        item.name for item in self.authority.resource_ceiling.generic_tres
+                    },
+                )
+                if state == "PENDING":
+                    pending_reason = fields[9] or None
+                else:
+                    if fields[9] != fields[8]:
+                        raise ValueError("non-pending reason field conflicts with node list")
+                    pending_reason = None
                 observation = SlurmJobObservationV2.model_validate(
                     {
                         "cluster": self.authority.cluster,
@@ -441,9 +614,10 @@ class AsyncSlurmBackend:
                         "partition": partition,
                         "cpus": cpus,
                         "memory_bytes": _memory_bytes(fields[6], cpus=cpus, nodes=len(nodes)),
-                        "gpus": _gpu_count(fields[7]),
+                        "gpus": gpus,
+                        "generic_tres": generic_tres,
                         "nodes": nodes,
-                        "pending_reason": fields[9] or None,
+                        "pending_reason": pending_reason,
                         "ownership_token": fields[10],
                     }
                 )
@@ -471,7 +645,7 @@ class AsyncSlurmBackend:
             raise TypeError("Slurm submit requires typed SlurmLaunchRequestV2")
         await self.validate_authority()
         self._assert_launch(request)
-        _validate_executable(request.launcher)
+        _validate_immutable_launcher(request.launcher, executor_uid=self.authority.local_uid)
         arguments = [
             "--parsable",
             f"--clusters={request.cluster}",
@@ -485,12 +659,27 @@ class AsyncSlurmBackend:
             f"--cpus-per-task={request.cpus}",
             f"--mem={request.memory_bytes // MEBIBYTE}M",
         ]
-        if request.gpus:
-            arguments.append(f"--gpus={request.gpus}")
-        if request.generic_tres:
+        typed_gpu = tuple(
+            item for item in request.generic_tres if item.name.startswith("gres/gpu:")
+        )
+        generic_gres = tuple(
+            item for item in request.generic_tres if not item.name.startswith("gres/gpu:")
+        )
+        if typed_gpu:
             arguments.append(
-                "--tres-per-task="
-                + ",".join(f"{item.name}:{item.value}" for item in request.generic_tres)
+                "--gpus="
+                + ",".join(
+                    f"{item.name.removeprefix('gres/gpu:')}:{item.value}" for item in typed_gpu
+                )
+            )
+        elif request.gpus:
+            arguments.append(f"--gpus={request.gpus}")
+        if generic_gres:
+            arguments.append(
+                "--gres="
+                + ",".join(
+                    f"{item.name.removeprefix('gres/')}:{item.value}" for item in generic_gres
+                )
             )
         if request.features:
             arguments.append(f"--constraint={'&'.join(request.features)}")
@@ -551,16 +740,25 @@ class AsyncSlurmBackend:
             or observation.state != "PENDING"
         ):
             raise SlurmStateConflictError("Slurm job is not exactly owned and pending")
-        await self._run_text(
-            self.authority.executables.scancel,
-            (
-                f"--clusters={request.cluster}",
-                "--state=PENDING",
-                f"--user={request.submitter}",
-                f"--account={request.account}",
-                request.job_id,
-            ),
-        )
+        try:
+            output = await self._run_text(
+                self.authority.executables.scancel,
+                (
+                    f"--clusters={request.cluster}",
+                    "--state=PENDING",
+                    f"--user={request.submitter}",
+                    f"--account={request.account}",
+                    request.job_id,
+                ),
+            )
+        except SlurmBackendError:
+            raise SlurmCancellationUncertainError(
+                "scancel began but returned no exact clean result"
+            ) from None
+        if output:
+            raise SlurmCancellationUncertainError(
+                "scancel returned unexpected output and requires reobservation"
+            )
         return observation
 
     def _parse_terminal(self, output: str) -> tuple[SlurmTerminalEvidenceV2, ...]:
@@ -587,6 +785,16 @@ class AsyncSlurmBackend:
             try:
                 cpus = int(fields[10])
                 nodes = tuple(fields[13].split(",")) if fields[13] else ()
+                requested_memory_bytes = _memory_bytes(fields[11], cpus=cpus, nodes=len(nodes))
+                gpus, generic_tres = _allocated_resources(
+                    fields[12],
+                    cpus=cpus,
+                    nodes=len(nodes),
+                    requested_memory_bytes=requested_memory_bytes,
+                    allowed_generic={
+                        item.name for item in self.authority.resource_ceiling.generic_tres
+                    },
+                )
                 item = SlurmTerminalEvidenceV2.model_validate(
                     {
                         "cluster": fields[4],
@@ -600,8 +808,9 @@ class AsyncSlurmBackend:
                         "elapsed_seconds": int(fields[8]),
                         "exit_code": fields[9],
                         "cpus": cpus,
-                        "memory_bytes": _memory_bytes(fields[11], cpus=cpus, nodes=len(nodes)),
-                        "gpus": _allocated_gpu_count(fields[12], cpus=cpus, nodes=len(nodes)),
+                        "memory_bytes": requested_memory_bytes,
+                        "gpus": gpus,
+                        "generic_tres": generic_tres,
                         "nodes": nodes,
                         "ownership_token": fields[14],
                     }
@@ -650,6 +859,7 @@ __all__ = [
     "AsyncSlurmBackend",
     "SlurmAuthorityError",
     "SlurmBackendError",
+    "SlurmCancellationUncertainError",
     "SlurmCommandError",
     "SlurmOutputError",
     "SlurmStateConflictError",
