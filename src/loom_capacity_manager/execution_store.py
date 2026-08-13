@@ -600,6 +600,14 @@ class CapacityExecutionStore:
                         binding=binding,
                         command_sequence=context.executor.command_high_water + 1,
                     )
+                if current.state == "observed" and not increase_allowed:
+                    binding = ExecutableIntentBindingV2.model_validate_json(
+                        json.dumps(current.binding_payload)
+                    )
+                    return ExecutableIntentCloseV2(
+                        binding=binding,
+                        command_sequence=context.executor.command_high_water + 1,
+                    )
                 if (
                     current.state == "closing"
                     and current.protected_release_payload is not None
@@ -847,7 +855,13 @@ class CapacityExecutionStore:
                 result_payload=payload,
             )
             if replay is None:
-                if row.state not in {"accepted", "launch-ready", "permitted", "terminal"}:
+                if row.state not in {
+                    "accepted",
+                    "launch-ready",
+                    "permitted",
+                    "observed",
+                    "terminal",
+                }:
                     raise ExecutionConflictError("intent cannot begin close")
                 if row.state in {"accepted", "launch-ready", "permitted"}:
                     runtime = (

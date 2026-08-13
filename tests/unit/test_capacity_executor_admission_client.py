@@ -5,11 +5,13 @@ from uuid import UUID
 
 import pytest
 
+from loom_capacity_agent.admission import ProtectedIntentObservationV2
 from loom_capacity_agent.claim_guard import ExecutableClaimProposalV2
 from loom_capacity_executor.admission_client import (
     DatabaseExecutableAdmissionClient,
     ExecutableAdmissionClientError,
 )
+from tests.unit.test_capacity_executor_launch_renderer import launch_context_fixture
 
 
 def _owner_file(path: Path, value: str) -> Path:
@@ -131,6 +133,24 @@ async def test_database_client_sends_complete_claim_to_protected_transaction() -
         assert method == "admit_claim"
         assert value is proposal
 
-    client._store_call = store_call  # type: ignore[method-assign]
+    client._store_call = store_call  # type: ignore[assignment]
 
     assert await client.admit_claim(proposal) is None
+
+
+# Production break caught: the production database client could not obtain the
+# exact protected worker/drain high-water needed before conditional cancellation.
+@pytest.mark.asyncio
+async def test_database_client_observes_exact_protected_intent() -> None:
+    binding = launch_context_fixture().binding
+    expected = ProtectedIntentObservationV2(binding=binding)
+    client = object.__new__(DatabaseExecutableAdmissionClient)
+
+    async def store_call(method: str, value: object) -> object:
+        assert method == "observe_intent"
+        assert value is binding
+        return expected
+
+    client._store_call = store_call  # type: ignore[assignment]
+
+    assert await client.observe_intent(binding) == expected

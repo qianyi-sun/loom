@@ -489,6 +489,44 @@ class ExecutableReleaseReceiptV2(StrictV2Model):
     executable: Literal[True] = True
 
 
+class ProtectedIntentObservationV2(StrictV2Model):
+    """Read-only exact protected state for one pool-managed intent."""
+
+    binding: ExecutableIntentBindingV2
+    bootstrap_registration_epoch: NonNegativeSequence = 0
+    worker_id: UUID | None = None
+    worker_incarnation: UUID | None = None
+    protected_registration_epoch: NonNegativeSequence = 0
+    claim_high_water: NonNegativeSequence = 0
+    drain: DrainedExecutableWorkerV2 | None = None
+    release: ExecutableReleaseReceiptV2 | None = None
+    executable: Literal[True] = True
+
+    @model_validator(mode="after")
+    def _coherent_worker_state(self) -> ProtectedIntentObservationV2:
+        if (self.worker_id is None) != (self.worker_incarnation is None):
+            raise ValueError("protected worker identities must be present together")
+        if self.worker_id is None and (
+            self.protected_registration_epoch != 0
+            or self.drain is not None
+            or self.release is not None
+        ):
+            raise ValueError("protected worker evidence requires a worker identity")
+        if self.drain is not None and (
+            self.drain.intent_id != self.binding.intent_id
+            or self.drain.worker_id != self.worker_id
+            or self.drain.worker_incarnation != self.worker_incarnation
+            or self.drain.claim_high_water != self.claim_high_water
+        ):
+            raise ValueError("protected drain differs from current intent observation")
+        if self.release is not None and (
+            self.release.binding != self.binding
+            or self.release.claim_high_water != self.claim_high_water
+        ):
+            raise ValueError("protected release differs from current intent observation")
+        return self
+
+
 __all__ = [
     "BoundExecutableWorkerV2",
     "DrainedExecutableWorkerV2",
@@ -504,5 +542,6 @@ __all__ = [
     "PreparedProtectedReleaseV1",
     "PreparedWorkerBindingV1",
     "PreparedWorkerShapeV1",
+    "ProtectedIntentObservationV2",
     "RegisteredExecutableWorkerV2",
 ]

@@ -777,6 +777,83 @@ async def test_drain_only_writer_transition_allows_retained_intent_close(
     assert result.intent_id == close.binding.intent_id
 
 
+# Production break caught: once a signed physical worker is observed, entering
+# drain-only authority could strand it forever because the pool queue emitted no
+# close work and the close transition rejected the observed state.
+async def test_drain_only_transition_emits_close_for_observed_worker(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityExecutionStore(
+        ownership_keyring=OwnershipKeyring({"gb10-key": EXECUTOR_KEYS["gb10"].public_key()})
+    )
+    permit = await _launch_ready(store, capacity_session)
+    await store.consume_launch_permit(
+        capacity_session,
+        ExecutablePermitConsumptionV2(
+            permit_id=permit.permit_id,
+            permit_digest=store.contract_digest(permit),
+            binding=permit.binding,
+            command_sequence=3,
+        ),
+    )
+    binding = permit.binding
+    metadata = ExecutableOwnershipMetadataV2(
+        binding=binding,
+        controller_authority_sha256="c" * 64,
+        trusted_launcher_sha256="7" * 64,
+        slurm_cluster="gb10-controller",
+        submitter_identity="loom",
+        association="loom",
+        submitted_at=datetime.now(UTC),
+    )
+    proof = SignedExecutableOwnershipProofV2(
+        metadata=metadata,
+        signing_key_id="gb10-key",
+        signature_base64=base64.b64encode(
+            EXECUTOR_KEYS["gb10"].sign(canonical_executable_bytes(metadata))
+        ).decode("ascii"),
+    )
+    active_payload = binding.execution.model_dump(mode="python")
+    active_payload.pop("allocation_epoch")
+    active_payload.pop("executable")
+    await store.ingest_executor_inventory(
+        capacity_session,
+        ExecutableExecutorInventoryV2(
+            execution=ExecutionContextV2.model_validate(active_payload),
+            executor_id=binding.executor_id,
+            executor_incarnation=binding.executor_incarnation,
+            pool_id=binding.pool_id,
+            pool_generation=binding.pool_generation,
+            inventory_sequence=2,
+            journal_sequence=0,
+            journal_digest="0" * 64,
+            records=(
+                ExecutableInventoryRecordV2(
+                    physical_identity="job-123",
+                    physical_kind="slurm-job",
+                    authority_scope="dedicated-loom-association",
+                    state="active",
+                    resources=binding.resources,
+                    node_ids=binding.node_ids,
+                    controller_evidence_sha256="9" * 64,
+                    ownership_proof=proof,
+                ),
+            ),
+        ),
+    )
+    await CapacityManagementStore().register_writer(
+        capacity_session,
+        binding.execution.authority_incarnation,
+        expected_epoch=binding.execution.writer_epoch,
+    )
+
+    close = await store.next_pool_work(capacity_session, executor_binding("gb10"))
+
+    assert isinstance(close, ExecutableIntentCloseV2)
+    result = await store.begin_intent_close(capacity_session, close)
+    assert result.intent_id == binding.intent_id
+
+
 async def test_release_requires_matching_protected_and_physical_terminal_evidence(
     capacity_session: AsyncSession,
 ) -> None:

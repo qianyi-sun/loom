@@ -48,6 +48,7 @@ from loom_capacity_guard.store import CapacityGuardStore, GuardNotInitializedErr
 _EXECUTABLE_ADMISSION_FUNCTIONS = (
     "prepare_executable_worker(uuid,uuid,jsonb,bytea,text,text)",
     "bind_executable_slurm_job(uuid,uuid,jsonb,bytea,text)",
+    "observe_executable_intent(uuid,uuid,uuid)",
     "register_executable_worker(uuid,uuid,jsonb,bytea,text,text,text)",
     "begin_executable_worker_drain(uuid,uuid,jsonb,bytea,text)",
     "acknowledge_executable_release(uuid,uuid,jsonb,bytea,text,text)",

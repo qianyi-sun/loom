@@ -18,6 +18,7 @@ from loom_capacity_agent.admission import (
     ExecutableWorkerRegistrationV2,
     PhysicalJobBindingV2,
     PreparedExecutableAdmissionV2,
+    ProtectedIntentObservationV2,
     RegisteredExecutableWorkerV2,
 )
 from loom_capacity_agent.claim_guard import (
@@ -26,7 +27,10 @@ from loom_capacity_agent.claim_guard import (
 )
 from loom_capacity_agent.client import read_owner_only_bytes
 from loom_capacity_agent.executable_admission import ExecutableAdmissionStore
-from loom_capacity_manager.executable_contracts import ExecutableBootstrapRegistrationV2
+from loom_capacity_manager.executable_contracts import (
+    ExecutableBootstrapRegistrationV2,
+    ExecutableIntentBindingV2,
+)
 
 _MAX_DATABASE_URL_BYTES = 16 * 1024
 
@@ -68,7 +72,7 @@ def _database_url(path: Path) -> str:
 
 
 class DatabaseExecutableAdmissionClient:
-    """Call only guard_0011 procedures for one exact environment incarnation."""
+    """Call only bounded executable procedures for one exact environment incarnation."""
 
     def __init__(
         self,
@@ -181,6 +185,14 @@ class DatabaseExecutableAdmissionClient:
     ) -> ExecutableClaimReceiptV2 | None:
         result = await self._store_call("admit_claim", proposal)
         assert result is None or isinstance(result, ExecutableClaimReceiptV2)
+        return result
+
+    async def observe_intent(
+        self,
+        binding: ExecutableIntentBindingV2,
+    ) -> ProtectedIntentObservationV2:
+        result = await self._store_call("observe_intent", binding)
+        assert isinstance(result, ProtectedIntentObservationV2)
         return result
 
     async def aclose(self) -> None:

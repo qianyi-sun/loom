@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -10,16 +11,29 @@ import pytest
 
 from loom_capacity_executor.client import (
     CapacityExecutorClient,
+    ExecutableCapacityExecutorClient,
     ExecutorRejectedError,
     ExecutorTransportError,
 )
 from loom_capacity_executor.dry_run import DryRunExecutorBinding
 from loom_capacity_executor.journal import ExecutorJournal, JournalRegressionError
 from loom_capacity_executor.remote import RemoteDryRunPoolExecutor
+from loom_capacity_manager.executable_contracts import (
+    ExecutableExecutorRegistrationV2,
+    ExecutableIntentCloseV2,
+    ExecutableLaunchPermitV2,
+    ExecutablePartialReleaseV2,
+    ExecutableReleasedShapeV2,
+    ExecutableReservationProposalV2,
+    ExecutionContextV2,
+    StrictV2Model,
+)
 from loom_capacity_manager.grant_contracts import (
     DryRunReservationAcceptanceV1,
+    ReservationShapeV1,
     canonical_grant_digest,
 )
+from tests.unit.test_capacity_executor_launch_renderer import launch_context_fixture
 
 
 def _binding() -> DryRunExecutorBinding:
@@ -49,6 +63,188 @@ def _checkpoint(binding: DryRunExecutorBinding) -> dict[str, object]:
         "lease_expires_at": (datetime.now(UTC) + timedelta(minutes=1)).isoformat(),
         "executable": False,
     }
+
+
+def _executable_registration() -> ExecutableExecutorRegistrationV2:
+    launch = launch_context_fixture()
+    return ExecutableExecutorRegistrationV2(
+        execution=ExecutionContextV2.model_validate(
+            launch.binding.execution.model_dump(exclude={"allocation_epoch", "executable"})
+        ),
+        executor_id=launch.binding.executor_id,
+        executor_incarnation=launch.binding.executor_incarnation,
+        pool_id=launch.binding.pool_id,
+        pool_generation=launch.binding.pool_generation,
+        signing_key_id=launch.ownership_key.signing_key_id,
+        signing_key_sha256=launch.ownership_key.public_key_sha256,
+        local_authority_sha256="a" * 64,
+        controller_authority_sha256=launch.controller_authority.controller_authority_sha256,
+    )
+
+
+def _executable_work() -> tuple[StrictV2Model, ...]:
+    binding = launch_context_fixture().binding
+    proposal = ExecutableReservationProposalV2(
+        tranche_id=binding.tranche_id,
+        execution=binding.execution,
+        subject_id=binding.subject_id,
+        subject_incarnation=binding.subject_incarnation,
+        account_id=binding.account_id,
+        tier_id=binding.tier_id,
+        candidate=binding.candidate,
+        candidate_generation=binding.candidate_generation,
+        deployment_generation=binding.deployment_generation,
+        pool_id=binding.pool_id,
+        pool_generation=binding.pool_generation,
+        executor_id=binding.executor_id,
+        executor_incarnation=binding.executor_incarnation,
+        shapes=(
+            ReservationShapeV1(
+                shape_instance_id=binding.shape_instance_id,
+                intent_id=binding.intent_id,
+                shape_id=binding.shape_id,
+                profile_id=binding.profile_id,
+                profile_generation=binding.profile_generation,
+                profile_digest=binding.profile_digest,
+                concurrency_slots=binding.concurrency_slots,
+                resources=binding.resources,
+                node_ids=binding.node_ids,
+            ),
+        ),
+    )
+    permit = ExecutableLaunchPermitV2(
+        permit_id=UUID(int=202),
+        binding=binding,
+        permit_epoch=1,
+        launch_rank=1,
+        expires_at=datetime.now(UTC) + timedelta(minutes=1),
+    )
+    close = ExecutableIntentCloseV2(binding=binding, command_sequence=1)
+    release = ExecutablePartialReleaseV2(
+        execution=binding.execution,
+        tranche_id=binding.tranche_id,
+        executor_id=binding.executor_id,
+        executor_incarnation=binding.executor_incarnation,
+        command_sequence=1,
+        releases=(
+            ExecutableReleasedShapeV2(
+                binding=binding,
+                inventory_sequence=1,
+                terminal_kind="unused",
+                terminal_identity="unused-shape",
+                terminal_evidence_sha256="b" * 64,
+                protected_registration_epoch=2,
+                bootstrap_revoked=True,
+                protected_release_sha256="c" * 64,
+            ),
+        ),
+    )
+    return proposal, binding, permit, close, release
+
+
+def _executable_receipt_digest(payload: dict[str, object]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            default=str,
+        ).encode("ascii")
+    ).hexdigest()
+
+
+@pytest.mark.parametrize("expected", _executable_work())
+async def test_executable_client_decodes_each_exact_pool_work_shape(
+    expected: StrictV2Model,
+) -> None:
+    registration = _executable_registration()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == f"/v2/executors/{registration.pool_id}/work"
+        assert request.headers["Authorization"] == "Bearer executor-secret"
+        return httpx.Response(200, content=expected.model_dump_json().encode("ascii"))
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = ExecutableCapacityExecutorClient(
+        registration,
+        manager_origin="https://capacity.example.test",
+        bearer_token="executor-secret",
+        http_client=http,
+    )
+    try:
+        assert await client.next_executable_work(0) == expected
+    finally:
+        await http.aclose()
+
+
+async def test_executable_client_validates_canonical_receipt_digest() -> None:
+    registration = _executable_registration()
+    binding = launch_context_fixture().binding
+    close = ExecutableIntentCloseV2(binding=binding, command_sequence=1)
+    payload: dict[str, object] = {
+        "intent_id": str(binding.intent_id),
+        "executable": True,
+    }
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                **payload,
+                "receipt_digest": _executable_receipt_digest(payload),
+                "replayed": False,
+            },
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = ExecutableCapacityExecutorClient(
+        registration,
+        manager_origin="https://capacity.example.test",
+        bearer_token="executor-secret",
+        http_client=http,
+    )
+    try:
+        assert (await client.close_executable_intent(close)).intent_id == binding.intent_id
+    finally:
+        await http.aclose()
+
+
+@pytest.mark.parametrize(
+    ("response", "error"),
+    (
+        (httpx.Response(409), ExecutorRejectedError),
+        (httpx.Response(503), ExecutorTransportError),
+        (httpx.ConnectTimeout("manager timed out"), ExecutorTransportError),
+    ),
+)
+async def test_executable_client_distinguishes_verified_rejection_from_unknown_failure(
+    response: httpx.Response | httpx.HTTPError,
+    error: type[ExecutorTransportError],
+) -> None:
+    registration = _executable_registration()
+    close = ExecutableIntentCloseV2(
+        binding=launch_context_fixture().binding,
+        command_sequence=1,
+    )
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        if isinstance(response, httpx.HTTPError):
+            raise response
+        return response
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = ExecutableCapacityExecutorClient(
+        registration,
+        manager_origin="https://capacity.example.test",
+        bearer_token="executor-secret",
+        http_client=http,
+    )
+    try:
+        with pytest.raises(error):
+            await client.close_executable_intent(close)
+    finally:
+        await http.aclose()
 
 
 async def test_remote_executor_retries_exact_journaled_command_after_transport_loss(

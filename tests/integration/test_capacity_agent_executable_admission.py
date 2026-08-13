@@ -167,6 +167,26 @@ async def _prepare_claim_terminal_race(
     )
 
 
+# Production break caught: the executor credential could not read the exact
+# protected intent state needed to construct a drain without gaining table access.
+async def test_executor_observes_exact_protected_intent_without_table_privilege(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    _fence, registration = await _initialize_and_register(capacity_guard_database)
+    request = _bootstrap(registration.subject_id, registration.subject_incarnation)
+    async with _serializable_executor_session(capacity_guard_database) as session:
+        store = ExecutableAdmissionStore(session, registration=registration)
+        await store.prepare_worker(request, bootstrap_sha256="a" * 64)
+
+        observed = await store.observe_intent(request.binding)
+
+    assert observed.binding == request.binding
+    assert observed.bootstrap_registration_epoch == request.bootstrap_registration_epoch
+    assert observed.worker_id is None
+    assert observed.drain is None
+    assert observed.release is None
+
+
 async def _run_claim_transaction(
     database: dict[str, object],
     registration: AgentRegistrationV1,

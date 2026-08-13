@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import ssl
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Literal, TypeVar
+from typing import Literal, TypeAlias, TypeVar
 from urllib.parse import SplitResult, urlsplit
 from uuid import UUID
 
 import httpx
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from loom_capacity_agent.client import (
     DemandReporterTLSFiles,
@@ -21,6 +23,21 @@ from loom_capacity_agent.client import (
 from loom_capacity_executor.dry_run import DryRunExecutorBinding
 from loom_capacity_manager.auth import MAX_BEARER_TOKEN_BYTES
 from loom_capacity_manager.contracts import Digest, StrictV1Model, canonical_bytes
+from loom_capacity_manager.executable_contracts import (
+    ExecutableBootstrapRegistrationV2,
+    ExecutableExecutorInventoryV2,
+    ExecutableExecutorRegistrationV2,
+    ExecutableIntentBindingV2,
+    ExecutableIntentCloseV2,
+    ExecutableLaunchPermitV2,
+    ExecutablePartialReleaseV2,
+    ExecutablePermitConsumptionV2,
+    ExecutableReservationAcceptanceV2,
+    ExecutableReservationProposalV2,
+    StrictV2Model,
+    canonical_executable_bytes,
+    canonical_executable_digest,
+)
 from loom_capacity_manager.grant_contracts import (
     DryRunBootstrapRegistrationV1,
     DryRunExecutorHeartbeatV1,
@@ -117,6 +134,77 @@ class ReleasedShapesReceiptV1(_Receipt):
     released_shape_ids: tuple[str, ...]
     replayed: bool
     executable: Literal[False]
+
+
+class ExecutableCheckpointReceiptV2(_Receipt):
+    execution_epoch: int
+    execution_manifest_sha256: Digest
+    executor_id: str
+    executor_incarnation: UUID
+    pool_id: str
+    pool_generation: int
+    command_sequence: int
+    journal_sequence: int
+    journal_digest: Digest
+    inventory_sequence: int
+    lease_expires_at: datetime
+    executable: Literal[True]
+
+
+class ExecutableInventoryReceiptV2(_Receipt):
+    inventory_sequence: int
+    inventory_digest: Digest
+    replayed: bool
+    executable: Literal[True]
+
+
+class AcceptedExecutableReservationReceiptV2(_Receipt):
+    tranche_id: UUID
+    intent_ids: tuple[UUID, ...]
+    receipt_digest: Digest
+    replayed: bool
+    executable: Literal[True]
+
+
+class RegisteredExecutableBootstrapReceiptV2(_Receipt):
+    intent_id: UUID
+    bootstrap_registration_epoch: int
+    receipt_digest: Digest
+    replayed: bool
+    executable: Literal[True]
+
+
+class ConsumedExecutablePermitReceiptV2(_Receipt):
+    permit_id: UUID
+    intent_id: UUID
+    receipt_digest: Digest
+    replayed: bool
+    executable: Literal[True]
+
+
+class ClosingExecutableIntentReceiptV2(_Receipt):
+    intent_id: UUID
+    receipt_digest: Digest
+    replayed: bool
+    executable: Literal[True]
+
+
+class ReleasedExecutableShapesReceiptV2(_Receipt):
+    tranche_id: UUID
+    released_shape_ids: tuple[str, ...]
+    receipt_digest: Digest
+    replayed: bool
+    executable: Literal[True]
+
+
+ExecutablePoolWorkV2: TypeAlias = (
+    ExecutableReservationProposalV2
+    | ExecutableIntentBindingV2
+    | ExecutableLaunchPermitV2
+    | ExecutableIntentCloseV2
+    | ExecutablePartialReleaseV2
+)
+_EXECUTABLE_WORK: TypeAdapter[ExecutablePoolWorkV2] = TypeAdapter(ExecutablePoolWorkV2)
 
 
 @dataclass(frozen=True, slots=True)
@@ -439,11 +527,321 @@ class CapacityExecutorClient:
         await self.aclose()
 
 
+def _receipt_digest(payload: dict[str, object]) -> str:
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        default=str,
+    ).encode("ascii")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+class ExecutableCapacityExecutorClient:
+    """Send only exact executable-v2 contracts for one registered pool executor."""
+
+    def __init__(
+        self,
+        registration: ExecutableExecutorRegistrationV2,
+        *,
+        manager_origin: str,
+        bearer_token: str,
+        http_client: httpx.AsyncClient,
+        owns_http_client: bool = False,
+    ) -> None:
+        if not isinstance(registration, ExecutableExecutorRegistrationV2):
+            raise TypeError("executable client requires its exact registration")
+        if not isinstance(http_client, httpx.AsyncClient):
+            raise TypeError("executor HTTP client must be asynchronous")
+        self.registration = registration
+        self._manager_origin = _canonical_manager_origin(manager_origin)
+        self._bearer_token = _validate_bearer(bearer_token)
+        self._http = http_client
+        self._owns_http = owns_http_client
+
+    def _binding(self, value: object) -> ExecutableIntentBindingV2 | None:
+        if isinstance(value, ExecutableIntentBindingV2):
+            return value
+        binding = getattr(value, "binding", None)
+        if isinstance(binding, ExecutableIntentBindingV2):
+            return binding
+        releases = getattr(value, "releases", ())
+        if releases:
+            release_binding = getattr(releases[0], "binding", None)
+            if isinstance(release_binding, ExecutableIntentBindingV2):
+                return release_binding
+        return None
+
+    def _assert_contract_binding(self, value: StrictV2Model) -> None:
+        if (
+            not isinstance(value, ExecutableIntentBindingV2)
+            and getattr(value, "executable", None) is not True
+        ):
+            raise ExecutorTransportError("executable executor contract binding changed")
+        binding = self._binding(value)
+        execution = binding.execution if binding is not None else getattr(value, "execution", None)
+        if execution is None:
+            raise ExecutorTransportError("executable executor contract binding changed")
+        checks = (
+            ("executor_id", self.registration.executor_id),
+            ("executor_incarnation", self.registration.executor_incarnation),
+            ("pool_id", self.registration.pool_id),
+            ("pool_generation", self.registration.pool_generation),
+        )
+        target = binding if binding is not None else value
+        if any(getattr(target, field, None) != expected for field, expected in checks):
+            raise ExecutorTransportError("executable executor contract binding changed")
+        expected_execution = self.registration.execution
+        if (
+            execution.authority_incarnation != expected_execution.authority_incarnation
+            or execution.writer_epoch != expected_execution.writer_epoch
+            or execution.configuration_epoch != expected_execution.configuration_epoch
+            or execution.execution_epoch != expected_execution.execution_epoch
+            or execution.execution_manifest_sha256 != expected_execution.execution_manifest_sha256
+            or execution.trusted_fleet_release_sha256
+            != expected_execution.trusted_fleet_release_sha256
+        ):
+            raise ExecutorTransportError("executable execution binding changed")
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        receipt_model: type[_ReceiptT],
+        *,
+        contract: StrictV2Model | None = None,
+    ) -> _ReceiptT:
+        content: bytes | None = None
+        if contract is not None:
+            self._assert_contract_binding(contract)
+            content = canonical_executable_bytes(contract)
+        try:
+            response = await self._http.request(
+                method,
+                f"{self._manager_origin}{path}",
+                content=content,
+                headers={
+                    "Authorization": f"Bearer {self._bearer_token}",
+                    **({"Content-Type": "application/json"} if content is not None else {}),
+                },
+            )
+        except httpx.HTTPError:
+            raise ExecutorTransportError("capacity manager transport failed") from None
+        if 400 <= response.status_code < 500:
+            raise ExecutorRejectedError(
+                f"capacity manager rejected executor request with status {response.status_code}"
+            )
+        if response.status_code != 200:
+            raise ExecutorTransportError(
+                f"capacity manager rejected executor request with status {response.status_code}"
+            )
+        if len(response.content) > _MAX_RECEIPT_BYTES:
+            raise ExecutorTransportError("capacity manager receipt exceeds its byte bound")
+        try:
+            return receipt_model.model_validate_json(response.content)
+        except (ValidationError, ValueError) as exc:
+            raise ExecutorTransportError("capacity manager receipt is invalid") from exc
+
+    @staticmethod
+    def _assert_receipt_digest(receipt_digest: str, payload: dict[str, object]) -> None:
+        if receipt_digest != _receipt_digest(payload):
+            raise ExecutorTransportError("capacity manager receipt digest changed")
+
+    async def executable_checkpoint(self) -> ExecutableCheckpointReceiptV2:
+        receipt = await self._request(
+            "GET",
+            f"/v2/executors/{self.registration.pool_id}/checkpoint",
+            ExecutableCheckpointReceiptV2,
+        )
+        if (
+            receipt.execution_epoch != self.registration.execution.execution_epoch
+            or receipt.execution_manifest_sha256
+            != self.registration.execution.execution_manifest_sha256
+            or receipt.executor_id != self.registration.executor_id
+            or receipt.executor_incarnation != self.registration.executor_incarnation
+            or receipt.pool_id != self.registration.pool_id
+            or receipt.pool_generation != self.registration.pool_generation
+        ):
+            raise ExecutorTransportError("capacity manager checkpoint binding changed")
+        return receipt
+
+    async def next_executable_work(
+        self,
+        command_sequence: int,
+    ) -> ExecutablePoolWorkV2 | None:
+        if type(command_sequence) is not int or command_sequence < 0:
+            raise ValueError("executable command high-water is invalid")
+        try:
+            response = await self._http.request(
+                "GET",
+                f"{self._manager_origin}/v2/executors/{self.registration.pool_id}/work",
+                headers={"Authorization": f"Bearer {self._bearer_token}"},
+            )
+        except httpx.HTTPError:
+            raise ExecutorTransportError("capacity manager transport failed") from None
+        if 400 <= response.status_code < 500:
+            raise ExecutorRejectedError(
+                f"capacity manager rejected executor request with status {response.status_code}"
+            )
+        if response.status_code != 200:
+            raise ExecutorTransportError(
+                f"capacity manager rejected executor request with status {response.status_code}"
+            )
+        if len(response.content) > _MAX_RECEIPT_BYTES:
+            raise ExecutorTransportError("capacity manager work exceeds its byte bound")
+        if response.content == b"null":
+            return None
+        try:
+            work = _EXECUTABLE_WORK.validate_json(response.content)
+        except (ValidationError, ValueError) as exc:
+            raise ExecutorTransportError("capacity manager work is invalid") from exc
+        self._assert_contract_binding(work)
+        work_sequence = getattr(work, "command_sequence", None)
+        if work_sequence is not None and work_sequence != command_sequence + 1:
+            raise ExecutorTransportError("capacity manager work command sequence changed")
+        return work
+
+    async def accept_executable_reservation(
+        self,
+        value: ExecutableReservationAcceptanceV2,
+    ) -> AcceptedExecutableReservationReceiptV2:
+        receipt = await self._request(
+            "POST",
+            f"/v2/executors/{self.registration.pool_id}/reservations/{value.tranche_id}/accept",
+            AcceptedExecutableReservationReceiptV2,
+            contract=value,
+        )
+        payload: dict[str, object] = {
+            "tranche_id": str(value.tranche_id),
+            "intent_ids": [str(item) for item in receipt.intent_ids],
+            "executable": True,
+        }
+        if receipt.tranche_id != value.tranche_id:
+            raise ExecutorTransportError("capacity manager acceptance receipt changed")
+        self._assert_receipt_digest(receipt.receipt_digest, payload)
+        return receipt
+
+    async def register_executable_bootstrap(
+        self,
+        value: ExecutableBootstrapRegistrationV2,
+    ) -> RegisteredExecutableBootstrapReceiptV2:
+        receipt = await self._request(
+            "POST",
+            f"/v2/executors/{self.registration.pool_id}/intents/{value.binding.intent_id}/bootstrap",
+            RegisteredExecutableBootstrapReceiptV2,
+            contract=value,
+        )
+        payload: dict[str, object] = {
+            "intent_id": str(value.binding.intent_id),
+            "bootstrap_registration_epoch": value.bootstrap_registration_epoch,
+            "executable": True,
+        }
+        if (
+            receipt.intent_id != value.binding.intent_id
+            or receipt.bootstrap_registration_epoch != value.bootstrap_registration_epoch
+        ):
+            raise ExecutorTransportError("capacity manager bootstrap receipt changed")
+        self._assert_receipt_digest(receipt.receipt_digest, payload)
+        return receipt
+
+    async def consume_executable_permit(
+        self,
+        value: ExecutablePermitConsumptionV2,
+    ) -> ConsumedExecutablePermitReceiptV2:
+        receipt = await self._request(
+            "POST",
+            f"/v2/executors/{self.registration.pool_id}/permits/{value.permit_id}/consume",
+            ConsumedExecutablePermitReceiptV2,
+            contract=value,
+        )
+        payload: dict[str, object] = {
+            "permit_id": str(value.permit_id),
+            "intent_id": str(value.binding.intent_id),
+            "executable": True,
+        }
+        if receipt.permit_id != value.permit_id or receipt.intent_id != value.binding.intent_id:
+            raise ExecutorTransportError("capacity manager permit receipt changed")
+        self._assert_receipt_digest(receipt.receipt_digest, payload)
+        return receipt
+
+    async def ingest_executable_inventory(
+        self,
+        value: ExecutableExecutorInventoryV2,
+    ) -> ExecutableInventoryReceiptV2:
+        receipt = await self._request(
+            "PUT",
+            f"/v2/executors/{self.registration.pool_id}/inventory",
+            ExecutableInventoryReceiptV2,
+            contract=value,
+        )
+        if (
+            receipt.inventory_sequence != value.inventory_sequence
+            or receipt.inventory_digest != canonical_executable_digest(value)
+        ):
+            raise ExecutorTransportError("capacity manager inventory receipt changed")
+        return receipt
+
+    async def close_executable_intent(
+        self,
+        value: ExecutableIntentCloseV2,
+    ) -> ClosingExecutableIntentReceiptV2:
+        receipt = await self._request(
+            "POST",
+            f"/v2/executors/{self.registration.pool_id}/intents/{value.binding.intent_id}/close",
+            ClosingExecutableIntentReceiptV2,
+            contract=value,
+        )
+        payload: dict[str, object] = {
+            "intent_id": str(value.binding.intent_id),
+            "executable": True,
+        }
+        if receipt.intent_id != value.binding.intent_id:
+            raise ExecutorTransportError("capacity manager close receipt changed")
+        self._assert_receipt_digest(receipt.receipt_digest, payload)
+        return receipt
+
+    async def release_executable_shapes(
+        self,
+        value: ExecutablePartialReleaseV2,
+    ) -> ReleasedExecutableShapesReceiptV2:
+        receipt = await self._request(
+            "POST",
+            f"/v2/executors/{self.registration.pool_id}/reservations/{value.tranche_id}/release",
+            ReleasedExecutableShapesReceiptV2,
+            contract=value,
+        )
+        released = tuple(item.binding.shape_instance_id for item in value.releases)
+        payload: dict[str, object] = {
+            "tranche_id": str(value.tranche_id),
+            "released_shape_ids": list(released),
+            "executable": True,
+        }
+        if receipt.tranche_id != value.tranche_id or receipt.released_shape_ids != released:
+            raise ExecutorTransportError("capacity manager release receipt changed")
+        self._assert_receipt_digest(receipt.receipt_digest, payload)
+        return receipt
+
+    async def aclose(self) -> None:
+        if self._owns_http:
+            await self._http.aclose()
+
+    async def __aenter__(self) -> ExecutableCapacityExecutorClient:
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        await self.aclose()
+
+
 __all__ = [
     "AcceptedReservationReceiptV1",
     "CapacityExecutorClient",
     "ClosingIntentReceiptV1",
     "ConsumedPermitReceiptV1",
+    "ExecutableCapacityExecutorClient",
+    "ExecutableCheckpointReceiptV2",
+    "ExecutableInventoryReceiptV2",
+    "ExecutablePoolWorkV2",
     "ExecutorCheckpointReceiptV1",
     "ExecutorConnection",
     "ExecutorHeartbeatReceiptV1",

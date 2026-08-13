@@ -247,3 +247,20 @@ def test_complete_mutation_inventory_migration_only_tightens_inert_policy() -> N
     assert "insert into loom_capacity_guard.protected_claim_leases" not in lowered
     assert "sbatch" not in lowered
     assert "scancel" not in lowered
+
+
+def test_executable_intent_observation_migration_is_read_only_and_role_bounded() -> None:
+    source = Path(
+        "capacity_guard_migrations/versions/guard_0012_executable_intent_observation.py"
+    ).read_text(encoding="utf-8")
+    lowered = source.lower()
+    assert "observe_executable_intent" in lowered
+    assert "security definer" in lowered
+    assert "session_user::text <> v_executor_role" in lowered
+    assert "to public" not in lowered
+    assert "insert into" not in lowered
+    assert "update " not in lowered
+    assert "delete from" not in lowered
+    assert "truncate " not in lowered
+    assert "sbatch" not in lowered
+    assert "scancel" not in lowered

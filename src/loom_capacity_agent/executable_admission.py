@@ -20,6 +20,7 @@ from loom_capacity_agent.admission import (
     ExecutableWorkerRegistrationV2,
     PhysicalJobBindingV2,
     PreparedExecutableAdmissionV2,
+    ProtectedIntentObservationV2,
     RegisteredExecutableWorkerV2,
 )
 from loom_capacity_agent.claim_guard import (
@@ -33,6 +34,7 @@ from loom_capacity_agent.prepared_store import (
 )
 from loom_capacity_manager.executable_contracts import (
     ExecutableBootstrapRegistrationV2,
+    ExecutableIntentBindingV2,
     StrictV2Model,
     canonical_executable_bytes,
     canonical_executable_digest,
@@ -291,6 +293,45 @@ class ExecutableAdmissionStore:
         ):
             raise ExecutableAdmissionError("protected release receipt changed")
         return receipt
+
+    async def observe_intent(
+        self,
+        binding: ExecutableIntentBindingV2,
+    ) -> ProtectedIntentObservationV2:
+        """Read one exact protected intent without granting table access."""
+
+        if not isinstance(binding, ExecutableIntentBindingV2):
+            raise TypeError("executable intent observation requires its schema-v2 binding")
+        if (
+            binding.subject_id != self.subject_id
+            or binding.subject_incarnation != self.subject_incarnation
+        ):
+            raise ExecutableAdmissionError("executable intent observation subject binding changed")
+        async with self._session.begin_nested():
+            returned = (
+                await self._session.execute(
+                    text(
+                        f"SELECT {_SCHEMA}.observe_executable_intent("
+                        ":subject_id, :subject_incarnation, :intent_id)"
+                    ),
+                    {
+                        "subject_id": self.subject_id,
+                        "subject_incarnation": self.subject_incarnation,
+                        "intent_id": binding.intent_id,
+                    },
+                )
+            ).scalar_one()
+            try:
+                observation = parse_protected_response(
+                    returned,
+                    ProtectedIntentObservationV2,
+                    label="executable intent observation procedure",
+                )
+            except CapacityPreparedAdmissionError as exc:
+                raise ExecutableAdmissionError(str(exc)) from exc
+            if observation.binding != binding:
+                raise ExecutableAdmissionError("protected executable intent binding changed")
+        return observation
 
     async def admit_claim(
         self,

@@ -31,7 +31,7 @@ def _guard_config(database: dict[str, object]) -> AlembicConfig:
     return cfg
 
 
-def test_executor_role_is_distinct_and_has_only_guard_0011_procedures(
+def test_executor_role_is_distinct_and_has_only_bounded_executable_procedures(
     capacity_guard_database: dict[str, object],
 ) -> None:
     engine = create_engine(_value(capacity_guard_database, "admin_url"))
@@ -110,6 +110,7 @@ def test_executor_role_is_distinct_and_has_only_guard_0011_procedures(
             "admit_executable_claim",
             "begin_executable_worker_drain",
             "bind_executable_slurm_job",
+            "observe_executable_intent",
             "prepare_executable_worker",
             "register_executable_worker",
         }
