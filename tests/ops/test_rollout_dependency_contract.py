@@ -105,9 +105,9 @@ def test_current_staging_rollout_docs_preserve_acceptance_boundary() -> None:
         "Do not run `loom cluster up`, `loom cluster rollout`, direct migration Jobs"
         in normalized_launch
     )
-    assert "15 Slurm nodes" in gb10
+    assert "14 Slurm nodes" in gb10
     assert "`trt-gb10-1` through `trt-gb10-9`" in gb10
-    assert "`trt-gb10-11` through `trt-gb10-16`" in normalized_gb10
+    assert "`trt-gb10-11` through `trt-gb10-15`" in normalized_gb10
     assert "becomes eligible again after resources are released" in normalized_gb10
     assert "loom-autoscaler-gb10-staging.timer" in gb10
     assert "loom-staging-rollout --env staging status REQUEST_ID" in gb10

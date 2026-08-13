@@ -16,7 +16,7 @@ pool_name = "gb10"
 actuator = "slurm"
 enabled = true
 min_slots = 0
-max_slots = 150
+max_slots = 140
 scale_up_threshold_slots = 1
 scale_down_idle_seconds = 600
 scale_up_cooldown_seconds = 60
@@ -45,7 +45,6 @@ allowed_nodes = [
   "trt-gb10-13",
   "trt-gb10-14",
   "trt-gb10-15",
-  "trt-gb10-16",
 ]
 env_file = "/shared_work2/loom-staging-rollout/worker-envs/staging-gb10-worker-${IMAGE_TAG}.env"
 repo_dir = "/shared_work2/loom-staging-rollout/worker-repos/loom-remote-worker-${IMAGE_TAG}"
@@ -63,7 +62,7 @@ container_cpus = 2.0
 container_memory_mib = 11500
 container_pids = 512
 job_pids_max = 5120
-max_jobs = 15
+max_jobs = 14
 pending_job_cap = 2
 # The physical gb10 partition advertises MaxTime=1-00:00:00. Slurm rejects
 # longer requests before allocation, so keep every autoscaled worker lease at

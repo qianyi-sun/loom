@@ -871,9 +871,9 @@ def _external_slurm_acceptance_check(
     expected_nodes = (
         raw_expected_nodes
         if isinstance(raw_expected_nodes, list)
-        and len(raw_expected_nodes) == 15
+        and len(raw_expected_nodes) == 14
         and all(isinstance(node, str) and node for node in raw_expected_nodes)
-        and len(set(raw_expected_nodes)) == 15
+        and len(set(raw_expected_nodes)) == 14
         else []
     )
     authority_matches = False

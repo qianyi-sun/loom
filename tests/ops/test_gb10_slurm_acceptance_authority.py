@@ -76,7 +76,6 @@ def test_authority_is_fixed_to_service_identity_and_real_slurm_partition() -> No
         "trt-gb10-13",
         "trt-gb10-14",
         "trt-gb10-15",
-        "trt-gb10-16",
     )
     assert authority.LEGACY_AGENT_NODES == tuple(f"trt-gb10-{number}" for number in range(1, 16))
 
@@ -98,7 +97,7 @@ pool_name = "gb10"
 actuator = "slurm"
 enabled = true
 min_slots = 0
-max_slots = 150
+max_slots = 140
 
 [worker_pool_autoscaler_policies.actuator_config]
 slurm_cluster_name = "trt-gb10"
@@ -108,11 +107,12 @@ external_runner = true
 slurm_account = "loom-staging"
 qos_normal = "loom-staging"
 candidate_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+max_jobs = 14
 allowed_nodes = [
   "trt-gb10-1", "trt-gb10-2", "trt-gb10-3", "trt-gb10-4",
   "trt-gb10-5", "trt-gb10-6", "trt-gb10-7", "trt-gb10-8",
   "trt-gb10-9", "trt-gb10-11", "trt-gb10-12", "trt-gb10-13",
-  "trt-gb10-14", "trt-gb10-15", "trt-gb10-16",
+  "trt-gb10-14", "trt-gb10-15",
 ]
 repo_dir = "/shared_work2/loom-staging-rollout/worker-repos/exact"
 env_file = "/shared_work2/loom-staging-rollout/worker-envs/exact.env"
@@ -194,6 +194,25 @@ def test_candidate_contract_rejects_retired_worker_service_endpoint(
     monkeypatch.setattr(authority, "CANDIDATE_ROOT", tmp_path)
 
     with pytest.raises(authority.AcceptanceError, match="prerequisites are incomplete"):
+        authority._load_contract(candidate_sha, "staging-aaaaaaa")
+
+
+def test_candidate_contract_rejects_job_ceiling_beyond_accepted_nodes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _load_authority()
+    candidate_sha = "a" * 40
+    profile = tmp_path / candidate_sha / "repo/deploy/environment-state/staging.toml"
+    profile.parent.mkdir(parents=True)
+    payload = Path("deploy/environment-state/staging.toml").read_text(encoding="utf-8")
+    profile.write_text(
+        payload.replace("max_jobs = 14", "max_jobs = 15", 1),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(authority, "CANDIDATE_ROOT", tmp_path)
+
+    with pytest.raises(authority.AcceptanceError, match="accepted contract"):
         authority._load_contract(candidate_sha, "staging-aaaaaaa")
 
 
