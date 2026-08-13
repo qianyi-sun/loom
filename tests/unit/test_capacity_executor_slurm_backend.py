@@ -36,6 +36,7 @@ def fake_slurm(tmp_path: Path) -> FakeSlurm:
 def slurm_launch_request_fixture(fake_slurm: FakeSlurm) -> SlurmLaunchRequestV2:
     return SlurmLaunchRequestV2(
         cluster="oldlab",
+        controller_host="ctl.oldlab.internal",
         partition="loom",
         account="loom-executor",
         submitter="loom-oldlab",
@@ -139,6 +140,20 @@ async def test_submit_validates_controller_and_cluster_before_mutation(
     fake_slurm.set_controller(cluster=cluster, host=host)
     with pytest.raises(SlurmAuthorityError):
         await fake_slurm.backend().submit(slurm_launch_request_fixture(fake_slurm))
+    assert fake_slurm.sbatch_calls == ()
+
+
+@pytest.mark.asyncio
+async def test_submit_rejects_same_scope_request_for_another_controller_host(
+    fake_slurm: FakeSlurm,
+) -> None:
+    request = slurm_launch_request_fixture(fake_slurm).model_copy(
+        update={"controller_host": "other.internal"}
+    )
+
+    with pytest.raises(SlurmAuthorityError, match="controller"):
+        await fake_slurm.backend().submit(request)
+
     assert fake_slurm.sbatch_calls == ()
 
 

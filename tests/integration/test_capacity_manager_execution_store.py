@@ -11,6 +11,15 @@ import pytest
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from loom_capacity_executor.keys import ExecutorOwnershipKey
+from loom_capacity_executor.launch_renderer import (
+    OperatorLaunchProfileV2,
+    OperatorResourceDomainV2,
+    TrustedLaunchContextV2,
+    canonical_launch_policy_digest,
+    render_signed_launch,
+)
+from loom_capacity_executor.slurm_contracts import SlurmExecutableIdentityV2
 from loom_capacity_manager.executable_contracts import (
     ExecutableBootstrapRegistrationV2,
     ExecutableExecutorHeartbeatV2,
@@ -25,6 +34,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableReservationProposalV2,
     ExecutionActivationV2,
     ExecutionContextV2,
+    PoolControllerAuthorityV2,
     SignedExecutableOwnershipProofV2,
     canonical_executable_bytes,
 )
@@ -38,7 +48,7 @@ from loom_capacity_manager.models import (
     CapacityPoolObservation,
     CapacityWorkerProfile,
 )
-from loom_capacity_manager.ownership import OwnershipKeyring
+from loom_capacity_manager.ownership import OwnershipKeyring, public_key_fingerprint
 from loom_capacity_manager.reconciler import reconcile_shadow_once
 from loom_capacity_manager.store import CapacityManagementStore, ExecutionConflictError
 from tests.capacity_execution_fixtures import (
@@ -180,6 +190,83 @@ async def _launch_ready(
     assert permit is not None
     assert permit.binding.intent_id == intent.intent_id
     return permit
+
+
+async def test_real_manager_profile_digest_is_not_reinterpreted_as_launch_policy(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityExecutionStore()
+    permit = await _launch_ready(store, capacity_session)
+    binding = permit.binding
+    persisted_profile = (
+        await capacity_session.execute(
+            select(CapacityWorkerProfile).where(
+                CapacityWorkerProfile.subject_id == binding.subject_id,
+                CapacityWorkerProfile.subject_incarnation == binding.subject_incarnation,
+                CapacityWorkerProfile.deployment_generation == binding.deployment_generation,
+                CapacityWorkerProfile.pool_id == binding.pool_id,
+                CapacityWorkerProfile.profile_generation == binding.profile_generation,
+            )
+        )
+    ).scalar_one()
+    profile = OperatorLaunchProfileV2(
+        pool_id=binding.pool_id,
+        pool_generation=binding.pool_generation,
+        profile_id=binding.profile_id,
+        profile_generation=binding.profile_generation,
+        profile_digest=persisted_profile.profile_digest,
+        shape_id=binding.shape_id,
+        concurrency_slots=binding.concurrency_slots,
+        controller_authority_sha256="c" * 64,
+        slurm_cluster="gb10-controller",
+        controller_host="ctl.gb10.internal",
+        partition="loom",
+        association="loom",
+        submitter="loom",
+        qos="loom",
+        job_name_prefix="loom-worker",
+        resource_domains=(
+            OperatorResourceDomainV2(
+                domain_id="gb10-arm",
+                node_ids=binding.node_ids,
+                features=("arm64",),
+            ),
+        ),
+        cpus=1,
+        resources=binding.resources,
+        time_limit_seconds=3_600,
+        launcher=SlurmExecutableIdentityV2(
+            path="/opt/loom/bin/trusted-worker-launcher",
+            sha256="a" * 64,
+            owner_uid=0,
+        ),
+        trusted_launcher_release_sha256=binding.execution.trusted_fleet_release_sha256,
+        image_digest="registry.internal/loom/worker@sha256:" + "b" * 64,
+    )
+    launch_policy_sha256 = canonical_launch_policy_digest(profile)
+    private_key = EXECUTOR_KEYS["gb10"]
+    context = TrustedLaunchContextV2(
+        binding=binding,
+        profile=profile,
+        controller_authority=PoolControllerAuthorityV2(
+            pool_id="gb10",
+            controller_authority_sha256="c" * 64,
+        ),
+        ownership_key=ExecutorOwnershipKey(
+            signing_key_id="gb10-key",
+            private_key=private_key,
+            public_key_sha256=public_key_fingerprint(private_key.public_key()),
+        ),
+        submitted_at=datetime.now(UTC),
+        launch_policy_sha256=launch_policy_sha256,
+    )
+
+    rendered = render_signed_launch(context)
+
+    assert persisted_profile.profile_digest == binding.profile_digest
+    assert launch_policy_sha256 != binding.profile_digest
+    assert rendered.ownership_proof.metadata.binding == binding
+    assert rendered.ownership_proof.metadata.launch_policy_sha256 == launch_policy_sha256
 
 
 async def test_queue_never_crosses_pool(capacity_session: AsyncSession) -> None:
@@ -668,7 +755,8 @@ async def test_release_requires_matching_protected_and_physical_terminal_evidenc
     metadata = ExecutableOwnershipMetadataV2(
         binding=binding,
         controller_authority_sha256="c" * 64,
-        trusted_launcher_sha256="e" * 64,
+        trusted_launcher_sha256="7" * 64,
+        launch_policy_sha256="f" * 64,
         slurm_cluster="gb10-controller",
         submitter_identity="loom",
         association="loom",

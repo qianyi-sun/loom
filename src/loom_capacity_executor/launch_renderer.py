@@ -110,6 +110,7 @@ class OperatorLaunchProfileV2(StrictV2Model):
     pool_generation: Annotated[int, Field(gt=0, le=(1 << 63) - 1)]
     profile_id: Identifier
     profile_generation: Annotated[int, Field(gt=0, le=(1 << 63) - 1)]
+    profile_digest: Digest
     shape_id: Identifier
     concurrency_slots: Annotated[int, Field(gt=0, le=(1 << 63) - 1)]
     controller_authority_sha256: Digest
@@ -220,6 +221,7 @@ class TrustedLaunchContextV2:
     controller_authority: PoolControllerAuthorityV2
     ownership_key: ExecutorOwnershipKey
     submitted_at: datetime
+    launch_policy_sha256: str
     candidate_diagnostic: str = ""
     display_diagnostic: str = ""
 
@@ -234,6 +236,8 @@ class TrustedLaunchContextV2:
             raise TrustedLaunchRenderError("controller ownership key is invalid")
         if self.submitted_at.tzinfo is None or self.submitted_at.utcoffset() is None:
             raise TrustedLaunchRenderError("launch submission time must be timezone-aware")
+        if re.fullmatch(r"[0-9a-f]{64}", self.launch_policy_sha256) is None:
+            raise TrustedLaunchRenderError("launch policy digest is invalid")
         _diagnostic_digest(self.candidate_diagnostic, label="candidate")
         _diagnostic_digest(self.display_diagnostic, label="display")
 
@@ -246,7 +250,7 @@ class RenderedTrustedLaunchV2:
     ownership_proof: SignedExecutableOwnershipProofV2
 
 
-def canonical_operator_profile_digest(profile: OperatorLaunchProfileV2) -> str:
+def canonical_launch_policy_digest(profile: OperatorLaunchProfileV2) -> str:
     """Commit every operator-owned scheduler and trusted-launch field."""
 
     if not isinstance(profile, OperatorLaunchProfileV2):
@@ -266,9 +270,9 @@ def _diagnostic_digest(value: str, *, label: str) -> str:
 def _assert_profile_binding(context: TrustedLaunchContextV2) -> OperatorResourceDomainV2:
     binding = context.binding
     profile = context.profile
-    digest = canonical_operator_profile_digest(profile)
-    if not hmac.compare_digest(digest, binding.profile_digest):
-        raise TrustedLaunchRenderError("operator profile digest does not match intent")
+    digest = canonical_launch_policy_digest(profile)
+    if not hmac.compare_digest(digest, context.launch_policy_sha256):
+        raise TrustedLaunchRenderError("operator launch policy digest does not match authority")
 
     # Revalidate after the digest check so model_copy cannot bypass profile invariants.
     OperatorLaunchProfileV2.model_validate(profile.model_dump(mode="python"))
@@ -277,6 +281,7 @@ def _assert_profile_binding(context: TrustedLaunchContextV2) -> OperatorResource
         or binding.pool_generation != profile.pool_generation
         or binding.profile_id != profile.profile_id
         or binding.profile_generation != profile.profile_generation
+        or not hmac.compare_digest(binding.profile_digest, profile.profile_digest)
         or binding.shape_id != profile.shape_id
         or binding.concurrency_slots != profile.concurrency_slots
         or binding.resources != profile.resources
@@ -322,7 +327,8 @@ def build_executable_ownership_metadata(
     return ExecutableOwnershipMetadataV2(
         binding=context.binding,
         controller_authority_sha256=context.controller_authority.controller_authority_sha256,
-        trusted_launcher_sha256=profile.trusted_launcher_release_sha256,
+        trusted_launcher_sha256=profile.launcher.sha256,
+        launch_policy_sha256=context.launch_policy_sha256,
         slurm_cluster=profile.slurm_cluster,
         submitter_identity=profile.submitter,
         association=profile.association,
@@ -362,6 +368,7 @@ def render_signed_launch(context: TrustedLaunchContextV2) -> RenderedTrustedLaun
     display_digest = _diagnostic_digest(context.display_diagnostic, label="display")
     request = SlurmLaunchRequestV2(
         cluster=profile.slurm_cluster,
+        controller_host=profile.controller_host,
         partition=profile.partition,
         account=profile.association,
         submitter=profile.submitter,
@@ -397,7 +404,7 @@ __all__ = [
     "TrustedLaunchContextV2",
     "TrustedLaunchRenderError",
     "build_executable_ownership_metadata",
-    "canonical_operator_profile_digest",
+    "canonical_launch_policy_digest",
     "render_launch_request",
     "render_signed_launch",
 ]

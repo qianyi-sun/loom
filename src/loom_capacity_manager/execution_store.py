@@ -477,7 +477,6 @@ class CapacityExecutionStore:
                     or proof.signing_key_id != registration.signing_key_id
                     or proof.metadata.controller_authority_sha256
                     != registration.controller_authority_sha256
-                    or proof.metadata.trusted_launcher_sha256 != epoch.trusted_fleet_release_sha256
                     or record.authority_scope != "dedicated-loom-association"
                     or proof.metadata.slurm_cluster != pool.controller
                     or proof.metadata.association != pool.association

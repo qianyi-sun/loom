@@ -188,6 +188,7 @@ class SlurmLaunchRequestV2(StrictSlurmV2Model):
     """One exact trusted-wrapper launch; no candidate text or script body exists."""
 
     cluster: SlurmIdentifier
+    controller_host: SlurmControllerHost
     partition: SlurmIdentifier
     account: SlurmIdentifier
     submitter: SlurmIdentifier

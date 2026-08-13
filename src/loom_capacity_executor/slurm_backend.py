@@ -720,6 +720,8 @@ class AsyncSlurmBackend:
             account=request.account,
             submitter=request.submitter,
         )
+        if request.controller_host != self.authority.controller_host:
+            raise SlurmAuthorityError("launch controller is outside Slurm authority")
         if request.partition != self.authority.partition or request.qos != self.authority.qos:
             raise SlurmAuthorityError("launch partition or QoS is outside Slurm authority")
         ceiling = self.authority.resource_ceiling
