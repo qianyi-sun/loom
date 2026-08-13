@@ -14,6 +14,7 @@ import os
 import socket
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, Request
@@ -61,6 +62,9 @@ from loom_service.personal_dev_lifecycle import (
     personal_dev_reconcile_run_loop,
 )
 from loom_service.pipeline_control_bindings import SqlPipelineRecipeBindingResolver
+from loom_service.pipeline_stage1_smoke_authority import (
+    build_stage1_candidate_authority_from_environment,
+)
 from loom_service.pipeline_stage1_smoke_service import (
     load_stage1_smoke_signature_verifier,
 )
@@ -83,6 +87,7 @@ from loom_service.routes import (
     personal_dev_candidates,
     pipeline,
     pipeline_stage1_smoke,
+    pipeline_stage1_smoke_prepare,
     provider_connections,
     rate_cards,
     run_library,
@@ -439,6 +444,11 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
 
     app = FastAPI(title="Loom Service", version="0.0.1", lifespan=lifespan)
     app.state.personal_dev_builder_available = False
+    stage1_candidate_authority = build_stage1_candidate_authority_from_environment(
+        repo_root=Path(__file__).resolve().parents[2]
+    )
+    if stage1_candidate_authority is not None:
+        app.state.pipeline_stage1_candidate_authority = stage1_candidate_authority
 
     @app.exception_handler(StagingAdmissionError)
     async def _staging_admission_error(
@@ -505,6 +515,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
     app.include_router(overview.router, prefix="/api/v1")
     app.include_router(pipeline.router, prefix="/api/v1")
     app.include_router(pipeline_stage1_smoke.router, prefix="/api/v1/internal")
+    app.include_router(pipeline_stage1_smoke_prepare.router, prefix="/api/v1/internal")
     app.include_router(backends.router, prefix="/api/v1")
     app.include_router(local_servers.router, prefix="/api/v1")
     app.include_router(provider_connections.router, prefix="/api/v1")

@@ -26,10 +26,19 @@ spec:
               value: "{{ runtime_environment }}"
             - name: LOOM_NAMESPACE
               value: "{{ namespace }}"
+{% if pipeline_stage1_smoke_authority.enabled %}
+            - name: LOOM_SVC_PIPELINE_STAGE1_SMOKE_PUBLIC_KEY_FILE
+              value: "/var/run/loom/stage1-authority/public-key"
+{% endif %}
           volumeMounts:
             - name: loom-admin-secret
               mountPath: /var/run/loom/secrets/admin
               readOnly: true
+{% if pipeline_stage1_smoke_authority.enabled %}
+            - name: pipeline-stage1-smoke-authority
+              mountPath: /var/run/loom/stage1-authority
+              readOnly: true
+{% endif %}
           ports:
             - containerPort: 8090
           readinessProbe:
@@ -43,6 +52,16 @@ spec:
           secret:
             secretName: loom-admin-secret
             defaultMode: 0400
+{% if pipeline_stage1_smoke_authority.enabled %}
+        - name: pipeline-stage1-smoke-authority
+          secret:
+            secretName: {{ pipeline_stage1_smoke_authority.public_key_secret_name }}
+            defaultMode: 0400
+            items:
+              - key: public-key
+                path: public-key
+                mode: 0400
+{% endif %}
 ---
 apiVersion: v1
 kind: Service

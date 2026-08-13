@@ -16,24 +16,32 @@ from loom.pipeline.spec import PipelineModel
 from loom.pipeline.stage1_smoke import (
     Stage1SmokeAuthorizationV1,
     Stage1SmokeCandidateV1,
+    Stage1SmokeCleanupBeginV1,
     Stage1SmokeCleanupV1,
+    Stage1SmokeEvidenceV1,
     Stage1SmokePreflightV1,
 )
 from loom_service.pipeline_stage1_smoke_service import (
+    Stage1SmokeCapacityPreflightAuthorityV1,
     Stage1SmokeCleanupAuthorityV1,
     Stage1SmokeEvidenceAuthorityV1,
-    Stage1SmokeEvidenceV1,
     Stage1SmokeExecutionPreflightAuthorityV1,
     Stage1SmokeServiceError,
     Stage1SmokeSignatureVerifier,
+    begin_stage1_smoke_cleanup,
+    capacity_preflight_signature_payload,
+    cleanup_begin_signature_payload,
     cleanup_signature_payload,
     cleanup_stage1_smoke,
     evidence_signature_payload,
     execute_signature_payload,
     execute_stage1_smoke,
-    get_stage1_smoke_replay,
+    get_stage1_smoke_capacity_replay,
+    get_stage1_smoke_execute_replay,
+    preflight_stage1_smoke_capacity,
     record_stage1_smoke_evidence,
-    stage1_smoke_request_digest,
+    stage1_smoke_capacity_request_digest,
+    stage1_smoke_execute_request_digest,
 )
 
 router = APIRouter(include_in_schema=False)
@@ -44,6 +52,11 @@ class Stage1SmokeExecuteV1(PipelineModel):
     candidate: Stage1SmokeCandidateV1
     authorization: Stage1SmokeAuthorizationV1
     preflight: Stage1SmokePreflightV1
+
+
+class Stage1SmokeCapacityPreflightV1(PipelineModel):
+    candidate: Stage1SmokeCandidateV1
+    authorization: Stage1SmokeAuthorizationV1
 
 
 _ModelT = TypeVar("_ModelT", bound=BaseModel)
@@ -76,6 +89,93 @@ def _validate_idempotency(value: str) -> None:
         raise HTTPException(status_code=422, detail="invalid_idempotency_key") from exc
 
 
+@router.post("/pipeline-stage1-smoke/capacity-preflight", status_code=201)
+async def capacity_preflight(
+    raw_payload: dict[str, Any],
+    request: Request,
+    response: Response,
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+    signature_key_id: Annotated[str, Header(alias="X-Loom-Stage1-Signature-Key-Id")],
+    signature: Annotated[
+        str, Header(alias="X-Loom-Stage1-Signature"), Field(min_length=128, max_length=128)
+    ],
+) -> dict[str, object]:
+    payload = _decode_json_model(raw_payload, Stage1SmokeCapacityPreflightV1)
+    _validate_idempotency(idempotency_key)
+    now = datetime.now(UTC)
+    signed = capacity_preflight_signature_payload(
+        candidate=payload.candidate,
+        authorization=payload.authorization,
+        idempotency_key=idempotency_key,
+    )
+    try:
+        signature_sha256 = _verifier(request).verify(
+            key_id=signature_key_id,
+            payload=signed,
+            signature=signature,
+            observed_at=payload.authorization.authorized_at,
+            now=now,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail="stage1_smoke_signature_invalid") from exc
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if session_factory is None:
+        raise HTTPException(status_code=503, detail="stage1_smoke_authority_unavailable")
+    capacity_authority = getattr(
+        request.app.state, "pipeline_stage1_capacity_preflight_authority", None
+    )
+    if capacity_authority is None or not hasattr(
+        capacity_authority, "verify_capacity_preflight"
+    ):
+        raise HTTPException(
+            status_code=503, detail="stage1_smoke_capacity_preflight_authority_unavailable"
+        )
+    try:
+        async with session_factory() as session:
+            body, replay = await preflight_stage1_smoke_capacity(
+                session,
+                candidate=payload.candidate,
+                authorization=payload.authorization,
+                idempotency_key=idempotency_key,
+                signature_key_id=signature_key_id,
+                signature_sha256=signature_sha256,
+                capacity_authority=cast(
+                    Stage1SmokeCapacityPreflightAuthorityV1, capacity_authority
+                ),
+                repo_root=_REPO_ROOT,
+                now=now,
+            )
+            await session.commit()
+    except Stage1SmokeServiceError as exc:
+        raise _error(exc) from exc
+    except IntegrityError as exc:
+        try:
+            async with session_factory() as session:
+                replay_body = await get_stage1_smoke_capacity_replay(
+                    session,
+                    team_id=payload.candidate.team_id,
+                    idempotency_key=idempotency_key,
+                    request_digest=stage1_smoke_capacity_request_digest(
+                        candidate=payload.candidate,
+                        authorization=payload.authorization,
+                        idempotency_key=idempotency_key,
+                        signature_key_id=signature_key_id,
+                    ),
+                    signature_key_id=signature_key_id,
+                    signature_sha256=signature_sha256,
+                )
+        except Stage1SmokeServiceError as replay_exc:
+            raise _error(replay_exc) from replay_exc
+        if replay_body is None:
+            raise HTTPException(status_code=409, detail="stage1_smoke_concurrent_conflict") from exc
+        body = replay_body
+        replay = True
+    if replay:
+        response.status_code = 200
+        response.headers["Idempotent-Replay"] = "true"
+    return body
+
+
 @router.post("/pipeline-stage1-smoke/execute", status_code=201)
 async def execute(
     raw_payload: dict[str, Any],
@@ -101,7 +201,7 @@ async def execute(
             key_id=signature_key_id,
             payload=signed,
             signature=signature,
-            observed_at=payload.authorization.authorized_at,
+            observed_at=payload.preflight.observed_at,
             now=now,
         )
     except ValueError as exc:
@@ -136,16 +236,19 @@ async def execute(
     except IntegrityError as exc:
         try:
             async with session_factory() as session:
-                replay_body = await get_stage1_smoke_replay(
+                replay_body = await get_stage1_smoke_execute_replay(
                     session,
                     team_id=payload.candidate.team_id,
                     idempotency_key=idempotency_key,
-                    request_digest=stage1_smoke_request_digest(
+                    request_digest=stage1_smoke_execute_request_digest(
                         candidate=payload.candidate,
                         authorization=payload.authorization,
                         preflight=payload.preflight,
+                        idempotency_key=idempotency_key,
                         signature_key_id=signature_key_id,
                     ),
+                    signature_key_id=signature_key_id,
+                    signature_sha256=signature_sha256,
                 )
         except Stage1SmokeServiceError as replay_exc:
             raise _error(replay_exc) from replay_exc
@@ -203,6 +306,48 @@ async def record_evidence(
     return body
 
 
+@router.post("/pipeline-stage1-smoke/cleanup/begin")
+async def cleanup_begin(
+    raw_payload: dict[str, Any],
+    request: Request,
+    response: Response,
+    signature_key_id: Annotated[str, Header(alias="X-Loom-Stage1-Signature-Key-Id")],
+    signature: Annotated[
+        str, Header(alias="X-Loom-Stage1-Signature"), Field(min_length=128, max_length=128)
+    ],
+) -> dict[str, object]:
+    payload = _decode_json_model(raw_payload, Stage1SmokeCleanupBeginV1)
+    now = datetime.now(UTC)
+    try:
+        signature_sha256 = _verifier(request).verify(
+            key_id=signature_key_id,
+            payload=cleanup_begin_signature_payload(payload),
+            signature=signature,
+            observed_at=payload.requested_at,
+            now=now,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail="stage1_smoke_signature_invalid") from exc
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if session_factory is None:
+        raise HTTPException(status_code=503, detail="stage1_smoke_authority_unavailable")
+    try:
+        async with session_factory() as session:
+            body, replay = await begin_stage1_smoke_cleanup(
+                session,
+                cleanup=payload,
+                signature_key_id=signature_key_id,
+                signature_sha256=signature_sha256,
+                now=now,
+            )
+            await session.commit()
+    except Stage1SmokeServiceError as exc:
+        raise _error(exc) from exc
+    if replay:
+        response.headers["Idempotent-Replay"] = "true"
+    return body
+
+
 @router.post("/pipeline-stage1-smoke/cleanup")
 async def cleanup(
     raw_payload: dict[str, Any],
@@ -216,7 +361,7 @@ async def cleanup(
     payload = _decode_json_model(raw_payload, Stage1SmokeCleanupV1)
     now = datetime.now(UTC)
     try:
-        _verifier(request).verify(
+        signature_sha256 = _verifier(request).verify(
             key_id=signature_key_id,
             payload=cleanup_signature_payload(payload),
             signature=signature,
@@ -236,6 +381,8 @@ async def cleanup(
             body, replay = await cleanup_stage1_smoke(
                 session,
                 cleanup=payload,
+                signature_key_id=signature_key_id,
+                signature_sha256=signature_sha256,
                 authority=cast(Stage1SmokeCleanupAuthorityV1, cleanup_authority),
                 now=now,
             )

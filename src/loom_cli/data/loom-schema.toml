@@ -1698,6 +1698,11 @@ python_type = "table"
 # routing.
 fields      = { enabled = false }
 
+[render_config.pipeline_stage1_smoke_authority]
+python_type = "table"
+description = "Explicitly mount the protected Stage 1 operator public key into loom-service. Disabled profiles keep every live-smoke mutation fail-closed."
+fields      = { enabled = false, public_key_secret_name = "loom-stage1-smoke-authority" }
+
 [render_config.pgbouncer]
 python_type = "table"
 description = "PgBouncer transaction-mode connection multiplexer. When enabled, renders a Deployment (2 replicas), Service (loom-pgbouncer:6432), PodDisruptionBudget, and NetworkPolicy; bootstrap populates *-db-url-pool secrets by deriving from the direct DSN. Disable it, re-render, and redeploy to make services fall back to db_url (direct). See docs/architecture/pgbouncer.md."

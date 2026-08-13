@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from pydantic import ValidationError
@@ -14,6 +14,9 @@ from loom.pipeline.spec import RunBudgetV1, StageBudgetV1
 from loom.pipeline.stage1_smoke import (
     STAGE1_SMOKE_RECIPE_NAME,
     Stage1SmokeCandidateV1,
+    Stage1SmokeCleanupBeginV1,
+    Stage1SmokeCleanupV1,
+    Stage1SmokeEvidenceV1,
     Stage1SmokeInputV1,
     Stage1SmokeOutputV1,
     Stage1SmokePreviewPolicyV1,
@@ -48,7 +51,9 @@ def _candidate(**updates: object) -> Stage1SmokeCandidateV1:
     now = datetime(2026, 8, 13, 16, tzinfo=UTC)
     renderer_digest = canonical_digest(load_behavior_renderer_lock(REPO_ROOT))
     schema_digest = digest_bytes(
-        (REPO_ROOT / "src/loom/pipeline/renderers/schemas/behavior.stage-request.v1.json").read_bytes()
+        (
+            REPO_ROOT / "src/loom/pipeline/renderers/schemas/behavior.stage-request.v1.json"
+        ).read_bytes()
     )
     value: dict[str, object] = {
         "schema_version": "loom.behavior-stage1-smoke-candidate.v1",
@@ -183,3 +188,86 @@ def test_candidate_rejects_input_reorder() -> None:
     value["inputs"] = list(reversed(value["inputs"]))
     with pytest.raises(ValidationError, match="exact graph order"):
         Stage1SmokeCandidateV1.model_validate(value)
+
+
+def test_evidence_and_cleanup_begin_are_shared_strict_contracts() -> None:
+    now = datetime.now(UTC)
+    authorization_id = uuid4()
+    pipeline_run_id = uuid4()
+    evidence = Stage1SmokeEvidenceV1(
+        schema_version="loom.behavior-stage1-smoke-evidence.v1",
+        authorization_id=authorization_id,
+        candidate_sha256=DIGEST,
+        pipeline_run_id=pipeline_run_id,
+        result_kind="terminal",
+        evidence={
+            "stage_run_id": uuid4(),
+            "stage_state": "failed",
+            "domain_outcome": None,
+            "backend_variant_id": "oldlab-rtx5080-2gpu",
+            "platform_child_digest": DIGEST,
+            "gpu_devices": [
+                {
+                    "logical_index": 0,
+                    "device_uuid": "GPU-A",
+                    "model": "NVIDIA GeForce RTX 5080",
+                    "role": "sim",
+                },
+                {
+                    "logical_index": 1,
+                    "device_uuid": "GPU-B",
+                    "model": "NVIDIA GeForce RTX 5080",
+                    "role": "vla",
+                },
+            ],
+            "input_descriptor_set_sha256": DIGEST,
+            "inputs_read_only_and_verified": True,
+            "vla_readiness_verified": True,
+            "process_groups_supervised_and_reaped": True,
+            "attempts": [
+                {
+                    "attempt_id": uuid4(),
+                    "attempt_number": 1,
+                    "state": "failed",
+                    "worker_id": uuid4(),
+                    "platform_child_digest": DIGEST,
+                    "input_view_digest": None,
+                    "cleanup_proof_digest": DIGEST,
+                }
+            ],
+            "output": None,
+            "preview": None,
+            "viewer": None,
+        },
+        observed_at=now,
+    )
+    cleanup_begin = Stage1SmokeCleanupBeginV1(
+        schema_version="loom.behavior-stage1-smoke-cleanup-begin.v1",
+        authorization_id=authorization_id,
+        candidate_sha256=DIGEST,
+        pipeline_run_id=pipeline_run_id,
+        requested_at=now,
+    )
+    cleanup = Stage1SmokeCleanupV1(
+        schema_version="loom.behavior-stage1-smoke-cleanup.v1",
+        authorization_id=authorization_id,
+        candidate_sha256=DIGEST,
+        pipeline_run_id=pipeline_run_id,
+        preview_generation_count=0,
+        preview_frame_count=0,
+        active_policy_slots=0,
+        active_upload_sessions=0,
+        active_input_leases=0,
+        active_worker_fences=0,
+        active_slurm_jobs=0,
+        active_allocations=0,
+        unexpected_processes=0,
+        unexpected_mounts=0,
+        cleaned_at=now,
+    )
+    assert evidence.pipeline_run_id == cleanup_begin.pipeline_run_id
+    assert cleanup.authorization_id == authorization_id
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        Stage1SmokeCleanupBeginV1.model_validate(
+            {**cleanup_begin.model_dump(mode="python"), "desired_slots": 1}
+        )

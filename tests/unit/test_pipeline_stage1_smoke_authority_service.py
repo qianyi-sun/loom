@@ -22,6 +22,7 @@ from loom_service.pipeline_api_service import PipelineApiError, create_public_ru
 from loom_service.pipeline_stage1_smoke_service import (
     Stage1SmokeSignatureVerifier,
     _validate_worker,
+    capacity_preflight_signature_payload,
     execute_signature_payload,
 )
 from tests.unit.test_pipeline_stage1_smoke import _candidate
@@ -200,6 +201,13 @@ def test_execute_http_json_scalars_reach_the_fail_closed_preflight_gate(
         observed_at=now,
     )
     key = "stage1-route-json"
+    capacity_signed = capacity_preflight_signature_payload(
+        candidate=candidate,
+        authorization=authorization,
+        idempotency_key="stage1-capacity-route-json",
+    )
+    assert b'"action":"capacity_preflight_activate_one_slot"' in capacity_signed
+    assert b'"activation_state":"active","desired_slots":1' in capacity_signed
     signature = private.sign(
         execute_signature_payload(
             candidate=candidate,
@@ -208,6 +216,12 @@ def test_execute_http_json_scalars_reach_the_fail_closed_preflight_gate(
             idempotency_key=key,
         )
     ).hex()
+    assert capacity_signed != execute_signature_payload(
+        candidate=candidate,
+        authorization=authorization,
+        preflight=preflight,
+        idempotency_key=key,
+    )
     response = TestClient(app).post(
         "/api/v1/internal/pipeline-stage1-smoke/execute",
         json={
@@ -223,6 +237,79 @@ def test_execute_http_json_scalars_reach_the_fail_closed_preflight_gate(
     )
     assert response.status_code == 503
     assert response.json()["detail"] == "stage1_smoke_preflight_authority_unavailable"
+
+
+def test_capacity_http_json_scalars_reach_the_fail_closed_authority_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for key, value in {
+        "LOOM_SVC_DB_URL": "postgresql+psycopg://u:p@h/db",
+        "LOOM_SVC_MINIO_ACCESS_KEY": "k",
+        "LOOM_SVC_MINIO_SECRET_KEY": "s",
+    }.items():
+        monkeypatch.setenv(key, value)
+    app = create_app(LoomServiceSettings(_env_file=None))
+    private = Ed25519PrivateKey.generate()
+    app.state.pipeline_stage1_smoke_verifier = Stage1SmokeSignatureVerifier(
+        keys={"stage1-test": private.public_key().public_bytes_raw()},
+        max_age_seconds=300,
+    )
+    app.state.session_factory = object()
+    now = datetime.now(UTC)
+    candidate = _candidate(
+        start_by=now.replace(microsecond=0),
+        cleanup_deadline=now.replace(microsecond=0) + timedelta(hours=1),
+    )
+    authorization = Stage1SmokeAuthorizationV1(
+        schema_version="loom.behavior-stage1-smoke-authorization.v1",
+        action="stage1",
+        authorization_id=uuid4(),
+        candidate_sha256=candidate.candidate_sha256,
+        operator_user_id=candidate.operator_user_id,
+        team_id=candidate.team_id,
+        environment=candidate.environment,
+        loom_commit_sha=candidate.loom_commit_sha,
+        recipe_digest=candidate.recipe_digest,
+        image_index_digest=candidate.image_index_digest,
+        platform=candidate.platform,
+        platform_child_digest=candidate.platform_child_digest,
+        backend_variant_id=candidate.backend_variant_id,
+        policy_id=candidate.policy_id,
+        policy_config_sha256=candidate.policy_config_sha256,
+        policy_activation_epoch=candidate.policy_activation_epoch,
+        input_descriptor_set_sha256=canonical_digest(candidate.inputs),
+        run_budget_sha256=canonical_digest(candidate.run_budget),
+        start_by=candidate.start_by,
+        cleanup_deadline=candidate.cleanup_deadline,
+        live_mutation_authorized=True,
+        authorized_at=now,
+        expires_at=now + timedelta(minutes=2),
+        nonce_sha256="sha256:" + "9" * 64,
+    )
+    key = "stage1-capacity-route-json"
+    signature = private.sign(
+        capacity_preflight_signature_payload(
+            candidate=candidate,
+            authorization=authorization,
+            idempotency_key=key,
+        )
+    ).hex()
+    response = TestClient(app).post(
+        "/api/v1/internal/pipeline-stage1-smoke/capacity-preflight",
+        json={
+            "candidate": candidate.model_dump(mode="json"),
+            "authorization": authorization.model_dump(mode="json"),
+        },
+        headers={
+            "Idempotency-Key": key,
+            "X-Loom-Stage1-Signature-Key-Id": "stage1-test",
+            "X-Loom-Stage1-Signature": signature,
+        },
+    )
+    assert response.status_code == 503
+    assert response.json()["detail"] == (
+        "stage1_smoke_capacity_preflight_authority_unavailable"
+    )
 
 
 @pytest.mark.asyncio

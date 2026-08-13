@@ -16,6 +16,7 @@ from loom.db.schema import (
     PipelineScopedPolicyActivation,
     PipelineStage1SmokeAuthorization,
     PipelineStage1SmokeEvent,
+    PipelineStageRun,
     Team,
     User,
 )
@@ -24,16 +25,207 @@ from loom.pipeline.spec import RunGraphSpecV1
 from loom.pipeline.stage1_smoke import (
     Stage1SmokeAuthorizationV1,
     Stage1SmokeCandidateV1,
+    Stage1SmokeCleanupBeginV1,
     Stage1SmokeCleanupV1,
+    Stage1SmokeEvidenceV1,
     Stage1SmokeGpuDeviceV1,
     Stage1SmokePreflightV1,
 )
 from loom_pipeline_orchestrator.repository import PipelineRepository
 from loom_service import pipeline_stage1_smoke_service as service
-from loom_service.pipeline_stage1_smoke_service import Stage1SmokeEvidenceV1
 from tests.unit.test_pipeline_stage1_smoke import _candidate
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+async def test_capacity_intent_can_drain_and_abort_without_a_run(
+    postgres_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = datetime.now(UTC)
+    team_id = uuid4()
+    operator_id = uuid4()
+    candidate = _candidate(
+        environment=f"stage1-abort-{uuid4().hex}",
+        team_id=team_id,
+        operator_user_id=operator_id,
+        policy_activation_epoch=1,
+        start_by=now + timedelta(minutes=5),
+        cleanup_deadline=now + timedelta(hours=1),
+    )
+    authorization = Stage1SmokeAuthorizationV1(
+        schema_version="loom.behavior-stage1-smoke-authorization.v1",
+        action="stage1",
+        authorization_id=uuid4(),
+        candidate_sha256=candidate.candidate_sha256,
+        operator_user_id=operator_id,
+        team_id=team_id,
+        environment=candidate.environment,
+        loom_commit_sha=candidate.loom_commit_sha,
+        recipe_digest=candidate.recipe_digest,
+        image_index_digest=candidate.image_index_digest,
+        platform=candidate.platform,
+        platform_child_digest=candidate.platform_child_digest,
+        backend_variant_id=candidate.backend_variant_id,
+        policy_id=candidate.policy_id,
+        policy_config_sha256=candidate.policy_config_sha256,
+        policy_activation_epoch=candidate.policy_activation_epoch,
+        input_descriptor_set_sha256=canonical_digest(candidate.inputs),
+        run_budget_sha256=canonical_digest(candidate.run_budget),
+        start_by=candidate.start_by,
+        cleanup_deadline=candidate.cleanup_deadline,
+        live_mutation_authorized=True,
+        authorized_at=now,
+        expires_at=now + timedelta(minutes=5),
+        nonce_sha256="sha256:" + "8" * 64,
+    )
+
+    async def fake_inputs(*_args: object, **_kwargs: object) -> dict[UUID, Artifact]:
+        return {}
+
+    class CapacityAuthority:
+        async def verify_capacity_preflight(self, **_kwargs: object) -> None:
+            return None
+
+    class CleanupAuthority:
+        async def verify_cleanup(self, **_kwargs: object) -> None:
+            return None
+
+    monkeypatch.setattr(service, "_validate_inputs", fake_inputs)
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    activation_id: UUID | None = None
+    try:
+        async with sessions() as session:
+            session.add_all(
+                [
+                    Team(id=team_id, name=f"stage1-abort-{team_id}"),
+                    User(
+                        id=operator_id,
+                        username=f"stage1-abort-{operator_id}",
+                        username_normalized=f"stage1-abort-{operator_id}",
+                        status="active",
+                    ),
+                ]
+            )
+            await session.commit()
+        async with sessions() as session:
+            body, replay = await service.preflight_stage1_smoke_capacity(
+                session,
+                candidate=candidate,
+                authorization=authorization,
+                idempotency_key="stage1-capacity-abort",
+                signature_key_id="stage1-test",
+                signature_sha256="sha256:" + "6" * 64,
+                capacity_authority=CapacityAuthority(),
+                repo_root=REPO_ROOT,
+                now=now,
+            )
+            await session.commit()
+            assert not replay
+            activation_id = UUID(str(body["policy_activation_id"]))
+        begin = Stage1SmokeCleanupBeginV1(
+            schema_version="loom.behavior-stage1-smoke-cleanup-begin.v1",
+            authorization_id=authorization.authorization_id,
+            candidate_sha256=candidate.candidate_sha256,
+            pipeline_run_id=None,
+            requested_at=now,
+        )
+        async with sessions() as session:
+            body, replay = await service.begin_stage1_smoke_cleanup(
+                session,
+                cleanup=begin,
+                signature_key_id="stage1-test",
+                signature_sha256="sha256:" + "5" * 64,
+                now=now,
+            )
+            await session.commit()
+            assert not replay
+            assert body["state"] == "capacity_draining"
+        cleanup = Stage1SmokeCleanupV1(
+            schema_version="loom.behavior-stage1-smoke-cleanup.v1",
+            authorization_id=authorization.authorization_id,
+            candidate_sha256=candidate.candidate_sha256,
+            pipeline_run_id=None,
+            preview_generation_count=0,
+            preview_frame_count=0,
+            active_policy_slots=0,
+            active_upload_sessions=0,
+            active_input_leases=0,
+            active_worker_fences=0,
+            active_slurm_jobs=0,
+            active_allocations=0,
+            unexpected_processes=0,
+            unexpected_mounts=0,
+            cleaned_at=now,
+        )
+        async with sessions() as session:
+            body, replay = await service.cleanup_stage1_smoke(
+                session,
+                cleanup=cleanup,
+                signature_key_id="stage1-test",
+                signature_sha256="sha256:" + "4" * 64,
+                authority=CleanupAuthority(),
+                now=now,
+            )
+            await session.commit()
+            assert not replay
+            assert body["state"] == "capacity_aborted"
+        async with sessions() as session:
+            activation = await session.get(PipelineScopedPolicyActivation, activation_id)
+            run_count = (
+                await session.execute(
+                    select(func.count())
+                    .select_from(PipelineRun)
+                    .where(PipelineRun.team_id == team_id)
+                )
+            ).scalar_one()
+            events = list(
+                (
+                    await session.execute(
+                        select(PipelineStage1SmokeEvent)
+                        .where(
+                            PipelineStage1SmokeEvent.authorization_id
+                            == authorization.authorization_id
+                        )
+                        .order_by(PipelineStage1SmokeEvent.seq)
+                    )
+                ).scalars()
+            )
+            assert activation is not None
+            assert (activation.state, activation.desired_slots, run_count) == (
+                "disabled",
+                0,
+                0,
+            )
+            assert [event.event_kind for event in events] == [
+                "capacity_preflight_started",
+                "cleanup_started",
+                "cleanup_complete",
+                "capacity_aborted",
+            ]
+    finally:
+        async with sessions() as session:
+            await session.execute(
+                delete(PipelineStage1SmokeEvent).where(
+                    PipelineStage1SmokeEvent.authorization_id == authorization.authorization_id
+                )
+            )
+            await session.execute(
+                delete(PipelineStage1SmokeAuthorization).where(
+                    PipelineStage1SmokeAuthorization.authorization_id
+                    == authorization.authorization_id
+                )
+            )
+            if activation_id is not None:
+                await session.execute(
+                    delete(PipelineScopedPolicyActivation).where(
+                        PipelineScopedPolicyActivation.id == activation_id
+                    )
+                )
+            await session.execute(delete(Team).where(Team.id == team_id))
+            await session.execute(delete(User).where(User.id == operator_id))
+            await session.commit()
+        await engine.dispose()
 
 
 async def test_execute_persists_claimable_budgeted_official_run_atomically(
@@ -134,9 +326,31 @@ async def test_execute_persists_claimable_budgeted_official_run_atomically(
             assert authorization.candidate_sha256 == candidate.candidate_sha256
             assert preflight.candidate_sha256 == candidate.candidate_sha256
             assert graph.recipe.digest == candidate.recipe_digest
+            intent = await session.get(
+                PipelineStage1SmokeAuthorization, authorization.authorization_id
+            )
+            assert intent is not None
+            assert (intent.state, intent.pipeline_run_id) == ("capacity_pending", None)
+            self.called += 1
+
+    class CapacityAuthority:
+        called = 0
+
+        async def verify_capacity_preflight(
+            self,
+            *,
+            session: AsyncSession,
+            candidate: Stage1SmokeCandidateV1,
+            authorization: Stage1SmokeAuthorizationV1,
+            graph: RunGraphSpecV1,
+        ) -> None:
+            assert session is not None
+            assert authorization.candidate_sha256 == candidate.candidate_sha256
+            assert graph.recipe.digest == candidate.recipe_digest
             self.called += 1
 
     preflight_authority = PreflightAuthority()
+    capacity_authority = CapacityAuthority()
     frozen_artifacts = {
         item.artifact_id: Artifact(
             id=item.artifact_id,
@@ -181,6 +395,90 @@ async def test_execute_persists_claimable_budgeted_official_run_atomically(
             )
             await session.commit()
 
+        async with sessions() as session:
+            capacity_body, replay = await service.preflight_stage1_smoke_capacity(
+                session,
+                candidate=candidate,
+                authorization=authorization,
+                idempotency_key="stage1-capacity-integration",
+                signature_key_id="stage1-test",
+                signature_sha256="sha256:" + "6" * 64,
+                capacity_authority=capacity_authority,
+                repo_root=REPO_ROOT,
+                now=now,
+            )
+            await session.commit()
+            assert not replay
+            assert capacity_body["state"] == "capacity_pending"
+            assert capacity_body["pipeline_run_id"] is None
+            activation_id = capacity_body["policy_activation_id"]
+        async with sessions() as session:
+            replay_body, replay = await service.preflight_stage1_smoke_capacity(
+                session,
+                candidate=candidate,
+                authorization=authorization,
+                idempotency_key="stage1-capacity-integration",
+                signature_key_id="stage1-test",
+                signature_sha256="sha256:" + "6" * 64,
+                capacity_authority=capacity_authority,
+                repo_root=REPO_ROOT,
+                now=now,
+            )
+            await session.commit()
+            assert replay
+            assert replay_body == capacity_body
+        async with sessions() as session:
+            with pytest.raises(
+                service.Stage1SmokeServiceError,
+                match="stage1_smoke_capacity_idempotency_conflict",
+            ):
+                await service.preflight_stage1_smoke_capacity(
+                    session,
+                    candidate=candidate,
+                    authorization=authorization,
+                    idempotency_key="stage1-capacity-integration",
+                    signature_key_id="stage1-test",
+                    signature_sha256="sha256:" + "1" * 64,
+                    capacity_authority=capacity_authority,
+                    repo_root=REPO_ROOT,
+                    now=now,
+                )
+            await session.rollback()
+        async with sessions() as session:
+            activation = await session.get(PipelineScopedPolicyActivation, UUID(str(activation_id)))
+            run_count = (
+                await session.execute(
+                    select(func.count())
+                    .select_from(PipelineRun)
+                    .where(PipelineRun.team_id == team_id)
+                )
+            ).scalar_one()
+            assert activation is not None
+            assert (activation.state, activation.desired_slots, run_count) == (
+                "active",
+                1,
+                0,
+            )
+
+        abort_begin = Stage1SmokeCleanupBeginV1(
+            schema_version="loom.behavior-stage1-smoke-cleanup-begin.v1",
+            authorization_id=authorization.authorization_id,
+            candidate_sha256=candidate.candidate_sha256,
+            pipeline_run_id=None,
+            requested_at=now,
+        )
+        async with sessions() as session:
+            abort_body, replay = await service.begin_stage1_smoke_cleanup(
+                session,
+                cleanup=abort_begin,
+                signature_key_id="stage1-test",
+                signature_sha256="sha256:" + "2" * 64,
+                now=now,
+            )
+            assert not replay
+            assert abort_body["state"] == "capacity_draining"
+            await session.rollback()
+
         class RejectingPreflightAuthority:
             async def verify_preflight(
                 self,
@@ -204,7 +502,7 @@ async def test_execute_persists_claimable_budgeted_official_run_atomically(
                     candidate=candidate,
                     authorization=authorization,
                     preflight=preflight,
-                    idempotency_key="stage1-integration",
+                    idempotency_key="stage1-execute-integration",
                     signature_key_id="stage1-test",
                     signature_sha256="sha256:" + "7" * 64,
                     preflight_authority=RejectingPreflightAuthority(),
@@ -228,14 +526,14 @@ async def test_execute_persists_claimable_budgeted_official_run_atomically(
                     .where(PipelineRun.team_id == team_id)
                 )
             ).scalar_one()
-            assert (authority_count, run_count) == (0, 0)
+            assert (authority_count, run_count) == (1, 0)
         async with sessions() as session:
             body, replay = await service.execute_stage1_smoke(
                 session,
                 candidate=candidate,
                 authorization=authorization,
                 preflight=preflight,
-                idempotency_key="stage1-integration",
+                idempotency_key="stage1-execute-integration",
                 signature_key_id="stage1-test",
                 signature_sha256="sha256:" + "7" * 64,
                 preflight_authority=preflight_authority,
@@ -245,14 +543,14 @@ async def test_execute_persists_claimable_budgeted_official_run_atomically(
             await session.commit()
             assert not replay
             run_id = body["pipeline_run_id"]
-            activation_id = body["policy_activation_id"]
+            assert body["policy_activation_id"] == activation_id
         async with sessions() as session:
             replay_body, replay = await service.execute_stage1_smoke(
                 session,
                 candidate=candidate,
                 authorization=authorization,
                 preflight=preflight,
-                idempotency_key="stage1-integration",
+                idempotency_key="stage1-execute-integration",
                 signature_key_id="stage1-test",
                 signature_sha256="sha256:" + "7" * 64,
                 preflight_authority=preflight_authority,
@@ -263,6 +561,25 @@ async def test_execute_persists_claimable_budgeted_official_run_atomically(
             assert replay
             assert replay_body == body
             assert preflight_authority.called == 1
+        async with sessions() as session:
+            with pytest.raises(
+                service.Stage1SmokeServiceError,
+                match="stage1_smoke_execute_idempotency_conflict",
+            ):
+                await service.execute_stage1_smoke(
+                    session,
+                    candidate=candidate,
+                    authorization=authorization,
+                    preflight=preflight,
+                    idempotency_key="stage1-execute-integration",
+                    signature_key_id="stage1-test",
+                    signature_sha256="sha256:" + "2" * 64,
+                    preflight_authority=preflight_authority,
+                    repo_root=REPO_ROOT,
+                    now=now,
+                )
+            await session.rollback()
+        assert preflight_authority.called == 1
         leases = await PipelineRepository(sessions).claim_runs(
             controller_id="stage1-integration-controller"
         )
@@ -274,6 +591,7 @@ async def test_execute_persists_claimable_budgeted_official_run_atomically(
             assert row is not None
             assert row.candidate_bytes == candidate.canonical_bytes
             assert canonical_digest(row.candidate_json) == candidate.candidate_sha256
+            assert row.preflight_json is not None
             assert [item["device_uuid"] for item in row.preflight_json["gpu_devices"]] == [
                 "GPU-Z",
                 "GPU-A",
@@ -307,16 +625,116 @@ async def test_execute_persists_claimable_budgeted_official_run_atomically(
             terminal_run.state = "finished"
             terminal_run.result = "succeeded"
             terminal_run.finished_at = now
+            terminal_stage_id = uuid4()
+            session.add(
+                PipelineStageRun(
+                    id=terminal_stage_id,
+                    pipeline_run_id=terminal_run.id,
+                    node_key="rollout",
+                    shard_key="singleton",
+                    node_kind="container",
+                    state="succeeded",
+                    domain_outcome=candidate.expected_domain_outcome,
+                    resolved_execution_spec_json={},
+                    resolved_execution_spec_bytes=b"{}\n",
+                    execution_spec_digest=canonical_digest({}),
+                    resource_profile_json={},
+                    resource_profile_digest=canonical_digest({}),
+                    resolved_input_bindings_json=[],
+                    resolved_input_bindings_digest=canonical_digest([]),
+                    failure_policy="fail_run",
+                    attempt_count=1,
+                    finished_at=now,
+                )
+            )
             await session.commit()
-        evidence = Stage1SmokeEvidenceV1(
-            schema_version="loom.behavior-stage1-smoke-evidence.v1",
-            authorization_id=authorization.authorization_id,
-            candidate_sha256=candidate.candidate_sha256,
-            pipeline_run_id=UUID(run_id),
-            result_kind="success",
-            evidence={"result_sha256": "sha256:" + "6" * 64},
-            observed_at=now,
-        )
+            evidence_attempt_id = uuid4()
+            evidence = Stage1SmokeEvidenceV1(
+                schema_version="loom.behavior-stage1-smoke-evidence.v1",
+                authorization_id=authorization.authorization_id,
+                candidate_sha256=candidate.candidate_sha256,
+                pipeline_run_id=UUID(run_id),
+                result_kind="success",
+                evidence={
+                    "stage_run_id": terminal_stage_id,
+                    "stage_state": "succeeded",
+                    "domain_outcome": candidate.expected_domain_outcome,
+                    "backend_variant_id": candidate.backend_variant_id,
+                    "platform_child_digest": candidate.platform_child_digest,
+                    "gpu_devices": preflight.gpu_devices,
+                    "input_descriptor_set_sha256": canonical_digest(candidate.inputs),
+                    "inputs_read_only_and_verified": True,
+                    "vla_readiness_verified": True,
+                    "process_groups_supervised_and_reaped": True,
+                    "attempts": [
+                        {
+                            "attempt_id": evidence_attempt_id,
+                            "attempt_number": 1,
+                            "state": "succeeded",
+                            "worker_id": preflight.worker_id,
+                            "platform_child_digest": candidate.platform_child_digest,
+                            "input_view_digest": "sha256:" + "5" * 64,
+                            "cleanup_proof_digest": None,
+                        }
+                    ],
+                    "output": {
+                        "artifact_id": uuid4(),
+                        "upload_session_id": uuid4(),
+                        "artifact_type": "behavior_rollout_bundle.v1",
+                        "manifest_sha256": "sha256:" + "1" * 64,
+                        "committed_marker_sha256": "sha256:" + "2" * 64,
+                        "content_sha256": "sha256:" + "3" * 64,
+                        "stage_result_sha256": "sha256:" + "4" * 64,
+                        "lineage_sha256": "sha256:" + "5" * 64,
+                        "stored_size_bytes": 1,
+                        "unpacked_size_bytes": 1,
+                        "file_count": 1,
+                        "signed_episode_identity_sha256": "sha256:" + "6" * 64,
+                        "root_and_file_manifests_verified": True,
+                        "range_and_head_readback_verified": True,
+                        "idempotent_replay_verified": True,
+                    },
+                    "preview": {
+                        "generation_id": uuid4(),
+                        "attempt_id": evidence_attempt_id,
+                        "frames": [
+                            {
+                                "sequence": index,
+                                "step_idx": index,
+                                "jpeg_sha256": "sha256:" + str(index + 1) * 64,
+                                "received_at": now + timedelta(milliseconds=500 * index),
+                            }
+                            for index in range(3)
+                        ],
+                        "live_unverified_label_seen": True,
+                        "one_composite_per_frame": True,
+                        "bounded_same_origin_requests": True,
+                        "inference_and_final_output_unaffected": True,
+                        "retry_generation_isolated": True,
+                        "late_response_absent": True,
+                        "handoff_without_preview_bytes": True,
+                    },
+                    "viewer": {
+                        "screenshot_sha256": "sha256:" + "7" * 64,
+                        "api_readback_sha256": "sha256:" + "8" * 64,
+                        "network_readback_sha256": "sha256:" + "9" * 64,
+                        "exact_artifact_route_opened": True,
+                        "ownership_revalidated": True,
+                        "same_team_access_succeeded": True,
+                        "cross_team_not_found": True,
+                        "public_access_denied": True,
+                        "renderer_selected_by_exact_type": True,
+                        "mounted_video_elements": 4,
+                        "synchronized_max_drift_ms": 100,
+                        "event_seek_verified": True,
+                        "tied_source_order_preserved": True,
+                        "unmount_released_media": True,
+                        "late_reads_aborted": True,
+                        "canary_absence_verified": True,
+                    },
+                },
+                observed_at=now,
+            )
 
         class EvidenceAuthority:
             called = False
@@ -389,8 +807,55 @@ async def test_execute_persists_claimable_budgeted_official_run_atomically(
                 self.called = True
 
         cleanup_authority = CleanupAuthority()
+        cleanup_begin = Stage1SmokeCleanupBeginV1(
+            schema_version="loom.behavior-stage1-smoke-cleanup-begin.v1",
+            authorization_id=authorization.authorization_id,
+            candidate_sha256=candidate.candidate_sha256,
+            pipeline_run_id=UUID(run_id),
+            requested_at=now,
+        )
+        async with sessions() as session:
+            cleanup_begin_body, replay = await service.begin_stage1_smoke_cleanup(
+                session,
+                cleanup=cleanup_begin,
+                signature_key_id="stage1-test",
+                signature_sha256="sha256:" + "5" * 64,
+                now=now,
+            )
+            await session.commit()
+            assert not replay
+            assert cleanup_begin_body["state"] == "cleanup_draining"
+        async with sessions() as session:
+            replay_body, replay = await service.begin_stage1_smoke_cleanup(
+                session,
+                cleanup=cleanup_begin,
+                signature_key_id="stage1-test",
+                signature_sha256="sha256:" + "5" * 64,
+                now=now,
+            )
+            await session.commit()
+            assert replay
+            assert replay_body == cleanup_begin_body
+            activation = await session.get(PipelineScopedPolicyActivation, UUID(str(activation_id)))
+            assert activation is not None
+            assert (activation.state, activation.desired_slots) == ("draining", 0)
+        async with sessions() as session:
+            with pytest.raises(
+                service.Stage1SmokeServiceError,
+                match="stage1_smoke_cleanup_begin_conflict",
+            ):
+                await service.begin_stage1_smoke_cleanup(
+                    session,
+                    cleanup=cleanup_begin,
+                    signature_key_id="stage1-test",
+                    signature_sha256="sha256:" + "3" * 64,
+                    now=now,
+                )
+            await session.rollback()
+
         cleanup = Stage1SmokeCleanupV1(
             schema_version="loom.behavior-stage1-smoke-cleanup.v1",
+            authorization_id=authorization.authorization_id,
             candidate_sha256=candidate.candidate_sha256,
             pipeline_run_id=UUID(run_id),
             preview_generation_count=0,
@@ -405,10 +870,42 @@ async def test_execute_persists_claimable_budgeted_official_run_atomically(
             unexpected_mounts=0,
             cleaned_at=now,
         )
+
+        class RejectingCleanupAuthority:
+            async def verify_cleanup(
+                self,
+                *,
+                authorization: PipelineStage1SmokeAuthorization,
+                cleanup: Stage1SmokeCleanupV1,
+            ) -> None:
+                del authorization, cleanup
+                raise ValueError("independent zero readback is unavailable")
+
+        async with sessions() as session:
+            with pytest.raises(
+                service.Stage1SmokeServiceError,
+                match="stage1_smoke_cleanup_unverified",
+            ):
+                await service.cleanup_stage1_smoke(
+                    session,
+                    cleanup=cleanup,
+                    signature_key_id="stage1-test",
+                    signature_sha256="sha256:" + "4" * 64,
+                    authority=RejectingCleanupAuthority(),
+                    now=now,
+                )
+            await session.rollback()
+        async with sessions() as session:
+            activation = await session.get(PipelineScopedPolicyActivation, UUID(str(activation_id)))
+            assert activation is not None
+            assert (activation.state, activation.desired_slots) == ("draining", 0)
+
         async with sessions() as session:
             cleanup_body, replay = await service.cleanup_stage1_smoke(
                 session,
                 cleanup=cleanup,
+                signature_key_id="stage1-test",
+                signature_sha256="sha256:" + "4" * 64,
                 authority=cleanup_authority,
                 now=now,
             )
@@ -416,6 +913,32 @@ async def test_execute_persists_claimable_budgeted_official_run_atomically(
             assert not replay
             assert cleanup_body["state"] == "accepted"
         assert cleanup_authority.called
+        async with sessions() as session:
+            replay_body, replay = await service.cleanup_stage1_smoke(
+                session,
+                cleanup=cleanup,
+                signature_key_id="stage1-test",
+                signature_sha256="sha256:" + "4" * 64,
+                authority=cleanup_authority,
+                now=now,
+            )
+            await session.commit()
+            assert replay
+            assert replay_body == cleanup_body
+        async with sessions() as session:
+            with pytest.raises(
+                service.Stage1SmokeServiceError,
+                match="stage1_smoke_cleanup_conflict",
+            ):
+                await service.cleanup_stage1_smoke(
+                    session,
+                    cleanup=cleanup,
+                    signature_key_id="stage1-test",
+                    signature_sha256="sha256:" + "2" * 64,
+                    authority=cleanup_authority,
+                    now=now,
+                )
+            await session.rollback()
         async with sessions() as session:
             activation = await session.get(PipelineScopedPolicyActivation, UUID(activation_id))
             events = list(
@@ -433,8 +956,10 @@ async def test_execute_persists_claimable_budgeted_official_run_atomically(
             assert activation is not None
             assert (activation.state, activation.desired_slots) == ("disabled", 0)
             assert [event.event_kind for event in events] == [
+                "capacity_preflight_started",
                 "live_action_consumed",
                 "evidence_recorded",
+                "cleanup_started",
                 "cleanup_complete",
                 "accepted",
             ]

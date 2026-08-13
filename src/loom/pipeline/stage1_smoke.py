@@ -9,6 +9,7 @@ its preflight, execution, terminal evidence, and cleanup.
 from __future__ import annotations
 
 from datetime import datetime
+from itertools import pairwise
 from pathlib import Path
 from typing import Annotated, Literal
 from uuid import UUID
@@ -285,9 +286,7 @@ def validate_stage1_smoke_authorization(
 
 class Stage1SmokeGpuDeviceV1(PipelineModel):
     logical_index: Annotated[int, Field(strict=True, ge=0, le=1)]
-    device_uuid: Annotated[
-        str, StringConstraints(pattern=r"^GPU-[A-Za-z0-9][A-Za-z0-9_-]{0,122}$")
-    ]
+    device_uuid: Annotated[str, StringConstraints(pattern=r"^GPU-[A-Za-z0-9][A-Za-z0-9_-]{0,122}$")]
     model: Literal["NVIDIA GeForce RTX 5080", "NVIDIA GB10"]
     role: Literal["sim", "vla", "sim_and_vla"]
 
@@ -332,11 +331,10 @@ class Stage1SmokePreflightV1(PipelineModel):
         if len(values) == 1:
             if values[0].model != "NVIDIA GB10" or values[0].role != "sim_and_vla":
                 raise ValueError("single-GPU preflight must be the GB10 shared-device contract")
-        elif (
-            [item.model for item in values]
-            != ["NVIDIA GeForce RTX 5080", "NVIDIA GeForce RTX 5080"]
-            or [item.role for item in values] != ["sim", "vla"]
-        ):
+        elif [item.model for item in values] != [
+            "NVIDIA GeForce RTX 5080",
+            "NVIDIA GeForce RTX 5080",
+        ] or [item.role for item in values] != ["sim", "vla"]:
             raise ValueError("two-GPU preflight must preserve OLDLAB sim/VLA role order")
         return values
 
@@ -348,10 +346,192 @@ class Stage1SmokePreflightV1(PipelineModel):
         return value
 
 
-class Stage1SmokeCleanupV1(PipelineModel):
-    schema_version: Literal["loom.behavior-stage1-smoke-cleanup.v1"]
+class Stage1SmokeAttemptEvidenceV1(PipelineModel):
+    attempt_id: UUID
+    attempt_number: Annotated[int, Field(strict=True, ge=1, le=3)]
+    state: Literal["succeeded", "failed", "cancelled", "lost"]
+    worker_id: UUID
+    platform_child_digest: Digest
+    input_view_digest: Digest | None
+    cleanup_proof_digest: Digest | None
+
+    @model_validator(mode="after")
+    def cleanup_proof_matches_terminal_state(self) -> Stage1SmokeAttemptEvidenceV1:
+        if (self.state == "succeeded") != (self.cleanup_proof_digest is None):
+            raise ValueError("only a succeeded Attempt omits a pre-evidence cleanup proof")
+        return self
+
+
+class Stage1SmokePreviewFrameEvidenceV1(PipelineModel):
+    sequence: NonNegativeSafeInt
+    step_idx: NonNegativeSafeInt
+    jpeg_sha256: Digest
+    received_at: datetime
+
+    @field_validator("received_at")
+    @classmethod
+    def aware_timestamp(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("preview frame timestamp must include a timezone")
+        return value
+
+
+class Stage1SmokePreviewEvidenceV1(PipelineModel):
+    generation_id: UUID
+    attempt_id: UUID
+    frames: Annotated[list[Stage1SmokePreviewFrameEvidenceV1], Field(min_length=3, max_length=64)]
+    live_unverified_label_seen: Literal[True]
+    one_composite_per_frame: Literal[True]
+    bounded_same_origin_requests: Literal[True]
+    inference_and_final_output_unaffected: Literal[True]
+    retry_generation_isolated: Literal[True]
+    late_response_absent: Literal[True]
+    handoff_without_preview_bytes: Literal[True]
+
+    @field_validator("frames")
+    @classmethod
+    def exact_frame_progression(
+        cls, values: list[Stage1SmokePreviewFrameEvidenceV1]
+    ) -> list[Stage1SmokePreviewFrameEvidenceV1]:
+        if any(right.sequence <= left.sequence for left, right in pairwise(values)):
+            raise ValueError("preview sequences must be strictly increasing")
+        if any(right.step_idx < left.step_idx for left, right in pairwise(values)):
+            raise ValueError("preview step indices must be nondecreasing")
+        if any(
+            (right.received_at - left.received_at).total_seconds() < 0.5
+            for left, right in pairwise(values)
+        ):
+            raise ValueError("preview evidence exceeds the sealed 2 Hz cadence")
+        return values
+
+
+class Stage1SmokeArtifactEvidenceV1(PipelineModel):
+    artifact_id: UUID
+    upload_session_id: UUID
+    artifact_type: Literal["behavior_rollout_bundle.v1"]
+    manifest_sha256: Digest
+    committed_marker_sha256: Digest
+    content_sha256: Digest
+    stage_result_sha256: Digest
+    lineage_sha256: Digest
+    stored_size_bytes: PositiveSafeInt
+    unpacked_size_bytes: PositiveSafeInt
+    file_count: PositiveSafeInt
+    signed_episode_identity_sha256: Digest
+    root_and_file_manifests_verified: Literal[True]
+    range_and_head_readback_verified: Literal[True]
+    idempotent_replay_verified: Literal[True]
+
+
+class Stage1SmokeViewerEvidenceV1(PipelineModel):
+    screenshot_sha256: Digest
+    api_readback_sha256: Digest
+    network_readback_sha256: Digest
+    exact_artifact_route_opened: Literal[True]
+    ownership_revalidated: Literal[True]
+    same_team_access_succeeded: Literal[True]
+    cross_team_not_found: Literal[True]
+    public_access_denied: Literal[True]
+    renderer_selected_by_exact_type: Literal[True]
+    mounted_video_elements: Annotated[int, Field(strict=True, ge=1, le=4)]
+    synchronized_max_drift_ms: Annotated[int, Field(strict=True, ge=0, le=100)]
+    event_seek_verified: Literal[True]
+    tied_source_order_preserved: Literal[True]
+    unmount_released_media: Literal[True]
+    late_reads_aborted: Literal[True]
+    canary_absence_verified: Literal[True]
+
+
+class Stage1SmokeTerminalEvidenceV1(PipelineModel):
+    stage_run_id: UUID
+    stage_state: Literal["succeeded", "failed"]
+    domain_outcome: Literal["rollout_success", "rollout_failure"] | None
+    backend_variant_id: Literal["oldlab-rtx5080-2gpu", "gb10-shared-1gpu"]
+    platform_child_digest: Digest
+    gpu_devices: Annotated[list[Stage1SmokeGpuDeviceV1], Field(min_length=1, max_length=2)]
+    input_descriptor_set_sha256: Digest
+    inputs_read_only_and_verified: Literal[True]
+    vla_readiness_verified: Literal[True]
+    process_groups_supervised_and_reaped: Literal[True]
+    attempts: Annotated[list[Stage1SmokeAttemptEvidenceV1], Field(min_length=1, max_length=3)]
+    output: Stage1SmokeArtifactEvidenceV1 | None
+    preview: Stage1SmokePreviewEvidenceV1 | None
+    viewer: Stage1SmokeViewerEvidenceV1 | None
+
+    @model_validator(mode="after")
+    def exact_terminal_shape(self) -> Stage1SmokeTerminalEvidenceV1:
+        if [item.attempt_number for item in self.attempts] != list(
+            range(1, len(self.attempts) + 1)
+        ):
+            raise ValueError("attempt evidence must be complete and consecutively ordered")
+        succeeded = [item for item in self.attempts if item.state == "succeeded"]
+        if self.stage_state == "succeeded":
+            if len(succeeded) != 1 or succeeded[0] != self.attempts[-1]:
+                raise ValueError("a succeeded Stage must end in exactly one succeeded Attempt")
+            if (
+                self.domain_outcome is None
+                or self.output is None
+                or self.preview is None
+                or self.viewer is None
+            ):
+                raise ValueError(
+                    "succeeded Stage evidence requires domain, output, preview, and viewer proof"
+                )
+            if self.preview.attempt_id != succeeded[0].attempt_id:
+                raise ValueError("preview generation must bind the succeeded Attempt")
+            if succeeded[0].input_view_digest is None:
+                raise ValueError("the succeeded Attempt must bind its verified input view")
+        elif succeeded or self.output is not None:
+            raise ValueError(
+                "failed Stage evidence cannot claim a succeeded Attempt or final output"
+            )
+        if len({item.attempt_id for item in self.attempts}) != len(self.attempts):
+            raise ValueError("Attempt evidence IDs must be unique")
+        return self
+
+
+class Stage1SmokeEvidenceV1(PipelineModel):
+    schema_version: Literal["loom.behavior-stage1-smoke-evidence.v1"]
+    authorization_id: UUID
     candidate_sha256: Digest
     pipeline_run_id: UUID
+    result_kind: Literal["success", "terminal"]
+    evidence: Stage1SmokeTerminalEvidenceV1
+    observed_at: datetime
+
+    @field_validator("observed_at")
+    @classmethod
+    def aware_timestamp(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("evidence timestamp must include a timezone")
+        return value
+
+    @model_validator(mode="after")
+    def no_secret_literals(self) -> Stage1SmokeEvidenceV1:
+        reject_secret_literals(self)
+        return self
+
+
+class Stage1SmokeCleanupBeginV1(PipelineModel):
+    schema_version: Literal["loom.behavior-stage1-smoke-cleanup-begin.v1"]
+    authorization_id: UUID
+    candidate_sha256: Digest
+    pipeline_run_id: UUID | None
+    requested_at: datetime
+
+    @field_validator("requested_at")
+    @classmethod
+    def aware_timestamp(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("cleanup-begin timestamp must include a timezone")
+        return value
+
+
+class Stage1SmokeCleanupV1(PipelineModel):
+    schema_version: Literal["loom.behavior-stage1-smoke-cleanup.v1"]
+    authorization_id: UUID
+    candidate_sha256: Digest
+    pipeline_run_id: UUID | None
     preview_generation_count: Literal[0]
     preview_frame_count: Literal[0]
     active_policy_slots: Literal[0]
@@ -478,10 +658,13 @@ def build_stage1_smoke_graph(
         budget=candidate.run_budget,
         nodes=[node],
     )
-    if StageBudgetV1.for_node(
-        node,
-        gpu_count_exact=2 if candidate.backend_variant_id == "oldlab-rtx5080-2gpu" else 1,
-    ) != candidate.stage_budget:
+    if (
+        StageBudgetV1.for_node(
+            node,
+            gpu_count_exact=2 if candidate.backend_variant_id == "oldlab-rtx5080-2gpu" else 1,
+        )
+        != candidate.stage_budget
+    ):
         raise ValueError("candidate Stage budget does not match the resolved graph")
     return graph
 
@@ -493,7 +676,9 @@ __all__ = [
     "STAGE1_SMOKE_RECIPE_VERSION",
     "Stage1SmokeAuthorizationV1",
     "Stage1SmokeCandidateV1",
+    "Stage1SmokeCleanupBeginV1",
     "Stage1SmokeCleanupV1",
+    "Stage1SmokeEvidenceV1",
     "Stage1SmokeGpuDeviceV1",
     "Stage1SmokeInputV1",
     "Stage1SmokeOutputV1",

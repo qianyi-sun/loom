@@ -15,8 +15,13 @@ ordered Artifact inputs, one-episode parameters, budget, preview policy, start
 window, and cleanup deadline. Rendering does not create a database row, worker,
 policy activation, Slurm job, or PipelineRun.
 
-The only repository route that can create the run is the hidden internal
-`POST /api/v1/internal/pipeline-stage1-smoke/execute` endpoint. It requires:
+The hidden internal protocol is intentionally two-phase. First,
+`POST /api/v1/internal/pipeline-stage1-smoke/capacity-preflight` consumes a
+candidate-bound signature and creates only a durable capacity intent plus one
+scoped policy activation with `desired_slots=1`. It creates no PipelineRun.
+After the autoscaler has produced the exact worker/allocation/GPU observation,
+`POST /api/v1/internal/pipeline-stage1-smoke/execute` consumes a separate fresh
+signature and may create the sole run. These routes require:
 
 - canonical candidate, authorization, and preflight documents;
 - an Ed25519 signature from a configured Stage 1 operator key;
@@ -25,16 +30,28 @@ The only repository route that can create the run is the hidden internal
   worker, image/platform, inputs, cluster, GPU order, capacity, and zero-residue
   observations.
 
-In one transaction the service consumes the authorization and creates exactly
-one controller-owned PipelineRun, one budget ledger, one GPU backend selection,
-and one scoped policy activation with `desired_slots=1`. Replaying the same
-signed request returns the same run; changing any bound input conflicts before
-a second mutation.
+Execute creates exactly one controller-owned PipelineRun, one budget ledger,
+and one GPU backend selection while retaining the capacity activation from the
+first phase. Replaying either exact signed request returns the same resource;
+changing any bound input conflicts before a second mutation.
 
-The hidden evidence and cleanup routes are separately signed. They also require
-injected evidence and cleanup authorities. The default application composition
-installs none of these three authorities, so execute, evidence, and cleanup all
-fail closed with `503` until an approved deployment supplies them.
+The hidden evidence and cleanup routes are separately signed. Cleanup begins by
+atomically changing the activation to `draining / desired_slots=0`; only after
+the controller has drained all resources can cleanup-final accept independent
+zero-residue evidence and disable the activation. A capacity intent that never
+reaches execute follows the same signed drain/finalize path and terminates as
+`capacity_aborted`, without creating a Run. The default application composition
+installs none of the capacity-preflight, execution-preflight, evidence, or
+cleanup authorities, so every live phase fails closed with `503` until an
+approved deployment supplies them.
+
+Terminal evidence is a closed typed document, not an operator note. It binds
+the complete ordered Attempt set, GPU topology, selected platform child, input
+view, at least three preview frames and their cadence, the committed Artifact
+and upload marker, authenticated viewer/readback proofs, synchronization bound,
+and secret-canary result. The SQL authority joins those identities and digests
+back to Run, StageRun, Attempt, preview, upload, and Artifact rows; an injected
+protected-environment observer must return the identical evidence document.
 
 ## Runtime confinement
 
@@ -68,6 +85,15 @@ outside Loom and supplies the resulting signature file.
 loom pipeline stage1-smoke render-candidate \
   --candidate @candidate.json --json
 
+loom pipeline stage1-smoke capacity-preflight \
+  --candidate @candidate.json \
+  --authorization @authorization.json \
+  --confirm-candidate-sha sha256:... \
+  --idempotency-key stage1-capacity-... \
+  --signature-key-id operator-key-1 \
+  --signature @capacity.signature \
+  --json
+
 loom pipeline stage1-smoke execute \
   --candidate @candidate.json \
   --authorization @authorization.json \
@@ -78,6 +104,13 @@ loom pipeline stage1-smoke execute \
   --signature @execute.signature \
   --json
 
+loom pipeline stage1-smoke cleanup-begin \
+  --cleanup-begin @cleanup-begin.json \
+  --confirm-candidate-sha sha256:... \
+  --signature-key-id operator-key-1 \
+  --signature @cleanup-begin.signature \
+  --json
+
 loom pipeline stage1-smoke cleanup \
   --cleanup @cleanup.json \
   --confirm-candidate-sha sha256:... \
@@ -86,9 +119,11 @@ loom pipeline stage1-smoke cleanup \
   --json
 ```
 
-`render-candidate` and all preflight construction are non-mutating. `execute`
-is the explicit live mutation boundary. Cleanup is mandatory after every live
-outcome and is idempotent.
+`inventory`, `prepare-candidate`, `render-candidate`, and observation assembly
+are read-only. `capacity-preflight` is the first explicit live mutation and
+`execute` is a distinct second live mutation. Cleanup is mandatory after every
+capacity activation, including pre-execute failure, and both cleanup phases are
+idempotent.
 
 ## Required post-merge gates
 

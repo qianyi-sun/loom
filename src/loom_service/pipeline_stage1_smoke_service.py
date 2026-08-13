@@ -10,12 +10,11 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Literal, Protocol
+from typing import Any, Protocol
 from uuid import UUID, uuid4
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-from pydantic import Field, field_validator, model_validator
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,16 +30,19 @@ from loom.db.schema import (
     PipelineScopedPolicyActivation,
     PipelineStage1SmokeAuthorization,
     PipelineStage1SmokeEvent,
+    PipelineStageRun,
     SlurmWorkerJob,
     Worker,
 )
 from loom.pipeline.gpu_backend import PipelineRunGpuBackendSelectionV1
 from loom.pipeline.keys import canonical_digest, canonical_document, digest_bytes
-from loom.pipeline.spec import Digest, PipelineModel, RunGraphSpecV1, reject_secret_literals
+from loom.pipeline.spec import Digest, RunGraphSpecV1
 from loom.pipeline.stage1_smoke import (
     Stage1SmokeAuthorizationV1,
     Stage1SmokeCandidateV1,
+    Stage1SmokeCleanupBeginV1,
     Stage1SmokeCleanupV1,
+    Stage1SmokeEvidenceV1,
     Stage1SmokePreflightV1,
     build_stage1_smoke_graph,
     validate_stage1_smoke_authorization,
@@ -57,28 +59,6 @@ class Stage1SmokeServiceError(RuntimeError):
         super().__init__(reason_code)
         self.status_code = status_code
         self.reason_code = reason_code
-
-
-class Stage1SmokeEvidenceV1(PipelineModel):
-    schema_version: Literal["loom.behavior-stage1-smoke-evidence.v1"]
-    authorization_id: UUID
-    candidate_sha256: Digest
-    pipeline_run_id: UUID
-    result_kind: Literal["success", "terminal"]
-    evidence: dict[str, Any] = Field(min_length=1, max_length=64)
-    observed_at: datetime
-
-    @field_validator("observed_at")
-    @classmethod
-    def aware_timestamp(cls, value: datetime) -> datetime:
-        if value.tzinfo is None or value.utcoffset() is None:
-            raise ValueError("evidence timestamp must include a timezone")
-        return value
-
-    @model_validator(mode="after")
-    def no_secret_literals(self) -> Stage1SmokeEvidenceV1:
-        reject_secret_literals(self)
-        return self
 
 
 class Stage1SmokeSignatureVerifier:
@@ -138,6 +118,19 @@ class Stage1SmokeCleanupAuthorityV1(Protocol):
         *,
         authorization: PipelineStage1SmokeAuthorization,
         cleanup: Stage1SmokeCleanupV1,
+    ) -> None: ...
+
+
+class Stage1SmokeCapacityPreflightAuthorityV1(Protocol):
+    """Independent readback required before the one-slot activation."""
+
+    async def verify_capacity_preflight(
+        self,
+        *,
+        session: AsyncSession,
+        candidate: Stage1SmokeCandidateV1,
+        authorization: Stage1SmokeAuthorizationV1,
+        graph: RunGraphSpecV1,
     ) -> None: ...
 
 
@@ -222,6 +215,26 @@ def execute_signature_payload(
     )
 
 
+def capacity_preflight_signature_payload(
+    *,
+    candidate: Stage1SmokeCandidateV1,
+    authorization: Stage1SmokeAuthorizationV1,
+    idempotency_key: str,
+) -> bytes:
+    """Bind the owner's signature to the one-slot capacity mutation."""
+
+    return canonical_document(
+        {
+            "action": "capacity_preflight_activate_one_slot",
+            "authorization": authorization.model_dump(mode="json", exclude_none=False),
+            "candidate": candidate.model_dump(mode="json", exclude_none=False),
+            "idempotency_key": idempotency_key,
+            "mutation": {"activation_state": "active", "desired_slots": 1},
+            "schema_version": "loom.behavior-stage1-smoke-signed-request.v1",
+        }
+    )
+
+
 def evidence_signature_payload(evidence: Stage1SmokeEvidenceV1) -> bytes:
     return canonical_document(
         {
@@ -240,6 +253,16 @@ def cleanup_signature_payload(cleanup: Stage1SmokeCleanupV1) -> bytes:
     )
 
 
+def cleanup_begin_signature_payload(cleanup: Stage1SmokeCleanupBeginV1) -> bytes:
+    return canonical_document(
+        {
+            "action": "cleanup_begin_set_desired_slots_zero",
+            "cleanup_begin": cleanup.model_dump(mode="json", exclude_none=False),
+            "mutation": {"activation_state": "draining", "desired_slots": 0},
+        }
+    )
+
+
 def render_stage1_smoke_candidate(
     candidate: Stage1SmokeCandidateV1, *, repo_root: Path
 ) -> dict[str, Any]:
@@ -254,21 +277,53 @@ def render_stage1_smoke_candidate(
     }
 
 
-def stage1_smoke_request_digest(
+def stage1_smoke_capacity_request_digest(
     *,
     candidate: Stage1SmokeCandidateV1,
     authorization: Stage1SmokeAuthorizationV1,
-    preflight: Stage1SmokePreflightV1,
+    idempotency_key: str,
     signature_key_id: str,
 ) -> Digest:
     return canonical_digest(
         {
+            "action": "capacity_preflight_activate_one_slot",
             "authorization": authorization.model_dump(mode="json", exclude_none=False),
             "candidate": candidate.model_dump(mode="json", exclude_none=False),
+            "idempotency_key": idempotency_key,
+            "mutation": {"activation_state": "active", "desired_slots": 1},
+            "signature_key_id": signature_key_id,
+        }
+    )
+
+
+def stage1_smoke_execute_request_digest(
+    *,
+    candidate: Stage1SmokeCandidateV1,
+    authorization: Stage1SmokeAuthorizationV1,
+    preflight: Stage1SmokePreflightV1,
+    idempotency_key: str,
+    signature_key_id: str,
+) -> Digest:
+    return canonical_digest(
+        {
+            "action": "execute",
+            "authorization": authorization.model_dump(mode="json", exclude_none=False),
+            "candidate": candidate.model_dump(mode="json", exclude_none=False),
+            "idempotency_key": idempotency_key,
             "preflight": preflight.model_dump(mode="json", exclude_none=False),
             "signature_key_id": signature_key_id,
         }
     )
+
+
+def _validate_candidate_authorization(
+    candidate: Stage1SmokeCandidateV1,
+    authorization: Stage1SmokeAuthorizationV1,
+) -> None:
+    try:
+        validate_stage1_smoke_authorization(candidate, authorization)
+    except ValueError as exc:
+        raise Stage1SmokeServiceError(409, "stage1_smoke_authority_drift") from exc
 
 
 def _validate_bindings(
@@ -277,10 +332,7 @@ def _validate_bindings(
     preflight: Stage1SmokePreflightV1,
 ) -> None:
     input_descriptor_set_sha256 = canonical_digest(candidate.inputs)
-    try:
-        validate_stage1_smoke_authorization(candidate, authorization)
-    except ValueError as exc:
-        raise Stage1SmokeServiceError(409, "stage1_smoke_authority_drift") from exc
+    _validate_candidate_authorization(candidate, authorization)
     expected_gpu_contract = {
         "oldlab-rtx5080-2gpu": [
             (0, "NVIDIA GeForce RTX 5080", "sim"),
@@ -403,34 +455,104 @@ async def _validate_worker(
         raise Stage1SmokeServiceError(409, "stage1_smoke_worker_drift")
 
 
-def _row_projection(row: PipelineStage1SmokeAuthorization) -> dict[str, Any]:
+def _persisted_identity(
+    row: PipelineStage1SmokeAuthorization,
+) -> tuple[Stage1SmokeCandidateV1, Stage1SmokeAuthorizationV1]:
     try:
         candidate = Stage1SmokeCandidateV1.model_validate_json(row.candidate_bytes)
         authorization = Stage1SmokeAuthorizationV1.model_validate_json(row.authorization_bytes)
-        preflight = Stage1SmokePreflightV1.model_validate_json(row.preflight_bytes)
     except ValueError as exc:
         raise Stage1SmokeServiceError(500, "stage1_smoke_persisted_document_invalid") from exc
     if (
         canonical_document(row.candidate_json) != row.candidate_bytes
         or canonical_document(row.authorization_json) != row.authorization_bytes
-        or canonical_document(row.preflight_json) != row.preflight_bytes
         or candidate.canonical_bytes != row.candidate_bytes
         or candidate.candidate_sha256 != row.candidate_sha256
         or canonical_document(authorization.model_dump(mode="json", exclude_none=False))
         != row.authorization_bytes
         or authorization.authorization_sha256 != row.authorization_sha256
-        or canonical_document(preflight.model_dump(mode="json", exclude_none=False))
-        != row.preflight_bytes
-        or canonical_digest(preflight.model_dump(mode="json", exclude_none=False))
-        != row.preflight_sha256
         or authorization.authorization_id != row.authorization_id
         or candidate.team_id != row.team_id
+        or stage1_smoke_capacity_request_digest(
+            candidate=candidate,
+            authorization=authorization,
+            idempotency_key=row.capacity_idempotency_key,
+            signature_key_id=row.capacity_signature_key_id,
+        )
+        != row.capacity_request_digest
     ):
+        raise Stage1SmokeServiceError(500, "stage1_smoke_persisted_document_drift")
+    return candidate, authorization
+
+
+def _assert_request_identity(
+    row: PipelineStage1SmokeAuthorization,
+    *,
+    candidate: Stage1SmokeCandidateV1,
+    authorization: Stage1SmokeAuthorizationV1,
+) -> None:
+    persisted_candidate, persisted_authorization = _persisted_identity(row)
+    if (
+        persisted_candidate.canonical_bytes != candidate.canonical_bytes
+        or persisted_authorization.authorization_id != authorization.authorization_id
+        or canonical_document(persisted_authorization.model_dump(mode="json", exclude_none=False))
+        != canonical_document(authorization.model_dump(mode="json", exclude_none=False))
+    ):
+        raise Stage1SmokeServiceError(409, "stage1_smoke_capacity_binding_conflict")
+
+
+def _row_projection(row: PipelineStage1SmokeAuthorization) -> dict[str, Any]:
+    candidate, authorization = _persisted_identity(row)
+    if row.preflight_bytes is not None:
+        try:
+            preflight = Stage1SmokePreflightV1.model_validate_json(row.preflight_bytes)
+        except ValueError as exc:
+            raise Stage1SmokeServiceError(500, "stage1_smoke_persisted_document_invalid") from exc
+        if (
+            row.preflight_json is None
+            or canonical_document(row.preflight_json) != row.preflight_bytes
+            or canonical_document(preflight.model_dump(mode="json", exclude_none=False))
+            != row.preflight_bytes
+            or canonical_digest(preflight.model_dump(mode="json", exclude_none=False))
+            != row.preflight_sha256
+            or row.execute_idempotency_key is None
+            or row.execute_signature_key_id is None
+            or stage1_smoke_execute_request_digest(
+                candidate=candidate,
+                authorization=authorization,
+                preflight=preflight,
+                idempotency_key=row.execute_idempotency_key,
+                signature_key_id=row.execute_signature_key_id,
+            )
+            != row.execute_request_digest
+        ):
+            raise Stage1SmokeServiceError(500, "stage1_smoke_persisted_document_drift")
+    elif row.preflight_json is not None or row.preflight_sha256 is not None:
+        raise Stage1SmokeServiceError(500, "stage1_smoke_persisted_document_drift")
+    if row.cleanup_begin_bytes is not None:
+        try:
+            cleanup_begin = Stage1SmokeCleanupBeginV1.model_validate_json(row.cleanup_begin_bytes)
+        except ValueError as exc:
+            raise Stage1SmokeServiceError(500, "stage1_smoke_persisted_document_invalid") from exc
+        if (
+            row.cleanup_begin_json is None
+            or canonical_document(row.cleanup_begin_json) != row.cleanup_begin_bytes
+            or canonical_document(cleanup_begin.model_dump(mode="json", exclude_none=False))
+            != row.cleanup_begin_bytes
+            or canonical_digest(cleanup_begin.model_dump(mode="json", exclude_none=False))
+            != row.cleanup_begin_sha256
+        ):
+            raise Stage1SmokeServiceError(500, "stage1_smoke_persisted_document_drift")
+    elif row.cleanup_begin_json is not None or row.cleanup_begin_sha256 is not None:
         raise Stage1SmokeServiceError(500, "stage1_smoke_persisted_document_drift")
     return {
         "authorization_id": str(row.authorization_id),
+        "capacity_idempotency_key": row.capacity_idempotency_key,
+        "capacity_request_digest": row.capacity_request_digest,
         "candidate_sha256": row.candidate_sha256,
-        "pipeline_run_id": str(row.pipeline_run_id),
+        "cleanup_begin_sha256": row.cleanup_begin_sha256,
+        "execute_request_digest": row.execute_request_digest,
+        "pipeline_run_id": str(row.pipeline_run_id) if row.pipeline_run_id is not None else None,
         "policy_activation_id": str(row.policy_activation_id),
         "state": row.state,
         "evidence_sha256": row.evidence_sha256,
@@ -438,26 +560,216 @@ def _row_projection(row: PipelineStage1SmokeAuthorization) -> dict[str, Any]:
     }
 
 
-async def get_stage1_smoke_replay(
+async def get_stage1_smoke_capacity_replay(
     session: AsyncSession,
     *,
     team_id: UUID,
     idempotency_key: str,
     request_digest: Digest,
+    signature_key_id: str,
+    signature_sha256: Digest,
 ) -> dict[str, Any] | None:
     row = (
         await session.execute(
             select(PipelineStage1SmokeAuthorization).where(
                 PipelineStage1SmokeAuthorization.team_id == team_id,
-                PipelineStage1SmokeAuthorization.idempotency_key == idempotency_key,
+                PipelineStage1SmokeAuthorization.capacity_idempotency_key == idempotency_key,
             )
         )
     ).scalar_one_or_none()
     if row is None:
         return None
-    if row.request_digest != request_digest:
-        raise Stage1SmokeServiceError(409, "stage1_smoke_idempotency_conflict")
+    if (
+        row.capacity_request_digest != request_digest
+        or row.capacity_signature_key_id != signature_key_id
+        or row.capacity_signature_sha256 != signature_sha256
+    ):
+        raise Stage1SmokeServiceError(409, "stage1_smoke_capacity_idempotency_conflict")
     return _row_projection(row)
+
+
+async def get_stage1_smoke_execute_replay(
+    session: AsyncSession,
+    *,
+    team_id: UUID,
+    idempotency_key: str,
+    request_digest: Digest,
+    signature_key_id: str,
+    signature_sha256: Digest,
+) -> dict[str, Any] | None:
+    row = (
+        await session.execute(
+            select(PipelineStage1SmokeAuthorization).where(
+                PipelineStage1SmokeAuthorization.team_id == team_id,
+                PipelineStage1SmokeAuthorization.execute_idempotency_key == idempotency_key,
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        return None
+    if (
+        row.execute_request_digest != request_digest
+        or row.execute_signature_key_id != signature_key_id
+        or row.execute_signature_sha256 != signature_sha256
+    ):
+        raise Stage1SmokeServiceError(409, "stage1_smoke_execute_idempotency_conflict")
+    return _row_projection(row)
+
+
+async def preflight_stage1_smoke_capacity(
+    session: AsyncSession,
+    *,
+    candidate: Stage1SmokeCandidateV1,
+    authorization: Stage1SmokeAuthorizationV1,
+    idempotency_key: str,
+    signature_key_id: str,
+    signature_sha256: Digest,
+    capacity_authority: Stage1SmokeCapacityPreflightAuthorityV1,
+    repo_root: Path,
+    now: datetime,
+) -> tuple[dict[str, Any], bool]:
+    _validate_candidate_authorization(candidate, authorization)
+    request_digest = stage1_smoke_capacity_request_digest(
+        candidate=candidate,
+        authorization=authorization,
+        idempotency_key=idempotency_key,
+        signature_key_id=signature_key_id,
+    )
+    existing = (
+        await session.execute(
+            select(PipelineStage1SmokeAuthorization)
+            .where(
+                PipelineStage1SmokeAuthorization.team_id == candidate.team_id,
+                PipelineStage1SmokeAuthorization.capacity_idempotency_key == idempotency_key,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        _assert_request_identity(existing, candidate=candidate, authorization=authorization)
+        if (
+            existing.capacity_request_digest != request_digest
+            or existing.capacity_signature_key_id != signature_key_id
+            or existing.capacity_signature_sha256 != signature_sha256
+        ):
+            raise Stage1SmokeServiceError(409, "stage1_smoke_capacity_idempotency_conflict")
+        return _row_projection(existing), True
+
+    if now > authorization.expires_at or now > candidate.start_by:
+        raise Stage1SmokeServiceError(409, "stage1_smoke_authorization_expired")
+    graph = build_stage1_smoke_graph(candidate, repo_root=repo_root)
+    await _validate_inputs(session, candidate)
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 1362))"),
+        {
+            "scope": canonical_digest(
+                {"environment": candidate.environment, "policy_id": candidate.policy_id}
+            )
+        },
+    )
+    try:
+        await capacity_authority.verify_capacity_preflight(
+            session=session,
+            candidate=candidate,
+            authorization=authorization,
+            graph=graph,
+        )
+    except ValueError as exc:
+        raise Stage1SmokeServiceError(409, "stage1_smoke_capacity_preflight_unverified") from exc
+    existing_authorization = await session.get(
+        PipelineStage1SmokeAuthorization,
+        authorization.authorization_id,
+        with_for_update=True,
+    )
+    if existing_authorization is not None:
+        raise Stage1SmokeServiceError(409, "stage1_smoke_capacity_binding_conflict")
+    latest_epoch = (
+        await session.execute(
+            select(
+                func.coalesce(func.max(PipelineScopedPolicyActivation.activation_epoch), 0)
+            ).where(
+                PipelineScopedPolicyActivation.environment == candidate.environment,
+                PipelineScopedPolicyActivation.policy_id == candidate.policy_id,
+            )
+        )
+    ).scalar_one()
+    if candidate.policy_activation_epoch <= latest_epoch:
+        raise Stage1SmokeServiceError(409, "stage1_smoke_activation_epoch_stale")
+
+    activation_id = uuid4()
+    activation = PipelineScopedPolicyActivation(
+        id=activation_id,
+        environment=candidate.environment,
+        policy_id=candidate.policy_id,
+        policy_config_sha256=candidate.policy_config_sha256,
+        authority_kind="acceptance",
+        authority_id=authorization.authorization_id,
+        activation_epoch=candidate.policy_activation_epoch,
+        state="active",
+        desired_slots=1,
+        activated_at=now,
+        updated_at=now,
+    )
+    authorization_json = authorization.model_dump(mode="json", exclude_none=False)
+    row = PipelineStage1SmokeAuthorization(
+        authorization_id=authorization.authorization_id,
+        team_id=candidate.team_id,
+        operator_user_id=candidate.operator_user_id,
+        environment=candidate.environment,
+        candidate_json=candidate.model_dump(mode="json", exclude_none=False),
+        candidate_bytes=candidate.canonical_bytes,
+        candidate_sha256=candidate.candidate_sha256,
+        authorization_json=authorization_json,
+        authorization_bytes=canonical_document(authorization_json),
+        authorization_sha256=authorization.authorization_sha256,
+        preflight_json=None,
+        preflight_bytes=None,
+        preflight_sha256=None,
+        nonce_sha256=authorization.nonce_sha256,
+        capacity_idempotency_key=idempotency_key,
+        capacity_request_digest=request_digest,
+        capacity_signature_key_id=signature_key_id,
+        capacity_signature_sha256=signature_sha256,
+        execute_idempotency_key=None,
+        execute_request_digest=None,
+        execute_signature_key_id=None,
+        execute_signature_sha256=None,
+        policy_activation_id=activation_id,
+        pipeline_run_id=None,
+        state="capacity_pending",
+        authorized_at=authorization.authorized_at,
+        expires_at=authorization.expires_at,
+        start_by=candidate.start_by,
+        cleanup_deadline=candidate.cleanup_deadline,
+        consumed_at=None,
+        created_at=now,
+        updated_at=now,
+    )
+    event_payload = {
+        "authorization_sha256": authorization.authorization_sha256,
+        "candidate_sha256": candidate.candidate_sha256,
+        "mutation": {"activation_state": "active", "desired_slots": 1},
+        "policy_activation_id": str(activation_id),
+        "request_digest": request_digest,
+    }
+    session.add(activation)
+    await session.flush()
+    session.add_all(
+        [
+            row,
+            PipelineStage1SmokeEvent(
+                authorization_id=authorization.authorization_id,
+                seq=1,
+                event_kind="capacity_preflight_started",
+                payload_json=event_payload,
+                payload_bytes=canonical_document(event_payload),
+                payload_sha256=canonical_digest(event_payload),
+                observed_at=now,
+            ),
+        ]
+    )
+    await session.flush()
+    return _row_projection(row), False
 
 
 async def execute_stage1_smoke(
@@ -474,29 +786,49 @@ async def execute_stage1_smoke(
     now: datetime,
 ) -> tuple[dict[str, Any], bool]:
     _validate_bindings(candidate, authorization, preflight)
-    if now > authorization.expires_at or now > candidate.start_by:
-        raise Stage1SmokeServiceError(409, "stage1_smoke_authorization_expired")
-    graph = build_stage1_smoke_graph(candidate, repo_root=repo_root)
-    request_digest = stage1_smoke_request_digest(
+    request_digest = stage1_smoke_execute_request_digest(
         candidate=candidate,
         authorization=authorization,
         preflight=preflight,
+        idempotency_key=idempotency_key,
         signature_key_id=signature_key_id,
     )
-    existing = (
+    existing_key = (
         await session.execute(
             select(PipelineStage1SmokeAuthorization)
             .where(
                 PipelineStage1SmokeAuthorization.team_id == candidate.team_id,
-                PipelineStage1SmokeAuthorization.idempotency_key == idempotency_key,
+                PipelineStage1SmokeAuthorization.execute_idempotency_key == idempotency_key,
             )
             .with_for_update()
         )
     ).scalar_one_or_none()
-    if existing is not None:
-        if existing.request_digest != request_digest:
-            raise Stage1SmokeServiceError(409, "stage1_smoke_idempotency_conflict")
-        return _row_projection(existing), True
+    if existing_key is not None:
+        _assert_request_identity(existing_key, candidate=candidate, authorization=authorization)
+        if (
+            existing_key.execute_request_digest != request_digest
+            or existing_key.execute_signature_key_id != signature_key_id
+            or existing_key.execute_signature_sha256 != signature_sha256
+            or existing_key.preflight_bytes
+            != canonical_document(preflight.model_dump(mode="json", exclude_none=False))
+        ):
+            raise Stage1SmokeServiceError(409, "stage1_smoke_execute_idempotency_conflict")
+        return _row_projection(existing_key), True
+
+    if now > authorization.expires_at or now > candidate.start_by:
+        raise Stage1SmokeServiceError(409, "stage1_smoke_authorization_expired")
+    graph = build_stage1_smoke_graph(candidate, repo_root=repo_root)
+    row = await session.get(
+        PipelineStage1SmokeAuthorization,
+        authorization.authorization_id,
+        with_for_update=True,
+    )
+    if row is None:
+        raise Stage1SmokeServiceError(409, "stage1_smoke_capacity_preflight_missing")
+    _assert_request_identity(row, candidate=candidate, authorization=authorization)
+    if row.state != "capacity_pending" or row.execute_idempotency_key is not None:
+        raise Stage1SmokeServiceError(409, "stage1_smoke_execute_phase_conflict")
+
     artifacts = await _validate_inputs(session, candidate)
     await _validate_worker(session, candidate=candidate, preflight=preflight)
     try:
@@ -509,29 +841,22 @@ async def execute_stage1_smoke(
         )
     except ValueError as exc:
         raise Stage1SmokeServiceError(409, "stage1_smoke_preflight_unverified") from exc
-    await session.execute(
-        text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 1362))"),
-        {
-            "scope": canonical_digest(
-                {"environment": candidate.environment, "policy_id": candidate.policy_id}
-            )
-        },
+    activation = await session.get(
+        PipelineScopedPolicyActivation, row.policy_activation_id, with_for_update=True
     )
-    latest_epoch = (
-        await session.execute(
-            select(
-                func.coalesce(func.max(PipelineScopedPolicyActivation.activation_epoch), 0)
-            ).where(
-                PipelineScopedPolicyActivation.environment == candidate.environment,
-                PipelineScopedPolicyActivation.policy_id == candidate.policy_id,
-            )
-        )
-    ).scalar_one()
-    if candidate.policy_activation_epoch <= latest_epoch:
-        raise Stage1SmokeServiceError(409, "stage1_smoke_activation_epoch_stale")
+    if (
+        activation is None
+        or activation.authority_id != authorization.authorization_id
+        or activation.environment != candidate.environment
+        or activation.policy_id != candidate.policy_id
+        or activation.policy_config_sha256 != candidate.policy_config_sha256
+        or activation.activation_epoch != candidate.policy_activation_epoch
+        or activation.state != "active"
+        or activation.desired_slots != 1
+    ):
+        raise Stage1SmokeServiceError(409, "stage1_smoke_capacity_drift")
 
     run_id = uuid4()
-    activation_id = uuid4()
     resolved_inputs = []
     for item in candidate.inputs:
         artifact = artifacts[item.artifact_id]
@@ -573,19 +898,6 @@ async def execute_stage1_smoke(
         state="submitted",
         created_at=now,
     )
-    activation = PipelineScopedPolicyActivation(
-        id=activation_id,
-        environment=candidate.environment,
-        policy_id=candidate.policy_id,
-        policy_config_sha256=candidate.policy_config_sha256,
-        authority_kind="acceptance",
-        authority_id=authorization.authorization_id,
-        activation_epoch=candidate.policy_activation_epoch,
-        state="active",
-        desired_slots=1,
-        activated_at=now,
-        updated_at=now,
-    )
     selection = PipelineRunGpuBackendSelectionV1(
         pipeline_run_id=run_id,
         scope="all_gpu_nodes",
@@ -606,55 +918,34 @@ async def execute_stage1_smoke(
         attempt_limit=candidate.run_budget.max_attempts_total,
         wall_deadline_at=now + timedelta(seconds=candidate.run_budget.max_wall_seconds),
     )
-    row = PipelineStage1SmokeAuthorization(
-        authorization_id=authorization.authorization_id,
-        team_id=candidate.team_id,
-        operator_user_id=candidate.operator_user_id,
-        environment=candidate.environment,
-        candidate_json=candidate.model_dump(mode="json"),
-        candidate_bytes=candidate.canonical_bytes,
-        candidate_sha256=candidate.candidate_sha256,
-        authorization_json=authorization.model_dump(mode="json"),
-        authorization_bytes=canonical_document(
-            authorization.model_dump(mode="json", exclude_none=False)
-        ),
-        authorization_sha256=authorization.authorization_sha256,
-        preflight_json=preflight.model_dump(mode="json"),
-        preflight_bytes=canonical_document(preflight.model_dump(mode="json", exclude_none=False)),
-        preflight_sha256=canonical_digest(preflight.model_dump(mode="json", exclude_none=False)),
-        nonce_sha256=authorization.nonce_sha256,
-        idempotency_key=idempotency_key,
-        request_digest=request_digest,
-        signature_key_id=signature_key_id,
-        signature_sha256=signature_sha256,
-        policy_activation_id=activation_id,
-        pipeline_run_id=run_id,
-        state="submitted",
-        authorized_at=authorization.authorized_at,
-        expires_at=authorization.expires_at,
-        start_by=candidate.start_by,
-        cleanup_deadline=candidate.cleanup_deadline,
-        consumed_at=now,
-        created_at=now,
-        updated_at=now,
-    )
+    preflight_json = preflight.model_dump(mode="json", exclude_none=False)
+    row.preflight_json = preflight_json
+    row.preflight_bytes = canonical_document(preflight_json)
+    row.preflight_sha256 = canonical_digest(preflight_json)
+    row.execute_idempotency_key = idempotency_key
+    row.execute_request_digest = request_digest
+    row.execute_signature_key_id = signature_key_id
+    row.execute_signature_sha256 = signature_sha256
+    row.pipeline_run_id = run_id
+    row.state = "submitted"
+    row.consumed_at = now
+    row.updated_at = now
+    row.version += 1
     event_payload = {
         "authorization_sha256": authorization.authorization_sha256,
         "candidate_sha256": candidate.candidate_sha256,
         "pipeline_run_id": str(run_id),
-        "policy_activation_id": str(activation_id),
-        "preflight_sha256": canonical_digest(preflight.model_dump(mode="json", exclude_none=False)),
+        "policy_activation_id": str(row.policy_activation_id),
+        "preflight_sha256": row.preflight_sha256,
         "request_digest": request_digest,
     }
-    # Establish the parent row before its independently mapped FK children.
-    # Both flushes remain inside the caller-owned transaction, so activation,
-    # budget authority, GPU selection, and Stage 1 consumption are still atomic.
+    # The independently verified worker snapshot and external preflight gate
+    # above both complete before a PipelineRun enters this transaction.
     session.add(run)
     await session.flush()
     session.add_all(
         [
             ledger,
-            activation,
             PipelineRunGpuBackendSelection(
                 id=uuid4(),
                 pipeline_run_id=run_id,
@@ -667,10 +958,9 @@ async def execute_stage1_smoke(
                 selection_bytes=canonical_document(selection_json),
                 gpu_backend_selection_sha256=selection.gpu_backend_selection_sha256,
             ),
-            row,
             PipelineStage1SmokeEvent(
                 authorization_id=authorization.authorization_id,
-                seq=1,
+                seq=2,
                 event_kind="live_action_consumed",
                 payload_json=event_payload,
                 payload_bytes=canonical_document(event_payload),
@@ -705,6 +995,8 @@ async def record_stage1_smoke_evidence(
         if row.evidence_sha256 != digest:
             raise Stage1SmokeServiceError(409, "stage1_smoke_evidence_conflict")
         return _row_projection(row), True
+    if row.state not in {"submitted", "running"}:
+        raise Stage1SmokeServiceError(409, "stage1_smoke_evidence_not_ready")
     try:
         await authority.verify_evidence(
             session=session,
@@ -721,7 +1013,7 @@ async def record_stage1_smoke_evidence(
     session.add(
         PipelineStage1SmokeEvent(
             authorization_id=row.authorization_id,
-            seq=2,
+            seq=3,
             event_kind="evidence_recorded",
             payload_json=payload,
             payload_bytes=canonical_document(payload),
@@ -733,75 +1025,185 @@ async def record_stage1_smoke_evidence(
     return _row_projection(row), False
 
 
-async def cleanup_stage1_smoke(
+async def begin_stage1_smoke_cleanup(
     session: AsyncSession,
     *,
-    cleanup: Stage1SmokeCleanupV1,
-    authority: Stage1SmokeCleanupAuthorityV1,
+    cleanup: Stage1SmokeCleanupBeginV1,
+    signature_key_id: str,
+    signature_sha256: Digest,
     now: datetime,
 ) -> tuple[dict[str, Any], bool]:
-    row = (
-        await session.execute(
-            select(PipelineStage1SmokeAuthorization)
-            .where(PipelineStage1SmokeAuthorization.pipeline_run_id == cleanup.pipeline_run_id)
-            .with_for_update()
-        )
-    ).scalar_one_or_none()
+    row = await session.get(
+        PipelineStage1SmokeAuthorization,
+        cleanup.authorization_id,
+        with_for_update=True,
+    )
     if row is None:
         raise Stage1SmokeServiceError(404, "stage1_smoke_not_found")
-    if row.candidate_sha256 != cleanup.candidate_sha256:
-        raise Stage1SmokeServiceError(409, "stage1_smoke_cleanup_drift")
-    digest = canonical_digest(cleanup.model_dump(mode="json", exclude_none=False))
-    if row.cleanup_sha256 is not None:
-        if row.cleanup_sha256 != digest:
-            raise Stage1SmokeServiceError(409, "stage1_smoke_cleanup_conflict")
+    if (
+        row.candidate_sha256 != cleanup.candidate_sha256
+        or row.pipeline_run_id != cleanup.pipeline_run_id
+    ):
+        raise Stage1SmokeServiceError(409, "stage1_smoke_cleanup_begin_drift")
+    payload = cleanup.model_dump(mode="json", exclude_none=False)
+    payload_bytes = canonical_document(payload)
+    digest = canonical_digest(payload)
+    if row.cleanup_begin_sha256 is not None:
+        if (
+            row.cleanup_begin_sha256 != digest
+            or row.cleanup_begin_bytes != payload_bytes
+            or row.cleanup_begin_signature_key_id != signature_key_id
+            or row.cleanup_begin_signature_sha256 != signature_sha256
+        ):
+            raise Stage1SmokeServiceError(409, "stage1_smoke_cleanup_begin_conflict")
         return _row_projection(row), True
-    if row.evidence_sha256 is None:
-        raise Stage1SmokeServiceError(409, "stage1_smoke_evidence_missing")
-    run = await session.get(PipelineRun, row.pipeline_run_id, with_for_update=True)
+    if row.state == "capacity_pending":
+        if row.pipeline_run_id is not None or row.evidence_sha256 is not None:
+            raise Stage1SmokeServiceError(409, "stage1_smoke_cleanup_begin_not_ready")
+        expected_activation_state = "active"
+        next_state = "capacity_draining"
+    elif row.state == "cleanup_required" and row.evidence_sha256 is not None:
+        expected_activation_state = "active"
+        next_state = "cleanup_draining"
+    else:
+        raise Stage1SmokeServiceError(409, "stage1_smoke_cleanup_begin_not_ready")
+    run = (
+        await session.get(PipelineRun, cleanup.pipeline_run_id, with_for_update=True)
+        if cleanup.pipeline_run_id is not None
+        else None
+    )
     activation = await session.get(
         PipelineScopedPolicyActivation, row.policy_activation_id, with_for_update=True
     )
     if (
-        run is None
-        or activation is None
-        or run.state != "finished"
-        or activation.state != "active"
+        activation is None
+        or (run is None) != (row.pipeline_run_id is None)
+        or (run is not None and run.state != "finished")
+        or activation.state != expected_activation_state
         or activation.desired_slots != 1
     ):
         raise Stage1SmokeServiceError(409, "stage1_smoke_not_terminal")
-    preview_count = (
-        await session.execute(
-            select(func.count())
-            .select_from(PipelineLivePreviewGeneration)
-            .where(
-                PipelineLivePreviewGeneration.pipeline_run_id == row.pipeline_run_id,
-                PipelineLivePreviewGeneration.purged_at.is_(None),
-            )
+
+    # Desired capacity reaches zero before any zero-residue proof can be
+    # accepted. The durable draining state is restart-safe and exactly replayed.
+    activation.state = "draining"
+    activation.desired_slots = 0
+    activation.updated_at = now
+    row.cleanup_begin_json = payload
+    row.cleanup_begin_bytes = payload_bytes
+    row.cleanup_begin_sha256 = digest
+    row.cleanup_begin_signature_key_id = signature_key_id
+    row.cleanup_begin_signature_sha256 = signature_sha256
+    row.cleanup_began_at = now
+    row.state = next_state
+    row.updated_at = now
+    row.version += 1
+    event_payload = {
+        "cleanup_begin_sha256": digest,
+        "mutation": {"activation_state": "draining", "desired_slots": 0},
+        "pipeline_run_id": str(cleanup.pipeline_run_id),
+    }
+    cleanup_begin_seq = 2 if next_state == "capacity_draining" else 4
+    session.add(
+        PipelineStage1SmokeEvent(
+            authorization_id=row.authorization_id,
+            seq=cleanup_begin_seq,
+            event_kind="cleanup_started",
+            payload_json=event_payload,
+            payload_bytes=canonical_document(event_payload),
+            payload_sha256=canonical_digest(event_payload),
+            observed_at=cleanup.requested_at,
         )
-    ).scalar_one()
-    frame_count = (
-        await session.execute(
-            select(func.count())
-            .select_from(PipelineLivePreviewFrame)
-            .join(
-                PipelineLivePreviewGeneration,
-                PipelineLivePreviewGeneration.execution_attempt_id
-                == PipelineLivePreviewFrame.execution_attempt_id,
+    )
+    await session.flush()
+    return _row_projection(row), False
+
+
+async def cleanup_stage1_smoke(
+    session: AsyncSession,
+    *,
+    cleanup: Stage1SmokeCleanupV1,
+    signature_key_id: str,
+    signature_sha256: Digest,
+    authority: Stage1SmokeCleanupAuthorityV1,
+    now: datetime,
+) -> tuple[dict[str, Any], bool]:
+    row = await session.get(
+        PipelineStage1SmokeAuthorization,
+        cleanup.authorization_id,
+        with_for_update=True,
+    )
+    if row is None:
+        raise Stage1SmokeServiceError(404, "stage1_smoke_not_found")
+    if (
+        row.candidate_sha256 != cleanup.candidate_sha256
+        or row.pipeline_run_id != cleanup.pipeline_run_id
+    ):
+        raise Stage1SmokeServiceError(409, "stage1_smoke_cleanup_drift")
+    digest = canonical_digest(cleanup.model_dump(mode="json", exclude_none=False))
+    if row.cleanup_sha256 is not None:
+        if (
+            row.cleanup_sha256 != digest
+            or row.cleanup_signature_key_id != signature_key_id
+            or row.cleanup_signature_sha256 != signature_sha256
+        ):
+            raise Stage1SmokeServiceError(409, "stage1_smoke_cleanup_conflict")
+        return _row_projection(row), True
+    capacity_abort = row.state == "capacity_draining"
+    execution_cleanup = row.state == "cleanup_draining" and row.evidence_sha256 is not None
+    if (not capacity_abort and not execution_cleanup) or row.cleanup_begin_sha256 is None:
+        raise Stage1SmokeServiceError(409, "stage1_smoke_cleanup_begin_missing")
+    run = (
+        await session.get(PipelineRun, cleanup.pipeline_run_id, with_for_update=True)
+        if cleanup.pipeline_run_id is not None
+        else None
+    )
+    activation = await session.get(
+        PipelineScopedPolicyActivation, row.policy_activation_id, with_for_update=True
+    )
+    if (
+        activation is None
+        or (capacity_abort and run is not None)
+        or (execution_cleanup and (run is None or run.state != "finished"))
+        or activation.state != "draining"
+        or activation.desired_slots != 0
+    ):
+        raise Stage1SmokeServiceError(409, "stage1_smoke_not_terminal")
+    if row.pipeline_run_id is None:
+        preview_count = frame_count = upload_count = 0
+    else:
+        preview_count = (
+            await session.execute(
+                select(func.count())
+                .select_from(PipelineLivePreviewGeneration)
+                .where(
+                    PipelineLivePreviewGeneration.pipeline_run_id == row.pipeline_run_id,
+                    PipelineLivePreviewGeneration.purged_at.is_(None),
+                )
             )
-            .where(PipelineLivePreviewGeneration.pipeline_run_id == row.pipeline_run_id)
-        )
-    ).scalar_one()
-    upload_count = (
-        await session.execute(
-            select(func.count())
-            .select_from(ArtifactUploadSession)
-            .where(
-                ArtifactUploadSession.pipeline_run_id == row.pipeline_run_id,
-                ArtifactUploadSession.state.not_in(["committed", "aborted"]),
+        ).scalar_one()
+        frame_count = (
+            await session.execute(
+                select(func.count())
+                .select_from(PipelineLivePreviewFrame)
+                .join(
+                    PipelineLivePreviewGeneration,
+                    PipelineLivePreviewGeneration.execution_attempt_id
+                    == PipelineLivePreviewFrame.execution_attempt_id,
+                )
+                .where(PipelineLivePreviewGeneration.pipeline_run_id == row.pipeline_run_id)
             )
-        )
-    ).scalar_one()
+        ).scalar_one()
+        upload_count = (
+            await session.execute(
+                select(func.count())
+                .select_from(ArtifactUploadSession)
+                .where(
+                    ArtifactUploadSession.pipeline_run_id == row.pipeline_run_id,
+                    ArtifactUploadSession.state.not_in(["committed", "aborted"]),
+                )
+            )
+        ).scalar_one()
     slurm_count = (
         await session.execute(
             select(func.count())
@@ -833,17 +1235,40 @@ async def cleanup_stage1_smoke(
     activation.desired_slots = 0
     activation.updated_at = now
     payload = cleanup.model_dump(mode="json")
+    if run is None:
+        accepted = False
+    else:
+        stages = list(
+            (
+                await session.execute(
+                    select(PipelineStageRun).where(PipelineStageRun.pipeline_run_id == run.id)
+                )
+            ).scalars()
+        )
+        try:
+            frozen_candidate = Stage1SmokeCandidateV1.model_validate_json(row.candidate_bytes)
+        except ValueError as exc:
+            raise Stage1SmokeServiceError(409, "stage1_smoke_candidate_corrupt") from exc
+        accepted = bool(
+            run.result == "succeeded"
+            and len(stages) == 1
+            and stages[0].state == "succeeded"
+            and stages[0].domain_outcome == frozen_candidate.expected_domain_outcome
+        )
     row.cleanup_sha256 = digest
-    accepted = run.result == "succeeded"
-    row.state = "accepted" if accepted else "rejected"
+    row.cleanup_signature_key_id = signature_key_id
+    row.cleanup_signature_sha256 = signature_sha256
+    row.state = "capacity_aborted" if capacity_abort else ("accepted" if accepted else "rejected")
     row.finished_at = now
     row.updated_at = now
     row.version += 1
+    cleanup_complete_seq = 3 if capacity_abort else 5
+    terminal_seq = 4 if capacity_abort else 6
     session.add_all(
         [
             PipelineStage1SmokeEvent(
                 authorization_id=row.authorization_id,
-                seq=3,
+                seq=cleanup_complete_seq,
                 event_kind="cleanup_complete",
                 payload_json=payload,
                 payload_bytes=canonical_document(payload),
@@ -852,11 +1277,19 @@ async def cleanup_stage1_smoke(
             ),
             PipelineStage1SmokeEvent(
                 authorization_id=row.authorization_id,
-                seq=4,
-                event_kind="accepted" if accepted else "rejected",
-                payload_json={"pipeline_result": run.result},
-                payload_bytes=canonical_document({"pipeline_result": run.result}),
-                payload_sha256=canonical_digest({"pipeline_result": run.result}),
+                seq=terminal_seq,
+                event_kind=(
+                    "capacity_aborted"
+                    if capacity_abort
+                    else ("accepted" if accepted else "rejected")
+                ),
+                payload_json={"pipeline_result": run.result if run is not None else None},
+                payload_bytes=canonical_document(
+                    {"pipeline_result": run.result if run is not None else None}
+                ),
+                payload_sha256=canonical_digest(
+                    {"pipeline_result": run.result if run is not None else None}
+                ),
                 observed_at=now,
             ),
         ]
@@ -867,20 +1300,28 @@ async def cleanup_stage1_smoke(
 
 __all__ = [
     "OFFICIAL_SUBMISSION_KIND",
+    "Stage1SmokeCapacityPreflightAuthorityV1",
     "Stage1SmokeCleanupAuthorityV1",
+    "Stage1SmokeCleanupBeginV1",
     "Stage1SmokeEvidenceAuthorityV1",
     "Stage1SmokeEvidenceV1",
     "Stage1SmokeExecutionPreflightAuthorityV1",
     "Stage1SmokeServiceError",
     "Stage1SmokeSignatureVerifier",
+    "begin_stage1_smoke_cleanup",
+    "capacity_preflight_signature_payload",
+    "cleanup_begin_signature_payload",
     "cleanup_signature_payload",
     "cleanup_stage1_smoke",
     "evidence_signature_payload",
     "execute_signature_payload",
     "execute_stage1_smoke",
-    "get_stage1_smoke_replay",
+    "get_stage1_smoke_capacity_replay",
+    "get_stage1_smoke_execute_replay",
     "load_stage1_smoke_signature_verifier",
+    "preflight_stage1_smoke_capacity",
     "record_stage1_smoke_evidence",
     "render_stage1_smoke_candidate",
-    "stage1_smoke_request_digest",
+    "stage1_smoke_capacity_request_digest",
+    "stage1_smoke_execute_request_digest",
 ]

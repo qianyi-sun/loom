@@ -32,7 +32,9 @@ from loom.pipeline.keys import canonical_digest, canonical_document
 from loom.pipeline.stage1_smoke import (
     Stage1SmokeAuthorizationV1,
     Stage1SmokeCandidateV1,
+    Stage1SmokeCleanupBeginV1,
     Stage1SmokeCleanupV1,
+    Stage1SmokeEvidenceV1,
     Stage1SmokePreflightV1,
     build_stage1_smoke_graph,
 )
@@ -310,6 +312,56 @@ def _stage1_render(args: argparse.Namespace) -> int:
     return 0
 
 
+def _stage1_inventory(args: argparse.Namespace) -> int:
+    team_id = _uuid(args.team, label="team ID")
+    cfg = require_logged_in()
+    with authed_client(cfg) as client:
+        data = _request_json(
+            client,
+            "GET",
+            f"/api/v1/internal/pipeline-stage1-smoke-preparation/teams/{team_id}/inventory",
+            action="read Stage 1 candidate inventory",
+        )
+    _emit(data, json_output=_json_mode(args), heading="Stage 1 candidate inventory")
+    return 0
+
+
+def _stage1_prepare_candidate(args: argparse.Namespace) -> int:
+    selection = _json_object(args.selection, option="--selection")
+    cfg = require_logged_in()
+    with authed_client(cfg) as client:
+        data = _request_json(
+            client,
+            "POST",
+            "/api/v1/internal/pipeline-stage1-smoke-preparation/candidate",
+            action="prepare the server-owned Stage 1 candidate",
+            json=selection,
+        )
+    candidate = cast(
+        Stage1SmokeCandidateV1,
+        _stage1_document_from_mapping(data, model=Stage1SmokeCandidateV1),
+    )
+    _emit(
+        candidate.model_dump(mode="json")
+        | {"candidate_sha256": candidate.candidate_sha256},
+        json_output=_json_mode(args),
+        heading="Stage 1 candidate prepared (no live mutation)",
+    )
+    return 0
+
+
+def _stage1_document_from_mapping(document: dict[str, Any], *, model: type[Any]) -> Any:
+    try:
+        parsed = model.model_validate_json(canonical_document(document))
+    except (TypeError, ValueError):
+        _fail("invalid_server_response", "server returned an invalid Stage 1 document")
+    if canonical_document(parsed.model_dump(mode="json", exclude_none=False)) != canonical_document(
+        document
+    ):
+        _fail("invalid_server_response", "server returned a noncanonical Stage 1 document")
+    return parsed
+
+
 def _stage1_execute(args: argparse.Namespace) -> int:
     candidate = cast(
         Stage1SmokeCandidateV1,
@@ -352,6 +404,103 @@ def _stage1_execute(args: argparse.Namespace) -> int:
             },
         )
     _emit(data, json_output=_json_mode(args), heading="Stage 1 live action submitted")
+    return 0
+
+
+def _stage1_capacity_preflight(args: argparse.Namespace) -> int:
+    candidate = cast(
+        Stage1SmokeCandidateV1,
+        _stage1_document(args.candidate, option="--candidate", model=Stage1SmokeCandidateV1),
+    )
+    authorization = cast(
+        Stage1SmokeAuthorizationV1,
+        _stage1_document(
+            args.authorization,
+            option="--authorization",
+            model=Stage1SmokeAuthorizationV1,
+        ),
+    )
+    if args.confirm_candidate_sha != candidate.candidate_sha256:
+        _fail(
+            "stage1_candidate_confirmation_mismatch",
+            "--confirm-candidate-sha must exactly match the rendered candidate",
+        )
+    cfg = require_logged_in()
+    with authed_client(cfg) as client:
+        data = _request_json(
+            client,
+            "POST",
+            "/api/v1/internal/pipeline-stage1-smoke/capacity-preflight",
+            action="activate the authorized Stage 1 preflight slot",
+            json={
+                "candidate": candidate.model_dump(mode="json"),
+                "authorization": authorization.model_dump(mode="json"),
+            },
+            headers={
+                _IDEMPOTENCY_HEADER: _idempotency_key(args.idempotency_key),
+                "X-Loom-Stage1-Signature-Key-Id": args.signature_key_id,
+                "X-Loom-Stage1-Signature": _signature_file(args.signature),
+            },
+        )
+    _emit(data, json_output=_json_mode(args), heading="Stage 1 preflight capacity activated")
+    return 0
+
+
+def _stage1_record_evidence(args: argparse.Namespace) -> int:
+    evidence = cast(
+        Stage1SmokeEvidenceV1,
+        _stage1_document(args.evidence, option="--evidence", model=Stage1SmokeEvidenceV1),
+    )
+    if args.confirm_candidate_sha != evidence.candidate_sha256:
+        _fail(
+            "stage1_candidate_confirmation_mismatch",
+            "--confirm-candidate-sha must exactly match the evidence document",
+        )
+    cfg = require_logged_in()
+    with authed_client(cfg) as client:
+        data = _request_json(
+            client,
+            "POST",
+            "/api/v1/internal/pipeline-stage1-smoke/evidence",
+            action="record independently verified Stage 1 evidence",
+            json=evidence.model_dump(mode="json"),
+            headers={
+                "X-Loom-Stage1-Signature-Key-Id": args.signature_key_id,
+                "X-Loom-Stage1-Signature": _signature_file(args.signature),
+            },
+        )
+    _emit(data, json_output=_json_mode(args), heading="Stage 1 evidence recorded")
+    return 0
+
+
+def _stage1_cleanup_begin(args: argparse.Namespace) -> int:
+    cleanup = cast(
+        Stage1SmokeCleanupBeginV1,
+        _stage1_document(
+            args.cleanup_begin,
+            option="--cleanup-begin",
+            model=Stage1SmokeCleanupBeginV1,
+        ),
+    )
+    if args.confirm_candidate_sha != cleanup.candidate_sha256:
+        _fail(
+            "stage1_candidate_confirmation_mismatch",
+            "--confirm-candidate-sha must exactly match the cleanup-begin document",
+        )
+    cfg = require_logged_in()
+    with authed_client(cfg) as client:
+        data = _request_json(
+            client,
+            "POST",
+            "/api/v1/internal/pipeline-stage1-smoke/cleanup/begin",
+            action="begin authorized Stage 1 capacity drain",
+            json=cleanup.model_dump(mode="json"),
+            headers={
+                "X-Loom-Stage1-Signature-Key-Id": args.signature_key_id,
+                "X-Loom-Stage1-Signature": _signature_file(args.signature),
+            },
+        )
+    _emit(data, json_output=_json_mode(args), heading="Stage 1 capacity drain started")
     return 0
 
 
@@ -986,6 +1135,33 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_json(stage1_render)
     stage1_render.set_defaults(handler=_stage1_render)
 
+    stage1_inventory = stage1_sub.add_parser(
+        "inventory", help="Read eligible inputs and immutable runtime choices without mutation"
+    )
+    stage1_inventory.add_argument("--team", required=True)
+    _add_json(stage1_inventory)
+    stage1_inventory.set_defaults(handler=_stage1_inventory)
+
+    stage1_prepare = stage1_sub.add_parser(
+        "prepare-candidate", help="Ask the server to compose the exact render-only candidate"
+    )
+    stage1_prepare.add_argument("--selection", required=True)
+    _add_json(stage1_prepare)
+    stage1_prepare.set_defaults(handler=_stage1_prepare_candidate)
+
+    stage1_capacity = stage1_sub.add_parser(
+        "capacity-preflight",
+        help="Consume a separately signed authorization to activate exactly one preflight slot",
+    )
+    stage1_capacity.add_argument("--candidate", required=True)
+    stage1_capacity.add_argument("--authorization", required=True)
+    stage1_capacity.add_argument("--confirm-candidate-sha", required=True)
+    stage1_capacity.add_argument("--idempotency-key", required=True)
+    stage1_capacity.add_argument("--signature-key-id", required=True)
+    stage1_capacity.add_argument("--signature", required=True)
+    _add_json(stage1_capacity)
+    stage1_capacity.set_defaults(handler=_stage1_capacity_preflight)
+
     stage1_execute = stage1_sub.add_parser(
         "execute",
         help="Consume one separately signed Stage 1 live authorization",
@@ -999,6 +1175,26 @@ def _build_parser() -> argparse.ArgumentParser:
     stage1_execute.add_argument("--signature", required=True)
     _add_json(stage1_execute)
     stage1_execute.set_defaults(handler=_stage1_execute)
+
+    stage1_evidence = stage1_sub.add_parser(
+        "record-evidence", help="Record separately signed terminal and viewer evidence"
+    )
+    stage1_evidence.add_argument("--evidence", required=True)
+    stage1_evidence.add_argument("--confirm-candidate-sha", required=True)
+    stage1_evidence.add_argument("--signature-key-id", required=True)
+    stage1_evidence.add_argument("--signature", required=True)
+    _add_json(stage1_evidence)
+    stage1_evidence.set_defaults(handler=_stage1_record_evidence)
+
+    stage1_cleanup_begin = stage1_sub.add_parser(
+        "cleanup-begin", help="Set the authorized Stage 1 slot to draining and desired zero"
+    )
+    stage1_cleanup_begin.add_argument("--cleanup-begin", required=True)
+    stage1_cleanup_begin.add_argument("--confirm-candidate-sha", required=True)
+    stage1_cleanup_begin.add_argument("--signature-key-id", required=True)
+    stage1_cleanup_begin.add_argument("--signature", required=True)
+    _add_json(stage1_cleanup_begin)
+    stage1_cleanup_begin.set_defaults(handler=_stage1_cleanup_begin)
 
     stage1_cleanup = stage1_sub.add_parser(
         "cleanup", help="Record independently verified zero-residue Stage 1 cleanup"
