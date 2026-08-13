@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import tempfile
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -87,6 +88,15 @@ def test_generic_tres_rejects_reserved_scheduler_aggregates(name: str) -> None:
         SlurmTresValueV2(name=name, value=1)
 
 
+def test_generic_tres_contract_rejects_sixty_five_entries() -> None:
+    with pytest.raises(ValidationError):
+        SlurmResourceV2(
+            generic_tres=tuple(
+                SlurmTresValueV2(name=f"gres/fpga{index:02d}", value=1) for index in range(65)
+            )
+        )
+
+
 @pytest.mark.asyncio
 async def test_submit_uses_absolute_argv_without_shell_or_inherited_environment(
     fake_slurm: FakeSlurm, monkeypatch: pytest.MonkeyPatch
@@ -115,12 +125,6 @@ async def test_submit_uses_absolute_argv_without_shell_or_inherited_environment(
         "--constraint=x86_64",
         "--time=0-01:00:00",
         "--comment=" + "A" * 43,
-        str(fake_slurm.launcher),
-        "--launcher-sha256=" + fake_slurm.launcher_sha256,
-        "--operation-id=00000000-0000-0000-0000-000000000101",
-        "--image-digest=registry.internal/loom/worker@sha256:" + "c" * 64,
-        "--release-sha256=" + "b" * 64,
-        "--ownership-token=" + "A" * 43,
     )
 
 
@@ -244,6 +248,80 @@ async def test_submit_rejects_launcher_mutable_by_executor_identity(fake_slurm: 
 
 
 @pytest.mark.asyncio
+async def test_spooled_verifier_rejects_replaced_launcher_even_when_it_ignores_digest_argument(
+    fake_slurm: FakeSlurm,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_uid = os.geteuid()
+    executor_uid = real_uid + 1
+    backend = fake_slurm.backend()
+    backend = slurm_backend.AsyncSlurmBackend(
+        backend.authority.model_copy(update={"local_uid": executor_uid})
+    )
+    monkeypatch.setattr("loom_capacity_executor.slurm_backend.os.geteuid", lambda: executor_uid)
+
+    cache = Path.home() / ".cache"
+    with tempfile.TemporaryDirectory(prefix="loom-launcher-", dir=cache) as directory:
+        authority_directory = Path(directory) / "authority"
+        authority_directory.mkdir(mode=0o700)
+        launcher = authority_directory / "trusted-launcher"
+        marker = Path(directory) / "executed"
+        launcher.write_text(
+            "#!/usr/bin/python3\n"
+            "from pathlib import Path\n"
+            f"Path({str(marker)!r}).write_text('approved', encoding='utf-8')\n",
+            encoding="utf-8",
+        )
+        launcher.chmod(0o700)
+        request = slurm_launch_request_fixture(fake_slurm).model_copy(
+            update={
+                "launcher": SlurmExecutableIdentityV2(
+                    path=str(launcher),
+                    sha256=fake_slurm._digest(launcher),
+                    owner_uid=real_uid,
+                )
+            }
+        )
+
+        approved_submission = await backend.submit(request)
+        approved = fake_slurm.run_submitted_job(approved_submission.job_id)
+        assert approved.returncode == 0
+        assert marker.read_text(encoding="utf-8") == "approved"
+        marker.unlink()
+
+        symlink_submission = await backend.submit(request)
+        redirected_directory = Path(directory) / "redirected"
+        redirected_directory.mkdir(mode=0o700)
+        redirected_launcher = redirected_directory / launcher.name
+        redirected_launcher.write_bytes(launcher.read_bytes())
+        redirected_launcher.chmod(0o700)
+        original_directory = Path(directory) / "authority-original"
+        authority_directory.rename(original_directory)
+        authority_directory.symlink_to(redirected_directory, target_is_directory=True)
+
+        symlinked = fake_slurm.run_submitted_job(symlink_submission.job_id)
+        assert symlinked.returncode != 0
+        assert not marker.exists()
+
+        authority_directory.unlink()
+        original_directory.rename(authority_directory)
+        submitted = await backend.submit(request)
+        replacement = Path(directory) / "replacement"
+        replacement.write_text(
+            "#!/usr/bin/python3\n"
+            "from pathlib import Path\n"
+            f"Path({str(marker)!r}).write_text('malicious', encoding='utf-8')\n",
+            encoding="utf-8",
+        )
+        replacement.chmod(0o700)
+        replacement.replace(launcher)
+
+        executed = fake_slurm.run_submitted_job(submitted.job_id)
+        assert executed.returncode != 0
+        assert not marker.exists()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "output",
     ("101\n", "101;oldlab\n102;oldlab\n", "101;foreign\n", "not-a-job;oldlab\n"),
@@ -255,6 +333,20 @@ async def test_submit_treats_malformed_duplicate_or_unknown_result_as_uncertain(
     with pytest.raises(SlurmSubmissionUncertainError):
         await fake_slurm.backend().submit(slurm_launch_request_fixture(fake_slurm))
     assert len(fake_slurm.sbatch_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_submit_treats_verifier_stdin_failure_as_uncertain(
+    fake_slurm: FakeSlurm,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def reject_stdin(stream: asyncio.StreamWriter, payload: bytes) -> None:
+        stream.close()
+        raise BrokenPipeError
+
+    monkeypatch.setattr(slurm_backend, "_write_bounded", reject_stdin)
+    with pytest.raises(SlurmSubmissionUncertainError):
+        await fake_slurm.backend().submit(slurm_launch_request_fixture(fake_slurm))
 
 
 @pytest.mark.asyncio
@@ -453,6 +545,106 @@ async def test_typed_gpu_and_generic_tres_round_trip_submission_inventory_and_ac
     assert terminal.generic_tres == tres
     assert "--gpus=a100:2" in fake_slurm.sbatch_calls[0].argv
     assert "--gres=fpga:vu9p:1" in fake_slurm.sbatch_calls[0].argv
+
+
+@pytest.mark.asyncio
+async def test_sixty_four_generic_tres_round_trip_with_scheduler_overhead(
+    fake_slurm: FakeSlurm,
+) -> None:
+    generic_tres = tuple(
+        SlurmTresValueV2(name=f"gres/fpga{index:02d}", value=1) for index in range(64)
+    )
+    ceiling = SlurmResourceV2(
+        cpus=64,
+        memory_bytes=512 * 1024 * 1024 * 1024,
+        gpus=8,
+        generic_tres=generic_tres,
+    )
+    request = slurm_launch_request_fixture(fake_slurm).model_copy(
+        update={"generic_tres": generic_tres}
+    )
+    backend = fake_slurm.backend(resource_ceiling=ceiling)
+
+    submitted = await backend.submit(request)
+    observed = (await backend.inventory())[0]
+    assert observed.generic_tres == generic_tres
+
+    fake_slurm.terminalize_job(submitted.job_id)
+    terminal = (
+        await backend.accounting_high_water(since=datetime(2026, 8, 13, 0, 0, tzinfo=UTC))
+    ).terminal_jobs[0]
+    assert terminal.generic_tres == generic_tres
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "gres",
+    (
+        "gpu:2,foreign:1",
+        "gpu:2,fpga00:1,fpga00:1",
+        "gpu:2," + ",".join(f"fpga{index:02d}:1" for index in range(64)) + ",fpga00:1",
+    ),
+)
+async def test_inventory_tres_boundary_rejects_unknown_duplicate_and_over_limit_records(
+    fake_slurm: FakeSlurm,
+    gres: str,
+) -> None:
+    generic_tres = tuple(
+        SlurmTresValueV2(name=f"gres/fpga{index:02d}", value=1) for index in range(64)
+    )
+    backend = fake_slurm.backend(
+        resource_ceiling=SlurmResourceV2(
+            cpus=64,
+            memory_bytes=512 * 1024 * 1024 * 1024,
+            gpus=8,
+            generic_tres=generic_tres,
+        )
+    )
+    fake_slurm.set_output(
+        "squeue",
+        "101|PENDING|loom-oldlab|loom-executor|loom|16|65536M|"
+        f"{gres}|oldlab-5|Resources|{'A' * 43}\n",
+    )
+
+    with pytest.raises(SlurmOutputError, match="resource"):
+        await backend.inventory()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "allocated_tres",
+    (
+        "billing=16,cpu=16,gres/gpu=2,mem=65536M,node=1,foreign=1",
+        "billing=16,cpu=16,gres/gpu=2,mem=65536M,node=1,cpu=16",
+        "billing=16,cpu=16,gres/gpu=2,mem=65536M,node=1,"
+        + ",".join(f"gres/fpga{index:02d}=1" for index in range(64))
+        + ",gres/fpga00=1",
+    ),
+)
+async def test_terminal_tres_boundary_rejects_unknown_duplicate_and_over_limit_records(
+    fake_slurm: FakeSlurm,
+    allocated_tres: str,
+) -> None:
+    generic_tres = tuple(
+        SlurmTresValueV2(name=f"gres/fpga{index:02d}", value=1) for index in range(64)
+    )
+    backend = fake_slurm.backend(
+        resource_ceiling=SlurmResourceV2(
+            cpus=64,
+            memory_bytes=512 * 1024 * 1024 * 1024,
+            gpus=8,
+            generic_tres=generic_tres,
+        )
+    )
+    fake_slurm.set_output(
+        "sacct",
+        "99|COMPLETED|loom-oldlab|loom-executor|oldlab|"
+        "2026-08-13T12:00:00Z|2026-08-13T12:01:00Z|2026-08-13T12:03:00Z|"
+        f"120|0:0|16|65536M|{allocated_tres}|oldlab-5|{'A' * 43}\n",
+    )
+
+    with pytest.raises(SlurmOutputError, match="terminal"):
+        await backend.accounting_high_water(since=datetime(2026, 8, 13, 0, 0, tzinfo=UTC))
 
 
 @pytest.mark.asyncio

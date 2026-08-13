@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import stat
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -155,6 +156,11 @@ elif command == "sbatch":
             gres_records.append(name + ":" + str(count))
     job_id = str(state["next_job_id"])
     state["next_job_id"] += 1
+    batch_script = sys.stdin.read()
+    direct_index = next(
+        (index for index, argument in enumerate(sys.argv[1:]) if not argument.startswith("--")),
+        None,
+    )
     state["jobs"][job_id] = {
         "job_id": job_id,
         "state": "PENDING",
@@ -169,6 +175,8 @@ elif command == "sbatch":
         "nodes": option("--nodelist=").split(","),
         "pending_reason": "Resources",
         "ownership_token": option("--comment="),
+        "batch_script": batch_script,
+        "direct_argv": sys.argv[1 + direct_index:] if direct_index is not None else [],
     }
     secure_write(state_path, state)
     sys.stdout.write(job_id + ";" + state["cluster"] + "\n")
@@ -181,6 +189,7 @@ elif command == "scancel":
 elif command == "sacct":
     for job in state["terminal_jobs"]:
         allocated_tres = [
+            "billing=" + str(job["cpus"]),
             "cpu=" + str(job["cpus"]),
             "mem=" + str(job["memory_bytes"] // 1048576) + "M",
             "node=" + str(len(job["nodes"])),
@@ -415,6 +424,35 @@ class FakeSlurm:
         )
         self._state["terminal_jobs"].append(job)
         self._write_state()
+
+    def run_submitted_job(self, job_id: str) -> subprocess.CompletedProcess[bytes]:
+        """Emulate delayed execution of the exact script spooled by sbatch."""
+
+        self._load_state()
+        job = self._state["jobs"][job_id]
+        batch_script = job.get("batch_script", "")
+        if batch_script:
+            path = self.root / f"spooled-{job_id}"
+            descriptor = os.open(
+                path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+                0o700,
+            )
+            try:
+                os.write(descriptor, batch_script.encode("utf-8"))
+                os.fchmod(descriptor, 0o700)
+            finally:
+                os.close(descriptor)
+            argv = (str(path),)
+        else:
+            argv = tuple(job["direct_argv"])
+        return subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            env={"LANG": "C", "LC_ALL": "C", "PATH": "/usr/bin:/bin"},
+            check=False,
+        )
 
     def evidence_paths(self) -> tuple[Path, ...]:
         return tuple(path for path in (self._state_path, self._calls_path) if path.exists())

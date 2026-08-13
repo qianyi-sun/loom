@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 MAX_SLURM_QUANTITY = (1 << 63) - 1
 MAX_SLURM_NODES = 128
 MAX_SLURM_FEATURES = 64
+MAX_GENERIC_TRES = 64
 MAX_ACCOUNTING_RECORDS = 10_000
 MEBIBYTE = 1024 * 1024
 
@@ -139,7 +140,7 @@ class SlurmResourceV2(StrictSlurmV2Model):
     cpus: Annotated[int, Field(ge=0, le=65_536)] = 0
     memory_bytes: SlurmQuantity = 0
     gpus: Annotated[int, Field(ge=0, le=1_024)] = 0
-    generic_tres: Annotated[tuple[SlurmTresValueV2, ...], Field(max_length=64)] = ()
+    generic_tres: Annotated[tuple[SlurmTresValueV2, ...], Field(max_length=MAX_GENERIC_TRES)] = ()
 
     @field_validator("generic_tres")
     @classmethod
@@ -198,7 +199,7 @@ class SlurmLaunchRequestV2(StrictSlurmV2Model):
     cpus: Annotated[int, Field(gt=0, le=65_536)]
     memory_bytes: PositiveSlurmQuantity
     gpus: Annotated[int, Field(ge=0, le=1_024)] = 0
-    generic_tres: Annotated[tuple[SlurmTresValueV2, ...], Field(max_length=64)] = ()
+    generic_tres: Annotated[tuple[SlurmTresValueV2, ...], Field(max_length=MAX_GENERIC_TRES)] = ()
     time_limit_seconds: Annotated[int, Field(gt=0, le=7 * 24 * 60 * 60)]
     launcher: SlurmExecutableIdentityV2
     launcher_release_sha256: Sha256Digest
@@ -273,7 +274,7 @@ class SlurmJobObservationV2(StrictSlurmV2Model):
     cpus: Annotated[int, Field(gt=0, le=65_536)]
     memory_bytes: PositiveSlurmQuantity
     gpus: Annotated[int, Field(ge=0, le=1_024)]
-    generic_tres: Annotated[tuple[SlurmTresValueV2, ...], Field(max_length=64)] = ()
+    generic_tres: Annotated[tuple[SlurmTresValueV2, ...], Field(max_length=MAX_GENERIC_TRES)] = ()
     nodes: Annotated[tuple[str, ...], Field(max_length=MAX_SLURM_NODES)]
     pending_reason: Annotated[str | None, Field(max_length=256)] = None
     ownership_token: OwnershipToken
@@ -318,7 +319,7 @@ class SlurmTerminalEvidenceV2(StrictSlurmV2Model):
     cpus: Annotated[int, Field(gt=0, le=65_536)]
     memory_bytes: PositiveSlurmQuantity
     gpus: Annotated[int, Field(ge=0, le=1_024)]
-    generic_tres: Annotated[tuple[SlurmTresValueV2, ...], Field(max_length=64)] = ()
+    generic_tres: Annotated[tuple[SlurmTresValueV2, ...], Field(max_length=MAX_GENERIC_TRES)] = ()
     nodes: Annotated[tuple[str, ...], Field(max_length=MAX_SLURM_NODES)]
     ownership_token: OwnershipToken
 
@@ -393,6 +394,7 @@ def strict_datetime(value: str) -> datetime:
 
 __all__ = [
     "MAX_ACCOUNTING_RECORDS",
+    "MAX_GENERIC_TRES",
     "MEBIBYTE",
     "SlurmAccountingHighWaterV2",
     "SlurmAuthorityV2",

@@ -18,6 +18,7 @@ from pydantic import ValidationError
 
 from loom_capacity_executor.slurm_contracts import (
     MAX_ACCOUNTING_RECORDS,
+    MAX_GENERIC_TRES,
     MEBIBYTE,
     SlurmAccountingHighWaterV2,
     SlurmAuthorityV2,
@@ -34,6 +35,12 @@ from loom_capacity_executor.slurm_contracts import (
 _MAX_EXECUTABLE_BYTES = 64 * 1024 * 1024
 _MAX_INVENTORY_RECORDS = 10_000
 _MAX_CONFIG_RECORDS = 4_096
+_MAX_SUBMITTED_VERIFIER_BYTES = 64 * 1024
+_EXECUTION_NODE_PYTHON = "/usr/bin/python3"
+_INVENTORY_AGGREGATE_TRES_RECORDS = 1
+_TERMINAL_FIXED_AND_AGGREGATE_TRES_RECORDS = 5
+_MAX_INVENTORY_TRES_RECORDS = MAX_GENERIC_TRES + _INVENTORY_AGGREGATE_TRES_RECORDS
+_MAX_TERMINAL_TRES_RECORDS = MAX_GENERIC_TRES + _TERMINAL_FIXED_AND_AGGREGATE_TRES_RECORDS
 _READ_CHUNK_BYTES = 64 * 1024
 _PROCESS_CLEANUP_GRACE_SECONDS = 0.5
 _TRUSTED_ENVIRONMENT = {
@@ -97,6 +104,19 @@ async def _read_bounded(
     return b"".join(chunks)
 
 
+async def _write_bounded(
+    stream: asyncio.StreamWriter,
+    payload: bytes,
+) -> None:
+    try:
+        stream.write(payload)
+        await stream.drain()
+    finally:
+        stream.close()
+        with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+            await stream.wait_closed()
+
+
 def _signal_process(process: asyncio.subprocess.Process) -> None:
     with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(process.pid, signal.SIGKILL)
@@ -107,7 +127,7 @@ def _signal_process(process: asyncio.subprocess.Process) -> None:
 
 async def _bounded_process_cleanup(
     process: asyncio.subprocess.Process,
-    tasks: tuple[asyncio.Task[bytes], asyncio.Task[bytes], asyncio.Task[int]],
+    tasks: tuple[asyncio.Task[bytes | int | None], ...],
 ) -> None:
     _signal_process(process)
     _completed, pending = await asyncio.wait(
@@ -189,6 +209,111 @@ def _validate_immutable_launcher(
             or (info.st_uid == executor_uid and info.st_mode & stat.S_IWUSR)
         ):
             raise SlurmAuthorityError("trusted launcher directory is not immutable")
+
+
+def _execution_node_verifier(
+    request: SlurmLaunchRequestV2,
+    *,
+    executor_uid: int,
+) -> bytes:
+    launcher_argv = request.trusted_launcher_argv()
+    # This fixed interpreter is part of the trusted compute-node kernel/OS boundary.
+    script = f"""#!{_EXECUTION_NODE_PYTHON}
+from __future__ import annotations
+
+import hashlib
+import hmac
+import os
+import stat
+
+LAUNCHER_PATH = {request.launcher.path!r}
+LAUNCHER_SHA256 = {request.launcher.sha256!r}
+LAUNCHER_OWNER_UID = {request.launcher.owner_uid!r}
+EXECUTOR_UID = {executor_uid!r}
+LAUNCHER_ARGV = {launcher_argv!r}
+MAX_LAUNCHER_BYTES = {_MAX_EXECUTABLE_BYTES!r}
+READ_CHUNK_BYTES = {_READ_CHUNK_BYTES!r}
+
+
+def fail() -> None:
+    raise SystemExit(70)
+
+
+def validate_directory(descriptor: int) -> None:
+    info = os.fstat(descriptor)
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid not in {{0, LAUNCHER_OWNER_UID}}
+        or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        or (info.st_uid == EXECUTOR_UID and info.st_mode & stat.S_IWUSR)
+    ):
+        fail()
+
+
+path_components = LAUNCHER_PATH.split("/")
+if (
+    LAUNCHER_OWNER_UID == EXECUTOR_UID
+    or not hasattr(os, "O_NOFOLLOW")
+    or not hasattr(os, "O_DIRECTORY")
+    or not LAUNCHER_PATH.startswith("/")
+    or len(path_components) < 2
+    or any(component in {{"", ".", ".."}} for component in path_components[1:])
+):
+    fail()
+directory_descriptor = -1
+descriptor = -1
+try:
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    directory_descriptor = os.open("/", directory_flags)
+    validate_directory(directory_descriptor)
+    for component in path_components[1:-1]:
+        next_descriptor = os.open(component, directory_flags, dir_fd=directory_descriptor)
+        os.close(directory_descriptor)
+        directory_descriptor = next_descriptor
+        validate_directory(directory_descriptor)
+    descriptor = os.open(
+        path_components[-1],
+        os.O_RDONLY | os.O_NOFOLLOW,
+        dir_fd=directory_descriptor,
+    )
+except OSError:
+    fail()
+finally:
+    if directory_descriptor >= 0:
+        os.close(directory_descriptor)
+try:
+    before = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_nlink != 1
+        or before.st_uid != LAUNCHER_OWNER_UID
+        or not before.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        or before.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        or before.st_size > MAX_LAUNCHER_BYTES
+    ):
+        fail()
+    digest = hashlib.sha256()
+    while chunk := os.read(descriptor, READ_CHUNK_BYTES):
+        digest.update(chunk)
+    after = os.fstat(descriptor)
+    if (
+        (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+        != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        or not hmac.compare_digest(digest.hexdigest(), LAUNCHER_SHA256)
+    ):
+        fail()
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    os.set_inheritable(descriptor, True)
+    os.execve(f"/proc/self/fd/{{descriptor}}", LAUNCHER_ARGV, dict(os.environ))
+except OSError:
+    fail()
+finally:
+    os.close(descriptor)
+"""
+    payload = script.encode("utf-8")
+    if not payload or len(payload) > _MAX_SUBMITTED_VERIFIER_BYTES:
+        raise SlurmAuthorityError("submitted execution-node verifier exceeds its bound")
+    return payload
 
 
 def _decode_output(payload: bytes, *, command: str) -> str:
@@ -291,7 +416,7 @@ def _gres_values(
     generic: list[SlurmTresValueV2] = []
     seen: set[str] = set()
     records = value.split(",")
-    if len(records) > 64:
+    if len(records) > _MAX_INVENTORY_TRES_RECORDS:
         raise ValueError("Slurm GRES value exceeds its bound")
     for record in records:
         fields = record.split(":")
@@ -339,7 +464,7 @@ def _allocated_resources(
     allowed_generic: set[str],
 ) -> tuple[int, tuple[SlurmTresValueV2, ...]]:
     records = value.split(",")
-    if not records or len(records) > 64:
+    if not records or len(records) > _MAX_TERMINAL_TRES_RECORDS:
         raise ValueError("Slurm allocated TRES value is malformed")
     parsed: dict[str, str] = {}
     fixed_names = {"billing", "cpu", "gres/gpu", "mem", "node"}
@@ -385,6 +510,8 @@ class AsyncSlurmBackend:
         self,
         identity: SlurmExecutableIdentityV2,
         argv: tuple[str, ...],
+        *,
+        stdin_payload: bytes | None = None,
     ) -> tuple[bytes, bytes]:
         if (
             not argv
@@ -395,6 +522,12 @@ class AsyncSlurmBackend:
             )
         ):
             raise SlurmAuthorityError("Slurm argv is not bound to its executable")
+        if stdin_payload is not None and (
+            not isinstance(stdin_payload, bytes)
+            or not stdin_payload
+            or len(stdin_payload) > _MAX_SUBMITTED_VERIFIER_BYTES
+        ):
+            raise SlurmAuthorityError("Slurm stdin payload is invalid or exceeds its bound")
         if not Path("/proc/self/fd").is_dir():
             raise SlurmAuthorityError("fd-bound Slurm execution is unavailable")
         try:
@@ -403,7 +536,11 @@ class AsyncSlurmBackend:
                     *argv,
                     executable=f"/proc/self/fd/{descriptor}",
                     pass_fds=(descriptor,),
-                    stdin=asyncio.subprocess.DEVNULL,
+                    stdin=(
+                        asyncio.subprocess.PIPE
+                        if stdin_payload is not None
+                        else asyncio.subprocess.DEVNULL
+                    ),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     env=_TRUSTED_ENVIRONMENT,
@@ -413,6 +550,8 @@ class AsyncSlurmBackend:
             raise SlurmCommandError("Slurm command could not start") from None
         assert process.stdout is not None
         assert process.stderr is not None
+        if stdin_payload is not None:
+            assert process.stdin is not None
         stdout_exceeded = asyncio.Event()
         stderr_exceeded = asyncio.Event()
         stdout_task = asyncio.create_task(
@@ -430,14 +569,29 @@ class AsyncSlurmBackend:
             )
         )
         wait_task = asyncio.create_task(process.wait())
+        stdin_task = (
+            asyncio.create_task(_write_bounded(process.stdin, stdin_payload))
+            if process.stdin is not None and stdin_payload is not None
+            else None
+        )
         stdout_limit_task = asyncio.create_task(stdout_exceeded.wait())
         stderr_limit_task = asyncio.create_task(stderr_exceeded.wait())
-        process_tasks = (stdout_task, stderr_task, wait_task)
+        process_tasks: tuple[asyncio.Task[bytes | int | None], ...] = (
+            stdout_task,
+            stderr_task,
+            wait_task,
+            *((stdin_task,) if stdin_task is not None else ()),
+        )
         limit_tasks = (stdout_limit_task, stderr_limit_task)
         deadline = asyncio.get_running_loop().time() + self.authority.command_timeout_seconds
         failure: SlurmBackendError | None = None
         try:
             while not all(task.done() for task in process_tasks):
+                if stdin_task is not None and stdin_task.done():
+                    stdin_failure = stdin_task.exception()
+                    if stdin_failure is not None:
+                        failure = SlurmCommandError("Slurm command did not accept exact stdin")
+                        break
                 if stdout_exceeded.is_set() or stderr_exceeded.is_set():
                     failure = SlurmOutputError("Slurm command output exceeded its bound")
                     break
@@ -454,6 +608,10 @@ class AsyncSlurmBackend:
                 if not completed:
                     failure = SlurmCommandError("Slurm command timed out")
                     break
+            if stdin_task is not None and stdin_task.done():
+                stdin_failure = stdin_task.exception()
+                if stdin_failure is not None:
+                    failure = SlurmCommandError("Slurm command did not accept exact stdin")
             if failure is not None:
                 await _bounded_process_cleanup(process, process_tasks)
             if stdout_exceeded.is_set() or stderr_exceeded.is_set():
@@ -480,8 +638,14 @@ class AsyncSlurmBackend:
         self,
         identity: SlurmExecutableIdentityV2,
         arguments: tuple[str, ...],
+        *,
+        stdin_payload: bytes | None = None,
     ) -> str:
-        stdout, _stderr = await self._run(identity, (identity.path, *arguments))
+        stdout, _stderr = await self._run(
+            identity,
+            (identity.path, *arguments),
+            stdin_payload=stdin_payload,
+        )
         return _decode_output(stdout, command=Path(identity.path).name)
 
     def _all_executables(self) -> tuple[SlurmExecutableIdentityV2, ...]:
@@ -646,6 +810,7 @@ class AsyncSlurmBackend:
         await self.validate_authority()
         self._assert_launch(request)
         _validate_immutable_launcher(request.launcher, executor_uid=self.authority.local_uid)
+        verifier = _execution_node_verifier(request, executor_uid=self.authority.local_uid)
         arguments = [
             "--parsable",
             f"--clusters={request.cluster}",
@@ -687,13 +852,13 @@ class AsyncSlurmBackend:
             (
                 f"--time={_time_argument(request.time_limit_seconds)}",
                 f"--comment={request.ownership_token}",
-                *request.trusted_launcher_argv(),
             )
         )
         try:
             output = await self._run_text(
                 self.authority.executables.sbatch,
                 tuple(arguments),
+                stdin_payload=verifier,
             )
             rows = _lines(output, command="sbatch", maximum=1, allow_empty=False)
             fields = rows[0].split(";")
