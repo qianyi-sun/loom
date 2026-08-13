@@ -11,7 +11,16 @@ from pathlib import Path
 from typing import Literal
 from uuid import UUID
 
-from loom_capacity_manager.executable_contracts import ExecutionContextV2
+from loom_capacity_executor.keys import (
+    ExecutorKeyError,
+    ExecutorOwnershipKey,
+    load_executor_ownership_key,
+)
+from loom_capacity_manager.executable_contracts import (
+    ExecutableExecutorRegistrationV2,
+    ExecutionContextV2,
+    PoolControllerAuthorityV2,
+)
 
 _MAX_CONFIG_BYTES = 64 * 1024
 _POOL_IDS = frozenset({"gb10", "oldlab"})
@@ -20,6 +29,24 @@ _DIGEST_LENGTH = 64
 
 class ExecutorConfigError(ValueError):
     """The controller-local daemon configuration is unsafe or incomplete."""
+
+
+@dataclass(frozen=True, slots=True)
+class ImmutablePoolManifest:
+    """The retained pool-local facts consumed by Task 6/7/8 runtime binding."""
+
+    pool_id: Literal["gb10", "oldlab"]
+    controller_authority_sha256: str
+    slurm_cluster: str
+    controller_host: str
+    partition: str
+    association: str
+    submitter: str
+    qos: str
+    profile_id: str
+    profile_generation: int
+    profile_digest: str
+    slurm_executables: tuple[tuple[str, Path], ...]
 
 
 def _absolute_path(value: object, *, label: str) -> Path:
@@ -127,11 +154,25 @@ class PoolExecutorConfig:
     signing_key_id: str
     signing_key_sha256: str
     ownership_key_file: Path
+    ownership_key: ExecutorOwnershipKey
     manager_origin: str
     local_uid: int
     bearer_token_file: Path
+    tls_ca_file: Path
+    tls_certificate_file: Path
+    tls_private_key_file: Path
     state_directory: Path
     journal_file: Path
+    slurm_cluster: str
+    controller_host: str
+    partition: str
+    association: str
+    submitter: str
+    qos: str
+    profile_id: str
+    profile_generation: int
+    profile_digest: str
+    manifest: ImmutablePoolManifest
     execution: ExecutionContextV2
 
     @classmethod
@@ -155,6 +196,9 @@ class PoolExecutorConfig:
             "signing_key_sha256",
             "manager_origin",
             "bearer_token_file",
+            "tls_ca_file",
+            "tls_certificate_file",
+            "tls_private_key_file",
             "state_directory",
             "journal_file",
             "ownership_key_file",
@@ -169,6 +213,12 @@ class PoolExecutorConfig:
             "association",
             "local_uid",
             "slurm_executables",
+            "slurm_cluster",
+            "submitter",
+            "qos",
+            "profile_id",
+            "profile_generation",
+            "profile_digest",
         }
         if set(value) - allowed:
             raise ExecutorConfigError("configuration file contains unknown fields")
@@ -199,6 +249,16 @@ class PoolExecutorConfig:
         key_bytes = _private_regular(ownership_key, label="ownership key file", maximum=32)
         if len(key_bytes) != 32:
             raise ExecutorConfigError("ownership key file must contain exactly 32 raw bytes")
+        try:
+            loaded_key = load_executor_ownership_key(
+                ownership_key,
+                signing_key_id=signing_key_id,
+                expected_public_key_sha256=signing_key_sha,
+            )
+        except ExecutorKeyError as exc:
+            raise ExecutorConfigError(
+                "ownership key fingerprint differs from registration"
+            ) from exc
         manager_origin = value.get("manager_origin")
         if not isinstance(manager_origin, str) or not manager_origin.startswith("https://"):
             raise ExecutorConfigError("manager origin must be an HTTPS origin")
@@ -207,6 +267,19 @@ class PoolExecutorConfig:
             raise ExecutorConfigError("local UID differs from controller-local identity")
         bearer = _absolute_path(value.get("bearer_token_file"), label="bearer token file")
         _one_line_text(bearer, label="bearer token file", maximum=16 * 1024)
+        tls_ca = _absolute_path(value.get("tls_ca_file"), label="TLS CA file")
+        tls_certificate = _absolute_path(
+            value.get("tls_certificate_file"), label="TLS certificate file"
+        )
+        tls_private_key = _absolute_path(
+            value.get("tls_private_key_file"), label="TLS private-key file"
+        )
+        for path, label in (
+            (tls_ca, "TLS CA file"),
+            (tls_certificate, "TLS certificate file"),
+            (tls_private_key, "TLS private-key file"),
+        ):
+            _private_regular(path, label=label, maximum=_MAX_CONFIG_BYTES)
         state = _absolute_path(value.get("state_directory"), label="state directory")
         _private_state_directory(state)
         journal = _absolute_path(value.get("journal_file"), label="journal file")
@@ -214,19 +287,33 @@ class PoolExecutorConfig:
             raise ExecutorConfigError("journal file must be directly inside the state directory")
         # These explicit values preserve the controller/partition/association and executable
         # authority even while the checked-in daemon is deliberately unable to scale up.
-        for field in ("controller_host", "partition", "association"):
+        retained: dict[str, str] = {}
+        for field in (
+            "slurm_cluster",
+            "controller_host",
+            "partition",
+            "association",
+            "submitter",
+            "qos",
+            "profile_id",
+        ):
             if field not in value:
                 raise ExecutorConfigError(f"{field.replace('_', ' ')} is required")
-            _identifier(value[field], label=field.replace("_", " "))
+            retained[field] = _identifier(value[field], label=field.replace("_", " "))
+        profile_generation = value.get("profile_generation")
+        if type(profile_generation) is not int or profile_generation <= 0:
+            raise ExecutorConfigError("profile generation is invalid")
+        profile_digest = _digest(value.get("profile_digest"), label="profile digest")
         executables = value.get("slurm_executables", {})
         if not isinstance(executables, dict):
             raise ExecutorConfigError("Slurm executables must be an object")
         expected_executables = {"scontrol", "sacctmgr", "squeue", "sbatch", "scancel", "sacct"}
         if set(executables) != expected_executables:
             raise ExecutorConfigError("Slurm executable binding is incomplete")
+        executable_paths: list[tuple[str, Path]] = []
         for name, executable in executables.items():
             _identifier(name, label="Slurm executable name")
-            _absolute_path(executable, label="Slurm executable")
+            executable_paths.append((name, _absolute_path(executable, label="Slurm executable")))
         try:
             execution = ExecutionContextV2(
                 authority_incarnation=authority_incarnation,
@@ -255,11 +342,38 @@ class PoolExecutorConfig:
             signing_key_id=signing_key_id,
             signing_key_sha256=signing_key_sha,
             ownership_key_file=ownership_key,
+            ownership_key=loaded_key,
             manager_origin=manager_origin,
             local_uid=local_uid,
             bearer_token_file=bearer,
+            tls_ca_file=tls_ca,
+            tls_certificate_file=tls_certificate,
+            tls_private_key_file=tls_private_key,
             state_directory=state,
             journal_file=journal,
+            slurm_cluster=retained["slurm_cluster"],
+            controller_host=retained["controller_host"],
+            partition=retained["partition"],
+            association=retained["association"],
+            submitter=retained["submitter"],
+            qos=retained["qos"],
+            profile_id=retained["profile_id"],
+            profile_generation=profile_generation,
+            profile_digest=profile_digest,
+            manifest=ImmutablePoolManifest(
+                pool_id=pool,
+                controller_authority_sha256=controller_digest,
+                slurm_cluster=retained["slurm_cluster"],
+                controller_host=retained["controller_host"],
+                partition=retained["partition"],
+                association=retained["association"],
+                submitter=retained["submitter"],
+                qos=retained["qos"],
+                profile_id=retained["profile_id"],
+                profile_generation=profile_generation,
+                profile_digest=profile_digest,
+                slurm_executables=tuple(sorted(executable_paths)),
+            ),
             execution=execution,
         )
 
@@ -267,5 +381,26 @@ class PoolExecutorConfig:
         if pool_id != self.pool_id:
             raise ExecutorConfigError("pool binding differs from controller-local configuration")
 
+    @property
+    def registration(self) -> ExecutableExecutorRegistrationV2:
+        return ExecutableExecutorRegistrationV2(
+            execution=self.execution,
+            executor_id=self.executor_id,
+            executor_incarnation=self.executor_incarnation,
+            pool_id=self.pool_id,
+            pool_generation=self.pool_generation,
+            signing_key_id=self.signing_key_id,
+            signing_key_sha256=self.signing_key_sha256,
+            local_authority_sha256=self.local_authority_sha256,
+            controller_authority_sha256=self.controller_authority_sha256,
+        )
 
-__all__ = ["ExecutorConfigError", "PoolExecutorConfig"]
+    @property
+    def controller_authority(self) -> PoolControllerAuthorityV2:
+        return PoolControllerAuthorityV2(
+            pool_id=self.pool_id,
+            controller_authority_sha256=self.controller_authority_sha256,
+        )
+
+
+__all__ = ["ExecutorConfigError", "ImmutablePoolManifest", "PoolExecutorConfig"]

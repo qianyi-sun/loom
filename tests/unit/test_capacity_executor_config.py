@@ -7,8 +7,10 @@ from pathlib import Path
 from uuid import UUID
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from loom_capacity_executor.config import ExecutorConfigError, PoolExecutorConfig
+from loom_capacity_manager.ownership import public_key_fingerprint
 
 
 @dataclass(frozen=True)
@@ -27,8 +29,16 @@ def executor_files(tmp_path: Path, *, pool_id: str = "oldlab") -> ExecutorFiles:
     state.mkdir(mode=0o700)
     bearer = tmp_path / f"{pool_id}.bearer"
     _private(bearer, "test-bearer\n")
+    tls_ca = tmp_path / f"{pool_id}.ca"
+    tls_cert = tmp_path / f"{pool_id}.cert"
+    tls_key = tmp_path / f"{pool_id}.tls-key"
+    for path in (tls_ca, tls_cert, tls_key):
+        _private(path, "test-tls\n")
+    private_key = Ed25519PrivateKey.from_private_bytes(
+        (b"\x11" if pool_id == "gb10" else b"\x12") * 32
+    )
     key = tmp_path / f"{pool_id}.key"
-    key.write_bytes(b"x" * 32)
+    key.write_bytes(private_key.private_bytes_raw())
     key.chmod(0o600)
     config = tmp_path / f"{pool_id}.json"
     _private(
@@ -46,15 +56,24 @@ def executor_files(tmp_path: Path, *, pool_id: str = "oldlab") -> ExecutorFiles:
                 "controller_authority_sha256": "d" * 64 if pool_id == "oldlab" else "c" * 64,
                 "local_authority_sha256": "b" * 64 if pool_id == "oldlab" else "a" * 64,
                 "signing_key_id": f"{pool_id}-key",
-                "signing_key_sha256": "1" * 64,
+                "signing_key_sha256": public_key_fingerprint(private_key.public_key()),
                 "manager_origin": "https://manager.example.test",
                 "bearer_token_file": str(bearer),
+                "tls_ca_file": str(tls_ca),
+                "tls_certificate_file": str(tls_cert),
+                "tls_private_key_file": str(tls_key),
                 "state_directory": str(state),
                 "journal_file": str(state / "executor.journal"),
                 "ownership_key_file": str(key),
                 "controller_host": f"{pool_id}-controller.example.test",
+                "slurm_cluster": pool_id,
                 "partition": f"{pool_id}-workers",
                 "association": f"{pool_id}-executor",
+                "submitter": f"loom-{pool_id}",
+                "qos": "loom",
+                "profile_id": f"{pool_id}-profile",
+                "profile_generation": 1,
+                "profile_digest": "9" * 64,
                 "local_uid": os.geteuid(),
                 "slurm_executables": {
                     name: f"/usr/bin/{name}"
@@ -81,6 +100,9 @@ def test_oldlab_and_gb10_configurations_have_distinct_exact_bindings(tmp_path: P
     assert gb10.pool_id == "gb10"
     assert oldlab.controller_authority_sha256 != gb10.controller_authority_sha256
     assert oldlab.executor_id != gb10.executor_id
+    assert oldlab.manifest.partition != gb10.manifest.partition
+    assert oldlab.manifest.association != gb10.manifest.association
+    assert oldlab.ownership_key.public_key_sha256 != gb10.ownership_key.public_key_sha256
 
 
 def test_cross_loaded_pool_configuration_fails_before_registration(tmp_path: Path) -> None:
@@ -116,4 +138,15 @@ def test_config_requires_exact_controller_partition_association_and_executables(
     payload.pop("association")
     _private(files.config, json.dumps(payload))
     with pytest.raises(ExecutorConfigError, match="association"):
+        PoolExecutorConfig.from_files(files.config)
+
+
+def test_config_rejects_private_key_that_does_not_match_registered_fingerprint(
+    tmp_path: Path,
+) -> None:
+    files = executor_files(tmp_path)
+    payload = json.loads(files.config.read_text(encoding="utf-8"))
+    payload["signing_key_sha256"] = "f" * 64
+    _private(files.config, json.dumps(payload))
+    with pytest.raises(ExecutorConfigError, match="fingerprint"):
         PoolExecutorConfig.from_files(files.config)
