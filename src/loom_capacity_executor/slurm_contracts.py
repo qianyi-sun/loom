@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import posixpath
 import re
 from datetime import UTC, datetime
 from pathlib import Path
@@ -87,8 +88,17 @@ class SlurmExecutableIdentityV2(StrictSlurmV2Model):
     @field_validator("path")
     @classmethod
     def _absolute_path(cls, value: str) -> str:
-        if "\0" in value or not Path(value).is_absolute():
-            raise ValueError("Slurm executable path must be absolute")
+        components = value.split("/")[1:]
+        if (
+            "\0" in value
+            or not Path(value).is_absolute()
+            or value == "/"
+            or value.startswith("//")
+            or value.endswith("/")
+            or any(component in {"", ".", ".."} for component in components)
+            or posixpath.normpath(value) != value
+        ):
+            raise ValueError("Slurm executable path must be canonical and absolute")
         return value
 
 

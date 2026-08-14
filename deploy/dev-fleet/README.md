@@ -18,9 +18,10 @@ checkpoint. A ready lifecycle operation includes an initial non-executable
 capacity publication, but it does not activate the fixture or global autoscaler
 templates in this directory and does not grant physical worker capacity.
 
-The global manager's fenced pool-executor protocol is also separate from these
-legacy assets. Its reservation, permit, inventory, and release receipts are
-`executable: false`; this directory contains no scheduler-facing executor
+The global manager's permanent v1 dry-run pool-executor protocol is also
+separate from these legacy assets. Its reservation, permit, inventory, and
+release receipts remain `executable: false`. The distinct v2 contracts are
+`executable: true`, but this directory activates no scheduler-facing executor
 service for them. Use the
 [pool-executor dry-run runbook](../../docs/runbooks/global-fleet-pool-executor-dry-run.md)
 for the implemented rehearsal and recovery procedure.

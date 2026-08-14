@@ -870,7 +870,6 @@ def test_group_readable_bearer_is_rejected(tmp_path: Path) -> None:
 async def test_zero_ceiling_never_constructs_mutating_backend() -> None:
     result = await run_executor_once(zero_ceiling_harness())
     assert result.mode == "inventory-only"
-    assert result.scheduler_mutations == 0
 ```
 
 - [ ] **Step 2: Run and verify the configuration module is absent**

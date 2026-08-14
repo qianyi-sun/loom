@@ -321,7 +321,15 @@ def _decode_output(payload: bytes, *, command: str) -> str:
         value = payload.decode("utf-8", errors="strict")
     except UnicodeDecodeError:
         raise SlurmOutputError(f"{command} output is not UTF-8") from None
-    if "\0" in value or "\r" in value:
+    if any(
+        character != "\n"
+        and (
+            ord(character) < 0x20
+            or 0x7F <= ord(character) <= 0x9F
+            or character in {"\u2028", "\u2029"}
+        )
+        for character in value
+    ):
         raise SlurmOutputError(f"{command} output contains invalid control data")
     return value
 

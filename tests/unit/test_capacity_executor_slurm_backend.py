@@ -83,6 +83,30 @@ def test_launch_contract_has_no_candidate_script_or_freeform_argv(
         SlurmLaunchRequestV2.model_validate({**payload, "job_name": "a;scancel-1"})
 
 
+@pytest.mark.parametrize(
+    "path",
+    (
+        "/usr//bin/sbatch",
+        "/usr/./bin/sbatch",
+        "/usr/local/../bin/sbatch",
+        "//usr/bin/sbatch",
+        "/usr/bin/sbatch/",
+    ),
+)
+def test_slurm_executable_identity_rejects_noncanonical_absolute_paths(path: str) -> None:
+    with pytest.raises(ValidationError, match="canonical"):
+        SlurmExecutableIdentityV2(path=path, sha256="a" * 64, owner_uid=0)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ("\t", "\x01", "\x1b", "\x7f", "\u0085", "\u009f", "\u2028", "\u2029"),
+)
+def test_scheduler_output_rejects_non_line_control_data(value: str) -> None:
+    with pytest.raises(SlurmOutputError, match="control data"):
+        slurm_backend._decode_output(f"record{value}".encode(), command="squeue")
+
+
 @pytest.mark.parametrize("name", ("billing", "cpu", "mem", "node", "gres/gpu"))
 def test_generic_tres_rejects_reserved_scheduler_aggregates(name: str) -> None:
     with pytest.raises(ValidationError, match="reserved"):

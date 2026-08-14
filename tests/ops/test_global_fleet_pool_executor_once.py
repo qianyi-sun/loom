@@ -4,7 +4,7 @@ import asyncio
 import signal
 import subprocess
 import sys
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -198,6 +198,10 @@ class UntrustedTick:
         return object()
 
 
+def test_executor_result_does_not_claim_an_unobserved_scheduler_mutation_count() -> None:
+    assert asdict(once.ExecutorOnceResult("inventory-only")) == {"mode": "inventory-only"}
+
+
 @pytest.mark.asyncio
 async def test_zero_ceiling_never_constructs_mutating_backend(tmp_path: Path) -> None:
     config = PoolExecutorConfig.from_files(executor_files(tmp_path).config)
@@ -207,7 +211,6 @@ async def test_zero_ceiling_never_constructs_mutating_backend(tmp_path: Path) ->
         executor=None,
     )
     assert result.mode == "inventory-only"
-    assert result.scheduler_mutations == 0
 
 
 @pytest.mark.asyncio
@@ -220,7 +223,6 @@ async def test_validate_only_does_not_construct_mutating_backend(tmp_path: Path)
         executor=None,
     )
     assert result.mode == "validate-only"
-    assert result.scheduler_mutations == 0
 
 
 @pytest.mark.asyncio

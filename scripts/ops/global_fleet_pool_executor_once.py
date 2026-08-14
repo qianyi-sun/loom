@@ -33,7 +33,6 @@ from loom_capacity_manager.executable_contracts import (
 @dataclass(frozen=True, slots=True)
 class ExecutorOnceResult:
     mode: Literal["drain-only", "inventory-only", "scale-up", "validate-only"]
-    scheduler_mutations: Literal[0] = 0
 
 
 def build_executable_client(config: PoolExecutorConfig) -> ExecutableCapacityExecutorClient:

@@ -128,7 +128,9 @@ def test_capacity_guard_is_in_default_static_validation() -> None:
     assert "src/loom_capacity_agent" in project["tool"]["mypy"]["files"]
 
     workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
-    ruff_command = "ruff check src tests packages migrations capacity_guard_migrations"
+    ruff_command = (
+        "ruff check src tests packages migrations capacity_guard_migrations capacity_migrations"
+    )
     assert ruff_command in workflow
 
 
