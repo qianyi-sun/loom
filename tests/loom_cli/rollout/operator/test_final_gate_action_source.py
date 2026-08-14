@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 
 import pytest
 
@@ -19,6 +20,7 @@ from loom_cli.rollout.final_gate_readiness import (
 from loom_cli.rollout.operator.backup_lease import BackupLease
 from loom_cli.rollout.operator.final_gate_action_source import FinalGateActionSource
 from loom_cli.rollout.operator.final_gate_plan import FinalGatePlanStore
+from loom_cli.rollout.operator.final_gate_store import FinalGateExecutionStore
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactStore
 from loom_cli.rollout.preflight_contract import (
     CheckContext,
@@ -44,6 +46,9 @@ from tests.loom_cli.rollout.operator.test_final_gate_plan import (
     _systemd_evidence,
 )
 from tests.loom_cli.rollout.operator.test_final_gate_runner import _admission
+from tests.loom_cli.rollout.operator.test_final_gate_store import (
+    _execution as _final_execution,
+)
 from tests.loom_cli.rollout.operator.test_protected_apply_baseline import (
     _baseline_executions,
 )
@@ -309,6 +314,44 @@ def test_final_gate_action_source_rejects_attested_publication_mismatch(tmp_path
         source(_envelope(attestation), attestation, 7, _admission(attestation))
 
     assert calls == []
+
+
+def test_final_gate_action_source_rejects_resume_plan_drift(tmp_path: Path) -> None:
+    source, attestation, _calls = _authority(tmp_path)
+    first = _envelope(attestation)
+    admission = _admission(attestation)
+    source(first, attestation, 7, admission)
+    FinalGateExecutionStore(
+        tmp_path / "state",
+        request_id="req-alpha",
+        attempt_number=1,
+    ).publish(_final_execution())
+    attempt2 = tmp_path / "state/requests/req-alpha/attempts/2"
+    attempt2.mkdir(mode=0o700)
+    changed = admission.tier2_executions[0]
+    changed_evidence = dict(changed.evidence)
+    changed_evidence["resource-digest"] = "f" * 64
+    changed = replace(
+        changed,
+        evidence=MappingProxyType(changed_evidence),
+        evidence_hash=hashlib.sha256(
+            json.dumps(changed_evidence, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+    )
+    drifted_admission = replace(
+        admission,
+        tier2_executions=(changed, *admission.tier2_executions[1:]),
+    )
+    resumed = replace(
+        first,
+        attempt_number=2,
+        attempt_operator="devansh",
+        attempt_uid=2003,
+        resume=True,
+    )
+
+    with pytest.raises(ValueError, match="resume plan binding drifted"):
+        source(resumed, attestation, 7, drifted_admission)
 
 
 def test_final_gate_action_source_runs_post_apply_drift_in_process(

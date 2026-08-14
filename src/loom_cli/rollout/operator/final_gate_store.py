@@ -14,9 +14,15 @@ from loom_cli.rollout.preflight_contract import CheckExecution
 from .model import validate_safe_identifier
 
 _CHECK_ID_RE = re.compile(r"^[a-z][a-z0-9.-]{2,95}$")
+_ENTRY_RE = re.compile(
+    r"^(?P<check_id>[a-z][a-z0-9.-]{2,95})(?:@(?P<revision>[1-9][0-9]{0,2}))?\.json$"
+)
 _PRIVATE_DIRECTORY_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
 _MAX_EXECUTION_BYTES = 256 * 1024
+_MAX_REVISIONS_PER_CHECK = 16
+_MAX_JOURNAL_ENTRIES = 96
+_DURABLE_CHECK_ID = "final.protected-apply"
 
 
 class FinalGateStoreError(RuntimeError):
@@ -24,7 +30,7 @@ class FinalGateStoreError(RuntimeError):
 
 
 class FinalGateExecutionStore:
-    """Publish each final result once so protected apply cannot be repeated."""
+    """Append final results while keeping protected apply permanently single-shot."""
 
     def __init__(
         self,
@@ -47,11 +53,7 @@ class FinalGateExecutionStore:
         ):
             raise FinalGateStoreError("final gate store authority is invalid")
         self.attempt_root = (
-            state_root
-            / "requests"
-            / self.request_id
-            / "attempts"
-            / str(self.attempt_number)
+            state_root / "requests" / self.request_id / "attempts" / str(self.attempt_number)
         )
         self.root = self.attempt_root / "final-gates"
 
@@ -69,20 +71,31 @@ class FinalGateExecutionStore:
         if execution.tier != 4 or _CHECK_ID_RE.fullmatch(execution.check_id) is None:
             raise FinalGateStoreError("only normalized final-gate evidence may be published")
         self.ensure()
-        path = self.root / f"{execution.check_id}.json"
+        history = sorted(
+            (
+                (revision, path, existing)
+                for (check_id, revision), (path, existing) in self._read_entries().items()
+                if check_id == execution.check_id
+            ),
+            key=lambda item: item[0],
+        )
+        if history:
+            _revision, latest_path, latest = history[-1]
+            if latest == execution:
+                return latest_path
+            if execution.check_id == _DURABLE_CHECK_ID:
+                raise FinalGateStoreError("final gate execution cannot be replaced")
+            if len(history) >= _MAX_REVISIONS_PER_CHECK:
+                raise FinalGateStoreError("final gate execution revision limit exceeded")
+            revision = history[-1][0] + 1
+            path = self.root / f"{execution.check_id}@{revision}.json"
+        else:
+            path = self.root / f"{execution.check_id}.json"
         payload = (
             json.dumps(execution.to_dict(), sort_keys=True, separators=(",", ":")) + "\n"
         ).encode()
         if len(payload) > _MAX_EXECUTION_BYTES:
             raise FinalGateStoreError("final gate execution evidence is too large")
-        try:
-            existing = self._read_path(path)
-        except FileNotFoundError:
-            pass
-        else:
-            if existing != execution:
-                raise FinalGateStoreError("final gate execution cannot be replaced")
-            return path
 
         directory_fd = _open_directory(self.root)
         temporary = f".{path.name}.{uuid4().hex}.tmp"
@@ -130,6 +143,16 @@ class FinalGateExecutionStore:
         return path
 
     def read_all(self) -> dict[str, CheckExecution]:
+        latest: dict[str, tuple[int, CheckExecution]] = {}
+        for (check_id, revision), (_path, execution) in self._read_entries().items():
+            current = latest.get(check_id)
+            if current is None or revision > current[0]:
+                latest[check_id] = (revision, execution)
+        return {check_id: item[1] for check_id, item in latest.items()}
+
+    def _read_entries(
+        self,
+    ) -> dict[tuple[str, int], tuple[Path, CheckExecution]]:
         try:
             _require_directory(self.root, uid=self.service_uid, exact_mode=_PRIVATE_DIRECTORY_MODE)
         except FileNotFoundError:
@@ -141,18 +164,28 @@ class FinalGateExecutionStore:
             raise FinalGateStoreError("final gate journal is unreadable") from exc
         finally:
             os.close(directory_fd)
-        if len(names) > 16 or any(
-            not name.endswith(".json")
-            or _CHECK_ID_RE.fullmatch(name.removesuffix(".json")) is None
-            for name in names
-        ):
+        matches = {name: _ENTRY_RE.fullmatch(name) for name in names}
+        if len(names) > _MAX_JOURNAL_ENTRIES or any(match is None for match in matches.values()):
             raise FinalGateStoreError("final gate journal contains unsafe entries")
-        results: dict[str, CheckExecution] = {}
+        results: dict[tuple[str, int], tuple[Path, CheckExecution]] = {}
+        revisions: dict[str, set[int]] = {}
         for name in sorted(names):
-            execution = self._read_path(self.root / name)
-            if execution.check_id != name.removesuffix(".json"):
+            match = matches[name]
+            assert match is not None
+            check_id = match.group("check_id")
+            raw_revision = match.group("revision")
+            revision = 0 if raw_revision is None else int(raw_revision)
+            path = self.root / name
+            execution = self._read_path(path)
+            if execution.check_id != check_id or (check_id == _DURABLE_CHECK_ID and revision != 0):
                 raise FinalGateStoreError("final gate journal identity drifted")
-            results[execution.check_id] = execution
+            check_revisions = revisions.setdefault(check_id, set())
+            check_revisions.add(revision)
+            if len(check_revisions) > _MAX_REVISIONS_PER_CHECK:
+                raise FinalGateStoreError("final gate execution revision limit exceeded")
+            results[(check_id, revision)] = (path, execution)
+        if any(found != set(range(len(found))) for found in revisions.values()):
+            raise FinalGateStoreError("final gate execution revision history is incomplete")
         return results
 
     def _read_path(self, path: Path) -> CheckExecution:

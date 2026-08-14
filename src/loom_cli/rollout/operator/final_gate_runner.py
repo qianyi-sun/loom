@@ -61,10 +61,11 @@ class FinalGateRunner:
         ):
             raise ValueError("final gate envelope drifts from attestation")
         mutation_epoch = self.read_mutation_epoch()
+        starting_epoch = attestation.bindings.staging_mutation_epoch
         if (
             type(mutation_epoch) is not int
             or mutation_epoch < 0
-            or mutation_epoch != attestation.bindings.staging_mutation_epoch
+            or mutation_epoch not in {starting_epoch, starting_epoch + 1}
         ):
             raise ValueError("final gate mutation epoch drifted before apply")
         journal = FinalGateExecutionStore(
@@ -73,22 +74,63 @@ class FinalGateRunner:
             attempt_number=envelope.attempt_number,
             service_uid=self.service_uid,
         )
-        prior = journal.read_all()
+        newest = {
+            check_id: execution
+            for check_id, execution in journal.read_all().items()
+            if execution.passed
+        }
+        if envelope.resume:
+            for attempt_number in range(envelope.attempt_number - 1, 0, -1):
+                earlier = FinalGateExecutionStore(
+                    self.state_root,
+                    request_id=envelope.request_id,
+                    attempt_number=attempt_number,
+                    service_uid=self.service_uid,
+                ).read_all()
+                for check_id, execution in earlier.items():
+                    if not execution.passed:
+                        continue
+                    newest.setdefault(check_id, execution)
+        protected_apply_recorded = "final.protected-apply" in newest
+        if mutation_epoch == starting_epoch + 1 and not protected_apply_recorded:
+            raise ValueError("final gate mutation epoch drifted before apply")
+        if admission.post_apply_resume != protected_apply_recorded:
+            raise ValueError("final gate post-apply admission is incomplete")
+        execution_time = self.now()
         authority = AttestedFinalGateAuthority(
             attestation=attestation,
-            actions=self.actions_factory(envelope, attestation, mutation_epoch, admission),
+            actions=self.actions_factory(envelope, attestation, starting_epoch, admission),
             candidate_sha=envelope.resolved_sha,
-            mutation_epoch=mutation_epoch,
-            now=self.now(),
+            mutation_epoch=starting_epoch,
+            now=execution_time,
+            post_apply_resume=admission.post_apply_resume,
             max_concurrency=self.max_concurrency,
         )
+        durable: frozenset[str] = frozenset()
+        if envelope.resume or protected_apply_recorded:
+            prior = authority.select_resume_evidence(newest, now=execution_time)
+            if protected_apply_recorded and "final.protected-apply" not in prior:
+                raise ValueError("durable protected apply evidence drifted")
+            if "final.protected-apply" in prior:
+                durable = frozenset({"final.protected-apply"})
+        else:
+            prior = newest
+        protected_apply_passed = "final.protected-apply" in prior
+        if mutation_epoch == starting_epoch + 1:
+            if not protected_apply_passed:
+                raise ValueError("final gate mutation epoch drifted before apply")
+        elif protected_apply_passed:
+            raise ValueError("final gate protected apply epoch did not advance")
+        for execution in prior.values():
+            journal.publish(execution)
 
         def publish(execution: CheckExecution) -> None:
             journal.publish(execution)
 
         report = authority.execute(
-            now=self.now(),
+            now=execution_time,
             prior_executions=prior,
+            durable_prior_executions=durable,
             on_execution=publish,
         )
         return 0 if report.passed else 1

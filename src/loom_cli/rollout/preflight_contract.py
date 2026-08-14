@@ -722,6 +722,7 @@ class PreflightDag:
         through_tier: int = 3,
         now: Callable[[], datetime] | None = None,
         prior_executions: Mapping[str, CheckExecution] | None = None,
+        freshness_exempt_prior_executions: frozenset[str] = frozenset(),
         on_execution: Callable[[CheckExecution], None] | None = None,
     ) -> tuple[CheckExecution, ...]:
         if through_tier not in {0, 1, 2, 3, 4}:
@@ -747,6 +748,17 @@ class PreflightDag:
         prior = dict(prior_executions or {})
         if not set(prior) <= set(selected):
             raise ValueError("prior check executions are outside the selected DAG")
+        if (
+            not isinstance(freshness_exempt_prior_executions, frozenset)
+            or not freshness_exempt_prior_executions <= prior.keys()
+            or any(
+                selected[check_id].spec.stage is not StageCapability.FINAL_ONLY
+                or selected[check_id].spec.mutation_class is not MutationClass.PROTECTED_STAGING
+                or operations[check_id] is not CheckOperation.APPLY
+                for check_id in freshness_exempt_prior_executions
+            )
+        ):
+            raise ValueError("prior freshness exemption is invalid")
         for check_id, execution in prior.items():
             check = selected[check_id]
             if (
@@ -758,7 +770,10 @@ class PreflightDag:
                 or execution.operation is not operations[check_id]
                 or execution.input_fingerprint != check.input_fingerprint(context)
                 or execution.implementation_digest != check.implementation_digest
-                or execution.expires_at <= validation_time
+                or (
+                    execution.expires_at <= validation_time
+                    and check_id not in freshness_exempt_prior_executions
+                )
             ):
                 raise ValueError("prior check execution is expired or drifted")
         pending = {check_id: check for check_id, check in selected.items() if check_id not in prior}

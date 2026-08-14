@@ -33,6 +33,7 @@ from loom_cli.rollout.preflight_pipeline import PreflightRehearsal
 
 from .backup_lease import BackupLease
 from .final_gate_plan import FinalGatePlan, FinalGatePlanStore
+from .final_gate_store import FinalGateExecutionStore
 from .model import CandidateBinding, DriverEnvelope
 from .protected_apply_baseline import ProtectedApplyBaseline
 
@@ -115,6 +116,8 @@ class FinalGateActionSource:
             systemd_evidence,
             predecessor_evidence,
         )
+        if envelope.resume:
+            self._validate_resume_plan(envelope, plan)
         plan_path = FinalGatePlanStore(
             self.state_root,
             request_id=envelope.request_id,
@@ -185,6 +188,41 @@ class FinalGateActionSource:
 
         actions["final.drift"] = verify_post_apply_drift
         return actions
+
+    def _validate_resume_plan(
+        self,
+        envelope: DriverEnvelope,
+        plan: FinalGatePlan,
+    ) -> None:
+        predecessor: FinalGatePlan | None = None
+        for attempt_number in range(envelope.attempt_number - 1, 0, -1):
+            executions = FinalGateExecutionStore(
+                self.state_root,
+                request_id=envelope.request_id,
+                attempt_number=attempt_number,
+                service_uid=self.service_uid,
+            ).read_all()
+            protected_apply = executions.get("final.protected-apply")
+            if protected_apply is None or not protected_apply.passed:
+                continue
+            predecessor = FinalGatePlanStore(
+                self.state_root,
+                request_id=envelope.request_id,
+                attempt_number=attempt_number,
+                service_uid=self.service_uid,
+            ).read()
+            break
+        if predecessor is None:
+            return
+
+        def stable_payload(value: FinalGatePlan) -> dict[str, object]:
+            payload = value.to_dict()
+            for field in ("attempt_number", "request_envelope_sha256", "plan_digest"):
+                payload.pop(field)
+            return payload
+
+        if stable_payload(predecessor) != stable_payload(plan):
+            raise ValueError("final gate resume plan binding drifted")
 
     def _publication(
         self,

@@ -195,3 +195,62 @@ def test_final_admission_rebuilds_exact_admission_plan(monkeypatch: pytest.Monke
     assert captured["candidate"] == candidate
     assert captured["current_mutation_epoch"] == 7
     assert captured["plan"].candidate == candidate  # type: ignore[union-attr]
+
+
+def test_post_apply_resume_admission_rechecks_the_advanced_epoch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = _candidate()
+    captured: dict[str, object] = {}
+    attestation = SimpleNamespace(registry_digest="1" * 64, coverage_digest="2" * 64)
+    prior_admission = SimpleNamespace(attestation=attestation)
+
+    class Store:
+        def read(self, _digest: str) -> object:
+            return attestation
+
+    class Runtime:
+        def prebackup_plan(self, found: CandidateBinding) -> object:
+            return SimpleNamespace(candidate=found)
+
+    class Sources:
+        def __init__(self, found: CandidateBinding) -> None:
+            self.candidate = found
+
+        def build(self, *, mutation_epoch: int) -> object:
+            assert mutation_epoch == 8
+            return Runtime()
+
+    def validate(**kwargs):
+        captured.update(kwargs)
+        return "resumed"
+
+    monkeypatch.setattr(
+        authority_module,
+        "validate_post_apply_resume_attestation",
+        validate,
+    )
+    authority = DeepPreflightAuthority(
+        sources_factory=lambda found, epoch, purpose: (  # type: ignore[arg-type]
+            Sources(found)
+            if epoch == 8 and purpose is RuntimePurpose.ADMISSION
+            else pytest.fail("resume used the wrong runtime authority")
+        ),
+        attestation_store=Store(),  # type: ignore[arg-type]
+        read_mutation_epoch=lambda: 8,
+        now=lambda: datetime(2026, 7, 19, 12, tzinfo=UTC),
+    )
+
+    result = authority.admit_post_apply_resume(
+        candidate,
+        prior_admission=prior_admission,  # type: ignore[arg-type]
+        attestation_digest="3" * 64,
+        expected_registry_digest="1" * 64,
+        expected_coverage_digest="2" * 64,
+    )
+
+    assert result == "resumed"
+    assert captured["prior_admission"] is prior_admission
+    assert captured["candidate"] == candidate
+    assert captured["current_mutation_epoch"] == 8
+    assert captured["plan"].candidate == candidate  # type: ignore[union-attr]

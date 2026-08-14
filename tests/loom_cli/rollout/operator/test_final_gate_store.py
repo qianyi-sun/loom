@@ -84,3 +84,29 @@ def test_final_gate_store_refuses_replacement_or_linked_evidence(tmp_path: Path)
     path.symlink_to(target)
     with pytest.raises((FinalGateStoreError, OSError)):
         store.read_all()
+
+
+def test_final_gate_store_appends_repeatable_check_revisions(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    first = replace(
+        _execution(),
+        check_id="final.convergence",
+        failure_code="final.convergence.failed",
+        operation=CheckOperation.VERIFY,
+        outcome=CheckOutcome.FAIL,
+    )
+    second = replace(
+        first,
+        outcome=CheckOutcome.PASS,
+        started_at=NOW + timedelta(minutes=2),
+        finished_at=NOW + timedelta(minutes=2),
+        expires_at=NOW + timedelta(hours=1, minutes=2),
+    )
+
+    first_path = store.publish(first)
+    second_path = store.publish(second)
+
+    assert first_path != second_path
+    assert first_path.exists()
+    assert second_path.exists()
+    assert store.read_all() == {"final.convergence": second}
