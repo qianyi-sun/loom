@@ -171,6 +171,7 @@ def test_skilllearnbench_converts_real_bundle_to_loom_task_config(
     assert cfg.environment.user == "root"
     assert cfg.verifier.name == "script"
     assert cfg.verifier.args["script_path"] == "/root/verifier/run.sh"
+    assert cfg.required_agent_capabilities == frozenset({"workspace_exec"})
     assert cfg.steps[0].required_artifacts == ["result.txt"]
     assert (out_dir / "skills" / ".keep").exists()
     run_sh = (out_dir / "verifier" / "run.sh").read_text()

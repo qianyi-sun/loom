@@ -375,6 +375,7 @@ class SkillFlowAdapter(CatalogBackedAdapter):
             )
         (out_dir / "task.toml").write_text(textwrap.dedent(f"""
             schema_version = "1"
+            required_agent_capabilities = ["workspace_exec"]
 
             [task]
             id = {toml_string(task_id)}

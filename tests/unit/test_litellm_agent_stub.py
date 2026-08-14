@@ -271,3 +271,62 @@ This solves the task.
     assert driver.filesystem[PurePosixPath("/workspace/solution.py")] == (
         b"def answer():\n    return 42"
     )
+
+
+async def test_direct_completion_rejects_artifact_glob_destination(
+    writer: TrajectoryWriter,
+) -> None:
+    fake_gateway = FakeLLMGatewayClient(scripted=[_resp("not an image")])
+    driver = FakeDriver()
+    await driver.start(options=StartOptions())
+    agent = LiteLLMAgent(
+        model=ModelSpec(provider="openai", name="gpt-4o"),
+        gateway=fake_gateway,
+        team_id="t",
+        trial_id=uuid4(),
+        max_turns=1,
+        artifact_paths=["*.png"],
+    )
+
+    from loom.errors import AgentError
+
+    with pytest.raises(AgentError, match="exact relative artifact path"):
+        await agent.run(
+            instruction="make a poster",
+            env=driver,
+            trajectory=writer,
+            mcp=[],
+            skills_dir=None,
+            step_id="main",
+        )
+
+    assert PurePosixPath("/workspace/*.png") not in driver.filesystem
+
+
+@pytest.mark.parametrize("artifact_path", ["/root/output.txt", "../output.txt", ""])
+async def test_direct_completion_rejects_non_relative_artifact_destination(
+    writer: TrajectoryWriter,
+    artifact_path: str,
+) -> None:
+    driver = FakeDriver()
+    await driver.start(options=StartOptions())
+    agent = LiteLLMAgent(
+        model=ModelSpec(provider="openai", name="gpt-4o"),
+        gateway=FakeLLMGatewayClient(scripted=[_resp("answer")]),
+        team_id="t",
+        trial_id=uuid4(),
+        max_turns=1,
+        artifact_paths=[artifact_path],
+    )
+
+    from loom.errors import AgentError
+
+    with pytest.raises(AgentError, match="exact relative artifact path"):
+        await agent.run(
+            instruction="answer",
+            env=driver,
+            trajectory=writer,
+            mcp=[],
+            skills_dir=None,
+            step_id="main",
+        )

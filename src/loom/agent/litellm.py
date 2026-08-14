@@ -8,6 +8,7 @@ commands in the task workspace.
 
 from __future__ import annotations
 
+import glob
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -164,6 +165,17 @@ class LiteLLMAgent:
         from pathlib import Path
 
         for rel_path in self.artifact_paths:
+            artifact_path = PurePosixPath(rel_path)
+            if (
+                not rel_path
+                or artifact_path.is_absolute()
+                or ".." in artifact_path.parts
+                or glob.has_magic(rel_path)
+            ):
+                raise AgentError(
+                    "direct-completion requires an exact relative artifact path; "
+                    f"got {rel_path!r}",
+                )
             body = _render_artifact_body(content, rel_path)
             with tempfile.NamedTemporaryFile(
                 mode="w",
