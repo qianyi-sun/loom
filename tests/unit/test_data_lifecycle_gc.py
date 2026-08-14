@@ -572,3 +572,31 @@ def test_resume_continues_from_exact_object_phase_without_redeleting() -> None:
         "metadata",
         "complete",
     ]
+
+
+def test_resume_rejects_non_monotonic_epoch_completion() -> None:
+    journal = _Journal(epoch_after=11, resume_completion_mutation_epoch=9)
+
+    class ResumeDeleter:
+        def delete_exact(self, item: RegisteredObject) -> None:
+            raise AssertionError("already-deleted object must not be deleted again")
+
+        def exact_absent(self, item: RegisteredObject) -> bool:
+            return True
+
+    with pytest.raises(LifecycleGcExecutionError, match="non-monotonic"):
+        resume_gc(
+            run_id=journal.run_id,
+            request_id="req-gcresume1",
+            completed_at=NOW,
+            journal=journal,
+            object_deleter=ResumeDeleter(),
+        )
+
+    assert [event[0] for event in journal.events] == [
+        "resume",
+        "verified",
+        "metadata",
+        "complete",
+        "failed",
+    ]

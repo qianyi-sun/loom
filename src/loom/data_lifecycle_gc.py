@@ -780,6 +780,8 @@ def resume_gc(
             mutation=mutation,
             deletion_token=snapshot.deletion_token,
         )
+        if epoch_state.epoch != snapshot.completion_mutation_epoch + 1:
+            raise LifecycleGcExecutionError("journal completed with a non-monotonic mutation epoch")
     except Exception as exc:
         journal.fail_apply(run_id=run_id, reason=f"{type(exc).__name__}: {exc}")
         if isinstance(exc, LifecycleGcExecutionError):
