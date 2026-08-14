@@ -26,6 +26,9 @@ from typing import Any
 # must publish an explicit per-task eligibility tag.
 _PYTEST_VERIFIER = "pytest"
 _ORACLE_ELIGIBLE_TAG = "oracle_eligible"
+_IMMUTABLE_WORKSPACE_EXEC_BENCHMARK_IDS = frozenset(
+    {"terminal-bench-2@tb2.1-r6"},
+)
 
 
 @dataclass(frozen=True)
@@ -42,11 +45,18 @@ class AgentTaskCompatibility:
 
 def task_required_agent_capabilities(
     task_config: Mapping[str, Any],
+    *,
+    benchmark_id: str | None = None,
 ) -> frozenset[str]:
     raw = task_config.get("required_agent_capabilities")
-    if not isinstance(raw, (list, tuple, set, frozenset)):
-        return frozenset()
-    return frozenset(item for item in raw if isinstance(item, str))
+    declared = (
+        frozenset(item for item in raw if isinstance(item, str))
+        if isinstance(raw, (list, tuple, set, frozenset))
+        else frozenset()
+    )
+    if benchmark_id in _IMMUTABLE_WORKSPACE_EXEC_BENCHMARK_IDS:
+        return declared | {"workspace_exec"}
+    return declared
 
 
 def agent_task_compatibility(
@@ -55,6 +65,7 @@ def agent_task_compatibility(
     agent_requires: Iterable[str],
     agent_provides: Iterable[str],
     tags: Mapping[str, str] | None = None,
+    benchmark_id: str | None = None,
 ) -> AgentTaskCompatibility:
     required_from_task = frozenset(agent_requires)
     provided_by_agent = frozenset(agent_provides)
@@ -64,7 +75,11 @@ def agent_task_compatibility(
         if not task_provides_capability(task_config, capability, tags=tags)
     )
     missing_from_agent = (
-        task_required_agent_capabilities(task_config) - provided_by_agent
+        task_required_agent_capabilities(
+            task_config,
+            benchmark_id=benchmark_id,
+        )
+        - provided_by_agent
     )
     return AgentTaskCompatibility(
         missing_from_task=missing_from_task,

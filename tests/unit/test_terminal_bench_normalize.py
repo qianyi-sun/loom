@@ -113,7 +113,8 @@ class TestNormalizeMapping:
         assert cfg.verifier.args == {
             "script_path": DEFAULT_VERIFIER_SCRIPT_PATH,
         }
-        assert cfg.required_agent_capabilities == frozenset({"workspace_exec"})
+        assert cfg.required_agent_capabilities == frozenset()
+        assert "required_agent_capabilities" not in normalized
         assert cfg.steps[0].artifacts == ["logs/verifier/**"]
         assert raw["schema_version"] == "1.1"
         assert raw["environment"]["architecture"] == "x86_64"

@@ -241,7 +241,7 @@ def test_tb21_catalog_provision_requires_target_local_activation() -> None:
             TaskRow(
                 id=task_id,
                 checksum="a" * 64,
-                config=_workspace_task_config(task_id),
+                config=_valid_task_config(task_id),
                 source=f"s3://source-bucket/{profile_id}/task/",
                 license="Apache-2.0",
                 benchmark_id=profile_id,

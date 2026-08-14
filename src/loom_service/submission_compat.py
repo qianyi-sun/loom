@@ -94,13 +94,22 @@ async def validate_submission_agent_task_compatibility(
     rows = (
         await session.execute(
             visible_tasks(team_id=team_id)
-            .with_only_columns(Task.id, Task.config, Task.tags)
+            .with_only_columns(
+                Task.id,
+                Task.config,
+                Task.tags,
+                Task.benchmark_id,
+            )
             .where(Task.id.in_(requested_task_ids)),
         )
     ).all()
     tasks = {
-        str(task_id): (config if isinstance(config, Mapping) else {}, tags)
-        for task_id, config, tags in rows
+        str(task_id): (
+            config if isinstance(config, Mapping) else {},
+            tags,
+            str(benchmark_id) if benchmark_id is not None else None,
+        )
+        for task_id, config, tags, benchmark_id in rows
     }
     if set(tasks) != set(requested_task_ids):
         raise HTTPException(status_code=404, detail="task not found")
@@ -111,12 +120,13 @@ async def validate_submission_agent_task_compatibility(
     for requested_name, entry in agents:
         failures: list[tuple[str, frozenset[str], frozenset[str]]] = []
         for task_id in requested_task_ids:
-            config, raw_tags = tasks[task_id]
+            config, raw_tags, benchmark_id = tasks[task_id]
             compatibility = agent_task_compatibility(
                 config,
                 agent_requires=entry.requires_capabilities,
                 agent_provides=entry.provides_capabilities,
                 tags=dict(raw_tags) if isinstance(raw_tags, Mapping) else None,
+                benchmark_id=benchmark_id,
             )
             if not compatibility.compatible:
                 failures.append(

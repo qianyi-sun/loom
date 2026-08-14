@@ -288,6 +288,75 @@ def test_submit_rejects_agent_that_cannot_satisfy_task_capabilities(
     assert trial_count == 0
 
 
+def test_submit_applies_immutable_tb21_workspace_requirement(
+    app,
+    seed_team: tuple[UUID, str],
+    postgres_url: str,
+) -> None:
+    _team_id, raw = seed_team
+    profile_id = "terminal-bench-2@tb2.1-r6"
+    task_id = f"{profile_id}/capability-overlay-test"
+    engine = create_engine(postgres_url)
+    session_factory = sessionmaker(engine)
+    try:
+        with session_factory() as session:
+            session.execute(
+                insert(Benchmark).values(
+                    id=profile_id,
+                    display_name="Terminal-Bench 2.1",
+                    upstream_kind="harbor-package",
+                    upstream_locator="terminal-bench/terminal-bench-2-1",
+                    upstream_revision="6",
+                    license_spdx="Apache-2.0",
+                    license_url="https://example.test/license",
+                    splits=["test"],
+                    execution_state="runnable",
+                ),
+            )
+            session.execute(
+                insert(Task).values(
+                    id=task_id,
+                    checksum="3" * 64,
+                    benchmark_id=profile_id,
+                    config={
+                        "schema_version": "1",
+                        "task": {"id": task_id, "name": task_id},
+                        "environment": {"os": "linux", "docker_image": "alpine"},
+                        "agent": {"name": "oracle"},
+                        "verifier": {"name": "script"},
+                        "steps": [{"name": "main"}],
+                    },
+                ),
+            )
+            session.commit()
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/trials",
+                headers={"Authorization": f"Bearer {raw}"},
+                json={
+                    "task_id": task_id,
+                    "config": {
+                        "agent_name": "direct-completion",
+                        "agent_model": {"provider": "openai", "name": "gpt-4o-mini"},
+                    },
+                },
+            )
+
+        assert response.status_code == 400, response.text
+        assert "workspace_exec" in response.json()["detail"]
+        with session_factory() as session:
+            trial_count = session.execute(select(func.count()).select_from(Trial)).scalar_one()
+        assert trial_count == 0
+    finally:
+        with session_factory() as session:
+            session.execute(delete(Trial).where(Trial.task_id == task_id))
+            session.execute(delete(Task).where(Task.id == task_id))
+            session.execute(delete(Benchmark).where(Benchmark.id == profile_id))
+            session.commit()
+        engine.dispose()
+
+
 def test_submit_rejects_invalid_task_config(app, seed_team):  # type: ignore[no-untyped-def]
     _, raw = seed_team
     with TestClient(app) as client:

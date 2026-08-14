@@ -69,6 +69,22 @@ def test_agent_task_compatibility_reports_missing_agent_capability() -> None:
     assert result.missing_from_task == frozenset()
 
 
+def test_immutable_tb21_profile_requires_workspace_exec_without_config_mutation() -> None:
+    result = task_compat.agent_task_compatibility(
+        _config(
+            "script",
+            task_id="terminal-bench-2@tb2.1-r6/chess-best-move",
+        ),
+        agent_requires=frozenset(),
+        agent_provides=frozenset(),
+        benchmark_id="terminal-bench-2@tb2.1-r6",
+    )
+
+    assert result.compatible is False
+    assert result.missing_from_agent == frozenset({"workspace_exec"})
+    assert result.missing_from_task == frozenset()
+
+
 def test_agent_task_compatibility_requires_both_directions() -> None:
     cfg = {
         **_config("script"),

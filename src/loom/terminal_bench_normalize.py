@@ -226,7 +226,6 @@ def _normalize_native_tb21_task_toml(payload: dict[str, Any]) -> dict[str, Any]:
 
     normalized: dict[str, Any] = {
         "schema_version": "1",
-        "required_agent_capabilities": ["workspace_exec"],
         "task": task,
         "environment": environment,
         "agent": agent,

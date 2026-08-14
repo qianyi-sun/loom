@@ -41,7 +41,6 @@ TB21_PROFILE_ID = "terminal-bench-2@tb2.1-r6"
 _WORKSPACE_EXEC_BENCHMARK_STEMS = (
     "skillflow",
     "skilllearnbench",
-    "terminal-bench-2",
 )
 T = TypeVar("T")
 
