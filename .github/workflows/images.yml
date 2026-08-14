@@ -1723,12 +1723,10 @@ jobs:
             --tag "${SUBJECT_NAME}:${REF_NAME}" \
             "${SUBJECT_NAME}@${SUBJECT_DIGEST}"
           for tag in "$sha_short" "$REF_NAME"; do
-            published=$(docker buildx imagetools inspect "${SUBJECT_NAME}:${tag}" \
-              | awk '$1 == "Digest:" {print $2; exit}')
-            [[ "$published" == "$SUBJECT_DIGEST" ]] || {
-              echo "FAIL: verified manifest tag ${tag} resolved to ${published}" >&2
-              exit 1
-            }
+            python3 scripts/ci_registry_readback.py digest \
+              --reference "${SUBJECT_NAME}:${tag}" \
+              --expected-digest "$SUBJECT_DIGEST" \
+              --attempts 6 --delay-seconds 2 >/dev/null
           done
 
   stage1-publish:
@@ -1764,6 +1762,20 @@ jobs:
           name: trivy-binaries-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
           path: /tmp/loom-trivy-binaries
 
+      - name: Require bounded large-image workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          required_bytes=85899345920
+          available_bytes=$(df --output=avail -B1 "$RUNNER_TEMP" | tail -n 1 | tr -d ' ')
+          [[ "$available_bytes" =~ ^[0-9]+$ ]]
+          (( available_bytes >= required_bytes )) || {
+            echo "FAIL: Stage 1 publication requires at least 80 GiB free; observed ${available_bytes} bytes" >&2
+            exit 1
+          }
+          df -h "$RUNNER_TEMP"
+          docker system df
+
       - name: Build, inspect, scan, and prepare Stage 1 child
         id: child
         shell: bash
@@ -1783,15 +1795,23 @@ jobs:
           tree_sha=$(git rev-parse "${HEAD_SHA}^{tree}")
           source_root="$RUNNER_TEMP/loom-stage1-sources-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           evidence_root="$RUNNER_TEMP/loom-stage1-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          builder="loom-stage1-${IMAGE}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           local_image="loom-release-${IMAGE_NAME}:build-${HEAD_SHA}"
           python3 scripts/prepare_behavior_stage1_image_sources.py \
             --repo-root . prepare --output "$source_root"
-          docker buildx build --load --platform linux/amd64 \
+          docker buildx create --name "$builder" --driver docker-container \
+            --use --bootstrap
+          docker buildx build --builder "$builder" --load --platform linux/amd64 \
             --build-context "stage1-sources=${source_root}" \
             --build-arg "LOOM_BUILD_SHA=${HEAD_SHA}" \
             --build-arg "LOOM_BUILD_TREE_SHA=${tree_sha}" \
             --label "org.opencontainers.image.revision=${HEAD_SHA}" \
             --file "$DOCKERFILE" --tag "$local_image" "$BUILD_CONTEXT"
+          docker buildx rm "$builder"
+          case "$source_root" in
+            "$RUNNER_TEMP"/loom-stage1-sources-*) rm -rf -- "$source_root" ;;
+            *) echo 'FAIL: refusing unsafe Stage 1 source cleanup' >&2; exit 1 ;;
+          esac
           common=(
             --rm --network none --read-only --cap-drop ALL
             --security-opt no-new-privileges --user 65532:65532
@@ -1823,6 +1843,11 @@ jobs:
           "$trivy_bin" image --format spdx-json \
             --output "$evidence_root/sbom.spdx.json" \
             --cache-dir "$RUNNER_TEMP/loom-trivy-cache" "$local_image"
+          trivy_cache="$RUNNER_TEMP/loom-trivy-cache"
+          case "$trivy_cache" in
+            "$RUNNER_TEMP"/loom-trivy-cache) rm -rf -- "$trivy_cache" ;;
+            *) echo 'FAIL: refusing unsafe Trivy cache cleanup' >&2; exit 1 ;;
+          esac
           container=$(docker create "$local_image" /bin/true)
           trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
           docker cp "$container:/opt/loom/contracts/compatibility-manifest.json" \
@@ -1867,8 +1892,11 @@ jobs:
             echo 'FAIL: child push did not emit exactly one digest' >&2
             exit 1
           }
-          docker buildx imagetools inspect --raw "${SUBJECT_NAME}@${digests[0]}" \
-            > "$EVIDENCE_ROOT/child-manifest.json"
+          python3 scripts/ci_registry_readback.py raw \
+            --reference "${SUBJECT_NAME}@${digests[0]}" \
+            --expected-digest "${digests[0]}" \
+            --output "$EVIDENCE_ROOT/child-manifest.json" \
+            --attempts 6 --delay-seconds 2
           {
             echo "subject_name=$SUBJECT_NAME"
             echo "subject_digest=${digests[0]}"
@@ -1929,16 +1957,33 @@ jobs:
         if: always()
         shell: bash
         env:
+          IMAGE: ${{ matrix.image }}
+          IMAGE_NAME: ${{ matrix.image_name }}
           LOCAL_IMAGE: ${{ steps.child.outputs.local_image }}
           SUBJECT_NAME: ${{ steps.child.outputs.subject_name }}
           HEAD_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           docker logout ghcr.io || true
-          if [[ -n "$LOCAL_IMAGE" ]]; then docker image rm "$LOCAL_IMAGE" || true; fi
-          if [[ -n "$SUBJECT_NAME" ]]; then \
-            docker image rm "${SUBJECT_NAME}:build-${HEAD_SHA}-amd64" || true; \
-          fi
+          builder="loom-stage1-${IMAGE}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker buildx rm "$builder" >/dev/null 2>&1 || true
+          local_image="${LOCAL_IMAGE:-loom-release-${IMAGE_NAME}:build-${HEAD_SHA}}"
+          owner_lower=$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+          subject_name="${SUBJECT_NAME:-ghcr.io/${owner_lower}/${IMAGE_NAME}}"
+          docker image rm "$local_image" >/dev/null 2>&1 || true
+          docker image rm "${subject_name}:build-${HEAD_SHA}-amd64" >/dev/null 2>&1 || true
+          for path in \
+            "$RUNNER_TEMP/loom-stage1-sources-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            "$RUNNER_TEMP/loom-stage1-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            "$RUNNER_TEMP/loom-trivy-cache"; do
+            case "$path" in
+              "$RUNNER_TEMP"/loom-stage1-sources-*|\
+              "$RUNNER_TEMP"/loom-stage1-release-*|\
+              "$RUNNER_TEMP"/loom-trivy-cache) rm -rf -- "$path" ;;
+              *) echo "FAIL: refusing unsafe cleanup path ${path}" >&2; exit 1 ;;
+            esac
+          done
+          df -h "$RUNNER_TEMP"
 
   stage1-publish-index:
     name: verify and publish Stage 1 OCI index
@@ -2070,9 +2115,10 @@ jobs:
             --tag "${SUBJECT_NAME}:${sha_short}" --tag "${SUBJECT_NAME}:${GITHUB_REF_NAME}" \
             "${SUBJECT_NAME}@${SUBJECT_DIGEST}"
           for tag in "$sha_short" "$GITHUB_REF_NAME"; do
-            observed=$(docker buildx imagetools inspect "${SUBJECT_NAME}:${tag}" \
-              | awk '$1 == "Digest:" {print $2; exit}')
-            test "$observed" = "$SUBJECT_DIGEST"
+            python3 scripts/ci_registry_readback.py digest \
+              --reference "${SUBJECT_NAME}:${tag}" \
+              --expected-digest "$SUBJECT_DIGEST" \
+              --attempts 6 --delay-seconds 2 >/dev/null
           done
 
       - name: Upload canonical final Stage 1 release evidence
