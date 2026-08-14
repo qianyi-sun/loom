@@ -54,7 +54,7 @@ idempotency key.
 | `env_start` / `env_ready` / `env_stop` | Driver | sandbox lifecycle |
 | `env_exec` | Driver | command, exit_code, duration_sec |
 | `file_upload` / `file_download` | Driver | path, size, sha256 |
-| `llm_call` | Gateway / LiteLLMAgent | model, dialect, input_tokens, output_tokens, cost_usd snapshot, rate_card_hash, latency_ms |
+| `llm_call` | Gateway / direct-completion runtime | model, dialect, input_tokens, output_tokens, cost_usd snapshot, rate_card_hash, latency_ms |
 | `tool_use` | Agent adapter | name, args, result_excerpt |
 | `agent_thought` | Agent adapter | reasoning text |
 | `verifier_start` / `verifier_end` / `verifier_check` | Verifier | check_name, passed, message |

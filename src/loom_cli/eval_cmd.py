@@ -49,8 +49,8 @@ from loom_cli.time_format import format_local_datetime
 from loom_service.agent_catalog import get_agent
 
 # Map provider_connection.type → ModelSpec.provider. The agent uses
-# the `provider/name` form for its LLM-call serialization (litellm,
-# anthropic-sdk, etc.); the gateway is what actually routes via the
+# the `provider/name` form for its LLM-call serialization (direct completion,
+# provider SDK adapters, etc.); the gateway is what actually routes via the
 # connection's credentials. For `custom`, default to openai-compatible
 # wire shape — operators creating a `custom` connection are typically
 # pointing at an OpenAI-compatible endpoint.

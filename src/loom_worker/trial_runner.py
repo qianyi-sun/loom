@@ -248,7 +248,7 @@ class LocalTrialRunner:
             self.trial_config.agent_model,
             self.trial_config.agent_name,
         )
-        # #184: if the agent opts in (LiteLLMAgent), surface the task's
+        # #184: if the direct-completion runtime opts in, surface the task's
         # declared artifact paths so it can write the LLM's final
         # response somewhere the verifier can grade. Duck-typed so
         # Protocol-respecting agents that write their own artifacts

@@ -1,4 +1,4 @@
-"""Step-scoped Gateway credentials for the builtin LiteLLM agent."""
+"""Step-scoped Gateway credentials for the direct-completion runtime."""
 
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ class StepTokenGatewayClient:
             or not request.step_id
         ):
             raise AgentError(
-                "builtin LiteLLM gateway request does not match its trial scope",
+                "direct-completion gateway request does not match its trial scope",
             )
 
         step_token = await self.token_issuer.mint_step_token(

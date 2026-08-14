@@ -11,8 +11,8 @@ Each entry also declares what models it accepts:
 
 - `supported_providers`: tuple of provider names (`"anthropic"`,
   `"openai"`, …) or `("*",)` for "any provider the LLM Gateway can
-  route". CLI adapters lock to one provider; generic agents (litellm,
-  aider, openhands) accept anything.
+  route". CLI adapters lock to one provider; generic agents
+  (direct-completion, aider, openhands) accept anything.
 - `supported_model_sources`: subset of `{"api", "local-server", "hf"}`
   matching the `ModelSpec.source` discriminator. Empty tuple means the
   agent doesn't take a model at all (oracle).

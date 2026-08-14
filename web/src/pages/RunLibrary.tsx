@@ -311,7 +311,7 @@ export default function RunLibrary(): JSX.Element {
               onChange={(event) =>
                 updateParamWithAliases("agent_name", event.target.value, ["agent"])
               }
-              placeholder="litellm"
+              placeholder="direct-completion"
               className="mt-1 normal-case tracking-normal"
             />
           </label>

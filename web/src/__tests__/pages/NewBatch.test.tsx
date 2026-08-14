@@ -583,6 +583,21 @@ describe("NewBatch", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("hides the canonical model runner from specific-agent choices", async () => {
+    const user = userEvent.setup();
+    mockEndpoints({ matchingTasks: 12 });
+    renderWithProviders(<NewBatch />);
+    await waitForNewBatchReady();
+
+    await user.click(
+      screen.getByRole("checkbox", { name: /Use a specific agent/i }),
+    );
+
+    expect(
+      screen.queryByRole("option", { name: /^direct-completion$/i }),
+    ).not.toBeInTheDocument();
+  });
+
   it("blocks submit when no task source is picked", async () => {
     const spy = mockEndpoints({ matchingTasks: 12 });
     const user = userEvent.setup();

@@ -28,7 +28,7 @@ command.
 Repeat `--model` in one `loom run` invocation:
 
 ```bash
-loom run --dataset humaneval --agent litellm \
+loom run --dataset humaneval --agent direct-completion \
   --model hf:meta-llama/Llama-3.1-8B-Instruct \
   --model /models/my-checkpoint \
   --output-dir runs/compare

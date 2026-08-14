@@ -7,7 +7,7 @@ retryable failures. Settings come from `GatewaySettings.llm_retry_*`.
 Why gateway-side (not worker-side): subprocess agents (aider,
 claude-code, qwen-cli, etc.) hit the gateway directly via
 `OPENAI_API_BASE`. Worker-side retry only catches the in-process
-`LiteLLMAgent`. The gateway is the universal interception point.
+direct-completion runtime. The gateway is the universal interception point.
 """
 from __future__ import annotations
 
