@@ -46,6 +46,7 @@ from loom_capacity_manager.executable_contracts import (
     PreparedExecutorBindingV2,
     StrictV2Model,
     canonical_executable_digest,
+    canonical_inventory_confirmation_journal_head,
 )
 from loom_capacity_manager.grant_contracts import ReservationShapeV1
 from loom_capacity_manager.models import (
@@ -383,16 +384,23 @@ class CapacityExecutionStore:
                 None if witnessed_inventory is None else witnessed_inventory.get("journal_digest")
             )
             if state.retirement_safe:
-                # The manager cannot derive executor-local journal record hashes. Its
-                # authenticated boundary is the exact pinned checkpoint, a distinct
-                # head exactly two records later, and the registered executor identity.
-                # ExecutablePoolExecutor owns the canonical requested/confirmed record
-                # content that produces this transition.
                 inventory_head = type(witnessed_journal_sequence) is int and isinstance(
                     witnessed_journal_digest, str
                 )
                 inventory_sequence = cast(int, witnessed_journal_sequence) if inventory_head else 0
                 inventory_digest = cast(str, witnessed_journal_digest) if inventory_head else ""
+                try:
+                    witnessed_contract = ExecutableExecutorInventoryV2.model_validate_json(
+                        json.dumps(witnessed_inventory)
+                    )
+                    confirmation_sequence, confirmation_digest = (
+                        canonical_inventory_confirmation_journal_head(witnessed_contract)
+                    )
+                except ValueError:
+                    confirmation_sequence, confirmation_digest = -1, ""
+                confirmation_bound = (
+                    state.inventory_confirmation_journal_digest == confirmation_digest
+                )
                 before_confirmation = bool(
                     inventory_head
                     and state.journal_high_water == inventory_sequence
@@ -400,8 +408,9 @@ class CapacityExecutionStore:
                 )
                 after_confirmation = bool(
                     inventory_head
-                    and state.journal_high_water == inventory_sequence + 2
-                    and state.journal_digest != inventory_digest
+                    and confirmation_bound
+                    and state.journal_high_water == confirmation_sequence
+                    and state.journal_digest == confirmation_digest
                     and state.journal_high_water == heartbeat.journal_sequence
                     and state.journal_digest == heartbeat.journal_digest
                 )
@@ -414,8 +423,9 @@ class CapacityExecutionStore:
                     and inventory_head
                     and heartbeat.journal_checkpoint_sequence == state.journal_high_water
                     and heartbeat.journal_checkpoint_digest == state.journal_digest
-                    and heartbeat.journal_sequence == inventory_sequence + 2
-                    and heartbeat.journal_digest != inventory_digest
+                    and confirmation_bound
+                    and heartbeat.journal_sequence == confirmation_sequence
+                    and heartbeat.journal_digest == confirmation_digest
                     and (before_confirmation or after_confirmation)
                 )
                 if not confirms_final_inventory:
@@ -484,6 +494,9 @@ class CapacityExecutionStore:
             state.inventory_high_water = inventory.inventory_sequence
             state.last_inventory_digest = digest
             state.inventory_payload = inventory.model_dump(mode="json", exclude_none=False)
+            _, state.inventory_confirmation_journal_digest = (
+                canonical_inventory_confirmation_journal_head(inventory)
+            )
             state.last_inventory_at = now
             state.retirement_safe = False
             state.retirement_inventory_digest = None

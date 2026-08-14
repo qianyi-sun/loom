@@ -45,6 +45,7 @@ from loom_capacity_manager.executable_contracts import (
     SignedExecutableOwnershipProofV2,
     canonical_executable_bytes,
     canonical_executable_digest,
+    canonical_inventory_confirmation_journal_head,
 )
 from loom_capacity_manager.execution_store import CapacityExecutionStore
 from loom_capacity_manager.models import (
@@ -298,8 +299,9 @@ async def _publish_pool_retirement_evidence(
     await store.ingest_executor_inventory(session, inventory)
     if later_heartbeat:
         heartbeat_sequence += 1
-        confirmed_journal_sequence = journal_sequence + 2
-        confirmed_journal_digest = "f" * 64 if journal_digest != "f" * 64 else "e" * 64
+        confirmed_journal_sequence, confirmed_journal_digest = (
+            canonical_inventory_confirmation_journal_head(inventory)
+        )
         await store.heartbeat_executor(
             session,
             ExecutableExecutorHeartbeatV2(
@@ -1520,7 +1522,7 @@ async def test_retirement_rejects_any_changed_final_checkpoint_binding(
     )
 
 
-@pytest.mark.parametrize("reported_sequence", (0, 1, 3))
+@pytest.mark.parametrize("reported_sequence", (0, 1, 2, 3))
 async def test_noncanonical_post_inventory_journal_transition_blocks_retirement(
     capacity_session: AsyncSession,
     reported_sequence: int,
@@ -1629,6 +1631,12 @@ async def test_normal_inventory_publish_advance_preserves_retirement_evidence(
         assert requested.previous_digest == inventory.journal_digest
         assert confirmed.previous_digest == requested.record_digest
         assert actual_head.sequence == inventory.journal_sequence + 2
+        assert canonical_inventory_confirmation_journal_head(inventory) == (
+            actual_head.sequence,
+            actual_head.digest,
+        )
+        assert state.inventory_confirmation_journal_digest == actual_head.digest
+        assert state.retirement_safe is True
         await store.heartbeat_executor(
             capacity_session,
             ExecutableExecutorHeartbeatV2(
@@ -1996,6 +2004,13 @@ async def test_retirement_needs_fresh_postrelease_inventory_and_later_pool_heart
             idempotency_key=UUID(int=12111),
         )
     executor = executor_binding("gb10")
+    await capacity_session.refresh(gb10_state)
+    final_inventory = ExecutableExecutorInventoryV2.model_validate_json(
+        json.dumps(gb10_state.inventory_payload)
+    )
+    confirmation_sequence, confirmation_digest = canonical_inventory_confirmation_journal_head(
+        final_inventory
+    )
     await store.heartbeat_executor(
         capacity_session,
         ExecutableExecutorHeartbeatV2(
@@ -2005,8 +2020,8 @@ async def test_retirement_needs_fresh_postrelease_inventory_and_later_pool_heart
             pool_id=executor.pool_id,
             pool_generation=executor.pool_generation,
             heartbeat_sequence=gb10.heartbeat_sequence + 1,
-            journal_sequence=gb10.journal_sequence + 2,
-            journal_digest="f" * 64,
+            journal_sequence=confirmation_sequence,
+            journal_digest=confirmation_digest,
             journal_checkpoint_sequence=gb10.journal_sequence,
             journal_checkpoint_digest=gb10.journal_digest,
         ),
@@ -2014,8 +2029,8 @@ async def test_retirement_needs_fresh_postrelease_inventory_and_later_pool_heart
     fresh_gb10 = gb10.model_copy(
         update={
             "heartbeat_sequence": gb10.heartbeat_sequence + 1,
-            "journal_sequence": gb10.journal_sequence + 2,
-            "journal_digest": "f" * 64,
+            "journal_sequence": confirmation_sequence,
+            "journal_digest": confirmation_digest,
         }
     )
     retired = await manager.retire_execution_epoch(

@@ -1830,7 +1830,9 @@ class CapacityExecutableExecutorState(Base):
             "OR (journal_high_water > 0 AND journal_digest ~ '^[0-9a-f]{64}$' "
             "AND journal_digest <> repeat('0', 64))) "
             "AND ((inventory_high_water = 0 AND last_inventory_digest IS NULL) "
-            "OR (inventory_high_water > 0 AND last_inventory_digest ~ '^[0-9a-f]{64}$'))",
+            "OR (inventory_high_water > 0 AND last_inventory_digest ~ '^[0-9a-f]{64}$')) "
+            "AND (inventory_confirmation_journal_digest IS NULL OR "
+            "inventory_confirmation_journal_digest ~ '^[0-9a-f]{64}$')",
             name="capacity_executable_executor_state_digest_check",
         ),
         CheckConstraint(
@@ -1852,10 +1854,11 @@ class CapacityExecutableExecutorState(Base):
             "= executor_incarnation::text "
             "AND inventory_payload ->> 'pool_id' = pool_id "
             "AND inventory_payload -> 'pool_generation' = to_jsonb(pool_generation) "
+            "AND inventory_confirmation_journal_digest ~ '^[0-9a-f]{64}$' "
             "AND ((inventory_payload -> 'journal_sequence' = to_jsonb(journal_high_water) "
             "AND inventory_payload ->> 'journal_digest' = journal_digest) OR "
             "(inventory_payload -> 'journal_sequence' = to_jsonb(journal_high_water - 2) "
-            "AND inventory_payload ->> 'journal_digest' <> journal_digest)) "
+            "AND inventory_confirmation_journal_digest = journal_digest)) "
             "AND inventory_payload -> 'execution' -> 'execution_epoch' "
             "= to_jsonb(execution_epoch) "
             "AND inventory_payload -> 'execution' ->> 'execution_manifest_sha256' "
@@ -1926,6 +1929,7 @@ class CapacityExecutableExecutorState(Base):
     )
     last_inventory_digest: Mapped[str | None] = mapped_column(Text)
     inventory_payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    inventory_confirmation_journal_digest: Mapped[str | None] = mapped_column(Text)
     last_inventory_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     retirement_safe: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")

@@ -324,6 +324,7 @@ def test_retirement_lifecycle_schema_matches_model_and_migration(
     executor_columns = {
         "retirement_safe": ("BOOLEAN", False),
         "retirement_inventory_digest": ("TEXT", True),
+        "inventory_confirmation_journal_digest": ("TEXT", True),
     }
     expected_unique_constraints = {
         "capacity_execution_epoch_drain_idempotency_key": ("drain_idempotency_key",),
@@ -359,10 +360,11 @@ def test_retirement_lifecycle_schema_matches_model_and_migration(
             "= executor_incarnation::text "
             "AND inventory_payload ->> 'pool_id' = pool_id "
             "AND inventory_payload -> 'pool_generation' = to_jsonb(pool_generation) "
+            "AND inventory_confirmation_journal_digest ~ '^[0-9a-f]{64}$' "
             "AND ((inventory_payload -> 'journal_sequence' = to_jsonb(journal_high_water) "
             "AND inventory_payload ->> 'journal_digest' = journal_digest) OR "
             "(inventory_payload -> 'journal_sequence' = to_jsonb(journal_high_water - 2) "
-            "AND inventory_payload ->> 'journal_digest' <> journal_digest)) "
+            "AND inventory_confirmation_journal_digest = journal_digest)) "
             "AND inventory_payload -> 'execution' -> 'execution_epoch' "
             "= to_jsonb(execution_epoch) "
             "AND inventory_payload -> 'execution' ->> 'execution_manifest_sha256' "
@@ -401,12 +403,13 @@ def test_retirement_lifecycle_schema_matches_model_and_migration(
             "(inventory_payload ->> 'pool_id'::text) = pool_id AND "
             "(inventory_payload -> 'pool_generation'::text) "
             "= to_jsonb(pool_generation) AND "
+            "inventory_confirmation_journal_digest ~ '^[0-9a-f]{64}$'::text AND "
             "((inventory_payload -> 'journal_sequence'::text) "
             "= to_jsonb(journal_high_water) AND "
             "(inventory_payload ->> 'journal_digest'::text) = journal_digest OR "
             "(inventory_payload -> 'journal_sequence'::text) "
             "= to_jsonb(journal_high_water - 2) AND "
-            "(inventory_payload ->> 'journal_digest'::text) <> journal_digest) AND "
+            "inventory_confirmation_journal_digest = journal_digest) AND "
             "((inventory_payload -> 'execution'::text) -> "
             "'execution_epoch'::text) = to_jsonb(execution_epoch) AND "
             "((inventory_payload -> 'execution'::text) ->> "

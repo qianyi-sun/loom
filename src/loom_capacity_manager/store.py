@@ -40,6 +40,7 @@ from loom_capacity_manager.contracts import (
     checked_sum,
 )
 from loom_capacity_manager.executable_contracts import (
+    ExecutableExecutorInventoryV2,
     ExecutableExecutorRegistrationV2,
     ExecutionActivationV2,
     ExecutionAuthorityV2,
@@ -50,6 +51,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutionRetirementV2,
     LegacyWriterFenceV2,
     canonical_executable_digest,
+    canonical_inventory_confirmation_journal_head,
 )
 from loom_capacity_manager.fleet_state import (
     FleetStateError,
@@ -2400,6 +2402,15 @@ class CapacityManagementStore:
                     if state.inventory_payload is None
                     else state.inventory_payload.get("journal_digest")
                 )
+                try:
+                    inventory_contract = ExecutableExecutorInventoryV2.model_validate_json(
+                        json.dumps(state.inventory_payload)
+                    )
+                    confirmation_sequence, confirmation_digest = (
+                        canonical_inventory_confirmation_journal_head(inventory_contract)
+                    )
+                except ValueError:
+                    confirmation_sequence, confirmation_digest = -1, ""
                 if (
                     state.state != "current"
                     or state.execution_manifest_sha256 != request.execution_manifest_sha256
@@ -2416,9 +2427,10 @@ class CapacityManagementStore:
                     or state.retirement_inventory_digest != checkpoint.inventory_digest
                     or state.inventory_payload is None
                     or type(inventory_journal_sequence) is not int
-                    or inventory_journal_sequence + 2 != state.journal_high_water
                     or not isinstance(inventory_journal_digest, str)
-                    or inventory_journal_digest == state.journal_digest
+                    or confirmation_sequence != state.journal_high_water
+                    or confirmation_digest != state.journal_digest
+                    or state.inventory_confirmation_journal_digest != confirmation_digest
                     or state.last_inventory_at is None
                     or state.last_inventory_at < now - self._freshness
                     or state.last_heartbeat_at <= state.last_inventory_at

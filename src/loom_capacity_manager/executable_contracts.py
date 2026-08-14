@@ -815,6 +815,53 @@ def canonical_executable_digest(contract: StrictV2Model) -> str:
     return hashlib.sha256(canonical_executable_bytes(contract)).hexdigest()
 
 
+def canonical_inventory_confirmation_journal_head(
+    inventory: ExecutableExecutorInventoryV2,
+) -> tuple[int, str]:
+    """Derive the exact journal head after requested/confirmed publication."""
+
+    if not isinstance(inventory, ExecutableExecutorInventoryV2):
+        raise ValueError("inventory confirmation requires an executable inventory")
+    payload = canonical_executable_bytes(inventory)
+    payload_digest = hashlib.sha256(payload).hexdigest()
+    payload_base64 = base64.b64encode(payload).decode("ascii")
+    object_id = str(inventory.executor_incarnation)
+
+    def record_digest(*, sequence: int, previous_digest: str, event_kind: str) -> str:
+        record = {
+            "schema_version": 2,
+            "sequence": sequence,
+            "previous_digest": previous_digest,
+            "event_kind": event_kind,
+            "object_kind": "inventory",
+            "object_id": object_id,
+            "payload_digest": payload_digest,
+            "payload_base64": payload_base64,
+        }
+        encoded = json.dumps(
+            record,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("ascii")
+        return hashlib.sha256(encoded).hexdigest()
+
+    requested_sequence = inventory.journal_sequence + 1
+    requested_digest = record_digest(
+        sequence=requested_sequence,
+        previous_digest=inventory.journal_digest,
+        event_kind="inventory-publish-requested",
+    )
+    confirmation_sequence = requested_sequence + 1
+    confirmation_digest = record_digest(
+        sequence=confirmation_sequence,
+        previous_digest=requested_digest,
+        event_kind="inventory-publish-confirmed",
+    )
+    return confirmation_sequence, confirmation_digest
+
+
 __all__ = [
     "CandidateBindingV2",
     "ExecutableBootstrapRegistrationV2",
@@ -849,4 +896,5 @@ __all__ = [
     "SubjectExecutionAcknowledgementV2",
     "canonical_executable_bytes",
     "canonical_executable_digest",
+    "canonical_inventory_confirmation_journal_head",
 ]

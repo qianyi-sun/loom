@@ -97,6 +97,43 @@ def isolated_capacity_migration_url(postgres_url: str) -> Iterator[str]:
         admin_engine.dispose()
 
 
+def test_forward_migration_replaces_existing_0004_retirement_constraint(
+    isolated_capacity_migration_url: str,
+) -> None:
+    """An installation already stamped at 0004 must receive the new binding."""
+
+    cfg = _capacity_config(isolated_capacity_migration_url)
+    command.upgrade(cfg, "capacity_0004")
+    engine = create_engine(isolated_capacity_migration_url)
+    try:
+        with engine.connect() as connection:
+            old_columns = {
+                item["name"]
+                for item in inspect(connection).get_columns("capacity_executable_executor_states")
+            }
+        assert "inventory_confirmation_journal_digest" not in old_columns
+
+        command.upgrade(cfg, "head")
+        with engine.connect() as connection:
+            columns = {
+                item["name"]
+                for item in inspect(connection).get_columns("capacity_executable_executor_states")
+            }
+            checks = {
+                item["name"]: item["sqltext"]
+                for item in inspect(connection).get_check_constraints(
+                    "capacity_executable_executor_states"
+                )
+            }
+        assert "inventory_confirmation_journal_digest" in columns
+        assert (
+            "inventory_confirmation_journal_digest"
+            in checks["capacity_executable_executor_retirement_check"]
+        )
+    finally:
+        engine.dispose()
+
+
 def test_shadow_schema_has_execution_epoch_table_and_zero_execution_guard(
     capacity_postgres_url: str,
 ) -> None:
@@ -756,12 +793,12 @@ def test_capacity_schema_has_independent_revision_table(
         with capacity_engine.connect() as connection:
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == ("capacity_0004")
+            ).scalar_one() == ("capacity_0005")
         with environment_engine.connect() as connection:
             environment_revision = connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one()
-            assert environment_revision != "capacity_0004"
+            assert environment_revision != "capacity_0005"
             assert not (EXPECTED_TABLES & set(inspect(connection).get_table_names()))
     finally:
         capacity_engine.dispose()
@@ -783,7 +820,7 @@ async def test_capacity_schema_error_uses_installed_capacity_migration_command(
 async def test_capacity_schema_startup_returns_numeric_head(
     capacity_engine: AsyncEngine,
 ) -> None:
-    assert await assert_capacity_schema_at_head(capacity_engine) == 4
+    assert await assert_capacity_schema_at_head(capacity_engine) == 5
 
 
 def test_package3_tables_are_database_constrained_to_dry_run(

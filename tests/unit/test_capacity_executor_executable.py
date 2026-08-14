@@ -30,6 +30,7 @@ from loom_capacity_executor.slurm_contracts import (
     SlurmJobObservationV2,
     SlurmSubmissionV2,
     SlurmTerminalEvidenceV2,
+    SlurmTresValueV2,
 )
 from loom_capacity_manager.executable_contracts import (
     ExecutableBootstrapRegistrationV2,
@@ -633,7 +634,19 @@ async def test_resource_mismatch_inventory_retains_owned_binding_for_quarantine(
     )
     await executor.tick()
     submitted = slurm.jobs[0]
-    slurm.jobs[0] = submitted.model_copy(update={"cpus": submitted.cpus + 1})
+    unexpected_tres = SlurmTresValueV2(name="gres/network", value=1)
+    observed_tres = (
+        *(
+            item.model_copy(update={"value": item.value + 1}) if item.name == "gres/fpga" else item
+            for item in submitted.generic_tres
+        ),
+        unexpected_tres,
+    )
+    assert observed_tres != submitted.generic_tres
+    assert all(isinstance(item, SlurmTresValueV2) for item in observed_tres)
+    slurm.jobs[0] = submitted.model_copy(
+        update={"cpus": submitted.cpus + 1, "generic_tres": observed_tres}
+    )
 
     result = await executor.tick()
 
@@ -642,6 +655,14 @@ async def test_resource_mismatch_inventory_retains_owned_binding_for_quarantine(
     assert record.ownership_proof is not None
     assert record.ownership_proof.metadata.binding == launch.binding
     assert record.resources.cpu_millicores == (submitted.cpus + 1) * 1_000
+    unexpected_resource = (
+        f"slurm_unmapped_{hashlib.sha256(unexpected_tres.name.encode('ascii')).hexdigest()[:40]}"
+    )
+    assert record.resources.generic == {
+        "fpga": 2,
+        "gpu_a100": 2,
+        unexpected_resource: 1,
+    }
     journal.close()
 
 

@@ -879,6 +879,23 @@ class ExecutablePoolExecutor:
             and item.ownership_token == request.ownership_token
         )
 
+    def _observed_generic_resources(
+        self,
+        item: SlurmJobObservationV2,
+    ) -> dict[str, int]:
+        mappings = {
+            mapping.tres_name: mapping.resource_name for mapping in self.profile.generic_tres
+        }
+        generic: dict[str, int] = {}
+        for tres in item.generic_tres:
+            resource_name = mappings.get(tres.name)
+            if resource_name is None:
+                resource_name = (
+                    f"slurm_unmapped_{hashlib.sha256(tres.name.encode('ascii')).hexdigest()[:40]}"
+                )
+            generic[resource_name] = tres.value
+        return generic
+
     @staticmethod
     def _slurm_evidence_digest(
         item: SlurmJobObservationV2 | SlurmTerminalEvidenceV2,
@@ -994,11 +1011,7 @@ class ExecutablePoolExecutor:
                     cpu_millicores=item.cpus * 1_000,
                     memory_bytes=item.memory_bytes,
                     gpu_count=item.gpus,
-                    generic=(
-                        proofs[item.job_id].metadata.binding.resources.generic
-                        if item.job_id in proofs
-                        else {}
-                    ),
+                    generic=self._observed_generic_resources(item),
                 ),
                 node_ids=item.nodes,
                 controller_evidence_sha256=self._slurm_evidence_digest(item),
