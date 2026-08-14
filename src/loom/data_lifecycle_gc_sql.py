@@ -385,6 +385,7 @@ class SqlAlchemyGcJournal:
         self,
         *,
         run_id: UUID,
+        run_mutation_epoch: int,
         mutation: MutationEpochAdvance,
         deletion_token: UUID,
     ) -> MutationEpochState:
@@ -413,7 +414,7 @@ class SqlAlchemyGcJournal:
                 {
                     "epoch": state.epoch,
                     "run_id": run_id,
-                    "expected_epoch": mutation.expected_epoch,
+                    "expected_epoch": run_mutation_epoch,
                 },
             )
             if result.rowcount != 1:
@@ -435,7 +436,12 @@ class SqlAlchemyGcJournal:
         with self._engine.connect() as connection:
             run = connection.execute(
                 text(
-                    "SELECT state, dry_run, inventory FROM data_lifecycle_gc_runs WHERE id=:run_id"
+                    "SELECT run.state, run.dry_run, run.inventory, run.environment, "
+                    "run.namespace, run.mutation_epoch_before, epoch.epoch "
+                    "FROM data_lifecycle_gc_runs AS run "
+                    "LEFT JOIN staging_mutation_epochs AS epoch "
+                    "ON epoch.environment=run.environment AND epoch.namespace=run.namespace "
+                    "WHERE run.id=:run_id"
                 ),
                 {"run_id": run_id},
             ).one_or_none()
@@ -469,6 +475,15 @@ class SqlAlchemyGcJournal:
             )
         else:
             plan = deserialize_gc_plan(inventory)
+        completion_mutation_epoch = run[6]
+        if (
+            run[3] != plan.scope.environment
+            or run[4] != plan.scope.namespace
+            or run[5] != plan.mutation_epoch
+            or type(completion_mutation_epoch) is not int
+            or completion_mutation_epoch < plan.mutation_epoch
+        ):
+            raise RuntimeError("GC resume mutation epoch authority is stale")
         tokens = {row[1] for row in rows} | {row[1] for row in authority_rows}
         if len(tokens) != 1:
             raise RuntimeError("GC run deletion token authority is invalid")
@@ -476,6 +491,7 @@ class SqlAlchemyGcJournal:
             run_id=run_id,
             deletion_token=tokens.pop(),
             plan=plan,
+            completion_mutation_epoch=completion_mutation_epoch,
             item_states=tuple((row[0], row[2]) for row in rows),
         )
 

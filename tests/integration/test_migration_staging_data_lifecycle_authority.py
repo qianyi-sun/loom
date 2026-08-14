@@ -273,7 +273,7 @@ def test_epoch_compare_and_swap_updates_authority_and_appends_exact_event(
         engine.dispose()
 
 
-def test_sql_gc_journal_commits_exact_phases_and_mutation_epoch(
+def test_sql_gc_resume_advances_from_intervening_mutation_epoch(
     postgres_url_at_0065: str,
 ) -> None:
     engine = create_engine(postgres_url_at_0065)
@@ -445,11 +445,25 @@ def test_sql_gc_journal_commits_exact_phases_and_mutation_epoch(
             7,
         )
         assert authority_evidence == tuple(sorted((authority_id, empty_authority_id)))
+        with engine.begin() as connection:
+            intervening = advance_mutation_epoch(
+                SqlAlchemyMutationEpochStore(connection),
+                MutationEpochAdvance(
+                    environment="staging",
+                    namespace="loom-staging",
+                    expected_epoch=epoch,
+                    mutation_class=ProtectedMutationClass.ROLLOUT_APPLY,
+                    request_id="req-rollout-intervening",
+                    evidence_sha256="c" * 64,
+                    occurred_at=now + timedelta(minutes=1),
+                ),
+            )
+        assert intervening.epoch == epoch + 1
         deleter.verify = True
         result = resume_gc(
             run_id=run_id,
-            request_id="req-gcinteg00",
-            completed_at=now,
+            request_id="req-gcresume-intervening",
+            completed_at=now + timedelta(minutes=2),
             journal=journal,
             object_deleter=deleter,
         )
@@ -472,9 +486,21 @@ def test_sql_gc_journal_commits_exact_phases_and_mutation_epoch(
                 text("SELECT count(*) FROM data_lifecycle_authorities WHERE id IN (:a,:b)"),
                 {"a": authority_id, "b": empty_authority_id},
             ).scalar_one()
-        assert tuple(run) == ("completed", epoch, epoch + 1)
+            completion_event = connection.execute(
+                text(
+                    "SELECT mutation_class, request_id, evidence_sha256 "
+                    "FROM staging_mutation_epoch_events WHERE epoch=:epoch"
+                ),
+                {"epoch": epoch + 2},
+            ).one()
+        assert tuple(run) == ("completed", epoch, epoch + 2)
         assert item_state == "metadata_deleted"
         assert authority_count == 0
+        assert tuple(completion_event) == (
+            ProtectedMutationClass.LIFECYCLE_GC,
+            "req-gcresume-intervening",
+            plan.inventory_digest,
+        )
     finally:
         engine.dispose()
 

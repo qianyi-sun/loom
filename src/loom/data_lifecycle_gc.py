@@ -152,6 +152,7 @@ class GcResumeSnapshot:
     run_id: UUID
     deletion_token: UUID
     plan: GcPlan
+    completion_mutation_epoch: int
     item_states: tuple[tuple[UUID, str], ...]
 
     def __post_init__(self) -> None:
@@ -159,7 +160,9 @@ class GcResumeSnapshot:
         actual_ids = {object_id for object_id, _state in self.item_states}
         allowed = {"marked", "object_deleted", "verified", "metadata_deleted"}
         if (
-            expected_ids != actual_ids
+            type(self.completion_mutation_epoch) is not int
+            or self.completion_mutation_epoch < self.plan.mutation_epoch
+            or expected_ids != actual_ids
             or len(self.item_states) != len(actual_ids)
             or any(state not in allowed for _object_id, state in self.item_states)
         ):
@@ -235,6 +238,7 @@ class GcJournal(Protocol):
         self,
         *,
         run_id: UUID,
+        run_mutation_epoch: int,
         mutation: MutationEpochAdvance,
         deletion_token: UUID,
     ) -> MutationEpochState: ...
@@ -643,6 +647,7 @@ def execute_gc(
         )
         epoch_state = journal.complete_apply(
             run_id=run_id,
+            run_mutation_epoch=plan.mutation_epoch,
             mutation=mutation,
             deletion_token=deletion_token,
         )
@@ -697,7 +702,7 @@ def resume_gc(
     mutation = MutationEpochAdvance(
         environment=plan.scope.environment,
         namespace=plan.scope.namespace,
-        expected_epoch=plan.mutation_epoch,
+        expected_epoch=snapshot.completion_mutation_epoch,
         mutation_class=ProtectedMutationClass.LIFECYCLE_GC,
         request_id=request_id,
         evidence_sha256=plan.inventory_digest,
@@ -771,6 +776,7 @@ def resume_gc(
             raise LifecycleGcExecutionError("GC resume contains mixed metadata phases")
         epoch_state = journal.complete_apply(
             run_id=run_id,
+            run_mutation_epoch=plan.mutation_epoch,
             mutation=mutation,
             deletion_token=snapshot.deletion_token,
         )
