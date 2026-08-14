@@ -30,6 +30,13 @@ matrix.
 inside a fresh QEMU/KVM guest. The host does not run repository job code
 directly.
 
+The disposable guest disk is a sparse 128 GiB boundary. This is required by
+the locked Stage 1 simulator image, whose local build, vulnerability scan,
+SPDX SBOM generation, and publish readback exceed the former 64 GiB boundary.
+Large-image jobs must still use a job-owned Buildx builder and remove only that
+builder, exact local tags, and job-scoped temporary directories; broad Docker
+pruning is forbidden on the shared host.
+
 The guest image and boot assets are pinned by digest. The manager validates the
 candidate image, reserves a work-class slot, creates a one-job JIT
 registration, starts the VM, observes completion, removes the runner

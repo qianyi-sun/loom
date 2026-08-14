@@ -738,11 +738,23 @@ def test_stage1_image_uses_separate_candidate_and_trusted_release_authorities() 
     for seal_script in (candidate_seal, trusted_seal):
         assert "trap 'docker rm -f \"$container\" >/dev/null 2>&1 || true' EXIT" in seal_script
     assert "trap - EXIT" in trusted_seal
+    assert "required_bytes=85899345920" in publish_scripts
+    assert 'docker buildx create --name "$builder" --driver docker-container' in trusted_seal
+    assert 'docker buildx build --builder "$builder" --load' in trusted_seal
+    assert 'docker buildx rm "$builder"' in publish_scripts
+    assert 'rm -rf -- "$source_root"' in trusted_seal
+    assert 'rm -rf -- "$trivy_cache"' in trusted_seal
+    assert "docker system prune" not in publish_scripts
+    assert "docker builder prune" not in publish_scripts
+    assert "scripts/ci_registry_readback.py raw" in publish_scripts
     assert "type=docker,dest=" not in publish_scripts
     assert "docker push" in publish_scripts
     assert index["runs-on"] == "ubuntu-24.04"
     assert index["needs"] == ["plan", "stage1-publish"]
     assert "--deny-self-hosted-runners" in "\n".join(
+        str(step.get("run", "")) for step in index["steps"] if "run" in step
+    )
+    assert "scripts/ci_registry_readback.py digest" in "\n".join(
         str(step.get("run", "")) for step in index["steps"] if "run" in step
     )
     assert {"stage1-build", "stage1-publish", "stage1-publish-index"} <= set(gate["needs"])
@@ -1332,6 +1344,13 @@ def test_manifest_digest_is_captured_once_and_tags_follow_verification() -> None
     assert names.index("Verify published manifest attestation") < names.index(
         "Publish verified manifest tags"
     )
+    publish_tags = next(
+        step["run"]
+        for step in manifest["steps"]
+        if step.get("name") == "Publish verified manifest tags"
+    )
+    assert "scripts/ci_registry_readback.py digest" in publish_tags
+    assert "--attempts 6 --delay-seconds 2" in publish_tags
 
 
 def test_release_record_helper_rejects_incomplete_workflow_handoff(tmp_path: Path) -> None:

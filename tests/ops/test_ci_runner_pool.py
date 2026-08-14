@@ -194,6 +194,7 @@ def test_checked_in_oldlab5_profile_is_bounded_and_pinned() -> None:
     assert profile.host_cpu_budget == 22
     assert profile.total_memory_mib == 67_584
     assert profile.host_memory_budget_mib == 81_920
+    assert profile.disk_gib_per_slot == 128
     assert profile.reconcile_seconds == 10
     assert profile.labels == pool.EXPECTED_LABELS
     assert {
