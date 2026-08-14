@@ -151,3 +151,21 @@ def test_index_record_requires_one_exact_amd64_child(tmp_path: Path) -> None:
     _canonical(index, value)
     with pytest.raises(Stage1ImageEvidenceError, match="exactly one child"):
         _record_index(index_args)
+
+
+@pytest.mark.parametrize("event_name", ["push", "workflow_dispatch"])
+def test_trusted_record_accepts_only_protected_branch_release_events(
+    tmp_path: Path, event_name: str
+) -> None:
+    args = _args(tmp_path)
+    args.mode = "trusted-publish"
+    args.event_name = event_name
+    args.ref_name = "dev"
+
+    record = _record(args)
+
+    assert record["build"]["mode"] == "trusted-publish"
+    assert record["source"]["event_name"] == event_name
+    args.ref_name = "feature"
+    with pytest.raises(Stage1ImageEvidenceError, match="ref"):
+        _record(args)

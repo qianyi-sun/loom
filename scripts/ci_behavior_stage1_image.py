@@ -129,8 +129,11 @@ def _record(args: argparse.Namespace) -> dict[str, object]:
         "workflow_dispatch",
     }:
         raise Stage1ImageEvidenceError("candidate event is invalid")
-    if args.mode == "trusted-publish" and args.event_name != "push":
-        raise Stage1ImageEvidenceError("trusted publish event is invalid")
+    if args.mode == "trusted-publish":
+        if args.event_name not in {"push", "workflow_dispatch"}:
+            raise Stage1ImageEvidenceError("trusted publish event is invalid")
+        if args.ref_name not in {"dev", "main"}:
+            raise Stage1ImageEvidenceError("trusted publish ref is invalid")
     if args.image != "behavior-stage1-sim":
         raise Stage1ImageEvidenceError("Stage 1 component identity drift")
     if args.image_name != "loom-behavior-stage1-sim":

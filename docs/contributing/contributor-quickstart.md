@@ -356,9 +356,14 @@ build path, do not log in to GHCR, and do not use a publication cache. Manual
 dispatch is build-only. Image validation builds AMD64 and ARM64 in separate
 jobs on matching native CPUs; the ARM job uses `ubuntu-24.04-arm` instead of
 QEMU. Only the checked-in architecture-specific `publish` jobs and their
-manifest joiner on a push to `dev` or `main` request job-scoped `packages: write`
-authority. The joiner verifies that the final tag contains exactly the AMD64 and
-ARM64 members. Same-repository branch workflow code still runs on the read-only PR
+manifest joiner on a push to `dev`/`main`, or an exact protected-head recovery
+from `trusted-image-release-controller`, request job-scoped `packages: write`
+authority. The scheduled controller exists because GitHub suppresses push
+workflows when the preceding squash auto-merge used its workflow
+`GITHUB_TOKEN`. It dispatches only the current protected `dev` head, starting
+at the nearest successful trusted release ancestor; ordinary manual dispatch
+remains build-only. The joiner verifies that the final tag contains exactly the
+AMD64 and ARM64 members. Same-repository branch workflow code still runs on the read-only PR
 path; autonomous-agent hard isolation requires
 fork-only execution or an external trusted workflow/App.
 

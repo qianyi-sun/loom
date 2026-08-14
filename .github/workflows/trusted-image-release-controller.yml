@@ -1,0 +1,43 @@
+name: trusted-image-release-controller
+
+# Auto-merge is enabled with the workflow GITHUB_TOKEN. GitHub intentionally
+# suppresses push-triggered workflows for the resulting merge commit. This
+# trusted default-branch controller reconciles that gap by dispatching the
+# images workflow for the exact protected dev head and the nearest successful
+# trusted release ancestor. The images workflow independently validates the
+# actor, branch, ancestry, and immutable commit range before gaining package
+# write authority.
+on:
+  schedule:
+    - cron: "17,47 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: trusted-image-release-controller-dev
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    name: reconcile protected dev image publication
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Reconcile exact protected head
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          python3 scripts/ops/trusted_image_release_controller.py
+          --repository "$GITHUB_REPOSITORY"
+          --branch dev
+          --checkout-head "$GITHUB_SHA"

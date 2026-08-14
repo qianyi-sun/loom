@@ -150,9 +150,14 @@ secrets.
   multi-arch image validation when the changed paths do not already require it.
   In the checked-in workflow, pull requests, merge groups, and manual
   dispatches build with a read-only token, do not log in to GHCR, and do not
-  use a shared publication cache. Manual dispatch is build-only. Only the
-  `publish` job on a push to `dev` or `main` requests `packages: write` and
-  publishes deployable images. This is not a repository-wide sandbox for
+  use a shared publication cache. Ordinary manual dispatch is build-only. The
+  `publish` jobs request `packages: write` only for a push to `dev`/`main`, or
+  for the exact protected-head reconciliation dispatched by the checked-in
+  `trusted-image-release-controller` as `github-actions[bot]`. The controller
+  closes GitHub's intentional suppression of workflows caused by an earlier
+  workflow `GITHUB_TOKEN`; it selects the range from the nearest successful
+  trusted release ancestor and deduplicates active, successful, and failed
+  heads. It cannot select PR code or an arbitrary commit. This is not a repository-wide sandbox for
   same-repository writers: branch workflow code still runs from the PR branch.
   Autonomous agents need a fork-only
   execution boundary or an external trusted workflow/App before this can be

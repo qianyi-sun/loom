@@ -80,8 +80,8 @@ def test_repository_workflows_match_the_verified_action_lock() -> None:
     )
 
     assert result.errors == ()
-    assert result.workflow_count == 13
-    assert result.reference_count == 97
+    assert result.workflow_count == 14
+    assert result.reference_count == 98
     assert set(result.remote_actions) == {
         "actions/attest",
         "actions/attest-build-provenance",
@@ -103,8 +103,7 @@ def test_repository_workflows_use_only_actions_allowed_by_github_policy() -> Non
     forbidden = {
         action
         for action in result.remote_actions
-        if not action.startswith(("actions/", "qianyi-sun/"))
-        and action != "astral-sh/setup-uv"
+        if not action.startswith(("actions/", "qianyi-sun/")) and action != "astral-sh/setup-uv"
     }
 
     assert forbidden == set()
@@ -142,7 +141,9 @@ def test_release_evidence_trivy_identity_matches_repository_owned_installer() ->
     assert len(installer_scripts) == 1
     assert "python3 scripts/install_trivy.py" in installer_scripts[0]
     assert all("python3 scripts/install_trivy.py" not in script for script in scan_scripts)
-    assert all("/tmp/loom-trivy-binaries/${ARCHITECTURE}/trivy" in script for script in scan_scripts)
+    assert all(
+        "/tmp/loom-trivy-binaries/${ARCHITECTURE}/trivy" in script for script in scan_scripts
+    )
     assert TRIVY_RELEASE_URL.endswith("/v0.70.0")
     assert TRIVY_ARCHIVE_SHA256 == {
         "amd64": "8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9",
