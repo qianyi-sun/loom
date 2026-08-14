@@ -339,6 +339,30 @@ def test_live_k3s_status_manager_is_exact_scoped_controller_authority(
     )
 
 
+def test_live_k3s_deployment_status_accepts_annotation_parent_marker() -> None:
+    k3s_status = {
+        "manager": "k3s",
+        "operation": "Update",
+        "apiVersion": "apps/v1",
+        "subresource": "status",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {
+            "f:metadata": {
+                "f:annotations": {
+                    ".": {},
+                    "f:deployment.kubernetes.io/revision": {},
+                }
+            },
+            "f:status": {},
+        },
+    }
+
+    _validate_managed_fields(
+        [*_managed_fields("loom-staging-rollout"), k3s_status],
+        identity="apps/v1|Deployment|loom-staging|loom-pipeline-orchestrator",
+    )
+
+
 def test_live_cnpg_status_manager_is_exact_scoped_controller_authority() -> None:
     legacy = _managed_fields("kubectl-client-side-apply")
     cnpg_status = {
@@ -372,6 +396,17 @@ def test_live_cnpg_status_manager_is_exact_scoped_controller_authority() -> None
                 "fieldsV1": {
                     "f:status": {},
                     "f:metadata": {"f:annotations": {"f:unexpected": {}}},
+                }
+            },
+            "apps/v1|Deployment|loom-staging|loom-test",
+        ),
+        (
+            {
+                "fieldsV1": {
+                    "f:status": {},
+                    "f:metadata": {
+                        "f:annotations": {".": {}, "f:unexpected": {}}
+                    },
                 }
             },
             "apps/v1|Deployment|loom-staging|loom-test",

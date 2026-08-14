@@ -525,9 +525,15 @@ def _is_scoped_controller_authority(entry: Mapping[str, object], *, identity: st
     if manager == "k3s":
         parts = identity.split("|", 3)
         metadata_fields = fields_v1.get("f:metadata")
-        deployment_revision_fields: dict[str, object] = {
-            "f:annotations": {"f:deployment.kubernetes.io/revision": {}}
-        }
+        deployment_revision_fields: tuple[dict[str, object], ...] = (
+            {"f:annotations": {"f:deployment.kubernetes.io/revision": {}}},
+            {
+                "f:annotations": {
+                    ".": {},
+                    "f:deployment.kubernetes.io/revision": {},
+                }
+            },
+        )
         return (
             len(parts) == 4
             and (parts[0], parts[1]) in _K3S_STATUS_RESOURCES
@@ -538,7 +544,7 @@ def _is_scoped_controller_authority(entry: Mapping[str, object], *, identity: st
                 metadata_fields is None
                 or (
                     (parts[0], parts[1]) == ("apps/v1", "Deployment")
-                    and metadata_fields == deployment_revision_fields
+                    and metadata_fields in deployment_revision_fields
                 )
             )
         )
