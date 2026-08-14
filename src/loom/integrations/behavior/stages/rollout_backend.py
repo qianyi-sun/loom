@@ -10,17 +10,24 @@ from __future__ import annotations
 
 import inspect
 import io
+import json
+import math
 import shutil
 import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
 from importlib import import_module
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
-from loom.integrations.behavior.contracts import BehaviorRolloutParametersV1, StageRequestV1
+from loom.integrations.behavior.contracts import (
+    ArtifactFileV1,
+    BehaviorRolloutParametersV1,
+    StageRequestV1,
+)
 from loom.integrations.behavior.errors import BehaviorContractError
 from loom.integrations.behavior.stages.rollout import (
+    MountedRolloutInputs,
     RolloutPaths,
     load_mounted_inputs,
 )
@@ -28,6 +35,7 @@ from loom.integrations.behavior.stages.rollout_engine import (
     EpisodeLivePreview,
     LoadedTaskInstance,
 )
+from loom.pipeline.keys import digest_bytes
 
 if TYPE_CHECKING:
     from loom.integrations.behavior.stages.rollout_engine import EpisodeDriver
@@ -93,6 +101,7 @@ class _OmniRuntime(Protocol):
         *,
         task_name: str,
         eval_instance_index: int,
+        task_config: Mapping[str, object],
         output_root: Path,
     ) -> _Evaluator: ...
 
@@ -142,6 +151,7 @@ class _PinnedOmniRuntime:
         *,
         task_name: str,
         eval_instance_index: int,
+        task_config: Mapping[str, object],
         output_root: Path,
     ) -> _Evaluator:
         # Resolve the name before interpolating it into Hydra syntax.  This
@@ -178,6 +188,13 @@ class _PinnedOmniRuntime:
                 config,
                 "output_folder",
                 str(output_root),
+                merge=False,
+                force_add=True,
+            )
+            self._omega_conf.update(
+                config,
+                "authoritative_task_config",
+                dict(task_config),
                 merge=False,
                 force_add=True,
             )
@@ -312,6 +329,88 @@ def _load_runtime() -> _OmniRuntime:
     )
 
 
+def _finite_vector(value: object, *, length: int, label: str) -> list[float]:
+    if not isinstance(value, list) or len(value) != length:
+        raise BehaviorContractError(f"signed TRO {label} is malformed")
+    result: list[float] = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            raise BehaviorContractError(f"signed TRO {label} is malformed")
+        number = float(item)
+        if not math.isfinite(number):
+            raise BehaviorContractError(f"signed TRO {label} is not finite")
+        result.append(number)
+    return result
+
+
+def _authoritative_task_config(
+    inputs: MountedRolloutInputs,
+    paths: RolloutPaths,
+) -> dict[str, object]:
+    task = inputs.task_instance.payload
+    if "/" in task.task_name or "\\" in task.task_name:
+        raise BehaviorContractError("signed task name is unsafe for a dataset path")
+    expected_file_suffix = (
+        f"_task_{task.task_name}_0_{task.engine_task_instance_id}_template-tro_state.json"
+    )
+    candidates: list[tuple[PurePosixPath, ArtifactFileV1]] = []
+    for descriptor in inputs.dataset.files:
+        path = PurePosixPath(descriptor.relative_path)
+        parts = path.parts
+        if (
+            len(parts) == 8
+            and parts[:4]
+            == (
+                "payload",
+                "omnigibson",
+                "2025-challenge-task-instances",
+                "scenes",
+            )
+            and parts[5] == "json"
+            and parts[6] == f"{parts[4]}_task_{task.task_name}_instances"
+            and parts[7] == f"{parts[4]}{expected_file_suffix}"
+        ):
+            candidates.append((path, descriptor))
+    if len(candidates) != 1:
+        raise BehaviorContractError("dataset has no unique signed Stage 1 TRO state")
+    relative, descriptor = candidates[0]
+    if descriptor.size_bytes > 16 * 1024 * 1024:
+        raise BehaviorContractError("signed TRO exceeds the Stage 1 byte limit")
+    target = paths.artifact_root("dataset").joinpath(*relative.parts)
+    try:
+        before = target.stat(follow_symlinks=False)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or before.st_size != descriptor.size_bytes
+        ):
+            raise BehaviorContractError("signed TRO is not a private regular file")
+        payload = target.read_bytes()
+        after = target.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise BehaviorContractError("signed TRO cannot be read") from exc
+    if (
+        (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+        != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        or digest_bytes(payload) != descriptor.sha256
+    ):
+        raise BehaviorContractError("signed TRO bytes disagree with the dataset manifest")
+    try:
+        value = json.loads(payload)
+        pose = value["robot_poses"]["R1Pro"][0]
+        position = _finite_vector(pose["position"], length=3, label="robot position")
+        orientation = _finite_vector(pose["orientation"], length=4, label="robot orientation")
+    except BehaviorContractError:
+        raise
+    except (KeyError, IndexError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise BehaviorContractError("signed TRO has no unique R1Pro pose") from exc
+    return {
+        "robot_start_orientation": orientation,
+        "robot_start_position": position,
+        "scene_model": relative.parts[4],
+    }
+
+
 def _step_count(evaluator: _Evaluator) -> int:
     recorder = evaluator.data_recorder
     value = getattr(recorder, "step_count", None)
@@ -402,6 +501,7 @@ class OmniGibsonStage1EpisodeDriver:
         evaluator = runtime.create_evaluator(
             task_name=task.task_name,
             eval_instance_index=task.eval_instance_index,
+            task_config=_authoritative_task_config(inputs, self._paths),
             output_root=self._upstream_root,
         )
         try:

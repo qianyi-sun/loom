@@ -379,6 +379,26 @@ def test_validator_fails_closed_for_unowned_test_files(
     assert f"{language} test has no CI owner: {test_path}" in errors
 
 
+def test_vendor_projection_tests_are_component_inputs_not_loom_test_entries(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "component-ownership.toml"
+    manifest_path.write_text("schema_version = 2\n", encoding="utf-8")
+    test_path = "third_party/vendor/runtime/tests/test_upstream.py"
+    target = tmp_path / test_path
+    target.parent.mkdir(parents=True)
+    target.write_text("def test_upstream(): pass\n", encoding="utf-8")
+    manifest = component_ownership.load_manifest(manifest_path)
+
+    errors = component_ownership.validate_manifest(
+        manifest,
+        repo_root=tmp_path,
+        tracked_paths=(test_path,),
+    )
+
+    assert errors == []
+
+
 def test_validator_rejects_duplicate_release_digest_ownership(tmp_path: Path) -> None:
     manifest_path = tmp_path / "component-ownership.toml"
     manifest_path.write_text(
@@ -860,10 +880,7 @@ def test_rollout_release_images_have_exact_manifest_owner() -> None:
     assert (
         component_ownership.validate_release_image_ownership(
             manifest,
-            tuple(
-                (entry["image_name"], entry["dockerfile"])
-                for entry in rollout_images
-            ),
+            tuple((entry["image_name"], entry["dockerfile"]) for entry in rollout_images),
         )
         == []
     )
@@ -903,7 +920,7 @@ def test_release_image_matrix_is_derived_from_all_release_components() -> None:
 
     matrix = component_ownership.release_image_matrix(manifest)
 
-    assert len(matrix) == 16
+    assert len(matrix) == 17
     assert {entry["image_name"] for entry in matrix} == {
         component.release_digest for component in manifest.release_components()
     }
@@ -913,7 +930,9 @@ def test_release_image_matrix_is_derived_from_all_release_components() -> None:
 def test_capacity_manager_image_has_narrow_ownership_and_no_rollout_role() -> None:
     manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
     component = next(
-        component for component in manifest.release_components() if component.id == "capacity-manager"
+        component
+        for component in manifest.release_components()
+        if component.id == "capacity-manager"
     )
 
     assert component.dockerfile == "deploy/Dockerfile.capacity-manager"
@@ -974,7 +993,10 @@ def test_pipeline_core_fixture_is_conformance_only_and_never_a_rollout_image() -
 def test_native_release_image_matrix_crosses_every_image_with_both_architectures() -> None:
     manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
 
-    images = component_ownership.release_image_matrix(manifest)
+    images = component_ownership.release_image_matrix_for_publisher(
+        manifest,
+        publisher="images",
+    )
     matrix = component_ownership.native_release_image_matrix(images)
 
     assert len(matrix) == len(images) * 2
@@ -985,10 +1007,28 @@ def test_native_release_image_matrix_crosses_every_image_with_both_architectures
     for image in images:
         matching = [entry for entry in matrix if entry["image"] == image["image"]]
         assert [entry["architecture"] for entry in matching] == ["amd64", "arm64"]
-        assert all(
-            {key: entry[key] for key in image} == image
-            for entry in matching
-        )
+        assert all({key: entry[key] for key in image} == image for entry in matching)
+
+
+def test_stage1_image_has_a_separate_single_platform_publisher() -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    images = component_ownership.release_image_matrix_for_publisher(
+        manifest,
+        publisher="behavior-stage1",
+    )
+
+    assert images == (
+        {
+            "image": "behavior-stage1-sim",
+            "image_name": "loom-behavior-stage1-sim",
+            "dockerfile": "deploy/Dockerfile.behavior-stage1-sim",
+            "context": ".",
+        },
+    )
+    component = next(
+        item for item in manifest.release_components() if item.id == "behavior-stage1-sim"
+    )
+    assert component.platforms == ("linux/amd64",)
 
 
 def test_release_image_selection_uses_manifest_source_ownership() -> None:
@@ -1139,8 +1179,7 @@ def test_runtime_payload_lane_paths_are_exactly_policy_owned() -> None:
     assert len(policy_paths) == 11
     assert policy_paths == set(lane_paths)
     assert all(
-        manifest.test_owner_for_path(path).execution_policy is not None
-        for path in policy_paths
+        manifest.test_owner_for_path(path).execution_policy is not None for path in policy_paths
     )
 
 

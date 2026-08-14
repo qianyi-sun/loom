@@ -1,0 +1,9 @@
+# @package _global_
+
+policy_name: local
+
+model:
+  _target_: omnigibson.learning.policies.LocalPolicy
+  # Must match the robot's action_dim. For R1Pro the action is:
+  # base(3) + torso(4) + left_arm(7) + left_gripper(2) + right_arm(7) + right_gripper(2) = 25
+  action_dim: 25

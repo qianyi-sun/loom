@@ -32,6 +32,8 @@ class Component:
     scan_owner: str
     attestation_owner: str
     release_digest: str | None
+    publisher: str
+    platforms: tuple[str, ...]
     runtime_policy: str
     rollout_role: str
 
@@ -84,9 +86,7 @@ class Manifest:
     def execution_policy(self, policy_id: str) -> ExecutionPolicy:
         matches = tuple(policy for policy in self.execution_policies if policy.id == policy_id)
         if len(matches) != 1:
-            raise ManifestError(
-                f"execution policy must have exactly one definition: {policy_id}"
-            )
+            raise ManifestError(f"execution policy must have exactly one definition: {policy_id}")
         return matches[0]
 
     def execution_case(self, path: str) -> ExecutionCase:
@@ -244,6 +244,8 @@ def _component(raw: dict[str, Any]) -> Component:
             "scan_owner",
             "attestation_owner",
             "release_digest",
+            "publisher",
+            "platforms",
             "runtime_policy",
             "rollout_role",
         },
@@ -267,15 +269,31 @@ def _component(raw: dict[str, Any]) -> Component:
     release_digest = (
         _required_string(raw, "release_digest", context) if "release_digest" in raw else None
     )
+    publisher = raw.get("publisher", "images")
+    if not isinstance(publisher, str) or publisher not in {
+        "behavior-stage1",
+        "images",
+    }:
+        raise ManifestError(f"{context}.publisher is invalid")
+    raw_platforms = raw.get("platforms", ["linux/amd64", "linux/arm64"])
+    if (
+        not isinstance(raw_platforms, list)
+        or not raw_platforms
+        or not all(isinstance(item, str) for item in raw_platforms)
+    ):
+        raise ManifestError(f"{context}.platforms must be a non-empty string array")
+    platforms = tuple(raw_platforms)
+    if publisher == "images" and platforms != ("linux/amd64", "linux/arm64"):
+        raise ManifestError(f"{context}.platforms must retain the native two-platform contract")
+    if publisher == "behavior-stage1" and platforms != ("linux/amd64",):
+        raise ManifestError(f"{context}.platforms must be exactly linux/amd64")
     rollout_role = raw.get("rollout_role", "none")
     if not isinstance(rollout_role, str) or rollout_role not in {
         "none",
         "primary",
         "auxiliary",
     }:
-        raise ManifestError(
-            f"{context}.rollout_role must be one of none, primary, auxiliary"
-        )
+        raise ManifestError(f"{context}.rollout_role must be one of none, primary, auxiliary")
     kind_contract_valid = (
         kind == "release-image"
         and runtime_policy in {"start", "conformance"}
@@ -292,12 +310,8 @@ def _component(raw: dict[str, Any]) -> Component:
             "loom-* digest and start/conformance policy; runtime payload images require no "
             "release digest and runtime-payload policy"
         )
-    if rollout_role == "primary" and not (
-        kind == "release-image" and runtime_policy == "start"
-    ):
-        raise ManifestError(
-            f"{context}.rollout_role primary requires a start-policy release image"
-        )
+    if rollout_role == "primary" and not (kind == "release-image" and runtime_policy == "start"):
+        raise ManifestError(f"{context}.rollout_role primary requires a start-policy release image")
     if rollout_role == "auxiliary" and not (
         kind == "release-image" and runtime_policy == "conformance"
     ):
@@ -314,6 +328,8 @@ def _component(raw: dict[str, Any]) -> Component:
         scan_owner=_required_slug(raw, "scan_owner", context),
         attestation_owner=_required_slug(raw, "attestation_owner", context),
         release_digest=release_digest,
+        publisher=publisher,
+        platforms=platforms,
         runtime_policy=runtime_policy,
         rollout_role=rollout_role,
     )
@@ -336,9 +352,10 @@ def _test_suite(raw: dict[str, Any]) -> TestSuite:
     lane = _required_slug(raw, "lane", context)
     execution_policy = raw.get("execution_policy")
     if execution_policy is not None:
-        if not isinstance(execution_policy, str) or re.fullmatch(
-            r"[a-z0-9][a-z0-9-]*", execution_policy
-        ) is None:
+        if (
+            not isinstance(execution_policy, str)
+            or re.fullmatch(r"[a-z0-9][a-z0-9-]*", execution_policy) is None
+        ):
             raise ManifestError(f"{context}.execution_policy must be a lowercase slug")
     include_paths = tuple(
         _safe_path(item, context=f"{context}.include_paths", allow_glob=True)
@@ -404,9 +421,7 @@ def _execution_policy(raw: dict[str, Any]) -> ExecutionPolicy:
         raise ManifestError(f"{context}.runner is unsupported: {runner}")
     container_image = _required_string(raw, "container_image", context)
     if re.fullmatch(r"[a-z0-9][a-z0-9./_-]*@sha256:[0-9a-f]{64}", container_image) is None:
-        raise ManifestError(
-            f"{context}.container_image must be pinned by a full sha256 digest"
-        )
+        raise ManifestError(f"{context}.container_image must be pinned by a full sha256 digest")
     virtual_root = _required_string(raw, "virtual_root", context)
     if virtual_root not in {"/app", "/workspace"}:
         raise ManifestError(f"{context}.virtual_root must be /app or /workspace")
@@ -428,8 +443,10 @@ def _execution_case(raw: dict[str, Any], *, index: int) -> ExecutionCase:
     )
     policy = _required_slug(raw, "policy", context)
     raw_files = raw.get("fixture_files")
-    if not isinstance(raw_files, list) or not raw_files or not all(
-        isinstance(item, dict) for item in raw_files
+    if (
+        not isinstance(raw_files, list)
+        or not raw_files
+        or not all(isinstance(item, dict) for item in raw_files)
     ):
         raise ManifestError(f"{context}.fixture_files must be a non-empty table array")
     fixture_files = tuple(
@@ -511,8 +528,7 @@ def load_manifest(path: Path) -> Manifest:
     ):
         raise ManifestError("manifest.execution_cases must be an array of tables")
     execution_cases = tuple(
-        _execution_case(item, index=index)
-        for index, item in enumerate(raw_execution_cases)
+        _execution_case(item, index=index) for index, item in enumerate(raw_execution_cases)
     )
     execution_case_paths = Counter(case.path for case in execution_cases)
     for case_path, count in sorted(execution_case_paths.items()):
@@ -522,8 +538,7 @@ def load_manifest(path: Path) -> Manifest:
     for case in execution_cases:
         if case.policy not in declared_policy_ids:
             raise ManifestError(
-                f"execution case {case.path!r} uses undeclared execution policy: "
-                f"{case.policy}"
+                f"execution case {case.path!r} uses undeclared execution policy: {case.policy}"
             )
     test_suites = tuple(_test_suite(item) for item in raw_test_suites)
     for suite in test_suites:
@@ -536,9 +551,7 @@ def load_manifest(path: Path) -> Manifest:
                 "lane is runtime-payload"
             )
         if runtime_payload and suite.language != "python":
-            raise ManifestError(
-                f"test suite {suite.id!r} runtime-payload lane requires Python"
-            )
+            raise ManifestError(f"test suite {suite.id!r} runtime-payload lane requires Python")
         if suite.execution_policy is not None and suite.execution_policy not in {
             policy.id for policy in execution_policies
         }:
@@ -567,6 +580,12 @@ def _is_dockerfile(path: str) -> bool:
 def _test_language(path: str) -> str | None:
     pure_path = PurePosixPath(path)
     parts = pure_path.parts
+    # Vendored runtime projections can contain their upstream test corpus, but
+    # those files are image inputs rather than Loom CI entrypoints.  Their
+    # component source_paths remain release-authoritative; test ownership is
+    # intentionally reserved for Loom-owned test roots.
+    if parts and parts[0] == "third_party":
+        return None
     if path.endswith(".py") and ("tests" in parts or pure_path.name.startswith("test_")):
         return "python"
     if path.endswith("_test.go"):
@@ -831,6 +850,23 @@ def release_image_matrix(manifest: Manifest) -> tuple[dict[str, str], ...]:
     )
 
 
+def release_image_matrix_for_publisher(
+    manifest: Manifest,
+    *,
+    publisher: str,
+) -> tuple[dict[str, str], ...]:
+    """Render one publisher's closed image matrix without workflow allowlists."""
+
+    if publisher not in {"behavior-stage1", "images"}:
+        raise ManifestError(f"unsupported image publisher: {publisher}")
+    selected = {
+        component.id
+        for component in manifest.release_components()
+        if component.publisher == publisher
+    }
+    return tuple(entry for entry in release_image_matrix(manifest) if entry["image"] in selected)
+
+
 def native_release_image_matrix(
     images: tuple[dict[str, str], ...],
 ) -> tuple[dict[str, str], ...]:
@@ -840,11 +876,7 @@ def native_release_image_matrix(
         {"architecture": "amd64", "platform": "linux/amd64"},
         {"architecture": "arm64", "platform": "linux/arm64"},
     )
-    return tuple(
-        {**image, **architecture}
-        for image in images
-        for architecture in architectures
-    )
+    return tuple({**image, **architecture} for image in images for architecture in architectures)
 
 
 def release_images_for_runtime_policy(
@@ -1005,9 +1037,7 @@ def lane_execution_plan(
     )
     if not lane_paths:
         raise ManifestError(f"CI lane has no tracked test paths: {lane}")
-    if any(
-        manifest.test_owner_for_path(path).execution_policy is None for path in lane_paths
-    ):
+    if any(manifest.test_owner_for_path(path).execution_policy is None for path in lane_paths):
         raise ManifestError(f"CI lane is not fully policy-owned: {lane}")
     cases_by_path = {case.path: case for case in manifest.execution_cases}
     if set(cases_by_path) != set(lane_paths):
@@ -1026,8 +1056,7 @@ def lane_execution_plan(
         }
         for policy in manifest.execution_policies
         if any(
-            manifest.test_owner_for_path(path).execution_policy == policy.id
-            for path in lane_paths
+            manifest.test_owner_for_path(path).execution_policy == policy.id for path in lane_paths
         )
     )
     planned_paths = [case["path"] for entry in plan for case in entry["cases"]]
@@ -1059,9 +1088,7 @@ def shard_paths(
     if shard_count < 1:
         raise ManifestError("shard count must be at least 1")
     if shard_index < 0 or shard_index >= shard_count:
-        raise ManifestError(
-            f"shard index must be between 0 and {shard_count - 1}: {shard_index}"
-        )
+        raise ManifestError(f"shard index must be between 0 and {shard_count - 1}: {shard_index}")
     if strategy == "round-robin":
         return paths[shard_index::shard_count]
     if strategy == "contiguous":
@@ -1184,16 +1211,27 @@ def main(argv: list[str] | None = None) -> int:
                 force_all=args.force_all,
                 fallback_all=args.fallback_all,
             )
-            payload = json.dumps(matrix, separators=(",", ":"))
+            publisher_by_image = {
+                component.id: component.publisher for component in manifest.release_components()
+            }
+            standard_matrix = tuple(
+                entry for entry in matrix if publisher_by_image[entry["image"]] == "images"
+            )
+            stage1_matrix = tuple(
+                entry for entry in matrix if publisher_by_image[entry["image"]] == "behavior-stage1"
+            )
+            payload = json.dumps(standard_matrix, separators=(",", ":"))
+            stage1_payload = json.dumps(stage1_matrix, separators=(",", ":"))
             native_payload = json.dumps(
-                native_release_image_matrix(matrix),
+                native_release_image_matrix(standard_matrix),
                 separators=(",", ":"),
             )
             with args.github_output.open("a", encoding="utf-8") as handle:
                 handle.write(f"images={payload}\n")
                 handle.write(f"native_builds={native_payload}\n")
+                handle.write(f"stage1_images={stage1_payload}\n")
                 handle.write(f"required={str(bool(matrix)).lower()}\n")
-            print(f"selected_images={payload}")
+            print(f"selected_images={payload} stage1_images={stage1_payload}")
             return 0
         if args.command == "validate-image":
             errors = validate_release_image_pair(

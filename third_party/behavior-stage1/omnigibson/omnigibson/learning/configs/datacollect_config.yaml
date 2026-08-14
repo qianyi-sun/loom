@@ -1,0 +1,29 @@
+# Hydra root config for eval_data_gen*.py data-collection scripts.
+# Mirrors base_config.yaml but fills in required keys and adds
+# the recording_path / traj_path / instance_id fields used by
+# PolicyEvalDataCollectionWrapper. Override any value via CLI.
+
+defaults:
+  - _self_
+  - robot: r1pro
+  - task: behavior
+  - policy: local
+
+env_wrapper:
+  _target_: omnigibson.learning.wrappers.RGBLowResWrapper
+
+policy_name: datacollect
+headless: true
+eval_on_train_instances: false
+eval_instance_ids: null
+write_video: true
+partial_scene_load: false
+max_steps: null
+log_path: /shared_work/logs/behavior_datacollect
+test_hidden: false
+
+# Data-collection-specific keys
+recording_path: null   # HDF5 output path; null disables recording
+traj_path: null        # trajectory input (for teleop/takeover replay)
+instance_id: 0
+only_successes: true   # only save successful episodes to HDF5

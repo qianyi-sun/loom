@@ -104,7 +104,12 @@ def test_images_publish_authority_is_push_only_on_trusted_branches() -> None:
         for job_name, job in workflow["jobs"].items()
         if job.get("permissions", {}).get("packages") == "write"
     }
-    assert write_capable_jobs == {"publish", "publish-manifest"}
+    assert write_capable_jobs == {
+        "publish",
+        "publish-manifest",
+        "stage1-publish",
+        "stage1-publish-index",
+    }
     assert publish["permissions"] == {
         "attestations": "write",
         "contents": "read",
@@ -145,6 +150,18 @@ def test_images_publish_authority_is_push_only_on_trusted_branches() -> None:
         step.get("with", {}).get("persist-credentials") is False
         for step in _checkout_steps(manifest)
     )
+    stage1_publish = workflow["jobs"]["stage1-publish"]
+    stage1_index = workflow["jobs"]["stage1-publish-index"]
+    assert _normalized_expression(stage1_publish["if"]).startswith(
+        "github.event_name == 'push' && "
+        "(github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') &&"
+    )
+    assert stage1_publish["permissions"] == publish["permissions"]
+    assert _normalized_expression(stage1_index["if"]).startswith(
+        "github.event_name == 'push' && "
+        "(github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') &&"
+    )
+    assert stage1_index["permissions"] == manifest["permissions"]
 
     login = _named_step(publish, "Log in to GHCR")
     assert login["env"]["GHCR_TOKEN"] == "${{ secrets.GITHUB_TOKEN }}"
@@ -189,15 +206,19 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
         "image-route",
         "trivy-binary",
         "build",
+        "stage1-build",
         "candidate-index",
         "publish",
         "publish-manifest",
+        "stage1-publish",
+        "stage1-publish-index",
         "images-gate",
     }
     for job_name in (
         "plan",
         "trivy-binary",
         "build",
+        "stage1-build",
         "candidate-index",
         "images-gate",
     ):
@@ -226,8 +247,14 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
         "id-token": "write",
         "packages": "write",
     }
+    assert jobs["stage1-publish"]["permissions"] == jobs["publish"]["permissions"]
+    assert jobs["stage1-publish-index"]["permissions"] == jobs["publish-manifest"][
+        "permissions"
+    ]
     assert "environment" not in jobs["publish"]
     assert "environment" not in jobs["publish-manifest"]
+    assert "environment" not in jobs["stage1-publish"]
+    assert "environment" not in jobs["stage1-publish-index"]
 
 
 def test_images_secret_and_cache_authority_is_exact() -> None:
@@ -241,6 +268,8 @@ def test_images_secret_and_cache_authority_is_exact() -> None:
     ]
 
     assert secret_references == [
+        "${{ secrets.GITHUB_TOKEN }}",
+        "${{ secrets.GITHUB_TOKEN }}",
         "${{ secrets.GITHUB_TOKEN }}",
         "${{ secrets.GITHUB_TOKEN }}",
     ]

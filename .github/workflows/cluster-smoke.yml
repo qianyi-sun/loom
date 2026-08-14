@@ -232,7 +232,7 @@ jobs:
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           repository: qianyi-sun/loom
-          ref: 119d9ffb20ef6ef9df8a224e384ca5e91721416b
+          ref: 9a0df38f5cc4f9cf747efac3c4e37e9657e8eb34
           sparse-checkout: .github/actions/ci-runner-route
           path: .loom-ci-route-action
           persist-credentials: false
