@@ -11,6 +11,7 @@ from __future__ import annotations
 from loom.models.types import ModelSpec
 from loom_service.agent_catalog import (
     get_agent,
+    known_names,
     list_agents,
     validate_agent_model_compat,
 )
@@ -37,6 +38,18 @@ def test_litellm_accepts_any_provider_api() -> None:
         )
         is None
     )
+
+
+def test_direct_completion_is_canonical_and_litellm_is_alias() -> None:
+    canonical = get_agent("direct-completion")
+    alias = get_agent("litellm")
+
+    assert canonical is not None
+    assert alias is canonical
+    assert canonical.name == "direct-completion"
+    assert canonical.aliases == ("litellm",)
+    assert {"direct-completion", "litellm"}.issubset(known_names())
+    assert "litellm" not in {entry.name for entry in list_agents()}
     assert (
         validate_agent_model_compat(
             "litellm",
@@ -154,7 +167,7 @@ def test_catalog_entries_include_service_mode_runtime_contract() -> None:
     and direct API callers to understand whether service-mode can run it."""
     displayed = {
         "oracle",
-        "litellm",
+        "direct-completion",
         "aider",
         "claude-code",
         "codex",

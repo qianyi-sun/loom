@@ -102,6 +102,7 @@ class AgentEntry:
     needs_model: bool
     kind: AgentKind
     description: str
+    aliases: tuple[str, ...] = ()
     supported_providers: tuple[str, ...] = ()
     supported_model_sources: tuple[str, ...] = ()
     runtime_contract: RuntimeContract = RuntimeContract(
@@ -127,6 +128,7 @@ class AgentEntry:
     def to_dict(self) -> dict[str, object]:
         return {
             "name": self.name,
+            "aliases": list(self.aliases),
             "needs_model": self.needs_model,
             "kind": self.kind,
             "description": self.description,
@@ -174,18 +176,19 @@ _BUILTIN: tuple[AgentEntry, ...] = (
         provides_capabilities=frozenset({"workspace_exec"}),
     ),
     AgentEntry(
-        name="litellm",
+        name="direct-completion",
+        aliases=("litellm",),
         needs_model=True,
         kind="builtin",
         description=(
-            "Multi-provider tool-loop agent. Routes through the LLM "
-            "Gateway via LiteLLM — pick any provider+model the rate "
-            "card knows about, or a HuggingFace / local-server model."
+            "Direct model completion with response-text artifact projection. "
+            "Routes through the LLM Gateway and supports API, HuggingFace, "
+            "and local-server models; it does not execute workspace tools."
         ),
         supported_providers=("*",),
         supported_model_sources=("api", "local-server", "hf"),
         runtime_contract=_ready_builtin_contract(
-            execution="builtin-litellm",
+            execution="builtin-direct-completion",
             capture="gateway-llm-calls",
             endpoint_dialect="openai_chat",
             api_key_env="LOOM_STEP_TOKEN",
@@ -462,13 +465,17 @@ def known_names() -> frozenset[str]:
     """Set of valid `agent_name` values for fast membership check at
     the request boundary. Recomputed per call because adapter
     registration is import-time (idempotent + cheap)."""
-    return frozenset(e.name for e in list_agents())
+    return frozenset(
+        name
+        for entry in list_agents()
+        for name in (entry.name, *entry.aliases)
+    )
 
 
 def get_agent(name: str, *, include_internal: bool = False) -> AgentEntry | None:
     """Look up an entry by name; returns None for unknown agents."""
     for e in list_agents(include_internal=include_internal):
-        if e.name == name:
+        if e.name == name or name in e.aliases:
             return e
     return None
 

@@ -153,17 +153,18 @@ def test_agent_rows_from_service_catalog_include_contract_and_provenance() -> No
     )
 
     by_name = {row.name: row for row in rows}
-    assert {"oracle", "litellm"}.issubset(by_name)
+    assert {"oracle", "direct-completion"}.issubset(by_name)
+    assert "litellm" not in by_name
 
     oracle = by_name["oracle"]
-    assert oracle.version == "service-catalog-v1"
+    assert oracle.version == "service-catalog-v2"
     assert oracle.mode == "builtin"
     assert oracle.spec["name"] == "oracle"
     assert oracle.spec["needs_model"] is False
     assert oracle.spec["runtime_contract"]["execution"] == "builtin-oracle"
     assert oracle.spec["catalog_provenance"] == {
         "source": "loom_service.agent_catalog",
-        "schema_version": 1,
+        "schema_version": 2,
         "provisioned_by": "release:staging",
     }
 
@@ -457,8 +458,10 @@ async def test_provision_ready_catalog_filters_blocked_rows_and_copies_missing_o
     assert stats.bytes_uploaded == 5
     assert stats.bytes_skipped == 4
     assert target_objects.buckets == {"loom-benchmarks"}
-    assert {"oracle", "litellm"}.issubset({row.name for row in target.rows.agents})
-    assert all(row.version == "service-catalog-v1" for row in target.rows.agents)
+    assert {"oracle", "direct-completion"}.issubset(
+        {row.name for row in target.rows.agents},
+    )
+    assert all(row.version == "service-catalog-v2" for row in target.rows.agents)
     assert target.rows.benchmarks == [
         replace(source.rows.benchmarks[0], imported_by="staging-provision"),
     ]

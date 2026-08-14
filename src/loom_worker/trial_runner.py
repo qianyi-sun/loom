@@ -56,7 +56,7 @@ OutputProjectionCallback = Callable[[dict[str, object], dict[str, object]], Awai
 # Factory signature: (task_dir, gateway, model, agent_name) → AgentRuntime.
 # agent_name is read from task_config.agent.name; the factory routes:
 #   "oracle"             → OracleAgent
-#   "litellm" (or model) → LiteLLMAgent
+#   "direct-completion"  → LiteLLMAgent (legacy alias: "litellm")
 #   <launcher adapter>   → SubprocessAgent wrapping the adapter
 AgentFactory = Callable[
     [Path, LLMGatewayClient, "ModelSpec | None", str],

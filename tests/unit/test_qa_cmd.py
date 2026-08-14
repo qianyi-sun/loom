@@ -472,7 +472,7 @@ def test_provider_compatibility_matrix_covers_default_ready_agent_catalog() -> N
 
     repo_known_ready_agents = {
         "oracle",
-        "litellm",
+        "direct-completion",
         *(
             name for name, ready in agent_catalog._ADAPTER_RUNTIME_READY.items()
             if ready
@@ -517,7 +517,7 @@ def test_provider_compatibility_matrix_includes_generic_agents_per_agent() -> No
         for cell in payload["cells"]
     }
 
-    for agent_name in ("litellm", "opencode"):
+    for agent_name in ("direct-completion", "opencode"):
         openai = cells[(agent_name, "user-hosted-openai-compatible")]
         anthropic = cells[(agent_name, "yibuapi-anthropic-messages")]
         assert openai["status"] == "supported"

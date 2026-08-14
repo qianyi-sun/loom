@@ -105,7 +105,7 @@ def test_metadata():
         team_id="t", trial_id=uuid4(),
     )
     assert agent.mode == "out-of-box"
-    assert agent.name == "litellm-agent"
+    assert agent.name == "direct-completion"
     assert "linux" in agent.supports_os
     assert agent.model is not None
 

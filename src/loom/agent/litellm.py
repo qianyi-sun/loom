@@ -1,10 +1,9 @@
-"""LiteLLMAgent — generic tool-loop using the LLM Gateway client.
+"""Direct-completion runtime using the LLM Gateway client.
 
-v1 behaviour: send the instruction as a single user message; loop until the
+Send the instruction as a single user message; continue completions until the
 gateway returns `finish_reason='stop'` (or max_turns hit). Each response is
-emitted as an `llm_call` event. Tool dispatch (parsing tool_calls and
-running them inside env.exec) is a v1.5 concern — Plan 4 + the agent
-follow-ups extend this loop.
+emitted as an `llm_call` event. This runtime does not expose tools or execute
+commands in the task workspace.
 """
 
 from __future__ import annotations
@@ -33,7 +32,7 @@ from loom.trajectory.writer import TrajectoryWriter
 
 @dataclass
 class LiteLLMAgent:
-    """Out-of-box tool-loop agent. All LLM calls go through the Gateway client."""
+    """Direct completion with Gateway accounting and text projection."""
 
     model: ModelSpec
     gateway: LLMGatewayClient
@@ -42,7 +41,7 @@ class LiteLLMAgent:
     system_prompt: str = "You are a helpful agent. Complete the task."
     max_turns: int = 8
     mode: Literal["out-of-box", "in-box"] = "out-of-box"
-    name: str = "litellm-agent"
+    name: str = "direct-completion"
     version: str = "1.0"
     supports_os: frozenset[OS] = field(default_factory=lambda: frozenset({"linux"}))
     # Trial finalization must not project gateway llm_calls rows back into the

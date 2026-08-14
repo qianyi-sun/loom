@@ -115,7 +115,8 @@ def test_displayed_agent_catalog_returns_expected_count() -> None:
     agents = list_agents()
     names = {a.name for a in agents}
     # Builtins.
-    assert {"oracle", "litellm"}.issubset(names)
+    assert {"oracle", "direct-completion"}.issubset(names)
+    assert "litellm" not in names
     # Retired (catalog cleanup PR #355).
     assert "claude-code-inbox" not in names
     # Launcher adapters (production only; hello is an internal fixture).

@@ -136,6 +136,27 @@ async def test_builtin_litellm_mints_bound_step_credential_per_call() -> None:
     }
 
 
+def test_worker_factory_routes_direct_completion_name() -> None:
+    factory = _default_agent_factory(
+        team_id=uuid4(),
+        trial_id=uuid4(),
+        cp_client=_RecordingTokenIssuer(),  # type: ignore[arg-type]
+        worker_gateway_url="http://gateway.test",
+    )
+
+    agent = factory(
+        task_dir=Path("/tmp"),
+        gateway=HttpLLMGatewayClient(
+            base_url="http://gateway.test",
+            token="unused",
+        ),
+        model=ModelSpec(provider="openai", name="gpt-4"),
+        agent_name="direct-completion",
+    )
+
+    assert isinstance(agent, LiteLLMAgent)
+
+
 async def test_builtin_litellm_rejects_identity_drift_before_minting() -> None:
     team_id = uuid4()
     trial_id = uuid4()

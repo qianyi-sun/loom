@@ -35,8 +35,8 @@ from loom_benchmark_tool.db_url import normalize_db_url
 from loom_service.agent_catalog import AgentEntry, list_agents
 
 POSTGRES_CATALOG_UPSERT_BATCH_SIZE = 1000
-AGENT_CATALOG_VERSION = "service-catalog-v1"
-AGENT_CATALOG_SPEC_SCHEMA_VERSION = 1
+AGENT_CATALOG_VERSION = "service-catalog-v2"
+AGENT_CATALOG_SPEC_SCHEMA_VERSION = 2
 TB21_PROFILE_ID = "terminal-bench-2@tb2.1-r6"
 T = TypeVar("T")
 

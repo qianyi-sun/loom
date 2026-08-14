@@ -1052,11 +1052,11 @@ async def _resolve_layered_trial_image(
 ) -> str:
     """Look up the agent adapter and, if it declares an install_script,
     return the cached layered image (or build it). Returns `task_image`
-    unchanged for agents without an install_script (oracle, litellm,
+    unchanged for agents without an install_script (oracle, direct completion,
     or adapters that haven't declared an install_script yet)."""
-    # Built-in agents (oracle, litellm) aren't in the launcher registry
+    # Built-in agents aren't in the launcher registry
     # and don't need an install step. Skip.
-    if agent_name in {"oracle", "litellm", "terminus-2"}:
+    if agent_name in {"oracle", "direct-completion", "litellm", "terminus-2"}:
         return task_image
     adapter_name = agent_name
     try:
@@ -1791,7 +1791,7 @@ def _default_agent_factory(
     `agent_name` (read from `task_config.agent.name`):
 
     - "oracle"      → OracleAgent (solution/solve.sh baseline)
-    - "litellm"     → LiteLLMAgent (v0.7 tool-loop runtime)
+    - "direct-completion" (or legacy "litellm") → LiteLLMAgent
     - "terminus-2"  → LoomTerminus2Runtime (Harbor-embedded in-box runtime;
                       uses ``worker_gateway_url`` only)
     - anything else → SubprocessAgent wrapping the loom-launcher adapter
@@ -1809,10 +1809,10 @@ def _default_agent_factory(
         agent: AgentRuntime
         if agent_name == "oracle":
             agent = OracleAgent(task_dir=task_dir, trial_id=trial_id)
-        elif agent_name == "litellm":
+        elif agent_name in {"direct-completion", "litellm"}:
             if model is None:
                 raise AgentError(
-                    "litellm agent requires task.agent.model to be set",
+                    "direct-completion agent requires task.agent.model to be set",
                 )
             # The worker token carried by the process-wide HTTP client is
             # intentionally not valid for model calls.  Bind a fresh
@@ -1852,7 +1852,7 @@ def _default_agent_factory(
         else:
             # Try the loom-launcher registry. Imports are lazy so the
             # launcher dep stays optional for sites that only run
-            # oracle/litellm.
+            # built-in agents.
             from loom_launcher import get_adapter
 
             from loom.agent.subprocess import SubprocessAgent
