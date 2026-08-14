@@ -197,3 +197,64 @@ Static verification:
 Concerns:
 
 - Full-repository Ruff format still has unrelated baseline drift, so this follow-up keeps Ruff scoped to amended files while retaining full MyPy, affected unit, bridge, and whitespace gates.
+
+## Fix round 3 — terminal adoption rejects same-job live reuse
+
+Review finding addressed:
+
+- Unknown-submission `recover()` could adopt exact terminal accounting evidence
+  for job ID 101/token A while Slurm inventory contained a live job with the
+  same job ID 101/token B. Job-ID reuse must be treated as ambiguous and
+  quarantined/charged, never bound or adopted.
+
+Root cause:
+
+- Submission recovery's live conflict predicates were scoped to the expected
+  ownership token. A reused live row with the same Slurm job ID and a different
+  token was neither an exact live match nor a token-scoped conflict, so terminal
+  adoption proceeded from stale accounting evidence.
+
+RED:
+
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_recovery.py::test_unknown_submission_recovery_quarantines_terminal_match_with_same_job_live_reuse -q`
+  → `1 failed in 0.16s`: `result.status` was `adopted` instead of
+  `quarantined`.
+
+Implementation:
+
+- Added `_terminal_live_job_id_conflicts()` to detect live Slurm rows sharing
+  the job ID of an exact terminal accounting match unless they are exact live
+  matches for the signed launch request.
+- `recover()` now includes those same-job live reuse rows in the ambiguity gate
+  before any live or terminal adoption, preserving the existing exact
+  live+terminal, duplicate, ownership, partition, resource, and node fences.
+
+GREEN/regression:
+
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_recovery.py::test_unknown_submission_recovery_quarantines_terminal_match_with_same_job_live_reuse -q`
+  → `1 passed in 0.16s`.
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_recovery.py::test_unknown_submission_recovery_adopts_exact_terminal_accounting_match tests/unit/test_capacity_executor_recovery.py::test_unknown_submission_recovery_quarantines_exact_live_and_terminal_conflict tests/unit/test_capacity_executor_recovery.py::test_unknown_submission_recovery_quarantines_changed_live_with_exact_terminal tests/unit/test_capacity_executor_recovery.py::test_unknown_submission_recovery_rejects_terminal_partition_mismatch tests/unit/test_capacity_executor_recovery.py::test_unknown_submission_recovery_quarantines_terminal_match_with_same_job_live_reuse -q`
+  → `5 passed in 0.50s`.
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_slurm_backend.py tests/unit/test_capacity_executor_executable.py tests/unit/test_capacity_executor_recovery.py tests/unit/test_capacity_executor_client.py tests/unit/test_capacity_executor_admission_client.py -q`
+  → `129 passed in 8.85s`.
+- `uv run --no-sync pytest tests/integration/test_executable_global_capacity_bridge.py -q`
+  → `4 passed in 40.13s`.
+
+Static verification:
+
+- Initial targeted `ruff format --check` reported
+  `Would reformat: src/loom_capacity_executor/executable.py`; targeted
+  `uv run --no-sync ruff format src/loom_capacity_executor/executable.py`
+  → `1 file reformatted`.
+- `uv run --no-sync ruff format --check src/loom_capacity_executor/executable.py tests/unit/test_capacity_executor_recovery.py`
+  → `2 files already formatted`.
+- `uv run --no-sync ruff check src/loom_capacity_executor/executable.py tests/unit/test_capacity_executor_recovery.py`
+  → `All checks passed!`.
+- `uv run --no-sync mypy` → `Success: no issues found in 805 source files`.
+- `git diff --check` → passed.
+
+Concerns:
+
+- No new concerns. Full-repository Ruff format baseline drift remains the
+  pre-existing concern; this round kept Ruff scoped to amended files while
+  retaining full MyPy, affected unit, bridge, and whitespace gates.

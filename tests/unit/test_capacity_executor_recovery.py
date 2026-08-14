@@ -653,6 +653,33 @@ async def test_unknown_submission_recovery_rejects_terminal_partition_mismatch(
     reopened.close()
 
 
+# Production break caught: terminal recovery adopted stale exact accounting
+# evidence even when Slurm had reused the same job ID for a different live job.
+async def test_unknown_submission_recovery_quarantines_terminal_match_with_same_job_live_reuse(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    executor, journal, manager, admission, slurm, launch = executor_fixture(
+        tmp_path, work=permit_fixture(launch.binding)
+    )
+    slurm.crash_after_submit = True
+    with pytest.raises(SimulatedCrash):
+        await executor.tick()
+    submitted = slurm.jobs.pop()
+    slurm.terminal_jobs = (_terminal_from_job(submitted),)
+    slurm.jobs.append(submitted.model_copy(update={"ownership_token": "B" * 43}))
+    journal.close()
+
+    slurm.crash_after_submit = False
+    recovered, reopened = _restart(journal.path, manager, admission, slurm, launch)
+    result = await recovered.recover()
+
+    assert result.status == "quarantined"
+    assert slurm.submit_count == 1
+    assert admission.bound == {}
+    reopened.close()
+
+
 # Production break caught: cancellation replay filtered away same-job live
 # conflicts and classified an older accounting row as already terminal.
 async def test_pending_cancel_recovery_quarantines_same_job_live_terminal_conflict(

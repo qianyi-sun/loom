@@ -1324,6 +1324,17 @@ class ExecutablePoolExecutor:
             and item not in self._exact_terminal_matches(envelope, jobs)
         )
 
+    def _terminal_live_job_id_conflicts(
+        self,
+        terminal_matches: tuple[SlurmTerminalEvidenceV2, ...],
+        live_matches: tuple[SlurmJobObservationV2, ...],
+        jobs: tuple[SlurmJobObservationV2, ...],
+    ) -> tuple[SlurmJobObservationV2, ...]:
+        terminal_job_ids = {item.job_id for item in terminal_matches}
+        return tuple(
+            item for item in jobs if item.job_id in terminal_job_ids and item not in live_matches
+        )
+
     def _bound_live_matches(
         self,
         envelope: _LaunchEnvelope | None,
@@ -1420,9 +1431,15 @@ class ExecutablePoolExecutor:
         terminal_matches = self._exact_terminal_matches(envelope, high_water.terminal_jobs)
         live_conflicts = self._live_ownership_conflicts(envelope, jobs)
         terminal_conflicts = self._terminal_ownership_conflicts(envelope, high_water.terminal_jobs)
+        terminal_live_conflicts = self._terminal_live_job_id_conflicts(
+            terminal_matches,
+            matches,
+            jobs,
+        )
         if (
             live_conflicts
             or terminal_conflicts
+            or terminal_live_conflicts
             or (matches and terminal_matches)
             or len(matches) > 1
             or len(terminal_matches) > 1
