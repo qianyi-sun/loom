@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+export PYTHONEXE=/opt/loom/venv-sim/bin/python
+exec /isaac-sim/python.sh "$@"

@@ -271,7 +271,7 @@ class _FakeOmniRuntime:
 
     def __init__(self) -> None:
         self.evaluator = _FakeEvaluator()
-        self.create_call: tuple[str, int, Path] | None = None
+        self.create_call: tuple[str, int, dict[str, object], Path] | None = None
 
     def task_id(self, task_name: str) -> int:
         assert task_name == "placing_can"
@@ -282,9 +282,10 @@ class _FakeOmniRuntime:
         *,
         task_name: str,
         eval_instance_index: int,
+        task_config: dict[str, object],
         output_root: Path,
     ) -> _FakeEvaluator:
-        self.create_call = (task_name, eval_instance_index, output_root)
+        self.create_call = (task_name, eval_instance_index, task_config, output_root)
         output_root.mkdir(parents=True)
         return self.evaluator
 
@@ -383,6 +384,11 @@ def test_rollout_backend_loads_signed_child_runs_once_and_projects_inventory(
     assert runtime.create_call == (
         task.payload.task_name,
         task.payload.eval_instance_index,
+        {
+            "robot_start_orientation": [0.0, 0.0, 0.0, 1.0],
+            "robot_start_position": [1.0, 2.0, 3.0],
+            "scene_model": "house_double_floor_lower",
+        },
         paths.scratch_root / "omnigibson-output",
     )
     assert ("load", task.payload.engine_task_instance_id, False) in runtime.evaluator.events

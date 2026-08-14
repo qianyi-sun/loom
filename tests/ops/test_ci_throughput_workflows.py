@@ -673,6 +673,7 @@ def test_images_workflow_uses_path_aware_matrix_plan() -> None:
     assert "plan" in jobs
     assert "images" in jobs["plan"]["outputs"]
     assert "native_builds" in jobs["plan"]["outputs"]
+    assert "stage1_images" in jobs["plan"]["outputs"]
     build = jobs["build"]
     assert set(build["needs"]) == {"plan", "image-route", "trivy-binary"}
     assert build["strategy"]["matrix"]["include"] == (
@@ -682,6 +683,93 @@ def test_images_workflow_uses_path_aware_matrix_plan() -> None:
     assert "scripts/component_ownership.py" in plan_script
     assert "plan-images" in plan_script
     assert push_trigger == {"branches": ["dev", "main"]}
+
+
+def test_stage1_image_uses_separate_candidate_and_trusted_release_authorities() -> None:
+    jobs = _workflow(".github/workflows/images.yml")["jobs"]
+    candidate = jobs["stage1-build"]
+    publish = jobs["stage1-publish"]
+    index = jobs["stage1-publish-index"]
+    gate = jobs["images-gate"]
+
+    assert candidate["needs"] == ["plan", "image-route", "trivy-binary"]
+    assert "github.event_name != 'push'" in candidate["if"]
+    assert candidate["strategy"]["matrix"]["include"] == (
+        "${{ fromJSON(needs.plan.outputs.stage1_images) }}"
+    )
+    assert publish["runs-on"] == ["self-hosted", "linux", "x64", "loom-ci-image"]
+    assert "github.event_name == 'push'" in publish["if"]
+    assert publish["permissions"] == {
+        "attestations": "write",
+        "contents": "read",
+        "id-token": "write",
+        "packages": "write",
+    }
+    publish_scripts = "\n".join(
+        str(step.get("run", "")) for step in publish["steps"] if "run" in step
+    )
+    candidate_seal = next(
+        step["run"] for step in candidate["steps"] if step.get("name") == "Seal candidate evidence"
+    )
+    trusted_seal = next(
+        step["run"]
+        for step in publish["steps"]
+        if step.get("name") == "Build, inspect, scan, and prepare Stage 1 child"
+    )
+    assert 'container=$(docker create "$LOCAL_IMAGE" /bin/true)' in candidate_seal
+    assert 'container=$(docker create "$local_image" /bin/true)' in trusted_seal
+    for seal_script in (candidate_seal, trusted_seal):
+        assert "trap 'docker rm -f \"$container\" >/dev/null 2>&1 || true' EXIT" in seal_script
+    assert "trap - EXIT" in trusted_seal
+    assert "type=docker,dest=" not in publish_scripts
+    assert "docker push" in publish_scripts
+    assert index["runs-on"] == "ubuntu-24.04"
+    assert index["needs"] == ["plan", "stage1-publish"]
+    assert "--deny-self-hosted-runners" in "\n".join(
+        str(step.get("run", "")) for step in index["steps"] if "run" in step
+    )
+    assert {"stage1-build", "stage1-publish", "stage1-publish-index"} <= set(gate["needs"])
+
+
+@pytest.mark.parametrize(
+    ("event_name", "stage1_build", "stage1_publish", "stage1_index"),
+    [
+        ("pull_request", "success", "skipped", "skipped"),
+        ("merge_group", "success", "skipped", "skipped"),
+        ("push", "skipped", "success", "success"),
+    ],
+)
+def test_stage1_only_image_selection_is_required_by_the_aggregate_gate(
+    event_name: str,
+    stage1_build: str,
+    stage1_publish: str,
+    stage1_index: str,
+) -> None:
+    result = subprocess.run(
+        ["bash"],
+        input=_gate_script(".github/workflows/images.yml", "images-gate"),
+        text=True,
+        capture_output=True,
+        env={
+            "EVENT_NAME": event_name,
+            "PLAN_RESULT": "success",
+            "GATE_MODE": "full",
+            "REQUIRED": "true",
+            "STANDARD_IMAGES": "[]",
+            "STAGE1_IMAGES": "[{}]",
+            "BUILD_RESULT": "skipped",
+            "CANDIDATE_INDEX_RESULT": "skipped",
+            "PUBLISH_RESULT": "skipped",
+            "MANIFEST_RESULT": "skipped",
+            "STAGE1_BUILD_RESULT": stage1_build,
+            "STAGE1_PUBLISH_RESULT": stage1_publish,
+            "STAGE1_INDEX_RESULT": stage1_index,
+            "INTERNAL_PULL_REQUEST": "false",
+        },
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_images_matrix_plan_receives_shared_required_decision() -> None:
@@ -950,8 +1038,7 @@ def test_release_images_are_scanned_attested_and_verified_before_manifest_join()
     assert '--architecture "$architecture"' in install["run"]
     assert "sha256sum --check trivy.sha256" in install["run"]
     assert upload["with"]["name"] == (
-        "trivy-binaries-run-${{ github.run_id }}-"
-        "attempt-${{ github.run_attempt }}"
+        "trivy-binaries-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}"
     )
     assert build["needs"] == ["plan", "image-route", "trivy-binary"]
     assert publish["needs"] == ["plan", "trivy-binary"]
@@ -1025,12 +1112,8 @@ def test_release_images_are_scanned_attested_and_verified_before_manifest_join()
     assert "uses" not in trusted_scan
     assert trusted_scan["shell"] == "bash"
     assert trusted_scan["env"] == {
-        "ARCHIVE": (
-            "/tmp/${{ matrix.image }}-${{ matrix.architecture }}.release.docker.tar"
-        ),
-        "REPORT": (
-            "/tmp/${{ matrix.image }}-${{ matrix.architecture }}.release.trivy.json"
-        ),
+        "ARCHIVE": ("/tmp/${{ matrix.image }}-${{ matrix.architecture }}.release.docker.tar"),
+        "REPORT": ("/tmp/${{ matrix.image }}-${{ matrix.architecture }}.release.trivy.json"),
         "IMAGE_NAME": "${{ matrix.image }}",
         "ARCHITECTURE": "${{ matrix.architecture }}",
     }
@@ -1706,6 +1789,9 @@ def test_optional_validation_workflows_have_stable_gate_contexts() -> None:
                 "candidate-index": "CANDIDATE_INDEX_RESULT",
                 "publish": "PUBLISH_RESULT",
                 "publish-manifest": "MANIFEST_RESULT",
+                "stage1-build": "STAGE1_BUILD_RESULT",
+                "stage1-publish": "STAGE1_PUBLISH_RESULT",
+                "stage1-publish-index": "STAGE1_INDEX_RESULT",
             },
         ),
         ".github/workflows/cluster-smoke.yml": (

@@ -1,0 +1,6 @@
+# Runtime imports required by Loom's image-owned integration and by pinned
+# upstream modules whose package metadata omits an import used on this path.
+chex==0.1.89
+pyjwt==2.13.0
+rfc8785==0.1.4
+toolz==1.0.0

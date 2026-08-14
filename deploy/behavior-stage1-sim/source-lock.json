@@ -1,0 +1,97 @@
+{
+  "base_image": {
+    "index_digest": "sha256:f3563cb2ba0c18af0b2fb321360dcb73a917b899f879e3213623d6bee484fa54",
+    "platform": "linux/amd64",
+    "platform_manifest_digest": "sha256:93b0f99635ab126fb5b33298d513c11520f119f0ee60ff8414ccef67ea977829",
+    "reference": "nvcr.io/nvidia/isaac-sim:5.1.0"
+  },
+  "runtime_assets": [
+    {
+      "binary_version": "n7.1.5-12-g1fdbca85aa-20260813",
+      "license": "LGPL-2.1-or-later",
+      "name": "ffmpeg",
+      "release_tag": "autobuild-2026-08-13-17-03",
+      "sha256": "sha256:b33b9c56b28dbc709a7938e2461d34caefc897a6090ac02da8fc55f82d6d5451",
+      "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-13-17-03/ffmpeg-n7.1.5-12-g1fdbca85aa-linux64-lgpl-shared-7.1.tar.xz",
+      "version": "7.1.5-12-g1fdbca85aa"
+    }
+  ],
+  "loom_runtime": {
+    "lock_sha256": "sha256:c5f1c5d10666fd757020c9116d526b5ae03876ad5dde81a1dc0882427904471d"
+  },
+  "schema_version": "loom.behavior-stage1-image-sources.v1",
+  "sim_python": {
+    "accepted_freeze_sha256": "sha256:478d736eb1064a57c7d12a4805f610c5a5ba4473f1bfad70e84107458b18e105",
+    "lock_sha256": "sha256:8faa36975ca568491384ff374697fcb5e75ade3d568790bb7e3d05977e4e81c5",
+    "python_version": "3.11.13"
+  },
+  "sources": [
+    {
+      "commit": "ca556f74a455cef7987a2be4537b5ac85cc56dd7",
+      "name": "b1k",
+      "repository": "https://github.com/IliaLarchenko/behavior-1k-solution.git",
+      "tree": "ec522cac024a1d77560dd7e07fe24a11c2af527d",
+      "visibility": "public"
+    },
+    {
+      "commit": "839cf641ae25661ef706afe5f1cf7b5818a1e00e",
+      "name": "bddl",
+      "repository": "https://github.com/StanfordVL/BEHAVIOR-1K.git",
+      "subdirectory": "bddl3",
+      "tree": "c03a745f1fc43fab05ddf9ccad8613d15b56a23b",
+      "visibility": "public"
+    },
+    {
+      "commit": "88f6c617ea2ac73c7efb10449bbae28ed235b6dd",
+      "excluded_upstream_entries": [
+        "images",
+        "src/curobo/content/assets"
+      ],
+      "name": "curobo",
+      "repository": "https://github.com/StanfordVL/curobo.git",
+      "tree": "b1dc70e3b9e90fb908e2c6c1cb9d6094a70851a1",
+      "visibility": "public"
+    },
+    {
+      "commit": "ad72ce3a9b414db2185bc0b38461d4101a65477a",
+      "name": "dlimp",
+      "repository": "https://github.com/kvablack/dlimp.git",
+      "tree": "b711159cc93928b3d738db74f3ec95c4d11f9e34",
+      "visibility": "public"
+    },
+    {
+      "commit": "577cd10974b84bea1f06b6472eb9e5e74e07f77a",
+      "excluded_upstream_entries": [
+        "tests"
+      ],
+      "name": "lerobot",
+      "repository": "https://github.com/huggingface/lerobot.git",
+      "tree": "4a6f63d77e6ad885fce2a0d9bba748efca051a4a",
+      "visibility": "public"
+    },
+    {
+      "commit": "d9056fa1468dd277e425b0b17caea90d367d35a6",
+      "excluded_upstream_entries": [
+        "OmniGibson/omnigibson/learning/configs/policy/hybrid_mp.yaml"
+      ],
+      "name": "omnigibson",
+      "projection_sha256": "sha256:d268e47a80dc32446fe3ca0ad5bb41062e71392224b750a8069ee4611718d366",
+      "source_identity": "authorized-behavior-1k-restore",
+      "tree": "9580959ba5783e65c218245cc60cfd4948ce2b94",
+      "vendor_path": "third_party/behavior-stage1/omnigibson",
+      "visibility": "vendored-runtime"
+    },
+    {
+      "commit": "01177e0242a1c7e8fad2547caa0e987def614cda",
+      "name": "openpi",
+      "repository": "https://github.com/Merlyn-Labs/openpi.git",
+      "tree": "337eaeaa8661abbda4eeae2ce5716cf080e9ba53",
+      "visibility": "public"
+    }
+  ],
+  "vla_python": {
+    "accepted_freeze_sha256": "sha256:77067f50b3ba42b8f286833a20580ceb44e726567a4a3df43711039e0a13a43a",
+    "lock_sha256": "sha256:2bf9803f105eca61e7136f05d6d415c4efc3309ab24463a4d12ec77a12e62578",
+    "python_version": "3.11.13"
+  }
+}

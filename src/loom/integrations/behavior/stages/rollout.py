@@ -64,7 +64,8 @@ from loom.pipeline.state import (
 )
 from loom_worker.pipeline_attempt_workspace import AttemptWorkspace
 
-PYTHON = "/opt/loom/venv/bin/python"
+SIMULATOR_PYTHON = "/opt/loom/bin/sim-python"
+VLA_PYTHON = "/opt/loom/venv-vla/bin/python"
 WORKDIR = "/opt/loom"
 INPUT_ROOT = Path("/inputs")
 OUTPUT_ROOT = Path("/outputs")
@@ -212,7 +213,7 @@ def build_vla_argv(task_id: int, seed: int) -> tuple[str, ...]:
     if isinstance(seed, bool) or not 0 <= seed <= 4_294_967_295:
         raise BehaviorContractError("seed is outside uint32")
     return (
-        PYTHON,
+        VLA_PYTHON,
         "-m",
         "loom.integrations.behavior.vla.server",
         "--task-id",
@@ -231,7 +232,7 @@ def build_vla_argv(task_id: int, seed: int) -> tuple[str, ...]:
 
 def build_engine_argv() -> tuple[str, ...]:
     return (
-        PYTHON,
+        SIMULATOR_PYTHON,
         "-m",
         "loom.integrations.behavior.stages.rollout_engine",
         "--request",
@@ -255,6 +256,7 @@ def build_vla_env(runtime: RolloutRuntimeContractV1) -> dict[str, str]:
         runtime,
         {
             "CUDA_VISIBLE_DEVICES": runtime.vla_visible_devices,
+            "OMNIGIBSON_DATA_PATH": "/inputs/dataset/payload/omnigibson",
             "PYTHONPATH": "/opt/loom/src",
         },
     )

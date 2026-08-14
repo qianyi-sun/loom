@@ -1,0 +1,159 @@
+# syntax=docker/dockerfile:1.7
+
+# OLDLAB Stage 1 is intentionally single-platform.  The graph pins the final
+# Loom OCI index while the runtime contract pins the linux/amd64 child built
+# from this exact Isaac Sim platform manifest.
+FROM nvcr.io/nvidia/isaac-sim@sha256:93b0f99635ab126fb5b33298d513c11520f119f0ee60ff8414ccef67ea977829
+
+ARG LOOM_BUILD_SHA
+ARG LOOM_BUILD_TREE_SHA
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    HF_HUB_DISABLE_TELEMETRY=1 \
+    HF_HUB_OFFLINE=1 \
+    HOME=/scratch/home \
+    OMNIGIBSON_HEADLESS=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    UV_LINK_MODE=copy \
+    UV_NO_CACHE=1 \
+    UV_PROJECT_ENVIRONMENT=/opt/loom/venv-vla \
+    WANDB_MODE=offline \
+    XDG_CACHE_HOME=/scratch/cache \
+    LD_LIBRARY_PATH=/opt/ffmpeg/lib
+
+USER root
+
+# uv is a pinned build tool only.  Stage 1 runtime never receives network
+# access and the final image contains no Git metadata or source credentials.
+ADD --checksum=sha256:6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0 \
+    https://github.com/astral-sh/uv/releases/download/0.11.26/uv-x86_64-unknown-linux-gnu.tar.gz \
+    /tmp/uv.tar.gz
+
+# BtbN's immutable LGPL shared build retains its license and documentation in
+# /opt/ffmpeg.  The release tag and archive digest are also sealed into the
+# checked-in source lock and therefore the compatibility-manifest digest.
+ADD --checksum=sha256:b33b9c56b28dbc709a7938e2461d34caefc897a6090ac02da8fc55f82d6d5451 \
+    https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-13-17-03/ffmpeg-n7.1.5-12-g1fdbca85aa-linux64-lgpl-shared-7.1.tar.xz \
+    /tmp/ffmpeg.tar.xz
+
+COPY --chmod=0555 deploy/behavior-stage1-sim/extract_runtime_asset.py \
+    /tmp/extract_runtime_asset.py
+
+RUN set -eux; \
+    tar -xzf /tmp/uv.tar.gz -C /tmp; \
+    install -m 0555 /tmp/uv-x86_64-unknown-linux-gnu/uv /usr/local/bin/uv; \
+    test "$(uv --version | awk '{print $1, $2}')" = "uv 0.11.26"; \
+    /isaac-sim/python.sh -I /tmp/extract_runtime_asset.py \
+      /tmp/ffmpeg.tar.xz /opt/ffmpeg \
+      ffmpeg-n7.1.5-12-g1fdbca85aa-linux64-lgpl-shared-7.1; \
+    test -f /opt/ffmpeg/LICENSE.txt; \
+    ln -s /opt/ffmpeg/bin/ffmpeg /usr/bin/ffmpeg; \
+    ln -s /opt/ffmpeg/bin/ffprobe /usr/bin/ffprobe; \
+    command -v ffmpeg; \
+    command -v ffprobe; \
+    test "$(ffmpeg -version | awk 'NR == 1 {print $3}')" = \
+      "n7.1.5-12-g1fdbca85aa-20260813"; \
+    test "$(uname -m)" = x86_64; \
+    if ! getent group 65532 >/dev/null; then groupadd --gid 65532 loom-stage1; fi; \
+    if ! getent passwd 65532 >/dev/null; then \
+      useradd --uid 65532 --gid 65532 --no-create-home --shell /usr/sbin/nologin loom-stage1; \
+    fi; \
+    chmod o+rx /isaac-sim; \
+    install -d -m 0555 /opt/loom/bin /opt/loom/contracts /opt/loom/locks \
+      /opt/loom/python /opt/loom/sources /opt/loom/vla
+
+COPY --chmod=0444 deploy/behavior-stage1-sim/sim.requirements.lock.txt /opt/loom/locks/
+COPY --chmod=0444 deploy/behavior-stage1-sim/loom-runtime.requirements.lock.txt \
+    /opt/loom/locks/
+COPY --chmod=0444 deploy/behavior-stage1-sim/vla.uv.lock /opt/loom/vla/uv.lock
+COPY --chmod=0444 deploy/behavior-stage1-sim/source-lock.json /opt/loom/locks/
+COPY --chmod=0555 deploy/behavior-stage1-sim/image_contract.py \
+    /opt/loom/bin/behavior_stage1_image_contract.py
+COPY --chmod=0555 deploy/behavior-stage1-sim/sim-python /opt/loom/bin/sim-python
+COPY --chmod=0444 deploy/behavior-stage1-sim/pipeline_rng.py /opt/loom/patches/pipeline_rng.py
+COPY --chmod=0555 src/loom /opt/loom/python/loom
+COPY --chmod=0555 src/loom_worker/__init__.py \
+    src/loom_worker/pipeline_attempt_workspace.py \
+    src/loom_worker/pipeline_live_preview.py \
+    /opt/loom/python/loom_worker/
+
+# `stage1-sources` is produced by prepare_behavior_stage1_image_sources.py.
+# Public sources are exact commit/tree archives.  The authorized OmniGibson
+# restore runtime is the repository-owned, projection-digested source package
+# with one explicitly omitted unsafe absolute symlink.  No checkout occurs in
+# Docker and no source credential reaches a layer.
+COPY --from=stage1-sources --chmod=0555 /b1k/ /opt/loom/vla/
+COPY --from=stage1-sources --chmod=0555 /openpi/ /opt/loom/vla/openpi/
+COPY --from=stage1-sources --chmod=0555 /bddl/ /opt/loom/sources/bddl/
+COPY --from=stage1-sources --chmod=0555 /curobo/ /opt/loom/sources/curobo/
+COPY --from=stage1-sources --chmod=0555 /dlimp/ /opt/loom/sources/dlimp/
+COPY --from=stage1-sources --chmod=0555 /lerobot/ /opt/loom/sources/lerobot/
+COPY --from=stage1-sources --chmod=0555 /omnigibson/ /opt/loom/sources/omnigibson/
+COPY --from=stage1-sources --chmod=0444 /source-evidence.json \
+    /opt/loom/contracts/source-evidence.json
+
+RUN set -eux; \
+    install -m 0444 /opt/loom/patches/pipeline_rng.py \
+      /opt/loom/sources/omnigibson/omnigibson/utils/pipeline_rng.py; \
+    uv venv --python /isaac-sim/kit/python/bin/python3 --system-site-packages \
+      /opt/loom/venv-sim; \
+    uv pip install --python /opt/loom/venv-sim/bin/python --require-hashes \
+      --requirement /opt/loom/locks/sim.requirements.lock.txt; \
+    sim_site=$(/opt/loom/bin/sim-python -I -c 'import site; print(site.getsitepackages()[0])'); \
+    /opt/loom/bin/sim-python -c \
+      'import os; paths=[path for path in os.environ["PYTHONPATH"].split(":") if path]; assert paths and all(path.startswith("/isaac-sim/") for path in paths); print("\n".join(paths))' \
+      > "${sim_site}/isaac-sim-runtime.pth"; \
+    printf '%s\n' \
+      /opt/loom/python \
+      /opt/loom/sources/bddl \
+      /opt/loom/sources/curobo/src \
+      /opt/loom/sources/lerobot/src \
+      /opt/loom/sources/omnigibson \
+      >> "${sim_site}/isaac-sim-runtime.pth"; \
+    cd /opt/loom/vla; \
+    uv sync --frozen --no-dev --python /isaac-sim/kit/python/bin/python3 \
+      --no-install-package dlimp --no-install-package evdev \
+      --no-install-package lerobot --no-install-package pynput --no-install-package python-xlib; \
+    uv pip install --python /opt/loom/venv-vla/bin/python --no-deps --require-hashes \
+      --requirement /opt/loom/locks/loom-runtime.requirements.lock.txt; \
+    vla_site=$(/opt/loom/venv-vla/bin/python -I -c 'import site; print(site.getsitepackages()[0])'); \
+    printf '%s\n' \
+      /opt/loom/python \
+      /opt/loom/sources/bddl \
+      /opt/loom/sources/curobo/src \
+      /opt/loom/sources/dlimp \
+      /opt/loom/sources/lerobot/src \
+      /opt/loom/sources/omnigibson \
+      /opt/loom/venv-sim/lib/python3.11/site-packages \
+      > "${vla_site}/loom-stage1.pth"; \
+    /opt/loom/bin/sim-python -I /opt/loom/bin/behavior_stage1_image_contract.py \
+      build-manifest \
+      --source-lock /opt/loom/locks/source-lock.json \
+      --source-evidence /opt/loom/contracts/source-evidence.json \
+      --sim-lock /opt/loom/locks/sim.requirements.lock.txt \
+      --loom-runtime-lock /opt/loom/locks/loom-runtime.requirements.lock.txt \
+      --vla-lock /opt/loom/vla/uv.lock \
+      --pipeline-rng-patch /opt/loom/patches/pipeline_rng.py \
+      --build-sha "${LOOM_BUILD_SHA}" \
+      --build-tree-sha "${LOOM_BUILD_TREE_SHA}" \
+      --output /opt/loom/contracts/compatibility-manifest.json; \
+    /opt/loom/bin/sim-python -I /opt/loom/bin/behavior_stage1_image_contract.py \
+      verify-freezes \
+      --manifest /opt/loom/contracts/compatibility-manifest.json; \
+    OMNIGIBSON_DATA_PATH=/tmp /opt/loom/bin/sim-python -I -c \
+      'from loom.integrations.behavior.stages.simulator_rng import set_pipeline_seed; set_pipeline_seed(0)'; \
+    /opt/loom/venv-vla/bin/python -I -c 'from loom.integrations.behavior.vla.policy_backend import PINNED_B1K_SOURCE_COMMIT; assert len(PINNED_B1K_SOURCE_COMMIT) == 40'; \
+    chmod -R a-w /opt/ffmpeg /opt/loom
+
+LABEL org.opencontainers.image.source="https://github.com/qianyi-sun/loom" \
+      org.opencontainers.image.title="Loom BEHAVIOR Stage 1 simulator" \
+      org.opencontainers.image.revision="${LOOM_BUILD_SHA}"
+
+USER 65532:65532
+WORKDIR /scratch
+ENTRYPOINT []
+CMD []

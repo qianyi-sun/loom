@@ -4,7 +4,7 @@ from pathlib import Path
 
 import yaml
 
-PINNED_ROUTE_SHA = "119d9ffb20ef6ef9df8a224e384ca5e91721416b"
+PINNED_ROUTE_SHA = "9a0df38f5cc4f9cf747efac3c4e37e9657e8eb34"
 PINNED_CHECKOUT = "actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd"
 LOCAL_ROUTE_ACTION = "./.loom-ci-route-action/.github/actions/ci-runner-route"
 

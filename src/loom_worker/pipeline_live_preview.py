@@ -19,7 +19,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 from uuid import UUID
 
 import httpx
@@ -37,8 +37,9 @@ from loom.pipeline.live_preview import (
     LivePreviewRecordV1,
     validate_preview_jpeg,
 )
-from loom_worker.control_plane_client import ExecutionAttemptClaimHeaders
-from loom_worker.metrics import PIPELINE_LIVE_PREVIEW_EVENTS_TOTAL
+
+if TYPE_CHECKING:
+    from loom_worker.control_plane_client import ExecutionAttemptClaimHeaders
 
 PREVIEW_MAX_JPEG_BYTES = PREVIEW_MAX_FRAME_BYTES
 PREVIEW_MAX_LOCAL_FRAMES = PREVIEW_MAX_FRAMES
@@ -166,7 +167,6 @@ class PipelineLivePreviewProducer:
             if elapsed < 0:
                 raise PipelineLivePreviewError("preview_clock_regressed")
             if elapsed < PREVIEW_MIN_INTERVAL_SECONDS:
-                PIPELINE_LIVE_PREVIEW_EVENTS_TOTAL.labels(result="dropped", reason="cadence").inc()
                 return PreviewProducerResult(accepted=False, reason="cadence_drop")
 
         if not isinstance(jpeg, bytes):
@@ -197,7 +197,6 @@ class PipelineLivePreviewProducer:
         self._next_sequence += 1
         self._last_step_idx = step_idx
         self._last_emitted_monotonic = monotonic_now
-        PIPELINE_LIVE_PREVIEW_EVENTS_TOTAL.labels(result="produced", reason="ok").inc()
         return PreviewProducerResult(
             accepted=True,
             reason="accepted",
@@ -297,18 +296,14 @@ class PipelineLivePreviewPublisher:
             except httpx.HTTPStatusError as exc:
                 if 400 <= exc.response.status_code < 500:
                     return self._close("control_plane_preview_rejected")
-                PIPELINE_LIVE_PREVIEW_EVENTS_TOTAL.labels(
-                    result="retrying", reason="control_plane"
-                ).inc()
+                _record_worker_preview_metric(result="retrying", reason="control_plane")
                 return PreviewPublishResult(
                     state="retrying",
                     sequence=sequence,
                     reason="control_plane_publish_failed",
                 )
             except Exception:
-                PIPELINE_LIVE_PREVIEW_EVENTS_TOTAL.labels(
-                    result="retrying", reason="control_plane"
-                ).inc()
+                _record_worker_preview_metric(result="retrying", reason="control_plane")
                 return PreviewPublishResult(
                     state="retrying",
                     sequence=sequence,
@@ -326,7 +321,7 @@ class PipelineLivePreviewPublisher:
                 self.expected_sequence += 1
                 self._last_published_step_idx = frame.record.step_idx
             self._trim_signatures()
-            PIPELINE_LIVE_PREVIEW_EVENTS_TOTAL.labels(result="published", reason="ok").inc()
+            _record_worker_preview_metric(result="published", reason="ok")
             return PreviewPublishResult(state="published", sequence=sequence)
         except PipelineLivePreviewError as exc:
             if exc.reason == "preview_spool_changed":
@@ -344,7 +339,7 @@ class PipelineLivePreviewPublisher:
         return PreviewPublishResult(state="closed", reason=reason)
 
     def _close(self, reason: str) -> PreviewPublishResult:
-        PIPELINE_LIVE_PREVIEW_EVENTS_TOTAL.labels(result="closed", reason=reason).inc()
+        _record_worker_preview_metric(result="closed", reason=reason)
         return self.stop(reason=reason)
 
     def _trim_signatures(self) -> None:
@@ -783,6 +778,14 @@ def _validate_episode_bound(value: int) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0 or value > _UINT64_MAX:
         raise PipelineLivePreviewError("preview_episode_bound_invalid")
     return value
+
+
+def _record_worker_preview_metric(*, result: str, reason: str) -> None:
+    """Load worker metrics only on the Worker-side publication path."""
+
+    from loom_worker.metrics import PIPELINE_LIVE_PREVIEW_EVENTS_TOTAL
+
+    PIPELINE_LIVE_PREVIEW_EVENTS_TOTAL.labels(result=result, reason=reason).inc()
 
 
 def _validate_root_path(path: Path, fd: int, *, owner_uid: int) -> None:

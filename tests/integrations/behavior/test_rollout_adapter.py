@@ -59,6 +59,10 @@ D0 = "sha256:" + "0" * 64
 D1 = "sha256:" + "1" * 64
 D2 = "sha256:" + "2" * 64
 D3 = "sha256:" + "3" * 64
+_TRO_BYTES = (
+    b'{"robot_poses":{"R1Pro":[{"orientation":[0.0,0.0,0.0,1.0],'
+    b'"position":[1.0,2.0,3.0]}]}}\n'
+)
 IMAGE = "registry.example.com/loom/behavior@sha256:" + "4" * 64
 RUN_ID = UUID(int=1)
 STAGE_RUN_ID = UUID(int=2)
@@ -157,6 +161,20 @@ def _dataset_document(bddl: bytes) -> BehaviorDatasetSnapshotArtifactV1:
                     "compatibility": compatibility,
                 },
                 "files": [
+                    {
+                        "name": "stage1_tro",
+                        "relative_path": (
+                            "payload/omnigibson/2025-challenge-task-instances/scenes/"
+                            "house_double_floor_lower/json/"
+                            "house_double_floor_lower_task_placing_can_instances/"
+                            "house_double_floor_lower_task_placing_can_0_37_"
+                            "template-tro_state.json"
+                        ),
+                        "sha256": digest_bytes(_TRO_BYTES),
+                        "size_bytes": len(_TRO_BYTES),
+                        "media_type": "application/json",
+                        "required": True,
+                    },
                     {
                         "name": "source_bddl",
                         "relative_path": (
@@ -396,6 +414,20 @@ def _write_inputs(root: Path, task: Any, dataset: Any, policy: Any) -> None:
     )
     bddl_path.parent.mkdir(parents=True)
     bddl_path.write_bytes(b"task")
+    tro_path = (
+        root
+        / "dataset"
+        / "payload"
+        / "omnigibson"
+        / "2025-challenge-task-instances"
+        / "scenes"
+        / "house_double_floor_lower"
+        / "json"
+        / "house_double_floor_lower_task_placing_can_instances"
+        / "house_double_floor_lower_task_placing_can_0_37_template-tro_state.json"
+    )
+    tro_path.parent.mkdir(parents=True)
+    tro_path.write_bytes(_TRO_BYTES)
     checkpoint = root / "policy" / "payload" / "checkpoint" / "weights.bin"
     checkpoint.parent.mkdir(parents=True)
     checkpoint.write_bytes(b"checkpoint")
@@ -653,7 +685,7 @@ def test_fixed_argv_env_gpu_topologies_and_ffmpeg_options(tmp_path: Path) -> Non
     oldlab = _runtime("oldlab")
     gb10 = _runtime("gb10")
     assert build_vla_argv(7, 1) == (
-        "/opt/loom/venv/bin/python",
+        "/opt/loom/venv-vla/bin/python",
         "-m",
         "loom.integrations.behavior.vla.server",
         "--task-id",
@@ -668,8 +700,21 @@ def test_fixed_argv_env_gpu_topologies_and_ffmpeg_options(tmp_path: Path) -> Non
         "--policy.dir",
         "/inputs/policy/payload/checkpoint",
     )
-    assert build_engine_argv()[2] == "loom.integrations.behavior.stages.rollout_engine"
+    assert build_engine_argv() == (
+        "/opt/loom/bin/sim-python",
+        "-m",
+        "loom.integrations.behavior.stages.rollout_engine",
+        "--request",
+        "/inputs/stage-request.json",
+        "--output-dir",
+        "/outputs",
+        "--scratch",
+        "/scratch/rollout",
+    )
     assert build_vla_env(oldlab)["CUDA_VISIBLE_DEVICES"] == "1"
+    assert build_vla_env(oldlab)["OMNIGIBSON_DATA_PATH"] == (
+        "/inputs/dataset/payload/omnigibson"
+    )
     assert build_simulator_env(oldlab)["CUDA_VISIBLE_DEVICES"] == "0,1"
     assert build_vla_env(gb10)["CUDA_VISIBLE_DEVICES"] == "0"
     assert build_simulator_env(gb10)["CUDA_VISIBLE_DEVICES"] == "0"

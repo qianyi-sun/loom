@@ -266,6 +266,32 @@ runtime_policy = "start"
 rollout_role = "primary"
 
 [[components]]
+id = "behavior-stage1-sim"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.behavior-stage1-sim"
+build_context = "."
+source_paths = [
+  ".dockerignore",
+  "deploy/Dockerfile.behavior-stage1-sim",
+  "deploy/behavior-stage1-sim/**",
+  "scripts/prepare_behavior_stage1_image_sources.py",
+  "src/loom/integrations/behavior/**",
+  "src/loom/pipeline/**",
+  "src/loom_worker/__init__.py",
+  "src/loom_worker/pipeline_attempt_workspace.py",
+  "src/loom_worker/pipeline_live_preview.py",
+  "third_party/behavior-stage1/**",
+]
+smoke_owner = "worker-runtime-conformance"
+scan_owner = "images"
+attestation_owner = "release-provenance"
+release_digest = "loom-behavior-stage1-sim"
+publisher = "behavior-stage1"
+platforms = ["linux/amd64"]
+runtime_policy = "conformance"
+rollout_role = "none"
+
+[[components]]
 id = "pipeline-core-fixture"
 kind = "release-image"
 dockerfile = "deploy/Dockerfile.pipeline-core-fixture"

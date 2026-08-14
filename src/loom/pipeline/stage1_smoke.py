@@ -601,7 +601,7 @@ def build_stage1_smoke_graph(
         node_key=STAGE1_SMOKE_NODE_KEY,
         image=candidate.image_index_digest,
         argv=[
-            "/opt/loom/venv/bin/python",
+            "/opt/loom/bin/sim-python",
             "-m",
             "loom.integrations.behavior.cli",
             "run",

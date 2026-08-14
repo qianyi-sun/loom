@@ -1,0 +1,77 @@
+type: R1Pro
+# R1Pro config for strict MOP script execution.
+#
+# Key idea: MOP skills (e.g., NAVIGATE_TO via `q_to_action`) require *all* robot
+# controllers to be JointController / HolonomicBaseJointController and to be
+# operating in absolute / position-target mode. For JointController-based
+# controllers (trunk / arms / grippers), this means `use_delta_commands: false`.
+# (HolonomicBaseJointController does not accept a `use_delta_commands` kwarg in
+# this OmniGibson version.)
+
+# multi_view_cameras are used by BehaviorIterableDataset
+multi_view_cameras:
+  left_wrist:
+    name: robot_r1::robot_r1:left_realsense_link:Camera:0
+    resolution: [240, 240]
+  right_wrist:
+    name: robot_r1::robot_r1:right_realsense_link:Camera:0
+    resolution: [240, 240]
+  head:
+    name: robot_r1::robot_r1:zed_link:Camera:0
+    resolution: [240, 240]
+
+# action_keys and action_key_dims are used by the baselines in il_lib repo
+action_keys: [base, torso, left_arm, left_gripper, right_arm, right_gripper]
+action_key_dims:
+  base: 3
+  torso: 4
+  left_arm: 7
+  left_gripper: 2
+  right_arm: 7
+  right_gripper: 2
+
+# Overwrite below to modify the robot controller
+controllers:
+  base:
+    name: HolonomicBaseJointController
+    motor_type: position
+    command_input_limits: default
+    # Per-tick output cap. Tuned from a 199-demo / 50k-sample bank rate
+    # study (`_overnight/bank_rate_stats.md`): human teleoperator p99 base xy
+    # = 0.0088 m/tick, base yaw = 0.0094 rad/tick. Old caps [±0.05, ±0.05,
+    # ±0.15] were 6–10× the human-natural rate, which produced the
+    # "snap-rotate" behaviour observed at run_1/step_810 (peak 168°/s yaw
+    # vs. human-natural ~16°/s p99). Caps add a small headroom over p99 so
+    # the controller doesn't deadband at the limit on long drives.
+    command_output_limits: [[-0.012, -0.012, -0.012], [0.012, 0.012, 0.012]]
+    use_impedances: false
+  trunk:
+    name: JointController
+    motor_type: position
+    command_input_limits: null
+    use_delta_commands: false
+    use_impedances: false
+  arm_left:
+    name: JointController
+    motor_type: position
+    command_input_limits: null
+    use_delta_commands: false
+    use_impedances: false
+  arm_right:
+    name: JointController
+    motor_type: position
+    command_input_limits: null
+    use_delta_commands: false
+    use_impedances: false
+  gripper_left:
+    name: JointController
+    motor_type: position
+    command_input_limits: null
+    use_delta_commands: false
+    use_impedances: false
+  gripper_right:
+    name: JointController
+    motor_type: position
+    command_input_limits: null
+    use_delta_commands: false
+    use_impedances: false

@@ -1,0 +1,23 @@
+low_primives_for_agent.py — VENDORED, externally owned. Do not edit here.
+
+Source repo : youtudou/BEHAVIOR_1K_CHALLENGE
+Source branch: agentic-data-collection-mop  (the MoP worktree)
+Source commit: 3747634854d05be8d17324c488f72342be14f3d1
+Source path  : OmniGibson/omnigibson/action_primitives/low_primives_for_agent.py
+
+This file is maintained by the MoP team. The failure-recovery pipeline depends on
+it ONLY through executor/low_prim_adapter.py (a thin wrapper, one method per public
+method). To pick up upstream changes, re-copy this single file from the MoP worktree
+at the same path and re-run the adapter smoke-test — do not hand-edit it here.
+
+Notes:
+- Its one FR-foreign dependency, `from omnigibson.learning.embodiedClaw.mop_controller
+  import resolve_target_object`, is inside `_resolve_object` under try/except and falls
+  back to `env.task.object_scope`, so it runs in this worktree without porting
+  mop_controller. The adapter resolves object words via embodiedClaw_recovery's own
+  ObjectResolver and never relies on the engine's resolver.
+- It expects ROBOT_CFG=r1pro_mop semantics (position-mode JointController everywhere;
+  robot.q_to_action asserts non-delta JointController). r1pro_mop.yaml was vendored
+  alongside it at OmniGibson/omnigibson/learning/configs/robot/r1pro_mop.yaml.
+- curobo.py / starter_semantic_action_primitives.py were NOT vendored: this worktree's
+  versions are API-compatible and carry the FR-only AG-serialize fix.
