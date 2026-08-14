@@ -301,7 +301,10 @@ async def test_aime_license_policy_tag_is_metadata_only(
             headers={"Authorization": f"Bearer {seed['token']}"},
             json={
                 "task_id": "aime-22/2022-I/1",
-                "config": {"agent_name": "oracle", "agent_model": None},
+                "config": {
+                    "agent_name": "direct-completion",
+                    "agent_model": {"provider": "openai", "name": "qwen"},
+                },
             },
         )
     assert r.status_code == 201, r.text
