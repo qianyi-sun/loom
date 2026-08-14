@@ -17,7 +17,7 @@ from loom.models.task import (
     VerifierDefaults,
 )
 from loom_worker import task_sidecars
-from loom_worker.task_sidecars import DockerTaskSidecarRuntime
+from loom_worker.task_sidecars import DockerTaskSidecarRuntime, task_sidecar_image_tag
 
 
 def _task_config() -> TaskConfig:
@@ -52,6 +52,23 @@ def _task_config() -> TaskConfig:
         ),
         agent=AgentDefaults(name="oracle"),
         verifier=VerifierDefaults(name="script"),
+    )
+
+
+def test_sidecar_image_tag_is_native_architecture_qualified() -> None:
+    config = _task_config()
+    sidecar = next(sidecar for sidecar in config.environment.sidecars if sidecar.name == "api")
+
+    assert task_sidecar_image_tag(
+        config,
+        sidecar,
+        task_checksum="abc123",
+        cpu_arch="x86_64",
+    ) != task_sidecar_image_tag(
+        config,
+        sidecar,
+        task_checksum="abc123",
+        cpu_arch="arm64",
     )
 
 
@@ -309,6 +326,44 @@ async def test_sidecar_runtime_enters_setup_slot_for_pull_and_build(
     assert slot.entered == 2
     assert slot.exited == 2
     assert slot.depth == 0
+
+
+async def test_execution_sidecar_pulls_architecture_qualified_registry_image(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    api_context = tmp_path / ".loom-build" / "sidecars" / "api"
+    api_context.mkdir(parents=True)
+    (api_context / "Dockerfile").write_text("FROM python:3.11-slim\n")
+    fake_client = _FakeDockerClient()
+    monkeypatch.setattr(task_sidecars.docker, "from_env", lambda: fake_client)
+    config = _task_config()
+    api_sidecar = next(sidecar for sidecar in config.environment.sidecars if sidecar.name == "api")
+    local_tag = task_sidecar_image_tag(
+        config,
+        api_sidecar,
+        task_checksum="abc123",
+        cpu_arch="arm64",
+    )
+    registry_repo = "registry.example/loom-task"
+    registry_ref = f"{registry_repo}:{local_tag.rpartition(':')[2]}"
+    runtime = DockerTaskSidecarRuntime(
+        task_config=config,
+        task_dir=tmp_path,
+        task_checksum="abc123",
+        trial_id=uuid4(),
+        health_poll_interval_sec=0,
+        cpu_arch="arm64",
+        registry_repo=registry_repo,
+        pull_only=True,
+    )
+
+    await runtime.start(network_name="loom-task-net")
+    await runtime.stop()
+
+    assert fake_client.images.pull_calls == ["postgres:15", registry_ref]
+    assert fake_client.images.build_calls == []
+    assert fake_client.containers.create_calls[1]["image"] == registry_ref
 
 
 async def test_sidecar_runtime_removes_container_when_start_fails_after_create(

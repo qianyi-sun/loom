@@ -810,6 +810,20 @@ def test_registry_tag_for_splits_on_last_colon_for_ported_registry() -> None:
     )
 
 
+def test_task_image_tag_is_native_architecture_qualified() -> None:
+    cfg = _task_config(dockerfile="environment/Dockerfile")
+
+    assert task_image_tag(
+        cfg,
+        task_checksum="abc123",
+        cpu_arch="x86_64",
+    ) != task_image_tag(
+        cfg,
+        task_checksum="abc123",
+        cpu_arch="arm64",
+    )
+
+
 async def test_contained_worker_pulls_base_image_from_registry_instead_of_building(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
@@ -886,6 +900,30 @@ async def test_contained_worker_refuses_build_when_registry_misses(
             registry_repo="192.168.50.13:5000/loom-task",
         )
     assert images.pull_calls  # tried the registry before refusing
+    assert images.build_calls == []
+
+
+async def test_execution_worker_never_builds_when_registry_misses(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    task_dir = tmp_path / "task"
+    dockerfile = task_dir / "environment" / "Dockerfile"
+    dockerfile.parent.mkdir(parents=True)
+    dockerfile.write_text("FROM alpine:3.19\n")
+    images = _RegistryFakeImages()
+    monkeypatch.setattr(task_image.docker, "from_env", lambda *a, **k: _FakeDockerClient(images))
+
+    with pytest.raises(TaskImageBuildError, match="registry"):
+        await resolve_task_image(
+            task_config=_task_config(dockerfile="environment/Dockerfile"),
+            task_dir=task_dir,
+            task_checksum="abc123",
+            cpu_arch="x86_64",
+            registry_repo="192.168.50.13:5000/loom-task",
+            build_if_missing=False,
+        )
+
+    assert images.pull_calls
     assert images.build_calls == []
 
 

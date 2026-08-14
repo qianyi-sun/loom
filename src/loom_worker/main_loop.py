@@ -1174,6 +1174,8 @@ async def _spawn_trial(
                 registry_pull_timeout_sec=getattr(
                     settings, "trial_cache_registry_pull_timeout_sec", 15.0
                 ),
+                cpu_arch=_host_cpu_arch(),
+                build_if_missing=False,
             )
             # #317 Phase 1: if the chosen agent declares an
             # install_script, layer the agent install onto the task
@@ -1359,6 +1361,9 @@ async def _spawn_trial(
                 container_pids=settings.container_pids,
                 container_cgroup_parent=_worker_cgroup_parent(settings),
                 runtime_identity_labels=_runtime_identity_labels(settings),
+                cpu_arch=_host_cpu_arch(),
+                registry_repo=(getattr(settings, "trial_cache_registry_repo", "") or None),
+                pull_only=True,
                 setup_slot_provider=lambda: _daemon_build_slot(
                     cp_client,
                     settings,

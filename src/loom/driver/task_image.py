@@ -14,6 +14,7 @@ import hashlib
 import logging
 import os
 import platform
+import re
 import tempfile
 import threading
 from collections.abc import Callable
@@ -120,17 +121,37 @@ class TaskImageBuildError(RuntimeError):
         self.diagnostic_detail = diagnostic_detail
 
 
-def task_image_tag(task_config: TaskConfig, *, task_checksum: str) -> str:
+def _native_cpu_arch(task_config: TaskConfig, cpu_arch: str | None) -> str:
+    selected = cpu_arch or task_config.environment.cpu_arch
+    if selected == "any":
+        machine = platform.machine().lower()
+        if machine in {"amd64", "x86_64"}:
+            selected = "x86_64"
+        elif machine in {"aarch64", "arm64"}:
+            selected = "arm64"
+    if selected not in {"x86_64", "arm64"}:
+        raise ValueError("cpu_arch must resolve to x86_64 or arm64")
+    return selected
+
+
+def task_image_tag(
+    task_config: TaskConfig,
+    *,
+    task_checksum: str,
+    cpu_arch: str | None = None,
+) -> str:
     """Stable local Docker tag for a task-bundle Dockerfile build."""
 
     dockerfile = task_config.environment.dockerfile
     dockerfile_text = dockerfile.as_posix() if dockerfile is not None else ""
     build_context = task_config.environment.docker_build_context
     build_context_text = build_context.as_posix() if build_context is not None else ""
+    native_cpu_arch = _native_cpu_arch(task_config, cpu_arch)
     material = "\n".join(
         [
             task_config.task.id,
             task_checksum,
+            native_cpu_arch,
             dockerfile_text,
             build_context_text,
         ]
@@ -149,6 +170,8 @@ async def resolve_task_image(
     require_containment: bool = False,
     registry_repo: str | None = None,
     registry_pull_timeout_sec: float = 15.0,
+    cpu_arch: str | None = None,
+    build_if_missing: bool = True,
 ) -> str:
     """Return the Docker image a service worker should use for this task.
 
@@ -179,7 +202,11 @@ async def resolve_task_image(
         dockerfile=dockerfile,
         docker_build_context=task_config.environment.docker_build_context,
     )
-    tag = task_image_tag(task_config, task_checksum=task_checksum)
+    tag = task_image_tag(
+        task_config,
+        task_checksum=task_checksum,
+        cpu_arch=cpu_arch,
+    )
 
     # Fast path: image already present locally, no build needed and no
     # slot claim required. Keeps steady-state trial dispatch free of the
@@ -204,6 +231,11 @@ async def resolve_task_image(
         docker_api_timeout_sec=docker_api_timeout_sec,
     ):
         return tag
+    if not build_if_missing:
+        raise TaskImageBuildError(
+            f"task image {tag!r} is not available from the configured registry; "
+            "execution workers are pull-only",
+        )
 
     timeout = task_config.environment.build_timeout_sec
     slot_ctx: contextlib.AbstractAsyncContextManager[Any] = (
@@ -321,7 +353,7 @@ async def _try_registry_pull_task_image(
             client.close()
 
 
-def _push_task_image_to_registry(client: Any, tag: str, registry_repo: str) -> None:
+def _push_task_image_to_registry(client: Any, tag: str, registry_repo: str) -> str:
     """Tag the freshly-built local ``tag`` as ``<registry_repo>:<digest>`` and
     push it so containment-required workers can pull it. Raises on push failure
     (the caller logs + continues — the local build already succeeded).
@@ -329,9 +361,49 @@ def _push_task_image_to_registry(client: Any, tag: str, registry_repo: str) -> N
     registry_tag = _registry_tag_for(tag, registry_repo)
     repo, _, key = registry_tag.rpartition(":")
     client.images.get(tag).tag(repository=repo, tag=key or "latest")
+    digest: str | None = None
     for line in client.images.push(repository=repo, tag=key, stream=True, decode=True):
         if isinstance(line, dict) and line.get("errorDetail"):
             raise APIError(line["errorDetail"].get("message", "push failed"))
+        if isinstance(line, dict):
+            aux = line.get("aux")
+            if isinstance(aux, dict) and isinstance(aux.get("Digest"), str):
+                digest = aux["Digest"]
+    if digest is not None and re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        return f"{repo}@{digest}"
+    image = client.images.get(registry_tag)
+    attrs = getattr(image, "attrs", {})
+    repo_digests = attrs.get("RepoDigests", []) if isinstance(attrs, dict) else []
+    for ref in repo_digests or []:
+        if isinstance(ref, str) and ref.startswith(f"{repo}@sha256:"):
+            return ref
+    raise TaskImageBuildError(
+        f"registry push for {registry_tag!r} did not return an immutable digest",
+    )
+
+
+async def publish_local_image_to_registry(
+    *,
+    tag: str,
+    registry_repo: str,
+    docker_api_timeout_sec: int | None = None,
+) -> str:
+    """Push one managed local image and return its immutable registry ref."""
+    client: Any = (
+        docker.from_env()
+        if docker_api_timeout_sec is None
+        else docker.from_env(timeout=docker_api_timeout_sec)
+    )
+    try:
+        return await asyncio.to_thread(
+            _push_task_image_to_registry,
+            client,
+            tag,
+            registry_repo,
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            client.close()
 
 
 def _resolve_dockerfile_path(*, task_dir: Path, dockerfile: PurePosixPath) -> Path:

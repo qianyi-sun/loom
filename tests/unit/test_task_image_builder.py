@@ -1,0 +1,183 @@
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+from uuid import UUID
+
+import pytest
+
+from loom_worker import task_image_builder
+from loom_worker.control_plane_client import TaskImageBuildClaim
+
+
+def _claim(*, cpu_arch: str = "arm64") -> TaskImageBuildClaim:
+    task_id = "benchmark/task"
+    return TaskImageBuildClaim(
+        id=UUID("00000000-0000-0000-0000-000000000123"),
+        materialization_key="a" * 64,
+        task_id=task_id,
+        task_checksum="b" * 64,
+        cpu_arch=cpu_arch,  # type: ignore[arg-type]
+        task_config={
+            "schema_version": "1",
+            "task": {"id": task_id, "name": task_id},
+            "environment": {
+                "os": "linux",
+                "cpu_arch": cpu_arch,
+                "dockerfile": "environment/Dockerfile",
+                "sidecars": [
+                    {
+                        "name": "database",
+                        "dockerfile": "environment/database.Dockerfile",
+                    }
+                ],
+            },
+            "agent": {"name": "oracle"},
+            "verifier": {"name": "pytest"},
+            "steps": [{"name": "main"}],
+        },
+        task_source="s3://loom-tasks/task",
+        task_source_provenance={},
+        attempt_count=1,
+        max_attempts=3,
+        lease_epoch=2,
+        lease_expires_at="2026-08-14T12:00:00+00:00",
+    )
+
+
+def _settings() -> SimpleNamespace:
+    return SimpleNamespace(
+        trial_cache_registry_repo="registry.example/loom-task",
+        docker_api_timeout_sec=120,
+        fixtures_root=None,
+        benchmark_cache=None,
+        task_materialize_timeout_sec=300.0,
+        heartbeat_interval_sec=0.01,
+    )
+
+
+async def test_materialization_rejects_non_native_builder_architecture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(task_image_builder, "host_cpu_arch", lambda: "x86_64")
+
+    with pytest.raises(RuntimeError, match="native architecture"):
+        await task_image_builder.materialize_and_publish_task_images(
+            _claim(cpu_arch="arm64"),
+            _settings(),  # type: ignore[arg-type]
+        )
+
+
+async def test_materialization_builds_and_publishes_every_dockerfile_component(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    claim = _claim()
+    task_dir = tmp_path / "task"
+    (task_dir / "environment").mkdir(parents=True)
+    (task_dir / "environment" / "Dockerfile").write_text("FROM alpine\n")
+    (task_dir / "environment" / "database.Dockerfile").write_text("FROM postgres\n")
+    observed: dict[str, Any] = {}
+    monkeypatch.setattr(task_image_builder, "host_cpu_arch", lambda: "arm64")
+    monkeypatch.setattr(task_image_builder, "_build_worker_object_store", lambda _s: object())
+
+    async def materialize(**kwargs: Any) -> Path:
+        observed["materialize"] = kwargs
+        return task_dir
+
+    async def resolve(**kwargs: Any) -> str:
+        observed["resolve"] = kwargs
+        return "loom-task:base"
+
+    async def sidecars(**kwargs: Any) -> dict[str, str]:
+        observed["sidecars"] = kwargs
+        return {"database": "loom-sidecar:database"}
+
+    async def publish(*, tag: str, registry_repo: str, **_kwargs: Any) -> str:
+        observed.setdefault("publish", []).append((tag, registry_repo))
+        digest = "1" * 64 if tag.startswith("loom-task") else "2" * 64
+        return f"{registry_repo}@sha256:{digest}"
+
+    monkeypatch.setattr(task_image_builder, "_materialize_task_dir", materialize)
+    monkeypatch.setattr(task_image_builder, "sha256_of_dir", lambda _path: claim.task_checksum)
+    monkeypatch.setattr(task_image_builder, "resolve_task_image", resolve)
+    monkeypatch.setattr(task_image_builder, "build_task_sidecar_images", sidecars)
+    monkeypatch.setattr(task_image_builder, "publish_local_image_to_registry", publish)
+    monkeypatch.setattr(
+        task_image_builder.shutil, "rmtree", lambda path: observed.setdefault("removed", path)
+    )
+
+    registry_images = await task_image_builder.materialize_and_publish_task_images(
+        claim,
+        _settings(),  # type: ignore[arg-type]
+    )
+
+    assert registry_images == {
+        "task": "registry.example/loom-task@sha256:" + "1" * 64,
+        "sidecar:database": "registry.example/loom-task@sha256:" + "2" * 64,
+    }
+    assert observed["resolve"]["cpu_arch"] == "arm64"
+    assert observed["sidecars"]["cpu_arch"] == "arm64"
+    assert observed["publish"] == [
+        ("loom-task:base", "registry.example/loom-task"),
+        ("loom-sidecar:database", "registry.example/loom-task"),
+    ]
+    assert observed["removed"] == task_dir
+
+
+class _FakeControlPlane:
+    def __init__(self) -> None:
+        self.heartbeats = 0
+        self.completed: dict[str, str] | None = None
+        self.failed = False
+
+    async def start_task_image_materialization(self, **_kwargs: Any) -> bool:
+        return True
+
+    async def heartbeat_task_image_materialization(self, **_kwargs: Any) -> bool:
+        self.heartbeats += 1
+        return True
+
+    async def complete_task_image_materialization(
+        self,
+        *,
+        registry_images: dict[str, str],
+        **_kwargs: Any,
+    ) -> bool:
+        self.completed = registry_images
+        return True
+
+    async def fail_task_image_materialization(self, **_kwargs: Any) -> bool:
+        self.failed = True
+        return True
+
+
+async def test_process_claim_heartbeats_and_completes_fenced_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control_plane = _FakeControlPlane()
+
+    async def materialize(_claim: Any, _settings: Any) -> dict[str, str]:
+        await asyncio.sleep(0.04)
+        return {"task": "registry.example/task@sha256:" + "d" * 64}
+
+    monkeypatch.setattr(
+        task_image_builder,
+        "materialize_and_publish_task_images",
+        materialize,
+    )
+
+    await task_image_builder.process_task_image_claim(
+        control_plane,  # type: ignore[arg-type]
+        claim=_claim(),
+        builder_id="builder-a",
+        settings=_settings(),  # type: ignore[arg-type]
+    )
+
+    assert control_plane.heartbeats >= 1
+    assert control_plane.completed == {
+        "task": "registry.example/task@sha256:" + "d" * 64,
+    }
+    assert control_plane.failed is False
