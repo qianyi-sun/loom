@@ -21,6 +21,8 @@ class Stage1ImageEvidenceError(ValueError):
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_MAX_PROVENANCE_VERIFICATION_BYTES = 4 * 1024 * 1024
+_MAX_SBOM_VERIFICATION_BYTES = 32 * 1024 * 1024
 _RECORD_KEYS = {
     "build",
     "component",
@@ -45,7 +47,7 @@ def _reject_nonfinite(value: str) -> object:
     raise Stage1ImageEvidenceError(f"non-finite JSON value: {value}")
 
 
-def _parse(path: Path, *, label: str, max_bytes: int) -> dict[str, Any]:
+def _load_json(path: Path, *, label: str, max_bytes: int) -> Any:
     observed = path.lstat()
     if (
         not stat.S_ISREG(observed.st_mode)
@@ -71,9 +73,94 @@ def _parse(path: Path, *, label: str, max_bytes: int) -> dict[str, Any]:
         after.st_mtime_ns,
     ):
         raise Stage1ImageEvidenceError(f"{label} changed while reading")
+    return value
+
+
+def _parse(path: Path, *, label: str, max_bytes: int) -> dict[str, Any]:
+    value = _load_json(path, label=label, max_bytes=max_bytes)
     if not isinstance(value, dict):
         raise Stage1ImageEvidenceError(f"{label} must be an object")
     return value
+
+
+def _parse_attestation_verification(
+    path: Path,
+    *,
+    label: str,
+    predicate_type: str,
+    subject_name: str,
+    subject_digest: str,
+    max_bytes: int,
+) -> dict[str, Any]:
+    value = _load_json(path, label=label, max_bytes=max_bytes)
+    if not isinstance(value, list) or len(value) != 1:
+        raise Stage1ImageEvidenceError(f"{label} must be a singleton verification array")
+    result = value[0]
+    if not isinstance(result, dict):
+        raise Stage1ImageEvidenceError(f"{label} result must be an object")
+    if set(result) != {"attestation", "verificationResult"}:
+        raise Stage1ImageEvidenceError(f"{label} result keys drifted")
+
+    attestation = result.get("attestation")
+    if not isinstance(attestation, dict) or set(attestation) != {
+        "bundle",
+        "bundle_url",
+        "initiator",
+    }:
+        raise Stage1ImageEvidenceError(f"{label} attestation keys drifted")
+    if (
+        not isinstance(attestation.get("bundle"), dict)
+        or not isinstance(attestation.get("bundle_url"), str)
+        or not isinstance(attestation.get("initiator"), str)
+    ):
+        raise Stage1ImageEvidenceError(f"{label} attestation types drifted")
+
+    verification = result.get("verificationResult")
+    if not isinstance(verification, dict) or set(verification) != {
+        "mediaType",
+        "signature",
+        "statement",
+        "verifiedIdentity",
+        "verifiedTimestamps",
+    }:
+        raise Stage1ImageEvidenceError(f"{label} verification result keys drifted")
+    if verification.get("mediaType") != (
+        "application/vnd.dev.sigstore.verificationresult+json;version=0.1"
+    ):
+        raise Stage1ImageEvidenceError(f"{label} verification media type drifted")
+    if (
+        not isinstance(verification.get("signature"), dict)
+        or not verification["signature"]
+        or not isinstance(verification.get("verifiedIdentity"), dict)
+        or not verification["verifiedIdentity"]
+        or not isinstance(verification.get("verifiedTimestamps"), list)
+        or not verification["verifiedTimestamps"]
+    ):
+        raise Stage1ImageEvidenceError(f"{label} verification proof is incomplete")
+
+    statement = verification.get("statement")
+    if not isinstance(statement, dict) or set(statement) != {
+        "_type",
+        "predicate",
+        "predicateType",
+        "subject",
+    }:
+        raise Stage1ImageEvidenceError(f"{label} statement keys drifted")
+    if (
+        statement.get("_type") != "https://in-toto.io/Statement/v1"
+        or statement.get("predicateType") != predicate_type
+        or not isinstance(statement.get("predicate"), dict)
+    ):
+        raise Stage1ImageEvidenceError(f"{label} statement predicate drifted")
+    expected_subject = [
+        {
+            "digest": {"sha256": subject_digest.removeprefix("sha256:")},
+            "name": subject_name,
+        }
+    ]
+    if statement.get("subject") != expected_subject:
+        raise Stage1ImageEvidenceError(f"{label} statement subject drifted")
+    return result
 
 
 def _finite_float(raw: str, label: str) -> float:
@@ -247,15 +334,25 @@ def _record_index(args: argparse.Namespace) -> dict[str, object]:
         "os": platform.get("os"),
     } != {"architecture": "amd64", "os": "linux"}:
         raise Stage1ImageEvidenceError("Stage 1 OCI child platform drift")
-    _parse(
+    subject_name = child_subject.get("name")
+    subject_digest = child_subject.get("digest")
+    if not isinstance(subject_name, str) or not isinstance(subject_digest, str):
+        raise Stage1ImageEvidenceError("Stage 1 child subject identity drift")
+    _parse_attestation_verification(
         args.provenance_verification,
         label="provenance verification",
-        max_bytes=4 * 1024 * 1024,
+        predicate_type="https://slsa.dev/provenance/v1",
+        subject_name=subject_name,
+        subject_digest=_exact(subject_digest, _DIGEST, "child subject digest"),
+        max_bytes=_MAX_PROVENANCE_VERIFICATION_BYTES,
     )
-    _parse(
+    _parse_attestation_verification(
         args.sbom_verification,
         label="SBOM verification",
-        max_bytes=4 * 1024 * 1024,
+        predicate_type="https://spdx.dev/Document/v2.3",
+        subject_name=subject_name,
+        subject_digest=subject_digest,
+        max_bytes=_MAX_SBOM_VERIFICATION_BYTES,
     )
     return {
         "attestations": {
