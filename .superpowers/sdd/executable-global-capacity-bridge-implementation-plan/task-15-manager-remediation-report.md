@@ -4,7 +4,11 @@
 
 Implemented the five requested remediation items while preserving the inert executable bridge posture: no live activation/apply/start path, no positive checked-in/rendered ceiling, and fixed namespace derivation (`loom-dev`, `loom-dev-<owner>`, no shared personal namespace).
 
-Commit: `68d2bc373` (`Fix Task 15A capacity remediation gaps`).
+Commit inventory:
+
+- `68d2bc373` (`Fix Task 15A capacity remediation gaps`)
+- `2e7278052` (`Fix Task 15A review round gaps`)
+- `a2c648584` (`Fix Task 15A guard audit history backfill`)
 
 ## Item 1 — Protected admission source/publication separation
 
@@ -193,3 +197,53 @@ Final pre-commit continuation check:
 - Removed the leftover working-tree-only `src/loom/db/schema.py` line-wrapping churn from this fix-round commit; `git diff -- src/loom/db/schema.py` → no output.
 - `git diff --check` → passed.
 - `uv run --no-sync pytest -q tests/unit/test_personal_dev_reconciler.py::test_capacity_installer_configuration_uses_candidate_publication_digest tests/integration/test_capacity_manager_execution_store.py::test_drain_telemetry_accepts_retained_active_registration_after_writer_failover tests/integration/test_capacity_guard_migrations.py::test_guard_0015_backfills_legacy_agent_registration_audit_for_replay tests/integration/test_capacity_manager_migrate.py::test_executor_retirement_safety_rejects_missing_inventory_binding_fields tests/integration/test_capacity_management_store.py::test_activation_rejects_unmatched_static_candidate_provenance tests/integration/test_alembic_migrations.py::test_dev_instance_capacity_coordinate_constraint_matches_model_and_migration tests/integration/test_capacity_manager_migrate.py::test_retirement_lifecycle_schema_matches_model_and_migration -vv` → 16 passed in 34.57s.
+
+## Fix round 2 — RED evidence
+
+Review findings addressed in this round:
+
+1. `guard_0015` enriched historical `agent_registered.v1` / `agent_reconfigured.v1` audit events from the one current `agent_registrations` row, corrupting multi-event histories such as register candidate A then reconfigure candidate B.
+2. The report commit inventory listed only `68d2bc373`, omitting `2e7278052`.
+3. `src/loom/db/schema.py` still carried unrelated line-wrapping churn versus pre-remediation base `4c11c9ef1`.
+
+Root cause:
+
+- The `guard_0015` audit backfill joined legacy audit rows to `agent_registrations` by `agent_incarnation`. Since that table stores only the current registration, every historical audit for the same agent received the latest candidate provenance.
+- The report header was not updated when fix round 1 was committed.
+- The first remediation commit had formatted unrelated `schema.py` hunks while adding the intended personal capacity coordinate constraint.
+
+RED:
+
+- `uv run --no-sync pytest -q tests/integration/test_capacity_guard_migrations.py::test_guard_0015_backfills_legacy_agent_audits_from_event_time_candidate_digest -vv` → failed as expected: the legacy `agent_registered.v1` event retained `candidate_digest = cccc...` but was backfilled with `candidate_identity = dddd...` from the current reconfigured registration row.
+
+Implementation:
+
+- Added a real `guard_0014 -> head` two-event regression that seeds register-A and reconfigure-B legacy audit payloads, upgrades through `guard_0015`, and asserts both event-time payloads plus canonical digests.
+- Changed `guard_0015` to backfill incomplete legacy registration audit events from each event payload's own legacy `candidate_digest`: algorithm `source-sha256`, identity exact `candidate_digest`, publication exact `candidate_digest`.
+- Combined payload and digest backfill into one update scoped only to incomplete audit payloads, preserving already-complete payloads.
+- Restored the pre-remediation `schema.py` line wrapping for unrelated hunks while preserving `dev_instances_personal_capacity_identity_check`.
+- Updated the report commit inventory to include `68d2bc373`, `2e7278052`, and `a2c648584`.
+
+GREEN/regression:
+
+- `uv run --no-sync pytest -q tests/integration/test_capacity_guard_migrations.py::test_guard_0015_backfills_legacy_agent_audits_from_event_time_candidate_digest -vv` → 1 passed in 12.41s.
+- `uv run --no-sync pytest -q tests/integration/test_capacity_guard_migrations.py::test_guard_0015_backfills_legacy_agent_audits_from_event_time_candidate_digest tests/integration/test_capacity_guard_migrations.py::test_guard_0015_backfills_legacy_agent_registration_audit_for_replay -vv` → 2 passed in 21.20s.
+- `uv run --no-sync pytest -q tests/integration/test_capacity_agent_executable_admission.py tests/integration/test_capacity_agent_store.py tests/integration/test_capacity_agent_migrations.py tests/integration/test_capacity_guard_migrations.py tests/integration/test_capacity_submission_store.py tests/integration/test_capacity_legacy_fence_store.py -vv` → 138 passed in 51.64s.
+- `uv run --no-sync pytest -q tests/integration/test_alembic_migrations.py::test_dev_instance_capacity_coordinate_constraint_matches_model_and_migration -vv` → 1 passed in 8.04s.
+
+Static verification:
+
+- `git diff --check` → passed.
+- `uv run --no-sync ruff format --check capacity_guard_migrations/versions/guard_0015_candidate_provenance.py tests/integration/test_capacity_guard_migrations.py` → 2 files already formatted.
+- `uv run --no-sync ruff check capacity_guard_migrations/versions/guard_0015_candidate_provenance.py tests/integration/test_capacity_guard_migrations.py src/loom/db/schema.py` → all checks passed.
+- `uv run --no-sync mypy` → success, no issues in 805 source files.
+- `git diff 4c11c9ef1 -- src/loom/db/schema.py` → only the intended `dev_instances_personal_capacity_identity_check` hunk remains.
+
+Commits:
+
+- `a2c648584` (`Fix Task 15A guard audit history backfill`)
+
+Concerns:
+
+- Full repository pytest was not rerun for this fix round.
+- The report update is committed separately after the code commit so the report can cite the exact code commit ID.
