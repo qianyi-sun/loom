@@ -77,6 +77,7 @@ class TrajectoryWriter:
         self._part_number = 0
         self._local_file: Any | None = None  # aiofiles handle
         self._closed = False
+        self._remote_committed = False
         self.parts_uploaded = 0
         self._next_seq = 0
         # #1186: agents that emit gateway LLMCallEvents (terminus-2) need
@@ -90,6 +91,11 @@ class TrajectoryWriter:
     @property
     def local_path(self) -> Path:
         return self._local_path
+
+    @property
+    def remote_committed(self) -> bool:
+        """Whether the exact remote object completed successfully."""
+        return self._remote_committed
 
     @property
     def llm_call_event_count(self) -> int:
@@ -246,6 +252,7 @@ class TrajectoryWriter:
                 else:
                     try:
                         await self._store.complete_multipart_upload(self._upload)
+                        self._remote_committed = True
                     except Exception as exc:
                         self._upload = None
                         raise TrajectoryFlushFailedError(
