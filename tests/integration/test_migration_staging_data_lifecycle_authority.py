@@ -273,15 +273,24 @@ def test_epoch_compare_and_swap_updates_authority_and_appends_exact_event(
         engine.dispose()
 
 
-def test_sql_gc_journal_commits_exact_phases_and_mutation_epoch(
+def test_sql_gc_resume_advances_from_intervening_mutation_epoch(
     postgres_url_at_0065: str,
 ) -> None:
+    command.upgrade(_cfg(postgres_url_at_0065), "head")
     engine = create_engine(postgres_url_at_0065)
     authority_id = uuid4()
     empty_authority_id = uuid4()
     object_id = uuid4()
     now = datetime(2026, 7, 20, 1, tzinfo=UTC)
-    with engine.connect() as connection:
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO staging_mutation_epochs "
+                "(environment, namespace, epoch, reason) "
+                "VALUES ('staging','loom-staging',0,'bootstrap') "
+                "ON CONFLICT (environment) DO NOTHING"
+            )
+        )
         epoch = connection.execute(
             text("SELECT epoch FROM staging_mutation_epochs WHERE environment='staging'")
         ).scalar_one()
@@ -445,11 +454,85 @@ def test_sql_gc_journal_commits_exact_phases_and_mutation_epoch(
             7,
         )
         assert authority_evidence == tuple(sorted((authority_id, empty_authority_id)))
+        with engine.begin() as connection:
+            intervening = advance_mutation_epoch(
+                SqlAlchemyMutationEpochStore(connection),
+                MutationEpochAdvance(
+                    environment="staging",
+                    namespace="loom-staging",
+                    expected_epoch=epoch,
+                    mutation_class=ProtectedMutationClass.ROLLOUT_APPLY,
+                    request_id="req-rollout-intervening",
+                    evidence_sha256="c" * 64,
+                    occurred_at=now + timedelta(minutes=1),
+                ),
+            )
+        assert intervening.epoch == epoch + 1
+
+        class RaceAfterLoadJournal:
+            def __init__(self, delegate: SqlAlchemyGcJournal) -> None:
+                self.delegate = delegate
+
+            def load_resume(self, exact_run_id):
+                snapshot = self.delegate.load_resume(exact_run_id)
+                with engine.begin() as connection:
+                    raced = advance_mutation_epoch(
+                        SqlAlchemyMutationEpochStore(connection),
+                        MutationEpochAdvance(
+                            environment="staging",
+                            namespace="loom-staging",
+                            expected_epoch=snapshot.completion_mutation_epoch,
+                            mutation_class=ProtectedMutationClass.ROLLOUT_APPLY,
+                            request_id="req-rollout-after-load",
+                            evidence_sha256="d" * 64,
+                            occurred_at=now + timedelta(minutes=2),
+                        ),
+                    )
+                assert raced.epoch == epoch + 2
+                return snapshot
+
+            def __getattr__(self, name):
+                return getattr(self.delegate, name)
+
         deleter.verify = True
+        with pytest.raises(LifecycleGcExecutionError, match="stale"):
+            resume_gc(
+                run_id=run_id,
+                request_id="req-gcresume-raced",
+                completed_at=now + timedelta(minutes=3),
+                journal=RaceAfterLoadJournal(journal),
+                object_deleter=deleter,
+            )
+        with engine.connect() as connection:
+            raced_run = connection.execute(
+                text(
+                    "SELECT state, mutation_epoch_before, mutation_epoch_after "
+                    "FROM data_lifecycle_gc_runs WHERE id=:id"
+                ),
+                {"id": run_id},
+            ).one()
+            raced_item_state = connection.execute(
+                text(
+                    "SELECT state FROM data_lifecycle_gc_items "
+                    "WHERE gc_run_id=:id AND object_id=:object_id"
+                ),
+                {"id": run_id, "object_id": object_id},
+            ).scalar_one()
+            raced_lifecycle_events = connection.execute(
+                text(
+                    "SELECT count(*) FROM staging_mutation_epoch_events "
+                    "WHERE environment='staging' AND namespace='loom-staging' "
+                    "AND request_id='req-gcresume-raced'"
+                )
+            ).scalar_one()
+        assert tuple(raced_run) == ("failed", epoch, None)
+        assert raced_item_state == "metadata_deleted"
+        assert raced_lifecycle_events == 0
+
         result = resume_gc(
             run_id=run_id,
-            request_id="req-gcinteg00",
-            completed_at=now,
+            request_id="req-gcresume-intervening",
+            completed_at=now + timedelta(minutes=4),
             journal=journal,
             object_deleter=deleter,
         )
@@ -472,9 +555,31 @@ def test_sql_gc_journal_commits_exact_phases_and_mutation_epoch(
                 text("SELECT count(*) FROM data_lifecycle_authorities WHERE id IN (:a,:b)"),
                 {"a": authority_id, "b": empty_authority_id},
             ).scalar_one()
-        assert tuple(run) == ("completed", epoch, epoch + 1)
+            completion_event = connection.execute(
+                text(
+                    "SELECT mutation_class, request_id, evidence_sha256 "
+                    "FROM staging_mutation_epoch_events "
+                    "WHERE environment='staging' AND namespace='loom-staging' "
+                    "AND epoch=:epoch"
+                ),
+                {"epoch": epoch + 3},
+            ).one()
+            completion_request_count = connection.execute(
+                text(
+                    "SELECT count(*) FROM staging_mutation_epoch_events "
+                    "WHERE environment='staging' AND namespace='loom-staging' "
+                    "AND request_id='req-gcresume-intervening'"
+                )
+            ).scalar_one()
+        assert tuple(run) == ("completed", epoch, epoch + 3)
         assert item_state == "metadata_deleted"
         assert authority_count == 0
+        assert tuple(completion_event) == (
+            ProtectedMutationClass.LIFECYCLE_GC,
+            "req-gcresume-intervening",
+            plan.inventory_digest,
+        )
+        assert completion_request_count == 1
     finally:
         engine.dispose()
 

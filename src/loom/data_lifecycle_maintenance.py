@@ -12,7 +12,7 @@ import argparse
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from loom.data_lifecycle_capacity import (
     collect_staging_capacity,
@@ -42,7 +42,7 @@ from loom.data_lifecycle_runtime import (
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
-    parser.add_argument("--action", choices=("auto", "capacity"), default="auto")
+    parser.add_argument("--action", choices=("auto", "capacity", "resume"), default="auto")
     parser.add_argument("--namespace", required=True)
     parser.add_argument("--bucket", action="append", required=True)
     parser.add_argument(
@@ -59,28 +59,68 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-drive-count", type=int, default=None)
     parser.add_argument("--filesystem-path", action="append", type=Path, default=None)
     parser.add_argument("--requested-by", default="staging-lifecycle-cronjob")
+    parser.add_argument("--resume-run-id", type=UUID)
+    parser.add_argument("--request-id")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    if args.capacity_source == "minio-admin" and (
-        args.expected_drive_count is None or args.expected_drive_count < 1
-    ):
-        raise RuntimeError(
-            "--capacity-source minio-admin requires a positive "
-            "--expected-drive-count"
-        )
-    if args.capacity_source == "filesystem" and args.expected_drive_count is not None:
-        raise RuntimeError(
-            "--capacity-source filesystem cannot use --expected-drive-count"
-        )
+    if args.action == "resume":
+        if args.resume_run_id is None or args.request_id is None:
+            raise RuntimeError("resume requires --resume-run-id and --request-id")
+    else:
+        if args.resume_run_id is not None or args.request_id is not None:
+            raise RuntimeError("auto and capacity do not accept resume authority")
+        if args.capacity_source == "minio-admin" and (
+            args.expected_drive_count is None or args.expected_drive_count < 1
+        ):
+            raise RuntimeError(
+                "--capacity-source minio-admin requires a positive --expected-drive-count"
+            )
+        if args.capacity_source == "filesystem" and args.expected_drive_count is not None:
+            raise RuntimeError("--capacity-source filesystem cannot use --expected-drive-count")
     runtime = load_lifecycle_runtime()
     engine = build_lifecycle_engine(runtime.database)
     client = build_lifecycle_object_store_client(runtime.object_store)
     try:
         now = datetime.now(UTC)
         object_inventory = S3ObservedObjectInventory(client)
+        document: dict[str, object] | None
+        if args.action == "resume":
+            document = run_lifecycle_operator(
+                request=LifecycleOperatorRequest(
+                    action=OperatorAction.RESUME,
+                    requested_by=args.requested_by,
+                    now=now,
+                    request_id=args.request_id,
+                    resume_run_id=args.resume_run_id,
+                ),
+                scope=GcScope(environment="staging", namespace=args.namespace),
+                inventory=ReconcilingLifecycleInventory(
+                    SqlAlchemyLifecycleInventory(engine),
+                    object_inventory,
+                    buckets=args.bucket,
+                ),
+                journal=SqlAlchemyGcJournal(engine),
+                object_deleter=S3ExactObjectDeleter(client),
+                batch_size=1000,
+            )
+            print(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "action": args.action,
+                        "capacity": None,
+                        "gc": document,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                flush=True,
+            )
+            return 0
+
         observed = object_inventory.load(buckets=args.bucket)
         if args.capacity_source == "minio-admin":
             store = runtime.object_store
@@ -104,8 +144,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             if not args.filesystem_path:
                 raise RuntimeError(
-                    "--capacity-source filesystem requires at least one "
-                    "--filesystem-path"
+                    "--capacity-source filesystem requires at least one --filesystem-path"
                 )
             capacity = collect_staging_capacity(
                 namespace=args.namespace,

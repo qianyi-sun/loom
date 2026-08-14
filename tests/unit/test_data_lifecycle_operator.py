@@ -117,6 +117,7 @@ class _Journal:
             run_id=run_id,
             deletion_token=self.token,
             plan=self.plan,
+            completion_mutation_epoch=self.plan.mutation_epoch,
             item_states=((self.plan.objects[0].id, "object_deleted"),),
         )
 

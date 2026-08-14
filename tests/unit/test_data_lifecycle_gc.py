@@ -243,9 +243,10 @@ def test_reconciliation_reports_both_orphan_directions() -> None:
 
 
 class _Journal:
-    def __init__(self, *, epoch_after: int = 8) -> None:
+    def __init__(self, *, epoch_after: int = 8, resume_completion_mutation_epoch: int = 7) -> None:
         self.run_id = uuid4()
         self.epoch_after = epoch_after
+        self.resume_completion_mutation_epoch = resume_completion_mutation_epoch
         self.events: list[tuple[str, object]] = []
 
     def record_dry_run(self, *, plan: GcPlan, requested_by: str) -> UUID:
@@ -293,10 +294,11 @@ class _Journal:
         self,
         *,
         run_id: UUID,
+        run_mutation_epoch: int,
         mutation: MutationEpochAdvance,
         deletion_token: UUID,
     ) -> MutationEpochState:
-        self.events.append(("complete", (run_id, mutation, deletion_token)))
+        self.events.append(("complete", (run_id, run_mutation_epoch, mutation, deletion_token)))
         return MutationEpochState(
             environment=mutation.environment,
             namespace=mutation.namespace,
@@ -318,6 +320,7 @@ class _Journal:
             run_id=run_id,
             deletion_token=UUID(int=42),
             plan=plan,
+            completion_mutation_epoch=self.resume_completion_mutation_epoch,
             item_states=((plan.objects[0].id, "object_deleted"),),
         )
 
@@ -382,6 +385,7 @@ class _BatchResumeJournal(_BatchJournal):
             run_id=run_id,
             deletion_token=UUID(int=42),
             plan=self.plan,
+            completion_mutation_epoch=self.resume_completion_mutation_epoch,
             item_states=tuple((item.id, "marked") for item in self.plan.objects),
         )
 
@@ -567,4 +571,32 @@ def test_resume_continues_from_exact_object_phase_without_redeleting() -> None:
         "verified",
         "metadata",
         "complete",
+    ]
+
+
+def test_resume_rejects_non_monotonic_epoch_completion() -> None:
+    journal = _Journal(epoch_after=11, resume_completion_mutation_epoch=9)
+
+    class ResumeDeleter:
+        def delete_exact(self, item: RegisteredObject) -> None:
+            raise AssertionError("already-deleted object must not be deleted again")
+
+        def exact_absent(self, item: RegisteredObject) -> bool:
+            return True
+
+    with pytest.raises(LifecycleGcExecutionError, match="non-monotonic"):
+        resume_gc(
+            run_id=journal.run_id,
+            request_id="req-gcresume1",
+            completed_at=NOW,
+            journal=journal,
+            object_deleter=ResumeDeleter(),
+        )
+
+    assert [event[0] for event in journal.events] == [
+        "resume",
+        "verified",
+        "metadata",
+        "complete",
+        "failed",
     ]
