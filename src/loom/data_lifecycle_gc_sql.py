@@ -536,19 +536,24 @@ class SqlAlchemyGcJournal:
             ):
                 raise ValueError("journal authority evidence is incomplete")
             objects = tuple(
-                RegisteredObject(
-                    id=cast(UUID, row[0]),
-                    authority_id=cast(UUID, row[3]),
-                    environment=scope.environment,
-                    namespace=scope.namespace,
-                    bucket=cast(str, row[4]),
-                    object_key=cast(str, row[5]),
-                    version_id=cast(str | None, row[6]),
-                    content_sha256=cast(str | None, row[7]),
-                    size_bytes=cast(int, row[8]),
-                    state="active",
+                sorted(
+                    (
+                        RegisteredObject(
+                            id=cast(UUID, row[0]),
+                            authority_id=cast(UUID, row[3]),
+                            environment=scope.environment,
+                            namespace=scope.namespace,
+                            bucket=cast(str, row[4]),
+                            object_key=cast(str, row[5]),
+                            version_id=cast(str | None, row[6]),
+                            content_sha256=cast(str | None, row[7]),
+                            size_bytes=cast(int, row[8]),
+                            state="active",
+                        )
+                        for row in rows
+                    ),
+                    key=lambda item: (item.identity, str(item.id)),
                 )
-                for row in rows
             )
             authority_ids = tuple(sorted(cast(UUID, row[0]) for row in authority_rows))
             if len(authority_ids) != len(set(authority_ids)):
