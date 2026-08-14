@@ -15,7 +15,7 @@ import httpx
 import pytest
 from botocore.config import Config
 from fastapi import FastAPI
-from sqlalchemy import create_engine, delete, insert, select, text
+from sqlalchemy import create_engine, delete, func, insert, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -3868,6 +3868,70 @@ async def test_rerun_failed_batch_creates_linked_exact_targets(
             "failure_reason": "gateway_error",
         }
     ]
+
+
+async def test_rerun_failed_rejects_task_that_became_agent_incompatible(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id = camp_setup
+    batch_id = uuid4()
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            Task.__table__.update()
+            .where(Task.id == "local/mit-0")
+            .values(config=_workspace_task_config("local/mit-0")),
+        )
+        conn.execute(
+            insert(Batch).values(
+                id=batch_id,
+                team_id=team_id,
+                name="now-incompatible",
+                task_filter={"task_ids": ["local/mit-0"], "subset_kind": "explicit"},
+                trial_config={
+                    "agent_name": "direct-completion",
+                    "agent_model": {"provider": "openai", "name": "qwen"},
+                },
+                state="finished",
+                created_by_token_prefix="abcdef12",
+                expected_trial_count=1,
+                n_per_task=1,
+                result_status="all_failed",
+                finished_at=datetime.now(UTC),
+            ),
+        )
+        conn.execute(
+            insert(Trial).values(
+                id=uuid4(),
+                task_id="local/mit-0",
+                team_id=team_id,
+                state="failed",
+                failure_reason="gateway_error",
+                failure_message="gateway 503",
+                config={},
+                requires_caps={},
+                submitted_at=datetime.now(UTC),
+                batch_id=batch_id,
+                sample_idx=0,
+                combination_idx=0,
+                result=None,
+            ),
+        )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        response = await ac.post(
+            f"/api/v1/batches/{batch_id}/rerun-failed",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert response.status_code == 400, response.text
+    assert "workspace_exec" in response.json()["detail"]
+    with sync_engine.begin() as conn:
+        batch_count = conn.execute(select(func.count()).select_from(Batch)).scalar_one()
+    sync_engine.dispose()
+    assert batch_count == 1
 
 
 async def test_rerun_failed_rejects_historical_benchmark_task(

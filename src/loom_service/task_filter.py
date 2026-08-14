@@ -32,7 +32,7 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import cast, false, or_, select
+from sqlalchemy import cast, false, or_
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -42,7 +42,7 @@ from loom.benchmark_profiles import (
 )
 from loom.benchmark_readiness import CURRENTLY_UNSUPPORTED_BENCHMARK_IDS
 from loom.db.schema import Task, TaskSet
-from loom.db.task_set_visibility import visible_task_sets
+from loom.db.task_set_visibility import visible_task_sets, visible_tasks
 
 # Recognized task_filter keys. Anything else is rejected so a typo
 # (`liscense` instead of `license`) doesn't silently match nothing.
@@ -193,17 +193,13 @@ async def resolve_task_filter_with_diagnostics(
     # is a dict like `{"verified": ["true"]}` applied as a JSONB
     # containment predicate per key — `AND` across keys, `OR` within
     # each key's value list.
-    stmt = select(Task.id, Task.benchmark_id).order_by(
-        Task.id.asc(),
-    )
-    visible_task_set_ids = visible_task_sets(team_id=team_id).with_only_columns(
-        TaskSet.id,
-    )
-    stmt = stmt.where(
-        or_(
-            Task.task_set_id.is_(None),
-            Task.task_set_id.in_(visible_task_set_ids),
-        ),
+    stmt = (
+        visible_tasks(team_id=team_id)
+        .with_only_columns(
+            Task.id,
+            Task.benchmark_id,
+        )
+        .order_by(Task.id.asc())
     )
     if CURRENTLY_UNSUPPORTED_BENCHMARK_IDS:
         stmt = stmt.where(

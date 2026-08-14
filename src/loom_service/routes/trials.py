@@ -35,7 +35,6 @@ from loom_llm_gateway.rate_card import (
     COST_META_SOURCE_KEY,
 )
 from loom_service.agent_catalog import (
-    get_agent,
     known_names,
     validate_agent_model_compat,
 )
@@ -57,7 +56,7 @@ from loom_service.provider_connection_lookup import validate_provider_connection
 from loom_service.public_links import public_url_for
 from loom_service.routes.object_downloads import stream_object_response
 from loom_service.stale_running_debug import trial_stale_running_debug_context
-from loom_service.task_compat import agent_task_compatibility
+from loom_service.submission_compat import validate_submission_agent_task_compatibility
 from loom_service.usage_accounting import (
     empty_usage_projection,
     price_snapshots_for_trials,
@@ -807,47 +806,6 @@ def _validate_agent_name(config: dict[str, Any]) -> None:
         raise HTTPException(status_code=400, detail=err)
 
 
-async def _reject_agent_task_incompat(
-    session: Any,
-    *,
-    task_id: str,
-    agent_name: Any,
-) -> None:
-    if not isinstance(agent_name, str):
-        return
-    entry = get_agent(agent_name)
-    if entry is None:
-        return
-    row = (
-        await session.execute(
-            select(Task.config, Task.tags).where(Task.id == task_id),
-        )
-    ).one_or_none()
-    if row is None:
-        return
-    config, tags = row
-    compatibility = agent_task_compatibility(
-        config or {},
-        agent_requires=entry.requires_capabilities,
-        agent_provides=entry.provides_capabilities,
-        tags=dict(tags or {}),
-    )
-    if compatibility.compatible:
-        return
-    reasons: list[str] = []
-    if compatibility.missing_from_task:
-        reasons.append(f"task missing {sorted(compatibility.missing_from_task)}")
-    if compatibility.missing_from_agent:
-        reasons.append(f"agent missing {sorted(compatibility.missing_from_agent)}")
-    raise HTTPException(
-        status_code=400,
-        detail=(
-            f"agent×task capability mismatch — {agent_name}: {task_id}; "
-            f"{', '.join(reasons)}. Choose a compatible agent or task."
-        ),
-    )
-
-
 @router.post("/trials", status_code=201)
 async def submit_trial(
     request: Request,
@@ -863,10 +821,11 @@ async def submit_trial(
     require_scope(ctx, "submit")
     require_submitting_user(ctx)
     _validate_agent_name(payload.config)
-    await _reject_agent_task_incompat(
+    await validate_submission_agent_task_compatibility(
         s,
-        task_id=payload.task_id,
-        agent_name=payload.config.get("agent_name"),
+        team_id=ctx.team_id,
+        task_ids=[payload.task_id],
+        trial_config=payload.config,
     )
 
     # Validate the optional provider_connection_id before forwarding.

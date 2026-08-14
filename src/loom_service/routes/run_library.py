@@ -44,6 +44,7 @@ from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.provider_connection_lookup import validate_provider_connection
 from loom_service.public_links import public_url_for
 from loom_service.routes.object_downloads import stream_object_response
+from loom_service.submission_compat import validate_submission_agent_task_compatibility
 from loom_service.task_config_validation import expected_trial_count
 from loom_service.task_filter import resolve_task_filter_with_diagnostics
 
@@ -2015,12 +2016,30 @@ async def clone_run_library_batch_config(
         )
 
     task_filter = dict(source.task_filter)
+    explicit_task_ids = task_filter.get("task_ids")
+    if isinstance(explicit_task_ids, (list, tuple)) and all(
+        isinstance(task_id, str) for task_id in explicit_task_ids
+    ):
+        await validate_submission_agent_task_compatibility(
+            session,
+            team_id=ctx.team_id,
+            task_ids=explicit_task_ids,
+            combinations=list(source.combinations or []),
+            trial_config=source.trial_config,
+        )
     resolved_task_ids, benchmark_provenance = await _resolve_new_batch_snapshot(
         session,
         task_filter=task_filter,
         team_id=ctx.team_id,
     )
     combinations = list(source.combinations or [])
+    await validate_submission_agent_task_compatibility(
+        session,
+        team_id=ctx.team_id,
+        task_ids=resolved_task_ids,
+        combinations=combinations,
+        trial_config=source.trial_config,
+    )
     # #1109: user clone must not re-inject operator pool-coverage trials.
     required_worker_pools: list[str] = []
     expected = expected_trial_count(

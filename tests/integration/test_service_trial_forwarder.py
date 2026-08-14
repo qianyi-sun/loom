@@ -20,7 +20,16 @@ from sqlalchemy import create_engine, delete, insert
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import Task, Team, TeamMembership, TeamQuota, Token, Trial, User
+from loom.db.schema import (
+    Task,
+    TaskSet,
+    Team,
+    TeamMembership,
+    TeamQuota,
+    Token,
+    Trial,
+    User,
+)
 from loom_service import agent_catalog
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
@@ -129,6 +138,7 @@ async def fwd_setup(
             s.execute(delete(Token))
             s.execute(delete(TeamMembership))
             s.execute(delete(Task))
+            s.execute(delete(TaskSet))
             s.execute(delete(TeamQuota))
             s.execute(delete(User))
             s.execute(delete(Team))
@@ -292,6 +302,72 @@ async def test_post_trial_rejects_completion_agent_for_workspace_task(
 
     assert response.status_code == 400, response.text
     assert "workspace_exec" in response.json()["detail"]
+    assert captured["reqs"] == []
+
+
+async def test_post_trial_hides_foreign_private_task_set_task(
+    fwd_setup: tuple[FastAPI, str, UUID, dict[str, list[dict[str, str]]]],
+    postgres_url: str,
+) -> None:
+    app, raw, _team_id, captured = fwd_setup
+    foreign_team_id = uuid4()
+    task_set_id = f"ts/{foreign_team_id}/private-source"
+    task_id = f"{task_set_id}/tasks/row-1"
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(insert(Team).values(id=foreign_team_id, name=f"t-{foreign_team_id}"))
+        s.execute(
+            insert(TaskSet).values(
+                id=task_set_id,
+                owning_team_id=foreign_team_id,
+                slug="private-source",
+                display_name="Private Source",
+                status="ready",
+                intents=["trajectory_generation"],
+                evaluation_ready=False,
+                task_count=1,
+                manifest_blob_uri=(
+                    f"s3://bucket/tasksets/user/{foreign_team_id}/private-source/manifest.yaml"
+                ),
+            ),
+        )
+        s.execute(
+            insert(Task).values(
+                id=task_id,
+                checksum="f" * 64,
+                config={
+                    "schema_version": "1",
+                    "required_agent_capabilities": ["workspace_exec"],
+                    "task": {"id": task_id, "name": task_id},
+                    "environment": {"os": "linux", "docker_image": "alpine"},
+                    "agent": {"name": "oracle"},
+                    "verifier": {"name": "script"},
+                    "steps": [{"name": "main"}],
+                },
+                source="local",
+                task_set_id=task_set_id,
+            ),
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        response = await ac.post(
+            "/api/v1/trials",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "task_id": task_id,
+                "config": {
+                    "agent_name": "direct-completion",
+                    "agent_model": {"provider": "openai", "name": "gpt-4o-mini"},
+                },
+            },
+        )
+
+    assert response.status_code == 404, response.text
+    assert response.json()["detail"] == "task not found"
     assert captured["reqs"] == []
 
 
