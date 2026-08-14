@@ -16,11 +16,13 @@ from loom.data_lifecycle_registry import ensure_trial_lifecycle_authority
 from loom.db.schema import Batch, LlmCall, TeamQuota
 from loom.db.schema import Task as TaskRow
 from loom.db.schema import Trial as TrialRow
+from loom.db.task_set_visibility import visible_tasks
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
 from loom.request_params import coerce_request_params
 from loom.submission_identity import require_submitting_user
 from loom_control_plane.scheduler.requires_caps import derive_requires_caps
+from loom_service.submission_compat import validate_submission_agent_task_compatibility
 
 router = APIRouter()
 
@@ -142,7 +144,7 @@ async def submit_trial(
     async with request.app.state.session_factory() as session:
         task_row = (
             await session.execute(
-                select(TaskRow).where(TaskRow.id == task_id),
+                visible_tasks(team_id=submit_team_id).where(TaskRow.id == task_id),
             )
         ).scalar_one_or_none()
         if task_row is not None and task_row.benchmark_id is not None:
@@ -151,7 +153,7 @@ async def submit_trial(
                 [task_row.benchmark_id],
             )
     if task_row is None:
-        raise HTTPException(status_code=404, detail=f"unknown task {task_id}")
+        raise HTTPException(status_code=404, detail="task not found")
 
     try:
         task_config = normalize_steps(
@@ -186,6 +188,13 @@ async def submit_trial(
             status_code=400,
             detail=f"invalid trial config: {exc}",
         ) from exc
+    async with request.app.state.session_factory() as session:
+        await validate_submission_agent_task_compatibility(
+            session,
+            team_id=submit_team_id,
+            task_ids=[task_id],
+            trial_config=trial_config.model_dump(mode="json"),
+        )
     requires_caps = derive_requires_caps(task_config)
     requires_caps_json = requires_caps.model_dump(mode="json")
     required_worker_pool = _required_worker_pool(payload)
