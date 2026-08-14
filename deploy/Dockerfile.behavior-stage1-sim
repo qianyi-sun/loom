@@ -17,6 +17,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    TMPDIR=/scratch/tmp \
     TRANSFORMERS_OFFLINE=1 \
     UV_LINK_MODE=copy \
     UV_NO_CACHE=1 \
@@ -97,6 +98,12 @@ COPY --from=stage1-sources --chmod=0444 /source-evidence.json \
     /opt/loom/contracts/source-evidence.json
 
 RUN set -eux; \
+    install -m 0444 \
+      /opt/loom/sources/omnigibson/omnigibson/omnigibson_5_1_0.kit \
+      /isaac-sim/apps/omnigibson_5_1_0.kit; \
+    cmp \
+      /opt/loom/sources/omnigibson/omnigibson/omnigibson_5_1_0.kit \
+      /isaac-sim/apps/omnigibson_5_1_0.kit; \
     install -m 0444 /opt/loom/patches/pipeline_rng.py \
       /opt/loom/sources/omnigibson/omnigibson/utils/pipeline_rng.py; \
     uv venv --python /isaac-sim/kit/python/bin/python3 --system-site-packages \
@@ -147,7 +154,7 @@ RUN set -eux; \
     OMNIGIBSON_DATA_PATH=/tmp /opt/loom/bin/sim-python -I -c \
       'from loom.integrations.behavior.stages.simulator_rng import set_pipeline_seed; set_pipeline_seed(0)'; \
     /opt/loom/venv-vla/bin/python -I -c 'from loom.integrations.behavior.vla.policy_backend import PINNED_B1K_SOURCE_COMMIT; assert len(PINNED_B1K_SOURCE_COMMIT) == 40'; \
-    chmod -R a-w /opt/ffmpeg /opt/loom
+    chmod -R a-w /isaac-sim/apps/omnigibson_5_1_0.kit /opt/ffmpeg /opt/loom
 
 LABEL org.opencontainers.image.source="https://github.com/qianyi-sun/loom" \
       org.opencontainers.image.title="Loom BEHAVIOR Stage 1 simulator" \

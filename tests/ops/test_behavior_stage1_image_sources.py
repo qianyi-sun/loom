@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from scripts.prepare_behavior_stage1_image_sources import (
     SourceLockError,
+    _apply_omnigibson_readonly_kit_patch,
     _apply_openpi_cache_patch,
     _extract_regular_archive,
     _reject_lfs_pointers,
@@ -259,11 +260,17 @@ def test_source_evidence_preimage_is_canonical_jcs_plus_lf() -> None:
     value = {
         "integration_patches": [
             {
+                "name": "omnigibson-readonly-isaac-kit",
+                "path": "omnigibson/omnigibson/simulator.py",
+                "result_sha256": "sha256:71129b407097684e6efbc4a2eb271c1bf9e6bafcb6a814d78198c8e550e7d09a",
+                "source_sha256": "sha256:7211956ce0d787b63f4f3860cd0fced063a5c6c9035af4de93e39191fec7570b",
+            },
+            {
                 "name": "openpi-transformers-cache-type",
                 "path": "openpi/src/openpi/models_pytorch/gemma_pytorch.py",
                 "result_sha256": "sha256:4f75d3647fadb7d00c0fee884579cf5a3ef33a6af53a3908fc237358d9606cf5",
                 "source_sha256": "sha256:08fd8d750519f0fb44fc5173311e50a30f4c8f32c02e51244b4f8e47b32cd52f",
-            }
+            },
         ],
         "schema_version": "loom.behavior-stage1-image-source-evidence.v1",
         "source_lock_sha256": "sha256:" + "a" * 64,
@@ -276,10 +283,10 @@ def test_source_evidence_preimage_is_canonical_jcs_plus_lf() -> None:
         + b"\n"
     )
     assert payload.endswith(b"\n") and not payload.endswith(b"\n\n")
-    assert len(payload) == 1318
+    assert len(payload) == 1583
     assert (
         hashlib.sha256(payload).hexdigest()
-        == "eedec0e240413281e62a6eee87555078092be729ec9cdae3fad176e241f3fbdf"
+        == "c21085fdae80699ab5b1aba81b5cad04d837d90e6df09336d7dfee4f707a15e7"
     )
 
 
@@ -299,3 +306,25 @@ def test_openpi_cache_patch_is_exact_and_removes_test_runtime_dependency(
     target.write_bytes(payload)
     with pytest.raises(SourceLockError, match="source drift"):
         _apply_openpi_cache_patch(tmp_path)
+
+
+def test_omnigibson_patch_requires_build_installed_kit_without_runtime_writes(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "omnigibson/omnigibson/simulator.py"
+    target.parent.mkdir(parents=True)
+    source = REPO_ROOT / "third_party/behavior-stage1/omnigibson/omnigibson/simulator.py"
+    target.write_bytes(source.read_bytes())
+    target.chmod(0o444)
+
+    evidence = _apply_omnigibson_readonly_kit_patch(tmp_path)
+
+    result = target.read_text(encoding="utf-8")
+    assert evidence["result_sha256"] == (
+        "sha256:71129b407097684e6efbc4a2eb271c1bf9e6bafcb6a814d78198c8e550e7d09a"
+    )
+    assert "shutil.copyfile(kit_file, kit_file_target)" not in result
+    assert "OmniGibson_logo.png" not in result
+    assert "kit_file_target.read_bytes() != kit_file.read_bytes()" in result
+    target.chmod(0o600)
+    target.parent.chmod(0o700)

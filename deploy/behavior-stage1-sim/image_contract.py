@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
 import json
 import os
+import platform
 import re
 import stat
 import subprocess
@@ -29,6 +31,7 @@ _MANIFEST_KEYS = {
     "base_image_platform_manifest_digest",
     "build_sha",
     "build_tree_sha",
+    "cuda_userspace_version",
     "gpu_contract",
     "minimum_nvidia_driver",
     "loom_runtime_lock_sha256",
@@ -132,11 +135,17 @@ def build_manifest(args: argparse.Namespace) -> None:
         raise ImageContractError("source evidence does not bind the source lock")
     if source_evidence["integration_patches"] != [
         {
+            "name": "omnigibson-readonly-isaac-kit",
+            "path": "omnigibson/omnigibson/simulator.py",
+            "result_sha256": "sha256:71129b407097684e6efbc4a2eb271c1bf9e6bafcb6a814d78198c8e550e7d09a",
+            "source_sha256": "sha256:7211956ce0d787b63f4f3860cd0fced063a5c6c9035af4de93e39191fec7570b",
+        },
+        {
             "name": "openpi-transformers-cache-type",
             "path": "openpi/src/openpi/models_pytorch/gemma_pytorch.py",
             "result_sha256": "sha256:4f75d3647fadb7d00c0fee884579cf5a3ef33a6af53a3908fc237358d9606cf5",
             "source_sha256": "sha256:08fd8d750519f0fb44fc5173311e50a30f4c8f32c02e51244b4f8e47b32cd52f",
-        }
+        },
     ]:
         raise ImageContractError("source evidence integration patch drift")
     try:
@@ -151,6 +160,7 @@ def build_manifest(args: argparse.Namespace) -> None:
         "base_image_platform_manifest_digest": "sha256:93b0f99635ab126fb5b33298d513c11520f119f0ee60ff8414ccef67ea977829",
         "build_sha": _require_git_sha(args.build_sha, "build SHA"),
         "build_tree_sha": _require_git_sha(args.build_tree_sha, "build tree SHA"),
+        "cuda_userspace_version": "12.6",
         "gpu_contract": {
             "count_exact": 2,
             "memory_mib_min_each": 16000,
@@ -250,11 +260,14 @@ def _probe(
     argv: list[str],
     label: str,
     *,
+    marker: str,
     environment: dict[str, str] | None = None,
 ) -> dict[str, object]:
     probe_environment = {
         "HOME": "/scratch/home",
         "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "TMPDIR": "/scratch/tmp",
+        "XDG_CACHE_HOME": "/scratch/cache",
     }
     if environment is not None:
         if set(probe_environment) & set(environment):
@@ -271,8 +284,15 @@ def _probe(
         )
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         raise ImageContractError(f"{label} runtime probe failed") from exc
+    matching = [
+        line.removeprefix(marker)
+        for line in completed.stdout.splitlines()
+        if line.startswith(marker)
+    ]
+    if len(matching) != 1:
+        raise ImageContractError(f"{label} runtime probe marker is not unique")
     try:
-        value = json.loads(completed.stdout)
+        value = json.loads(matching[0])
     except json.JSONDecodeError as exc:
         raise ImageContractError(f"{label} runtime probe output is invalid") from exc
     if not isinstance(value, dict):
@@ -314,6 +334,21 @@ def _verify_distribution_freezes(manifest: dict[str, Any]) -> None:
         raise ImageContractError("VLA distribution freeze drifted")
 
 
+def _prepare_preflight_scratch(root: Path = Path("/scratch")) -> None:
+    try:
+        observed = root.lstat()
+    except OSError as exc:
+        raise ImageContractError("preflight scratch root is unavailable") from exc
+    if not stat.S_ISDIR(observed.st_mode) or root.is_symlink():
+        raise ImageContractError("preflight scratch root is not a real directory")
+    for relative in ("home", "tmp", "cache", "omnigibson", "omnigibson/appdata"):
+        directory = root / relative
+        try:
+            directory.mkdir(mode=0o700, parents=False, exist_ok=False)
+        except OSError as exc:
+            raise ImageContractError("preflight scratch is not fresh and writable") from exc
+
+
 def preflight(args: argparse.Namespace) -> None:
     manifest_path = Path("/opt/loom/contracts/compatibility-manifest.json")
     source_evidence_path = Path("/opt/loom/contracts/source-evidence.json")
@@ -331,58 +366,99 @@ def preflight(args: argparse.Namespace) -> None:
     ):
         raise ImageContractError("installed Pipeline RNG patch digest drift")
     _require_digest(manifest["source_lock_sha256"], "source lock")
+    if not args.json:
+        raise ImageContractError("preflight JSON output is required")
+    platform_manifest_digest = _require_digest(args.platform_manifest_digest, "platform manifest")
+    preflight_digest = _require_digest(args.preflight_digest, "preflight")
+    if _sha256(Path(__file__).resolve()) != preflight_digest:
+        raise ImageContractError("installed preflight digest drift")
+    if platform.machine() != "x86_64":
+        raise ImageContractError("runtime CPU architecture drift")
+    _prepare_preflight_scratch()
     _verify_distribution_freezes(manifest)
-    devices, driver = _gpu_observation(str(manifest["minimum_nvidia_driver"]))
-    simulator = _probe(
-        [
-            "/opt/loom/bin/sim-python",
-            "-I",
-            "-c",
-            (
-                "import json,sys; import omnigibson; import bddl; "
-                "from loom.integrations.behavior.stages.rollout_backend import _load_runtime; "
-                "runtime=_load_runtime(); print(json.dumps({'omnigibson':runtime.version,"
-                "'python':'.'.join(map(str,sys.version_info[:3]))},sort_keys=True,separators=(',',':')))"
-            ),
-        ],
-        "simulator",
-        environment={
-            "OMNIGIBSON_APPDATA_PATH": "/scratch/omnigibson/appdata",
-            "OMNIGIBSON_DATA_PATH": "/inputs/dataset/payload/omnigibson",
-            "OMNIGIBSON_HEADLESS": "1",
-            "OMNI_KIT_ACCEPT_EULA": "YES",
-        },
-    )
-    vla = _probe(
-        [
-            "/opt/loom/venv-vla/bin/python",
-            "-I",
-            "-c",
-            (
-                "import json,sys,torch; "
-                "from loom.integrations.behavior.vla.policy_backend import _load_runtime; "
-                "runtime=_load_runtime(); print(json.dumps({'b1k':runtime.version,"
-                "'cuda':torch.version.cuda,'python':'.'.join(map(str,sys.version_info[:3]))},"
-                "sort_keys=True,separators=(',',':')))"
-            ),
-        ],
-        "VLA",
-    )
-    if simulator != {"omnigibson": "3.8.0", "python": "3.11.13"}:
+    devices, _driver = _gpu_observation(str(manifest["minimum_nvidia_driver"]))
+    simulator_argv = [
+        "/opt/loom/bin/sim-python",
+        "-I",
+        "-c",
+        (
+            "import json,sys; import omnigibson as og; import bddl; "
+            "from loom.integrations.behavior.stages.rollout_backend import _load_runtime; "
+            "runtime=_load_runtime(); og.gm.HEADLESS=True; "
+            "og.launch(device='cuda:0'); og.sim.render(); "
+            "value={'egl':True,'isaac':True,'omnigibson':runtime.version,"
+            "'python':'.'.join(map(str,sys.version_info[:3]))}; "
+            "print('LOOM_STAGE1_SIM_PROBE='+json.dumps(value,sort_keys=True,separators=(',',':'))); "
+            "og.shutdown(due_to_signal=True)"
+        ),
+    ]
+    simulator_environment = {
+        "CUDA_VISIBLE_DEVICES": "0",
+        "OMNIGIBSON_APPDATA_PATH": "/scratch/omnigibson/appdata",
+        "OMNIGIBSON_DATA_PATH": "/inputs/dataset/payload/omnigibson",
+        "OMNIGIBSON_GPU_ID": "0",
+        "OMNIGIBSON_HEADLESS": "1",
+        "OMNI_KIT_ACCEPT_EULA": "YES",
+    }
+    vla_argv = [
+        "/opt/loom/venv-vla/bin/python",
+        "-I",
+        "-c",
+        (
+            "import json,sys,torch; "
+            "from loom.integrations.behavior.vla.policy_backend import _load_runtime; "
+            "runtime=_load_runtime(); tensor=torch.ones(1,device='cuda'); "
+            "torch.cuda.synchronize(); value={'b1k':runtime.version,'cuda':torch.version.cuda,"
+            "'cuda_tensor':float(tensor.item())==1.0,"
+            "'python':'.'.join(map(str,sys.version_info[:3]))}; "
+            "print('LOOM_STAGE1_VLA_PROBE='+json.dumps(value,sort_keys=True,separators=(',',':')))"
+        ),
+    ]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        simulator_future = executor.submit(
+            _probe,
+            simulator_argv,
+            "simulator",
+            marker="LOOM_STAGE1_SIM_PROBE=",
+            environment=simulator_environment,
+        )
+        vla_future = executor.submit(
+            _probe,
+            vla_argv,
+            "VLA",
+            marker="LOOM_STAGE1_VLA_PROBE=",
+            environment={"CUDA_VISIBLE_DEVICES": "1"},
+        )
+        simulator = simulator_future.result()
+        vla = vla_future.result()
+    if simulator != {
+        "egl": True,
+        "isaac": True,
+        "omnigibson": "3.8.0",
+        "python": "3.11.13",
+    }:
         raise ImageContractError("simulator runtime versions drifted")
-    if vla.get("b1k") != "0.1.0" or vla.get("python") != "3.11.13":
+    if vla != {
+        "b1k": "0.1.0",
+        "cuda": manifest["cuda_userspace_version"],
+        "cuda_tensor": True,
+        "python": "3.11.13",
+    }:
         raise ImageContractError("VLA runtime versions drifted")
     observation = {
-        "compatibility_manifest_sha256": _sha256(manifest_path),
-        "devices": devices,
-        "driver_version": driver,
-        "schema_version": "loom.behavior-stage1-image-preflight.v1",
-        "simulator": simulator,
-        "source_evidence_sha256": _sha256(source_evidence_path),
-        "vla": vla,
+        "concurrent_vla_isaac_healthy": False,
+        "cpu_arch": "x86_64",
+        "cuda_userspace_version": manifest["cuda_userspace_version"],
+        "device_models": [str(item["model"]) for item in devices],
+        "egl_healthy": True,
+        "isaac_healthy": True,
+        "omnigibson_healthy": True,
+        "platform_manifest_digest": platform_manifest_digest,
+        "preflight_digest": preflight_digest,
+        "visible_device_uuids": [str(item["device_uuid"]) for item in devices],
+        "vla_healthy": True,
     }
-    if args.json:
-        sys.stdout.buffer.write(_canonical(observation))
+    sys.stdout.buffer.write(_canonical(observation))
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -400,6 +476,8 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--pipeline-rng-patch", type=Path, required=True)
     runtime = subparsers.add_parser("preflight")
     runtime.add_argument("--json", action="store_true")
+    runtime.add_argument("--platform-manifest-digest", required=True)
+    runtime.add_argument("--preflight-digest", required=True)
     verify = subparsers.add_parser("verify-freezes")
     verify.add_argument("--manifest", type=Path, required=True)
     subparsers.add_parser("freeze-digest")

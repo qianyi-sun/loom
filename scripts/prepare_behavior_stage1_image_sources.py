@@ -69,6 +69,13 @@ _OPENPI_CACHE_PATCH_SOURCE_SHA256 = (
 _OPENPI_CACHE_PATCH_RESULT_SHA256 = (
     "sha256:4f75d3647fadb7d00c0fee884579cf5a3ef33a6af53a3908fc237358d9606cf5"
 )
+_OMNIGIBSON_READONLY_KIT_PATCH_PATH = PurePosixPath("omnigibson/omnigibson/simulator.py")
+_OMNIGIBSON_READONLY_KIT_PATCH_SOURCE_SHA256 = (
+    "sha256:7211956ce0d787b63f4f3860cd0fced063a5c6c9035af4de93e39191fec7570b"
+)
+_OMNIGIBSON_READONLY_KIT_PATCH_RESULT_SHA256 = (
+    "sha256:71129b407097684e6efbc4a2eb271c1bf9e6bafcb6a814d78198c8e550e7d09a"
+)
 
 
 @dataclass(frozen=True)
@@ -620,6 +627,65 @@ def _apply_openpi_cache_patch(output: Path) -> dict[str, str]:
     }
 
 
+def _apply_omnigibson_readonly_kit_patch(output: Path) -> dict[str, str]:
+    """Move OmniGibson's Isaac app installation to the immutable image build."""
+
+    path = output.joinpath(*_OMNIGIBSON_READONLY_KIT_PATCH_PATH.parts)
+    before = path.lstat()
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise SourceLockError("OmniGibson kit patch target must be a private regular file")
+    if _sha256(path) != _OMNIGIBSON_READONLY_KIT_PATCH_SOURCE_SHA256:
+        raise SourceLockError("OmniGibson kit patch source drift")
+    source = path.read_bytes()
+    copy_before = b"""    # Copy the OmniGibson kit file and icon file to the Isaac Sim apps directory. This is necessary because the Isaac Sim app\n    # expects the extensions to be reachable in the parent directory of the kit file. We copy on every launch to\n    # ensure that the kit file is always up to date.\n    assert "EXP_PATH" in os.environ, "The EXP_PATH variable is not set. Are you in an Isaac Sim installed environment?"\n    exp_path = os.environ["EXP_PATH"]\n    kit_file = Path(__file__).parent / kit_file_name\n    kit_file_target = Path(exp_path) / kit_file_name\n    icon_file = Path(__file__).parents[2] / "docs" / "assets" / "OmniGibson_logo.png"\n    icon_file_target = Path(exp_path) / "OmniGibson_logo.png"\n\n    try:\n        shutil.copyfile(kit_file, kit_file_target)\n        shutil.copyfile(icon_file, icon_file_target)\n    except Exception as e:\n        raise e from ValueError(f"Failed to copy {kit_file_name} or {icon_file.name} to Isaac Sim apps directory.")\n"""
+    verify_after = b"""    # Loom installs the exact OmniGibson kit beside Isaac Sim extensions at image\n    # build time. Runtime mutation is forbidden because Pipeline root filesystems\n    # are read-only; require byte identity instead of copying the kit or UI logo.\n    assert "EXP_PATH" in os.environ, "The EXP_PATH variable is not set. Are you in an Isaac Sim installed environment?"\n    exp_path = os.environ["EXP_PATH"]\n    kit_file = Path(__file__).parent / kit_file_name\n    kit_file_target = Path(exp_path) / kit_file_name\n    try:\n        if not kit_file_target.is_file() or kit_file_target.read_bytes() != kit_file.read_bytes():\n            raise ValueError(f"Preinstalled {kit_file_name} does not match the sealed OmniGibson source.")\n    except OSError as e:\n        raise e from ValueError(f"Failed to verify preinstalled {kit_file_name} in the Isaac Sim apps directory.")\n"""
+    if source.count(copy_before) != 1:
+        raise SourceLockError("OmniGibson kit patch replacement cardinality drift")
+    result = source.replace(copy_before, verify_after)
+    if (
+        f"sha256:{hashlib.sha256(result).hexdigest()}"
+        != _OMNIGIBSON_READONLY_KIT_PATCH_RESULT_SHA256
+    ):
+        raise SourceLockError("OmniGibson kit patch result drift")
+
+    parent = path.parent
+    os.chmod(parent, 0o700)
+    temporary = parent / ".simulator.py.loom-patch"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(temporary, flags, 0o444)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(result)
+            stream.flush()
+            os.fsync(stream.fileno())
+        after = path.lstat()
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ):
+            raise SourceLockError("OmniGibson kit patch target changed while reading")
+        os.replace(temporary, path)
+        os.chmod(path, 0o444)
+        directory_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+        os.chmod(parent, 0o555)
+    return {
+        "name": "omnigibson-readonly-isaac-kit",
+        "path": _OMNIGIBSON_READONLY_KIT_PATCH_PATH.as_posix(),
+        "result_sha256": _OMNIGIBSON_READONLY_KIT_PATCH_RESULT_SHA256,
+        "source_sha256": _OMNIGIBSON_READONLY_KIT_PATCH_SOURCE_SHA256,
+    }
+
+
 def materialize(repo_root: Path, *, output: Path) -> None:
     lock = load_source_lock(repo_root)
     if output.exists() or output.is_symlink():
@@ -633,7 +699,10 @@ def materialize(repo_root: Path, *, output: Path) -> None:
                     _materialize_vendored(source, repo_root, output)
                 else:
                     _materialize_public(source, output, staging)
-        integration_patches = [_apply_openpi_cache_patch(output)]
+        integration_patches = [
+            _apply_omnigibson_readonly_kit_patch(output),
+            _apply_openpi_cache_patch(output),
+        ]
         evidence = {
             "integration_patches": integration_patches,
             "schema_version": "loom.behavior-stage1-image-source-evidence.v1",

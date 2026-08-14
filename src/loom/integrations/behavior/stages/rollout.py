@@ -256,8 +256,11 @@ def build_vla_env(runtime: RolloutRuntimeContractV1) -> dict[str, str]:
         runtime,
         {
             "CUDA_VISIBLE_DEVICES": runtime.vla_visible_devices,
+            "HOME": "/scratch/home",
             "OMNIGIBSON_DATA_PATH": "/inputs/dataset/payload/omnigibson",
             "PYTHONPATH": "/opt/loom/src",
+            "TMPDIR": "/scratch/tmp",
+            "XDG_CACHE_HOME": "/scratch/cache/xdg",
         },
     )
 
@@ -280,6 +283,7 @@ def build_simulator_env(runtime: RolloutRuntimeContractV1) -> dict[str, str]:
             "XDG_CACHE_HOME": "/scratch/cache/xdg",
             "MPLCONFIGDIR": "/scratch/cache/mpl",
             "TORCHINDUCTOR_CACHE_DIR": "/scratch/cache/inductor",
+            "TMPDIR": "/scratch/tmp",
             "TRITON_CACHE_DIR": "/scratch/cache/triton",
             "__GL_SHADER_DISK_CACHE": "1",
             "__GL_SHADER_DISK_CACHE_SKIP_CLEANUP": "1",
@@ -299,6 +303,7 @@ def prepare_scratch(paths: RolloutPaths) -> None:
         base / "omnigibson",
         base / "omnigibson" / "appdata",
         base / "home",
+        base / "tmp",
         base / "cache",
         *(base.joinpath(*parts) for parts in _CACHE_DIRECTORY_PARTS if parts[0] == "cache"),
     ]
@@ -313,6 +318,7 @@ def cleanup_scratch(paths: RolloutPaths) -> None:
         base / "omnigibson",
         base / "cache",
         base / "home",
+        base / "tmp",
     }
     for root in sorted(roots, key=lambda item: len(item.parts), reverse=True):
         with contextlib.suppress(FileNotFoundError):

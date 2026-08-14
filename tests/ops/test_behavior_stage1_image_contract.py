@@ -143,11 +143,17 @@ def test_build_manifest_binds_all_repository_and_source_evidence(tmp_path: Path)
             {
                 "integration_patches": [
                     {
+                        "name": "omnigibson-readonly-isaac-kit",
+                        "path": "omnigibson/omnigibson/simulator.py",
+                        "result_sha256": "sha256:71129b407097684e6efbc4a2eb271c1bf9e6bafcb6a814d78198c8e550e7d09a",
+                        "source_sha256": "sha256:7211956ce0d787b63f4f3860cd0fced063a5c6c9035af4de93e39191fec7570b",
+                    },
+                    {
                         "name": "openpi-transformers-cache-type",
                         "path": "openpi/src/openpi/models_pytorch/gemma_pytorch.py",
                         "result_sha256": "sha256:4f75d3647fadb7d00c0fee884579cf5a3ef33a6af53a3908fc237358d9606cf5",
                         "source_sha256": "sha256:08fd8d750519f0fb44fc5173311e50a30f4c8f32c02e51244b4f8e47b32cd52f",
-                    }
+                    },
                 ],
                 "schema_version": "loom.behavior-stage1-image-source-evidence.v1",
                 "source_lock_sha256": _sha256(source_lock),
@@ -194,6 +200,7 @@ def test_build_manifest_binds_all_repository_and_source_evidence(tmp_path: Path)
         == source_authority["vla_python"]["accepted_freeze_sha256"]
     )
     assert manifest["application_features"] == ["isaac-sim-5.1", "omnigibson-3.8"]
+    assert manifest["cuda_userspace_version"] == "12.6"
     assert manifest["provider_assets"] == []
     assert manifest["gpu_contract"] == {
         "count_exact": 2,
@@ -260,6 +267,152 @@ def test_gpu_observation_rejects_capacity_or_driver_drift(
         module._gpu_observation("570.00")
 
 
+def test_probe_accepts_one_exact_marker_and_rejects_ambiguous_logs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    marker = "LOOM_STAGE1_SIM_PROBE="
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0, f'upstream log\n{marker}{{"healthy":true}}\n', ""
+        ),
+    )
+    assert module._probe(["probe"], "simulator", marker=marker) == {"healthy": True}
+
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0, f"{marker}{{}}\n{marker}{{}}\n", ""
+        ),
+    )
+    with pytest.raises(module.ImageContractError, match="marker is not unique"):
+        module._probe(["probe"], "simulator", marker=marker)
+
+
+def test_preflight_scratch_is_private_fresh_and_confined(tmp_path: Path) -> None:
+    module = _module()
+    root = tmp_path / "scratch"
+    root.mkdir(mode=0o700)
+    module._prepare_preflight_scratch(root)
+    assert sorted(path.relative_to(root).as_posix() for path in root.rglob("*")) == [
+        "cache",
+        "home",
+        "omnigibson",
+        "omnigibson/appdata",
+        "tmp",
+    ]
+    with pytest.raises(module.ImageContractError, match="not fresh"):
+        module._prepare_preflight_scratch(root)
+
+
+def test_preflight_emits_the_worker_contract_after_real_runtime_probe_shapes(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = _module()
+    digest = "sha256:" + "a" * 64
+    source_digest = "sha256:" + "b" * 64
+    rng_digest = "sha256:" + "c" * 64
+    manifest = {key: None for key in module._MANIFEST_KEYS}
+    manifest.update(
+        {
+            "cuda_userspace_version": "12.6",
+            "minimum_nvidia_driver": "570.00",
+            "pipeline_rng_patch_sha256": rng_digest,
+            "platform": "linux/amd64",
+            "schema_version": "loom.behavior-stage1-image-compatibility.v1",
+            "source_evidence_sha256": source_digest,
+            "source_lock_sha256": digest,
+        }
+    )
+    monkeypatch.setattr(module, "_load_canonical", lambda *args, **kwargs: manifest)
+    monkeypatch.setattr(module, "_verify_distribution_freezes", lambda value: None)
+    monkeypatch.setattr(module, "_prepare_preflight_scratch", lambda: None)
+    monkeypatch.setattr(module.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(
+        module,
+        "_gpu_observation",
+        lambda minimum: (
+            [
+                {"device_uuid": "GPU-aaaaaaaa", "model": "NVIDIA GeForce RTX 5080"},
+                {"device_uuid": "GPU-bbbbbbbb", "model": "NVIDIA GeForce RTX 5080"},
+            ],
+            "575.64.03",
+        ),
+    )
+
+    def fake_sha(path: Path) -> str:
+        if path.name == "image_contract.py":
+            return digest
+        if path.name == "source-evidence.json":
+            return source_digest
+        return rng_digest
+
+    calls: list[tuple[str, dict[str, str] | None, str]] = []
+
+    def fake_probe(
+        argv: list[str],
+        label: str,
+        *,
+        marker: str,
+        environment: dict[str, str] | None = None,
+    ) -> dict[str, object]:
+        calls.append((label, environment, " ".join(argv)))
+        if label == "simulator":
+            return {
+                "egl": True,
+                "isaac": True,
+                "omnigibson": "3.8.0",
+                "python": "3.11.13",
+            }
+        return {
+            "b1k": "0.1.0",
+            "cuda": "12.6",
+            "cuda_tensor": True,
+            "python": "3.11.13",
+        }
+
+    monkeypatch.setattr(module, "_sha256", fake_sha)
+    monkeypatch.setattr(module, "_probe", fake_probe)
+    module.preflight(
+        argparse.Namespace(
+            json=True,
+            platform_manifest_digest="sha256:" + "d" * 64,
+            preflight_digest=digest,
+        )
+    )
+
+    observation = json.loads(capsys.readouterr().out)
+    assert set(observation) == {
+        "concurrent_vla_isaac_healthy",
+        "cpu_arch",
+        "cuda_userspace_version",
+        "device_models",
+        "egl_healthy",
+        "isaac_healthy",
+        "omnigibson_healthy",
+        "platform_manifest_digest",
+        "preflight_digest",
+        "visible_device_uuids",
+        "vla_healthy",
+    }
+    assert observation["platform_manifest_digest"] == "sha256:" + "d" * 64
+    assert observation["preflight_digest"] == digest
+    assert observation["visible_device_uuids"] == ["GPU-aaaaaaaa", "GPU-bbbbbbbb"]
+    assert observation["concurrent_vla_isaac_healthy"] is False
+    assert {label for label, _, _ in calls} == {"simulator", "VLA"}
+    simulator_call = next(item for item in calls if item[0] == "simulator")
+    vla_call = next(item for item in calls if item[0] == "VLA")
+    assert simulator_call[1] is not None and simulator_call[1]["CUDA_VISIBLE_DEVICES"] == "0"
+    assert "og.launch(device='cuda:0')" in simulator_call[2]
+    assert "og.sim.render()" in simulator_call[2]
+    assert vla_call[1] == {"CUDA_VISIBLE_DEVICES": "1"}
+    assert "torch.ones(1,device='cuda')" in vla_call[2]
+
+
 def test_simulator_seed_hook_latches_uint32_and_rejects_drift() -> None:
     module = _rng_module()
     with pytest.raises(RuntimeError, match="not initialized"):
@@ -294,6 +447,8 @@ def test_stage1_dockerfile_is_single_platform_closed_and_source_locked() -> None
     assert "USER 65532:65532" in value
     assert "ENTRYPOINT []" in value and "CMD []" in value
     assert "LOOM_BUILD_SHA" in value and "LOOM_BUILD_TREE_SHA" in value
+    assert "/isaac-sim/apps/omnigibson_5_1_0.kit" in value
+    assert "cmp \\" in value
 
 
 def test_source_lock_vendors_runtime_only_and_omits_the_known_absolute_symlink() -> None:
