@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -26,6 +28,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutionRetirementExecutorCheckpointV2,
     ExecutionRetirementV2,
     canonical_executable_digest,
+    canonical_inventory_confirmation_journal_head,
 )
 from loom_capacity_manager.execution_store import CapacityExecutionStore
 from loom_capacity_manager.models import (
@@ -179,13 +182,16 @@ async def _publish_final_safe_evidence(
             records=(),
         )
         await execution_store.ingest_executor_inventory(capacity_session, inventory)
+        confirmation_sequence, confirmation_digest = canonical_inventory_confirmation_journal_head(
+            inventory
+        )
         await execution_store.heartbeat_executor(
             capacity_session,
             ExecutableExecutorHeartbeatV2(
                 **common,
                 heartbeat_sequence=2,
-                journal_sequence=0,
-                journal_digest="0" * 64,
+                journal_sequence=confirmation_sequence,
+                journal_digest=confirmation_digest,
             ),
         )
         checkpoints.append(
@@ -196,8 +202,8 @@ async def _publish_final_safe_evidence(
                 pool_generation=binding.pool_generation,
                 heartbeat_sequence=2,
                 command_sequence=0,
-                journal_sequence=0,
-                journal_digest="0" * 64,
+                journal_sequence=confirmation_sequence,
+                journal_digest=confirmation_digest,
                 inventory_sequence=1,
                 inventory_digest=canonical_executable_digest(inventory),
             )
@@ -843,6 +849,45 @@ async def test_writer_restart_retires_a_stale_preparation(
     ).scalar_one()
     assert row.state == "retired"
     assert row.retired_at is not None
+    expected_payload = {
+        "schema_version": 2,
+        "transition": "retire-prepared",
+        "reason": "writer-replacement",
+        "authority_incarnation": str(AUTHORITY_ID),
+        "previous_writer_epoch": fixture.writer.writer_epoch,
+        "successor_writer_epoch": successor.writer_epoch,
+        "execution_epoch": prepared.execution_epoch,
+        "execution_manifest_sha256": prepared.execution_manifest_sha256,
+        "executable": True,
+    }
+    expected_name = (
+        f"retire-prepared:{AUTHORITY_ID}:{fixture.writer.writer_epoch}:"
+        f"{successor.writer_epoch}:{prepared.execution_epoch}:"
+        f"{prepared.execution_manifest_sha256}"
+    )
+    expected_uuid_bytes = bytearray(
+        hashlib.sha256(
+            UUID("9e40e05d-f1c0-4aa8-9ee2-21cc4b46f489").bytes + expected_name.encode("utf-8")
+        ).digest()[:16]
+    )
+    expected_uuid_bytes[6] = (expected_uuid_bytes[6] & 0x0F) | 0x80
+    expected_uuid_bytes[8] = (expected_uuid_bytes[8] & 0x3F) | 0x80
+    assert row.retirement_actor == f"capacity-manager:{AUTHORITY_ID}"
+    assert row.retirement_idempotency_key == UUID(bytes=bytes(expected_uuid_bytes))
+    assert row.retirement_idempotency_key.version == 8
+    assert row.retirement_request_payload == expected_payload
+    assert (
+        row.retirement_request_digest
+        == hashlib.sha256(
+            json.dumps(
+                expected_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            ).encode("ascii")
+        ).hexdigest()
+    )
 
     with pytest.raises(ExecutionConflictError, match="only while prepared"):
         await fixture.store.prepare_execution_epoch(
@@ -870,6 +915,38 @@ async def test_writer_restart_retires_a_stale_preparation(
             actor="executor-installer",
             idempotency_key=UUID(int=741),
         )
+
+
+async def test_database_rejects_fabricated_prepared_writer_retirement(
+    capacity_session: AsyncSession,
+) -> None:
+    """Prepared writer replacement accepts only its exact derived evidence."""
+
+    fixture = await _setup(capacity_session, execution_policy=_policy())
+    prepared = await fixture.store.prepare_execution_epoch(
+        capacity_session,
+        fixture.request,
+        actor="activation-operator",
+        idempotency_key=UUID(int=7291),
+    )
+    row = (
+        await capacity_session.execute(
+            select(CapacityExecutionEpoch).where(
+                CapacityExecutionEpoch.execution_epoch == prepared.execution_epoch
+            )
+        )
+    ).scalar_one()
+
+    with pytest.raises(DBAPIError, match="prepared execution retirement evidence"):
+        async with capacity_session.begin_nested():
+            row.state = "retired"
+            row.current_writer_epoch = fixture.writer.writer_epoch + 1
+            row.retirement_actor = "fabricated-writer-replacement"
+            row.retirement_idempotency_key = UUID(int=7292)
+            row.retirement_request_digest = "f" * 64
+            row.retirement_request_payload = {"schema_version": 2}
+            row.retired_at = datetime.now(UTC)
+            await capacity_session.flush()
 
 
 async def test_active_writer_restart_clamps_to_drain_only_and_refences(

@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, TypeVar, cast
-from uuid import UUID, uuid5
+from uuid import UUID
 
 from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.exc import DBAPIError
@@ -405,6 +405,17 @@ def _legacy_writer_key(
     return (value.scope_kind, value.scope_id, value.writer_kind, value.writer_id)
 
 
+def _writer_lifecycle_idempotency_key(name: str) -> UUID:
+    """Derive a database-reproducible namespaced UUID from bounded trusted text."""
+
+    raw = bytearray(
+        hashlib.sha256(_EXECUTION_LIFECYCLE_NAMESPACE.bytes + name.encode("utf-8")).digest()[:16]
+    )
+    raw[6] = (raw[6] & 0x0F) | 0x80
+    raw[8] = (raw[8] & 0x3F) | 0x80
+    return UUID(bytes=bytes(raw))
+
+
 def _writer_lifecycle_evidence(
     *,
     authority_incarnation: UUID,
@@ -427,10 +438,9 @@ def _writer_lifecycle_evidence(
         "executable": True,
     }
     digest = _canonical_json_digest(payload)
-    idempotency_key = uuid5(
-        _EXECUTION_LIFECYCLE_NAMESPACE,
+    idempotency_key = _writer_lifecycle_idempotency_key(
         f"{transition}:{authority_incarnation}:{previous_writer_epoch}:"
-        f"{successor_writer_epoch}:{execution_epoch}:{execution_manifest_sha256}",
+        f"{successor_writer_epoch}:{execution_epoch}:{execution_manifest_sha256}"
     )
     return actor, idempotency_key, digest, payload
 
