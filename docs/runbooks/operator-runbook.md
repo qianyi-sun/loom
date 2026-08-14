@@ -68,6 +68,10 @@ loom-staging-rollout --env staging cancel REQUEST_ID --reason "bounded operation
 loom-staging-rollout --env staging cleanup-incomplete-backup REQUEST_ID
 loom-staging-rollout --env staging lifecycle-capacity inventory
 loom-staging-rollout --env staging lifecycle-capacity apply --approved-plan-sha256 SHA256
+loom-staging-rollout --env staging backup-recovery inventory
+loom-staging-rollout --env staging backup-recovery apply --approved-plan-sha256 SHA256
+loom-staging-rollout --env staging backup-retention inventory
+loom-staging-rollout --env staging backup-retention apply --approved-plan-sha256 SHA256
 ```
 
 `start` accepts no ref, SHA, image tag, checkout, secret, or passthrough
@@ -75,6 +79,15 @@ argument. `--dry-run` validates authority and resolves the current candidate
 without mutating staging. `status` and `logs` expose redacted request evidence.
 Use `resume` only for the same immutable request after correcting its failure;
 use a merged revert on `dev` and a new request to roll code back.
+
+If a detached backup job is already `backup_verified`, `launch_pending`, or
+`launch_running` while rotation still contains its manifest-verified candidate,
+do not use incomplete-backup cleanup and do not edit the rotation files. While
+the lifecycle is maintenance-idle, inspect `backup-recovery inventory`, approve
+the exact printed plan digest, and apply that digest. Then inspect and separately
+approve `backup-retention` to retire the prior active payload. Exact replay is
+idempotent; any lease, attestation, request, Attempt, or rotation drift is a
+hard refusal.
 
 The broker enforces a single environment lifecycle owner. Broker unavailability
 does not grant authority for direct mutation. See

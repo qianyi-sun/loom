@@ -21,6 +21,7 @@ loom-staging-rollout --env ENV cancel --reason REASON REQUEST_ID
 loom-staging-rollout --env ENV cleanup-incomplete-backup REQUEST_ID
 loom-staging-rollout --env ENV manifest-ownership {inventory,apply} ...
 loom-staging-rollout --env ENV lifecycle-capacity {inventory,apply} ...
+loom-staging-rollout --env ENV backup-recovery {inventory,apply} ...
 loom-staging-rollout --env ENV backup-retention {inventory,apply} ...
 ```
 
@@ -61,8 +62,13 @@ individual rollout steps.
    creating a new attributed attempt.
 
 An incomplete backup can be removed only through the request-bound cleanup
-command. Valid retained backups are managed through the backup-retention
-inventory/apply protocol.
+command. A manifest- and restore-verified candidate whose detached job reached
+launch publication before rotation promotion is recovered through the
+digest-approved `backup-recovery` inventory/apply protocol. Recovery
+cross-checks the immutable job, lease, attestation, request, and Attempt before
+promoting the candidate; it never deletes either payload. The superseded
+active payload is queued for the separate `backup-retention` inventory/apply
+protocol.
 
 ## Failure behavior
 

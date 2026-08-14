@@ -21,7 +21,7 @@ from loom_cli.rollout.operator.broker import main as broker_main
 from loom_cli.rollout.operator.model import ActivePointer, DriverEnvelope, RequestEvent
 from loom_cli.rollout.operator.policy import sanitized_child_environment
 from loom_cli.rollout.operator.readonly_database_client import ReadonlyDatabaseTunnelError
-from loom_cli.rollout.operator.store import RequestStore
+from loom_cli.rollout.operator.store import RequestStore, RequestStoreError
 from loom_cli.rollout.operator.worker import (
     VerifiedBackupJob,
     WorkerDependencies,
@@ -411,12 +411,14 @@ def test_backup_worker_promotes_verified_request_then_launches_exact_attempt(
 ) -> None:
     store, job = _backup_worker_store(tmp_path)
     config = make_config(tmp_path)
+    order: list[str] = []
 
     class LaunchLifecycle:
         def __init__(self) -> None:
             self.launched: list[DriverEnvelope] = []
 
         def launch(self, envelope: DriverEnvelope) -> ActivePointer:
+            order.append("launch")
             self.launched.append(envelope)
             return ActivePointer(
                 request_id=envelope.request_id,
@@ -426,6 +428,28 @@ def test_backup_worker_promotes_verified_request_then_launches_exact_attempt(
             )
 
     lifecycle = LaunchLifecycle()
+
+    def reconcile(
+        envelope: PreflightBackupJobEnvelope,
+        verified: VerifiedBackupJob,
+    ) -> None:
+        assert envelope == job
+        assert verified.manifest_sha256 == "d" * 64
+        assert (
+            store.read_preflight_backup_job_state(REQUEST_ID).phase
+            is LifecyclePhase.BACKUP_RUNNING
+        )
+        order.append("reconcile")
+
+    def finalize(request, verified):  # type: ignore[no-untyped-def]
+        order.append("finalize")
+        return worker_module._finalize_verified_backup(  # type: ignore[attr-defined]
+            config,
+            store,
+            request,
+            verified,
+        )
+
     deps = WorkerDependencies(
         store=store,
         lifecycle=lifecycle,
@@ -436,12 +460,8 @@ def test_backup_worker_promotes_verified_request_then_launches_exact_attempt(
             lease_digest="e" * 64,
             preflight_attestation_sha256="f" * 64,
         ),
-        finalize_backup=lambda request, verified: worker_module._finalize_verified_backup(  # type: ignore[attr-defined]
-            config,
-            store,
-            request,
-            verified,
-        ),
+        finalize_backup=finalize,
+        reconcile_verified_backup=reconcile,
         now=lambda: "2026-07-19T22:00:00Z",
         stderr=io.StringIO(),
     )
@@ -456,6 +476,42 @@ def test_backup_worker_promotes_verified_request_then_launches_exact_attempt(
     assert envelope.backup_manifest_sha256 == "d" * 64
     assert envelope.preflight_attestation_sha256 == "f" * 64
     assert lifecycle.launched == [envelope]
+    assert order == ["reconcile", "finalize", "launch"]
+
+
+def test_backup_worker_recovery_failure_blocks_publish_and_launch(tmp_path: Path) -> None:
+    store, job = _backup_worker_store(tmp_path)
+    finalized = False
+
+    def finalize(_request, _verified):  # type: ignore[no-untyped-def]
+        nonlocal finalized
+        finalized = True
+        raise AssertionError("recovery failure must block finalization")
+
+    deps = WorkerDependencies(
+        store=store,
+        lifecycle=object(),
+        run_driver=lambda _path, _resume: 0,
+        run_backup=lambda _request, _job, _cancelled: VerifiedBackupJob(
+            manifest_path=tmp_path / "backup-manifest.json",
+            manifest_sha256="d" * 64,
+            lease_digest="e" * 64,
+            preflight_attestation_sha256="f" * 64,
+        ),
+        finalize_backup=finalize,
+        reconcile_verified_backup=lambda _envelope, _verified: (_ for _ in ()).throw(
+            RuntimeError("rotation convergence failed")
+        ),
+        now=lambda: "2026-07-19T22:00:00Z",
+        stderr=io.StringIO(),
+    )
+
+    assert run_backup_job(job, deps) == 1
+    state = store.read_preflight_backup_job_state(REQUEST_ID)
+    assert state.phase is LifecyclePhase.BACKUP_FAILED
+    assert finalized is False
+    with pytest.raises(RequestStoreError):
+        store.read_request(REQUEST_ID)
 
 
 def test_backup_worker_observes_durable_cancel_and_never_verifies(tmp_path: Path) -> None:

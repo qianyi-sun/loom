@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from loom_cli.rollout.lifecycle_protocol import LifecyclePhase
+from loom_cli.rollout.operator import worker as worker_module
 from loom_cli.rollout.operator.backup import BackupCreator, BackupError
 from loom_cli.rollout.operator.backup_lease import BackupLease
 from loom_cli.rollout.operator.backup_retirement import (
@@ -24,14 +25,24 @@ from loom_cli.rollout.operator.backup_rotation import (
     BackupRotationState,
     backup_rotation_admission_blockers,
     begin_candidate,
+    record_manifest_verified,
 )
 from loom_cli.rollout.operator.installed_backup_retention import (
+    InstalledBackupRecoveryError,
+    InstalledBackupRecoveryService,
     InstalledBackupRetentionError,
     InstalledBackupRetentionService,
+    converge_verified_backup_candidate,
 )
 from loom_cli.rollout.operator.model import ActivePointer
 from loom_cli.rollout.operator.store import RequestStore, RequestStoreError
+from loom_cli.rollout.operator.worker import VerifiedBackupJob, WorkerDependencies, run_backup_job
 from tests.loom_cli.rollout.operator.test_backup import make_config
+from tests.loom_cli.rollout.operator.test_store import (
+    make_assessment,
+    make_preflight_backup_job,
+    make_preflight_request,
+)
 
 
 def _service(tmp_path: Path) -> tuple[InstalledBackupRetentionService, tuple[Path, Path]]:
@@ -42,6 +53,8 @@ def _service(tmp_path: Path) -> tuple[InstalledBackupRetentionService, tuple[Pat
         source_tree_sha="b" * 40,
         source_base_sha="c" * 40,
     )
+
+
     store = RequestStore(config.state_root)
     backups = config.rollout_root / "backups"
     backups.mkdir(mode=0o700)
@@ -103,6 +116,284 @@ def _service(tmp_path: Path) -> tuple[InstalledBackupRetentionService, tuple[Pat
         ),
         (roots[0], roots[1]),
     )
+
+
+def _verified_candidate_recovery_service(
+    tmp_path: Path,
+) -> tuple[InstalledBackupRecoveryService, BackupPayloadRecord, BackupPayloadRecord, list[str]]:
+    config = replace(
+        make_config(tmp_path),
+        source_mode="sealed-cumulative",
+        source_commit_sha="a" * 40,
+        source_tree_sha="b" * 40,
+        source_base_sha="c" * 40,
+    )
+    store = RequestStore(config.state_root)
+    assessment = make_assessment(tmp_path)
+    request_id = "req-20260713-abcdef12"
+    request = replace(
+        make_preflight_request(),
+        request_id=request_id,
+        preflight_assessment_sha256=assessment.assessment_digest,
+        preflight_registry_sha256=assessment.registry_digest,
+        preflight_coverage_sha256=assessment.coverage_digest,
+    )
+    job = replace(
+        make_preflight_backup_job(),
+        request_id=request_id,
+        bundle_name=f"20260713T200000Z-{request_id}",
+        preflight_assessment_sha256=assessment.assessment_digest,
+        preflight_registry_sha256=assessment.registry_digest,
+        preflight_coverage_sha256=assessment.coverage_digest,
+    )
+    store.create_preflight_request(request)
+    store.publish_preflight_assessment(request.request_id, assessment)
+    store.publish_preflight_backup_job(job)
+
+    old_lease = BackupLease(
+        lease_id="lease-old0000000",
+        source_request_id="req-old000000",
+        manifest_sha256="1" * 64,
+        component_sha256={"postgres": "2" * 64},
+        environment="staging",
+        namespace="loom-staging",
+        mutation_epoch=3,
+        db_snapshot_identity="pgdump-sha256:" + "3" * 64,
+        schema_revision="0092",
+        object_inventory_root="4" * 64,
+        created_at=datetime(2026, 7, 13, 19, tzinfo=UTC),
+        restore_verified_at=datetime(2026, 7, 13, 19, 5, tzinfo=UTC),
+        expires_at=datetime(2026, 7, 14, 19, tzinfo=UTC),
+    )
+    old_active = BackupPayloadRecord(
+        payload_id="payload-old00000",
+        request_id=old_lease.source_request_id,
+        bundle_name="20260713T190000Z-req-old000000",
+        phase=BackupPayloadPhase.ACTIVE,
+        created_at=old_lease.created_at,
+        manifest_sha256=old_lease.manifest_sha256,
+        lease=old_lease,
+    )
+    store.publish_backup_lease(old_lease)
+    active_state = BackupRotationState(generation=1, active=old_active)
+    store.replace_backup_rotation(active_state, expected_generation=0)
+    reserved = begin_candidate(
+        active_state,
+        payload_id=job.payload_id,
+        request_id=job.request_id,
+        bundle_name=job.bundle_name,
+        created_at=job.created_at,
+    ).state
+    store.replace_backup_rotation(reserved, expected_generation=active_state.generation)
+
+    manifest_sha256 = "d" * 64
+    manifested = record_manifest_verified(
+        reserved,
+        payload_id=job.payload_id,
+        manifest_sha256=manifest_sha256,
+    ).state
+    store.replace_backup_rotation(manifested, expected_generation=reserved.generation)
+    lease = BackupLease(
+        lease_id="lease-candidate01",
+        source_request_id=job.request_id,
+        manifest_sha256=manifest_sha256,
+        component_sha256={"postgres": "5" * 64},
+        environment="staging",
+        namespace="loom-staging",
+        mutation_epoch=job.mutation_epoch,
+        db_snapshot_identity="pgdump-sha256:" + "6" * 64,
+        schema_revision="0092",
+        object_inventory_root="7" * 64,
+        created_at=job.created_at,
+        restore_verified_at=datetime(2026, 7, 13, 20, 5, tzinfo=UTC),
+        expires_at=datetime(2026, 7, 14, 20, tzinfo=UTC),
+    )
+    store.publish_backup_lease(lease)
+
+    class LaunchLifecycle:
+        def launch(self, envelope):  # type: ignore[no-untyped-def]
+            return ActivePointer(
+                request_id=envelope.request_id,
+                attempt_number=envelope.attempt_number,
+                unit_name=f"loom-staging-rollout-{envelope.request_id}-1.service",
+                status="pending",
+            )
+
+    verified = VerifiedBackupJob(
+        manifest_path=tmp_path / job.bundle_name / "backup-manifest.json",
+        manifest_sha256=manifest_sha256,
+        lease_digest=lease.evidence_digest,
+        preflight_attestation_sha256="f" * 64,
+    )
+    dependencies = WorkerDependencies(
+        store=store,
+        lifecycle=LaunchLifecycle(),
+        run_driver=lambda _path, _resume: 0,
+        run_backup=lambda _request, _job, _cancelled: verified,
+        finalize_backup=lambda found, result: worker_module._finalize_verified_backup(  # type: ignore[attr-defined]
+            config,
+            store,
+            found,
+            result,
+        ),
+        now=lambda: "2026-07-13T20:06:00Z",
+        stderr=SimpleNamespace(write=lambda _value: None),
+    )
+    assert run_backup_job(job, dependencies) == 0
+    assert store.read_preflight_backup_job_state(job.request_id).phase is LifecyclePhase.LAUNCH_RUNNING
+    assert store.read_backup_rotation() == manifested
+
+    activated: list[str] = []
+    service = InstalledBackupRecoveryService(
+        config=config,
+        service_uid=os.geteuid(),
+        store=store,
+        activate_payload=lambda record: activated.append(record.payload_id),
+    )
+    candidate = manifested.candidate
+    assert candidate is not None
+    recovered = replace(
+        candidate,
+        phase=BackupPayloadPhase.ACTIVE,
+        lease=lease,
+    )
+    return service, old_active, recovered, activated
+
+
+def test_verified_candidate_recovery_promotes_without_deleting_payloads(
+    tmp_path: Path,
+) -> None:
+    service, old_active, recovered, activated = _verified_candidate_recovery_service(tmp_path)
+
+    plan = service.inventory()
+    result = service.apply(service.load_claim(plan.plan_digest))
+    replayed = service.apply(service.load_claim(plan.plan_digest))
+
+    assert plan.candidate_before.phase is BackupPayloadPhase.MANIFEST_VERIFIED
+    assert plan.recovered_active == recovered
+    assert plan.previous_active == old_active
+    assert result == replayed
+    assert result["recovered_payload_id"] == recovered.payload_id
+    assert result["queued_retirement_payload_ids"] == [old_active.payload_id]
+    state = service.store.read_backup_rotation()
+    assert state.active == recovered
+    assert state.candidate is None
+    assert tuple(record.payload_id for record in state.retirements) == (
+        old_active.payload_id,
+    )
+    assert activated == [recovered.payload_id, recovered.payload_id]
+    assert service.store.read_backup_retention_claim() is None
+    assert not service.store.has_backup_retirement_receipt(old_active.payload_id)
+
+
+def test_worker_convergence_promotes_verified_candidate_before_launch(tmp_path: Path) -> None:
+    service, old_active, recovered, activated = _verified_candidate_recovery_service(tmp_path)
+    plan = service.inventory()
+
+    result = converge_verified_backup_candidate(
+        service.store,
+        request_id=plan.candidate_before.request_id,
+        payload_id=plan.candidate_before.payload_id,
+        bundle_name=plan.candidate_before.bundle_name,
+        manifest_sha256=plan.candidate_before.manifest_sha256 or "",
+        lease_digest=plan.lease_digest,
+        activate_payload=service.activate_payload,
+    )
+
+    assert result == recovered
+    state = service.store.read_backup_rotation()
+    assert state.active == recovered
+    assert state.candidate is None
+    assert tuple(record.payload_id for record in state.retirements) == (
+        old_active.payload_id,
+    )
+    assert activated == [recovered.payload_id]
+
+
+def test_verified_candidate_recovery_rejects_cross_ledger_attestation_drift(
+    tmp_path: Path,
+) -> None:
+    service, _old_active, _recovered, activated = _verified_candidate_recovery_service(tmp_path)
+    request_id = service.inventory().candidate_before.request_id
+    attempt = service.store.read_attempt_envelope(request_id, 1)
+    attempt_path = (
+        service.store.requests_root
+        / attempt.request_id
+        / "attempts"
+        / "1"
+        / "envelope.json"
+    )
+    payload = attempt.to_dict()
+    payload["preflight_attestation_sha256"] = "0" * 64
+    attempt_path.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
+    attempt_path.chmod(0o600)
+
+    with pytest.raises(InstalledBackupRecoveryError, match="attempt authority drifted"):
+        service.inventory()
+
+    state = service.store.read_backup_rotation()
+    assert state.candidate is not None
+    assert state.candidate.phase is BackupPayloadPhase.MANIFEST_VERIFIED
+    assert activated == []
+
+
+def test_verified_candidate_recovery_plan_binds_entire_attempt_envelope(
+    tmp_path: Path,
+) -> None:
+    service, _old_active, _recovered, activated = _verified_candidate_recovery_service(tmp_path)
+    plan = service.inventory()
+    attempt = service.store.read_attempt_envelope(plan.candidate_before.request_id, 1)
+    attempt_path = (
+        service.store.requests_root
+        / attempt.request_id
+        / "attempts"
+        / "1"
+        / "envelope.json"
+    )
+    payload = attempt.to_dict()
+    payload["attempt_uid"] = 2003
+    attempt_path.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
+    attempt_path.chmod(0o600)
+
+    with pytest.raises(InstalledBackupRecoveryError, match="job authority drifted"):
+        service.load_claim(plan.plan_digest)
+
+    assert activated == []
+
+
+def test_verified_candidate_recovery_resumes_after_promotion_before_activation(
+    tmp_path: Path,
+) -> None:
+    service, old_active, recovered, activated = _verified_candidate_recovery_service(tmp_path)
+    fail_once = True
+
+    def activate(record: BackupPayloadRecord) -> None:
+        nonlocal fail_once
+        activated.append(record.payload_id)
+        if fail_once:
+            fail_once = False
+            raise RuntimeError("activation interrupted")
+
+    service.activate_payload = activate
+    plan = service.inventory()
+    loaded = service.load_claim(plan.plan_digest)
+
+    with pytest.raises(InstalledBackupRecoveryError, match="activation did not complete"):
+        service.apply(loaded)
+
+    stranded = service.store.read_backup_rotation()
+    assert stranded.active == recovered
+    assert stranded.candidate is None
+    assert tuple(record.payload_id for record in stranded.retirements) == (
+        old_active.payload_id,
+    )
+    assert service.store.read_backup_retention_claim() == (plan.plan_digest, ())
+
+    result = service.apply(service.load_claim(plan.plan_digest))
+
+    assert result["recovered_payload_id"] == recovered.payload_id
+    assert activated == [recovered.payload_id, recovered.payload_id]
+    assert service.store.read_backup_retention_claim() is None
 
 
 def _stranded_activation_service(

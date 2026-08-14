@@ -774,6 +774,66 @@ def test_backup_retention_rejects_non_coordinator(tmp_path: Path) -> None:
     assert service.calls == []
 
 
+class _BackupRecovery(_BackupRetention):
+    def apply(self, plan):  # type: ignore[no-untyped-def]
+        self.calls.append(("apply", self.lifecycle.guard_depth))
+        assert plan is self.plan
+        return {"recovered_payload_id": "payload-candidate01", "schema_version": 1}
+
+
+def test_backup_recovery_requires_maintenance_and_digest_approval(tmp_path: Path) -> None:
+    deps = fakes(tmp_path)
+    sealed_config = replace(
+        deps.config,
+        source_mode="sealed-cumulative",
+        source_commit_sha=SHA,
+        source_tree_sha="b" * 40,
+        source_base_sha="c" * 40,
+    )
+    service = _BackupRecovery(deps.lifecycle)
+    dependencies = replace(
+        deps.dependencies,
+        authenticate=lambda: CallerIdentity("hongjian", 2002),
+        config=sealed_config,
+        backup_recovery=service,
+    )
+
+    assert broker_main(["backup-recovery", "inventory"], dependencies=dependencies) == 1
+    assert service.calls == []
+
+    deps.lifecycle.maintenance = True
+    assert broker_main(["backup-recovery", "inventory"], dependencies=dependencies) == 0
+    assert service.calls == [("inventory", 1)]
+    assert _last_json(deps.stdout)["plan_sha256"] == "f" * 64
+
+    assert (
+        broker_main(
+            [
+                "backup-recovery",
+                "apply",
+                "--approved-plan-sha256",
+                "f" * 64,
+            ],
+            dependencies=dependencies,
+        )
+        == 0
+    )
+    assert service.calls[-3:] == [("load", 1), ("claim", 1), ("apply", 0)]
+
+
+def test_backup_recovery_rejects_non_coordinator(tmp_path: Path) -> None:
+    deps = fakes(tmp_path)
+    service = _BackupRecovery(deps.lifecycle)
+    dependencies = replace(
+        deps.dependencies,
+        authenticate=lambda: CallerIdentity("devansh", 2003),
+        backup_recovery=service,
+    )
+
+    assert broker_main(["backup-recovery", "inventory"], dependencies=dependencies) == 1
+    assert service.calls == []
+
+
 @pytest.mark.parametrize("reason", ["", "   ", "x" * 501])
 def test_cancel_reason_is_nonempty_and_bounded(tmp_path: Path, reason: str) -> None:
     deps = fakes(tmp_path)

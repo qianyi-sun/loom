@@ -22,15 +22,17 @@ from loom_cli.rollout.failure_authority import RolloutFailureEvidence
 from loom_cli.rollout.final_attestation_admission import FinalAttestationAdmission
 from loom_cli.rollout.lifecycle_protocol import LifecycleAction, LifecyclePhase
 
-from .backup import BackupError, backup_public_reason_for_code
+from .backup import BackupCreator, BackupError, backup_public_reason_for_code
 from .backup_job import (
     BackupJobState,
     PreflightBackupJobEnvelope,
     transition_backup_job,
 )
+from .backup_retirement import BackupPayloadActivator
 from .config import OperatorConfig
 from .envelope import fixed_operator_config_path, load_validated_envelope
 from .failure_diagnostics import unclassified_failure_diagnostic
+from .installed_backup_retention import converge_verified_backup_candidate
 from .lifecycle import LifecycleCoordinator
 from .model import (
     ActivePointer,
@@ -198,6 +200,9 @@ class WorkerDependencies:
         | None
     ) = None
     finalize_backup: Callable[[PreflightRequest, VerifiedBackupJob], DriverEnvelope] | None = None
+    reconcile_verified_backup: (
+        Callable[[PreflightBackupJobEnvelope, VerifiedBackupJob], object] | None
+    ) = None
     read_driver_failure: Callable[[DriverEnvelope], RolloutFailureEvidence | None] | None = None
     final_admission: Callable[[DriverEnvelope], FinalAttestationAdmission] | None = None
     run_final_gates: Callable[[DriverEnvelope, FinalAttestationAdmission], int] | None = None
@@ -600,6 +605,30 @@ def run_backup_job(
             failure_code="backup_cancelled",
         )
         return 130
+    if dependencies.reconcile_verified_backup is not None:
+        try:
+            dependencies.reconcile_verified_backup(envelope, verified)
+        except BaseException as error:
+            current = dependencies.store.read_preflight_backup_job_state(envelope.request_id)
+            _seal_backup_failure(
+                dependencies,
+                current,
+                action=LifecycleAction.FAIL_BACKUP,
+                failure_code=_backup_failure_code(error),
+            )
+            _append_backup_failed_event(
+                dependencies,
+                request=request,
+                reason=backup_public_reason_for_code(_backup_failure_code(error)),
+            )
+            _write_backup_failure_diagnostic(
+                dependencies,
+                request=request,
+                envelope=envelope,
+                failure_code=_backup_failure_code(error),
+                error=error,
+            )
+            return 1
     completed = transition_backup_job(
         current,
         LifecycleAction.VERIFY_BACKUP,
@@ -764,6 +793,11 @@ def _default_dependencies(config: OperatorConfig, *, service_uid: int) -> Worker
         now=clock,
         authority=deep_preflight,
     )
+    recovery_creator = BackupCreator(config, service_uid=service_uid)
+    recovery_activator = BackupPayloadActivator(
+        creator=recovery_creator,
+        enforce_freshness=False,
+    )
 
     def run_driver(envelope_path: Path, resume: bool) -> int:
         from loom_cli.cluster_cmd import dispatch
@@ -854,6 +888,15 @@ def _default_dependencies(config: OperatorConfig, *, service_uid: int) -> Worker
             store,
             request,
             verified,
+        ),
+        reconcile_verified_backup=lambda envelope, verified: converge_verified_backup_candidate(
+            store,
+            request_id=envelope.request_id,
+            payload_id=envelope.payload_id,
+            bundle_name=envelope.bundle_name,
+            manifest_sha256=verified.manifest_sha256,
+            lease_digest=verified.lease_digest,
+            activate_payload=recovery_activator,
         ),
         read_driver_failure=lambda envelope: _read_driver_failure(config, envelope),
         final_admission=final_admission,

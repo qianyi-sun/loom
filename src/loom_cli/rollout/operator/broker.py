@@ -44,7 +44,10 @@ from .checkpoint_inventory_provider import ReadonlyLifecycleInventoryProvider
 from .config import OperatorConfig, environment_authority
 from .envelope import fixed_operator_config_path
 from .final_gate_store import FinalGateExecutionStore, FinalGateStoreError
-from .installed_backup_retention import InstalledBackupRetentionService
+from .installed_backup_retention import (
+    InstalledBackupRecoveryService,
+    InstalledBackupRetentionService,
+)
 from .installed_deep_preflight_factory import build_installed_deep_preflight_composition
 from .installed_lifecycle_capacity import InstalledLifecycleCapacityService
 from .installed_manifest_ownership import InstalledManifestOwnershipService
@@ -176,6 +179,11 @@ def _parser(*, default_environment: str | None = None) -> argparse.ArgumentParse
     retention_commands.add_parser("inventory")
     retention_apply = retention_commands.add_parser("apply")
     retention_apply.add_argument("--approved-plan-sha256", required=True)
+    recovery = commands.add_parser("backup-recovery")
+    recovery_commands = recovery.add_subparsers(dest="recovery_action", required=True)
+    recovery_commands.add_parser("inventory")
+    recovery_apply = recovery_commands.add_parser("apply")
+    recovery_apply.add_argument("--approved-plan-sha256", required=True)
     return parser
 
 
@@ -205,6 +213,7 @@ class BrokerDependencies:
     manifest_ownership: Any | None = None
     lifecycle_capacity: Any | None = None
     backup_retention: Any | None = None
+    backup_recovery: Any | None = None
 
 
 def _timestamp(now: Callable[[], datetime]) -> str:
@@ -537,6 +546,43 @@ def _backup_retention(
         )
         return 0
     result = dependencies.backup_retention.apply(plan)
+    _write_json(dependencies.stdout, result)
+    return 0
+
+
+def _backup_recovery(
+    dependencies: BrokerDependencies,
+    caller: CallerIdentity,
+    *,
+    action: str,
+    approved_plan_sha256: str | None,
+) -> int:
+    if not _has_coordinator_authority(caller):
+        return _safe_error(
+            dependencies,
+            "backup recovery maintenance requires coordinator authority",
+        )
+    if (
+        dependencies.config.source_mode != "sealed-cumulative"
+        or dependencies.backup_recovery is None
+    ):
+        return _safe_error(dependencies, "backup recovery maintenance is not configured")
+    with dependencies.lifecycle.launch_guard():
+        dependencies.lifecycle.assert_maintenance_idle()
+        if action == "inventory" and approved_plan_sha256 is None:
+            plan = dependencies.backup_recovery.inventory()
+        elif action == "apply" and approved_plan_sha256 is not None:
+            plan = dependencies.backup_recovery.load_claim(approved_plan_sha256)
+            dependencies.backup_recovery.claim(plan)
+        else:
+            return 2
+    if action == "inventory":
+        _write_json(
+            dependencies.stdout,
+            {"plan": plan.to_dict(), "plan_sha256": plan.plan_digest},
+        )
+        return 0
+    result = dependencies.backup_recovery.apply(plan)
     _write_json(dependencies.stdout, result)
     return 0
 
@@ -1949,6 +1995,19 @@ def _default_dependencies(config: OperatorConfig) -> BrokerDependencies:
         if config.source_mode == "sealed-cumulative"
         else None
     )
+    backup_recovery = (
+        InstalledBackupRecoveryService(
+            config=config,
+            service_uid=service_uid,
+            store=store,
+            activate_payload=BackupPayloadActivator(
+                creator=backup,
+                enforce_freshness=False,
+            ),
+        )
+        if config.source_mode == "sealed-cumulative"
+        else None
+    )
     return BrokerDependencies(
         config=config,
         authenticate=lambda: caller_from_sudo(
@@ -1977,6 +2036,7 @@ def _default_dependencies(config: OperatorConfig) -> BrokerDependencies:
         manifest_ownership=manifest_ownership,
         lifecycle_capacity=lifecycle_capacity,
         backup_retention=backup_retention,
+        backup_recovery=backup_recovery,
     )
 
 
@@ -2064,6 +2124,13 @@ def _main(
                 deps,
                 caller,
                 action=args.retention_action,
+                approved_plan_sha256=getattr(args, "approved_plan_sha256", None),
+            )
+        if args.command == "backup-recovery":
+            return _backup_recovery(
+                deps,
+                caller,
+                action=args.recovery_action,
                 approved_plan_sha256=getattr(args, "approved_plan_sha256", None),
             )
         return 2
