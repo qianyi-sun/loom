@@ -100,7 +100,10 @@ class ExecutableAdmissionStore:
             raise ExecutableAdmissionError("executable admission subject binding changed")
         if self._registration is not None and (
             binding.deployment_generation != self._registration.deployment_generation
-            or binding.candidate.publication_sha256 != self._registration.candidate_digest
+            or binding.candidate.algorithm != self._registration.candidate_identity_algorithm
+            or binding.candidate.identity != self._registration.candidate_identity
+            or binding.candidate.publication_sha256
+            != self._registration.candidate_publication_sha256
         ):
             raise ExecutableAdmissionError("executable admission candidate binding changed")
 

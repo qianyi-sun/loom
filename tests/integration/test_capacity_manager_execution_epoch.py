@@ -150,16 +150,41 @@ def _drain_request(active):  # type: ignore[no-untyped-def]
     )
 
 
+async def _retained_active_context(
+    capacity_session: AsyncSession,
+    drained: ExecutionContextV2,
+) -> ExecutionContextV2:
+    epoch = (
+        await capacity_session.execute(
+            select(CapacityExecutionEpoch).where(
+                CapacityExecutionEpoch.execution_epoch == drained.execution_epoch
+            )
+        )
+    ).scalar_one()
+    return ExecutionContextV2(
+        authority_incarnation=epoch.authority_incarnation,
+        writer_epoch=epoch.current_writer_epoch,
+        configuration_epoch=epoch.configuration_epoch,
+        execution_epoch=epoch.execution_epoch,
+        execution_manifest_sha256=epoch.execution_manifest_sha256,
+        execution_state="active",
+        executable_new_capacity_ceiling=epoch.requested_ceiling,
+        executable_new_capacity_rate_per_minute=epoch.requested_rate_per_minute,
+        trusted_fleet_release_sha256=epoch.trusted_fleet_release_sha256,
+    )
+
+
 async def _publish_final_safe_evidence(
     capacity_session: AsyncSession,
-    drained,  # type: ignore[no-untyped-def]
+    drained: ExecutionContextV2,
 ) -> tuple[ExecutionRetirementExecutorCheckpointV2, ...]:
     execution_store = CapacityExecutionStore()
     checkpoints = []
+    retained_execution = await _retained_active_context(capacity_session, drained)
     for pool_id in ("gb10", "oldlab"):
         binding = _executor_binding(pool_id)
         common = {
-            "execution": drained,
+            "execution": retained_execution,
             "executor_id": binding.executor_id,
             "executor_incarnation": binding.executor_incarnation,
             "pool_id": binding.pool_id,

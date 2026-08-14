@@ -32,6 +32,7 @@ from loom_capacity_manager.contracts import (
     ProfileReferenceV1,
     ResourceVectorV1,
     ShadowEpochV1,
+    StaticCandidateProvenanceV1,
     StrictV1Model,
     SubjectAllocationInputV1,
     SubjectConfigurationV1,
@@ -733,6 +734,11 @@ class CapacityManagementStore:
                     if account.owner_id is not None
                 )
             self._validate_activation(fleet, subjects, derived_accounts)
+            await self._persist_static_candidate_provenance(
+                session,
+                subjects,
+                proposal.static_candidate_provenance,
+            )
             authority.global_pending_slot_ceiling = fleet.global_max_pending_slots
             authority.global_pending_job_ceiling = fleet.global_max_pending_jobs
             authority.global_submission_rate_ceiling = fleet.global_submission_rate_per_minute
@@ -822,6 +828,65 @@ class CapacityManagementStore:
                 configuration_epoch=configuration_epoch,
                 digest=snapshot_digest,
                 snapshot=snapshot,
+            )
+
+    @staticmethod
+    async def _persist_static_candidate_provenance(
+        session: AsyncSession,
+        subjects: tuple[SubjectConfigurationV1, ...],
+        provenance: tuple[StaticCandidateProvenanceV1, ...],
+    ) -> None:
+        by_subject = {item.subject_id: item for item in provenance}
+        for subject in subjects:
+            row = (
+                await session.execute(
+                    select(CapacityCandidate).where(
+                        CapacityCandidate.subject_id == subject.subject_id,
+                        CapacityCandidate.subject_incarnation == subject.subject_incarnation,
+                        CapacityCandidate.candidate_generation == subject.candidate_generation,
+                    )
+                )
+            ).scalar_one_or_none()
+            supplied = by_subject.get(subject.subject_id)
+            if row is not None:
+                if supplied is None:
+                    continue
+                publication = row.source_payload.get("publication_sha256")
+                if (
+                    supplied.subject_incarnation != subject.subject_incarnation
+                    or supplied.candidate_generation != subject.candidate_generation
+                    or row.candidate_identity_algorithm != supplied.algorithm
+                    or row.candidate_identity != supplied.identity
+                    or publication != supplied.publication_sha256
+                ):
+                    raise ConfigurationConflictError("static candidate provenance changed")
+                continue
+            if supplied is None:
+                raise ConfigurationConflictError("static candidate provenance is missing")
+            if (
+                supplied.subject_incarnation != subject.subject_incarnation
+                or supplied.candidate_generation != subject.candidate_generation
+            ):
+                raise ConfigurationConflictError("static candidate provenance mismatched subject")
+            session.add(
+                CapacityCandidate(
+                    subject_id=subject.subject_id,
+                    subject_incarnation=subject.subject_incarnation,
+                    candidate_generation=subject.candidate_generation,
+                    candidate_digest=(
+                        supplied.identity
+                        if supplied.algorithm == "source-sha256"
+                        else supplied.publication_sha256
+                    ),
+                    candidate_identity_algorithm=supplied.algorithm,
+                    candidate_identity=supplied.identity,
+                    source_payload={"publication_sha256": supplied.publication_sha256},
+                    artifact_payload={},
+                    architecture_payload={},
+                    launcher_payload={},
+                    attestation_payload={"operator_static_provenance": True},
+                    protocol_payload={},
+                )
             )
 
     async def project_development_subject(

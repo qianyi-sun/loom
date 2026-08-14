@@ -205,6 +205,30 @@ async def _drain_active(
     return manager, drained
 
 
+async def _retained_active_context(
+    session: AsyncSession,
+    drained: ExecutionContextV2,
+) -> ExecutionContextV2:
+    epoch = (
+        await session.execute(
+            select(CapacityExecutionEpoch).where(
+                CapacityExecutionEpoch.execution_epoch == drained.execution_epoch
+            )
+        )
+    ).scalar_one()
+    return ExecutionContextV2(
+        authority_incarnation=epoch.authority_incarnation,
+        writer_epoch=epoch.current_writer_epoch,
+        configuration_epoch=epoch.configuration_epoch,
+        execution_epoch=epoch.execution_epoch,
+        execution_manifest_sha256=epoch.execution_manifest_sha256,
+        execution_state="active",
+        executable_new_capacity_ceiling=epoch.requested_ceiling,
+        executable_new_capacity_rate_per_minute=epoch.requested_rate_per_minute,
+        trusted_fleet_release_sha256=epoch.trusted_fleet_release_sha256,
+    )
+
+
 # Production break caught: a long-lived executor keeps the immutable context it
 # registered while active. After monotonic drain starts, that exact registration
 # must still be able to renew its lease and publish complete terminal inventory.
@@ -247,6 +271,101 @@ async def test_drain_telemetry_accepts_retained_same_epoch_active_registration(
     assert ingested.inventory_digest == canonical_executable_digest(inventory)
 
 
+@pytest.mark.parametrize("telemetry_kind", ("heartbeat", "inventory"))
+@pytest.mark.parametrize(
+    "changed_field",
+    ("writer_epoch", "execution_state", "ceiling", "rate"),
+)
+async def test_retained_drain_telemetry_rejects_changed_original_active_context(
+    capacity_session: AsyncSession,
+    telemetry_kind: str,
+    changed_field: str,
+) -> None:
+    """Drain-only retained telemetry must name the exact frozen active context."""
+
+    store = CapacityExecutionStore()
+    active, _allocation_epoch = await _active_plan(capacity_session)
+    _manager, drained = await _drain_active(capacity_session, active)
+    executor = executor_binding("gb10")
+    await store.heartbeat_executor(
+        capacity_session,
+        ExecutableExecutorHeartbeatV2(
+            execution=active,
+            executor_id=executor.executor_id,
+            executor_incarnation=executor.executor_incarnation,
+            pool_id=executor.pool_id,
+            pool_generation=executor.pool_generation,
+            heartbeat_sequence=1,
+            journal_sequence=0,
+            journal_digest="0" * 64,
+        ),
+    )
+    state = (
+        await capacity_session.execute(
+            select(CapacityExecutableExecutorState).where(
+                CapacityExecutableExecutorState.execution_epoch == drained.execution_epoch,
+                CapacityExecutableExecutorState.pool_id == "gb10",
+            )
+        )
+    ).scalar_one()
+    before = (state.heartbeat_high_water, state.inventory_high_water, state.last_inventory_digest)
+    if changed_field == "writer_epoch":
+        changed = active.model_copy(update={"writer_epoch": active.writer_epoch + 1})
+    elif changed_field == "execution_state":
+        changed = drained
+    elif changed_field == "ceiling":
+        changed = active.model_copy(
+            update={"executable_new_capacity_ceiling": active.executable_new_capacity_ceiling + 1}
+        )
+    else:
+        changed = active.model_copy(
+            update={
+                "executable_new_capacity_rate_per_minute": (
+                    active.executable_new_capacity_rate_per_minute + 1
+                )
+            }
+        )
+    with pytest.raises(ExecutionConflictError, match="execution fence"):
+        if telemetry_kind == "heartbeat":
+            await store.heartbeat_executor(
+                capacity_session,
+                ExecutableExecutorHeartbeatV2(
+                    execution=changed,
+                    executor_id=executor.executor_id,
+                    executor_incarnation=executor.executor_incarnation,
+                    pool_id=executor.pool_id,
+                    pool_generation=executor.pool_generation,
+                    heartbeat_sequence=2,
+                    journal_sequence=0,
+                    journal_digest="0" * 64,
+                    journal_checkpoint_sequence=0,
+                    journal_checkpoint_digest="0" * 64,
+                ),
+            )
+        else:
+            await store.ingest_executor_inventory(
+                capacity_session,
+                ExecutableExecutorInventoryV2(
+                    execution=changed,
+                    executor_id=executor.executor_id,
+                    executor_incarnation=executor.executor_incarnation,
+                    pool_id=executor.pool_id,
+                    pool_generation=executor.pool_generation,
+                    inventory_sequence=1,
+                    journal_sequence=0,
+                    journal_digest="0" * 64,
+                    journal_checkpoint_sequence=0,
+                    journal_checkpoint_digest="0" * 64,
+                ),
+            )
+    await capacity_session.refresh(state)
+    assert (
+        state.heartbeat_high_water,
+        state.inventory_high_water,
+        state.last_inventory_digest,
+    ) == before
+
+
 async def _publish_pool_retirement_evidence(
     store: CapacityExecutionStore,
     session: AsyncSession,
@@ -257,6 +376,7 @@ async def _publish_pool_retirement_evidence(
     later_heartbeat: bool = True,
 ) -> ExecutionRetirementExecutorCheckpointV2:
     binding = executor_binding(pool_id)
+    retained_execution = await _retained_active_context(session, drained)
     state = (
         await session.execute(
             select(CapacityExecutableExecutorState).where(
@@ -270,7 +390,7 @@ async def _publish_pool_retirement_evidence(
     journal_sequence = 0 if state is None else state.journal_high_water
     journal_digest = "0" * 64 if state is None else state.journal_digest
     common = {
-        "execution": drained,
+        "execution": retained_execution,
         "executor_id": binding.executor_id,
         "executor_incarnation": binding.executor_incarnation,
         "pool_id": binding.pool_id,
@@ -1457,9 +1577,13 @@ async def test_retirement_rejects_incomplete_or_stale_executor_evidence_atomical
     elif blocker == "heartbeat-before-inventory":
         assert state.last_inventory_at is not None
         state.last_heartbeat_at = state.last_inventory_at - timedelta(seconds=1)
+        state.retirement_safe = False
+        state.retirement_inventory_digest = None
     elif blocker == "heartbeat-at-inventory":
         assert state.last_inventory_at is not None
         state.last_heartbeat_at = state.last_inventory_at
+        state.retirement_safe = False
+        state.retirement_inventory_digest = None
     else:
         state.state = blocker
     await capacity_session.flush()
@@ -1535,11 +1659,12 @@ async def test_noncanonical_post_inventory_journal_transition_blocks_retirement(
     )
     gb10, oldlab = checkpoints
     executor = executor_binding("gb10")
+    retained = await _retained_active_context(capacity_session, drained)
 
     await store.heartbeat_executor(
         capacity_session,
         ExecutableExecutorHeartbeatV2(
-            execution=drained,
+            execution=retained,
             executor_id=executor.executor_id,
             executor_incarnation=executor.executor_incarnation,
             pool_id=executor.pool_id,
@@ -1590,6 +1715,7 @@ async def test_normal_inventory_publish_advance_preserves_retirement_evidence(
         later_heartbeat=False,
     )
     advanced: list[ExecutionRetirementExecutorCheckpointV2] = []
+    retained = await _retained_active_context(capacity_session, drained)
 
     for checkpoint in checkpoints:
         state = (
@@ -1636,11 +1762,11 @@ async def test_normal_inventory_publish_advance_preserves_retirement_evidence(
             actual_head.digest,
         )
         assert state.inventory_confirmation_journal_digest == actual_head.digest
-        assert state.retirement_safe is True
+        assert state.retirement_safe is False
         await store.heartbeat_executor(
             capacity_session,
             ExecutableExecutorHeartbeatV2(
-                execution=drained,
+                execution=retained,
                 executor_id=state.executor_id,
                 executor_incarnation=state.executor_incarnation,
                 pool_id=state.pool_id,
@@ -1951,10 +2077,11 @@ async def test_retirement_needs_fresh_postrelease_inventory_and_later_pool_heart
             )
         )
     ).scalar_one()
+    retained = await _retained_active_context(capacity_session, drained)
     await store.heartbeat_executor(
         capacity_session,
         ExecutableExecutorHeartbeatV2(
-            execution=drained,
+            execution=retained,
             executor_id=gb10_state.executor_id,
             executor_incarnation=gb10_state.executor_incarnation,
             pool_id=gb10_state.pool_id,
@@ -2011,10 +2138,11 @@ async def test_retirement_needs_fresh_postrelease_inventory_and_later_pool_heart
     confirmation_sequence, confirmation_digest = canonical_inventory_confirmation_journal_head(
         final_inventory
     )
+    retained = await _retained_active_context(capacity_session, drained)
     await store.heartbeat_executor(
         capacity_session,
         ExecutableExecutorHeartbeatV2(
-            execution=drained,
+            execution=retained,
             executor_id=executor.executor_id,
             executor_incarnation=executor.executor_incarnation,
             pool_id=executor.pool_id,

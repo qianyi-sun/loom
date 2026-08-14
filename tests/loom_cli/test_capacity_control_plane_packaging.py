@@ -29,6 +29,7 @@ _MIGRATION_RESOURCES = {
     "capacity_migrations/versions/capacity_0004_executable_bridge.py",
     "capacity_migrations/versions/capacity_0005_inventory_confirmation.py",
     "capacity_migrations/versions/capacity_0006_prepared_retirement_evidence.py",
+    "capacity_migrations/versions/capacity_0007_retirement_heartbeat_freshness.py",
 }
 _PROFILE = _REPO_ROOT / "deploy/dev-fleet/capacity-control-plane.toml"
 _MANAGER_IMAGE = "ghcr.io/qianyi-sun/loom-capacity-manager@sha256:" + "a" * 64
@@ -190,4 +191,4 @@ def test_installed_wheel_renders_capacity_manifests_outside_checkout(
         "StatefulSet",
         "Job",
     ]
-    assert documents[3]["metadata"]["name"].startswith("loom-capacity-migrate-capacity-0006-")
+    assert documents[3]["metadata"]["name"].startswith("loom-capacity-migrate-capacity-0007-")

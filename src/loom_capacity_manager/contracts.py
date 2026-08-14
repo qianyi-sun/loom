@@ -652,10 +652,32 @@ class ConfigurationSnapshotV1(StrictV1Model):
         return self
 
 
+class StaticCandidateProvenanceV1(StrictV1Model):
+    """Operator-owned exact candidate provenance for a static configured subject."""
+
+    subject_id: UUID
+    subject_incarnation: UUID
+    candidate_generation: PositiveQuantity
+    algorithm: Literal["git-sha1", "source-sha256"]
+    identity: Annotated[str, Field(min_length=40, max_length=64)]
+    publication_sha256: Digest
+
+    @model_validator(mode="after")
+    def _exact_algorithm_identity(self) -> StaticCandidateProvenanceV1:
+        expected = 40 if self.algorithm == "git-sha1" else 64
+        if len(self.identity) != expected or re.fullmatch(r"^[0-9a-f]+$", self.identity) is None:
+            raise ValueError("candidate identity does not match its algorithm")
+        return self
+
+
 class ConfigurationActivationV1(StrictV1Model):
     expected_configuration_epoch: Quantity
     fleet: ConfigurationGenerationRefV1
     subjects: Annotated[tuple[ConfigurationGenerationRefV1, ...], Field(max_length=MAX_SUBJECTS)]
+    static_candidate_provenance: Annotated[
+        tuple[StaticCandidateProvenanceV1, ...],
+        Field(max_length=MAX_SUBJECTS),
+    ] = ()
 
     @field_validator("subjects")
     @classmethod
@@ -664,6 +686,15 @@ class ConfigurationActivationV1(StrictV1Model):
     ) -> tuple[ConfigurationGenerationRefV1, ...]:
         _ensure_unique(value, "subject_id", "activation subject_id")
         return tuple(sorted(value, key=lambda item: item.subject_id.hex if item.subject_id else ""))
+
+    @field_validator("static_candidate_provenance")
+    @classmethod
+    def _static_candidate_provenance(
+        cls,
+        value: tuple[StaticCandidateProvenanceV1, ...],
+    ) -> tuple[StaticCandidateProvenanceV1, ...]:
+        _ensure_unique(value, "subject_id", "static candidate subject_id")
+        return tuple(sorted(value, key=lambda item: item.subject_id.hex))
 
 
 class DemandBucketV1(StrictV1Model):
@@ -1296,6 +1327,7 @@ __all__ = [
     "RolloutSurgePairingV1",
     "ShadowAllocationV1",
     "ShadowEpochV1",
+    "StaticCandidateProvenanceV1",
     "StrictV1Model",
     "SubjectAllocationInputV1",
     "SubjectConfigurationV1",

@@ -20,8 +20,10 @@ from loom_capacity_manager.contracts import (
     ConfigurationActivationV1,
     ConfigurationGenerationRefV1,
     ObservedCommitmentV1,
+    StaticCandidateProvenanceV1,
     canonical_digest_excluding,
 )
+from loom_capacity_manager.execution_store import CapacityExecutionStore
 from loom_capacity_manager.models import (
     Base,
     CapacityAccountPolicy,
@@ -371,6 +373,51 @@ async def test_activation_materializes_exact_worker_profile_bindings(
     assert all(len(item.shape_catalog) == 1 for item in profiles)
 
 
+async def test_activation_seeds_static_candidate_provenance_for_executable_lookup(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityManagementStore()
+    fleet_proposal = await store.propose_fleet_configuration(
+        capacity_session,
+        fleet_manifest(),
+        actor="fleet-operator",
+        idempotency_key=uuid4(),
+    )
+    subject = subject_configuration()
+    subject_proposal = await store.propose_subject_configuration(
+        capacity_session,
+        subject,
+        actor="environment-state",
+        idempotency_key=uuid4(),
+    )
+    provenance = StaticCandidateProvenanceV1(
+        subject_id=subject.subject_id,
+        subject_incarnation=subject.subject_incarnation,
+        candidate_generation=subject.candidate_generation,
+        algorithm="source-sha256",
+        identity="1" * 64,
+        publication_sha256="2" * 64,
+    )
+
+    await store.activate_configuration(
+        capacity_session,
+        configuration_activation(
+            fleet=fleet_proposal,
+            subjects=(subject_proposal,),
+            static_candidate_provenance=(provenance,),
+        ),
+        actor="fleet-operator",
+        idempotency_key=uuid4(),
+    )
+
+    subject_row = (await capacity_session.execute(select(CapacitySubject))).scalar_one()
+    candidate = await CapacityExecutionStore._current_candidate(capacity_session, subject_row)
+
+    assert candidate.algorithm == provenance.algorithm
+    assert candidate.identity == provenance.identity
+    assert candidate.publication_sha256 == provenance.publication_sha256
+
+
 async def test_dynamic_development_projection_is_atomic_idempotent_and_shadow_only(
     capacity_session: AsyncSession,
 ) -> None:
@@ -405,9 +452,17 @@ async def test_dynamic_development_projection_is_atomic_idempotent_and_shadow_on
     assert replay.replayed
     assert replay.configuration_digest == result.configuration_digest
     assert (
-        await capacity_session.execute(select(func.count()).select_from(CapacityCandidate))
+        await capacity_session.execute(
+            select(func.count())
+            .select_from(CapacityCandidate)
+            .where(CapacityCandidate.subject_id == request.subject_id)
+        )
     ).scalar_one() == 1
-    candidate = (await capacity_session.execute(select(CapacityCandidate))).scalar_one()
+    candidate = (
+        await capacity_session.execute(
+            select(CapacityCandidate).where(CapacityCandidate.subject_id == request.subject_id)
+        )
+    ).scalar_one()
     assert candidate.candidate_digest == request.candidate_sha256
     assert candidate.candidate_identity_algorithm == "source-sha256"
     assert candidate.candidate_identity == request.candidate_sha256
@@ -494,7 +549,11 @@ async def test_dynamic_projection_accepts_consumed_local_generations_and_capacit
     assert resized.subject.min_slots == 1
     assert resized.subject.max_slots == 3
     assert (
-        await capacity_session.execute(select(func.count()).select_from(CapacityCandidate))
+        await capacity_session.execute(
+            select(func.count())
+            .select_from(CapacityCandidate)
+            .where(CapacityCandidate.subject_id == created_request.subject_id)
+        )
     ).scalar_one() == 1
     assert (
         await capacity_session.execute(

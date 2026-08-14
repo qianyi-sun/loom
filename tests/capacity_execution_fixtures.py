@@ -10,6 +10,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from loom_capacity_manager.contracts import StaticCandidateProvenanceV1
 from loom_capacity_manager.executable_contracts import (
     CandidateBindingV2,
     ExecutableExecutorRegistrationV2,
@@ -26,7 +27,6 @@ from loom_capacity_manager.grant_store import CapacityGrantStore
 from loom_capacity_manager.models import (
     Base,
     CapacityAuthorityState,
-    CapacityCandidate,
 )
 from loom_capacity_manager.ownership import OwnershipKeyring, public_key_fingerprint
 from loom_capacity_manager.store import CapacityManagementStore, WriterFence
@@ -210,35 +210,25 @@ async def setup_execution(
         actor="environment-state",
         idempotency_key=UUID(int=702),
     )
+    acknowledgement = execution_acknowledgement(candidate)
     active = await store.activate_configuration(
         session,
         configuration_activation(
             fleet=fleet_proposal,
             subjects=(subject_proposal,),
+            static_candidate_provenance=(
+                StaticCandidateProvenanceV1(
+                    subject_id=subject.subject_id,
+                    subject_incarnation=subject.subject_incarnation,
+                    candidate_generation=subject.candidate_generation,
+                    algorithm=acknowledgement.candidate.algorithm,
+                    identity=acknowledgement.candidate.identity,
+                    publication_sha256=acknowledgement.candidate.publication_sha256,
+                ),
+            ),
         ),
         actor="fleet-operator",
         idempotency_key=UUID(int=703),
-    )
-    acknowledgement = execution_acknowledgement(candidate)
-    session.add(
-        CapacityCandidate(
-            subject_id=acknowledgement.subject_id,
-            subject_incarnation=acknowledgement.subject_incarnation,
-            candidate_generation=subject.candidate_generation,
-            candidate_digest=(
-                acknowledgement.candidate.identity
-                if acknowledgement.candidate.algorithm == "source-sha256"
-                else "a" * 64
-            ),
-            candidate_identity_algorithm=acknowledgement.candidate.algorithm,
-            candidate_identity=acknowledgement.candidate.identity,
-            source_payload={"publication_sha256": acknowledgement.candidate.publication_sha256},
-            artifact_payload={},
-            architecture_payload={},
-            launcher_payload={},
-            attestation_payload={},
-            protocol_payload={},
-        )
     )
     await session.flush()
     writer = await store.register_writer(session, AUTHORITY_ID, expected_epoch=0)

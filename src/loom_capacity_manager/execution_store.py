@@ -261,6 +261,33 @@ def _retained_drain_context_matches(
         and epoch.effective_ceiling == 0
         and epoch.effective_rate_per_minute == 0
         and authority.authority_incarnation == execution.authority_incarnation
+        and execution.writer_epoch == epoch.current_writer_epoch
+        and authority.execution_epoch == execution.execution_epoch
+        and authority.execution_manifest_sha256 == execution.execution_manifest_sha256
+        and execution.execution_state == "active"
+        and execution.executable_new_capacity_ceiling == epoch.requested_ceiling
+        and execution.executable_new_capacity_rate_per_minute == epoch.requested_rate_per_minute
+        and epoch.configuration_epoch == execution.configuration_epoch
+        and epoch.execution_epoch == execution.execution_epoch
+        and epoch.execution_manifest_sha256 == execution.execution_manifest_sha256
+        and epoch.trusted_fleet_release_sha256 == execution.trusted_fleet_release_sha256
+    )
+
+
+def _retained_drain_close_context_matches(
+    authority: CapacityAuthorityState,
+    epoch: CapacityExecutionEpoch,
+    execution: ExecutionContextV2,
+) -> bool:
+    """Allow retained close commands to use the immutable active binding."""
+
+    return bool(
+        authority.execution_state == "drain-only"
+        and authority.executable_new_capacity_ceiling == 0
+        and epoch.state == "drain-only"
+        and epoch.effective_ceiling == 0
+        and epoch.effective_rate_per_minute == 0
+        and authority.authority_incarnation == execution.authority_incarnation
         and authority.execution_epoch == execution.execution_epoch
         and authority.execution_manifest_sha256 == execution.execution_manifest_sha256
         and epoch.configuration_epoch == execution.configuration_epoch
@@ -323,6 +350,105 @@ class CapacityExecutionStore:
             lease_expires_at=state.lease_expires_at,
         )
 
+    async def _stored_inventory_is_retirement_safe(
+        self,
+        session: AsyncSession,
+        registration: CapacityExecutionExecutor,
+        epoch: CapacityExecutionEpoch,
+        state: CapacityExecutableExecutorState,
+    ) -> bool:
+        if state.inventory_payload is None or state.last_inventory_digest is None:
+            return False
+        try:
+            inventory = ExecutableExecutorInventoryV2.model_validate_json(
+                json.dumps(state.inventory_payload)
+            )
+        except ValueError:
+            return False
+        if (
+            inventory.inventory_sequence != state.inventory_high_water
+            or canonical_executable_digest(inventory) != state.last_inventory_digest
+            or inventory.journal_sequence != state.journal_high_water
+            or inventory.journal_digest != state.journal_digest
+        ):
+            return False
+        pool = (
+            await session.execute(
+                select(CapacityPool).where(
+                    CapacityPool.configuration_epoch == epoch.configuration_epoch,
+                    CapacityPool.pool_id == inventory.pool_id,
+                    CapacityPool.pool_generation == inventory.pool_generation,
+                )
+            )
+        ).scalar_one_or_none()
+        if pool is None:
+            return False
+        pool_intents = (
+            (
+                await session.execute(
+                    select(CapacityExecutableIntent)
+                    .where(
+                        CapacityExecutableIntent.execution_epoch == epoch.execution_epoch,
+                        CapacityExecutableIntent.pool_id == inventory.pool_id,
+                    )
+                    .order_by(CapacityExecutableIntent.launch_rank)
+                    .with_for_update()
+                )
+            )
+            .scalars()
+            .all()
+        )
+        intents_by_id = {intent.intent_id: intent for intent in pool_intents}
+        observed_intent_ids: set[UUID] = set()
+        for record in inventory.records:
+            if record.authority_scope == "foreign":
+                continue
+            proof = record.ownership_proof
+            if proof is None:
+                return False
+            binding = proof.metadata.binding
+            intent = intents_by_id.get(binding.intent_id)
+            try:
+                stored_binding = (
+                    None
+                    if intent is None
+                    else ExecutableIntentBindingV2.model_validate_json(
+                        json.dumps(intent.binding_payload)
+                    )
+                )
+            except ValueError:
+                return False
+            if (
+                intent is None
+                or intent.executor_incarnation != inventory.executor_incarnation
+                or intent.pool_id != inventory.pool_id
+                or binding != stored_binding
+                or binding.intent_id in observed_intent_ids
+            ):
+                return False
+            observed_intent_ids.add(binding.intent_id)
+            if (
+                not self._ownership_keyring.verify_executable(
+                    proof,
+                    expected_public_key_sha256=registration.signing_key_sha256,
+                )
+                or proof.signing_key_id != registration.signing_key_id
+                or proof.metadata.controller_authority_sha256
+                != registration.controller_authority_sha256
+                or record.authority_scope != "dedicated-loom-association"
+                or proof.metadata.slurm_cluster != pool.controller
+                or proof.metadata.association != pool.association
+                or proof.metadata.submitter_identity != "loom"
+                or record.resources != binding.resources
+                or record.node_ids != binding.node_ids
+                or record.state != "terminal"
+                or intent.state != "released"
+            ):
+                return False
+        return observed_intent_ids == set(intents_by_id) and all(
+            intent.state == "released" for intent in pool_intents
+        )
+
     async def heartbeat_executor(
         self,
         session: AsyncSession,
@@ -383,6 +509,7 @@ class CapacityExecutionStore:
             witnessed_journal_digest = (
                 None if witnessed_inventory is None else witnessed_inventory.get("journal_digest")
             )
+            confirms_final_inventory = False
             if state.retirement_safe:
                 inventory_head = type(witnessed_journal_sequence) is int and isinstance(
                     witnessed_journal_digest, str
@@ -431,12 +558,65 @@ class CapacityExecutionStore:
                 if not confirms_final_inventory:
                     state.retirement_safe = False
                     state.retirement_inventory_digest = None
+            elif state.inventory_payload is not None:
+                inventory_head = type(witnessed_journal_sequence) is int and isinstance(
+                    witnessed_journal_digest, str
+                )
+                inventory_sequence = cast(int, witnessed_journal_sequence) if inventory_head else 0
+                inventory_digest = cast(str, witnessed_journal_digest) if inventory_head else ""
+                try:
+                    witnessed_contract = ExecutableExecutorInventoryV2.model_validate_json(
+                        json.dumps(witnessed_inventory)
+                    )
+                    confirmation_sequence, confirmation_digest = (
+                        canonical_inventory_confirmation_journal_head(witnessed_contract)
+                    )
+                except ValueError:
+                    confirmation_sequence, confirmation_digest = -1, ""
+                confirmation_bound = (
+                    state.inventory_confirmation_journal_digest == confirmation_digest
+                )
+                before_confirmation = bool(
+                    inventory_head
+                    and state.journal_high_water == inventory_sequence
+                    and state.journal_digest == inventory_digest
+                )
+                after_confirmation = bool(
+                    inventory_head
+                    and confirmation_bound
+                    and state.journal_high_water == confirmation_sequence
+                    and state.journal_digest == confirmation_digest
+                    and state.journal_high_water == heartbeat.journal_sequence
+                    and state.journal_digest == heartbeat.journal_digest
+                )
+                confirms_final_inventory = bool(
+                    authority.execution_state == "drain-only"
+                    and authority.executable_new_capacity_ceiling == 0
+                    and epoch.state == "drain-only"
+                    and epoch.effective_ceiling == 0
+                    and epoch.effective_rate_per_minute == 0
+                    and inventory_head
+                    and heartbeat.journal_checkpoint_sequence == state.journal_high_water
+                    and heartbeat.journal_checkpoint_digest == state.journal_digest
+                    and confirmation_bound
+                    and heartbeat.journal_sequence == confirmation_sequence
+                    and heartbeat.journal_digest == confirmation_digest
+                    and (before_confirmation or after_confirmation)
+                ) and await self._stored_inventory_is_retirement_safe(
+                    session,
+                    registration,
+                    epoch,
+                    state,
+                )
             now = await _database_now(session)
             state.heartbeat_high_water = heartbeat.heartbeat_sequence
             state.last_heartbeat_digest = digest
             state.journal_high_water = heartbeat.journal_sequence
             state.journal_digest = heartbeat.journal_digest
             state.last_heartbeat_at = now
+            if confirms_final_inventory:
+                state.retirement_safe = True
+                state.retirement_inventory_digest = state.last_inventory_digest
             state.lease_expires_at = now + self._executor_lease
             return HeartbeatedExecutableExecutor(
                 state.heartbeat_high_water,
@@ -525,17 +705,11 @@ class CapacityExecutionStore:
                 .all()
             )
             intents_by_id = {intent.intent_id: intent for intent in pool_intents}
-            records_safe = (
-                inventory.journal_sequence == state.journal_high_water
-                and inventory.journal_digest == state.journal_digest
-            )
-            observed_intent_ids: set[UUID] = set()
             for record in inventory.records:
                 if record.authority_scope == "foreign":
                     continue
                 proof = record.ownership_proof
                 if proof is None:
-                    records_safe = False
                     continue
                 binding = proof.metadata.binding
                 intent = intents_by_id.get(binding.intent_id)
@@ -555,7 +729,6 @@ class CapacityExecutionStore:
                     or intent.pool_id != inventory.pool_id
                     or binding != stored_binding
                 ):
-                    records_safe = False
                     continue
                 ownership_invalid = (
                     not self._ownership_keyring.verify_executable(
@@ -573,14 +746,9 @@ class CapacityExecutionStore:
                     or record.node_ids != binding.node_ids
                 )
                 if ownership_invalid:
-                    records_safe = False
                     if intent.state != "released":
                         intent.state = "quarantined"
                     continue
-                if binding.intent_id in observed_intent_ids:
-                    records_safe = False
-                else:
-                    observed_intent_ids.add(binding.intent_id)
                 intent.inventory_sequence = inventory.inventory_sequence
                 intent.observed_state = record.state
                 intent.terminal_kind = record.physical_kind
@@ -591,15 +759,6 @@ class CapacityExecutionStore:
                     intent.terminal_evidence_sha256 = record.terminal_evidence_sha256
                 elif intent.state == "submitting-unknown":
                     intent.state = "observed"
-                if record.state != "terminal" or intent.state != "released":
-                    records_safe = False
-            if (
-                records_safe
-                and observed_intent_ids == set(intents_by_id)
-                and all(intent.state == "released" for intent in pool_intents)
-            ):
-                state.retirement_safe = True
-                state.retirement_inventory_digest = digest
             return IngestedExecutableInventory(inventory.inventory_sequence, digest, False)
 
     async def next_pool_work(
@@ -1176,7 +1335,7 @@ class CapacityExecutionStore:
         authority = await self._lock_authority(session)
         epoch = await self._lock_current_epoch(session, authority)
         context_matches = _context_matches(authority, epoch, fence) or (
-            not require_active and _retained_drain_context_matches(authority, epoch, fence)
+            not require_active and _retained_drain_close_context_matches(authority, epoch, fence)
         )
         if not context_matches or (
             require_active and (authority.execution_state != "active" or authority.increase_freeze)
@@ -1215,10 +1374,12 @@ class CapacityExecutionStore:
     ) -> tuple[CapacityAuthorityState, CapacityExecutionEpoch, CapacityExecutionExecutor]:
         authority = await self._lock_authority(session)
         epoch = await self._lock_current_epoch(session, authority)
-        if not (
-            _context_matches(authority, epoch, execution)
-            or _retained_drain_context_matches(authority, epoch, execution)
-        ):
+        matches = (
+            _retained_drain_context_matches(authority, epoch, execution)
+            if authority.execution_state == "drain-only"
+            else _context_matches(authority, epoch, execution)
+        )
+        if not matches:
             raise ExecutionConflictError("execution fence changed")
         registration = (
             await session.execute(

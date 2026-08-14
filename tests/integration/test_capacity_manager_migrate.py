@@ -352,6 +352,7 @@ def test_retirement_lifecycle_schema_matches_model_and_migration(
             "AND inventory_high_water > 0 AND inventory_payload IS NOT NULL "
             "AND jsonb_typeof(inventory_payload) = 'object' "
             "AND last_inventory_at IS NOT NULL "
+            "AND last_heartbeat_at > last_inventory_at "
             "AND inventory_payload -> 'schema_version' = '2'::jsonb "
             "AND inventory_payload -> 'inventory_sequence' "
             "= to_jsonb(inventory_high_water) "
@@ -394,6 +395,7 @@ def test_retirement_lifecycle_schema_matches_model_and_migration(
             "inventory_high_water > 0 AND inventory_payload IS NOT NULL AND "
             "jsonb_typeof(inventory_payload) = 'object'::text AND "
             "last_inventory_at IS NOT NULL AND "
+            "last_heartbeat_at > last_inventory_at AND "
             "(inventory_payload -> 'schema_version'::text) = '2'::jsonb AND "
             "(inventory_payload -> 'inventory_sequence'::text) "
             "= to_jsonb(inventory_high_water) AND "
@@ -778,6 +780,60 @@ def test_executor_retirement_safety_rejects_noncanonical_inventory_payload(
                         "id": uuid4(),
                         "execution_epoch": execution_epoch,
                         "executor_incarnation": UUID(int=12011),
+                    },
+                )
+    finally:
+        transaction.rollback()
+        connection.close()
+        engine.dispose()
+
+
+def test_executor_retirement_safety_requires_post_inventory_heartbeat(
+    capacity_postgres_url: str,
+) -> None:
+    """Direct SQL cannot mark safe until a heartbeat confirms after inventory time."""
+
+    engine = create_engine(capacity_postgres_url)
+    connection = engine.connect()
+    transaction = connection.begin()
+    try:
+        execution_epoch = _seed_active_execution(connection)
+        with pytest.raises(IntegrityError):
+            with connection.begin_nested():
+                connection.execute(
+                    text(
+                        "INSERT INTO capacity_executable_executor_states "
+                        "(id, execution_epoch, execution_manifest_sha256, executor_id, "
+                        "executor_incarnation, pool_id, pool_generation, state, "
+                        "journal_high_water, journal_digest, inventory_high_water, "
+                        "last_inventory_digest, inventory_payload, "
+                        "inventory_confirmation_journal_digest, last_inventory_at, "
+                        "retirement_safe, retirement_inventory_digest, lease_expires_at, "
+                        "last_heartbeat_at) VALUES "
+                        "(:id, :execution_epoch, repeat('4', 64), 'gb10-executor', "
+                        ":executor_incarnation, 'gb10', 1, 'current', 0, repeat('0', 64), "
+                        "1, repeat('f', 64), jsonb_build_object("
+                        "'schema_version', 2, "
+                        "'execution', jsonb_build_object("
+                        "'execution_epoch', :execution_epoch, "
+                        "'execution_manifest_sha256', repeat('4', 64)), "
+                        "'executor_id', 'gb10-executor', "
+                        "'executor_incarnation', CAST(:executor_incarnation AS text), "
+                        "'pool_id', 'gb10', 'pool_generation', 1, "
+                        "'inventory_sequence', 1, "
+                        "'journal_sequence', 0, 'journal_digest', repeat('0', 64), "
+                        "'journal_checkpoint_sequence', 0, "
+                        "'journal_checkpoint_digest', repeat('0', 64), "
+                        "'complete', true, 'records', '[]'::jsonb, 'executable', true), "
+                        "repeat('0', 64), CAST(:observed_at AS timestamptz), true, "
+                        "repeat('f', 64), CAST(:observed_at AS timestamptz) + "
+                        "interval '1 minute', CAST(:observed_at AS timestamptz))"
+                    ),
+                    {
+                        "id": uuid4(),
+                        "execution_epoch": execution_epoch,
+                        "executor_incarnation": UUID(int=12011),
+                        "observed_at": "2026-08-14T12:00:00+00:00",
                     },
                 )
     finally:

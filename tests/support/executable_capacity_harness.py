@@ -77,6 +77,7 @@ from loom_capacity_manager.contracts import (
     ProfileReferenceV1,
     ResourceDomainV1,
     ResourceVectorV1,
+    StaticCandidateProvenanceV1,
     SubjectConfigurationV1,
     TierPolicyV1,
     WorkerShapeV1,
@@ -111,7 +112,6 @@ from loom_capacity_manager.execution_store import CapacityExecutionStore
 from loom_capacity_manager.models import (
     CapacityAllocationEpoch,
     CapacityAuthorityState,
-    CapacityCandidate,
     CapacityDevelopmentProjection,
     CapacityExecutableExecutorState,
     CapacityExecutableIntent,
@@ -1210,6 +1210,7 @@ class ExecutableCapacityHarness:
             expected_configuration_epoch=0,
             fleet=self._fleet_reference,
             subjects=tuple(self._subject_references.values()),
+            static_candidate_provenance=self._static_candidate_provenance(),
         )
         response = await self._request(
             "POST",
@@ -1219,7 +1220,6 @@ class ExecutableCapacityHarness:
         )
         response.raise_for_status()
         self._configuration_epoch = int(response.json()["configuration_epoch"])
-        await self._seed_static_candidates()
         for index, subject in enumerate(self.static_subjects, start=1):
             report = DemandSnapshotV1(
                 subject_id=subject.subject_id,
@@ -1318,6 +1318,7 @@ class ExecutableCapacityHarness:
                     key=lambda value: value.hex,
                 )
             ),
+            static_candidate_provenance=self._static_candidate_provenance(),
         )
         activated = await self._request(
             "POST",
@@ -1371,6 +1372,7 @@ class ExecutableCapacityHarness:
                     key=lambda value: value.hex,
                 )
             ),
+            static_candidate_provenance=self._static_candidate_provenance(),
         )
         activated = await self._request(
             "POST",
@@ -1385,29 +1387,18 @@ class ExecutableCapacityHarness:
         self._configuration_epoch = int(activated.json()["configuration_epoch"])
         return executable
 
-    async def _seed_static_candidates(self) -> None:
-        if self._session_factory is None:
-            raise RuntimeError("manager session factory is unavailable")
-        async with self._session_factory() as session, session.begin():
-            for index, subject in enumerate(self.static_subjects, start=1):
-                identity = _sha(f"static:{index}:candidate")
-                publication = _sha(f"static:{index}:publication")
-                session.add(
-                    CapacityCandidate(
-                        subject_id=subject.subject_id,
-                        subject_incarnation=subject.subject_incarnation,
-                        candidate_generation=1,
-                        candidate_digest=identity,
-                        candidate_identity_algorithm="source-sha256",
-                        candidate_identity=identity,
-                        source_payload={"publication_sha256": publication},
-                        artifact_payload={},
-                        architecture_payload={},
-                        launcher_payload={},
-                        attestation_payload={},
-                        protocol_payload={},
-                    )
-                )
+    def _static_candidate_provenance(self) -> tuple[StaticCandidateProvenanceV1, ...]:
+        return tuple(
+            StaticCandidateProvenanceV1(
+                subject_id=subject.subject_id,
+                subject_incarnation=subject.subject_incarnation,
+                candidate_generation=subject.candidate_generation,
+                algorithm="source-sha256",
+                identity=_sha(f"static:{index}:candidate"),
+                publication_sha256=_sha(f"static:{index}:publication"),
+            )
+            for index, subject in enumerate(self.static_subjects, start=1)
+        )
 
     async def add_owner(self, name: str, candidate_sha256: str) -> OwnerHandle:
         if name in self._owners:
@@ -1476,6 +1467,9 @@ class ExecutableCapacityHarness:
             agent_incarnation=_uuid(f"owner:{name}:agent-incarnation:1"),
             reporter_incarnation=reporter,
             candidate_digest=publication,
+            candidate_identity_algorithm="source-sha256",
+            candidate_identity=candidate_sha256,
+            candidate_publication_sha256=publication,
             deployment_generation=1,
             configuration_generation=executable_subject.configuration_generation,
         )
@@ -2730,6 +2724,9 @@ class ExecutableCapacityHarness:
             update={
                 "reporter_incarnation": reporter,
                 "candidate_digest": publication,
+                "candidate_identity_algorithm": "source-sha256",
+                "candidate_identity": candidate_sha256,
+                "candidate_publication_sha256": publication,
                 "deployment_generation": projected_subject.deployment_generation,
                 "configuration_generation": executable_subject.configuration_generation,
             }
@@ -2813,7 +2810,9 @@ class ExecutableCapacityHarness:
                             "SELECT agent_incarnation, schema_version, environment_id, "
                             "subject_id, subject_incarnation, authority_incarnation, "
                             "reporter_incarnation, authority_mode, allocation_epoch, "
-                            "candidate_digest, deployment_generation, configuration_generation "
+                            "candidate_digest, candidate_identity_algorithm, "
+                            "candidate_identity, candidate_publication_sha256, "
+                            "deployment_generation, configuration_generation "
                             "FROM loom_capacity_guard.agent_registrations "
                             "WHERE singleton_id = 1"
                         )

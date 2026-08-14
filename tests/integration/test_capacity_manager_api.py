@@ -392,6 +392,17 @@ async def api_context(
                     "subject_incarnation": str(SUBJECT_INCARNATION),
                 }
             ],
+            "static_candidate_provenance": [
+                {
+                    "schema_version": 1,
+                    "subject_id": str(SUBJECT_ID),
+                    "subject_incarnation": str(SUBJECT_INCARNATION),
+                    "candidate_generation": subject.candidate_generation,
+                    "algorithm": "source-sha256",
+                    "identity": "1" * 64,
+                    "publication_sha256": "2" * 64,
+                }
+            ],
         }
         activation_response = client.post(
             "/v1/config-activations",

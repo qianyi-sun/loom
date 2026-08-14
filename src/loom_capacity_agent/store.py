@@ -92,12 +92,16 @@ class CapacityAgentStore:
                         "(agent_incarnation, singleton_id, schema_version, environment_id, "
                         "subject_id, subject_incarnation, authority_incarnation, "
                         "reporter_incarnation, authority_mode, allocation_epoch, "
-                        "candidate_digest, deployment_generation, configuration_generation, "
+                        "candidate_digest, candidate_identity_algorithm, candidate_identity, "
+                        "candidate_publication_sha256, deployment_generation, "
+                        "configuration_generation, "
                         "registration_state) VALUES "
                         "(:agent_incarnation, 1, 1, :environment_id, :subject_id, "
                         ":subject_incarnation, :authority_incarnation, :reporter_incarnation, "
                         ":authority_mode, :allocation_epoch, :candidate_digest, "
-                        ":deployment_generation, :configuration_generation, 'registered') "
+                        ":candidate_identity_algorithm, :candidate_identity, "
+                        ":candidate_publication_sha256, :deployment_generation, "
+                        ":configuration_generation, 'registered') "
                         "ON CONFLICT DO NOTHING RETURNING agent_incarnation"
                     ),
                     registration.model_dump(mode="python", exclude_none=False),
@@ -157,8 +161,7 @@ class CapacityAgentStore:
         )
         if mismatches:
             raise CapacityAgentStoreError(
-                "agent reconfiguration differs from the guard fence: "
-                + ", ".join(mismatches)
+                "agent reconfiguration differs from the guard fence: " + ", ".join(mismatches)
             )
         payload = registration.model_dump(mode="json", exclude_none=False)
         payload_digest = canonical_digest(registration)
@@ -176,19 +179,18 @@ class CapacityAgentStore:
                 or current.authority_mode != registration.authority_mode
                 or current.allocation_epoch != registration.allocation_epoch
             ):
-                raise CapacityAgentStoreError(
-                    "agent reconfiguration changed an immutable binding"
-                )
+                raise CapacityAgentStoreError("agent reconfiguration changed an immutable binding")
             if current.configuration_generation != expected_configuration_generation:
-                raise CapacityAgentStoreError(
-                    "agent configuration generation was superseded"
-                )
+                raise CapacityAgentStoreError("agent configuration generation was superseded")
             updated = (
                 await self._session.execute(
                     text(
                         f"UPDATE {_SCHEMA}.agent_registrations SET "
                         "reporter_incarnation = :reporter_incarnation, "
                         "candidate_digest = :candidate_digest, "
+                        "candidate_identity_algorithm = :candidate_identity_algorithm, "
+                        "candidate_identity = :candidate_identity, "
+                        "candidate_publication_sha256 = :candidate_publication_sha256, "
                         "deployment_generation = :deployment_generation, "
                         "configuration_generation = :configuration_generation "
                         "WHERE agent_incarnation = :agent_incarnation "
@@ -202,9 +204,7 @@ class CapacityAgentStore:
                 )
             ).scalar_one_or_none()
             if updated is None:
-                raise CapacityAgentStoreError(
-                    "agent configuration generation was superseded"
-                )
+                raise CapacityAgentStoreError("agent configuration generation was superseded")
             await self._session.execute(
                 text(
                     f"INSERT INTO {_SCHEMA}.audit_events "
@@ -241,6 +241,8 @@ class CapacityAgentStore:
                         f"SELECT agent_incarnation, schema_version, environment_id, subject_id, "
                         "subject_incarnation, authority_incarnation, reporter_incarnation, "
                         "authority_mode, allocation_epoch, candidate_digest, "
+                        "candidate_identity_algorithm, candidate_identity, "
+                        "candidate_publication_sha256, "
                         "deployment_generation, configuration_generation "
                         f"FROM {_SCHEMA}.agent_registrations WHERE singleton_id = 1 "
                         + ("FOR UPDATE" if lock else "FOR KEY SHARE")
@@ -253,9 +255,7 @@ class CapacityAgentStore:
         if row is None:
             raise CapacityAgentStoreError("agent registration insert was not observable")
         try:
-            return AgentRegistrationV1.model_validate(
-                {**dict(row), "reporter_high_water": 0}
-            )
+            return AgentRegistrationV1.model_validate({**dict(row), "reporter_high_water": 0})
         except ValidationError as exc:
             raise CapacityAgentStoreError("stored agent registration is invalid") from exc
 
@@ -278,9 +278,8 @@ class CapacityAgentStore:
         expected_payload = registration.model_dump(mode="json", exclude_none=False)
         if len(rows) != 1:
             raise CapacityAgentStoreError("expected a current agent registration audit")
-        if (
-            rows[0]["payload"] != expected_payload
-            or rows[0]["payload_digest"] != canonical_digest(registration)
+        if rows[0]["payload"] != expected_payload or rows[0]["payload_digest"] != canonical_digest(
+            registration
         ):
             raise CapacityAgentStoreError("agent registration audit does not match its binding")
 
@@ -294,9 +293,7 @@ async def read_agent_reporter_high_water(
 
     value = (
         await session.execute(
-            text(
-                f"SELECT {_SCHEMA}.read_agent_reporter_high_water(:agent_incarnation)"
-            ),
+            text(f"SELECT {_SCHEMA}.read_agent_reporter_high_water(:agent_incarnation)"),
             {"agent_incarnation": registration.agent_incarnation},
         )
     ).scalar_one()
@@ -461,7 +458,9 @@ async def capture_lifecycle_demand_observation(
             )
         ).scalar_one()
         if not isinstance(payload, Mapping):
-            raise CapacityAgentStoreError("protected lifecycle demand capture returned a non-object")
+            raise CapacityAgentStoreError(
+                "protected lifecycle demand capture returned a non-object"
+            )
         try:
             observation = GuardLifecycleDemandObservationV2.model_validate_json(
                 _json_payload(payload).encode("ascii")
@@ -477,8 +476,7 @@ async def capture_lifecycle_demand_observation(
         )
         if mismatches:
             raise CapacityAgentStoreError(
-                "protected lifecycle demand capture binding mismatch: "
-                f"{', '.join(mismatches)}"
+                f"protected lifecycle demand capture binding mismatch: {', '.join(mismatches)}"
             )
         if observation.sequence != expected_high_water + 1:
             raise CapacityAgentStoreError(

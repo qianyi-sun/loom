@@ -38,8 +38,10 @@ from loom_capacity_manager.executable_contracts import (
     ExecutionFenceV2,
 )
 from tests.integration.test_capacity_agent_store import (
+    _fence,
     _initialize_and_register,
     _owner_session,
+    _registration,
     _seed_trial,
 )
 
@@ -289,8 +291,8 @@ def _bootstrap(subject_id: UUID, subject_incarnation: UUID) -> ExecutableBootstr
         account_id="owner-alice",
         tier_id="development",
         candidate=CandidateBindingV2(
-            algorithm="git-sha1",
-            identity="a" * 40,
+            algorithm="source-sha256",
+            identity="a" * 64,
             publication_sha256="a" * 64,
         ),
         candidate_generation=7,
@@ -350,6 +352,48 @@ def _worker(
         worker_credential_sha256=hashlib.sha256(worker_credential.encode("ascii")).hexdigest(),
         predecessor_worker_incarnation=predecessor_worker_incarnation,
     )
+
+
+@pytest.mark.asyncio
+async def test_executable_admission_separates_candidate_source_and_publication(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    """Protected admission compares tagged source identity and publication independently."""
+
+    fence = _fence()
+    registration = AgentRegistrationV1.model_validate(
+        {
+            **_registration(fence).model_dump(mode="python"),
+            "candidate_identity_algorithm": "git-sha1",
+            "candidate_identity": "b" * 40,
+            "candidate_publication_sha256": "c" * 64,
+        }
+    )
+    async with _owner_session(capacity_guard_database) as (agent_store, guard_store, _):
+        await guard_store.initialize_disabled_authority(fence)
+        await agent_store.register_agent(registration)
+
+    request = _bootstrap(registration.subject_id, registration.subject_incarnation)
+    exact = request.model_copy(
+        update={
+            "binding": request.binding.model_copy(
+                update={
+                    "candidate": CandidateBindingV2(
+                        algorithm="git-sha1",
+                        identity="b" * 40,
+                        publication_sha256="c" * 64,
+                    )
+                }
+            )
+        }
+    )
+    async with _serializable_executor_session(capacity_guard_database) as session:
+        receipt = await ExecutableAdmissionStore(session, registration=registration).prepare_worker(
+            exact,
+            bootstrap_sha256="d" * 64,
+        )
+
+    assert receipt.intent_id == exact.binding.intent_id
 
 
 @pytest.mark.asyncio

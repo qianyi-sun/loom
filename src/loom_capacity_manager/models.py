@@ -1846,6 +1846,7 @@ class CapacityExecutableExecutorState(Base):
             "AND inventory_high_water > 0 AND inventory_payload IS NOT NULL "
             "AND jsonb_typeof(inventory_payload) = 'object' "
             "AND last_inventory_at IS NOT NULL "
+            "AND last_heartbeat_at > last_inventory_at "
             "AND inventory_payload -> 'schema_version' = '2'::jsonb "
             "AND inventory_payload -> 'inventory_sequence' "
             "= to_jsonb(inventory_high_water) "
