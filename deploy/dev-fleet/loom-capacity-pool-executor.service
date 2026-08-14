@@ -1,0 +1,37 @@
+[Unit]
+Description=Loom inert global capacity pool executor rehearsal
+Documentation=https://github.com/qianyi-sun/loom/blob/dev/docs/runbooks/executable-global-capacity-bridge-rehearsal.md
+After=network-online.target
+Wants=network-online.target
+ConditionPathIsRegular=/etc/loom-capacity-executor/service.env
+
+[Service]
+Type=oneshot
+User=loom_capacity_executor
+Group=loom_capacity_executor
+UMask=0077
+Environment=PYTHONNOUSERSITE=1
+EnvironmentFile=/etc/loom-capacity-executor/service.env
+ExecCondition=/usr/bin/test ${LOOM_CAPACITY_EXECUTOR_EXECUTABLE_CEILING} = 0
+ExecStart=/opt/loom-capacity-executor/venv/bin/python -I -B -m loom_capacity_executor --config ${LOOM_CAPACITY_EXECUTOR_CONFIG} --expected-manifest-sha256 ${LOOM_CAPACITY_EXECUTOR_EXPECTED_MANIFEST_SHA256} --pool ${LOOM_CAPACITY_EXECUTOR_POOL} --validate-only
+TimeoutStartSec=120
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+ReadOnlyPaths=/etc/loom-capacity-executor /run/loom-capacity-executor
+ReadWritePaths=/var/lib/loom-capacity-executor
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+
+# Deliberately no [Install] section: this Package 5B unit cannot be enabled.

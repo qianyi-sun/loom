@@ -319,3 +319,20 @@ store, API, mTLS, property, and offline-driver tests; Ruff; mypy; whitespace
 checks; and a source audit for grant, launch-permit, worker-claim, or Slurm
 mutation vocabulary. Integration tests additionally prove the authority
 ceiling and every stored allocation executable flag remain zero/false.
+
+## Inert executable bridge package
+
+The executable-v2 package has one global manager spanning production, staging,
+shared development, and personal-development subjects, and exactly one
+controller-local executor for OLDLAB and GB10. Users do not configure pool
+weights, QoS, shapes, profiles, or priorities: `min_slots` defaults to zero,
+architecture-specific demand constrains eligibility, and neutral placement is
+manager-owned. `loom-dev` is shared infrastructure; personal namespaces are
+`loom-dev-<owner>`, never `loom-dev-shared`.
+
+The checked-in executor profile has immutable images and an exact zero
+executable ceiling. Rendering and systemd validation are read-only; no merge
+authorizes activation or live infrastructure mutation. The manager's v2 status
+may report exact active physical Slurm-job intent, but only a matching fresh
+protected personal guard registration, with no later release/drain, can make a
+worker available. Scheduler evidence and pod readiness alone are insufficient.

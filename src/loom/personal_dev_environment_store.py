@@ -18,6 +18,7 @@ from loom.db.schema import (
     DevLifecycleOperationAttempt,
     PersonalDevCandidate,
 )
+from loom.dev_instance import derive_identity
 from loom.personal_dev_activation import (
     PersonalDevActivationIntent,
     VerifiedPersonalDevActivationAcknowledgement,
@@ -519,9 +520,7 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             or environment.owner_user_id != requested.owner_user_id
             or environment.owner_team_id != requested.owner_team_id
         ):
-            raise PersonalDevEnvironmentNotFoundError(
-                "personal-dev environment not found"
-            )
+            raise PersonalDevEnvironmentNotFoundError("personal-dev environment not found")
         if environment.operation_epoch != requested.expected_operation_epoch:
             raise PersonalDevEnvironmentEpochFencedError(
                 "personal-dev environment operation epoch changed"
@@ -612,9 +611,7 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             capacity_reporter_incarnation=environment.capacity_reporter_incarnation,
             capacity_reporter_token_sha256=(environment.capacity_reporter_token_sha256),
             protected_admission_sha256=environment.protected_admission_sha256,
-            capacity_agent_installation_sha256=(
-                environment.capacity_agent_installation_sha256
-            ),
+            capacity_agent_installation_sha256=(environment.capacity_agent_installation_sha256),
             capacity_supported_pool_ids=list(supported_pool_ids),
             capacity_supported_architectures=list(supported_architectures),
             keep_data=requested.keep_data,
@@ -777,6 +774,8 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                 deployment_generation=generation,
                 candidate_id=requested.candidate_id,
                 candidate_sha=requested.candidate_sha,
+                capacity_namespace=derive_identity(requested.name).namespace,
+                capacity_database=derive_identity(requested.name).database,
                 operation_epoch=operation_epoch,
                 operation_id=operation_id,
                 operation_step="candidate_build",
@@ -1408,29 +1407,32 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             and operation.protected_admission_sha256 == protected_admission_sha256
             and operation.capacity_agent_installation_sha256 == capacity_agent_installation_sha256
             and tuple(operation.capacity_supported_pool_ids or ()) == supported_pool_ids
-            and tuple(operation.capacity_supported_architectures or ())
-            == supported_architectures
+            and tuple(operation.capacity_supported_architectures or ()) == supported_architectures
         )
         if exact:
             result = self._reservation(environment, operation, acquired=False)
             await self.session.commit()
             return result
         allowed = (
-            operation.kind in {"create", "update"}
-            and operation.state == "activating"
-            and operation.checkpoint == "activation_acknowledged"
-            and operation.activation_acknowledgement_sha256 is not None
-            and operation.local_activation_sha256 is not None
-        ) or (
-            operation.kind == "capacity"
-            and operation.state == "running"
-            and operation.checkpoint == "capacity_projection_requested"
-            and operation.local_activation_sha256 is not None
-        ) or (
-            operation.kind == "destroy"
-            and operation.state == "running"
-            and operation.checkpoint == "capacity_retirement_requested"
-            and operation.local_activation_sha256 is not None
+            (
+                operation.kind in {"create", "update"}
+                and operation.state == "activating"
+                and operation.checkpoint == "activation_acknowledged"
+                and operation.activation_acknowledgement_sha256 is not None
+                and operation.local_activation_sha256 is not None
+            )
+            or (
+                operation.kind == "capacity"
+                and operation.state == "running"
+                and operation.checkpoint == "capacity_projection_requested"
+                and operation.local_activation_sha256 is not None
+            )
+            or (
+                operation.kind == "destroy"
+                and operation.state == "running"
+                and operation.checkpoint == "capacity_retirement_requested"
+                and operation.local_activation_sha256 is not None
+            )
         )
         if not allowed:
             await self.session.rollback()
@@ -1447,8 +1449,7 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                 or environment.protected_admission_sha256 != protected_admission_sha256
                 or environment.capacity_agent_installation_sha256
                 != capacity_agent_installation_sha256
-                or tuple(environment.capacity_supported_pool_ids or ())
-                != supported_pool_ids
+                or tuple(environment.capacity_supported_pool_ids or ()) != supported_pool_ids
                 or tuple(environment.capacity_supported_architectures or ())
                 != supported_architectures
             ):
@@ -1647,9 +1648,7 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             operation.capacity_agent_installation_sha256
         )
         environment.capacity_supported_pool_ids = operation.capacity_supported_pool_ids
-        environment.capacity_supported_architectures = (
-            operation.capacity_supported_architectures
-        )
+        environment.capacity_supported_architectures = operation.capacity_supported_architectures
         environment.updated_at = now
         attempt.claimed_by = None
         attempt.lease_expires_at = None
@@ -1702,12 +1701,10 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
                 or environment.capacity_reporter_token_sha256
                 != operation.capacity_reporter_token_sha256
                 or environment.local_activation_sha256 != operation.local_activation_sha256
-                or environment.protected_admission_sha256
-                != operation.protected_admission_sha256
+                or environment.protected_admission_sha256 != operation.protected_admission_sha256
                 or environment.capacity_agent_installation_sha256
                 != operation.capacity_agent_installation_sha256
-                or environment.capacity_supported_pool_ids
-                != operation.capacity_supported_pool_ids
+                or environment.capacity_supported_pool_ids != operation.capacity_supported_pool_ids
                 or environment.capacity_supported_architectures
                 != operation.capacity_supported_architectures
             ):
@@ -1775,9 +1772,7 @@ class SqlAlchemyPersonalDevEnvironmentAuthority:
             operation.capacity_agent_installation_sha256
         )
         environment.capacity_supported_pool_ids = operation.capacity_supported_pool_ids
-        environment.capacity_supported_architectures = (
-            operation.capacity_supported_architectures
-        )
+        environment.capacity_supported_architectures = operation.capacity_supported_architectures
         environment.status = "ready"
         environment.operation_step = "complete"
         environment.failure_reason = None

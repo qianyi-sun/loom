@@ -50,7 +50,15 @@ async def test_capacity_role_convergence_rejects_external_owner_membership(
     credentials = _new_credentials()
     database = PsycopgPersonalDevCapacityDatabase(postgres_url)
 
-    owner, migrator, agent, executor, _migrator_url, _agent_url = await database._converge_roles(
+    (
+        owner,
+        migrator,
+        agent,
+        executor,
+        _observer,
+        _migrator_url,
+        _agent_url,
+    ) = await database._converge_roles(
         identity,
         credentials,
     )
@@ -148,6 +156,7 @@ async def test_capacity_role_convergence_removes_contaminated_executor_privilege
         _migrator,
         _agent,
         executor,
+        _observer,
         _migrator_url,
         _agent_url,
     ) = await database._converge_roles(identity, credentials)
@@ -255,6 +264,7 @@ async def test_capacity_role_convergence_isolates_executor_from_public_functions
             _migrator,
             _agent,
             executor,
+            _observer,
             _migrator_url,
             _agent_url,
         ) = await database._converge_roles(identity, _new_credentials())
@@ -313,7 +323,15 @@ async def test_capacity_migrator_authority_is_sealed_between_reconciliations(
     assert database_name is not None
     identity = replace(derive_identity(name), database=database_name)
     database = PsycopgPersonalDevCapacityDatabase(postgres_url)
-    owner, migrator, _agent, _executor, _migrator_url, _agent_url = await database._converge_roles(
+    (
+        owner,
+        migrator,
+        _agent,
+        _executor,
+        _observer,
+        _migrator_url,
+        _agent_url,
+    ) = await database._converge_roles(
         identity,
         _new_credentials(),
     )
@@ -357,7 +375,15 @@ async def test_destroy_seal_disables_primary_and_capacity_database_logins(
         await connection.execute(
             f"CREATE ROLE \"{identity.db_role}\" LOGIN PASSWORD 'primary-password'"
         )
-    owner, migrator, agent, executor, _migrator_url, _agent_url = await database._converge_roles(
+    (
+        owner,
+        migrator,
+        agent,
+        executor,
+        _observer,
+        _migrator_url,
+        _agent_url,
+    ) = await database._converge_roles(
         identity,
         _new_credentials(),
     )

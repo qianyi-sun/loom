@@ -50,6 +50,7 @@ EXPECTED_GUARD_TABLES = {
     "legacy_writer_cursors",
     "legacy_compatibility_freezes",
     "executable_admission_authority",
+    "executable_observer_authority",
     "executable_admission_events",
     "executable_claim_state",
     "executable_claim_leases",
@@ -69,7 +70,7 @@ async def test_guard_schema_startup_returns_numeric_head(
 ) -> None:
     engine = create_async_engine(_value(capacity_guard_database, "migrator_url"))
     try:
-        assert await assert_capacity_guard_schema_at_head(engine) == 12
+        assert await assert_capacity_guard_schema_at_head(engine) == 13
     finally:
         await engine.dispose()
 
@@ -196,7 +197,7 @@ def test_guard_schema_has_exact_owner_and_preserves_public_application_tables(
             revision = connection.execute(
                 text("SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version")
             ).scalar_one()
-            assert revision == "guard_0012"
+            assert revision == "guard_0013"
             public_before = capacity_guard_database["public_tables_before"]
             assert isinstance(public_before, frozenset)
             assert frozenset(inspect(connection).get_table_names(schema="public")) == public_before
@@ -606,6 +607,7 @@ def _guard_config(database: dict[str, object]) -> AlembicConfig:
     os.environ["LOOM_CAPACITY_GUARD_OWNER_ROLE"] = _value(database, "owner_role")
     os.environ["LOOM_CAPACITY_GUARD_AGENT_ROLE"] = _value(database, "agent_role")
     os.environ["LOOM_CAPACITY_GUARD_EXECUTOR_ROLE"] = _value(database, "executor_role")
+    os.environ["LOOM_CAPACITY_GUARD_OBSERVER_ROLE"] = _value(database, "observer_role")
     return cfg
 
 

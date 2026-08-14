@@ -1967,6 +1967,26 @@ class ExecutableCapacityHarness:
                     pool.last_inventory = ExecutableExecutorInventoryV2.model_validate_json(payload)
             await self._publish_pool_observation(pool_id)
 
+    async def executable_executor_status(self) -> dict[str, Any]:
+        """Read the manager's bounded executable executor projection."""
+
+        response = await self._request("GET", "/v2/status/executors")
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("executable executor status is invalid")
+        return payload
+
+    async def executable_subject_status(self, subject_id: UUID) -> dict[str, Any]:
+        """Read the manager's bounded executable subject projection."""
+
+        response = await self._request("GET", f"/v2/status/subjects/{subject_id}")
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("executable subject status is invalid")
+        return payload
+
     async def _latest_launch_ranks(self) -> tuple[dict[str, Any], ...]:
         if self._session_factory is None or self._execution is None:
             return ()

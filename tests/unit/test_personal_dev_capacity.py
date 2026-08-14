@@ -7,6 +7,7 @@ import pytest
 
 from loom.personal_dev_capacity import (
     CapacityManagerPersonalDevProjector,
+    PersonalDevCapacityManagerCheckpoint,
     PersonalDevCapacityProjectionConflictError,
     PersonalDevCapacityProjectionError,
 )
@@ -62,14 +63,19 @@ def _projection_response(request, *, configuration_epoch: int | None = None):
     }
 
 
-async def test_capacity_projector_reads_only_zero_execution_status() -> None:
+async def test_capacity_projector_reads_complete_shadow_checkpoint() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.url == httpx.URL("https://capacity.example/v1/status")
         assert request.headers["Authorization"] == "Bearer lifecycle-token"
         return httpx.Response(
             200,
             headers={"content-type": "application/json"},
-            json={"configuration_epoch": 7, "executable_new_capacity_ceiling": 0},
+            json={
+                "configuration_epoch": 7,
+                "execution_state": "shadow",
+                "execution_epoch": 0,
+                "executable_new_capacity_ceiling": 0,
+            },
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
@@ -78,7 +84,14 @@ async def test_capacity_projector_reads_only_zero_execution_status() -> None:
             bearer_token="lifecycle-token",
             http_client=http,
         )
-        assert await projector.current_configuration_epoch() == 7
+        assert await projector.current_manager_checkpoint() == (
+            PersonalDevCapacityManagerCheckpoint(
+                configuration_epoch=7,
+                execution_state="shadow",
+                execution_epoch=0,
+                executable_new_capacity_ceiling=0,
+            )
+        )
 
 
 async def test_capacity_projector_publishes_canonical_exact_request() -> None:
@@ -159,7 +172,12 @@ async def test_capacity_projector_rejects_mismatched_or_executable_acknowledgeme
             return httpx.Response(
                 200,
                 headers={"content-type": "application/json"},
-                json={"configuration_epoch": 1, "executable_new_capacity_ceiling": 1},
+                json={
+                    "configuration_epoch": 1,
+                    "execution_state": "active",
+                    "execution_epoch": 7,
+                    "executable_new_capacity_ceiling": 2,
+                },
             )
         payload = _projection_response(projection, configuration_epoch=99)
         return httpx.Response(
@@ -174,11 +192,60 @@ async def test_capacity_projector_rejects_mismatched_or_executable_acknowledgeme
             bearer_token="lifecycle-token",
             http_client=http,
         )
-        with pytest.raises(PersonalDevCapacityProjectionError, match="zero-execution"):
-            await projector.current_configuration_epoch()
+        assert await projector.current_manager_checkpoint() == (
+            PersonalDevCapacityManagerCheckpoint(
+                configuration_epoch=1,
+                execution_state="active",
+                execution_epoch=7,
+                executable_new_capacity_ceiling=2,
+            )
+        )
         with pytest.raises(PersonalDevCapacityProjectionError, match="differs"):
             await projector.project(projection, idempotency_key=uuid4())
     assert calls == 2
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "configuration_epoch": 1,
+            "execution_state": "shadow",
+            "execution_epoch": 1,
+            "executable_new_capacity_ceiling": 0,
+        },
+        {
+            "configuration_epoch": 1,
+            "execution_state": "prepared",
+            "execution_epoch": 7,
+            "executable_new_capacity_ceiling": 1,
+        },
+        {
+            "configuration_epoch": 1,
+            "execution_state": "active",
+            "execution_epoch": 0,
+            "executable_new_capacity_ceiling": 1,
+        },
+        {
+            "configuration_epoch": 1,
+            "execution_state": "drain-only",
+            "execution_epoch": 7,
+            "executable_new_capacity_ceiling": 1,
+        },
+    ],
+)
+async def test_capacity_projector_rejects_incoherent_manager_checkpoint(payload) -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "application/json"}, json=payload)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        projector = CapacityManagerPersonalDevProjector(
+            manager_origin="https://capacity.example",
+            bearer_token="lifecycle-token",
+            http_client=http,
+        )
+        with pytest.raises(PersonalDevCapacityProjectionError, match="checkpoint"):
+            await projector.current_manager_checkpoint()
 
 
 @pytest.mark.parametrize(

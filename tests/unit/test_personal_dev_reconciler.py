@@ -350,8 +350,15 @@ class _Projector:
         self.conflict = conflict
         self.requests = []
 
-    async def current_configuration_epoch(self) -> int:
-        return 11
+    async def current_manager_checkpoint(self):
+        from loom.personal_dev_capacity import PersonalDevCapacityManagerCheckpoint
+
+        return PersonalDevCapacityManagerCheckpoint(
+            configuration_epoch=11,
+            execution_state="active",
+            execution_epoch=7,
+            executable_new_capacity_ceiling=2,
+        )
 
     async def project(self, request, *, idempotency_key):
         from loom.personal_dev_capacity import PersonalDevCapacityProjectionConflictError

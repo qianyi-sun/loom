@@ -9,6 +9,7 @@ import json
 from collections import Counter, defaultdict
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 from typing import Any, TypeVar, cast
 from uuid import UUID
 
@@ -34,6 +35,7 @@ from loom_capacity_manager.auth import (
 from loom_capacity_manager.config import CapacityManagerSettings, read_owner_only_secret
 from loom_capacity_manager.contracts import (
     MAX_CONTRACT_BYTES,
+    MAX_FIXED_CLAIMS_PER_REPORT,
     MAX_POOLS,
     ConfigurationActivationV1,
     DemandSnapshotV1,
@@ -48,12 +50,14 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableBootstrapRegistrationV2,
     ExecutableExecutorHeartbeatV2,
     ExecutableExecutorInventoryV2,
+    ExecutableIntentBindingV2,
     ExecutableIntentCloseV2,
     ExecutablePartialReleaseV2,
     ExecutablePermitConsumptionV2,
     ExecutableProtectedReleaseV2,
     ExecutableReservationAcceptanceV2,
     PreparedExecutorBindingV2,
+    canonical_executable_digest,
 )
 from loom_capacity_manager.execution_store import CapacityExecutionStore
 from loom_capacity_manager.grant_contracts import (
@@ -93,6 +97,8 @@ from loom_capacity_manager.models import (
     CapacityAllocationEpoch,
     CapacityAuditEvent,
     CapacityAuthorityState,
+    CapacityExecutableExecutorState,
+    CapacityExecutableIntent,
     CapacityExecutor,
     CapacityPool,
     CapacityReservationShape,
@@ -269,6 +275,101 @@ def _health_payload(*, ready: bool, executable_new_capacity_ceiling: int) -> byt
         sort_keys=True,
         separators=(",", ":"),
     ).encode("ascii")
+
+
+def _manager_execution_blockers(authority: CapacityAuthorityState) -> list[str]:
+    if authority.execution_state == "shadow":
+        return ["manager-shadow"]
+    if authority.execution_state == "prepared":
+        return ["manager-prepared", "zero-executable-ceiling"]
+    if authority.execution_state == "drain-only":
+        return ["manager-drain-only", "zero-executable-ceiling"]
+    return []
+
+
+def _validated_executable_inventory(
+    row: CapacityExecutableExecutorState,
+) -> ExecutableExecutorInventoryV2 | None:
+    payload = row.inventory_payload
+    if payload is None or row.last_inventory_digest is None:
+        return None
+    try:
+        # JSONB returns UUID values as strings; validate through the wire form
+        # so the strict executable contracts restore their exact UUID types.
+        inventory = ExecutableExecutorInventoryV2.model_validate_json(json.dumps(payload))
+    except ValidationError:
+        return None
+    if (
+        inventory.execution.execution_epoch != row.execution_epoch
+        or inventory.execution.execution_manifest_sha256 != row.execution_manifest_sha256
+        or inventory.executor_id != row.executor_id
+        or inventory.executor_incarnation != row.executor_incarnation
+        or inventory.pool_id != row.pool_id
+        or inventory.pool_generation != row.pool_generation
+        or inventory.inventory_sequence != row.inventory_high_water
+        or canonical_executable_digest(inventory) != row.last_inventory_digest
+    ):
+        return None
+    return inventory
+
+
+def _executor_status_item(
+    row: CapacityExecutableExecutorState,
+    *,
+    now: datetime,
+    freshness_seconds: int,
+) -> tuple[dict[str, Any], ExecutableExecutorInventoryV2 | None]:
+    inventory = _validated_executable_inventory(row)
+    blockers: list[str] = []
+    if row.state != "current":
+        blockers.append(f"executor-{row.state}")
+    if row.lease_expires_at <= now:
+        blockers.append("executor-lease-expired")
+    if inventory is None:
+        blockers.append(
+            "executor-inventory-missing"
+            if row.inventory_high_water == 0
+            else "executor-inventory-invalid"
+        )
+    elif (
+        row.last_inventory_at is None
+        or row.last_inventory_at + timedelta(seconds=freshness_seconds) <= now
+    ):
+        blockers.append("executor-inventory-stale")
+    counts: Counter[str] = Counter()
+    quarantine_count = 0
+    if inventory is not None:
+        for record in inventory.records:
+            counts[f"{record.physical_kind}:{record.state}"] += 1
+            if (
+                record.state == "unknown"
+                or record.authority_scope == "foreign"
+                or record.ownership_proof is None
+            ):
+                quarantine_count += 1
+    if quarantine_count:
+        blockers.append("executor-inventory-quarantine")
+    item = {
+        "executor_id": row.executor_id,
+        "executor_incarnation": row.executor_incarnation,
+        "pool_id": row.pool_id,
+        "pool_generation": row.pool_generation,
+        "state": row.state,
+        "lease_expires_at": row.lease_expires_at,
+        "last_heartbeat_at": row.last_heartbeat_at,
+        "heartbeat_sequence": row.heartbeat_high_water,
+        "command_sequence": row.command_high_water,
+        "journal_sequence": row.journal_high_water,
+        "journal_digest": row.journal_digest,
+        "inventory_sequence": row.inventory_high_water,
+        "inventory_digest": row.last_inventory_digest,
+        "inventory_observed_at": row.last_inventory_at,
+        "inventory_record_counts": dict(sorted(counts.items())),
+        "quarantine_count": quarantine_count,
+        "retirement_safe": row.retirement_safe,
+        "blockers": sorted(set(blockers)),
+    }
+    return item, inventory
 
 
 def create_app(
@@ -1446,6 +1547,221 @@ def create_app(
                 for row in rows
             ]
         }
+
+    @app.get("/v2/status/executors")
+    async def executable_executor_status(
+        request: Request,
+        _actor: CapacityPrincipal = Depends(require("capacity:read")),
+    ) -> Any:
+        session_factory, _store, _writer = runtime(request)
+        async with session_factory() as session:
+            authority = (await session.execute(select(CapacityAuthorityState))).scalar_one()
+            now = (await session.execute(select(func.now()))).scalar_one()
+            rows = (
+                (
+                    await session.execute(
+                        select(CapacityExecutableExecutorState)
+                        .where(
+                            CapacityExecutableExecutorState.execution_epoch
+                            == authority.execution_epoch
+                        )
+                        .order_by(CapacityExecutableExecutorState.pool_id)
+                        .limit(MAX_POOLS + 1)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        if len(rows) > MAX_POOLS:
+            raise HTTPException(status_code=503, detail="executable executor status is unbounded")
+        items = [
+            _executor_status_item(
+                row,
+                now=now,
+                freshness_seconds=settings.freshness_seconds,
+            )[0]
+            for row in rows
+        ]
+        blockers = _manager_execution_blockers(authority)
+        if authority.execution_epoch > 0:
+            observed_pools = {row.pool_id for row in rows}
+            blockers.extend(
+                f"executor-missing:{pool_id}"
+                for pool_id in ("gb10", "oldlab")
+                if pool_id not in observed_pools
+            )
+        return jsonable_encoder(
+            {
+                "schema_version": 2,
+                "execution_epoch": authority.execution_epoch,
+                "execution_state": authority.execution_state,
+                "executable_new_capacity_ceiling": (authority.executable_new_capacity_ceiling),
+                "items": items,
+                "blockers": sorted(set(blockers)),
+            }
+        )
+
+    @app.get("/v2/status/subjects/{subject_id}")
+    async def executable_subject_status(
+        subject_id: UUID,
+        request: Request,
+        _actor: CapacityPrincipal = Depends(require("capacity:read")),
+    ) -> Any:
+        session_factory, _store, _writer = runtime(request)
+        async with session_factory() as session:
+            authority = (await session.execute(select(CapacityAuthorityState))).scalar_one()
+            configuration_epoch = (
+                await session.execute(select(func.max(CapacitySubject.configuration_epoch)))
+            ).scalar_one()
+            subject = (
+                await session.execute(
+                    select(CapacitySubject).where(
+                        CapacitySubject.configuration_epoch == configuration_epoch,
+                        CapacitySubject.subject_id == subject_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if subject is None:
+                raise HTTPException(status_code=404, detail="capacity subject not found")
+            intents = (
+                (
+                    await session.execute(
+                        select(CapacityExecutableIntent)
+                        .where(
+                            CapacityExecutableIntent.execution_epoch == authority.execution_epoch,
+                            CapacityExecutableIntent.subject_id == subject.subject_id,
+                            CapacityExecutableIntent.subject_incarnation
+                            == subject.subject_incarnation,
+                        )
+                        .order_by(CapacityExecutableIntent.launch_rank)
+                        .limit(MAX_FIXED_CLAIMS_PER_REPORT + 1)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            executor_rows = (
+                (
+                    await session.execute(
+                        select(CapacityExecutableExecutorState)
+                        .where(
+                            CapacityExecutableExecutorState.execution_epoch
+                            == authority.execution_epoch
+                        )
+                        .order_by(CapacityExecutableExecutorState.pool_id)
+                        .limit(MAX_POOLS + 1)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            now = (await session.execute(select(func.now()))).scalar_one()
+        if len(intents) > MAX_FIXED_CLAIMS_PER_REPORT or len(executor_rows) > MAX_POOLS:
+            raise HTTPException(status_code=503, detail="capacity subject status is unbounded")
+
+        intent_state_counts = Counter(intent.state for intent in intents)
+        quarantined = sum(intent.state == "quarantined" for intent in intents)
+        intents_by_id = {intent.intent_id: intent for intent in intents}
+        active_capacity: dict[UUID, int] = {}
+        active_bindings: dict[UUID, ExecutableIntentBindingV2] = {}
+        executor_blockers: list[str] = []
+        for executor_row in executor_rows:
+            item, inventory = _executor_status_item(
+                executor_row,
+                now=now,
+                freshness_seconds=settings.freshness_seconds,
+            )
+            row_blockers = cast(list[str], item["blockers"])
+            executor_blockers.extend(
+                f"{executor_row.pool_id}:{blocker}" for blocker in row_blockers
+            )
+            critical = set(row_blockers) - {"executor-inventory-quarantine"}
+            if inventory is None or critical:
+                continue
+            for record in inventory.records:
+                proof = record.ownership_proof
+                if (
+                    record.physical_kind != "slurm-job"
+                    or record.state != "active"
+                    or record.authority_scope != "dedicated-loom-association"
+                    or proof is None
+                ):
+                    continue
+                binding = proof.metadata.binding
+                intent = intents_by_id.get(binding.intent_id)
+                if intent is None:
+                    continue
+                try:
+                    stored_binding = ExecutableIntentBindingV2.model_validate_json(
+                        json.dumps(intent.binding_payload)
+                    )
+                except ValidationError:
+                    continue
+                if (
+                    binding != stored_binding
+                    or binding.subject_id != subject.subject_id
+                    or binding.subject_incarnation != subject.subject_incarnation
+                    or binding.deployment_generation != subject.deployment_generation
+                    or intent.inventory_sequence != inventory.inventory_sequence
+                    or intent.observed_state != "active"
+                    or intent.state != "observed"
+                ):
+                    continue
+                active_capacity[binding.intent_id] = binding.concurrency_slots
+                active_bindings[binding.intent_id] = binding
+
+        # Scheduler evidence establishes active physical intent only.  A
+        # protected personal guard registration is deliberately not readable
+        # by this global manager, so it can never turn scheduler evidence into
+        # worker availability on its own.
+        worker_available = False
+        if authority.execution_state == "active":
+            capacity_status = "waiting"
+        elif authority.execution_state == "shadow":
+            capacity_status = "shadow"
+        else:
+            capacity_status = "prepared"
+        blockers = _manager_execution_blockers(authority)
+        if not worker_available and authority.execution_state == "active":
+            if quarantined:
+                blockers.append("quarantined-intent")
+            elif active_capacity:
+                blockers.append("worker-registration-pending")
+            elif not intents:
+                blockers.append("allocation-pending")
+            else:
+                blockers.extend(
+                    f"intent-{state_name}" for state_name in sorted(intent_state_counts)
+                )
+            blockers.extend(executor_blockers)
+        return jsonable_encoder(
+            {
+                "schema_version": 2,
+                "subject_id": subject.subject_id,
+                "subject_incarnation": subject.subject_incarnation,
+                "deployment_generation": subject.deployment_generation,
+                "configuration_epoch": subject.configuration_epoch,
+                "execution_epoch": authority.execution_epoch,
+                "execution_state": authority.execution_state,
+                "executable_new_capacity_ceiling": (authority.executable_new_capacity_ceiling),
+                "capacity_prepared": True,
+                "capacity_status": capacity_status,
+                "worker_available": worker_available,
+                # This is deliberately the exact canonical binding accepted by
+                # the fresh manager inventory, not a reconstructed summary.
+                # The personal status observer compares it byte-for-byte with
+                # its protected local observation before reporting availability.
+                "active_capacity_intents": [
+                    active_bindings[intent_id].model_dump(mode="json")
+                    for intent_id in sorted(active_bindings, key=str)
+                ],
+                "active_capacity_intent_count": len(active_capacity),
+                "active_capacity_slots": sum(active_capacity.values()),
+                "quarantined_intent_count": quarantined,
+                "intent_state_counts": dict(sorted(intent_state_counts.items())),
+                "blockers": sorted(set(blockers)),
+            }
+        )
 
     @app.get("/v1/status/reservations")
     async def reservation_status(

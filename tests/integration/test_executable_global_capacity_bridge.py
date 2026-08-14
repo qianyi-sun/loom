@@ -31,6 +31,24 @@ async def test_two_owners_share_both_pools_without_cross_binding(
     assert executable_capacity_harness.oldlab.owner_slots(alice.subject_id) == 1
     assert executable_capacity_harness.gb10.owner_slots(bob.subject_id) == 1
     assert executable_capacity_harness.cross_owner_bindings() == []
+    executor_status = await executable_capacity_harness.executable_executor_status()
+    alice_status = await executable_capacity_harness.executable_subject_status(
+        alice.subject_id
+    )
+    bob_status = await executable_capacity_harness.executable_subject_status(bob.subject_id)
+    assert executor_status["execution_state"] == "active"
+    assert executor_status["blockers"] == []
+    assert {item["pool_id"] for item in executor_status["items"]} == {
+        "oldlab",
+        "gb10",
+    }
+    assert all(item["blockers"] == [] for item in executor_status["items"])
+    for status in (alice_status, bob_status):
+        assert status["capacity_status"] == "waiting"
+        assert status["worker_available"] is False
+        assert status["active_capacity_intent_count"] == 1
+        assert status["active_capacity_slots"] == 1
+        assert status["blockers"] == ["worker-registration-pending"]
 
 
 async def test_neutral_fairness_is_stable_and_complete_work_scales_to_zero(

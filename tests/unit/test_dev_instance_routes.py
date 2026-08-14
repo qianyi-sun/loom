@@ -26,6 +26,7 @@ from loom.personal_dev_environment import (
     PersonalDevEnvironmentRecord,
     PersonalDevLifecycleOperationRecord,
 )
+from loom.personal_dev_capacity import PersonalDevCapacityAvailability
 from loom_service.routes.dev_instances import (
     DevInstanceCreateRequest,
     PersonalDevActivationAcknowledgementPayload,
@@ -488,6 +489,10 @@ async def test_personal_apply_binds_authenticated_owner_and_returns_operation() 
 
     assert response.status_code == 202
     assert result.environment.subject_id == subject_id
+    assert result.environment.application_status == "provisioning"
+    assert result.environment.capacity_status == "shadow"
+    assert result.environment.capacity_prepared is False
+    assert result.environment.worker_available is False
     assert result.operation.id == operation_id
     assert result.operation.promotable is False
     assert captured[0][0].owner_user_id == _OWNER
@@ -749,3 +754,40 @@ async def test_activation_intent_route_requires_agent_signature_and_returns_exac
     )
     assert response.operation_id == intent.operation_id
     assert response.intent_sha256 == intent.intent_sha256
+
+
+async def test_personal_status_uses_persisted_authority_coordinates_not_display_name() -> None:
+    store = _Store()
+    record = DevInstanceRecord(
+        name="renamed-display",
+        owner_user_id=_OWNER,
+        owner_team_id=_TEAM,
+        min_slots=0,
+        max_slots=2,
+        status="ready",
+        deployment_generation=7,
+        candidate_sha="a" * 64,
+        candidate_id=UUID("00000000-0000-0000-0000-000000000010"),
+        subject_id=UUID("00000000-0000-0000-0000-000000000012"),
+        subject_incarnation=UUID("00000000-0000-0000-0000-000000000013"),
+        capacity_namespace="loom-dev-bound-owner",
+        capacity_database="loom_dev_bound_owner",
+        operation_epoch=1,
+        operation_id=_OPERATION,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    store.rows[record.name] = record
+    request = _request(store)
+
+    class _Reader:
+        async def read(self, **kwargs):
+            assert kwargs["namespace"] == "loom-dev-bound-owner"
+            assert kwargs["database"] == "loom_dev_bound_owner"
+            assert "environment_name" not in kwargs
+            return PersonalDevCapacityAvailability("available", True, True)
+
+    request.app.state.personal_dev_capacity_status_reader = _Reader()
+    response = await get_dev_instance(record.name, request, (object(), _ctx(_OWNER)))  # type: ignore[arg-type]
+    assert response.capacity_status == "available"
+    assert response.worker_available is True

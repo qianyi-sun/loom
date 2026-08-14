@@ -287,6 +287,10 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         app.state.personal_dev_candidate_limits = personal_dev_candidate_limits
         app.state.personal_dev_builder_available = personal_dev_builder_runtime is not None
         install_behavior_pipeline_public_adapter(app=app, settings=settings)
+        if personal_dev_capacity_runtime is not None:
+            app.state.personal_dev_capacity_status_reader = (
+                personal_dev_capacity_runtime.status_reader
+            )
         if (
             personal_dev_builder_runtime is not None
             and personal_dev_candidate_limits is not None

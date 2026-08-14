@@ -509,6 +509,8 @@ def _assert_exact_approved_routes(app: FastAPI) -> None:
         ("/v1/status/pools", ("GET",)),
         ("/v1/status/executors", ("GET",)),
         ("/v1/status/reservations", ("GET",)),
+        ("/v2/status/executors", ("GET",)),
+        ("/v2/status/subjects/{subject_id}", ("GET",)),
         ("/v1/shadow-epochs/{allocation_epoch}", ("GET",)),
         ("/v1/shadow-epochs/{allocation_epoch}/allocations", ("GET",)),
         ("/v1/audit-events", ("GET",)),
@@ -521,6 +523,46 @@ def test_shadow_api_exposes_exactly_the_approved_routes(
 ) -> None:
     _client, app, _settings, _allocator = api_context
     _assert_exact_approved_routes(app)
+
+
+def test_executable_status_is_read_only_and_shadow_is_never_worker_available(
+    api_context: tuple[TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator],
+    operator_headers: dict[str, str],
+) -> None:
+    client, _app, _settings, _allocator = api_context
+
+    executors = client.get("/v2/status/executors", headers=operator_headers)
+    subject = client.get(f"/v2/status/subjects/{SUBJECT_ID}", headers=operator_headers)
+
+    assert executors.status_code == 200
+    assert executors.json() == {
+        "schema_version": 2,
+        "execution_epoch": 0,
+        "execution_state": "shadow",
+        "executable_new_capacity_ceiling": 0,
+        "items": [],
+        "blockers": ["manager-shadow"],
+    }
+    assert subject.status_code == 200
+    assert subject.json() == {
+        "schema_version": 2,
+        "subject_id": str(SUBJECT_ID),
+        "subject_incarnation": str(SUBJECT_INCARNATION),
+        "deployment_generation": 1,
+        "configuration_epoch": 1,
+        "execution_epoch": 0,
+        "execution_state": "shadow",
+        "executable_new_capacity_ceiling": 0,
+        "capacity_prepared": True,
+        "capacity_status": "shadow",
+        "worker_available": False,
+        "active_capacity_intents": [],
+        "active_capacity_intent_count": 0,
+        "active_capacity_slots": 0,
+        "quarantined_intent_count": 0,
+        "intent_state_counts": {},
+        "blockers": ["manager-shadow"],
+    }
 
 
 @pytest.fixture

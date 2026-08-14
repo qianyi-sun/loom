@@ -10,9 +10,8 @@ from loom_cli.admin_cmd import dispatch
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PROFILE = _REPO_ROOT / "deploy/dev-fleet/capacity-control-plane.toml"
-_MANAGER_IMAGE = (
-    "ghcr.io/qianyi-sun/loom-capacity-manager@sha256:" + "a" * 64
-)
+_EXECUTOR_PROFILE = _REPO_ROOT / "deploy/dev-fleet/capacity-pool-executor.toml.example"
+_MANAGER_IMAGE = "ghcr.io/qianyi-sun/loom-capacity-manager@sha256:" + "a" * 64
 _AUTHORITY = "00000000-0000-4000-8000-000000000901"
 
 
@@ -39,9 +38,7 @@ def test_admin_render_writes_only_the_exact_manifest(
     assert documents[0]["kind"] == "Namespace"
     assert documents[0]["metadata"]["name"] == "loom-dev"
     assert documents[5]["kind"] == "Deployment"
-    assert documents[5]["spec"]["template"]["spec"]["containers"][0]["image"] == (
-        _MANAGER_IMAGE
-    )
+    assert documents[5]["spec"]["template"]["spec"]["containers"][0]["image"] == (_MANAGER_IMAGE)
 
 
 def test_admin_render_rejects_invalid_release_without_partial_yaml(
@@ -73,8 +70,7 @@ def test_admin_render_does_not_echo_rejected_profile_values(
     secret_value = "do-not-log-this-accidental-password"
     profile = tmp_path / "capacity-control-plane.toml"
     profile.write_text(
-        _PROFILE.read_text(encoding="utf-8")
-        + f'\naccidental_password = "{secret_value}"\n',
+        _PROFILE.read_text(encoding="utf-8") + f'\naccidental_password = "{secret_value}"\n',
         encoding="utf-8",
     )
 
@@ -122,6 +118,56 @@ def test_admin_render_does_not_echo_invalid_authority_input(
     assert captured.out == ""
     assert "must be a non-nil UUID" in captured.err
     assert secret_value not in captured.err
+
+
+def test_admin_render_executor_writes_only_one_complete_inert_pool_config(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = dispatch(
+        [
+            "capacity-control-plane",
+            "render-executor",
+            "--file",
+            str(_EXECUTOR_PROFILE),
+            "--pool",
+            "gb10",
+            "--output",
+            "config",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = yaml.safe_load(captured.out)
+    assert result == 0
+    assert captured.err == ""
+    assert payload["pool_id"] == "gb10"
+    assert payload["executor_id"].startswith("gb10-")
+    assert payload["manager_origin"].endswith(".loom-dev.svc.cluster.local:8443")
+
+
+def test_admin_render_executor_service_environment_is_nonsecret_and_zero_ceiling(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = dispatch(
+        [
+            "capacity-control-plane",
+            "render-executor",
+            "--file",
+            str(_EXECUTOR_PROFILE),
+            "--pool",
+            "oldlab",
+            "--output",
+            "service-environment",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert captured.err == ""
+    assert "LOOM_CAPACITY_EXECUTOR_POOL=oldlab\n" in captured.out
+    assert "LOOM_CAPACITY_EXECUTOR_EXECUTABLE_CEILING=0\n" in captured.out
+    assert "token" not in captured.out.lower()
+    assert "private" not in captured.out.lower()
 
 
 def test_admin_status_executes_the_fixed_in_pod_zero_ceiling_probe(
@@ -218,8 +264,8 @@ def test_admin_capacity_control_plane_has_no_mutating_subcommand(
 
     output = capsys.readouterr().out
     assert stopped.value.code == 0
-    assert "{render,status}" in output
-    for forbidden in ("apply", "activate"):
+    assert "{render,render-executor,status}" in output
+    for forbidden in ("apply", "activate", "enable", "start", "set-ceiling"):
         with pytest.raises(SystemExit) as rejected:
             dispatch(["capacity-control-plane", forbidden])
         assert rejected.value.code == 2

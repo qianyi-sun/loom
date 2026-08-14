@@ -66,6 +66,7 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
     migrator_role = f"loom_guard_migrator_test_{suffix}"
     agent_role = f"loom_guard_agent_test_{suffix}"
     executor_role = f"loom_guard_executor_test_{suffix}"
+    observer_role = f"loom_guard_observer_test_{suffix}"
     # The literal percent becomes ``%25`` in the URL and exercises Alembic's
     # ConfigParser interpolation boundary on every protected migration test.
     migrator_password = f"guard-test-%-{uuid4().hex}"
@@ -78,6 +79,7 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
     )
     agent_password = f"guard-agent-test-{uuid4().hex}"
     executor_password = f"guard-executor-test-{uuid4().hex}"
+    observer_password = f"guard-observer-test-{uuid4().hex}"
     agent_url = source_url.set(
         database=database_name,
         username=agent_role,
@@ -88,6 +90,11 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
         username=executor_role,
         password=executor_password,
     )
+    observer_url = source_url.set(
+        database=database_name,
+        username=observer_role,
+        password=observer_password,
+    )
     admin_engine = create_engine(admin_url, isolation_level="AUTOCOMMIT")
     preparer = admin_engine.dialect.identifier_preparer
     quoted_database = preparer.quote(database_name)
@@ -95,12 +102,14 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
     quoted_migrator = preparer.quote(migrator_role)
     quoted_agent = preparer.quote(agent_role)
     quoted_executor = preparer.quote(executor_role)
+    quoted_observer = preparer.quote(observer_role)
     repo_root = Path(__file__).resolve().parents[2]
     created_database = False
     created_owner = False
     created_migrator = False
     created_agent = False
     created_executor = False
+    created_observer = False
 
     try:
         with admin_engine.connect() as connection:
@@ -127,6 +136,12 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
                 f"PASSWORD '{executor_password}'"
             )
             created_executor = True
+            connection.exec_driver_sql(
+                f"CREATE ROLE {quoted_observer} LOGIN NOSUPERUSER "
+                "NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS "
+                f"PASSWORD '{observer_password}'"
+            )
+            created_observer = True
             connection.exec_driver_sql(f"GRANT {quoted_owner} TO {quoted_migrator}")
             connection.exec_driver_sql(f"CREATE DATABASE {quoted_database} TEMPLATE template0")
             created_database = True
@@ -192,12 +207,14 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
         previous_owner = os.environ.get("LOOM_CAPACITY_GUARD_OWNER_ROLE")
         previous_agent = os.environ.get("LOOM_CAPACITY_GUARD_AGENT_ROLE")
         previous_executor = os.environ.get("LOOM_CAPACITY_GUARD_EXECUTOR_ROLE")
+        previous_observer = os.environ.get("LOOM_CAPACITY_GUARD_OBSERVER_ROLE")
         os.environ["LOOM_CAPACITY_GUARD_DB_URL"] = migrator_url.render_as_string(
             hide_password=False
         )
         os.environ["LOOM_CAPACITY_GUARD_OWNER_ROLE"] = owner_role
         os.environ["LOOM_CAPACITY_GUARD_AGENT_ROLE"] = agent_role
         os.environ["LOOM_CAPACITY_GUARD_EXECUTOR_ROLE"] = executor_role
+        os.environ["LOOM_CAPACITY_GUARD_OBSERVER_ROLE"] = observer_role
         try:
             command.upgrade(guard_cfg, "head")
         finally:
@@ -217,6 +234,10 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
                 os.environ.pop("LOOM_CAPACITY_GUARD_EXECUTOR_ROLE", None)
             else:
                 os.environ["LOOM_CAPACITY_GUARD_EXECUTOR_ROLE"] = previous_executor
+            if previous_observer is None:
+                os.environ.pop("LOOM_CAPACITY_GUARD_OBSERVER_ROLE", None)
+            else:
+                os.environ["LOOM_CAPACITY_GUARD_OBSERVER_ROLE"] = previous_observer
 
         yield {
             "admin_url": environment_admin_url.render_as_string(hide_password=False),
@@ -226,6 +247,9 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
             "executor_password": executor_password,
             "executor_role": executor_role,
             "executor_url": executor_url.render_as_string(hide_password=False),
+            "observer_password": observer_password,
+            "observer_role": observer_role,
+            "observer_url": observer_url.render_as_string(hide_password=False),
             "cluster_admin_url": admin_url.render_as_string(hide_password=False),
             "database_name": database_name,
             "migrator_url": migrator_url.render_as_string(hide_password=False),
@@ -250,6 +274,8 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
                 connection.exec_driver_sql(f"DROP ROLE IF EXISTS {quoted_agent}")
             if created_executor:
                 connection.exec_driver_sql(f"DROP ROLE IF EXISTS {quoted_executor}")
+            if created_observer:
+                connection.exec_driver_sql(f"DROP ROLE IF EXISTS {quoted_observer}")
             if created_migrator:
                 connection.exec_driver_sql(f"DROP ROLE IF EXISTS {quoted_migrator}")
             if created_owner:
@@ -275,6 +301,7 @@ def capacity_guard_database(
     migrator_url = make_url(required_string("migrator_url")).set(database=database_name)
     agent_url = make_url(required_string("agent_url")).set(database=database_name)
     executor_url = make_url(required_string("executor_url")).set(database=database_name)
+    observer_url = make_url(required_string("observer_url")).set(database=database_name)
     engine = create_engine(cluster_admin_url, isolation_level="AUTOCOMMIT")
     preparer = engine.dialect.identifier_preparer
     quoted_database = preparer.quote(database_name)
@@ -292,6 +319,7 @@ def capacity_guard_database(
             **capacity_guard_template_database,
             "admin_url": admin_url.render_as_string(hide_password=False),
             "executor_url": executor_url.render_as_string(hide_password=False),
+            "observer_url": observer_url.render_as_string(hide_password=False),
             "agent_url": agent_url.render_as_string(hide_password=False),
             "database_name": database_name,
             "migrator_url": migrator_url.render_as_string(hide_password=False),

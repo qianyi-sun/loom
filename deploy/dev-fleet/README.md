@@ -31,6 +31,14 @@ placeholders with reviewed immutable values before an authorized apply. The
 template does not enable the service-side controller, restricted builder, or
 physical worker capacity.
 
+`capacity-pool-executor.toml.example` and
+`loom-capacity-pool-executor.service` package the later two-pool executable
+bridge inertly. They bind distinct GB10 and OLDLAB controller-local identities,
+credentials, journals, and state directories, but the checked-in ceiling is
+exactly zero and the systemd unit only validates configuration. It has no
+install target and must never be started or enabled from this package. See the
+[executable bridge rehearsal](../../docs/runbooks/executable-global-capacity-bridge-rehearsal.md).
+
 ## Capacity authority package
 
 `capacity-control-plane.toml` is the reviewed, non-secret render source for
