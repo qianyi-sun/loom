@@ -19,6 +19,13 @@ _CHECKSUM_RE = re.compile(r"[0-9a-f]{64}")
 _KEY_DOMAIN = "task-image-materialization-v1"
 
 
+def canonical_task_checksum(task_checksum: str) -> str:
+    checksum = task_checksum.removeprefix("sha256:")
+    if _CHECKSUM_RE.fullmatch(checksum) is None:
+        raise ValueError("task_checksum must be a SHA-256 digest")
+    return checksum
+
+
 def required_task_image_architectures(task: TaskConfig) -> tuple[NativeCPUArch, ...]:
     has_dockerfile = task.environment.dockerfile is not None or any(
         sidecar.dockerfile is not None for sidecar in task.environment.sidecars
@@ -38,9 +45,8 @@ def task_image_materialization_key(
 ) -> str:
     if cpu_arch not in {"x86_64", "arm64"}:
         raise ValueError("cpu_arch must be x86_64 or arm64")
-    if _CHECKSUM_RE.fullmatch(task_checksum) is None:
-        raise ValueError("task_checksum must be 64 lowercase hexadecimal characters")
-    material = "\0".join((_KEY_DOMAIN, task_id, task_checksum, cpu_arch))
+    checksum = canonical_task_checksum(task_checksum)
+    material = "\0".join((_KEY_DOMAIN, task_id, checksum, cpu_arch))
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
@@ -54,10 +60,11 @@ async def ensure_task_image_materializations(
     if not architectures:
         return ()
 
+    task_checksum = canonical_task_checksum(task_row.checksum)
     keys = {
         cpu_arch: task_image_materialization_key(
             task_id=task_row.id,
-            task_checksum=task_row.checksum,
+            task_checksum=task_checksum,
             cpu_arch=cpu_arch,
         )
         for cpu_arch in architectures
@@ -69,7 +76,7 @@ async def ensure_task_image_materializations(
                 id=uuid4(),
                 materialization_key=keys[cpu_arch],
                 task_id=task_row.id,
-                task_checksum=task_row.checksum,
+                task_checksum=task_checksum,
                 cpu_arch=cpu_arch,
                 task_config=task_row.config,
                 task_source=task_row.source,

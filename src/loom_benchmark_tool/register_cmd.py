@@ -42,6 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from loom.db.schema import Benchmark
 from loom.db.schema import Task as TaskRow
 from loom.models.task import TaskConfig
+from loom.task_image_materialization import ensure_task_image_materializations
 from loom.trajectory.storage import (
     BUNDLE_FILE_METADATA_NAME,
     ObjectStore,
@@ -885,31 +886,39 @@ async def run_register(
                         ),
                     )
                     for task in prepared_tasks:
-                        await session.execute(
-                            pg_insert(TaskRow)
-                            .values(
-                                id=task.task_id,
-                                checksum=task.checksum,
-                                config=task.config,
-                                source=task.source,
-                                license=task.license_spdx,
-                                benchmark_id=task.benchmark_id,
-                                tags=task.tags,
-                                source_provenance=task.source_provenance,
+                        task_row = (
+                            await session.execute(
+                                pg_insert(TaskRow)
+                                .values(
+                                    id=task.task_id,
+                                    checksum=task.checksum,
+                                    config=task.config,
+                                    source=task.source,
+                                    license=task.license_spdx,
+                                    benchmark_id=task.benchmark_id,
+                                    tags=task.tags,
+                                    source_provenance=task.source_provenance,
+                                )
+                                .on_conflict_do_update(
+                                    index_elements=["id"],
+                                    set_={
+                                        "checksum": task.checksum,
+                                        "source": task.source,
+                                        "license": task.license_spdx,
+                                        "benchmark_id": task.benchmark_id,
+                                        "tags": task.tags,
+                                        "config": task.config,
+                                        "source_provenance": task.source_provenance,
+                                    },
+                                )
+                                .returning(TaskRow)
                             )
-                            .on_conflict_do_update(
-                                index_elements=["id"],
-                                set_={
-                                    "checksum": task.checksum,
-                                    "source": task.source,
-                                    "license": task.license_spdx,
-                                    "benchmark_id": task.benchmark_id,
-                                    "tags": task.tags,
-                                    "config": task.config,
-                                    "source_provenance": task.source_provenance,
-                                },
-                            ),
-                        )
+                        ).scalar_one()
+                        if task.config:
+                            await ensure_task_image_materializations(
+                                session,
+                                task_row=task_row,
+                            )
                         registered += 1
     finally:
         await engine.dispose()

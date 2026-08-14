@@ -4,6 +4,7 @@ import pytest
 
 from loom.models.task import TaskConfig
 from loom.task_image_materialization import (
+    canonical_task_checksum,
     required_task_image_architectures,
     task_image_materialization_key,
 )
@@ -81,11 +82,14 @@ def test_prebuilt_sidecars_do_not_create_build_work() -> None:
 def test_materialization_key_is_stable_and_architecture_qualified() -> None:
     checksum = "a" * 64
 
-    assert task_image_materialization_key(
-        task_id="benchmark/task-1",
-        task_checksum=checksum,
-        cpu_arch="arm64",
-    ) == "df469479b973f7365515571e28627719d98a7740c56070708022c51832810095"
+    assert (
+        task_image_materialization_key(
+            task_id="benchmark/task-1",
+            task_checksum=checksum,
+            cpu_arch="arm64",
+        )
+        == "df469479b973f7365515571e28627719d98a7740c56070708022c51832810095"
+    )
     assert task_image_materialization_key(
         task_id="benchmark/task-1",
         task_checksum=checksum,
@@ -95,6 +99,13 @@ def test_materialization_key_is_stable_and_architecture_qualified() -> None:
         task_checksum=checksum,
         cpu_arch="arm64",
     )
+
+
+def test_canonical_task_checksum_accepts_prefixed_benchmark_digest() -> None:
+    checksum = "a" * 64
+
+    assert canonical_task_checksum(checksum) == checksum
+    assert canonical_task_checksum(f"sha256:{checksum}") == checksum
 
 
 @pytest.mark.parametrize("cpu_arch", ["any", "amd64", "", "ARM64"])
