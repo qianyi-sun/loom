@@ -56,7 +56,7 @@ class S3ExactObjectDeleter:
         observed_version = response.get("VersionId")
         if item.version_id is not None and not (
             observed_version == item.version_id
-            or (item.version_id == "null" and observed_version is None)
+            or (item.version_id == "null" and "VersionId" not in response)
         ):
             raise LifecycleGcExecutionError(
                 f"registered object version drifted: {item.bucket}/{item.object_key}"
@@ -156,7 +156,7 @@ class S3ExactObjectDeleter:
                     key = str(item.get("Key", ""))
                     version = str(item.get("VersionId", ""))
                     if (
-                        item.get("VersionId") is None
+                        "VersionId" not in item
                         and (key, "null") in expected
                         and (key, "") not in expected
                     ):
