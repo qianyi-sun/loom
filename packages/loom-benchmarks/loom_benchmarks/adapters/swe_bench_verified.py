@@ -174,6 +174,7 @@ class SWEBenchVerifiedAdapter(CatalogBackedAdapter):
         )
         (out_dir / "task.toml").write_text(
             f"""schema_version = "1"
+required_agent_capabilities = ["workspace_exec"]
 
 [task]
 id = {toml_id}

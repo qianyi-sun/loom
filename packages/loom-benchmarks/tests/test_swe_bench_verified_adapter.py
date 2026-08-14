@@ -32,6 +32,7 @@ def test_convert_emits_valid_task(tmp_path: Path) -> None:
     )
     assert cfg.task.id == "swe-bench-verified/django__django-12345"
     assert cfg.verifier.name == "pytest"
+    assert cfg.required_agent_capabilities == frozenset({"workspace_exec"})
     assert "swebench/sweb.eval.x86_64" in (cfg.environment.docker_image or "")
     assert (tmp_path / "instruction.md").read_text().startswith(
         "Querysets with `.filter",

@@ -214,6 +214,49 @@ def test_ready_catalog_requires_workspace_benchmarks_to_be_republished() -> None
         )
 
 
+@pytest.mark.parametrize(
+    "benchmark_id",
+    ["swe-bench", "swe-bench-verified", "swe-bench-multimodal"],
+)
+def test_ready_catalog_requires_swe_bench_tasks_to_be_republished(
+    benchmark_id: str,
+) -> None:
+    task_id = f"{benchmark_id}/task"
+    source = CatalogRows(
+        benchmarks=[
+            BenchmarkRow(
+                id=benchmark_id,
+                display_name="SWE-Bench",
+                upstream_kind="huggingface",
+                upstream_locator="princeton-nlp/SWE-bench",
+                upstream_revision="rev",
+                license_spdx="MIT",
+                license_url="https://example.test/license",
+                splits=["test"],
+                series="code",
+                imported_by="source",
+            ),
+        ],
+        tasks=[
+            TaskRow(
+                id=task_id,
+                checksum="a" * 64,
+                config=_valid_task_config(task_id),
+                source=f"s3://source-bucket/{benchmark_id}/task/",
+                license="MIT",
+                benchmark_id=benchmark_id,
+                tags={},
+            ),
+        ],
+    )
+
+    with pytest.raises(ValueError, match=r"republish.*workspace_exec"):
+        catalog_provision._ready_catalog_rows(
+            source,
+            target_bucket="target-bucket",
+        )
+
+
 def test_tb21_catalog_provision_requires_target_local_activation() -> None:
     profile_id = "terminal-bench-2@tb2.1-r6"
     task_id = f"{profile_id}/task"
