@@ -80,6 +80,7 @@ class LiteLLMAgent:
         skills_dir: PurePosixPath | None,
         step_id: str,
     ) -> None:
+        artifact_paths = _validate_artifact_paths(self.artifact_paths)
         messages: list[ChatMessage] = [
             ChatMessage(role="user", content=instruction),
         ]
@@ -143,14 +144,19 @@ class LiteLLMAgent:
                         for p in raw_content
                     )
                 )
-                await self._write_artifacts(env, content_str)
+                await self._write_artifacts(env, content_str, artifact_paths)
                 return
 
         raise AgentError(
             f"LiteLLMAgent exhausted max_turns={self.max_turns} without 'stop'",
         )
 
-    async def _write_artifacts(self, env: Driver, content: str) -> None:
+    async def _write_artifacts(
+        self,
+        env: Driver,
+        content: str,
+        artifact_paths: Sequence[tuple[str, PurePosixPath]],
+    ) -> None:
         """#184: write the LLM's final response into the declared
         artifact paths so file-artifact benchmarks (pytest etc.) can
         grade it. Rendering is artifact-aware: final-answer artifacts keep
@@ -159,12 +165,11 @@ class LiteLLMAgent:
         historical fenced-block extraction. Each path is written
         individually to `/workspace/{path}` via the driver's upload.
         """
-        if not self.artifact_paths:
+        if not artifact_paths:
             return
         import tempfile
         from pathlib import Path
 
-        artifact_paths = _validate_artifact_paths(self.artifact_paths)
         for rel_path, artifact_path in artifact_paths:
             body = _render_artifact_body(content, rel_path)
             with tempfile.NamedTemporaryFile(

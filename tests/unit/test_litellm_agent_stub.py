@@ -300,6 +300,7 @@ async def test_direct_completion_rejects_artifact_glob_destination(
             step_id="main",
         )
 
+    assert fake_gateway.calls_recorded == []
     assert PurePosixPath("/workspace/*.png") not in driver.filesystem
 
 
@@ -313,9 +314,10 @@ async def test_direct_completion_rejects_non_relative_artifact_destination(
 ) -> None:
     driver = FakeDriver()
     await driver.start(options=StartOptions())
+    fake_gateway = FakeLLMGatewayClient(scripted=[_resp("answer")])
     agent = LiteLLMAgent(
         model=ModelSpec(provider="openai", name="gpt-4o"),
-        gateway=FakeLLMGatewayClient(scripted=[_resp("answer")]),
+        gateway=fake_gateway,
         team_id="t",
         trial_id=uuid4(),
         max_turns=1,
@@ -334,15 +336,18 @@ async def test_direct_completion_rejects_non_relative_artifact_destination(
             step_id="main",
         )
 
+    assert fake_gateway.calls_recorded == []
+
 
 async def test_direct_completion_validates_all_artifact_destinations_before_upload(
     writer: TrajectoryWriter,
 ) -> None:
     driver = FakeDriver()
     await driver.start(options=StartOptions())
+    fake_gateway = FakeLLMGatewayClient(scripted=[_resp("answer")])
     agent = LiteLLMAgent(
         model=ModelSpec(provider="openai", name="gpt-4o"),
-        gateway=FakeLLMGatewayClient(scripted=[_resp("answer")]),
+        gateway=fake_gateway,
         team_id="t",
         trial_id=uuid4(),
         max_turns=1,
@@ -361,4 +366,5 @@ async def test_direct_completion_validates_all_artifact_destinations_before_uplo
             step_id="main",
         )
 
+    assert fake_gateway.calls_recorded == []
     assert PurePosixPath("/workspace/safe.txt") not in driver.filesystem
