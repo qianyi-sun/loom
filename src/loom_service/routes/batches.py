@@ -84,7 +84,7 @@ from loom_service.monitor_filters import (
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.provider_connection_lookup import validate_provider_connection
 from loom_service.stale_running_debug import batch_stale_running_decisions
-from loom_service.task_compat import task_supports_agent
+from loom_service.task_compat import agent_task_compatibility
 from loom_service.task_config_validation import (
     expected_trial_count,
     invalid_task_config_detail,
@@ -659,22 +659,22 @@ async def _reject_agent_task_incompat(
     combinations: Sequence[Combination],
     single_agent_name: Any,
 ) -> None:
-    """#320 preflight. For every agent in the batch, drop any task
-    that doesn't expose every capability the agent requires
-    (currently only `solution_solve_sh` for oracle). Reject the whole
-    batch with a structured 400 listing the offending (agent, task)
-    pairs so the caller can resubmit with a per-agent task slate."""
+    """Reject pairs missing capabilities in either direction.
+
+    Agent prerequisites such as Oracle's ``solution_solve_sh`` must be
+    supplied by the task. Task execution requirements such as
+    ``workspace_exec`` must be supplied by the agent.
+    """
     agents = _agents_in_batch(combinations, single_agent_name)
     if not agents or not valid_task_ids:
         return
-    # Skip the DB read entirely if every agent is capability-permissive.
-    requirements: dict[str, frozenset[str]] = {}
+    entries: dict[str, Any] = {}
     for name in agents:
         entry = get_agent(name)
-        if entry is None or not entry.requires_capabilities:
+        if entry is None:
             continue
-        requirements[name] = entry.requires_capabilities
-    if not requirements:
+        entries[name] = entry
+    if not entries:
         return
 
     rows = (
@@ -687,29 +687,44 @@ async def _reject_agent_task_incompat(
     configs: dict[str, Any] = {str(tid): cfg for tid, cfg, _ in rows}
     tags_by_id: dict[str, dict[str, str]] = {str(tid): dict(tags or {}) for tid, _, tags in rows}
 
-    offenders: dict[str, list[str]] = {}
-    for agent_name, required in requirements.items():
-        bad = [
-            tid
-            for tid in valid_task_ids
-            if not task_supports_agent(
-                configs.get(tid) or {},
-                required,
-                tags=tags_by_id.get(tid),
+    offenders: dict[str, list[tuple[str, frozenset[str], frozenset[str]]]] = {}
+    for agent_name, entry in entries.items():
+        bad: list[tuple[str, frozenset[str], frozenset[str]]] = []
+        for task_id in valid_task_ids:
+            compatibility = agent_task_compatibility(
+                configs.get(task_id) or {},
+                agent_requires=entry.requires_capabilities,
+                agent_provides=entry.provides_capabilities,
+                tags=tags_by_id.get(task_id),
             )
-        ]
+            if not compatibility.compatible:
+                bad.append(
+                    (
+                        task_id,
+                        compatibility.missing_from_task,
+                        compatibility.missing_from_agent,
+                    ),
+                )
         if bad:
             offenders[agent_name] = bad
 
     if not offenders:
         return
 
-    pairs = "; ".join(
-        f"{name}: {len(ids)} task(s) (e.g. {sorted(ids)[0]})"
-        for name, ids in sorted(offenders.items())
-    )
+    pairs: list[str] = []
+    for name, failures in sorted(offenders.items()):
+        task_id, missing_from_task, missing_from_agent = sorted(failures)[0]
+        reasons: list[str] = []
+        if missing_from_task:
+            reasons.append(f"task missing {sorted(missing_from_task)}")
+        if missing_from_agent:
+            reasons.append(f"agent missing {sorted(missing_from_agent)}")
+        pairs.append(
+            f"{name}: {len(failures)} task(s) "
+            f"(e.g. {task_id}; {', '.join(reasons)})",
+        )
     detail = (
-        f"agent×task capability mismatch — {pairs}. The listed agents "
+        f"agent×task capability mismatch — {'; '.join(pairs)}. The listed agents "
         f"cannot run these tasks at the platform level (e.g. oracle "
         f"requires a benchmark adapter that ships `solution/solve.sh`). "
         f"Submit per-agent batches with the "
@@ -1021,12 +1036,8 @@ async def _create_batch_record(
             detail=invalid_task_config_detail(invalid_tasks),
         )
 
-    # #320 preflight: skip launching trials for (agent, task) combos
-    # where the agent's `requires_capabilities` doesn't match what the
-    # task bundle exposes. The current case is oracle, which needs
-    # `solution/solve.sh` (granted by the pytest-verifier heuristic).
-    # Reject upfront with a structured detail instead of fanning out
-    # into trials that deterministically AgentError mid-run.
+    # Reject structurally incompatible agent/task pairs instead of fanning
+    # out trials that cannot satisfy the task's execution contract.
     await _reject_agent_task_incompat(
         s,
         valid_task_ids=valid_task_ids,

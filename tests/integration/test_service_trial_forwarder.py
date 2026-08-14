@@ -248,6 +248,53 @@ async def test_post_trial_rejects_agent_without_service_runtime(
     assert captured["reqs"] == []
 
 
+async def test_post_trial_rejects_completion_agent_for_workspace_task(
+    fwd_setup: tuple[FastAPI, str, UUID, dict[str, list[dict[str, str]]]],
+    postgres_url: str,
+) -> None:
+    app, raw, _team_id, captured = fwd_setup
+    task_id = "local/workspace-trial"
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            insert(Task).values(
+                id=task_id,
+                checksum="w" * 64,
+                config={
+                    "schema_version": "1",
+                    "required_agent_capabilities": ["workspace_exec"],
+                    "task": {"id": task_id, "name": task_id},
+                    "environment": {"os": "linux", "docker_image": "alpine"},
+                    "agent": {"name": "oracle"},
+                    "verifier": {"name": "script"},
+                    "steps": [{"name": "main"}],
+                },
+                source="local",
+            ),
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        response = await ac.post(
+            "/api/v1/trials",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "task_id": task_id,
+                "config": {
+                    "agent_name": "direct-completion",
+                    "agent_model": {"provider": "openai", "name": "gpt-4o-mini"},
+                },
+            },
+        )
+
+    assert response.status_code == 400, response.text
+    assert "workspace_exec" in response.json()["detail"]
+    assert captured["reqs"] == []
+
+
 async def test_cancel_trial_forwards(
     fwd_setup: tuple[FastAPI, str, UUID, dict[str, list[dict[str, str]]]],
     postgres_url: str,

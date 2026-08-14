@@ -79,6 +79,12 @@ def _script_verifier_task_config(task_id: str) -> dict[str, object]:
     }
 
 
+def _workspace_task_config(task_id: str) -> dict[str, object]:
+    config = _script_verifier_task_config(task_id)
+    config["required_agent_capabilities"] = ["workspace_exec"]
+    return config
+
+
 def _counter_value(
     metric_name: str,
     sample_name: str,
@@ -4835,3 +4841,99 @@ async def test_post_batch_does_not_filter_when_agent_has_no_requirements(
             },
         )
     assert r.status_code == 201, r.text
+
+
+@pytest.mark.parametrize("agent_name", ["direct-completion", "litellm"])
+async def test_post_batch_rejects_completion_agent_for_workspace_task(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+    agent_name: str,
+) -> None:
+    app, raw, _team_id = camp_setup
+    task_id = f"local/workspace-{agent_name}"
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            insert(Task).values(
+                id=task_id,
+                checksum="w" * 64,
+                config=_workspace_task_config(task_id),
+                source="local",
+                license="MIT",
+            ),
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        response = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "completion-on-workspace",
+                "task_filter": {
+                    "task_ids": [task_id],
+                    "subset_kind": "explicit",
+                },
+                "trial_config": {
+                    "agent_name": agent_name,
+                    "agent_model": {
+                        "provider": "openai",
+                        "name": "gpt-4o-mini",
+                    },
+                },
+            },
+        )
+
+    assert response.status_code == 400, response.text
+    detail = response.json()["detail"]
+    assert "agent×task capability mismatch" in detail
+    assert task_id in detail
+    assert "workspace_exec" in detail
+
+
+async def test_post_batch_allows_workspace_agent_for_workspace_task(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, _team_id = camp_setup
+    task_id = "local/workspace-terminus"
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            insert(Task).values(
+                id=task_id,
+                checksum="z" * 64,
+                config=_workspace_task_config(task_id),
+                source="local",
+                license="MIT",
+            ),
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        response = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "terminus-on-workspace",
+                "task_filter": {
+                    "task_ids": [task_id],
+                    "subset_kind": "explicit",
+                },
+                "trial_config": {
+                    "agent_name": "terminus-2",
+                    "agent_model": {
+                        "provider": "openai",
+                        "name": "gpt-4o-mini",
+                    },
+                },
+            },
+        )
+
+    assert response.status_code == 201, response.text
