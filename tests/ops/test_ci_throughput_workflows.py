@@ -266,34 +266,43 @@ def test_coverage_artifacts_map_hosted_and_oldlab_checkout_roots() -> None:
 
 def test_source_workflows_share_authoritative_generation_marker() -> None:
     workflows = {path: _workflow(path) for path in GATE_CONTRACTS}
-    run_names = {workflow["run-name"] for workflow in workflows.values()}
+    common_run_names = {
+        workflow["run-name"]
+        for path, workflow in workflows.items()
+        if path != ".github/workflows/images.yml"
+    }
 
-    assert len(run_names) == 1
-    run_name = run_names.pop()
-    assert "github.event.pull_request.base.sha == " in run_name
-    assert "28aa5257927a3468ebc35ec7f245fecaf3226dbf" in run_name
-    assert "' ' ||" in run_name
-    for mode in ("manual", "filtered", "full"):
-        assert f"gate={mode} / head={{0}} / base={{1}}" in run_name
-    for field in ("updated={2}", "action={3}", "label={4}", "labels={5}", "pull={6}"):
-        assert field in run_name
-    assert run_name.count("format('{0}{1}{2}{3}{4}{5}'") == 3
+    assert len(common_run_names) == 1
+    image_run_name = workflows[".github/workflows/images.yml"]["run-name"]
+    assert "gate=trusted-publish / head={0} / base={1}" in image_run_name
+    assert "inputs.trusted_publish == true" in image_run_name
+    for run_name in (common_run_names.pop(), image_run_name):
+        assert "github.event.pull_request.base.sha == " in run_name
+        assert "28aa5257927a3468ebc35ec7f245fecaf3226dbf" in run_name
+        assert "' ' ||" in run_name
+        for mode in ("manual", "filtered", "full"):
+            assert f"gate={mode} / head={{0}} / base={{1}}" in run_name
+        for field in ("updated={2}", "action={3}", "label={4}", "labels={5}", "pull={6}"):
+            assert field in run_name
+        assert run_name.count("format('{0}{1}{2}{3}{4}{5}'") == 3
 
-    assert "github.event.pull_request.draft" in run_name
-    assert "github.event.action == 'converted_to_draft'" in run_name
-    assert """fromJSON('["labeled","unlabeled"]')""" in run_name
-    assert "github.event.action == 'edited'" in run_name
-    assert "github.event.changes.base == null" in run_name
-    for label in (
-        "ci:integration",
-        "ci:integration-docker",
-        "ci:images",
-        "cluster-smoke",
-        "staging-smoke",
-        "ci:coverage-summary",
-    ):
-        assert label in run_name
-        assert run_name.count(f"contains(github.event.pull_request.labels.*.name, '{label}')") == 3
+        assert "github.event.pull_request.draft" in run_name
+        assert "github.event.action == 'converted_to_draft'" in run_name
+        assert """fromJSON('["labeled","unlabeled"]')""" in run_name
+        assert "github.event.action == 'edited'" in run_name
+        assert "github.event.changes.base == null" in run_name
+        for label in (
+            "ci:integration",
+            "ci:integration-docker",
+            "ci:images",
+            "cluster-smoke",
+            "staging-smoke",
+            "ci:coverage-summary",
+        ):
+            assert label in run_name
+            assert (
+                run_name.count(f"contains(github.event.pull_request.labels.*.name, '{label}')") == 3
+            )
 
     expected_pr_types = {
         "opened",
@@ -394,9 +403,17 @@ def test_source_gate_names_switch_only_after_base_publisher_is_active() -> None:
         plan_job_id, _ = SOURCE_PLAN_CONTRACTS[workflow_path]
         plan_ref = f"needs.{plan_job_id}.outputs"
         expression = _normalized_expression(workflow["jobs"][gate_id]["name"])
+        trusted_recovery = ""
+        if workflow_path == ".github/workflows/images.yml":
+            trusted_recovery = (
+                "github.event_name == 'workflow_dispatch' && "
+                "needs.plan.outputs.trusted_publish == 'true' && "
+                "'images-gate-trusted-publish' || "
+            )
 
         assert expression == _normalized_expression(
             "${{ "
+            f"{trusted_recovery}"
             f"github.event_name == 'workflow_dispatch' && '{protected_name}-manual' || "
             f"github.event_name == 'push' && '{protected_name}-push' || "
             f"{plan_ref}.gate_mode == 'full' && "

@@ -72,6 +72,7 @@ def test_images_untrusted_build_is_read_only_and_cannot_publish_or_write_cache()
     assert build["permissions"] == {"contents": "read"}
     assert _normalized_expression(build["if"]) == (
         "github.event_name != 'push' && "
+        "needs.plan.outputs.trusted_publish != 'true' && "
         "needs.plan.outputs.gate_mode == 'full' && "
         "needs.plan.outputs.required == 'true' && "
         "needs.plan.outputs.images != '[]'"
@@ -95,7 +96,7 @@ def test_images_untrusted_build_is_read_only_and_cannot_publish_or_write_cache()
     assert "${{" not in script
 
 
-def test_images_publish_authority_is_push_only_on_trusted_branches() -> None:
+def test_images_publish_authority_is_protected_push_or_reconciler_only() -> None:
     workflow = _workflow(".github/workflows/images.yml")
     publish = workflow["jobs"]["publish"]
 
@@ -124,9 +125,13 @@ def test_images_publish_authority_is_push_only_on_trusted_branches() -> None:
         "id-token": "write",
         "packages": "write",
     }
+    trusted_event = (
+        "(github.event_name == 'push' || "
+        "(github.event_name == 'workflow_dispatch' && "
+        "needs.plan.outputs.trusted_publish == 'true')) && "
+    )
     assert _normalized_expression(publish["if"]) == (
-        "github.event_name == 'push' && "
-        "(github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && "
+        trusted_event + "(github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && "
         "needs.plan.outputs.gate_mode == 'full' && "
         "needs.plan.outputs.required == 'true' && "
         "needs.plan.outputs.images != '[]'"
@@ -137,8 +142,7 @@ def test_images_publish_authority_is_push_only_on_trusted_branches() -> None:
         for step in _checkout_steps(publish)
     )
     assert _normalized_expression(manifest["if"]) == (
-        "github.event_name == 'push' && "
-        "(github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && "
+        trusted_event + "(github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && "
         "needs.plan.outputs.gate_mode == 'full' && "
         "needs.plan.outputs.required == 'true' && "
         "needs.plan.outputs.images != '[]' && "
@@ -153,13 +157,11 @@ def test_images_publish_authority_is_push_only_on_trusted_branches() -> None:
     stage1_publish = workflow["jobs"]["stage1-publish"]
     stage1_index = workflow["jobs"]["stage1-publish-index"]
     assert _normalized_expression(stage1_publish["if"]).startswith(
-        "github.event_name == 'push' && "
-        "(github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') &&"
+        trusted_event + "(github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') &&"
     )
     assert stage1_publish["permissions"] == publish["permissions"]
     assert _normalized_expression(stage1_index["if"]).startswith(
-        "github.event_name == 'push' && "
-        "(github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') &&"
+        trusted_event + "(github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') &&"
     )
     assert stage1_index["permissions"] == manifest["permissions"]
 
@@ -193,8 +195,84 @@ def test_images_manual_dispatch_is_build_only() -> None:
     publish = workflow["jobs"]["publish"]
 
     assert "workflow_dispatch" in on_config
-    assert _normalized_expression(build["if"]).startswith("github.event_name != 'push' &&")
-    assert _normalized_expression(publish["if"]).startswith("github.event_name == 'push' &&")
+    assert _normalized_expression(build["if"]).startswith(
+        "github.event_name != 'push' && needs.plan.outputs.trusted_publish != 'true' &&"
+    )
+    assert "needs.plan.outputs.trusted_publish == 'true'" in _normalized_expression(publish["if"])
+
+
+def test_images_trusted_dispatch_is_validated_before_any_publish_job() -> None:
+    workflow = _workflow(".github/workflows/images.yml")
+    plan = workflow["jobs"]["plan"]
+    trust = _named_step(plan, "Validate trusted release reconciliation")
+    script = trust["run"]
+
+    assert trust["env"]["ACTOR"] == "${{ github.actor }}"
+    assert trust["env"]["BASE_SHA"] == "${{ inputs.trusted_base_sha || '' }}"
+    assert '[[ "$ACTOR" == "github-actions[bot]" ]]' in script
+    assert '[[ "$REF_NAME" == "dev" || "$REF_NAME" == "main" ]]' in script
+    assert 'git merge-base --is-ancestor "$BASE_SHA" "$HEAD_SHA"' in script
+    assert 'test "$(git rev-parse HEAD)" = "$HEAD_SHA"' in script
+    for job_name in ("publish", "publish-manifest", "stage1-publish", "stage1-publish-index"):
+        assert "needs.plan.outputs.trusted_publish == 'true'" in workflow["jobs"][job_name]["if"]
+
+
+def test_images_trusted_dispatch_accepts_only_bot_exact_ancestor_range(tmp_path: Path) -> None:
+    plan = _workflow(".github/workflows/images.yml")["jobs"]["plan"]
+    trust = _named_step(plan, "Validate trusted release reconciliation")
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    base = subprocess.run(
+        ["git", "rev-parse", "HEAD^"],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    output = tmp_path / "github-output.txt"
+    common = {
+        "EVENT_NAME": "workflow_dispatch",
+        "REQUESTED": "true",
+        "BASE_SHA": base,
+        "HEAD_SHA": head,
+        "ACTOR": "github-actions[bot]",
+        "REF_NAME": "dev",
+        "GITHUB_OUTPUT": str(output),
+    }
+
+    accepted = subprocess.run(
+        ["bash"],
+        cwd=REPO_ROOT,
+        input=trust["run"],
+        text=True,
+        capture_output=True,
+        env={**os.environ, **common},
+        check=False,
+    )
+
+    assert accepted.returncode == 0, accepted.stderr
+    assert output.read_text(encoding="utf-8") == "trusted_publish=true\n"
+    for drift in (
+        {"ACTOR": "qianyi-sun"},
+        {"REF_NAME": "feature"},
+        {"BASE_SHA": head},
+        {"BASE_SHA": "0" * 40},
+    ):
+        rejected = subprocess.run(
+            ["bash"],
+            cwd=REPO_ROOT,
+            input=trust["run"],
+            text=True,
+            capture_output=True,
+            env={**os.environ, **common, **drift},
+            check=False,
+        )
+        assert rejected.returncode != 0
 
 
 def test_images_permissions_are_an_exact_job_allowlist() -> None:
@@ -248,9 +326,7 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
         "packages": "write",
     }
     assert jobs["stage1-publish"]["permissions"] == jobs["publish"]["permissions"]
-    assert jobs["stage1-publish-index"]["permissions"] == jobs["publish-manifest"][
-        "permissions"
-    ]
+    assert jobs["stage1-publish-index"]["permissions"] == jobs["publish-manifest"]["permissions"]
     assert "environment" not in jobs["publish"]
     assert "environment" not in jobs["publish-manifest"]
     assert "environment" not in jobs["stage1-publish"]
