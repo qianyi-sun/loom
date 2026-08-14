@@ -128,7 +128,11 @@ def test_action_rejects_unknown_jobs_and_tampered_oldlab_slots(tmp_path: Path) -
         action.validate_assignment(request_value, response)
 
 
-def test_images_contract_allows_pipeline_orchestrator() -> None:
+@pytest.mark.parametrize(
+    "job_key",
+    ("pipeline-orchestrator", "behavior-stage1-sim"),
+)
+def test_images_contract_allows_manifest_owned_jobs(job_key: str) -> None:
     action = _module()
     request, mode = action.build_request(
         {
@@ -139,15 +143,13 @@ def test_images_contract_allows_pipeline_orchestrator() -> None:
             "ROUTE_WORKFLOW_RUN_ID": "40001",
             "ROUTE_RUN_ATTEMPT": "1",
             "ROUTE_HEAD_SHA": HEAD_SHA,
-            "ROUTE_JOB_KEYS_JSON": '["pipeline-orchestrator"]',
+            "ROUTE_JOB_KEYS_JSON": json.dumps([job_key]),
         }
     )
 
-    assert request["job_keys"] == ["pipeline-orchestrator"]
+    assert request["job_keys"] == [job_key]
     assert mode == "disabled"
-    assert leases.RouteRequest.from_mapping(request).job_keys == (
-        "pipeline-orchestrator",
-    )
+    assert leases.RouteRequest.from_mapping(request).job_keys == (job_key,)
 
 
 def test_poll_accepts_only_the_exact_digest_check(
