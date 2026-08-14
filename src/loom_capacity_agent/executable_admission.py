@@ -18,10 +18,12 @@ from loom_capacity_agent.admission import (
     ExecutableReleaseReceiptV2,
     ExecutableReleaseRequestV2,
     ExecutableWorkerRegistrationV2,
+    ExecutableWorkerWithdrawalRequestV2,
     PhysicalJobBindingV2,
     PreparedExecutableAdmissionV2,
     ProtectedIntentObservationV2,
     RegisteredExecutableWorkerV2,
+    WithdrawnExecutableWorkerV2,
 )
 from loom_capacity_agent.claim_guard import (
     ExecutableClaimProposalV2,
@@ -262,6 +264,31 @@ class ExecutableAdmissionStore:
             or receipt.drain_digest != receipt.request_digest
         ):
             raise ExecutableAdmissionError("protected drain receipt changed")
+        return receipt
+
+    async def withdraw_unregistered_worker(
+        self,
+        request: ExecutableWorkerWithdrawalRequestV2,
+    ) -> WithdrawnExecutableWorkerV2:
+        if not isinstance(request, ExecutableWorkerWithdrawalRequestV2):
+            raise TypeError("worker withdrawal requires its schema-v2 contract")
+        receipt = await self._invoke(
+            "withdraw_unregistered_executable_worker",
+            request,
+            WithdrawnExecutableWorkerV2,
+        )
+        if (
+            receipt.intent_id != request.binding.intent_id
+            or receipt.bootstrap_registration_epoch != request.bootstrap_registration_epoch
+            or receipt.protected_registration_epoch != request.protected_registration_epoch
+            or receipt.slurm_job_id != request.slurm_job_id
+            or receipt.ownership_evidence_sha256 != request.ownership_evidence_sha256
+            or receipt.claim_high_water != request.expected_claim_high_water
+            or receipt.live_claim_count != 0
+            or receipt.bootstrap_revoked is not True
+            or receipt.withdrawal_digest != receipt.request_digest
+        ):
+            raise ExecutableAdmissionError("protected worker withdrawal receipt changed")
         return receipt
 
     async def acknowledge_release(

@@ -7,9 +7,11 @@ from uuid import UUID
 
 import pytest
 
-from loom_capacity_executor.executable import ExecutablePoolExecutor
+from loom_capacity_executor.executable import ExecutablePoolExecutor, ProtectedIntentObservationV2
 from loom_capacity_executor.journal import ExecutorJournal, JournalRegressionError
 from loom_capacity_executor.launch_renderer import TrustedLaunchContextV2
+from loom_capacity_executor.slurm_contracts import SlurmTerminalEvidenceV2
+from loom_capacity_manager.executable_contracts import ExecutableIntentCloseV2
 from tests.unit.test_capacity_executor_executable import (
     _NOW,
     FakeAdmission,
@@ -169,6 +171,94 @@ async def test_ambiguous_committed_physical_binding_replays_exact_request(
     reopened.close()
 
 
+# Production break caught: a protected drain request that committed locally but
+# crashed before journal confirmation could remain unresolved forever.
+async def test_crash_after_protected_drain_request_replays_before_work_fetch(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    executor, journal, manager, admission, slurm, launch = executor_fixture(
+        tmp_path,
+        work=permit_fixture(launch.binding),
+    )
+    await executor.tick()
+    slurm.jobs[0] = slurm.jobs[0].model_copy(
+        update={"state": "RUNNING", "nodes": launch.binding.node_ids, "pending_reason": None}
+    )
+    manager.work = ExecutableIntentCloseV2(binding=launch.binding, command_sequence=2)
+    admission.observations[launch.binding.intent_id] = ProtectedIntentObservationV2(
+        binding=launch.binding,
+        bootstrap_registration_epoch=1,
+        worker_id=UUID(int=401),
+        worker_incarnation=UUID(int=402),
+        protected_registration_epoch=2,
+        claim_high_water=0,
+    )
+    admission.crash_after_drain = True
+
+    with pytest.raises(SimulatedCrash):
+        await executor.tick()
+
+    requested = journal.latest("intent", str(launch.binding.intent_id))
+    assert requested is not None and requested.event_kind == "protected-drain-requested"
+    journal.close()
+
+    admission.crash_after_drain = False
+    manager.reject_work_fetch = True
+    recovered, reopened = _restart(journal.path, manager, admission, slurm, launch)
+    result = await recovered.tick()
+
+    assert result.status == "draining"
+    assert admission.drain_requests[1] == admission.drain_requests[0]
+    confirmed = reopened.latest("intent", str(launch.binding.intent_id))
+    assert confirmed is not None and confirmed.event_kind == "protected-drain-confirmed"
+    reopened.close()
+
+
+# Production break caught: a durable pending-cancel request could block the
+# journal forever after a crash before scancel; recovery must retry safely from
+# the exact scheduler observation and resolve the local request.
+async def test_crash_after_pending_cancel_request_retries_exact_cancel_before_work_fetch(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    executor, journal, manager, admission, slurm, launch = executor_fixture(
+        tmp_path,
+        work=permit_fixture(launch.binding),
+    )
+    await executor.tick()
+    manager.work = ExecutableIntentCloseV2(binding=launch.binding, command_sequence=2)
+    admission.observations[launch.binding.intent_id] = ProtectedIntentObservationV2(
+        binding=launch.binding,
+        bootstrap_registration_epoch=1,
+        worker_id=UUID(int=411),
+        worker_incarnation=UUID(int=412),
+        protected_registration_epoch=2,
+        claim_high_water=0,
+    )
+    slurm.cancel_failure = SimulatedCrash("process stopped before scancel mutation")
+
+    with pytest.raises(SimulatedCrash):
+        await executor.tick()
+
+    job_id = slurm.jobs[0].job_id
+    requested = journal.latest("job", job_id)
+    assert requested is not None and requested.event_kind == "pending-cancel-requested"
+    journal.close()
+
+    slurm.cancel_failure = None
+    manager.reject_work_fetch = True
+    recovered, reopened = _restart(journal.path, manager, admission, slurm, launch)
+    result = await recovered.tick()
+
+    assert result.status == "pending-cancelled"
+    assert slurm.cancel_requests[1] == slurm.cancel_requests[0]
+    assert slurm.jobs == []
+    confirmed = reopened.latest("job", job_id)
+    assert confirmed is not None and confirmed.event_kind == "pending-cancel-confirmed-cancelled"
+    reopened.close()
+
+
 # Production break caught: journal-chain integrity does not authenticate the
 # stored Ed25519 proof, so a well-formed but invalid signature could be adopted.
 async def test_recovery_rejects_tampered_ownership_signature(tmp_path: Path) -> None:
@@ -299,4 +389,54 @@ async def test_ambiguous_recovery_stays_quarantined_and_charged(tmp_path: Path, 
         record.authority_scope == "dedicated-loom-association" for record in inventory.records
     )
     assert all(record.ownership_proof is None for record in inventory.records)
+    reopened.close()
+
+
+# Production break caught: recovery of an unknown submission ignored exact
+# terminal accounting evidence and quarantined work that had conclusively ended.
+async def test_unknown_submission_recovery_adopts_exact_terminal_accounting_match(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    executor, journal, manager, admission, slurm, launch = executor_fixture(
+        tmp_path, work=permit_fixture(launch.binding)
+    )
+    slurm.crash_after_submit = True
+    with pytest.raises(SimulatedCrash):
+        await executor.tick()
+    submitted = slurm.jobs.pop()
+    slurm.terminal_jobs = (
+        SlurmTerminalEvidenceV2(
+            cluster=submitted.cluster,
+            job_id=submitted.job_id,
+            state="COMPLETED",
+            submitter=submitted.submitter,
+            account=submitted.account,
+            submitted_at=_NOW,
+            started_at=_NOW,
+            ended_at=_NOW,
+            elapsed_seconds=0,
+            exit_code="0:0",
+            cpus=submitted.cpus,
+            memory_bytes=submitted.memory_bytes,
+            gpus=submitted.gpus,
+            generic_tres=submitted.generic_tres,
+            nodes=launch.binding.node_ids,
+            ownership_token=submitted.ownership_token,
+        ),
+    )
+    journal.close()
+
+    slurm.crash_after_submit = False
+    recovered, reopened = _restart(journal.path, manager, admission, slurm, launch)
+    result = await recovered.recover()
+
+    assert result.status == "adopted"
+    assert result.detail == submitted.job_id
+    assert slurm.submit_count == 1
+    assert admission.bound[launch.binding.intent_id].slurm_job_id == submitted.job_id
+    record = manager.inventories[-1].records[0]
+    assert record.physical_identity == submitted.job_id
+    assert record.state == "terminal"
+    assert record.ownership_proof is not None
     reopened.close()

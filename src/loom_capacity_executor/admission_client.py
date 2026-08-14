@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from uuid import UUID
 
+from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
@@ -16,10 +18,12 @@ from loom_capacity_agent.admission import (
     ExecutableReleaseReceiptV2,
     ExecutableReleaseRequestV2,
     ExecutableWorkerRegistrationV2,
+    ExecutableWorkerWithdrawalRequestV2,
     PhysicalJobBindingV2,
     PreparedExecutableAdmissionV2,
     ProtectedIntentObservationV2,
     RegisteredExecutableWorkerV2,
+    WithdrawnExecutableWorkerV2,
 )
 from loom_capacity_agent.claim_guard import (
     ExecutableClaimProposalV2,
@@ -80,15 +84,36 @@ class DatabaseExecutableAdmissionClient:
         *,
         subject_id: UUID,
         subject_incarnation: UUID,
+        operation_timeout_seconds: float = 10.0,
+        statement_timeout_ms: int = 10_000,
+        lock_timeout_ms: int = 5_000,
     ) -> None:
         if not isinstance(subject_id, UUID) or not isinstance(subject_incarnation, UUID):
             raise ExecutableAdmissionClientError("database client subject scope is invalid")
         if subject_id == subject_incarnation:
             raise ExecutableAdmissionClientError("database client subject identities overlap")
+        if (
+            not isinstance(operation_timeout_seconds, (int, float))
+            or not 0.05 <= float(operation_timeout_seconds) <= 60.0
+        ):
+            raise ExecutableAdmissionClientError(
+                "database operation timeout must be between 0.05 and 60 seconds"
+            )
+        if type(statement_timeout_ms) is not int or not 1 <= statement_timeout_ms <= 60_000:
+            raise ExecutableAdmissionClientError(
+                "database statement timeout must be an integer between 1 and 60000 ms"
+            )
+        if type(lock_timeout_ms) is not int or not 1 <= lock_timeout_ms <= 60_000:
+            raise ExecutableAdmissionClientError(
+                "database lock timeout must be an integer between 1 and 60000 ms"
+            )
         self._engine = engine
         self._factory = async_sessionmaker(engine, expire_on_commit=False)
         self.subject_id = subject_id
         self.subject_incarnation = subject_incarnation
+        self._operation_timeout_seconds = float(operation_timeout_seconds)
+        self._statement_timeout_ms = statement_timeout_ms
+        self._lock_timeout_ms = lock_timeout_ms
 
     @classmethod
     def from_database_url_file(
@@ -98,32 +123,57 @@ class DatabaseExecutableAdmissionClient:
         subject_id: UUID,
         subject_incarnation: UUID,
         timeout_seconds: int = 10,
+        pool_timeout_seconds: int | None = None,
+        statement_timeout_ms: int = 10_000,
+        lock_timeout_ms: int = 5_000,
+        operation_timeout_seconds: float = 10.0,
     ) -> DatabaseExecutableAdmissionClient:
         if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 60:
             raise ExecutableAdmissionClientError(
                 "database connection timeout must be an integer between 1 and 60 seconds"
+            )
+        pool_timeout = timeout_seconds if pool_timeout_seconds is None else pool_timeout_seconds
+        if type(pool_timeout) is not int or not 1 <= pool_timeout <= 60:
+            raise ExecutableAdmissionClientError(
+                "database pool timeout must be an integer between 1 and 60 seconds"
             )
         url = _database_url(path)
         engine = create_async_engine(
             url,
             connect_args={"connect_timeout": timeout_seconds},
             isolation_level="SERIALIZABLE",
+            pool_timeout=pool_timeout,
             pool_pre_ping=True,
         )
         return cls(
             engine,
             subject_id=subject_id,
             subject_incarnation=subject_incarnation,
+            operation_timeout_seconds=operation_timeout_seconds,
+            statement_timeout_ms=statement_timeout_ms,
+            lock_timeout_ms=lock_timeout_ms,
         )
 
     async def _store_call(self, method: str, *args: object, **kwargs: object) -> object:
-        async with self._factory() as session, session.begin():
-            store = ExecutableAdmissionStore(
-                session,
-                subject_id=self.subject_id,
-                subject_incarnation=self.subject_incarnation,
-            )
-            return await getattr(store, method)(*args, **kwargs)
+        try:
+            async with asyncio.timeout(self._operation_timeout_seconds):
+                async with self._factory() as session, session.begin():
+                    await session.execute(
+                        text(f"SET LOCAL lock_timeout = '{self._lock_timeout_ms}ms'")
+                    )
+                    await session.execute(
+                        text(f"SET LOCAL statement_timeout = '{self._statement_timeout_ms}ms'")
+                    )
+                    store = ExecutableAdmissionStore(
+                        session,
+                        subject_id=self.subject_id,
+                        subject_incarnation=self.subject_incarnation,
+                    )
+                    return await getattr(store, method)(*args, **kwargs)
+        except TimeoutError as exc:
+            raise ExecutableAdmissionClientError(
+                "protected admission transaction timed out"
+            ) from exc
 
     async def prepare_worker(
         self,
@@ -163,6 +213,14 @@ class DatabaseExecutableAdmissionClient:
     async def begin_drain(self, request: ExecutableDrainRequestV2) -> DrainedExecutableWorkerV2:
         result = await self._store_call("begin_drain", request)
         assert isinstance(result, DrainedExecutableWorkerV2)
+        return result
+
+    async def withdraw_unregistered_worker(
+        self,
+        request: ExecutableWorkerWithdrawalRequestV2,
+    ) -> WithdrawnExecutableWorkerV2:
+        result = await self._store_call("withdraw_unregistered_worker", request)
+        assert isinstance(result, WithdrawnExecutableWorkerV2)
         return result
 
     async def acknowledge_release(

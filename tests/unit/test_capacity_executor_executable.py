@@ -194,6 +194,9 @@ class FakeAdmission:
         self.bind_requests: list[PhysicalJobBindingV2] = []
         self.bind_failure: Exception | None = None
         self.bind_commits_before_failure = False
+        self.withdraw_requests: list[Any] = []
+        self.drain_requests: list[Any] = []
+        self.crash_after_drain = False
         self.observations: dict[UUID, ProtectedIntentObservationV2] = {}
 
     async def prepare_worker(
@@ -249,6 +252,7 @@ class FakeAdmission:
         )
 
     async def begin_drain(self, request: Any) -> DrainedExecutableWorkerV2:
+        self.drain_requests.append(request)
         current = self.observations[request.binding.intent_id]
         receipt = DrainedExecutableWorkerV2(
             subject_id=request.binding.subject_id,
@@ -264,7 +268,37 @@ class FakeAdmission:
             protected_high_water=request.drain_epoch,
         )
         self.observations[request.binding.intent_id] = current.model_copy(update={"drain": receipt})
+        if self.crash_after_drain:
+            raise SimulatedCrash("process stopped after protected drain committed")
         return receipt
+
+    async def withdraw_unregistered_worker(self, request: Any) -> SimpleNamespace:
+        self.withdraw_requests.append(request)
+        self.observations.setdefault(
+            request.binding.intent_id,
+            ProtectedIntentObservationV2(
+                binding=request.binding,
+                bootstrap_registration_epoch=request.bootstrap_registration_epoch,
+                claim_high_water=request.expected_claim_high_water,
+            ),
+        )
+        return SimpleNamespace(
+            subject_id=request.binding.subject_id,
+            subject_incarnation=request.binding.subject_incarnation,
+            intent_id=request.binding.intent_id,
+            bootstrap_registration_epoch=request.bootstrap_registration_epoch,
+            protected_registration_epoch=request.protected_registration_epoch,
+            slurm_job_id=request.slurm_job_id,
+            ownership_evidence_sha256=request.ownership_evidence_sha256,
+            claim_high_water=request.expected_claim_high_water,
+            live_claim_count=0,
+            bootstrap_revoked=True,
+            request_digest=canonical_executable_digest(request),
+            withdrawal_digest=canonical_executable_digest(request),
+            protected_high_water=request.protected_registration_epoch,
+            withdrawal_state="withdrawn",
+            executable=True,
+        )
 
 
 class FakeSlurm:
@@ -274,6 +308,9 @@ class FakeSlurm:
         self.crash_after_submit = False
         self.admission: FakeAdmission | None = None
         self.terminal_jobs: tuple[SlurmTerminalEvidenceV2, ...] = ()
+        self.cancel_requests: list[SlurmCancelRequestV2] = []
+        self.cancel_failure: Exception | None = None
+        self.cancel_commits_before_failure = False
 
     async def submit(self, request: Any) -> SlurmSubmissionV2:
         self.submit_count += 1
@@ -312,12 +349,20 @@ class FakeSlurm:
         )
 
     async def cancel_pending(self, request: SlurmCancelRequestV2) -> SlurmJobObservationV2:
+        self.cancel_requests.append(request)
         assert self.admission is not None
         intent = next(iter(self.admission.observations))
-        assert self.admission.observations[intent].drain is not None
+        assert (
+            self.admission.observations[intent].drain is not None
+            or len(self.admission.withdraw_requests) == 1
+        )
         job = next(item for item in self.jobs if item.job_id == request.job_id)
         assert job.state == "PENDING"
+        if self.cancel_failure is not None and not self.cancel_commits_before_failure:
+            raise self.cancel_failure
         self.jobs.remove(job)
+        if self.cancel_failure is not None:
+            raise self.cancel_failure
         return job
 
 
@@ -806,9 +851,10 @@ async def test_ordinary_reclamation_never_signals_active_worker(tmp_path: Path) 
     journal.close()
 
 
-# Production break caught: acknowledging close for an exact pending job without
-# protected worker/drain identity could let that job register after central close.
-async def test_close_retains_pending_job_without_protected_worker_identity(
+# Production break caught: an exact pending physical job with no registered
+# worker stayed quarantined instead of first revoking bootstrap, fencing late
+# registration, and then conditionally cancelling the owned pending job.
+async def test_close_withdraws_bound_unregistered_pending_job_before_cancel(
     tmp_path: Path,
 ) -> None:
     launch = launch_context_fixture()
@@ -824,15 +870,24 @@ async def test_close_retains_pending_job_without_protected_worker_identity(
 
     result = await executor.tick()
 
-    assert result.status == "quarantined"
+    assert result.status == "pending-cancelled"
     assert result.operation_id == launch.binding.intent_id
-    assert manager.command_sequence == 1
-    assert manager.work == close
-    assert tuple(manager.central_requests) == prior_requests
-    assert slurm.jobs == [pending]
-    assert admission.observations == {}
+    assert manager.command_sequence == 2
+    assert manager.work is None
+    assert tuple(manager.central_requests) == (*prior_requests, close)
+    assert slurm.jobs == []
+    assert len(admission.withdraw_requests) == 1
+    withdrawal = admission.withdraw_requests[0]
+    assert withdrawal.binding == launch.binding
+    assert withdrawal.slurm_job_id == pending.job_id
+    assert (
+        withdrawal.ownership_evidence_sha256 == admission.bind_requests[0].ownership_evidence_sha256
+    )
+    assert withdrawal.expected_claim_high_water == 0
+    assert withdrawal.bootstrap_registration_epoch == 1
+    assert withdrawal.protected_registration_epoch == 2
     retained = journal.latest("intent", str(launch.binding.intent_id))
-    assert retained is not None and retained.event_kind == "physical-bind-confirmed"
+    assert retained is not None and retained.event_kind == "intent-close-confirmed"
     journal.close()
 
 

@@ -391,6 +391,25 @@ class ExecutableDrainRequestV2(StrictV2Model):
     executable: Literal[True] = True
 
 
+class ExecutableWorkerWithdrawalRequestV2(StrictV2Model):
+    """Fence delayed registration for one bound scheduler job with no worker."""
+
+    operation_id: UUID
+    binding: ExecutableIntentBindingV2
+    bootstrap_registration_epoch: PositiveGeneration
+    protected_registration_epoch: PositiveGeneration
+    slurm_job_id: Identifier
+    ownership_evidence_sha256: Digest
+    expected_claim_high_water: Literal[0] = 0
+    executable: Literal[True] = True
+
+    @model_validator(mode="after")
+    def _withdrawal_epoch(self) -> ExecutableWorkerWithdrawalRequestV2:
+        if self.protected_registration_epoch <= self.bootstrap_registration_epoch:
+            raise ValueError("withdrawal registration epoch must advance past bootstrap")
+        return self
+
+
 class ExecutableReleaseRequestV2(StrictV2Model):
     """Fence delayed registration after protected claims and credentials close."""
 
@@ -470,6 +489,26 @@ class DrainedExecutableWorkerV2(StrictV2Model):
     executable: Literal[True] = True
 
 
+class WithdrawnExecutableWorkerV2(StrictV2Model):
+    """Exact receipt proving bootstrap was revoked before worker registration."""
+
+    subject_id: UUID
+    subject_incarnation: UUID
+    intent_id: UUID
+    bootstrap_registration_epoch: PositiveGeneration
+    protected_registration_epoch: PositiveGeneration
+    slurm_job_id: Identifier
+    ownership_evidence_sha256: Digest
+    claim_high_water: Literal[0] = 0
+    live_claim_count: Literal[0] = 0
+    bootstrap_revoked: Literal[True] = True
+    request_digest: Digest
+    withdrawal_digest: Digest
+    protected_high_water: PositiveGeneration
+    withdrawal_state: Literal["withdrawn"] = "withdrawn"
+    executable: Literal[True] = True
+
+
 class ExecutableReleaseReceiptV2(StrictV2Model):
     """Append-only protected release proof consumed by the manager."""
 
@@ -534,6 +573,7 @@ __all__ = [
     "ExecutableReleaseReceiptV2",
     "ExecutableReleaseRequestV2",
     "ExecutableWorkerRegistrationV2",
+    "ExecutableWorkerWithdrawalRequestV2",
     "PhysicalJobBindingV2",
     "PreparedAdmissionPlanV1",
     "PreparedBootstrapBindingV1",
@@ -544,4 +584,5 @@ __all__ = [
     "PreparedWorkerShapeV1",
     "ProtectedIntentObservationV2",
     "RegisteredExecutableWorkerV2",
+    "WithdrawnExecutableWorkerV2",
 ]

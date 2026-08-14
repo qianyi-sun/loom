@@ -66,6 +66,14 @@ def cancel_request(job_id: str = "101") -> SlurmCancelRequestV2:
         job_id=job_id,
         submitter="loom-oldlab",
         account="loom-executor",
+        partition="loom",
+        cpus=16,
+        memory_bytes=64 * 1024 * 1024 * 1024,
+        gpus=2,
+        generic_tres=(),
+        nodes=("oldlab-5",),
+        ownership_token="A" * 43,
+        ownership_evidence_sha256="d" * 64,
     )
 
 
@@ -470,6 +478,71 @@ async def test_cancel_pending_rechecks_exact_state_and_association(
     fake_slurm.add_job(state=state, submitter=submitter, account=account)
     with pytest.raises(SlurmStateConflictError):
         await fake_slurm.backend().cancel_pending(cancel_request())
+    assert fake_slurm.scancel_calls == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "change",
+    (
+        {"partition": "loom-debug"},
+        {"cpus": 32},
+        {"memory_bytes": 128 * 1024 * 1024 * 1024},
+        {"gpus": 3, "gres": "gpu:3"},
+        {"nodes": ["oldlab-6"]},
+        {"ownership_token": "B" * 43},
+        {
+            "generic_tres": {"gres/fpga:vu9p": 1},
+            "gres": "gpu:2,fpga:vu9p:1",
+        },
+    ),
+)
+async def test_cancel_pending_rejects_job_reuse_or_scheduler_field_mismatch(
+    fake_slurm: FakeSlurm,
+    change: dict[str, object],
+) -> None:
+    fake_slurm.add_job()
+    fake_slurm.replace_job("101", **change)
+    backend = fake_slurm.backend(
+        resource_ceiling=SlurmResourceV2(
+            cpus=64,
+            memory_bytes=512 * 1024 * 1024 * 1024,
+            gpus=8,
+            generic_tres=(SlurmTresValueV2(name="gres/fpga:vu9p", value=1),),
+        )
+    )
+
+    with pytest.raises(SlurmStateConflictError):
+        await backend.cancel_pending(cancel_request())
+
+    assert fake_slurm.scancel_calls == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "output",
+    (
+        "",
+        "101|UNRECOGNIZED|loom-oldlab|loom-executor|loom|16|65536M|gpu:2|oldlab-5|Resources|"
+        + "A" * 43
+        + "\n",
+        "101|PENDING|loom-oldlab|loom-executor|loom|16|65536M|gpu:2|oldlab-5|Resources|"
+        + "A" * 43
+        + "\n"
+        + "101|PENDING|loom-oldlab|loom-executor|loom|16|65536M|gpu:2|oldlab-5|Resources|"
+        + "A" * 43
+        + "\n",
+    ),
+)
+async def test_cancel_pending_rejects_missing_unknown_or_duplicate_evidence_before_scancel(
+    fake_slurm: FakeSlurm,
+    output: str,
+) -> None:
+    fake_slurm.set_output("squeue", output)
+
+    with pytest.raises(SlurmStateConflictError):
+        await fake_slurm.backend().cancel_pending(cancel_request())
+
     assert fake_slurm.scancel_calls == ()
 
 

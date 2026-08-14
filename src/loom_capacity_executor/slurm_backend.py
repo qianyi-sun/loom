@@ -912,6 +912,13 @@ class AsyncSlurmBackend:
             observation.cluster != request.cluster
             or observation.submitter != request.submitter
             or observation.account != request.account
+            or observation.partition != request.partition
+            or observation.cpus != request.cpus
+            or observation.memory_bytes != request.memory_bytes
+            or observation.gpus != request.gpus
+            or observation.generic_tres != request.generic_tres
+            or observation.nodes != request.nodes
+            or observation.ownership_token != request.ownership_token
             or observation.state != "PENDING"
         ):
             raise SlurmStateConflictError("Slurm job is not exactly owned and pending")

@@ -20,6 +20,7 @@ from loom_capacity_agent.admission import (
     ExecutableDrainRequestV2,
     ExecutableReleaseRequestV2,
     ExecutableWorkerRegistrationV2,
+    ExecutableWorkerWithdrawalRequestV2,
     PhysicalJobBindingV2,
 )
 from loom_capacity_agent.claim_guard import (
@@ -354,6 +355,19 @@ def _worker(
     )
 
 
+def _withdrawal(request: ExecutableBootstrapRegistrationV2) -> ExecutableWorkerWithdrawalRequestV2:
+    physical = _physical(request)
+    return ExecutableWorkerWithdrawalRequestV2(
+        operation_id=UUID(int=121),
+        binding=request.binding,
+        bootstrap_registration_epoch=request.bootstrap_registration_epoch,
+        protected_registration_epoch=request.bootstrap_registration_epoch + 1,
+        slurm_job_id=physical.slurm_job_id,
+        ownership_evidence_sha256=physical.ownership_evidence_sha256,
+        expected_claim_high_water=0,
+    )
+
+
 @pytest.mark.asyncio
 async def test_executable_admission_separates_candidate_source_and_publication(
     capacity_guard_database: dict[str, object],
@@ -505,6 +519,39 @@ async def test_prepare_bind_register_is_ordered_exact_and_one_time(
                 worker.model_copy(update={"worker_credential_sha256": "9" * 64}),
                 bootstrap_capability=capability,
             )
+
+
+@pytest.mark.asyncio
+async def test_withdraw_unregistered_physical_binding_revokes_bootstrap_and_fences_registration(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    _fence, registration = await _initialize_and_register(capacity_guard_database)
+    request = _bootstrap(registration.subject_id, registration.subject_incarnation)
+    capability = "single-use-bootstrap-capability"
+    digest = hashlib.sha256(capability.encode("ascii")).hexdigest()
+    physical = _physical(request)
+    withdrawal = _withdrawal(request)
+    worker = _worker(request)
+
+    async with _serializable_executor_session(capacity_guard_database) as session:
+        store = ExecutableAdmissionStore(session, registration=registration)
+        await store.prepare_worker(request, bootstrap_sha256=digest)
+        await store.bind_slurm_job(physical)
+
+        receipt = await store.withdraw_unregistered_worker(withdrawal)
+
+        assert receipt.intent_id == request.binding.intent_id
+        assert receipt.slurm_job_id == physical.slurm_job_id
+        assert receipt.ownership_evidence_sha256 == physical.ownership_evidence_sha256
+        assert receipt.bootstrap_registration_epoch == request.bootstrap_registration_epoch
+        assert receipt.protected_registration_epoch == request.bootstrap_registration_epoch + 1
+        assert receipt.claim_high_water == 0
+        assert receipt.live_claim_count == 0
+        assert receipt.bootstrap_revoked is True
+        assert receipt.request_digest == receipt.withdrawal_digest
+        assert await store.withdraw_unregistered_worker(withdrawal) == receipt
+        with pytest.raises(DBAPIError, match="delayed registration"):
+            await store.register_worker(worker, bootstrap_capability=capability)
 
 
 @pytest.mark.asyncio

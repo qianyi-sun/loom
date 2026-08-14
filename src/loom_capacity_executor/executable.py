@@ -12,6 +12,7 @@ from uuid import UUID, uuid5
 
 from loom_capacity_agent.admission import (
     ExecutableDrainRequestV2,
+    ExecutableWorkerWithdrawalRequestV2,
     PhysicalJobBindingV2,
     ProtectedIntentObservationV2,
 )
@@ -98,6 +99,10 @@ class _AdmissionClient(Protocol):
     ) -> ProtectedIntentObservationV2: ...
 
     async def begin_drain(self, request: ExecutableDrainRequestV2) -> Any: ...
+
+    async def withdraw_unregistered_worker(
+        self, request: ExecutableWorkerWithdrawalRequestV2
+    ) -> Any: ...
 
 
 class _SlurmBackend(Protocol):
@@ -401,6 +406,9 @@ class ExecutablePoolExecutor:
 
     async def tick(self) -> ExecutorTickResult:
         checkpoint = await self._checkpoint()
+        replayed_local = await self._replay_local_request(checkpoint)
+        if replayed_local is not None:
+            return replayed_local
         replayed = await self._replay_central_request(checkpoint)
         if replayed is not None:
             return replayed
@@ -523,6 +531,176 @@ class ExecutablePoolExecutor:
             operation=lambda: self.client.release_executable_shapes(release),
         )
         return ExecutorTickResult("released")
+
+    def _validate_cancel_replay(
+        self,
+        record: JournalRecord,
+        cancel: SlurmCancelRequestV2,
+    ) -> None:
+        if (
+            record.object_kind != "job"
+            or record.object_id != cancel.job_id
+            or record.payload_digest
+            != hashlib.sha256(
+                json.dumps(
+                    cancel.model_dump(mode="json"),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("ascii")
+            ).hexdigest()
+        ):
+            raise JournalRegressionError("pending cancellation request binding changed")
+
+    @staticmethod
+    def _cancel_matches_job(
+        cancel: SlurmCancelRequestV2,
+        job: SlurmJobObservationV2,
+    ) -> bool:
+        return (
+            job.cluster == cancel.cluster
+            and job.job_id == cancel.job_id
+            and job.submitter == cancel.submitter
+            and job.account == cancel.account
+            and job.partition == cancel.partition
+            and job.cpus == cancel.cpus
+            and job.memory_bytes == cancel.memory_bytes
+            and job.gpus == cancel.gpus
+            and job.generic_tres == cancel.generic_tres
+            and job.nodes == cancel.nodes
+            and job.ownership_token == cancel.ownership_token
+        )
+
+    @staticmethod
+    def _cancel_matches_terminal(
+        cancel: SlurmCancelRequestV2,
+        terminal: SlurmTerminalEvidenceV2,
+    ) -> bool:
+        return (
+            terminal.cluster == cancel.cluster
+            and terminal.job_id == cancel.job_id
+            and terminal.submitter == cancel.submitter
+            and terminal.account == cancel.account
+            and terminal.cpus == cancel.cpus
+            and terminal.memory_bytes == cancel.memory_bytes
+            and terminal.gpus == cancel.gpus
+            and terminal.generic_tres == cancel.generic_tres
+            and terminal.nodes == cancel.nodes
+            and terminal.ownership_token == cancel.ownership_token
+        )
+
+    async def _recover_pending_cancel(
+        self,
+        record: JournalRecord,
+        cancel: SlurmCancelRequestV2,
+        checkpoint: Any,
+    ) -> ExecutorTickResult:
+        self._validate_cancel_replay(record, cancel)
+        jobs = await self.slurm.inventory()
+        live_matches = tuple(job for job in jobs if self._cancel_matches_job(cancel, job))
+        payload = record.durable_payload()
+        if payload is None:
+            raise JournalRegressionError("pending cancellation request is absent from journal")
+        if len(live_matches) == 1 and live_matches[0].state == "PENDING":
+            await self.slurm.cancel_pending(cancel)
+            self.journal.append(
+                "pending-cancel-confirmed-cancelled",
+                record.payload_digest,
+                object_kind=record.object_kind,
+                object_id=record.object_id,
+                payload=payload,
+            )
+            return ExecutorTickResult("pending-cancelled")
+        if len(live_matches) == 1 and live_matches[0].state in {
+            "CONFIGURING",
+            "RUNNING",
+            "COMPLETING",
+            "SUSPENDED",
+        }:
+            self.journal.append(
+                "pending-cancel-running-drain-only",
+                record.payload_digest,
+                object_kind=record.object_kind,
+                object_id=record.object_id,
+                payload=payload,
+            )
+            return ExecutorTickResult("draining")
+        high_water = await self.slurm.accounting_high_water(since=self._now() - _RECOVERY_LOOKBACK)
+        terminal_matches = tuple(
+            item for item in high_water.terminal_jobs if self._cancel_matches_terminal(cancel, item)
+        )
+        if not live_matches and len(terminal_matches) == 1:
+            self.journal.append(
+                "pending-cancel-already-terminal",
+                record.payload_digest,
+                object_kind=record.object_kind,
+                object_id=record.object_id,
+                payload=payload,
+            )
+            return ExecutorTickResult("pending-cancelled")
+        self.journal.append(
+            "pending-cancel-ambiguous-quarantined",
+            record.payload_digest,
+            object_kind=record.object_kind,
+            object_id=record.object_id,
+            payload=payload,
+        )
+        await self._publish_inventory(checkpoint, jobs=jobs, quarantine_all=True)
+        return ExecutorTickResult(
+            "quarantined",
+            detail="pending cancellation recovery could not prove exact scheduler outcome",
+        )
+
+    async def _replay_local_request(self, checkpoint: Any) -> ExecutorTickResult | None:
+        local_events = {
+            "protected-drain-requested",
+            "protected-withdraw-requested",
+            "pending-cancel-requested",
+        }
+        records = tuple(
+            record
+            for record in self.journal.pending_requests()
+            if record.event_kind in local_events
+        )
+        if not records:
+            return None
+        if len(records) != 1:
+            raise JournalRegressionError("multiple local executable requests remain unresolved")
+        record = records[0]
+        payload = record.durable_payload()
+        if payload is None:
+            raise JournalRegressionError("local executable request is absent from journal")
+        if record.event_kind == "protected-drain-requested":
+            drain = ExecutableDrainRequestV2.model_validate_json(payload)
+            if record.object_kind != "intent" or record.object_id != str(drain.binding.intent_id):
+                raise JournalRegressionError("protected drain request object binding changed")
+            self._assert_binding(drain.binding)
+            await self.admission.begin_drain(drain)
+            self.journal.append(
+                "protected-drain-confirmed",
+                record.payload_digest,
+                object_kind=record.object_kind,
+                object_id=record.object_id,
+                payload=payload,
+            )
+            return ExecutorTickResult("draining", drain.binding.intent_id)
+        if record.event_kind == "protected-withdraw-requested":
+            withdrawal = ExecutableWorkerWithdrawalRequestV2.model_validate_json(payload)
+            if record.object_kind != "intent" or record.object_id != str(
+                withdrawal.binding.intent_id
+            ):
+                raise JournalRegressionError("protected withdrawal request object binding changed")
+            self._assert_binding(withdrawal.binding)
+            await self.admission.withdraw_unregistered_worker(withdrawal)
+            self.journal.append(
+                "protected-withdraw-confirmed",
+                record.payload_digest,
+                object_kind=record.object_kind,
+                object_id=record.object_id,
+                payload=payload,
+            )
+            return ExecutorTickResult("quarantined", withdrawal.binding.intent_id)
+        cancel = SlurmCancelRequestV2.model_validate_json(payload)
+        return await self._recover_pending_cancel(record, cancel, checkpoint)
 
     async def _apply_one(self, work: object, checkpoint: Any) -> ExecutorTickResult:
         if isinstance(work, ExecutableReservationProposalV2):
@@ -681,6 +859,71 @@ class ExecutablePoolExecutor:
             event="physical-bind-confirmed",
         )
 
+    @staticmethod
+    def _cancel_request_from_job(
+        envelope: _LaunchEnvelope,
+        job: SlurmJobObservationV2,
+    ) -> SlurmCancelRequestV2:
+        return SlurmCancelRequestV2(
+            cluster=job.cluster,
+            job_id=job.job_id,
+            submitter=job.submitter,
+            account=job.account,
+            partition=job.partition,
+            cpus=job.cpus,
+            memory_bytes=job.memory_bytes,
+            gpus=job.gpus,
+            generic_tres=job.generic_tres,
+            nodes=job.nodes,
+            ownership_token=job.ownership_token,
+            ownership_evidence_sha256=canonical_executable_digest(
+                envelope.rendered.ownership_proof
+            ),
+        )
+
+    async def _withdraw_unregistered(
+        self,
+        *,
+        close: ExecutableIntentCloseV2,
+        envelope: _LaunchEnvelope,
+        observation: ProtectedIntentObservationV2,
+        job: SlurmJobObservationV2,
+    ) -> None:
+        if observation.claim_high_water != 0:
+            raise JournalRegressionError("unregistered worker has protected claims")
+        bootstrap_epoch = max(
+            1,
+            observation.bootstrap_registration_epoch,
+            envelope.bootstrap_registration_epoch,
+        )
+        withdrawal = ExecutableWorkerWithdrawalRequestV2(
+            operation_id=uuid5(_OPERATION_NAMESPACE, f"withdraw:{close.binding.intent_id}"),
+            binding=close.binding,
+            bootstrap_registration_epoch=bootstrap_epoch,
+            protected_registration_epoch=bootstrap_epoch + 1,
+            slurm_job_id=job.job_id,
+            ownership_evidence_sha256=canonical_executable_digest(
+                envelope.rendered.ownership_proof
+            ),
+        )
+        payload = canonical_executable_bytes(withdrawal)
+        digest = canonical_executable_digest(withdrawal)
+        self.journal.append(
+            "protected-withdraw-requested",
+            digest,
+            object_kind="intent",
+            object_id=str(close.binding.intent_id),
+            payload=payload,
+        )
+        await self.admission.withdraw_unregistered_worker(withdrawal)
+        self.journal.append(
+            "protected-withdraw-confirmed",
+            digest,
+            object_kind="intent",
+            object_id=str(close.binding.intent_id),
+            payload=payload,
+        )
+
     async def _close(self, close: ExecutableIntentCloseV2, checkpoint: Any) -> ExecutorTickResult:
         observation = await self.admission.observe_intent(close.binding)
         envelope = self._load_launch(close.binding.intent_id)
@@ -714,19 +957,16 @@ class ExecutablePoolExecutor:
                 )
             if len(matches) == 1 and matches[0].state == "PENDING":
                 job = matches[0]
-                cancel = SlurmCancelRequestV2(
-                    cluster=job.cluster,
-                    job_id=job.job_id,
-                    submitter=job.submitter,
-                    account=job.account,
-                )
+                if envelope is None:
+                    raise JournalRegressionError("pending cancellation lacks ownership proof")
+                cancel = self._cancel_request_from_job(envelope, job)
                 cancel_payload = json.dumps(
                     cancel.model_dump(mode="json"),
                     sort_keys=True,
                     separators=(",", ":"),
                 ).encode("ascii")
                 self.journal.append(
-                    "slurm-cancel-requested",
+                    "pending-cancel-requested",
                     hashlib.sha256(cancel_payload).hexdigest(),
                     object_kind="job",
                     object_id=job.job_id,
@@ -734,7 +974,7 @@ class ExecutablePoolExecutor:
                 )
                 await self.slurm.cancel_pending(cancel)
                 self.journal.append(
-                    "slurm-cancel-confirmed",
+                    "pending-cancel-confirmed-cancelled",
                     hashlib.sha256(cancel_payload).hexdigest(),
                     object_kind="job",
                     object_id=job.job_id,
@@ -748,6 +988,47 @@ class ExecutablePoolExecutor:
                 return ExecutorTickResult("pending-cancelled", close.binding.intent_id)
             if matches:
                 return ExecutorTickResult("draining", close.binding.intent_id)
+        if (
+            observation.worker_id is None
+            and observation.worker_incarnation is None
+            and envelope is not None
+            and len(matches) == 1
+            and matches[0].state == "PENDING"
+        ):
+            job = matches[0]
+            await self._withdraw_unregistered(
+                close=close,
+                envelope=envelope,
+                observation=observation,
+                job=job,
+            )
+            cancel = self._cancel_request_from_job(envelope, job)
+            cancel_payload = json.dumps(
+                cancel.model_dump(mode="json"),
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("ascii")
+            self.journal.append(
+                "pending-cancel-requested",
+                hashlib.sha256(cancel_payload).hexdigest(),
+                object_kind="job",
+                object_id=job.job_id,
+                payload=cancel_payload,
+            )
+            await self.slurm.cancel_pending(cancel)
+            self.journal.append(
+                "pending-cancel-confirmed-cancelled",
+                hashlib.sha256(cancel_payload).hexdigest(),
+                object_kind="job",
+                object_id=job.job_id,
+                payload=cancel_payload,
+            )
+            await self._central_command(
+                close,
+                event="intent-close",
+                operation=lambda: self.client.close_executable_intent(close),
+            )
+            return ExecutorTickResult("pending-cancelled", close.binding.intent_id)
         if matches:
             return ExecutorTickResult(
                 "quarantined",
@@ -910,6 +1191,9 @@ class ExecutablePoolExecutor:
 
     async def recover(self) -> ExecutorTickResult:
         checkpoint = await self._checkpoint()
+        replayed_local = await self._replay_local_request(checkpoint)
+        if replayed_local is not None:
+            return replayed_local
         jobs = await self.slurm.inventory()
         recovering = tuple(
             record
@@ -935,6 +1219,14 @@ class ExecutablePoolExecutor:
             await self._bind_physical(envelope=envelope, job_id=matches[0].job_id)
             await self._publish_inventory(checkpoint, jobs=jobs)
             return ExecutorTickResult("adopted", intent_id, matches[0].job_id)
+        if envelope is not None and len(matches) == 0:
+            submitted_at = envelope.rendered.ownership_proof.metadata.submitted_at
+            high_water = await self.slurm.accounting_high_water(since=submitted_at)
+            terminal_matches = self._exact_terminal_matches(envelope, high_water.terminal_jobs)
+            if high_water.observed_through >= submitted_at and len(terminal_matches) == 1:
+                await self._bind_physical(envelope=envelope, job_id=terminal_matches[0].job_id)
+                await self._publish_inventory(checkpoint, jobs=jobs)
+                return ExecutorTickResult("adopted", intent_id, terminal_matches[0].job_id)
         await self._publish_inventory(checkpoint, jobs=jobs, quarantine_all=True)
         return ExecutorTickResult(
             "quarantined",

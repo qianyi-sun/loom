@@ -290,6 +290,40 @@ def _read_bearer(path: Path) -> str:
     return _validate_bearer(value)
 
 
+async def _stream_response_bounded(
+    http_client: httpx.AsyncClient,
+    method: str,
+    url: str,
+    *,
+    headers: dict[str, str],
+    content: bytes | None = None,
+    body_label: str,
+) -> tuple[int, bytes]:
+    try:
+        async with http_client.stream(
+            method,
+            url,
+            content=content,
+            headers=headers,
+        ) as response:
+            if response.status_code != 200:
+                return response.status_code, b""
+            chunks: list[bytes] = []
+            observed = 0
+            async for chunk in response.aiter_bytes():
+                observed += len(chunk)
+                if observed > _MAX_RECEIPT_BYTES:
+                    raise ExecutorTransportError(
+                        f"capacity manager {body_label} exceeds its byte bound"
+                    )
+                chunks.append(chunk)
+            return response.status_code, b"".join(chunks)
+    except ExecutorTransportError:
+        raise
+    except httpx.HTTPError:
+        raise ExecutorTransportError("capacity manager transport failed") from None
+
+
 class CapacityExecutorClient:
     """Send only exact pool-bound, zero-executable contracts to the manager."""
 
@@ -372,30 +406,27 @@ class CapacityExecutorClient:
         if contract is not None:
             self._assert_binding(contract)
             content = canonical_bytes(contract)
-        try:
-            response = await self._http.request(
-                method,
-                f"{self._manager_origin}{path}",
-                content=content,
-                headers={
-                    "Authorization": f"Bearer {self._bearer_token}",
-                    **({"Content-Type": "application/json"} if content is not None else {}),
-                },
-            )
-        except httpx.HTTPError:
-            raise ExecutorTransportError("capacity manager transport failed") from None
-        if 400 <= response.status_code < 500:
+        status_code, response_content = await _stream_response_bounded(
+            self._http,
+            method,
+            f"{self._manager_origin}{path}",
+            content=content,
+            headers={
+                "Authorization": f"Bearer {self._bearer_token}",
+                **({"Content-Type": "application/json"} if content is not None else {}),
+            },
+            body_label="receipt",
+        )
+        if 400 <= status_code < 500:
             raise ExecutorRejectedError(
-                f"capacity manager rejected executor request with status {response.status_code}"
+                f"capacity manager rejected executor request with status {status_code}"
             )
-        if response.status_code != 200:
+        if status_code != 200:
             raise ExecutorTransportError(
-                f"capacity manager rejected executor request with status {response.status_code}"
+                f"capacity manager rejected executor request with status {status_code}"
             )
-        if len(response.content) > _MAX_RECEIPT_BYTES:
-            raise ExecutorTransportError("capacity manager receipt exceeds its byte bound")
         try:
-            return receipt_model.model_validate_json(response.content)
+            return receipt_model.model_validate_json(response_content)
         except (ValidationError, ValueError) as exc:
             raise ExecutorTransportError("capacity manager receipt is invalid") from exc
 
@@ -633,30 +664,27 @@ class ExecutableCapacityExecutorClient:
         if contract is not None:
             self._assert_contract_binding(contract)
             content = canonical_executable_bytes(contract)
-        try:
-            response = await self._http.request(
-                method,
-                f"{self._manager_origin}{path}",
-                content=content,
-                headers={
-                    "Authorization": f"Bearer {self._bearer_token}",
-                    **({"Content-Type": "application/json"} if content is not None else {}),
-                },
-            )
-        except httpx.HTTPError:
-            raise ExecutorTransportError("capacity manager transport failed") from None
-        if 400 <= response.status_code < 500:
+        status_code, response_content = await _stream_response_bounded(
+            self._http,
+            method,
+            f"{self._manager_origin}{path}",
+            content=content,
+            headers={
+                "Authorization": f"Bearer {self._bearer_token}",
+                **({"Content-Type": "application/json"} if content is not None else {}),
+            },
+            body_label="receipt",
+        )
+        if 400 <= status_code < 500:
             raise ExecutorRejectedError(
-                f"capacity manager rejected executor request with status {response.status_code}"
+                f"capacity manager rejected executor request with status {status_code}"
             )
-        if response.status_code != 200:
+        if status_code != 200:
             raise ExecutorTransportError(
-                f"capacity manager rejected executor request with status {response.status_code}"
+                f"capacity manager rejected executor request with status {status_code}"
             )
-        if len(response.content) > _MAX_RECEIPT_BYTES:
-            raise ExecutorTransportError("capacity manager receipt exceeds its byte bound")
         try:
-            return receipt_model.model_validate_json(response.content)
+            return receipt_model.model_validate_json(response_content)
         except (ValidationError, ValueError) as exc:
             raise ExecutorTransportError("capacity manager receipt is invalid") from exc
 
@@ -707,28 +735,25 @@ class ExecutableCapacityExecutorClient:
     ) -> ExecutablePoolWorkV2 | None:
         if type(command_sequence) is not int or command_sequence < 0:
             raise ValueError("executable command high-water is invalid")
-        try:
-            response = await self._http.request(
-                "GET",
-                f"{self._manager_origin}/v2/executors/{self.registration.pool_id}/work",
-                headers={"Authorization": f"Bearer {self._bearer_token}"},
-            )
-        except httpx.HTTPError:
-            raise ExecutorTransportError("capacity manager transport failed") from None
-        if 400 <= response.status_code < 500:
+        status_code, response_content = await _stream_response_bounded(
+            self._http,
+            "GET",
+            f"{self._manager_origin}/v2/executors/{self.registration.pool_id}/work",
+            headers={"Authorization": f"Bearer {self._bearer_token}"},
+            body_label="work",
+        )
+        if 400 <= status_code < 500:
             raise ExecutorRejectedError(
-                f"capacity manager rejected executor request with status {response.status_code}"
+                f"capacity manager rejected executor request with status {status_code}"
             )
-        if response.status_code != 200:
+        if status_code != 200:
             raise ExecutorTransportError(
-                f"capacity manager rejected executor request with status {response.status_code}"
+                f"capacity manager rejected executor request with status {status_code}"
             )
-        if len(response.content) > _MAX_RECEIPT_BYTES:
-            raise ExecutorTransportError("capacity manager work exceeds its byte bound")
-        if response.content == b"null":
+        if response_content == b"null":
             return None
         try:
-            work = _EXECUTABLE_WORK.validate_json(response.content)
+            work = _EXECUTABLE_WORK.validate_json(response_content)
         except (ValidationError, ValueError) as exc:
             raise ExecutorTransportError("capacity manager work is invalid") from exc
         self._assert_contract_binding(work)

@@ -273,6 +273,31 @@ class SlurmCancelRequestV2(StrictSlurmV2Model):
     job_id: SlurmJobId
     submitter: SlurmIdentifier
     account: SlurmIdentifier
+    partition: SlurmIdentifier
+    cpus: Annotated[int, Field(gt=0, le=65_536)]
+    memory_bytes: PositiveSlurmQuantity
+    gpus: Annotated[int, Field(ge=0, le=1_024)]
+    generic_tres: Annotated[tuple[SlurmTresValueV2, ...], Field(max_length=MAX_GENERIC_TRES)] = ()
+    nodes: Annotated[tuple[str, ...], Field(max_length=MAX_SLURM_NODES)]
+    ownership_token: OwnershipToken
+    ownership_evidence_sha256: Sha256Digest
+
+    @field_validator("nodes")
+    @classmethod
+    def _nodes(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        return _canonical_nodes(value, allow_empty=True)
+
+    @field_validator("generic_tres")
+    @classmethod
+    def _unique_tres(cls, value: tuple[SlurmTresValueV2, ...]) -> tuple[SlurmTresValueV2, ...]:
+        return _canonical_tres(value)
+
+    @model_validator(mode="after")
+    def _typed_gpu_request(self) -> SlurmCancelRequestV2:
+        typed_total = _typed_gpu_total(self.generic_tres)
+        if typed_total is not None and typed_total != self.gpus:
+            raise ValueError("typed GPU TRES conflicts with aggregate GPU cancellation")
+        return self
 
 
 class SlurmJobObservationV2(StrictSlurmV2Model):

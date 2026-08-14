@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from uuid import UUID
 
 import pytest
+from sqlalchemy.sql.elements import TextClause
 
+import loom_capacity_executor.admission_client as admission_client_module
 from loom_capacity_agent.admission import ProtectedIntentObservationV2
 from loom_capacity_agent.claim_guard import ExecutableClaimProposalV2
 from loom_capacity_executor.admission_client import (
@@ -52,6 +55,7 @@ def test_database_client_loads_only_bounded_owner_only_tls_urls(
     assert captured["kwargs"] == {
         "connect_args": {"connect_timeout": 7},
         "isolation_level": "SERIALIZABLE",
+        "pool_timeout": 7,
         "pool_pre_ping": True,
     }
 
@@ -62,6 +66,110 @@ def test_database_client_loads_only_bounded_owner_only_tls_urls(
             subject_id=UUID(int=1),
             subject_incarnation=UUID(int=2),
         )
+
+
+def test_database_client_configures_pool_and_transaction_timeouts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    class Engine:
+        def dispose(self) -> None:  # pragma: no cover - constructor test only
+            return None
+
+    def engine_factory(url: str, **kwargs: object) -> Engine:
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        return Engine()
+
+    monkeypatch.setattr(
+        "loom_capacity_executor.admission_client.create_async_engine", engine_factory
+    )
+    path = _owner_file(
+        tmp_path / "database-url",
+        "postgresql+psycopg://admission:secret@db.internal/loom_dev_alice?sslmode=verify-full",
+    )
+
+    client = DatabaseExecutableAdmissionClient.from_database_url_file(
+        path,
+        subject_id=UUID(int=1),
+        subject_incarnation=UUID(int=2),
+        timeout_seconds=7,
+        pool_timeout_seconds=3,
+        statement_timeout_ms=1200,
+        lock_timeout_ms=800,
+        operation_timeout_seconds=4,
+    )
+
+    assert client.subject_id == UUID(int=1)
+    assert captured["kwargs"] == {
+        "connect_args": {"connect_timeout": 7},
+        "isolation_level": "SERIALIZABLE",
+        "pool_timeout": 3,
+        "pool_pre_ping": True,
+    }
+    assert client._statement_timeout_ms == 1200
+    assert client._lock_timeout_ms == 800
+    assert client._operation_timeout_seconds == 4
+
+
+@pytest.mark.asyncio
+async def test_database_store_call_sets_local_timeouts_and_rolls_back_on_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    statements: list[str] = []
+    exited_with: list[type[BaseException] | None] = []
+
+    class Transaction:
+        async def __aenter__(self) -> None:
+            return None
+
+        async def __aexit__(
+            self,
+            exc_type: type[BaseException] | None,
+            _exc: BaseException | None,
+            _tb: object,
+        ) -> None:
+            exited_with.append(exc_type)
+
+    class Session:
+        async def __aenter__(self) -> Session:
+            return self
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+        def begin(self) -> Transaction:
+            return Transaction()
+
+        async def execute(self, statement: object) -> None:
+            assert isinstance(statement, TextClause)
+            statements.append(str(statement))
+
+    class Store:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        async def observe_intent(self, _binding: object) -> None:
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(admission_client_module, "ExecutableAdmissionStore", Store)
+    client = object.__new__(DatabaseExecutableAdmissionClient)
+    client._factory = lambda: Session()  # type: ignore[assignment]
+    client._operation_timeout_seconds = 0.01
+    client._statement_timeout_ms = 1200
+    client._lock_timeout_ms = 800
+    client.subject_id = UUID(int=1)
+    client.subject_incarnation = UUID(int=2)
+
+    with pytest.raises(ExecutableAdmissionClientError, match="timed out"):
+        await asyncio.wait_for(client._store_call("observe_intent", object()), timeout=0.5)
+
+    assert statements == [
+        "SET LOCAL lock_timeout = '800ms'",
+        "SET LOCAL statement_timeout = '1200ms'",
+    ]
+    assert exited_with == [asyncio.CancelledError]
 
 
 @pytest.mark.parametrize(
