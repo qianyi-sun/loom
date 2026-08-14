@@ -351,6 +351,57 @@ async def test_capacity_projector_rejects_unknown_or_incoherent_subject_status(
 
 
 @pytest.mark.parametrize(
+    "intent_state",
+    ["proposed", "accepted", "launch-ready", "permitted"],
+)
+async def test_capacity_projector_accepts_complete_valid_subject_intent_states(
+    intent_state: str,
+) -> None:
+    subject_id = uuid4()
+    incarnation = uuid4()
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            json={
+                "schema_version": 2,
+                "subject_id": str(subject_id),
+                "subject_incarnation": str(incarnation),
+                "deployment_generation": 1,
+                "configuration_epoch": 1,
+                "execution_epoch": 7,
+                "execution_state": "active",
+                "executable_new_capacity_ceiling": 1,
+                "capacity_prepared": True,
+                "capacity_status": "waiting",
+                "worker_available": False,
+                "active_capacity_intents": [],
+                "active_capacity_intent_count": 0,
+                "active_capacity_slots": 0,
+                "quarantined_intent_count": 0,
+                "intent_state_counts": {intent_state: 1},
+                "blockers": [f"intent-{intent_state}"],
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        projector = CapacityManagerPersonalDevProjector(
+            manager_origin="https://capacity.example",
+            bearer_token="lifecycle-token",
+            http_client=http,
+        )
+        status = await projector.subject_status(
+            subject_id=subject_id,
+            subject_incarnation=incarnation,
+            deployment_generation=1,
+        )
+
+    assert status.subject_id == subject_id
+    assert status.subject_incarnation == incarnation
+
+
+@pytest.mark.parametrize(
     ("active_capacity_intent_count", "active_capacity_slots"),
     [(0, 1), (1, 0)],
 )

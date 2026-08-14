@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -26,6 +27,7 @@ from loom.personal_dev_capacity_runtime import (
     PersonalDevCapacityStatusReader,
     PsycopgPersonalDevCapacityDatabase,
     _new_credentials,
+    _role_names,
 )
 from loom_capacity_manager.contracts import ResourceVectorV1
 from loom_capacity_manager.executable_contracts import (
@@ -461,6 +463,155 @@ async def test_destroy_seal_disables_primary_and_capacity_database_logins(
 
 
 @pytest.mark.asyncio
+async def test_destroy_seal_terminates_live_sessions_and_blocks_reconnects(
+    postgres_url: str,
+) -> None:
+    name = f"sealrace-{uuid4().hex[:8]}"
+    database_name = make_url(postgres_url).database
+    assert database_name is not None
+    identity = replace(derive_identity(name), database=database_name)
+    database = PsycopgPersonalDevCapacityDatabase(postgres_url)
+    connect_url = postgres_url.replace("postgresql+psycopg://", "postgresql://", 1)
+    application_password = f"app-password-{uuid4().hex}"
+    async with await psycopg.AsyncConnection.connect(connect_url, autocommit=True) as connection:
+        await connection.execute(
+            f"CREATE ROLE \"{identity.db_role}\" LOGIN PASSWORD '{application_password}'"
+        )
+    credentials = _new_credentials()
+    (
+        owner,
+        migrator,
+        agent,
+        executor,
+        observer,
+        _migrator_url,
+        _agent_url,
+    ) = await database._converge_roles(identity, credentials)
+
+    role_urls = {
+        migrator: make_url(postgres_url)
+        .set(database=database_name, username=migrator, password=credentials.migrator_password)
+        .render_as_string(hide_password=False)
+        .replace("postgresql+psycopg://", "postgresql://", 1),
+        agent: make_url(postgres_url)
+        .set(database=database_name, username=agent, password=credentials.agent_password)
+        .render_as_string(hide_password=False)
+        .replace("postgresql+psycopg://", "postgresql://", 1),
+        observer: make_url(postgres_url)
+        .set(database=database_name, username=observer, password=credentials.observer_password)
+        .render_as_string(hide_password=False)
+        .replace("postgresql+psycopg://", "postgresql://", 1),
+        identity.db_role: make_url(postgres_url)
+        .set(database=database_name, username=identity.db_role, password=application_password)
+        .render_as_string(hide_password=False)
+        .replace("postgresql+psycopg://", "postgresql://", 1),
+    }
+    live_connections: dict[str, psycopg.AsyncConnection] = {}
+    backend_pids: dict[str, int] = {}
+    protected_roles = (*_role_names(identity), identity.db_role)
+    role_lock: psycopg.AsyncConnection | None = None
+    try:
+        for role, url in role_urls.items():
+            connection = await psycopg.AsyncConnection.connect(url, autocommit=True)
+            live_connections[role] = connection
+            row = await connection.execute("SELECT pg_backend_pid()")
+            pid = await row.fetchone()
+            assert pid is not None
+            backend_pids[role] = pid[0]
+
+        race_connected = asyncio.Event()
+
+        async def race_reconnect(role: str) -> str:
+            try:
+                connection = await psycopg.AsyncConnection.connect(role_urls[role], autocommit=True)
+            except psycopg.Error:
+                return "blocked"
+            try:
+                race_connected.set()
+                await seal_task
+                with pytest.raises(psycopg.Error):
+                    await connection.execute("SELECT 1")
+                return "terminated"
+            finally:
+                with suppress(Exception):
+                    await connection.close()
+
+        # Hold the first role update so a reversed terminate-before-NOLOGIN
+        # implementation has a deterministic observable failure window.
+        role_lock = await psycopg.AsyncConnection.connect(connect_url)
+        await role_lock.execute(
+            "SELECT oid FROM pg_authid WHERE rolname = %s FOR UPDATE",
+            (owner,),
+        )
+        seal_task = asyncio.create_task(database.seal(identity))
+        async with asyncio.timeout(5):
+            while True:
+                async with await psycopg.AsyncConnection.connect(connect_url) as probe:
+                    waiting = await probe.execute(
+                        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity "
+                        "WHERE query LIKE %s AND wait_event_type = 'Lock')",
+                        (f'ALTER ROLE "%{owner}%" NOLOGIN PASSWORD NULL',),
+                    )
+                    if bool((await waiting.fetchone())[0]):
+                        break
+                await asyncio.sleep(0.01)
+        for connection in live_connections.values():
+            await connection.execute("SELECT 1")
+
+        race_task = asyncio.create_task(race_reconnect(agent))
+        async with asyncio.timeout(5):
+            await race_connected.wait()
+        await role_lock.commit()
+        race_result = await race_task
+        await seal_task
+
+        for connection in live_connections.values():
+            with pytest.raises(psycopg.Error):
+                await connection.execute("SELECT 1")
+
+        async with await psycopg.AsyncConnection.connect(connect_url) as admin:
+            roles = await admin.execute(
+                "SELECT rolname, rolcanlogin, rolpassword IS NULL FROM pg_authid "
+                "WHERE rolname = ANY(%s) ORDER BY rolname",
+                ([identity.db_role, owner, migrator, agent, executor, observer],),
+            )
+            assert await roles.fetchall() == sorted(
+                (role, False, True)
+                for role in (identity.db_role, owner, migrator, agent, executor, observer)
+            )
+            active = await admin.execute(
+                "SELECT pid FROM pg_stat_activity WHERE pid = ANY(%s)",
+                (list(backend_pids.values()),),
+            )
+            assert await active.fetchall() == []
+
+        assert race_result in {"blocked", "terminated"}
+        for _role, url in role_urls.items():
+            with pytest.raises(psycopg.Error):
+                async with await psycopg.AsyncConnection.connect(url, autocommit=True):
+                    pass
+    finally:
+        if role_lock is not None:
+            with suppress(Exception):
+                await role_lock.rollback()
+            with suppress(Exception):
+                await role_lock.close()
+        for connection in live_connections.values():
+            with suppress(Exception):
+                await connection.close()
+        async with await psycopg.AsyncConnection.connect(
+            connect_url, autocommit=True
+        ) as connection:
+            existing_roles = await connection.execute(
+                "SELECT rolname FROM pg_roles WHERE rolname = ANY(%s)",
+                (list(protected_roles),),
+            )
+            for (role_name,) in await existing_roles.fetchall():
+                await connection.execute(f'DROP OWNED BY "{role_name}"')
+                await connection.execute(f'DROP ROLE IF EXISTS "{role_name}"')
+
+
+@pytest.mark.asyncio
 async def test_personal_capacity_status_reader_accepts_jsonb_uuid_dict_observation(
     postgres_url: str,
 ) -> None:
@@ -695,67 +846,3 @@ async def test_personal_capacity_status_reader_accepts_jsonb_uuid_dict_observati
             )
             connection.exec_driver_sql(f"DROP DATABASE IF EXISTS {quoted_database}")
         admin_engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_destroy_seal_disables_all_logins_before_terminating_sessions(
-    postgres_url: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    identity = replace(
-        derive_identity(f"ordering-{uuid4().hex[:8]}"),
-        database=make_url(postgres_url).database,
-    )
-    assert identity.database is not None
-    database = PsycopgPersonalDevCapacityDatabase(postgres_url)
-    protected = (
-        f"loom_cap_{identity.name.replace('-', '_')}_owner",
-        f"loom_cap_{identity.name.replace('-', '_')}_migrator",
-        f"loom_cap_{identity.name.replace('-', '_')}_agent",
-        f"loom_cap_{identity.name.replace('-', '_')}_executor",
-        f"loom_cap_{identity.name.replace('-', '_')}_observer",
-        identity.db_role,
-    )
-    statements: list[str] = []
-
-    class _Result:
-        def __init__(self, rows):
-            self._rows = rows
-
-        async def fetchall(self):
-            return self._rows
-
-        async def fetchone(self):
-            return self._rows[0] if self._rows else None
-
-    class _Connection:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            return None
-
-        async def execute(self, query, params=None):
-            statement = str(query)
-            statements.append(statement)
-            if "SELECT rolname FROM pg_roles" in statement:
-                return _Result([(role,) for role in protected])
-            if "SELECT EXISTS (SELECT 1 FROM pg_database" in statement:
-                return _Result([(False,)])
-            return _Result([])
-
-    async def fake_connect(*_args: object, **_kwargs: object) -> _Connection:
-        return _Connection()
-
-    monkeypatch.setattr(psycopg.AsyncConnection, "connect", fake_connect)
-
-    await database.seal(identity)
-
-    terminate_index = next(
-        index for index, statement in enumerate(statements) if "pg_terminate_backend" in statement
-    )
-    alter_indices = [
-        index for index, statement in enumerate(statements) if "ALTER ROLE " in statement
-    ]
-    assert len(alter_indices) == len(protected)
-    assert max(alter_indices) < terminate_index

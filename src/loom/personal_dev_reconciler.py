@@ -362,9 +362,7 @@ class PersonalDevEnvironmentReconciler:
                         "capacity manager rejected the request at its current epoch"
                     ) from exc
                 refreshed = request.model_copy(
-                    update={
-                        "expected_configuration_epoch": refreshed_epoch.configuration_epoch
-                    }
+                    update={"expected_configuration_epoch": refreshed_epoch.configuration_epoch}
                 )
                 callback_now = now + timedelta(seconds=loop.time() - started)
                 await self.authority.refresh_capacity_projection_epoch(
@@ -503,9 +501,7 @@ class PersonalDevEnvironmentReconciler:
                 reporter_incarnation=operation.capacity_reporter_incarnation,
                 reporter_token_sha256=operation.capacity_reporter_token_sha256,
                 protected_admission_sha256=operation.protected_admission_sha256,
-                capacity_agent_installation_sha256=(
-                    operation.capacity_agent_installation_sha256
-                ),
+                capacity_agent_installation_sha256=(operation.capacity_agent_installation_sha256),
                 supported_pool_ids=operation.capacity_supported_pool_ids,
                 supported_architectures=operation.capacity_supported_architectures,
             )
@@ -540,9 +536,7 @@ class PersonalDevEnvironmentReconciler:
                         "capacity manager rejected retirement at its current epoch"
                     ) from exc
                 refreshed = request.model_copy(
-                    update={
-                        "expected_configuration_epoch": refreshed_epoch.configuration_epoch
-                    }
+                    update={"expected_configuration_epoch": refreshed_epoch.configuration_epoch}
                 )
                 callback_now = initial_now + timedelta(seconds=loop.time() - started)
                 await self.authority.refresh_capacity_projection_epoch(

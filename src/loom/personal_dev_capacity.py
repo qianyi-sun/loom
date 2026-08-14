@@ -32,7 +32,19 @@ from loom_capacity_manager.executable_contracts import ExecutableIntentBindingV2
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 _MAX_RESPONSE_BYTES = 64 * 1024
 _EXECUTABLE_INTENT_STATES = frozenset(
-    {"submitting-unknown", "bound", "observed", "terminal", "closing", "released", "quarantined"}
+    {
+        "proposed",
+        "accepted",
+        "launch-ready",
+        "permitted",
+        "submitting-unknown",
+        "bound",
+        "observed",
+        "terminal",
+        "closing",
+        "released",
+        "quarantined",
+    }
 )
 
 

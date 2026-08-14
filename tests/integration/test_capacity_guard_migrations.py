@@ -815,6 +815,12 @@ def test_guard_0013_downgrade_restores_executor_only_observation(
     capacity_guard_database: dict[str, object],
 ) -> None:
     cfg = _guard_config(capacity_guard_database)
+    observer_role = _value(capacity_guard_database, "observer_role")
+    observation_signature = "loom_capacity_guard.observe_executable_intent(uuid,uuid,uuid)"
+    with _owner_connection(capacity_guard_database) as connection:
+        connection.exec_driver_sql(
+            f'GRANT USAGE ON SCHEMA loom_capacity_guard TO "{observer_role}"'
+        )
     executor = create_engine(
         _value(capacity_guard_database, "executor_url"), isolation_level="SERIALIZABLE"
     )
@@ -823,6 +829,21 @@ def test_guard_0013_downgrade_restores_executor_only_observation(
     )
     try:
         command.downgrade(cfg, "guard_0012")
+        with create_engine(_value(capacity_guard_database, "admin_url")).connect() as connection:
+            assert (
+                connection.execute(
+                    text("SELECT has_schema_privilege(:role, 'loom_capacity_guard', 'USAGE')"),
+                    {"role": observer_role},
+                ).scalar_one()
+                is True
+            )
+            assert (
+                connection.execute(
+                    text("SELECT has_function_privilege(:role, :function, 'EXECUTE')"),
+                    {"role": observer_role, "function": observation_signature},
+                ).scalar_one()
+                is False
+            )
         statement = text(
             "SELECT loom_capacity_guard.observe_executable_intent("
             "'00000000-0000-0000-0000-000000000001'::uuid, "
@@ -844,12 +865,22 @@ def test_guard_0013_downgrade_restores_executor_only_observation(
         with create_engine(_value(capacity_guard_database, "admin_url")).connect() as connection:
             assert (
                 connection.execute(
+                    text("SELECT has_function_privilege(:role, :function, 'EXECUTE')"),
+                    {"role": observer_role, "function": observation_signature},
+                ).scalar_one()
+                is True
+            )
+            assert (
+                connection.execute(
                     text(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
                 == "guard_0013"
             )
+        with observer.connect() as connection, pytest.raises(DBAPIError) as caught:
+            connection.execute(statement)
+        assert getattr(caught.value.orig, "sqlstate", None) == "55000"
     finally:
         executor.dispose()
         observer.dispose()

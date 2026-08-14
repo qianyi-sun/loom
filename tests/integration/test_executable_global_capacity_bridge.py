@@ -32,9 +32,7 @@ async def test_two_owners_share_both_pools_without_cross_binding(
     assert executable_capacity_harness.gb10.owner_slots(bob.subject_id) == 1
     assert executable_capacity_harness.cross_owner_bindings() == []
     executor_status = await executable_capacity_harness.executable_executor_status()
-    alice_status = await executable_capacity_harness.executable_subject_status(
-        alice.subject_id
-    )
+    alice_status = await executable_capacity_harness.executable_subject_status(alice.subject_id)
     bob_status = await executable_capacity_harness.executable_subject_status(bob.subject_id)
     assert executor_status["execution_state"] == "active"
     assert executor_status["blockers"] == []

@@ -21,12 +21,12 @@ from loom.personal_dev_activation import (
     PersonalDevActivationVerifier,
 )
 from loom.personal_dev_candidate import PERSONAL_DEV_COMPONENTS
+from loom.personal_dev_capacity import PersonalDevCapacityAvailability
 from loom.personal_dev_environment import (
     PersonalDevApplyReservation,
     PersonalDevEnvironmentRecord,
     PersonalDevLifecycleOperationRecord,
 )
-from loom.personal_dev_capacity import PersonalDevCapacityAvailability
 from loom_service.routes.dev_instances import (
     DevInstanceCreateRequest,
     PersonalDevActivationAcknowledgementPayload,
