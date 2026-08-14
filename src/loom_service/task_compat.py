@@ -18,6 +18,7 @@ without an upstream `solve.sh`).
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 # Convention: current pytest adapters co-emit `solution/solve.sh` next to a
@@ -25,6 +26,50 @@ from typing import Any
 # must publish an explicit per-task eligibility tag.
 _PYTEST_VERIFIER = "pytest"
 _ORACLE_ELIGIBLE_TAG = "oracle_eligible"
+
+
+@dataclass(frozen=True)
+class AgentTaskCompatibility:
+    """Missing capabilities in each direction for one agent/task pair."""
+
+    missing_from_task: frozenset[str]
+    missing_from_agent: frozenset[str]
+
+    @property
+    def compatible(self) -> bool:
+        return not self.missing_from_task and not self.missing_from_agent
+
+
+def task_required_agent_capabilities(
+    task_config: Mapping[str, Any],
+) -> frozenset[str]:
+    raw = task_config.get("required_agent_capabilities")
+    if not isinstance(raw, (list, tuple, set, frozenset)):
+        return frozenset()
+    return frozenset(item for item in raw if isinstance(item, str))
+
+
+def agent_task_compatibility(
+    task_config: Mapping[str, Any],
+    *,
+    agent_requires: Iterable[str],
+    agent_provides: Iterable[str],
+    tags: Mapping[str, str] | None = None,
+) -> AgentTaskCompatibility:
+    required_from_task = frozenset(agent_requires)
+    provided_by_agent = frozenset(agent_provides)
+    missing_from_task = frozenset(
+        capability
+        for capability in required_from_task
+        if not task_provides_capability(task_config, capability, tags=tags)
+    )
+    missing_from_agent = (
+        task_required_agent_capabilities(task_config) - provided_by_agent
+    )
+    return AgentTaskCompatibility(
+        missing_from_task=missing_from_task,
+        missing_from_agent=missing_from_agent,
+    )
 
 
 def task_provides_capability(

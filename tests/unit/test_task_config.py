@@ -29,6 +29,18 @@ def test_minimal_config_parses():
     assert cfg.steps == []
 
 
+def test_task_config_round_trips_required_agent_capabilities() -> None:
+    raw = _minimal_config().model_dump(mode="json")
+    raw["required_agent_capabilities"] = ["workspace_exec"]
+
+    cfg = TaskConfig.model_validate(raw)
+
+    assert cfg.required_agent_capabilities == frozenset({"workspace_exec"})
+    assert cfg.model_dump(mode="json")["required_agent_capabilities"] == [
+        "workspace_exec",
+    ]
+
+
 def test_multi_step_config_weights_optional_unless_weighted():
     _minimal_config()
     ms = MultiStepConfig(reward_strategy="mean")

@@ -6,6 +6,7 @@ mid-trial (the original case: oracle vs. non-pytest benchmarks)."""
 
 from __future__ import annotations
 
+from loom_service import task_compat
 from loom_service.agent_catalog import get_agent
 from loom_service.task_compat import (
     filter_tasks_by_agent_capability,
@@ -31,15 +32,60 @@ def test_oracle_agent_declares_solution_solve_sh_requirement() -> None:
     oracle = get_agent("oracle")
     assert oracle is not None
     assert "solution_solve_sh" in oracle.requires_capabilities
+    assert oracle.provides_capabilities == frozenset({"workspace_exec"})
 
 
 def test_litellm_agent_has_no_hard_capability_requirements() -> None:
-    """Model-backed agents work against any task shape — they emit
-    the answer however the task's verifier expects it. The preflight
-    should never filter tasks for them."""
+    """The direct completion runtime has no task prerequisites, but it
+    also does not claim a workspace execution surface."""
     litellm = get_agent("litellm")
     assert litellm is not None
     assert litellm.requires_capabilities == frozenset()
+    assert litellm.provides_capabilities == frozenset()
+
+
+def test_terminus_2_provides_workspace_execution() -> None:
+    terminus = get_agent("terminus-2")
+    assert terminus is not None
+    assert terminus.provides_capabilities == frozenset({"workspace_exec"})
+
+
+def test_agent_task_compatibility_reports_missing_agent_capability() -> None:
+    cfg = {
+        **_config("script"),
+        "required_agent_capabilities": ["workspace_exec"],
+    }
+
+    compatibility = getattr(task_compat, "agent_task_compatibility", None)
+    assert compatibility is not None
+    result = compatibility(
+        cfg,
+        agent_requires=frozenset(),
+        agent_provides=frozenset(),
+    )
+
+    assert result.compatible is False
+    assert result.missing_from_agent == frozenset({"workspace_exec"})
+    assert result.missing_from_task == frozenset()
+
+
+def test_agent_task_compatibility_requires_both_directions() -> None:
+    cfg = {
+        **_config("script"),
+        "required_agent_capabilities": ["workspace_exec"],
+    }
+
+    compatibility = getattr(task_compat, "agent_task_compatibility", None)
+    assert compatibility is not None
+    result = compatibility(
+        cfg,
+        agent_requires=frozenset({"solution_solve_sh"}),
+        agent_provides=frozenset({"workspace_exec"}),
+    )
+
+    assert result.compatible is False
+    assert result.missing_from_agent == frozenset()
+    assert result.missing_from_task == frozenset({"solution_solve_sh"})
 
 
 def test_pytest_verifier_task_provides_solve_sh_capability() -> None:

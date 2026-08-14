@@ -120,6 +120,9 @@ class AgentEntry:
     # preflight to skip incompatible (agent, task) combos before
     # fan-out instead of bubbling agent_error after submit.
     requires_capabilities: frozenset[str] = frozenset()
+    # Execution surfaces this runtime exposes to a task. Tasks declare
+    # requirements separately in TaskConfig.required_agent_capabilities.
+    provides_capabilities: frozenset[str] = frozenset()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -135,6 +138,7 @@ class AgentEntry:
             "readiness_message": self.readiness_message,
             "catalog_visibility": self.catalog_visibility,
             "requires_capabilities": sorted(self.requires_capabilities),
+            "provides_capabilities": sorted(self.provides_capabilities),
         }
 
     def readiness_error(self) -> str | None:
@@ -167,6 +171,7 @@ _BUILTIN: tuple[AgentEntry, ...] = (
         # out at POST /batches preflight rather than launched and
         # failed mid-trial with `AgentError: solve.sh ... not found`.
         requires_capabilities=frozenset({"solution_solve_sh"}),
+        provides_capabilities=frozenset({"workspace_exec"}),
     ),
     AgentEntry(
         name="litellm",
@@ -208,6 +213,7 @@ _BUILTIN: tuple[AgentEntry, ...] = (
             base_url_env="LOOM_GATEWAY_URL",
             model_name_template="openai/{model_id}",
         ),
+        provides_capabilities=frozenset({"workspace_exec"}),
     ),
 )
 # Note: `claude-code-inbox` was a separate catalog entry for the v0.7
@@ -446,6 +452,7 @@ def list_agents(*, include_internal: bool = False) -> list[AgentEntry]:
                 readiness_status=readiness_status,
                 readiness_message=readiness_message,
                 catalog_visibility=visibility,
+                provides_capabilities=frozenset({"workspace_exec"}),
             ),
         )
     return entries

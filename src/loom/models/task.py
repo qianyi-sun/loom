@@ -154,6 +154,7 @@ class MultiStepConfig(BaseModel):
 class TaskConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     schema_version: Literal["1"] = "1"
+    required_agent_capabilities: frozenset[str] = frozenset()
     task: TaskMetadata
     environment: EnvironmentConfig
     agent: AgentDefaults

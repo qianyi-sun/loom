@@ -144,6 +144,21 @@ def test_every_displayed_agent_is_service_mode_ready() -> None:
         )
 
 
+def test_every_displayed_subprocess_agent_provides_workspace_exec() -> None:
+    """Removing workspace capability metadata from a CLI adapter would let
+    submission preflight reject tasks the runtime can actually execute."""
+    import loom_launcher.adapters  # noqa: F401
+
+    from loom_service.agent_catalog import list_agents
+
+    adapters = [entry for entry in list_agents() if entry.kind == "adapter"]
+    assert adapters
+    assert all(
+        "workspace_exec" in entry.provides_capabilities
+        for entry in adapters
+    )
+
+
 # ─── Agent × benchmark compatibility (metadata-level) ──────────────
 
 
