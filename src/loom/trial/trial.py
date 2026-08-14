@@ -201,7 +201,6 @@ class Trial:
 
         cancelled = False
         pending_llm_rows: list[dict[str, Any]] | None = None
-        result.trajectory_uri = self.ctx.trajectory_uri
         seq = _SeqCounter()
 
         try:
@@ -432,6 +431,7 @@ class Trial:
         finally:
             try:
                 trajectory_body = self.ctx.local_trajectory_path.read_bytes()
+                result.trajectory_uri = self.ctx.trajectory_uri if writer.remote_committed else None
                 result.trajectory_sha256 = hashlib.sha256(trajectory_body).hexdigest()
                 result.trajectory_size_bytes = len(trajectory_body)
                 finalized = await asyncio.wait_for(

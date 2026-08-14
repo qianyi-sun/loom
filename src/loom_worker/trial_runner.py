@@ -7,6 +7,7 @@ the Control Plane.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -40,6 +41,11 @@ from loom_worker.task_sidecars import DockerTaskSidecarRuntime
 from loom_worker.vllm_registry import WorkerVLLMRegistry
 
 logger = logging.getLogger(__name__)
+
+_TERMINAL_TRIAL_STATES = frozenset(
+    {TrialState.SUCCEEDED, TrialState.FAILED, TrialState.CANCELLED}
+)
+_TERMINAL_TRIAL_STATE_VALUES = frozenset(state.value for state in _TERMINAL_TRIAL_STATES)
 
 
 # (state, failure_reason, failure_message) → bool: True if the Control Plane
@@ -291,7 +297,7 @@ class LocalTrialRunner:
             slurm_gpu_device_ids=self.slurm_gpu_device_ids,
         )
 
-        deferred_success_patch: tuple[str, str | None, str | None] | None = None
+        deferred_terminal_patch: tuple[str, str | None, str | None] | None = None
 
         async def _send_state_patch(
             state: str,
@@ -322,11 +328,31 @@ class LocalTrialRunner:
                 return False
 
         async def _patch(state: str, fr: str | None, fm: str | None = None) -> None:
-            nonlocal deferred_success_patch
-            if state == TrialState.SUCCEEDED.value and self.output_projection_callback is not None:
-                deferred_success_patch = (state, fr, fm)
+            nonlocal deferred_terminal_patch
+            if (
+                state in _TERMINAL_TRIAL_STATE_VALUES
+                and self.output_projection_callback is not None
+            ):
+                deferred_terminal_patch = (state, fr, fm)
                 return
             await _send_state_patch(state, fr, fm)
+
+        async def _project_then_report_terminal(result: TrialResult) -> bool:
+            projection_ok = await self._patch_output_projection(result)
+            if not projection_ok:
+                if result.state == TrialState.SUCCEEDED:
+                    result.state = TrialState.FAILED
+                    result.failure_reason = FailureReason.TRAJECTORY_FLUSH_FAILED
+                    result.failure_message = (
+                        result.failure_message
+                        or "successful trial output projection was not accepted "
+                        "by the control plane"
+                    )
+                    result.finished_at = datetime.now(UTC)
+                return False
+            if deferred_terminal_patch is not None:
+                await _send_state_patch(*deferred_terminal_patch)
+            return True
 
         trial = Trial(ctx=ctx, state_patch=_patch)
         # Phase D: when a rotator is configured, wrap the trial body
@@ -343,26 +369,14 @@ class LocalTrialRunner:
                     network_name=(sandbox_bridge.name if sandbox_bridge is not None else None),
                 )
             result = await trial.run()
-            if result.state == TrialState.SUCCEEDED:
-                projection_ok = await self._patch_output_projection(result)
-                if not projection_ok:
-                    result.state = TrialState.FAILED
-                    result.failure_reason = FailureReason.TRAJECTORY_FLUSH_FAILED
-                    result.failure_message = (
-                        result.failure_message
-                        or "successful trial output projection was not accepted "
-                        "by the control plane"
-                    )
-                    result.finished_at = datetime.now(UTC)
-                    await _send_state_patch(
-                        result.state.value,
-                        result.failure_reason.value,
-                        result.failure_message,
-                    )
-                    return result
-                if deferred_success_patch is not None:
-                    await _send_state_patch(*deferred_success_patch)
+            if result.state in _TERMINAL_TRIAL_STATES:
+                await _project_then_report_terminal(result)
             return result
+        except asyncio.CancelledError:
+            cancelled_result = trial.result
+            if cancelled_result is not None and cancelled_result.state == TrialState.CANCELLED:
+                await asyncio.shield(_project_then_report_terminal(cancelled_result))
+            raise
         except Exception:
             logger.exception("trial_runner_uncaught_exception trial=%s", self.trial_id)
             if trial.result is None:
@@ -379,6 +393,7 @@ class LocalTrialRunner:
                     result.failure_reason.value if result.failure_reason else None,
                     result.failure_message,
                 )
+                await _project_then_report_terminal(result)
                 return result
             raise
         finally:
@@ -420,8 +435,6 @@ class LocalTrialRunner:
 
     async def _patch_output_projection(self, result: TrialResult) -> bool:
         if self.output_projection_callback is None:
-            return True
-        if result.state != TrialState.SUCCEEDED:
             return True
         result_payload = _build_result_payload(result)
         trajectory_index = _build_trajectory_index(result)

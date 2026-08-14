@@ -3,6 +3,7 @@ the callback. Uses Plan 1+2+3 stack with fakes."""
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import uuid4
@@ -726,6 +727,129 @@ async def test_runner_projects_successful_trial_outputs(  # type: ignore[no-unty
     ]
 
 
+async def test_runner_projects_failed_trial_outputs_before_terminal_state(
+    hello_task: Path,
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    projected: dict[str, Any] = {}
+
+    class _FailingAgent:
+        mode = "out-of-box"
+        name = "failing"
+        version = "1"
+        supports_os = frozenset({"linux"})
+        model = None
+
+        async def run(self, **_kwargs: Any) -> None:
+            raise RuntimeError("intentional agent failure")
+
+    async def fake_state_patch(
+        state: str,
+        _failure_reason: str | None,
+        _failure_message: str | None = None,
+    ) -> bool:
+        if state in {"succeeded", "failed", "cancelled"}:
+            events.append(f"state:{state}")
+        return True
+
+    async def fake_output_projection(
+        result_payload: dict[str, Any],
+        trajectory_index: dict[str, Any],
+    ) -> bool:
+        events.append(f"projection:{result_payload['state']}")
+        projected.update(trajectory_index)
+        return True
+
+    runner = LocalTrialRunner(
+        trial_id=uuid4(),
+        team_id=uuid4(),
+        task_config=_task_config(),
+        task_checksum="0" * 64,
+        task_dir=hello_task,
+        trial_config=stub_trial_config(agent_name="failing"),
+        driver_factory=lambda: FakeDriver(),
+        agent_factory=lambda *_args: _FailingAgent(),
+        verifier_factory=lambda: _AlwaysPassVerifier(),  # type: ignore[return-value]
+        object_store=FakeObjectStore(),
+        gateway_client=FakeLLMGatewayClient(scripted=[]),
+        local_trajectory_root=tmp_path / "trajectories",
+        state_patch_callback=fake_state_patch,
+        output_projection_callback=fake_output_projection,
+    )
+
+    result = await runner.run()
+
+    assert result.state == TrialState.FAILED
+    assert events == ["projection:failed", "state:failed"]
+    assert projected["trajectory_uri"] == result.trajectory_uri
+    assert projected["atif_uri"] == result.atif_uri
+    assert projected["trajectory_sha256"] == result.trajectory_sha256
+    assert projected["atif_sha256"] == result.atif_sha256
+
+
+async def test_runner_projects_cancelled_trial_outputs_before_cancellation_propagates(
+    hello_task: Path,
+    tmp_path: Path,
+) -> None:
+    agent_started = asyncio.Event()
+    events: list[str] = []
+
+    class _BlockingAgent:
+        mode = "out-of-box"
+        name = "blocking"
+        version = "1"
+        supports_os = frozenset({"linux"})
+        model = None
+
+        async def run(self, **_kwargs: Any) -> None:
+            agent_started.set()
+            await asyncio.Event().wait()
+
+    async def fake_state_patch(
+        state: str,
+        _failure_reason: str | None,
+        _failure_message: str | None = None,
+    ) -> bool:
+        if state in {"succeeded", "failed", "cancelled"}:
+            events.append(f"state:{state}")
+        return True
+
+    async def fake_output_projection(
+        result_payload: dict[str, Any],
+        trajectory_index: dict[str, Any],
+    ) -> bool:
+        events.append(f"projection:{result_payload['state']}")
+        assert trajectory_index["trajectory_uri"] is not None
+        assert trajectory_index["atif_uri"] is not None
+        return True
+
+    runner = LocalTrialRunner(
+        trial_id=uuid4(),
+        team_id=uuid4(),
+        task_config=_task_config(),
+        task_checksum="0" * 64,
+        task_dir=hello_task,
+        trial_config=stub_trial_config(agent_name="blocking"),
+        driver_factory=lambda: FakeDriver(),
+        agent_factory=lambda *_args: _BlockingAgent(),
+        verifier_factory=lambda: _AlwaysPassVerifier(),  # type: ignore[return-value]
+        object_store=FakeObjectStore(),
+        gateway_client=FakeLLMGatewayClient(scripted=[]),
+        local_trajectory_root=tmp_path / "trajectories",
+        state_patch_callback=fake_state_patch,
+        output_projection_callback=fake_output_projection,
+    )
+
+    run_task = asyncio.create_task(runner.run())
+    await agent_started.wait()
+    run_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run_task
+
+    assert events == ["projection:cancelled", "state:cancelled"]
+
+
 async def test_runner_does_not_report_success_when_output_projection_fails(  # type: ignore[no-untyped-def]
     hello_task,
     tmp_path: Path,
@@ -797,10 +921,61 @@ async def test_runner_does_not_report_success_when_output_projection_fails(  # t
     assert result.state == TrialState.FAILED
     assert result.failure_reason == FailureReason.TRAJECTORY_FLUSH_FAILED
     assert not any(call[0] == "succeeded" for call in state_calls)
-    assert any(
-        call[0] == "failed" and call[1] == FailureReason.TRAJECTORY_FLUSH_FAILED.value
-        for call in state_calls
+    assert not any(call[0] in {"succeeded", "failed", "cancelled"} for call in state_calls)
+
+
+async def test_runner_does_not_project_uncommitted_trajectory_identity(
+    hello_task: Path,
+    tmp_path: Path,
+) -> None:
+    projected: dict[str, Any] = {}
+
+    class MissingBucketStore(FakeObjectStore):
+        async def create_multipart_upload(self, *, bucket: str, key: str):  # type: ignore[no-untyped-def]
+            raise RuntimeError(f"NoSuchBucket: {bucket}/{key}")
+
+        async def put_object(self, *, bucket: str, key: str, body: bytes):  # type: ignore[no-untyped-def]
+            raise RuntimeError(f"NoSuchBucket: {bucket}/{key}")
+
+    async def fake_state_patch(
+        _state: str,
+        _failure_reason: str | None,
+        _failure_message: str | None = None,
+    ) -> bool:
+        return True
+
+    async def fake_output_projection(
+        _result_payload: dict[str, Any],
+        trajectory_index: dict[str, Any],
+    ) -> bool:
+        projected.update(trajectory_index)
+        return True
+
+    trial_id = uuid4()
+    runner = LocalTrialRunner(
+        trial_id=trial_id,
+        team_id=uuid4(),
+        task_config=_task_config(),
+        task_checksum="0" * 64,
+        task_dir=hello_task,
+        trial_config=stub_trial_config(),
+        driver_factory=lambda: FakeDriver(),
+        agent_factory=lambda task_dir, _gw, _model, _name: OracleAgent(
+            task_dir=task_dir, trial_id=trial_id
+        ),
+        verifier_factory=lambda: _AlwaysPassVerifier(),  # type: ignore[return-value]
+        object_store=MissingBucketStore(),
+        gateway_client=FakeLLMGatewayClient(scripted=[]),
+        local_trajectory_root=tmp_path / "trajectories",
+        state_patch_callback=fake_state_patch,
+        output_projection_callback=fake_output_projection,
     )
+
+    result = await runner.run()
+
+    assert result.state == TrialState.FAILED
+    assert projected["trajectory_uri"] is None
+    assert projected["atif_uri"] is None
 
 
 async def test_runner_logs_fenced_response(  # type: ignore[no-untyped-def]
