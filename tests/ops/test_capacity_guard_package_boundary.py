@@ -253,7 +253,7 @@ def test_complete_mutation_inventory_migration_only_tightens_inert_policy() -> N
 
 def test_executable_intent_observation_migration_is_read_only_and_role_bounded() -> None:
     source = Path(
-        "capacity_guard_migrations/versions/guard_0012_executable_intent_observation.py"
+        "capacity_guard_migrations/versions/guard_0013_executable_intent_observation.py"
     ).read_text(encoding="utf-8")
     lowered = source.lower()
     assert "observe_executable_intent" in lowered

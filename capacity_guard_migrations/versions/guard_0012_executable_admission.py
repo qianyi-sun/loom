@@ -1,7 +1,7 @@
 """Protected executable-v2 worker admission and release fence.
 
-Revision ID: guard_0011
-Revises: guard_0010
+Revision ID: guard_0012
+Revises: guard_0011
 Create Date: 2026-08-12
 """
 
@@ -13,8 +13,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "guard_0011"
-down_revision: str | Sequence[str] | None = "guard_0010"
+revision: str = "guard_0012"
+down_revision: str | Sequence[str] | None = "guard_0011"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -1900,7 +1900,7 @@ def downgrade() -> None:
         DO $block$
         BEGIN
           IF EXISTS (SELECT 1 FROM {SCHEMA}.executable_admission_events) THEN
-            RAISE EXCEPTION 'cannot downgrade guard_0011 with executable admission evidence';
+            RAISE EXCEPTION 'cannot downgrade guard_0012 with executable admission evidence';
           END IF;
         END
         $block$

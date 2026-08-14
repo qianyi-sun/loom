@@ -1,7 +1,7 @@
 """Persist immutable local authority coordinates for personal capacity status.
 
-Revision ID: 0090
-Revises: 0089
+Revision ID: 0096
+Revises: 0095
 """
 
 from __future__ import annotations
@@ -9,8 +9,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0090"
-down_revision = "0089"
+revision = "0096"
+down_revision = "0095"
 branch_labels = None
 depends_on = None
 

@@ -178,9 +178,15 @@ async def test_capacity_role_convergence_grants_only_required_reference_columns(
     identity = replace(derive_identity(name), database=database_name)
     database = PsycopgPersonalDevCapacityDatabase(postgres_url)
 
-    owner, _migrator, _agent, _executor, _migrator_url, _agent_url = (
-        await database._converge_roles(identity, _new_credentials())
-    )
+    (
+        owner,
+        _migrator,
+        _agent,
+        _executor,
+        _observer,
+        _migrator_url,
+        _agent_url,
+    ) = await database._converge_roles(identity, _new_credentials())
 
     async with await psycopg.AsyncConnection.connect(
         postgres_url.replace("postgresql+psycopg://", "postgresql://", 1),

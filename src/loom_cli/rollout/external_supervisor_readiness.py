@@ -58,6 +58,14 @@ _STAGING_DATABASE_SECRETS = {
     "gb10": "loom-external-slurm-autoscaler-db",
     "oldlab": "loom-secrets",
 }
+_STAGING_GLOBAL_EXECUTION_WITNESSES = {
+    "gb10": "/etc/loom/credentials/global-execution/gb10-witness.json",
+    "oldlab": "/etc/loom/credentials/global-execution/oldlab-witness.json",
+}
+_STAGING_MANAGER_PUBLIC_KEY = "/etc/loom/credentials/global-execution/manager-ed25519.pub"
+_STAGING_MANAGER_PUBLIC_KEY_PIN = (
+    "/etc/loom/credentials/global-execution/manager-ed25519.pub.sha256"
+)
 
 _MAX_PROFILE_BYTES = 1024 * 1024
 _MAX_SCRIPT_BYTES = 2 * 1024 * 1024
@@ -81,6 +89,9 @@ _REQUIRED_ARGUMENTS = frozenset(
         "--db-port-forward-stop-timeout-sec",
         "--db-connect-timeout-sec",
         "--freshness-sec",
+        "--global-execution-witness-json",
+        "--manager-public-key",
+        "--expected-manager-public-key-sha256-file",
     }
 )
 _OPTIONAL_ARGUMENTS = frozenset(
@@ -385,6 +396,14 @@ class ExternalSupervisorIdentity:
             raise ValueError("external supervisor staging namespace is not canonical")
         if arguments["--kubeconfig"] != STAGING_KUBECONFIG:
             raise ValueError("external supervisor staging kubeconfig is not canonical")
+        if (
+            arguments["--global-execution-witness-json"]
+            != _STAGING_GLOBAL_EXECUTION_WITNESSES[self.pool_name]
+            or arguments["--manager-public-key"] != _STAGING_MANAGER_PUBLIC_KEY
+            or arguments["--expected-manager-public-key-sha256-file"]
+            != _STAGING_MANAGER_PUBLIC_KEY_PIN
+        ):
+            raise ValueError("external supervisor global execution authority is not canonical")
         optional_authority = {
             "--kubectl": "/usr/local/bin/kubectl",
             "--db-secret-key": "cp-db-url",

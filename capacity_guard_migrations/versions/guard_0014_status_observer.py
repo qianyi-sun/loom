@@ -1,7 +1,7 @@
 """Authorize a distinct least-privilege executable-status observer.
 
-Revision ID: guard_0013
-Revises: guard_0012
+Revision ID: guard_0014
+Revises: guard_0013
 """
 
 from __future__ import annotations
@@ -10,8 +10,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "guard_0013"
-down_revision: str | Sequence[str] | None = "guard_0012"
+revision: str = "guard_0014"
+down_revision: str | Sequence[str] | None = "guard_0013"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

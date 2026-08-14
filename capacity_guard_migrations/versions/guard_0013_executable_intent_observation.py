@@ -1,7 +1,7 @@
 """Read-only protected executable intent observation.
 
-Revision ID: guard_0012
-Revises: guard_0011
+Revision ID: guard_0013
+Revises: guard_0012
 Create Date: 2026-08-13
 """
 
@@ -11,8 +11,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "guard_0012"
-down_revision: str | Sequence[str] | None = "guard_0011"
+revision: str = "guard_0013"
+down_revision: str | Sequence[str] | None = "guard_0012"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -491,7 +491,7 @@ Commit the six listed files with message
 **Files:**
 
 - Create: `src/loom_capacity_agent/executable_admission.py`
-- Create: `capacity_guard_migrations/versions/guard_0011_executable_admission.py`
+- Create: `capacity_guard_migrations/versions/guard_0012_executable_admission.py`
 - Modify: `src/loom_capacity_agent/admission.py`
 - Modify: `src/loom_capacity_agent/prepared_store.py`
 - Modify: `src/loom_capacity_agent/claim_guard.py`
@@ -531,7 +531,7 @@ Run: `uv run --no-sync pytest -q tests/integration/test_capacity_agent_executabl
 
 Expected: collection fails for `ExecutableAdmissionStore`.
 
-- [ ] **Step 3: Add `guard_0011` append-only protected records**
+- [ ] **Step 3: Add `guard_0012` append-only protected records**
 
 Records bind execution fence, subject/incarnation, candidate, deployment,
 pool/profile/shape/resources, intent, bootstrap epoch, physical job, worker
@@ -565,7 +565,7 @@ credential; requeue advances worker incarnation and revokes the predecessor.
 
 `DatabaseExecutableAdmissionClient.from_database_url_file()` applies the same
 regular-file, owner, mode-0600, bounded URL, timeout, and TLS checks as other
-secret clients. Its database role can execute only the `guard_0011` procedures
+secret clients. Its database role can execute only the `guard_0012` procedures
 for the exact subject/incarnation. It cannot select candidate tables, mint
 grants, or administer the database. Every response binds the full request
 digest and protected high-water.
