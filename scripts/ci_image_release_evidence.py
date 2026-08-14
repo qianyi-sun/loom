@@ -159,7 +159,7 @@ def _common_values(
     build_context = _relative_path(build_context, "build context", directory=True)
     run_id = _positive_integer(run_id, "workflow run id")
     run_attempt = _positive_integer(run_attempt, "workflow run attempt")
-    if event_name != "push":
+    if event_name not in {"push", "workflow_dispatch"}:
         raise EvidenceError("release event is invalid")
     repository_id = _exact(_NUMERIC_ID, repository_id, "repository id")
     repository_owner_id = _exact(_NUMERIC_ID, repository_owner_id, "repository owner id")

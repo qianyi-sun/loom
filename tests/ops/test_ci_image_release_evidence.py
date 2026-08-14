@@ -223,6 +223,49 @@ def test_architecture_predicate_binds_source_build_scan_and_invocation() -> None
     assert run_details["metadata"]["invocationId"].endswith("/actions/runs/123/attempts/2")
 
 
+def test_architecture_predicate_binds_trusted_reconciliation_event() -> None:
+    common = _common()
+    common["event_name"] = "workflow_dispatch"
+
+    predicate = architecture_predicate(
+        **common,
+        platform="linux/amd64",
+        architecture="amd64",
+        scan_report_sha256=_SCAN,
+        build_mode="trusted-rebuild",
+    )
+
+    build_definition: Any = predicate["buildDefinition"]
+    internal: Any = build_definition["internalParameters"]
+    assert internal["github"]["event_name"] == "workflow_dispatch"
+    assert (
+        verify_architecture_attestation(
+            _verification(predicate),
+            **common,
+            platform="linux/amd64",
+            architecture="amd64",
+            subject_name="ghcr.io/qianyi-sun/loom-capacity-manager",
+            subject_digest=f"sha256:{_DIGEST}",
+            build_mode="trusted-rebuild",
+        )
+        == _SCAN
+    )
+
+
+def test_architecture_predicate_rejects_untrusted_release_event() -> None:
+    common = _common()
+    common["event_name"] = "schedule"
+
+    with pytest.raises(EvidenceError, match="release event"):
+        architecture_predicate(
+            **common,
+            platform="linux/amd64",
+            architecture="amd64",
+            scan_report_sha256=_SCAN,
+            build_mode="trusted-rebuild",
+        )
+
+
 def test_official_architecture_evidence_rejects_pr_candidate_bytes() -> None:
     with pytest.raises(EvidenceError, match="build mode"):
         architecture_predicate(
