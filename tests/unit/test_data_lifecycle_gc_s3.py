@@ -132,11 +132,53 @@ def test_versioned_delete_binds_exact_version_without_body_read() -> None:
     ]
 
 
+def test_null_version_delete_accepts_minio_omitted_version_evidence() -> None:
+    body = b"pre-versioning"
+    client = _Client(body)
+    item = _item(body, version_id="null", content_sha256=None)
+
+    S3ExactObjectDeleter(client).delete_exact(item)
+
+    assert client.calls == [
+        ("head", {"Bucket": item.bucket, "Key": item.object_key, "VersionId": "null"}),
+        ("delete", {"Bucket": item.bucket, "Key": item.object_key, "VersionId": "null"}),
+    ]
+
+
+def test_null_version_delete_rejects_present_none_version_evidence() -> None:
+    body = b"pre-versioning"
+
+    class Client(_Client):
+        def head_object(self, **params: str):
+            result = super().head_object(**params)
+            result["VersionId"] = None
+            return result
+
+    client = Client(body)
+    item = _item(body, version_id="null", content_sha256=None)
+
+    with pytest.raises(LifecycleGcExecutionError, match="version drifted"):
+        S3ExactObjectDeleter(client).delete_exact(item)
+
+    assert not client.deleted
+
+
 def test_version_drift_fails_closed() -> None:
     body = b"versioned"
     client = _Client(body, version_id="v2")
     with pytest.raises(LifecycleGcExecutionError, match="version drifted"):
         S3ExactObjectDeleter(client).delete_exact(_item(body, version_id="v1", content_sha256=None))
+    assert not client.deleted
+
+
+def test_real_version_delete_rejects_omitted_version_evidence() -> None:
+    body = b"versioned"
+    client = _Client(body)
+    item = _item(body, version_id="v1", content_sha256=None)
+
+    with pytest.raises(LifecycleGcExecutionError, match="version drifted"):
+        S3ExactObjectDeleter(client).delete_exact(item)
+
     assert not client.deleted
 
 
@@ -160,6 +202,53 @@ def test_batch_delete_verifies_all_bytes_and_binds_exact_returned_identities() -
         first.id: True,
         second.id: True,
     }
+
+
+def test_batch_delete_accepts_minio_omitted_null_version_evidence() -> None:
+    body = b"pre-versioning"
+    item = _item(body, version_id="null")
+    client = _BatchClient({(item.bucket, item.object_key): body})
+    deleter = S3ExactObjectDeleter(client)
+
+    deleter.delete_exact_many((item,))
+
+    assert client.calls == [
+        (
+            "delete_objects",
+            (
+                item.bucket,
+                [{"Key": item.object_key, "VersionId": "null"}],
+            ),
+        )
+    ]
+    assert deleter.exact_absent_many((item,)) == {item.id: True}
+
+
+def test_batch_delete_rejects_present_none_null_version_evidence() -> None:
+    body = b"pre-versioning"
+    item = _item(body, version_id="null")
+
+    class Client(_BatchClient):
+        def delete_objects(self, **kwargs: object):
+            response = super().delete_objects(**kwargs)
+            response["Deleted"][0]["VersionId"] = None
+            return response
+
+    with pytest.raises(LifecycleGcExecutionError, match="identity drifted"):
+        S3ExactObjectDeleter(Client({(item.bucket, item.object_key): body})).delete_exact_many(
+            (item,)
+        )
+
+
+def test_batch_delete_rejects_ambiguous_unversioned_and_null_version_evidence() -> None:
+    body = b"pre-versioning"
+    unversioned = _item(body)
+    null_version = _item(body, version_id="null")
+
+    with pytest.raises(LifecycleGcExecutionError, match="identity drifted"):
+        S3ExactObjectDeleter(
+            _BatchClient({(unversioned.bucket, unversioned.object_key): body})
+        ).delete_exact_many((unversioned, null_version))
 
 
 def test_batch_delete_rejects_incomplete_identity_evidence() -> None:

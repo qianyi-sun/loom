@@ -54,7 +54,10 @@ class S3ExactObjectDeleter:
                 f"registered object size drifted: {item.bucket}/{item.object_key}"
             )
         observed_version = response.get("VersionId")
-        if item.version_id is not None and observed_version != item.version_id:
+        if item.version_id is not None and not (
+            observed_version == item.version_id
+            or (item.version_id == "null" and "VersionId" not in response)
+        ):
             raise LifecycleGcExecutionError(
                 f"registered object version drifted: {item.bucket}/{item.object_key}"
             )
@@ -146,11 +149,19 @@ class S3ExactObjectDeleter:
                         f"exact object batch delete returned no identity evidence for {bucket}"
                     )
                 expected = {(item.object_key, item.version_id or "") for item in batch}
-                observed = {
-                    (str(item.get("Key", "")), str(item.get("VersionId", "")))
-                    for item in deleted
-                    if isinstance(item, dict)
-                }
+                observed: set[tuple[str, str]] = set()
+                for item in deleted:
+                    if not isinstance(item, dict):
+                        continue
+                    key = str(item.get("Key", ""))
+                    version = str(item.get("VersionId", ""))
+                    if (
+                        "VersionId" not in item
+                        and (key, "null") in expected
+                        and (key, "") not in expected
+                    ):
+                        version = "null"
+                    observed.add((key, version))
                 if observed != expected:
                     raise LifecycleGcExecutionError(
                         f"exact object batch delete identity drifted for {bucket}"
