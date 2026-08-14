@@ -49,6 +49,22 @@ WITH next AS (
        COALESCE(t.requires_caps->>'cpu_arch', 'x86_64') = 'any'
        OR COALESCE(t.requires_caps->>'cpu_arch', 'x86_64') = ANY(:worker_cpu_arches)
      )
+     AND (
+       NOT EXISTS (
+         SELECT 1
+           FROM trial_task_image_materializations task_image_link
+          WHERE task_image_link.trial_id = t.id
+       )
+       OR EXISTS (
+         SELECT 1
+           FROM trial_task_image_materializations task_image_link
+           JOIN task_image_materializations task_image
+             ON task_image.id = task_image_link.materialization_id
+          WHERE task_image_link.trial_id = t.id
+            AND task_image.cpu_arch = ANY(:worker_cpu_arches)
+            AND task_image.state = 'ready'
+       )
+     )
      AND t.requires_caps->>'gpu_vendor' = ANY(:worker_gpu_vendors)
      AND (t.requires_caps->'network_policies') <@ (:worker_network_policies)::jsonb
      AND (
@@ -230,6 +246,22 @@ WITH candidates AS (
      AND t.requires_caps->>'os' = ANY(:worker_os)
      AND (COALESCE(t.requires_caps->>'cpu_arch', 'x86_64') = 'any'
           OR COALESCE(t.requires_caps->>'cpu_arch', 'x86_64') = ANY(:worker_cpu_arches))
+     AND (
+       NOT EXISTS (
+         SELECT 1
+           FROM trial_task_image_materializations task_image_link
+          WHERE task_image_link.trial_id = t.id
+       )
+       OR EXISTS (
+         SELECT 1
+           FROM trial_task_image_materializations task_image_link
+           JOIN task_image_materializations task_image
+             ON task_image.id = task_image_link.materialization_id
+          WHERE task_image_link.trial_id = t.id
+            AND task_image.cpu_arch = ANY(:worker_cpu_arches)
+            AND task_image.state = 'ready'
+       )
+     )
      AND t.requires_caps->>'gpu_vendor' = ANY(:worker_gpu_vendors)
      AND (t.requires_caps->'network_policies') <@ (:worker_network_policies)::jsonb
      AND (
