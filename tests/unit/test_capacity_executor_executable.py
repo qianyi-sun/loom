@@ -354,7 +354,7 @@ class FakeSlurm:
         intent = next(iter(self.admission.observations))
         assert (
             self.admission.observations[intent].drain is not None
-            or len(self.admission.withdraw_requests) == 1
+            or len(self.admission.withdraw_requests) >= 1
         )
         job = next(item for item in self.jobs if item.job_id == request.job_id)
         assert job.state == "PENDING"

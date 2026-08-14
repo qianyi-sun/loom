@@ -157,3 +157,43 @@ Concerns:
 
 - Full-repository Ruff format still has unrelated baseline drift; this round keeps Ruff formatting/checking scoped to the seven amended files while retaining full MyPy and task-required test gates.
 - Physical-bind retrieval is intentionally fail-closed from the durable current intent record available at close entry; the protected observation contract still does not expose physical job ID after later intent events.
+
+## Fix round 2 — durable physical-bind retrieval after later intent events
+
+Review finding addressed:
+
+- The fix-round-1 concern was a correctness gap: once `protected-withdraw-confirmed` or `protected-drain-confirmed` overwrote the latest generic intent record, `_physical_binding()` could no longer recover the earlier `physical-bind-confirmed`. A repeated close after withdrawal could quarantine a conclusively owned pending job forever, and a repeated close after drain could report quarantine instead of stable draining for a running worker.
+
+Root cause:
+
+- The physical binding receipt was only written under the shared `object_kind='intent'` / intent-ID key. Later protected intent events are valid latest intent state but are not physical binding state.
+
+RED:
+
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_recovery.py::test_repeated_close_after_withdraw_confirmed_recovers_physical_binding tests/unit/test_capacity_executor_recovery.py::test_repeated_close_after_drain_confirmed_recovers_running_physical_binding -q` → `2 failed`: both cases returned `quarantined` instead of `pending-cancelled` / `draining`.
+
+Implementation:
+
+- Kept existing generic intent `physical-bind-*` records for compatibility with current recovery tests and old journal state before later intent events.
+- Added a distinct confirmed physical-bind journal record under `object_kind='executor'` and object ID `physical-bind:<intent_id>`.
+- `_physical_binding()` now prefers the distinct confirmed key and falls back to legacy latest-intent `physical-bind-confirmed` when available.
+- `_bind_physical()` validates the distinct record against the signed envelope, physical binding digest, protected job ID, and ownership evidence digest; if a crash leaves the distinct confirmed key ahead of a legacy intent requested record, recovery can finish the legacy confirmation without re-mutating protected admission.
+- Test fake Slurm now allows idempotent withdrawal replay (`>= 1` protected withdrawal request) before pending cancellation.
+
+GREEN/regression:
+
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_recovery.py::test_repeated_close_after_withdraw_confirmed_recovers_physical_binding tests/unit/test_capacity_executor_recovery.py::test_repeated_close_after_drain_confirmed_recovers_running_physical_binding -q` → `2 passed in 0.40s`.
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_recovery.py::test_repeated_close_after_withdraw_confirmed_recovers_physical_binding tests/unit/test_capacity_executor_recovery.py::test_repeated_close_after_drain_confirmed_recovers_running_physical_binding tests/unit/test_capacity_executor_recovery.py::test_crash_after_pending_cancel_request_retries_exact_cancel_before_work_fetch tests/unit/test_capacity_executor_executable.py::test_close_withdraws_bound_unregistered_pending_job_before_cancel tests/unit/test_capacity_executor_executable.py::test_close_never_cancels_unbound_duplicate_pending_job_after_drain tests/unit/test_capacity_executor_executable.py::test_close_never_cancels_bound_pending_job_with_node_mismatch -q` → `6 passed in 1.08s`.
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_slurm_backend.py tests/unit/test_capacity_executor_executable.py tests/unit/test_capacity_executor_recovery.py tests/unit/test_capacity_executor_client.py tests/unit/test_capacity_executor_admission_client.py -q` → `128 passed in 8.49s`.
+- `uv run --no-sync pytest tests/integration/test_executable_global_capacity_bridge.py -q` → `4 passed in 51.11s`.
+
+Static verification:
+
+- `uv run --no-sync ruff format --check src/loom_capacity_executor/executable.py tests/unit/test_capacity_executor_recovery.py tests/unit/test_capacity_executor_executable.py` → `3 files already formatted`.
+- `uv run --no-sync ruff check src/loom_capacity_executor/executable.py tests/unit/test_capacity_executor_recovery.py tests/unit/test_capacity_executor_executable.py` → `All checks passed!`.
+- `uv run --no-sync mypy` → `Success: no issues found in 805 source files`.
+- `git diff --check` → passed.
+
+Concerns:
+
+- Full-repository Ruff format still has unrelated baseline drift, so this follow-up keeps Ruff scoped to amended files while retaining full MyPy, affected unit, bridge, and whitespace gates.

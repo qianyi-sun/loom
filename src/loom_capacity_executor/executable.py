@@ -140,6 +140,10 @@ class _LaunchEnvelope:
     bootstrap_registration_epoch: int
 
 
+def _physical_binding_object_id(intent_id: UUID) -> str:
+    return f"physical-bind:{intent_id}"
+
+
 class ExecutablePoolExecutor:
     """Apply at most one exact manager-authored executable-v2 operation per tick."""
 
@@ -847,6 +851,29 @@ class ExecutablePoolExecutor:
         )
         payload = canonical_executable_bytes(request)
         digest = canonical_executable_digest(request)
+        dedicated = self.journal.latest(
+            "executor",
+            _physical_binding_object_id(request.binding.intent_id),
+        )
+        if dedicated is not None and dedicated.event_kind == "physical-bind-confirmed":
+            retained = self._validate_physical_binding_record(dedicated, envelope)
+            if retained != request or dedicated.payload_digest != digest:
+                raise JournalRegressionError("physical binding request changed during recovery")
+            latest_intent = self.journal.latest("intent", str(request.binding.intent_id))
+            if latest_intent is not None and latest_intent.event_kind == "physical-bind-requested":
+                self.journal.append(
+                    "physical-bind-confirmed",
+                    digest,
+                    object_kind="intent",
+                    object_id=str(request.binding.intent_id),
+                    payload=payload,
+                )
+            self._remember_launch(
+                envelope.rendered,
+                bootstrap_registration_epoch=envelope.bootstrap_registration_epoch,
+                event="physical-bind-confirmed",
+            )
+            return
         latest = self.journal.latest("intent", str(request.binding.intent_id))
         if latest is not None and latest.event_kind in {
             "physical-bind-requested",
@@ -859,6 +886,13 @@ class ExecutablePoolExecutor:
             if retained != request or latest.payload_digest != digest:
                 raise JournalRegressionError("physical binding request changed during recovery")
             if latest.event_kind == "physical-bind-confirmed":
+                self.journal.append(
+                    "physical-bind-confirmed",
+                    digest,
+                    object_kind="executor",
+                    object_id=_physical_binding_object_id(request.binding.intent_id),
+                    payload=payload,
+                )
                 self._remember_launch(
                     envelope.rendered,
                     bootstrap_registration_epoch=envelope.bootstrap_registration_epoch,
@@ -874,6 +908,13 @@ class ExecutablePoolExecutor:
                 payload=payload,
             )
         await self.admission.bind_slurm_job(request)
+        self.journal.append(
+            "physical-bind-confirmed",
+            digest,
+            object_kind="executor",
+            object_id=_physical_binding_object_id(request.binding.intent_id),
+            payload=payload,
+        )
         self.journal.append(
             "physical-bind-confirmed",
             digest,
@@ -894,13 +935,27 @@ class ExecutablePoolExecutor:
         if envelope is None:
             return None
         binding = envelope.rendered.ownership_proof.metadata.binding
+        dedicated = self.journal.latest(
+            "executor",
+            _physical_binding_object_id(binding.intent_id),
+        )
+        if dedicated is not None and dedicated.event_kind == "physical-bind-confirmed":
+            return self._validate_physical_binding_record(dedicated, envelope)
         retained = self.journal.latest("intent", str(binding.intent_id))
         if retained is None or retained.event_kind != "physical-bind-confirmed":
             return None
+        return self._validate_physical_binding_record(retained, envelope)
+
+    @staticmethod
+    def _validate_physical_binding_record(
+        retained: JournalRecord,
+        envelope: _LaunchEnvelope,
+    ) -> PhysicalJobBindingV2:
         payload = retained.durable_payload()
         if payload is None:
             raise JournalRegressionError("physical binding request is absent from journal")
         physical = PhysicalJobBindingV2.model_validate_json(payload)
+        binding = envelope.rendered.ownership_proof.metadata.binding
         expected_digest = canonical_executable_digest(envelope.rendered.ownership_proof)
         if (
             physical.binding != binding
@@ -908,6 +963,8 @@ class ExecutablePoolExecutor:
             or physical.ownership_evidence_sha256 != expected_digest
         ):
             raise JournalRegressionError("physical binding request changed after confirmation")
+        if retained.payload_digest != canonical_executable_digest(physical):
+            raise JournalRegressionError("physical binding record digest changed")
         return physical
 
     @staticmethod

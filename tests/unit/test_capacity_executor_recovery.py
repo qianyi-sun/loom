@@ -7,6 +7,7 @@ from uuid import UUID
 
 import pytest
 
+from loom_capacity_agent.admission import ExecutableWorkerWithdrawalRequestV2
 from loom_capacity_executor.executable import ExecutablePoolExecutor, ProtectedIntentObservationV2
 from loom_capacity_executor.journal import ExecutorJournal, JournalRegressionError
 from loom_capacity_executor.launch_renderer import TrustedLaunchContextV2
@@ -15,7 +16,11 @@ from loom_capacity_executor.slurm_contracts import (
     SlurmJobObservationV2,
     SlurmTerminalEvidenceV2,
 )
-from loom_capacity_manager.executable_contracts import ExecutableIntentCloseV2
+from loom_capacity_manager.executable_contracts import (
+    ExecutableIntentCloseV2,
+    canonical_executable_bytes,
+    canonical_executable_digest,
+)
 from tests.unit.test_capacity_executor_executable import (
     _NOW,
     FakeAdmission,
@@ -286,6 +291,102 @@ async def test_crash_after_pending_cancel_request_retries_exact_cancel_before_wo
     assert slurm.jobs == []
     confirmed = reopened.latest("job", job_id)
     assert confirmed is not None and confirmed.event_kind == "pending-cancel-confirmed-cancelled"
+    reopened.close()
+
+
+# Production break caught: after protected withdrawal confirmed and the process
+# stopped before the pending-cancel request, the latest intent record no longer
+# contained the physical bind, so repeated close quarantined an owned pending job.
+async def test_repeated_close_after_withdraw_confirmed_recovers_physical_binding(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    executor, journal, manager, admission, slurm, launch = executor_fixture(
+        tmp_path,
+        work=permit_fixture(launch.binding),
+    )
+    await executor.tick()
+    pending = slurm.jobs[0]
+    withdrawal = ExecutableWorkerWithdrawalRequestV2(
+        operation_id=UUID(int=901),
+        binding=launch.binding,
+        bootstrap_registration_epoch=1,
+        protected_registration_epoch=2,
+        slurm_job_id=pending.job_id,
+        ownership_evidence_sha256=admission.bind_requests[0].ownership_evidence_sha256,
+    )
+    payload = canonical_executable_bytes(withdrawal)
+    digest = canonical_executable_digest(withdrawal)
+    journal.append(
+        "protected-withdraw-requested",
+        digest,
+        object_kind="intent",
+        object_id=str(launch.binding.intent_id),
+        payload=payload,
+    )
+    await admission.withdraw_unregistered_worker(withdrawal)
+    journal.append(
+        "protected-withdraw-confirmed",
+        digest,
+        object_kind="intent",
+        object_id=str(launch.binding.intent_id),
+        payload=payload,
+    )
+    journal.close()
+
+    close = ExecutableIntentCloseV2(binding=launch.binding, command_sequence=2)
+    manager.work = close
+    recovered, reopened = _restart(journal.path, manager, admission, slurm, launch)
+    result = await recovered.tick()
+
+    assert result.status == "pending-cancelled"
+    assert slurm.jobs == []
+    assert len(slurm.cancel_requests) == 1
+    assert slurm.cancel_requests[0].job_id == pending.job_id
+    assert manager.work is None
+    confirmed = reopened.latest("job", pending.job_id)
+    assert confirmed is not None
+    assert confirmed.event_kind == "pending-cancel-confirmed-cancelled"
+    reopened.close()
+
+
+# Production break caught: after drain confirmation, the latest intent record no
+# longer exposed the protected physical binding, so repeated close reported
+# quarantine instead of the stable drain-only state for a running worker.
+async def test_repeated_close_after_drain_confirmed_recovers_running_physical_binding(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    executor, journal, manager, admission, slurm, launch = executor_fixture(
+        tmp_path,
+        work=permit_fixture(launch.binding),
+    )
+    await executor.tick()
+    slurm.jobs[0] = slurm.jobs[0].model_copy(
+        update={"state": "RUNNING", "nodes": launch.binding.node_ids, "pending_reason": None}
+    )
+    close = ExecutableIntentCloseV2(binding=launch.binding, command_sequence=2)
+    manager.work = close
+    admission.observations[launch.binding.intent_id] = ProtectedIntentObservationV2(
+        binding=launch.binding,
+        bootstrap_registration_epoch=1,
+        worker_id=UUID(int=421),
+        worker_incarnation=UUID(int=422),
+        protected_registration_epoch=2,
+        claim_high_water=0,
+    )
+
+    first = await executor.tick()
+    assert first.status == "draining"
+    journal.close()
+
+    recovered, reopened = _restart(journal.path, manager, admission, slurm, launch)
+    result = await recovered.tick()
+
+    assert result.status == "draining"
+    assert slurm.cancel_requests == []
+    assert len(admission.drain_requests) == 1
+    assert manager.work == close
     reopened.close()
 
 
