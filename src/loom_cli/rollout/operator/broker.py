@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Never, TextIO, cast
 from uuid import uuid4
 
-from loom_cli.cluster_config import load_cluster_config
+from loom_cli.cluster_config import lifecycle_inventory_buckets, load_cluster_config
 from loom_cli.rollout.evidence import new_rollout_id
 from loom_cli.rollout.final_gate_readiness import FINAL_CHECK_IDS
 from loom_cli.rollout.lifecycle_protocol import LifecycleAction, LifecyclePhase
@@ -1904,11 +1904,8 @@ def _default_dependencies(config: OperatorConfig) -> BrokerDependencies:
                 service_uid=service_uid,
             ),
             now=clock,
-            expected_buckets=(
-                (
-                    cluster_config := load_cluster_config(config.cluster_config_path)
-                ).trajectories_bucket,
-                cluster_config.artifacts_bucket,
+            expected_buckets=lifecycle_inventory_buckets(
+                cluster_config := load_cluster_config(config.cluster_config_path)
             ),
             capacity_source=(
                 "minio-admin" if bool(cluster_config.topology.multi_node) else "filesystem"

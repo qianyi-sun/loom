@@ -171,6 +171,7 @@ if TYPE_CHECKING:
         ingress_host: str = "loom.example.com"
         ingress_redirect_hosts: tuple[str, ...] = ()
         ingress_tls_secret_name: str = "loom-tls"
+        lifecycle_legacy_buckets: tuple[str, ...] = ()
         frontend_environment: str = "local"
         frontend_environment_label: str = "Local development"
         frontend_route_path: str = ""
@@ -206,6 +207,20 @@ if TYPE_CHECKING:
         def to_render_context(self) -> dict[str, Any]: ...
 else:
     ClusterConfig = _build_cluster_config_cls()
+
+
+def lifecycle_inventory_buckets(config: ClusterConfig) -> tuple[str, ...]:
+    """Return the exact, unambiguous staging object-inventory boundary."""
+    buckets = (
+        config.trajectories_bucket,
+        config.artifacts_bucket,
+        *config.lifecycle_legacy_buckets,
+    )
+    if any(not bucket or bucket != bucket.strip() for bucket in buckets) or len(
+        set(buckets)
+    ) != len(buckets):
+        raise ValueError("lifecycle inventory buckets must be non-empty, normalized, and unique")
+    return buckets
 
 
 _DEPRECATED_TOP_LEVEL_KEYS: dict[str, str] = {

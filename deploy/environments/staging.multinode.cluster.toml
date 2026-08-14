@@ -23,6 +23,10 @@ frontend_route_path = "/staging"
 frontend_api_base_path = "/staging"
 trajectories_bucket = "loom-staging-trajectories"
 artifacts_bucket = "loom-staging-artifacts"
+# Legacy external workers wrote authoritative objects to these exact physical
+# buckets. Lifecycle maintenance inventories them until their objects and
+# registry references are retired through a separate migration.
+lifecycle_legacy_buckets = ["artifacts", "trajectories"]
 env_state_profile = "../environment-state/staging.toml"
 # Dynamic (Longhorn) provisioning for the multi-node distributed backends.
 persistent_storage_backend = "dynamic"

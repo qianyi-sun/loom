@@ -28,6 +28,7 @@ from loom_cli.rollout.operator.rollout_checkpoint import ImmutableObjectReferenc
 from loom_cli.rollout.readonly_minio_bootstrap import (
     READONLY_MINIO_ACCESS_KEY,
     READONLY_MINIO_BUCKETS,
+    READONLY_MINIO_CAPACITY_BUCKETS,
     ReadonlyMinioCredential,
 )
 
@@ -73,7 +74,7 @@ class S3:
 
     def get_bucket_versioning(self, **kwargs: str) -> dict[str, object]:
         assert kwargs == {"Bucket": kwargs["Bucket"]}
-        assert kwargs["Bucket"] in READONLY_MINIO_BUCKETS
+        assert kwargs["Bucket"] in READONLY_MINIO_CAPACITY_BUCKETS
         return {}
 
     def get_paginator(self, operation: str) -> Paginator:
@@ -207,10 +208,7 @@ def test_replica_count_probe_binds_ready_live_statefulset_to_configured_ceiling(
         service_uid=os.getuid(),
         configured_drive_count=4,
         kubeconfig_path=kubeconfig,
-        run=lambda argv, environment: calls.append(
-            (tuple(argv), dict(environment))
-        )
-        or Result(),
+        run=lambda argv, environment: calls.append((tuple(argv), dict(environment))) or Result(),
     )
 
     assert observed == 4
@@ -296,15 +294,18 @@ def test_admin_probe_requires_exact_drive_count_of_live_statefulset() -> None:
         calls.append((str(kwargs["endpoint_url"]), int(kwargs["expected_drive_count"])))
         return (DriveHeadroom(1000, 990, 1000, 980),) * 4
 
-    assert len(
-        probe_installed_minio_admin_drives(
-            service_uid=os.getuid(),
-            expected_drive_count=4,
-            tunnel_context=tunnel,
-            replica_count_probe=replica_count,
-            drive_probe=drives,
+    assert (
+        len(
+            probe_installed_minio_admin_drives(
+                service_uid=os.getuid(),
+                expected_drive_count=4,
+                tunnel_context=tunnel,
+                replica_count_probe=replica_count,
+                drive_probe=drives,
+            )
         )
-    ) == 4
+        == 4
+    )
     assert calls == [("http://127.0.0.1:19003", 4)]
 
 
@@ -322,8 +323,8 @@ def test_probe_counts_exact_execution_buckets_and_host_capacity(tmp_path: Path) 
         client_context=context,
     )
 
-    assert capacity.object_count == 4
-    assert capacity.bytes_used == 60
+    assert capacity.object_count == 8
+    assert capacity.bytes_used == 120
     assert 0 <= capacity.disk_free_percent <= 100
     assert 0 <= capacity.inode_free_percent <= 100
 
@@ -367,8 +368,8 @@ def test_probe_uses_minio_admin_drive_headroom_for_multinode() -> None:
         admin_drive_probe=admin_drives,
     )
 
-    assert capacity.object_count == 4
-    assert capacity.bytes_used == 60
+    assert capacity.object_count == 8
+    assert capacity.bytes_used == 120
     assert capacity.disk_free_percent == 97
     assert capacity.inode_free_percent == 96
 
@@ -534,7 +535,7 @@ def test_source_is_single_flight_under_concurrent_dag(tmp_path: Path) -> None:
 
     assert results == [capacity] * 4
     assert calls == [
-        (os.getuid(), "filesystem", (tmp_path,), READONLY_MINIO_BUCKETS, None)
+        (os.getuid(), "filesystem", (tmp_path,), READONLY_MINIO_CAPACITY_BUCKETS, None)
     ]
 
 
@@ -572,7 +573,7 @@ def test_multinode_source_is_single_flight_without_retired_host_path() -> None:
     assert source() == capacity
     assert source() == capacity
     assert calls == [
-        (os.getuid(), "minio-admin", (), READONLY_MINIO_BUCKETS, 4),
+        (os.getuid(), "minio-admin", (), READONLY_MINIO_CAPACITY_BUCKETS, 4),
     ]
 
 

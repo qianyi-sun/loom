@@ -86,7 +86,11 @@ def test_plan_accepts_multinode_staging_minio_admin_capacity_contract() -> None:
         control_plane_image_id=_IMAGE_ID,
         image_tag=config.image_tag,
         rendered_yaml=rendered,
-        expected_buckets=(config.trajectories_bucket, config.artifacts_bucket),
+        expected_buckets=(
+            config.trajectories_bucket,
+            config.artifacts_bucket,
+            *config.lifecycle_legacy_buckets,
+        ),
         capacity_source="minio-admin",
         expected_drive_count=4,
         expected_filesystem_paths=(),

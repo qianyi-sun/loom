@@ -25,7 +25,10 @@ def test_readonly_minio_policy_has_exact_non_mutating_staging_authority() -> Non
         "s3:ListBucketVersions",
     ]
     assert bucket_statement["Resource"] == [
-        f"arn:aws:s3:::{bucket}" for bucket in READONLY_MINIO_BUCKETS
+        "arn:aws:s3:::loom-staging-trajectories",
+        "arn:aws:s3:::loom-staging-artifacts",
+        "arn:aws:s3:::artifacts",
+        "arn:aws:s3:::trajectories",
     ]
     assert object_statement == {
         "Effect": "Allow",

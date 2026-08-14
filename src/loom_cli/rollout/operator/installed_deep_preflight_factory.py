@@ -14,7 +14,7 @@ from typing import Protocol, cast
 from urllib.parse import urlsplit
 
 from loom_cli.cluster_cmd import render_manifests
-from loom_cli.cluster_config import load_cluster_config
+from loom_cli.cluster_config import lifecycle_inventory_buckets, load_cluster_config
 from loom_cli.rollout.external_supervisor_predecessor import (
     ABSENT_PREDECESSOR_DIGEST,
     ExternalSupervisorCanonicalPointer,
@@ -519,7 +519,7 @@ def build_installed_deep_preflight_composition(
         capacity_source=capacity_kind,
         filesystem_paths=capacity_paths,
         expected_drive_count=expected_drive_count,
-        buckets=tuple(sorted((cluster.artifacts_bucket, cluster.trajectories_bucket))),
+        buckets=lifecycle_inventory_buckets(cluster),
     )
     inventory_source = ReadonlyLifecycleInventoryProvider(
         config,

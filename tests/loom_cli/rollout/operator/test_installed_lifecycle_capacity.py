@@ -180,6 +180,7 @@ def _service(
             image_tag=_TAG,
             container_registry="192.168.50.13:5000" if registry else "",
             container_registry_push="localhost:5000" if registry else "",
+            lifecycle_legacy_buckets=("legacy-artifacts", "legacy-trajectories"),
         )
     )
     registry_digests = (
@@ -227,7 +228,12 @@ def _service(
         commands=commands,
         read_database=lambda: database,
         now=lambda: datetime(2026, 7, 20, 0, 0, 1, tzinfo=UTC),
-        expected_buckets=("trajectories", "artifacts"),
+        expected_buckets=(
+            "trajectories",
+            "artifacts",
+            "legacy-artifacts",
+            "legacy-trajectories",
+        ),
         expected_filesystem_paths=("/var/lib/loom-minio-capacity/0",),
         container_registry="192.168.50.13:5000" if registry else "",
         container_registry_push="localhost:5000" if registry else "",
@@ -274,10 +280,10 @@ def test_registry_capacity_uses_preflight_digest_without_kind_or_republish(tmp_p
 
     service.execute_claimed(plan)
 
-    assert not any(command[:2] in {("docker", "tag"), ("docker", "push")} for command in commands.calls)
-    assert (
-        f"192.168.50.13:5000/loom-control-plane@{_MANIFEST_DIGEST}" in plan.job_manifest
+    assert not any(
+        command[:2] in {("docker", "tag"), ("docker", "push")} for command in commands.calls
     )
+    assert f"192.168.50.13:5000/loom-control-plane@{_MANIFEST_DIGEST}" in plan.job_manifest
     assert not any(command and command[0] == "kind" for command in commands.calls)
 
     inactive, _commands = _service(tmp_path / "other")

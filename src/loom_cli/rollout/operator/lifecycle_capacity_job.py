@@ -296,7 +296,10 @@ class LifecycleCapacityJobPlan:
             "rendered_manifest_sha256",
             "schema_version",
         }
-        if set(value) not in {frozenset(expected), frozenset((*expected, "control_plane_registry_digest"))}:
+        if set(value) not in {
+            frozenset(expected),
+            frozenset((*expected, "control_plane_registry_digest")),
+        }:
             raise LifecycleCapacityJobError("lifecycle capacity Job plan keys are invalid")
         try:
             return cls(**cast(Any, value))
@@ -322,8 +325,8 @@ def build_lifecycle_capacity_job_plan(
     registry_digest: str = "",
 ) -> LifecycleCapacityJobPlan:
     if (
-        len(expected_buckets) != 2
-        or len(set(expected_buckets)) != 2
+        len(expected_buckets) < 2
+        or len(set(expected_buckets)) != len(expected_buckets)
         or capacity_source not in {"filesystem", "minio-admin"}
         or (capacity_source == "filesystem" and not expected_filesystem_paths)
         or (capacity_source == "filesystem" and expected_drive_count is not None)
@@ -340,7 +343,7 @@ def build_lifecycle_capacity_job_plan(
         or bool(container_registry) != bool(registry_digest)
         or (registry_digest and _IMAGE_ID_RE.fullmatch(registry_digest) is None)
         or any(
-            not value or "\x00" in value
+            not value or value != value.strip() or "\x00" in value
             for value in (*expected_buckets, *expected_filesystem_paths)
         )
     ):

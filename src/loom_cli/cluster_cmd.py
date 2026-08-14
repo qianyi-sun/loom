@@ -42,6 +42,7 @@ from loom_cli.cluster_backup_guard import (
 from loom_cli.cluster_config import (
     ClusterConfig,
     cluster_config_from_mapping,
+    lifecycle_inventory_buckets,
     load_cluster_config,
 )
 from loom_cli.cluster_release_gate import (
@@ -1381,6 +1382,7 @@ _TEMPLATE_ORDER: tuple[str, ...] = (
     "grafana-dashboards.yaml.j2",
 )
 
+
 _PERSISTENT_STORAGE_DYNAMIC = "dynamic"
 _PERSISTENT_STORAGE_STATIC_HOST_PATH = "static-host-path"
 _PERSISTENT_STORAGE_BACKENDS = frozenset(
@@ -1964,6 +1966,7 @@ def render_manifests(config: ClusterConfig) -> str:
     ctx["ingress_redirect_hosts"] = _ingress_redirect_hosts(config)
     ctx["provider_egress_rules"] = _provider_egress_rules(config)
     ctx["gateway_local_providers"] = _gateway_local_providers(config)
+    ctx["lifecycle_inventory_buckets"] = lifecycle_inventory_buckets(config)
     try:
         ipaddress.ip_address(config.ingress_host)
         ctx["ingress_host_is_ip"] = True
@@ -2497,8 +2500,8 @@ def _release_gate(args: argparse.Namespace) -> int:
     if args.external_slurm_authority:
         authority_path = Path(args.external_slurm_authority).resolve()
         try:
-            external_slurm_authority_artifact = (
-                _load_root_owned_external_slurm_authority(authority_path)
+            external_slurm_authority_artifact = _load_root_owned_external_slurm_authority(
+                authority_path
             )
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             external_slurm_authority_error = str(exc)
@@ -4644,8 +4647,14 @@ def _run_migration_job(
     # backoffLimit=1 means a connection-refused racing that start fails the
     # Job outright. (staging/prod migrate as a separate post-Postgres step.)
     pg_wait = [
-        "kubectl", "wait", "-n", namespace,
-        "--for=condition=ready", "pod", "-l", "app=loom-postgres",
+        "kubectl",
+        "wait",
+        "-n",
+        namespace,
+        "--for=condition=ready",
+        "pod",
+        "-l",
+        "app=loom-postgres",
         f"--timeout={timeout_sec}s",
     ]
     if context:
@@ -4653,8 +4662,7 @@ def _run_migration_job(
     pg = subprocess.run(pg_wait, capture_output=True, text=True)
     if pg.returncode != 0:
         sys.stderr.write(
-            "error: Postgres did not become ready before the migration Job: "
-            f"{pg.stderr.strip()}\n",
+            f"error: Postgres did not become ready before the migration Job: {pg.stderr.strip()}\n",
         )
         return False
     sys.stdout.write("  Postgres ready; applying migration Job...\n")
@@ -4675,14 +4683,16 @@ def _run_migration_job(
 
     if not wait:
         sys.stdout.write(
-            "  Skipping migration wait (--no-wait); app pods start once "
-            "the Job completes.\n",
+            "  Skipping migration wait (--no-wait); app pods start once the Job completes.\n",
         )
         return True
 
     sys.stdout.write(f"  Waiting for migration Job {job_name} to complete...\n")
     wait_cmd = [
-        "kubectl", "wait", "-n", namespace,
+        "kubectl",
+        "wait",
+        "-n",
+        namespace,
         f"job/{job_name}",
         "--for=condition=complete",
         f"--timeout={timeout_sec}s",

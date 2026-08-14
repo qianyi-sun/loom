@@ -101,14 +101,15 @@ def test_installed_rehearsal_source_rebuilds_aggregate_supervisor_artifact(
         gb10_identity_metadata_fingerprint="2" * 64,
     )
     cluster = SimpleNamespace(
-        artifacts_bucket="artifacts",
+        artifacts_bucket="loom-staging-artifacts",
         container_registry="registry.invalid",
         container_registry_push="registry-push.invalid",
         k8s_worker=SimpleNamespace(enabled=True),
+        lifecycle_legacy_buckets=("artifacts", "trajectories"),
         minio_replicas=1,
         persistent_storage_host_path_root="/data/loom-staging",
         topology=SimpleNamespace(multi_node=False, minio_replicas=1),
-        trajectories_bucket="trajectories",
+        trajectories_bucket="loom-staging-trajectories",
     )
     readonly = SimpleNamespace(
         baseline_probe_route="https://staging.example.invalid/staging",
@@ -194,10 +195,15 @@ def test_installed_rehearsal_source_rebuilds_aggregate_supervisor_artifact(
     monkeypatch.setattr(
         installed_deep_preflight_factory, "load_cluster_config", lambda _path: cluster
     )
+
+    def capacity_source(**kwargs: object) -> SimpleNamespace:
+        captured["capacity_source"] = kwargs
+        return SimpleNamespace()
+
     monkeypatch.setattr(
         installed_deep_preflight_factory,
         "InstalledReadonlyCapacitySource",
-        lambda **_kwargs: SimpleNamespace(),
+        capacity_source,
     )
     monkeypatch.setattr(
         installed_deep_preflight_factory,
@@ -279,6 +285,12 @@ def test_installed_rehearsal_source_rebuilds_aggregate_supervisor_artifact(
             "image_tag": candidate.image_tag,
         }
     ]
+    assert captured["capacity_source"]["buckets"] == (  # type: ignore[index]
+        "loom-staging-trajectories",
+        "loom-staging-artifacts",
+        "artifacts",
+        "trajectories",
+    )
 
 
 class _Artifacts:
@@ -802,8 +814,7 @@ def test_installed_predecessor_recognizes_exact_pr1342_gb10_activation(
         "217acbf8ceaecf7967bbb5da4bd6464fe252377fdc822319b3bd643387f9ffee"
     )
     assert dict(snapshot.unit_sha256) == {
-        name: hashlib.sha256(payload).hexdigest()
-        for name, payload in store.unit_payloads.items()
+        name: hashlib.sha256(payload).hexdigest() for name, payload in store.unit_payloads.items()
     }
     assert snapshot.transition_clear is True
     assert snapshot.runtime_ready is True

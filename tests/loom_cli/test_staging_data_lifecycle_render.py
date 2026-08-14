@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
 import yaml
 
 from loom_cli.cluster_cmd import render_manifests
-from loom_cli.cluster_config import ClusterConfig
+from loom_cli.cluster_config import ClusterConfig, load_cluster_config
 
 
 def _resource(config: ClusterConfig, kind: str, name: str) -> dict[str, object] | None:
@@ -129,6 +132,7 @@ def test_staging_lifecycle_uses_exact_physical_bucket_authority() -> None:
             namespace="loom-staging",
             artifacts_bucket="loom-staging-artifacts",
             trajectories_bucket="loom-staging-trajectories",
+            lifecycle_legacy_buckets=("artifacts", "trajectories"),
         ),
         "CronJob",
         "loom-staging-data-lifecycle",
@@ -138,9 +142,53 @@ def test_staging_lifecycle_uses_exact_physical_bucket_authority() -> None:
     args = document["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0][  # type: ignore[index]
         "args"
     ]
-    assert args.count("--bucket") == 2
-    assert "loom-staging-artifacts" in args
-    assert "loom-staging-trajectories" in args
+    buckets = [args[index + 1] for index, value in enumerate(args) if value == "--bucket"]
+    assert buckets == [
+        "loom-staging-trajectories",
+        "loom-staging-artifacts",
+        "artifacts",
+        "trajectories",
+    ]
+
+
+@pytest.mark.parametrize(
+    "legacy_buckets",
+    [
+        ("artifacts", "artifacts"),
+        ("", "trajectories"),
+        (" artifacts",),
+        ("loom-staging-artifacts",),
+    ],
+)
+def test_staging_lifecycle_rejects_ambiguous_bucket_inventory(
+    legacy_buckets: tuple[str, ...],
+) -> None:
+    config = ClusterConfig(
+        runtime_environment="staging",
+        artifacts_bucket="loom-staging-artifacts",
+        trajectories_bucket="loom-staging-trajectories",
+        lifecycle_legacy_buckets=legacy_buckets,
+    )
+
+    with pytest.raises(ValueError, match="lifecycle inventory buckets"):
+        render_manifests(config)
+
+
+def test_live_staging_profile_inventories_legacy_and_canonical_buckets() -> None:
+    config = load_cluster_config(Path("deploy/environments/staging.multinode.cluster.toml"))
+
+    document = _resource(config, "CronJob", "loom-staging-data-lifecycle")
+    assert document is not None
+    args = document["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0][  # type: ignore[index]
+        "args"
+    ]
+    buckets = [args[index + 1] for index, value in enumerate(args) if value == "--bucket"]
+    assert buckets == [
+        "loom-staging-trajectories",
+        "loom-staging-artifacts",
+        "artifacts",
+        "trajectories",
+    ]
 
 
 def test_staging_lifecycle_network_policy_is_staging_only() -> None:

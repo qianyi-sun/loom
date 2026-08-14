@@ -36,10 +36,10 @@ spec:
                 - auto
                 - --namespace
                 - {{ namespace }}
+{% for bucket in lifecycle_inventory_buckets %}
                 - --bucket
-                - {{ trajectories_bucket }}
-                - --bucket
-                - {{ artifacts_bucket }}
+                - {{ bucket }}
+{% endfor %}
 {% if topology.multi_node %}
                 # Distributed MinIO drives are RWO PVCs already attached to the
                 # loom-minio-* pods (cannot be co-mounted, #1113); read per-drive
