@@ -1838,6 +1838,146 @@ class Task(Base):
     )
 
 
+class TaskImageMaterialization(Base):
+    """Immutable per-architecture build prerequisite for one task checksum."""
+
+    __tablename__ = "task_image_materializations"
+    __table_args__ = (
+        CheckConstraint(
+            "materialization_key ~ '^[0-9a-f]{64}$'",
+            name="task_image_materializations_key_check",
+        ),
+        CheckConstraint(
+            "task_checksum ~ '^[0-9a-f]{64}$'",
+            name="task_image_materializations_checksum_check",
+        ),
+        CheckConstraint(
+            "cpu_arch IN ('x86_64', 'arm64')",
+            name="task_image_materializations_cpu_arch_check",
+        ),
+        CheckConstraint(
+            "state IN ('queued', 'claimed', 'running', 'ready', 'failed')",
+            name="task_image_materializations_state_check",
+        ),
+        CheckConstraint(
+            "attempt_count >= 0 AND max_attempts > 0 AND lease_epoch >= 0",
+            name="task_image_materializations_counters_check",
+        ),
+        UniqueConstraint(
+            "materialization_key",
+            name="task_image_materializations_key_uidx",
+        ),
+        UniqueConstraint(
+            "task_id",
+            "task_checksum",
+            "cpu_arch",
+            name="task_image_materializations_task_arch_uidx",
+        ),
+        Index(
+            "task_image_materializations_queue_idx",
+            "cpu_arch",
+            "state",
+            "next_attempt_at",
+            "created_at",
+        ),
+        Index(
+            "task_image_materializations_reference_idx",
+            "task_id",
+            "task_checksum",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    materialization_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    task_id: Mapped[str] = mapped_column(Text, nullable=False)
+    task_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    cpu_arch: Mapped[str] = mapped_column(String(16), nullable=False)
+    task_config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    task_source: Mapped[str | None] = mapped_column(Text, nullable=True)
+    task_source_provenance: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+        default=dict,
+    )
+    state: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'queued'"),
+        default="queued",
+    )
+    attempt_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("0"),
+        default=0,
+    )
+    max_attempts: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("3"),
+        default=3,
+    )
+    next_attempt_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
+    claimed_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_epoch: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        server_default=text("0"),
+        default=0,
+    )
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
+    registry_images: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+        default=dict,
+    )
+    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    failure_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    claimed_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
+    ready_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
+    last_referenced_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    unreferenced_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
+
+
 class Benchmark(Base):
     """One row per registered benchmark suite (Plan 13)."""
 
