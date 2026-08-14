@@ -12,10 +12,101 @@ from scripts.prepare_behavior_stage1_image_sources import (
     _apply_openpi_cache_patch,
     _extract_regular_archive,
     _reject_lfs_pointers,
+    cleanup_materialized_sources,
     load_source_lock,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _sealed_source_tree(root: Path) -> None:
+    nested = root / "locked"
+    nested.mkdir(parents=True)
+    payload = nested / "source.py"
+    payload.write_bytes(b"locked\n")
+    payload.chmod(0o444)
+    nested.chmod(0o555)
+    root.chmod(0o555)
+
+
+def test_cleanup_removes_only_exact_read_only_workflow_source_tree(tmp_path: Path) -> None:
+    runner_temp = tmp_path / "runner-temp"
+    runner_temp.mkdir()
+    output = runner_temp / "loom-stage1-sources-123-4"
+    _sealed_source_tree(output)
+
+    assert cleanup_materialized_sources(
+        output=output,
+        runner_temp=runner_temp,
+        run_id="123",
+        run_attempt="4",
+    )
+    assert not output.exists()
+    assert not cleanup_materialized_sources(
+        output=output,
+        runner_temp=runner_temp,
+        run_id="123",
+        run_attempt="4",
+    )
+
+
+def test_cleanup_rejects_path_substitution_and_symlink(tmp_path: Path) -> None:
+    runner_temp = tmp_path / "runner-temp"
+    runner_temp.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    substituted = runner_temp / "loom-stage1-sources-123-5"
+    substituted.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(SourceLockError, match="substitution"):
+        cleanup_materialized_sources(
+            output=outside,
+            runner_temp=runner_temp,
+            run_id="123",
+            run_attempt="4",
+        )
+    with pytest.raises(SourceLockError, match="symlink"):
+        cleanup_materialized_sources(
+            output=substituted,
+            runner_temp=runner_temp,
+            run_id="123",
+            run_attempt="5",
+        )
+    assert outside.exists()
+
+
+def test_cleanup_rejects_invalid_workflow_identity(tmp_path: Path) -> None:
+    runner_temp = tmp_path / "runner-temp"
+    runner_temp.mkdir()
+    with pytest.raises(SourceLockError, match="run id"):
+        cleanup_materialized_sources(
+            output=runner_temp / "loom-stage1-sources-not-a-run-1",
+            runner_temp=runner_temp,
+            run_id="not-a-run",
+            run_attempt="1",
+        )
+
+
+def test_cleanup_rejects_symlink_inside_source_tree(tmp_path: Path) -> None:
+    runner_temp = tmp_path / "runner-temp"
+    runner_temp.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    output = runner_temp / "loom-stage1-sources-123-6"
+    output.mkdir()
+    (output / "unsafe").symlink_to(outside, target_is_directory=True)
+    output.chmod(0o555)
+
+    with pytest.raises(SourceLockError, match="unsafe directory"):
+        cleanup_materialized_sources(
+            output=output,
+            runner_temp=runner_temp,
+            run_id="123",
+            run_attempt="6",
+        )
+    assert outside.exists()
+    output.chmod(0o700)
+    (output / "unsafe").unlink()
 
 
 def test_checked_in_stage1_source_lock_is_closed_and_self_consistent() -> None:
