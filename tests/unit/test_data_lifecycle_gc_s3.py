@@ -132,6 +132,19 @@ def test_versioned_delete_binds_exact_version_without_body_read() -> None:
     ]
 
 
+def test_null_version_delete_accepts_minio_omitted_version_evidence() -> None:
+    body = b"pre-versioning"
+    client = _Client(body)
+    item = _item(body, version_id="null", content_sha256=None)
+
+    S3ExactObjectDeleter(client).delete_exact(item)
+
+    assert client.calls == [
+        ("head", {"Bucket": item.bucket, "Key": item.object_key, "VersionId": "null"}),
+        ("delete", {"Bucket": item.bucket, "Key": item.object_key, "VersionId": "null"}),
+    ]
+
+
 def test_version_drift_fails_closed() -> None:
     body = b"versioned"
     client = _Client(body, version_id="v2")
@@ -160,6 +173,26 @@ def test_batch_delete_verifies_all_bytes_and_binds_exact_returned_identities() -
         first.id: True,
         second.id: True,
     }
+
+
+def test_batch_delete_accepts_minio_omitted_null_version_evidence() -> None:
+    body = b"pre-versioning"
+    item = _item(body, version_id="null")
+    client = _BatchClient({(item.bucket, item.object_key): body})
+    deleter = S3ExactObjectDeleter(client)
+
+    deleter.delete_exact_many((item,))
+
+    assert client.calls == [
+        (
+            "delete_objects",
+            (
+                item.bucket,
+                [{"Key": item.object_key, "VersionId": "null"}],
+            ),
+        )
+    ]
+    assert deleter.exact_absent_many((item,)) == {item.id: True}
 
 
 def test_batch_delete_rejects_incomplete_identity_evidence() -> None:
