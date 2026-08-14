@@ -20,6 +20,7 @@ from loom_capacity_executor.journal import ExecutorJournal, JournalRegressionErr
 from loom_capacity_executor.remote import RemoteDryRunPoolExecutor
 from loom_capacity_manager.executable_contracts import (
     ExecutableExecutorHeartbeatV2,
+    ExecutableExecutorInventoryV2,
     ExecutableExecutorRegistrationV2,
     ExecutableIntentCloseV2,
     ExecutableLaunchPermitV2,
@@ -29,6 +30,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableReservationProposalV2,
     ExecutionContextV2,
     StrictV2Model,
+    canonical_executable_digest,
 )
 from loom_capacity_manager.grant_contracts import (
     DryRunReservationAcceptanceV1,
@@ -202,6 +204,53 @@ async def test_executable_heartbeat_client_sends_exact_request() -> None:
     assert len(seen_requests) == 1
     assert seen_requests[0].url.path == "/v2/executors/oldlab/heartbeat"
     assert json.loads(seen_requests[0].content) == heartbeat.model_dump(mode="json")
+
+
+# Production break caught: complete pool inventory spans allocation epochs and
+# therefore carries the registered epoch context, not one synthetic allocation
+# fence. The exact journaled inventory must cross the HTTP boundary unchanged.
+async def test_executable_inventory_client_sends_exact_epoch_context_request() -> None:
+    registration = _executable_registration()
+    inventory = ExecutableExecutorInventoryV2(
+        execution=registration.execution,
+        executor_id=registration.executor_id,
+        executor_incarnation=registration.executor_incarnation,
+        pool_id=registration.pool_id,
+        pool_generation=registration.pool_generation,
+        inventory_sequence=1,
+        journal_sequence=0,
+        journal_digest="0" * 64,
+    )
+    seen_requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen_requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "inventory_sequence": inventory.inventory_sequence,
+                "inventory_digest": canonical_executable_digest(inventory),
+                "replayed": False,
+                "executable": True,
+            },
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = ExecutableCapacityExecutorClient(
+        registration,
+        manager_origin="https://capacity.example.test",
+        bearer_token="executor-secret",
+        http_client=http,
+    )
+    try:
+        receipt = await client.ingest_executable_inventory(inventory)
+    finally:
+        await http.aclose()
+
+    assert receipt.inventory_digest == canonical_executable_digest(inventory)
+    assert len(seen_requests) == 1
+    assert seen_requests[0].url.path == "/v2/executors/oldlab/inventory"
+    assert json.loads(seen_requests[0].content) == inventory.model_dump(mode="json")
 
 
 @pytest.mark.parametrize(

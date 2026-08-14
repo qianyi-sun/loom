@@ -2390,6 +2390,16 @@ class CapacityManagementStore:
             }
             for state in executor_states:
                 checkpoint = checkpoints[cast(Literal["gb10", "oldlab"], state.pool_id)]
+                inventory_journal_sequence = (
+                    None
+                    if state.inventory_payload is None
+                    else state.inventory_payload.get("journal_sequence")
+                )
+                inventory_journal_digest = (
+                    None
+                    if state.inventory_payload is None
+                    else state.inventory_payload.get("journal_digest")
+                )
                 if (
                     state.state != "current"
                     or state.execution_manifest_sha256 != request.execution_manifest_sha256
@@ -2405,6 +2415,10 @@ class CapacityManagementStore:
                     or not state.retirement_safe
                     or state.retirement_inventory_digest != checkpoint.inventory_digest
                     or state.inventory_payload is None
+                    or type(inventory_journal_sequence) is not int
+                    or inventory_journal_sequence + 2 != state.journal_high_water
+                    or not isinstance(inventory_journal_digest, str)
+                    or inventory_journal_digest == state.journal_digest
                     or state.last_inventory_at is None
                     or state.last_inventory_at < now - self._freshness
                     or state.last_heartbeat_at <= state.last_inventory_at

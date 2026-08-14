@@ -329,7 +329,7 @@ class CapacityExecutionStore:
     ) -> HeartbeatedExecutableExecutor:
         digest = canonical_executable_digest(heartbeat)
         async with _write_transaction(session):
-            _authority, epoch, registration = await self._locked_epoch_and_registration(
+            authority, epoch, registration = await self._locked_epoch_and_registration(
                 session,
                 heartbeat.execution,
                 executor_id=heartbeat.executor_id,
@@ -382,12 +382,45 @@ class CapacityExecutionStore:
             witnessed_journal_digest = (
                 None if witnessed_inventory is None else witnessed_inventory.get("journal_digest")
             )
-            if state.retirement_safe and (
-                heartbeat.journal_sequence != witnessed_journal_sequence
-                or heartbeat.journal_digest != witnessed_journal_digest
-            ):
-                state.retirement_safe = False
-                state.retirement_inventory_digest = None
+            if state.retirement_safe:
+                # The manager cannot derive executor-local journal record hashes. Its
+                # authenticated boundary is the exact pinned checkpoint, a distinct
+                # head exactly two records later, and the registered executor identity.
+                # ExecutablePoolExecutor owns the canonical requested/confirmed record
+                # content that produces this transition.
+                inventory_head = type(witnessed_journal_sequence) is int and isinstance(
+                    witnessed_journal_digest, str
+                )
+                inventory_sequence = cast(int, witnessed_journal_sequence) if inventory_head else 0
+                inventory_digest = cast(str, witnessed_journal_digest) if inventory_head else ""
+                before_confirmation = bool(
+                    inventory_head
+                    and state.journal_high_water == inventory_sequence
+                    and state.journal_digest == inventory_digest
+                )
+                after_confirmation = bool(
+                    inventory_head
+                    and state.journal_high_water == inventory_sequence + 2
+                    and state.journal_digest != inventory_digest
+                    and state.journal_high_water == heartbeat.journal_sequence
+                    and state.journal_digest == heartbeat.journal_digest
+                )
+                confirms_final_inventory = bool(
+                    authority.execution_state == "drain-only"
+                    and authority.executable_new_capacity_ceiling == 0
+                    and epoch.state == "drain-only"
+                    and epoch.effective_ceiling == 0
+                    and epoch.effective_rate_per_minute == 0
+                    and inventory_head
+                    and heartbeat.journal_checkpoint_sequence == state.journal_high_water
+                    and heartbeat.journal_checkpoint_digest == state.journal_digest
+                    and heartbeat.journal_sequence == inventory_sequence + 2
+                    and heartbeat.journal_digest != inventory_digest
+                    and (before_confirmation or after_confirmation)
+                )
+                if not confirms_final_inventory:
+                    state.retirement_safe = False
+                    state.retirement_inventory_digest = None
             now = await _database_now(session)
             state.heartbeat_high_water = heartbeat.heartbeat_sequence
             state.last_heartbeat_digest = digest
@@ -1169,7 +1202,10 @@ class CapacityExecutionStore:
     ) -> tuple[CapacityAuthorityState, CapacityExecutionEpoch, CapacityExecutionExecutor]:
         authority = await self._lock_authority(session)
         epoch = await self._lock_current_epoch(session, authority)
-        if not _context_matches(authority, epoch, execution):
+        if not (
+            _context_matches(authority, epoch, execution)
+            or _retained_drain_context_matches(authority, epoch, execution)
+        ):
             raise ExecutionConflictError("execution fence changed")
         registration = (
             await session.execute(

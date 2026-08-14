@@ -621,6 +621,30 @@ async def test_idle_inventory_publishes_exact_owned_terminal_accounting_evidence
     journal.close()
 
 
+# Production break caught: a live job whose resources changed lost its durable
+# ownership proof, so the manager could not attribute and quarantine the intent.
+async def test_resource_mismatch_inventory_retains_owned_binding_for_quarantine(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    executor, journal, manager, _admission, slurm, _launch = executor_fixture(
+        tmp_path,
+        work=permit_fixture(launch.binding),
+    )
+    await executor.tick()
+    submitted = slurm.jobs[0]
+    slurm.jobs[0] = submitted.model_copy(update={"cpus": submitted.cpus + 1})
+
+    result = await executor.tick()
+
+    assert result.status == "inventory-published"
+    record = manager.inventories[-1].records[0]
+    assert record.ownership_proof is not None
+    assert record.ownership_proof.metadata.binding == launch.binding
+    assert record.resources.cpu_millicores == (submitted.cpus + 1) * 1_000
+    journal.close()
+
+
 # Production break caught: timeout/5xx could be recorded as rejected and permit a
 # later scheduler mutation without knowing whether the central transition committed.
 @pytest.mark.parametrize(
@@ -678,6 +702,29 @@ async def test_launch_uses_exact_signed_operation_identity(tmp_path: Path) -> No
     assert submitted.event_kind == "physical-bind-confirmed"
     assert admission.bound[launch.binding.intent_id].slurm_job_id == "101"
     assert result.operation_id == launch.binding.intent_id
+    journal.close()
+
+
+# Production break caught: protected bootstrap and physical binding cannot reuse
+# one durable operation identity, and the protected request must equal the bytes
+# retained for recovery.
+async def test_physical_bind_uses_distinct_deterministic_journaled_operation(
+    tmp_path: Path,
+) -> None:
+    executor, journal, _manager, admission, _slurm, launch = executor_fixture(
+        tmp_path,
+        work=permit_fixture(launch_context_fixture().binding),
+    )
+
+    await executor.tick()
+
+    request = admission.bind_requests[0]
+    assert request.operation_id == UUID("23661071-f8d3-57ba-8707-581ddecc9fee")
+    assert request.operation_id != launch.binding.intent_id
+    retained = journal.latest("intent", str(launch.binding.intent_id))
+    assert retained is not None
+    assert retained.event_kind == "physical-bind-confirmed"
+    assert retained.durable_payload() == canonical_executable_bytes(request)
     journal.close()
 
 

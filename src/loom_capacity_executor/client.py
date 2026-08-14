@@ -591,8 +591,11 @@ class ExecutableCapacityExecutorClient:
             raise ExecutorTransportError("executable executor contract binding changed")
         binding = self._binding(value)
         execution = binding.execution if binding is not None else getattr(value, "execution", None)
-        heartbeat = isinstance(value, ExecutableExecutorHeartbeatV2)
-        if heartbeat:
+        epoch_context = isinstance(
+            value,
+            (ExecutableExecutorHeartbeatV2, ExecutableExecutorInventoryV2),
+        )
+        if epoch_context:
             if not isinstance(execution, ExecutionContextV2):
                 raise ExecutorTransportError("executable executor contract binding changed")
         elif not isinstance(execution, ExecutionFenceV2):
@@ -610,7 +613,9 @@ class ExecutableCapacityExecutorClient:
         target = binding if binding is not None else value
         if any(getattr(target, field, None) != expected for field, expected in checks):
             raise ExecutorTransportError("executable executor contract binding changed")
-        execution_exclusions = {"executable"} if heartbeat else {"allocation_epoch", "executable"}
+        execution_exclusions = (
+            {"executable"} if epoch_context else {"allocation_epoch", "executable"}
+        )
         actual_execution = execution.model_dump(exclude=execution_exclusions)
         expected_execution = self.registration.execution.model_dump(exclude={"executable"})
         if actual_execution != expected_execution:

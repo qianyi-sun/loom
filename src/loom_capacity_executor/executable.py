@@ -628,7 +628,10 @@ class ExecutablePoolExecutor:
 
     async def _bind_physical(self, *, envelope: _LaunchEnvelope, job_id: str) -> None:
         request = PhysicalJobBindingV2(
-            operation_id=envelope.rendered.request.operation_id,
+            operation_id=uuid5(
+                _OPERATION_NAMESPACE,
+                f"physical-bind:{envelope.rendered.ownership_proof.metadata.binding.intent_id}",
+            ),
             binding=envelope.rendered.ownership_proof.metadata.binding,
             bootstrap_registration_epoch=envelope.bootstrap_registration_epoch,
             slurm_job_id=job_id,
@@ -847,6 +850,35 @@ class ExecutablePoolExecutor:
             and item.ownership_token == request.ownership_token
         )
 
+    def _bound_live_matches(
+        self,
+        envelope: _LaunchEnvelope | None,
+        jobs: tuple[SlurmJobObservationV2, ...],
+    ) -> tuple[SlurmJobObservationV2, ...]:
+        if envelope is None:
+            return ()
+        binding = envelope.rendered.ownership_proof.metadata.binding
+        retained = self.journal.latest("intent", str(binding.intent_id))
+        if retained is None or retained.event_kind != "physical-bind-confirmed":
+            return ()
+        payload = retained.durable_payload()
+        if payload is None:
+            raise JournalRegressionError("physical binding request is absent from journal")
+        physical = PhysicalJobBindingV2.model_validate_json(payload)
+        if physical.binding != binding:
+            raise JournalRegressionError("physical binding request changed after confirmation")
+        request = envelope.rendered.request
+        return tuple(
+            item
+            for item in jobs
+            if item.job_id == physical.slurm_job_id
+            and item.cluster == request.cluster
+            and item.submitter == request.submitter
+            and item.account == request.account
+            and item.partition == request.partition
+            and item.ownership_token == request.ownership_token
+        )
+
     @staticmethod
     def _slurm_evidence_digest(
         item: SlurmJobObservationV2 | SlurmTerminalEvidenceV2,
@@ -934,6 +966,10 @@ class ExecutablePoolExecutor:
                 matches = self._exact_matches(envelope, observed)
                 if envelope is not None and len(matches) == 1:
                     proofs[matches[0].job_id] = envelope.rendered.ownership_proof
+                else:
+                    bound_matches = self._bound_live_matches(envelope, observed)
+                    if envelope is not None and len(bound_matches) == 1:
+                        proofs[bound_matches[0].job_id] = envelope.rendered.ownership_proof
                 terminal_matches = self._exact_terminal_matches(envelope, terminals)
                 if envelope is not None and len(terminal_matches) == 1:
                     terminal_proofs[terminal_matches[0].job_id] = envelope.rendered.ownership_proof
@@ -949,16 +985,20 @@ class ExecutablePoolExecutor:
                     if item.state in {"CONFIGURING", "RUNNING", "COMPLETING", "SUSPENDED"}
                     else "unknown"
                 ),
-                resources=(
-                    proofs[item.job_id].metadata.binding.resources
-                    if item.job_id in proofs
-                    else ResourceVectorV1(
-                        slots=1,
-                        cpu_millicores=item.cpus * 1_000,
-                        memory_bytes=item.memory_bytes,
-                        gpu_count=item.gpus,
-                        generic={},
-                    )
+                resources=ResourceVectorV1(
+                    slots=(
+                        proofs[item.job_id].metadata.binding.resources.slots
+                        if item.job_id in proofs
+                        else 1
+                    ),
+                    cpu_millicores=item.cpus * 1_000,
+                    memory_bytes=item.memory_bytes,
+                    gpu_count=item.gpus,
+                    generic=(
+                        proofs[item.job_id].metadata.binding.resources.generic
+                        if item.job_id in proofs
+                        else {}
+                    ),
                 ),
                 node_ids=item.nodes,
                 controller_evidence_sha256=self._slurm_evidence_digest(item),

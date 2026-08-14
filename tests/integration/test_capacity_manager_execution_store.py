@@ -5,12 +5,14 @@ from __future__ import annotations
 import base64
 import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import UUID
 
 import pytest
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from loom_capacity_executor.journal import ExecutorJournal
 from loom_capacity_executor.keys import ExecutorOwnershipKey
 from loom_capacity_executor.launch_renderer import (
     OperatorLaunchProfileV2,
@@ -202,6 +204,48 @@ async def _drain_active(
     return manager, drained
 
 
+# Production break caught: a long-lived executor keeps the immutable context it
+# registered while active. After monotonic drain starts, that exact registration
+# must still be able to renew its lease and publish complete terminal inventory.
+async def test_drain_telemetry_accepts_retained_same_epoch_active_registration(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityExecutionStore()
+    active, _allocation_epoch = await _active_plan(capacity_session)
+    _manager, drained = await _drain_active(capacity_session, active)
+    executor = executor_binding("gb10")
+
+    heartbeat = await store.heartbeat_executor(
+        capacity_session,
+        ExecutableExecutorHeartbeatV2(
+            execution=active,
+            executor_id=executor.executor_id,
+            executor_incarnation=executor.executor_incarnation,
+            pool_id=executor.pool_id,
+            pool_generation=executor.pool_generation,
+            heartbeat_sequence=1,
+            journal_sequence=0,
+            journal_digest="0" * 64,
+        ),
+    )
+    inventory = ExecutableExecutorInventoryV2(
+        execution=active,
+        executor_id=executor.executor_id,
+        executor_incarnation=executor.executor_incarnation,
+        pool_id=executor.pool_id,
+        pool_generation=executor.pool_generation,
+        inventory_sequence=1,
+        journal_sequence=0,
+        journal_digest="0" * 64,
+    )
+    ingested = await store.ingest_executor_inventory(capacity_session, inventory)
+
+    assert drained.execution_state == "drain-only"
+    assert active.execution_state == "active"
+    assert heartbeat.heartbeat_sequence == 1
+    assert ingested.inventory_digest == canonical_executable_digest(inventory)
+
+
 async def _publish_pool_retirement_evidence(
     store: CapacityExecutionStore,
     session: AsyncSession,
@@ -254,13 +298,15 @@ async def _publish_pool_retirement_evidence(
     await store.ingest_executor_inventory(session, inventory)
     if later_heartbeat:
         heartbeat_sequence += 1
+        confirmed_journal_sequence = journal_sequence + 2
+        confirmed_journal_digest = "f" * 64 if journal_digest != "f" * 64 else "e" * 64
         await store.heartbeat_executor(
             session,
             ExecutableExecutorHeartbeatV2(
                 **common,
                 heartbeat_sequence=heartbeat_sequence,
-                journal_sequence=journal_sequence,
-                journal_digest=journal_digest,
+                journal_sequence=confirmed_journal_sequence,
+                journal_digest=confirmed_journal_digest,
                 journal_checkpoint_sequence=journal_sequence,
                 journal_checkpoint_digest=journal_digest,
             ),
@@ -293,6 +339,7 @@ async def _publish_retirement_evidence(
     drained: ExecutionContextV2,
     *,
     records_by_pool: dict[str, tuple[ExecutableInventoryRecordV2, ...]] | None = None,
+    later_heartbeat: bool = True,
 ) -> tuple[ExecutionRetirementExecutorCheckpointV2, ...]:
     records_by_pool = records_by_pool or {}
     return tuple(
@@ -303,6 +350,7 @@ async def _publish_retirement_evidence(
                 drained,
                 pool_id=pool_id,
                 records=records_by_pool.get(pool_id, ()),
+                later_heartbeat=later_heartbeat,
             )
             for pool_id in ("gb10", "oldlab")
         ]
@@ -476,6 +524,8 @@ def _signed_inventory_record(
 
 async def _released_intent_retirement_fixture(
     session: AsyncSession,
+    *,
+    later_heartbeat: bool = True,
 ) -> tuple[
     CapacityExecutionStore,
     CapacityManagementStore,
@@ -497,6 +547,7 @@ async def _released_intent_retirement_fixture(
         session,
         drained,
         records_by_pool={"gb10": (_signed_inventory_record(binding, state="terminal"),)},
+        later_heartbeat=later_heartbeat,
     )
     return store, manager, drained, checkpoints
 
@@ -1469,13 +1520,16 @@ async def test_retirement_rejects_any_changed_final_checkpoint_binding(
     )
 
 
-async def test_journal_advance_after_inventory_invalidates_retirement_safety(
+@pytest.mark.parametrize("reported_sequence", (0, 1, 3))
+async def test_noncanonical_post_inventory_journal_transition_blocks_retirement(
     capacity_session: AsyncSession,
+    reported_sequence: int,
 ) -> None:
-    """A later journal head cannot reuse safety derived from an older inventory."""
+    """A stale, skipped, or extra record cannot confirm final inventory publication."""
 
     store, manager, drained, checkpoints = await _released_intent_retirement_fixture(
-        capacity_session
+        capacity_session,
+        later_heartbeat=False,
     )
     gb10, oldlab = checkpoints
     executor = executor_binding("gb10")
@@ -1489,8 +1543,8 @@ async def test_journal_advance_after_inventory_invalidates_retirement_safety(
             pool_id=executor.pool_id,
             pool_generation=executor.pool_generation,
             heartbeat_sequence=gb10.heartbeat_sequence + 1,
-            journal_sequence=1,
-            journal_digest="f" * 64,
+            journal_sequence=reported_sequence,
+            journal_digest=(gb10.journal_digest if reported_sequence == 0 else "f" * 64),
             journal_checkpoint_sequence=gb10.journal_sequence,
             journal_checkpoint_digest=gb10.journal_digest,
         ),
@@ -1509,8 +1563,8 @@ async def test_journal_advance_after_inventory_invalidates_retirement_safety(
     advanced = gb10.model_copy(
         update={
             "heartbeat_sequence": gb10.heartbeat_sequence + 1,
-            "journal_sequence": 1,
-            "journal_digest": "f" * 64,
+            "journal_sequence": reported_sequence,
+            "journal_digest": (gb10.journal_digest if reported_sequence == 0 else "f" * 64),
         }
     )
     await _assert_retirement_conflicts_without_mutation(
@@ -1519,6 +1573,97 @@ async def test_journal_advance_after_inventory_invalidates_retirement_safety(
         _retirement_request(drained, (advanced, oldlab)),
         idempotency_key=UUID(int=12113),
     )
+
+
+# Production break caught: a truthful inventory publisher embeds its pre-publish
+# journal head, then durably appends exactly the requested and confirmed records.
+# The authenticated post-inventory heartbeat must bind that later actual head
+# without discarding the terminal/released evidence in the exact inventory.
+async def test_normal_inventory_publish_advance_preserves_retirement_evidence(
+    capacity_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    store, manager, drained, checkpoints = await _released_intent_retirement_fixture(
+        capacity_session,
+        later_heartbeat=False,
+    )
+    advanced: list[ExecutionRetirementExecutorCheckpointV2] = []
+
+    for checkpoint in checkpoints:
+        state = (
+            await capacity_session.execute(
+                select(CapacityExecutableExecutorState).where(
+                    CapacityExecutableExecutorState.execution_epoch == drained.execution_epoch,
+                    CapacityExecutableExecutorState.pool_id == checkpoint.pool_id,
+                )
+            )
+        ).scalar_one()
+        inventory = ExecutableExecutorInventoryV2.model_validate_json(
+            json.dumps(state.inventory_payload)
+        )
+        payload = canonical_executable_bytes(inventory)
+        digest = canonical_executable_digest(inventory)
+        journal = ExecutorJournal(tmp_path / checkpoint.pool_id / "executor.journal")
+        journal.__enter__()
+        try:
+            assert journal.head.sequence == inventory.journal_sequence
+            assert journal.head.digest == inventory.journal_digest
+            requested = journal.append(
+                "inventory-publish-requested",
+                digest,
+                object_kind="inventory",
+                object_id=str(state.executor_incarnation),
+                payload=payload,
+            )
+            confirmed = journal.append(
+                "inventory-publish-confirmed",
+                digest,
+                object_kind="inventory",
+                object_id=str(state.executor_incarnation),
+                payload=payload,
+            )
+            actual_head = journal.head
+        finally:
+            journal.close()
+
+        assert requested.previous_digest == inventory.journal_digest
+        assert confirmed.previous_digest == requested.record_digest
+        assert actual_head.sequence == inventory.journal_sequence + 2
+        await store.heartbeat_executor(
+            capacity_session,
+            ExecutableExecutorHeartbeatV2(
+                execution=drained,
+                executor_id=state.executor_id,
+                executor_incarnation=state.executor_incarnation,
+                pool_id=state.pool_id,
+                pool_generation=state.pool_generation,
+                heartbeat_sequence=state.heartbeat_high_water + 1,
+                journal_sequence=actual_head.sequence,
+                journal_digest=actual_head.digest,
+                journal_checkpoint_sequence=state.journal_high_water,
+                journal_checkpoint_digest=state.journal_digest,
+            ),
+        )
+        await capacity_session.refresh(state)
+        assert state.retirement_safe is True
+        assert state.retirement_inventory_digest == digest
+        advanced.append(
+            checkpoint.model_copy(
+                update={
+                    "heartbeat_sequence": state.heartbeat_high_water,
+                    "journal_sequence": actual_head.sequence,
+                    "journal_digest": actual_head.digest,
+                }
+            )
+        )
+
+    retired = await manager.retire_execution_epoch(
+        capacity_session,
+        _retirement_request(drained, tuple(advanced)),
+        actor="activation-operator",
+        idempotency_key=UUID(int=12114),
+    )
+    assert retired.execution_epoch == drained.execution_epoch
 
 
 async def test_proofless_loom_scoped_final_record_blocks_retirement(
@@ -1860,13 +2005,19 @@ async def test_retirement_needs_fresh_postrelease_inventory_and_later_pool_heart
             pool_id=executor.pool_id,
             pool_generation=executor.pool_generation,
             heartbeat_sequence=gb10.heartbeat_sequence + 1,
-            journal_sequence=gb10.journal_sequence,
-            journal_digest=gb10.journal_digest,
+            journal_sequence=gb10.journal_sequence + 2,
+            journal_digest="f" * 64,
             journal_checkpoint_sequence=gb10.journal_sequence,
             journal_checkpoint_digest=gb10.journal_digest,
         ),
     )
-    fresh_gb10 = gb10.model_copy(update={"heartbeat_sequence": gb10.heartbeat_sequence + 1})
+    fresh_gb10 = gb10.model_copy(
+        update={
+            "heartbeat_sequence": gb10.heartbeat_sequence + 1,
+            "journal_sequence": gb10.journal_sequence + 2,
+            "journal_digest": "f" * 64,
+        }
+    )
     retired = await manager.retire_execution_epoch(
         capacity_session,
         _retirement_request(drained, (fresh_gb10, oldlab)),
