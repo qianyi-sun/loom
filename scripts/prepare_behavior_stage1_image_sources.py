@@ -666,6 +666,82 @@ def materialize(repo_root: Path, *, output: Path) -> None:
         raise
 
 
+def cleanup_materialized_sources(
+    *,
+    output: Path,
+    runner_temp: Path,
+    run_id: str,
+    run_attempt: str,
+) -> bool:
+    """Remove only this workflow attempt's sealed source tree.
+
+    Materialization deliberately makes every source directory read-only.  Keep
+    the inverse operation beside that authority so workflow shells never need
+    broad privileges or a generic recursive deletion allowance.
+    """
+
+    for value, label in ((run_id, "run id"), (run_attempt, "run attempt")):
+        if re.fullmatch(r"[1-9][0-9]*", value) is None:
+            raise SourceLockError(f"Stage 1 cleanup {label} is invalid")
+    if not runner_temp.is_absolute() or runner_temp != Path(os.path.abspath(runner_temp)):
+        raise SourceLockError("Stage 1 cleanup runner temp must be an absolute normalized path")
+    try:
+        runner_observed = runner_temp.lstat()
+    except OSError as exc:
+        raise SourceLockError("Stage 1 cleanup runner temp is unavailable") from exc
+    if not stat.S_ISDIR(runner_observed.st_mode) or runner_temp.is_symlink():
+        raise SourceLockError("Stage 1 cleanup runner temp must be a real directory")
+    directory_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    directory_flags |= getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(runner_temp, directory_flags)
+    except OSError as exc:
+        raise SourceLockError("Stage 1 cleanup runner temp cannot be opened safely") from exc
+
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (runner_observed.st_dev, runner_observed.st_ino):
+            raise SourceLockError("Stage 1 cleanup runner temp changed before removing sources")
+        expected = runner_temp / f"loom-stage1-sources-{run_id}-{run_attempt}"
+        if not output.is_absolute() or output != expected:
+            raise SourceLockError("Stage 1 cleanup output path substitution")
+        if output.is_symlink():
+            raise SourceLockError("Stage 1 cleanup output must not be a symlink")
+        if not output.exists():
+            return False
+        observed = output.lstat()
+        if not stat.S_ISDIR(observed.st_mode):
+            raise SourceLockError("Stage 1 cleanup output must be a real directory")
+
+        for current_raw, directories, files in os.walk(
+            output, topdown=False, followlinks=False
+        ):
+            current = Path(current_raw)
+            for name in files:
+                path = current / name
+                item = path.lstat()
+                if not stat.S_ISREG(item.st_mode) or item.st_nlink != 1:
+                    raise SourceLockError(
+                        "Stage 1 cleanup source tree contains a non-private regular file"
+                    )
+                os.chmod(path, 0o600, follow_symlinks=False)
+            for name in directories:
+                path = current / name
+                item = path.lstat()
+                if not stat.S_ISDIR(item.st_mode) or path.is_symlink():
+                    raise SourceLockError(
+                        "Stage 1 cleanup source tree contains an unsafe directory"
+                    )
+                os.chmod(path, 0o700, follow_symlinks=False)
+            os.chmod(current, 0o700, follow_symlinks=False)
+
+        shutil.rmtree(output.name, dir_fd=descriptor)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    return True
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
@@ -673,6 +749,8 @@ def _parser() -> argparse.ArgumentParser:
     subparsers.add_parser("validate")
     prepare = subparsers.add_parser("prepare")
     prepare.add_argument("--output", type=Path, required=True)
+    cleanup = subparsers.add_parser("cleanup")
+    cleanup.add_argument("--output", type=Path, required=True)
     return parser
 
 
@@ -682,11 +760,24 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "validate":
             lock = load_source_lock(args.repo_root.resolve())
             print(f"validated {len(lock.sources)} Stage 1 image sources")
-        else:
+        elif args.command == "prepare":
             materialize(
                 args.repo_root.resolve(),
                 output=args.output.resolve(),
             )
+        else:
+            runner_temp = os.environ.get("RUNNER_TEMP")
+            run_id = os.environ.get("GITHUB_RUN_ID")
+            run_attempt = os.environ.get("GITHUB_RUN_ATTEMPT")
+            if runner_temp is None or run_id is None or run_attempt is None:
+                raise SourceLockError("Stage 1 cleanup workflow identity is unavailable")
+            removed = cleanup_materialized_sources(
+                output=args.output,
+                runner_temp=Path(runner_temp),
+                run_id=run_id,
+                run_attempt=run_attempt,
+            )
+            print("removed Stage 1 image sources" if removed else "Stage 1 image sources absent")
         return 0
     except SourceLockError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)

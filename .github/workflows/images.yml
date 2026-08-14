@@ -1808,10 +1808,8 @@ jobs:
             --label "org.opencontainers.image.revision=${HEAD_SHA}" \
             --file "$DOCKERFILE" --tag "$local_image" "$BUILD_CONTEXT"
           docker buildx rm "$builder"
-          case "$source_root" in
-            "$RUNNER_TEMP"/loom-stage1-sources-*) rm -rf -- "$source_root" ;;
-            *) echo 'FAIL: refusing unsafe Stage 1 source cleanup' >&2; exit 1 ;;
-          esac
+          python3 scripts/prepare_behavior_stage1_image_sources.py \
+            cleanup --output "$source_root"
           common=(
             --rm --network none --read-only --cap-drop ALL
             --security-opt no-new-privileges --user 65532:65532
@@ -1972,12 +1970,13 @@ jobs:
           subject_name="${SUBJECT_NAME:-ghcr.io/${owner_lower}/${IMAGE_NAME}}"
           docker image rm "$local_image" >/dev/null 2>&1 || true
           docker image rm "${subject_name}:build-${HEAD_SHA}-amd64" >/dev/null 2>&1 || true
+          source_root="$RUNNER_TEMP/loom-stage1-sources-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          python3 scripts/prepare_behavior_stage1_image_sources.py \
+            cleanup --output "$source_root"
           for path in \
-            "$RUNNER_TEMP/loom-stage1-sources-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             "$RUNNER_TEMP/loom-stage1-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             "$RUNNER_TEMP/loom-trivy-cache"; do
             case "$path" in
-              "$RUNNER_TEMP"/loom-stage1-sources-*|\
               "$RUNNER_TEMP"/loom-stage1-release-*|\
               "$RUNNER_TEMP"/loom-trivy-cache) rm -rf -- "$path" ;;
               *) echo "FAIL: refusing unsafe cleanup path ${path}" >&2; exit 1 ;;

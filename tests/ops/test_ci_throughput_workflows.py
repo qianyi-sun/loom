@@ -742,7 +742,18 @@ def test_stage1_image_uses_separate_candidate_and_trusted_release_authorities() 
     assert 'docker buildx create --name "$builder" --driver docker-container' in trusted_seal
     assert 'docker buildx build --builder "$builder" --load' in trusted_seal
     assert 'docker buildx rm "$builder"' in publish_scripts
-    assert 'rm -rf -- "$source_root"' in trusted_seal
+    cleanup_command = (
+        "python3 scripts/prepare_behavior_stage1_image_sources.py \\\n"
+        '  cleanup --output "$source_root"'
+    )
+    assert cleanup_command in trusted_seal
+    assert cleanup_command in next(
+        step["run"]
+        for step in publish["steps"]
+        if step.get("name") == "Remove exact local Stage 1 release image"
+    )
+    assert 'rm -rf -- "$source_root"' not in publish_scripts
+    assert '"$RUNNER_TEMP"/loom-stage1-sources-*' not in publish_scripts
     assert 'rm -rf -- "$trivy_cache"' in trusted_seal
     assert "docker system prune" not in publish_scripts
     assert "docker builder prune" not in publish_scripts
