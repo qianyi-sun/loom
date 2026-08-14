@@ -34,6 +34,7 @@ from loom_cli.rollout.preflight_credential_paths import (
 )
 from loom_cli.rollout.readonly_minio_bootstrap import (
     READONLY_MINIO_BUCKETS,
+    READONLY_MINIO_CAPACITY_BUCKETS,
     ReadonlyMinioCredential,
 )
 from loom_cli.rollout.staging_baseline_source import ObjectStoreBaselineEvidence
@@ -201,9 +202,7 @@ def _stop_exact(process: TunnelProcess) -> None:
                     try:
                         process.wait(timeout=_STOP_TIMEOUT_SECONDS)
                     except subprocess.TimeoutExpired as exc:
-                        raise RuntimeError(
-                            "readonly MinIO port-forward did not stop"
-                        ) from exc
+                        raise RuntimeError("readonly MinIO port-forward did not stop") from exc
     finally:
         stream = getattr(process, "stdout", None)
         if stream is not None:
@@ -409,7 +408,7 @@ def probe_installed_staging_capacity(
     filesystem_paths: Sequence[Path],
     capacity_source: CapacitySource = "filesystem",
     expected_drive_count: int | None = None,
-    buckets: Sequence[str] = READONLY_MINIO_BUCKETS,
+    buckets: Sequence[str] = READONLY_MINIO_CAPACITY_BUCKETS,
     client_context: Callable[..., Any] = open_readonly_minio_client,
     admin_drive_probe: AdminDriveProbe = probe_installed_minio_admin_drives,
     now: Now = lambda: datetime.now(UTC),
@@ -417,7 +416,7 @@ def probe_installed_staging_capacity(
     """Return a fresh exact capacity snapshot without database mutation."""
     exact_buckets = tuple(buckets)
     exact_paths = tuple(filesystem_paths)
-    if exact_buckets != READONLY_MINIO_BUCKETS:
+    if exact_buckets != READONLY_MINIO_CAPACITY_BUCKETS:
         raise ValueError("readonly capacity bucket authority drifted")
     if capacity_source == "filesystem":
         if not exact_paths:
@@ -563,7 +562,7 @@ class InstalledReadonlyCapacitySource:
         filesystem_paths: Sequence[Path],
         capacity_source: CapacitySource = "filesystem",
         expected_drive_count: int | None = None,
-        buckets: Sequence[str] = READONLY_MINIO_BUCKETS,
+        buckets: Sequence[str] = READONLY_MINIO_CAPACITY_BUCKETS,
         probe: Callable[..., StagingCapacity] = probe_installed_staging_capacity,
     ) -> None:
         exact_paths = tuple(filesystem_paths)
@@ -584,7 +583,7 @@ class InstalledReadonlyCapacitySource:
             or expected_drive_count < 1
         ):
             raise ValueError("readonly MinIO admin drive count authority is invalid")
-        if tuple(buckets) != READONLY_MINIO_BUCKETS:
+        if tuple(buckets) != READONLY_MINIO_CAPACITY_BUCKETS:
             raise ValueError("readonly capacity source buckets drifted")
         self._service_uid = service_uid
         self._filesystem_paths = exact_paths

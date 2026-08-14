@@ -1621,6 +1621,11 @@ python_type = "str"
 default     = "artifacts"
 description = "Object-store bucket for trial artifacts. Rendered into control-plane, worker, and loom-service env. Set per environment when deployments share an object-store endpoint."
 
+[render_config.lifecycle_legacy_buckets]
+python_type = "str_list"
+default     = []
+description = "Additional exact legacy object-store buckets that staging lifecycle maintenance must inventory alongside the configured trajectories and artifacts write buckets."
+
 [render_config.env_state_profile]
 python_type = "str"
 default     = ""

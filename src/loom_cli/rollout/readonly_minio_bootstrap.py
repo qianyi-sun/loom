@@ -13,6 +13,12 @@ READONLY_MINIO_BUCKETS = (
     "loom-staging-artifacts",
     "loom-staging-trajectories",
 )
+READONLY_MINIO_CAPACITY_BUCKETS = (
+    "loom-staging-trajectories",
+    "loom-staging-artifacts",
+    "artifacts",
+    "trajectories",
+)
 
 _SECRET_RE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
 
@@ -30,7 +36,9 @@ def readonly_minio_policy() -> dict[str, object]:
                     "s3:ListBucket",
                     "s3:ListBucketVersions",
                 ],
-                "Resource": [f"arn:aws:s3:::{bucket}" for bucket in READONLY_MINIO_BUCKETS],
+                "Resource": [
+                    f"arn:aws:s3:::{bucket}" for bucket in READONLY_MINIO_CAPACITY_BUCKETS
+                ],
             },
             {
                 "Effect": "Allow",
@@ -134,6 +142,7 @@ class ReadonlyMinioCredential:
 __all__ = [
     "READONLY_MINIO_ACCESS_KEY",
     "READONLY_MINIO_BUCKETS",
+    "READONLY_MINIO_CAPACITY_BUCKETS",
     "READONLY_MINIO_POLICY_NAME",
     "ReadonlyMinioCredential",
     "readonly_minio_policy",

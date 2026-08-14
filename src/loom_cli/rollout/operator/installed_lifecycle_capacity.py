@@ -276,8 +276,12 @@ class InstalledLifecycleCapacityService:
             or config.source_commit_sha is None
             or config.source_tree_sha is None
             or config.source_base_sha is None
-            or len(expected_buckets) != 2
-            or len(set(expected_buckets)) != 2
+            or len(expected_buckets) < 2
+            or len(set(expected_buckets)) != len(expected_buckets)
+            or any(
+                not bucket or bucket != bucket.strip() or "\x00" in bucket
+                for bucket in expected_buckets
+            )
             or capacity_source not in {"filesystem", "minio-admin"}
             or (capacity_source == "filesystem" and not expected_filesystem_paths)
             or (capacity_source == "filesystem" and expected_drive_count is not None)

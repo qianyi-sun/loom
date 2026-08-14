@@ -10,6 +10,9 @@ frontend_api_base_path = "/staging"
 # This profile serves staging at its canonical `/staging` route.
 trajectories_bucket = "loom-staging-trajectories"
 artifacts_bucket = "loom-staging-artifacts"
+# Keep rehearsal lifecycle coverage equal to shared staging while legacy
+# worker objects remain in the logical-name buckets.
+lifecycle_legacy_buckets = ["artifacts", "trajectories"]
 env_state_profile = "../environment-state/staging.toml"
 persistent_storage_backend = "static-host-path"
 persistent_storage_host_path_root = "/data/loom-staging"
