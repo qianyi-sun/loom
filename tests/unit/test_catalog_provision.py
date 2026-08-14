@@ -28,6 +28,13 @@ def _valid_task_config(task_id: str) -> dict[str, object]:
     }
 
 
+def _workspace_task_config(task_id: str) -> dict[str, object]:
+    return {
+        **_valid_task_config(task_id),
+        "required_agent_capabilities": ["workspace_exec"],
+    }
+
+
 class FakeCatalog:
     def __init__(self, rows: CatalogRows | None = None) -> None:
         self.rows = rows or CatalogRows(benchmarks=[], tasks=[])
@@ -169,6 +176,44 @@ def test_agent_rows_from_service_catalog_include_contract_and_provenance() -> No
     }
 
 
+def test_ready_catalog_requires_workspace_benchmarks_to_be_republished() -> None:
+    benchmark_id = "skillflow"
+    task_id = f"{benchmark_id}/task"
+    source = CatalogRows(
+        benchmarks=[
+            BenchmarkRow(
+                id=benchmark_id,
+                display_name="SkillFlow",
+                upstream_kind="huggingface",
+                upstream_locator="example/skillflow",
+                upstream_revision="rev",
+                license_spdx="MIT",
+                license_url="https://example.test/license",
+                splits=["test"],
+                series="workspace",
+                imported_by="source",
+            ),
+        ],
+        tasks=[
+            TaskRow(
+                id=task_id,
+                checksum="a" * 64,
+                config=_valid_task_config(task_id),
+                source=f"s3://source-bucket/{benchmark_id}/task/",
+                license="MIT",
+                benchmark_id=benchmark_id,
+                tags={},
+            ),
+        ],
+    )
+
+    with pytest.raises(ValueError, match=r"republish.*workspace_exec"):
+        catalog_provision._ready_catalog_rows(
+            source,
+            target_bucket="target-bucket",
+        )
+
+
 def test_tb21_catalog_provision_requires_target_local_activation() -> None:
     profile_id = "terminal-bench-2@tb2.1-r6"
     task_id = f"{profile_id}/task"
@@ -196,7 +241,7 @@ def test_tb21_catalog_provision_requires_target_local_activation() -> None:
             TaskRow(
                 id=task_id,
                 checksum="a" * 64,
-                config=_valid_task_config(task_id),
+                config=_workspace_task_config(task_id),
                 source=f"s3://source-bucket/{profile_id}/task/",
                 license="Apache-2.0",
                 benchmark_id=profile_id,
@@ -239,7 +284,7 @@ async def test_tb21_catalog_drift_fails_before_target_object_copy() -> None:
     source_task = TaskRow(
         id=task_id,
         checksum="a" * 64,
-        config=_valid_task_config(task_id),
+        config=_workspace_task_config(task_id),
         source=f"s3://source-bucket/{profile_id}/task/",
         license="Apache-2.0",
         benchmark_id=profile_id,
@@ -299,7 +344,7 @@ async def test_exact_runnable_tb21_target_is_reset_for_local_reactivation() -> N
     source_task = TaskRow(
         id=task_id,
         checksum="a" * 64,
-        config=_valid_task_config(task_id),
+        config=_workspace_task_config(task_id),
         source=f"s3://source-bucket/{profile_id}/task/",
         license="Apache-2.0",
         benchmark_id=profile_id,
