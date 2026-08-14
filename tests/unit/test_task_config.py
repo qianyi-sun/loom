@@ -41,6 +41,32 @@ def test_task_config_round_trips_required_agent_capabilities() -> None:
     ]
 
 
+def test_task_config_serializes_required_agent_capabilities_canonically() -> None:
+    cfg = _minimal_config().model_copy(
+        update={
+            "required_agent_capabilities": frozenset(
+                {
+                    "workspace_exec",
+                    "browser",
+                    "filesystem",
+                    "network_proxy",
+                    "database",
+                    "shell",
+                },
+            ),
+        },
+    )
+
+    assert cfg.model_dump(mode="json")["required_agent_capabilities"] == [
+        "browser",
+        "database",
+        "filesystem",
+        "network_proxy",
+        "shell",
+        "workspace_exec",
+    ]
+
+
 def test_multi_step_config_weights_optional_unless_weighted():
     _minimal_config()
     ms = MultiStepConfig(reward_strategy="mean")

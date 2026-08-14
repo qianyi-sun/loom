@@ -164,18 +164,8 @@ class LiteLLMAgent:
         import tempfile
         from pathlib import Path
 
-        for rel_path in self.artifact_paths:
-            artifact_path = PurePosixPath(rel_path)
-            if (
-                not rel_path
-                or artifact_path.is_absolute()
-                or ".." in artifact_path.parts
-                or glob.has_magic(rel_path)
-            ):
-                raise AgentError(
-                    "direct-completion requires an exact relative artifact path; "
-                    f"got {rel_path!r}",
-                )
+        artifact_paths = _validate_artifact_paths(self.artifact_paths)
+        for rel_path, artifact_path in artifact_paths:
             body = _render_artifact_body(content, rel_path)
             with tempfile.NamedTemporaryFile(
                 mode="w",
@@ -186,10 +176,30 @@ class LiteLLMAgent:
                 tf.write(body)
                 tmp = Path(tf.name)
             try:
-                dst = self.workdir / rel_path
+                dst = self.workdir / artifact_path
                 await env.upload(tmp, dst)
             finally:
                 tmp.unlink(missing_ok=True)
+
+
+def _validate_artifact_paths(
+    paths: Sequence[str],
+) -> tuple[tuple[str, PurePosixPath], ...]:
+    validated: list[tuple[str, PurePosixPath]] = []
+    for rel_path in paths:
+        artifact_path = PurePosixPath(rel_path)
+        if (
+            not artifact_path.parts
+            or artifact_path.is_absolute()
+            or ".." in artifact_path.parts
+            or glob.has_magic(rel_path)
+        ):
+            raise AgentError(
+                "direct-completion requires an exact relative artifact path; "
+                f"got {rel_path!r}",
+            )
+        validated.append((rel_path, artifact_path))
+    return tuple(validated)
 
 
 _FINAL_ANSWER_ARTIFACT_FILENAMES = frozenset({"final_answer.txt"})
