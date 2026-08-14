@@ -14,7 +14,7 @@ import hashlib
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from urllib.parse import quote
 from uuid import UUID
 
@@ -84,6 +84,47 @@ class ExecutionAttemptClaimHeaders:
 
 # Short compatibility name for callers that do not need the subject repeated.
 AttemptClaimHeaders = ExecutionAttemptClaimHeaders
+
+
+@dataclass(frozen=True)
+class TaskImageBuildClaim:
+    id: UUID
+    materialization_key: str
+    task_id: str
+    task_checksum: str
+    cpu_arch: Literal["x86_64", "arm64"]
+    task_config: dict[str, Any]
+    task_source: str | None
+    task_source_provenance: dict[str, Any]
+    attempt_count: int
+    max_attempts: int
+    lease_epoch: int
+    lease_expires_at: str
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any]) -> TaskImageBuildClaim:
+        cpu_arch = str(payload["cpu_arch"])
+        if cpu_arch not in {"x86_64", "arm64"}:
+            raise ValueError("task image claim cpu_arch must be native")
+        lease_epoch = int(payload["lease_epoch"])
+        if lease_epoch <= 0:
+            raise ValueError("task image claim lease_epoch must be positive")
+        return cls(
+            id=UUID(str(payload["id"])),
+            materialization_key=str(payload["materialization_key"]),
+            task_id=str(payload["task_id"]),
+            task_checksum=str(payload["task_checksum"]),
+            cpu_arch=cpu_arch,  # type: ignore[arg-type]
+            task_config=dict(payload["task_config"]),
+            task_source=(
+                str(payload["task_source"]) if payload.get("task_source") is not None else None
+            ),
+            task_source_provenance=dict(payload["task_source_provenance"]),
+            attempt_count=int(payload["attempt_count"]),
+            max_attempts=int(payload["max_attempts"]),
+            lease_epoch=lease_epoch,
+            lease_expires_at=str(payload["lease_expires_at"]),
+        )
 
 
 @dataclass
@@ -1330,3 +1371,114 @@ class HttpControlPlaneClient:
         finally:
             if owned:
                 await client.aclose()
+
+    # ─── durable task-image builder protocol ────────────────────────
+
+    async def claim_task_image_materialization(
+        self,
+        *,
+        builder_id: str,
+        cpu_arch: Literal["x86_64", "arm64"],
+    ) -> TaskImageBuildClaim | None:
+        client, owned = self._http()
+        try:
+            response = await client.post(
+                "/api/v1/internal/task-image-materializations/claim",
+                headers=self._headers,
+                json={"builder_id": builder_id, "cpu_arch": cpu_arch},
+            )
+            if response.status_code == 204:
+                return None
+            response.raise_for_status()
+            return TaskImageBuildClaim.from_payload(response.json())
+        finally:
+            if owned:
+                await client.aclose()
+
+    async def _mutate_task_image_materialization(
+        self,
+        *,
+        materialization_id: UUID,
+        operation: str,
+        payload: dict[str, Any],
+    ) -> bool:
+        client, owned = self._http()
+        try:
+            response = await client.post(
+                f"/api/v1/internal/task-image-materializations/{materialization_id}/{operation}",
+                headers=self._headers,
+                json=payload,
+            )
+            if response.status_code == 409:
+                return False
+            response.raise_for_status()
+            return True
+        finally:
+            if owned:
+                await client.aclose()
+
+    async def start_task_image_materialization(
+        self,
+        *,
+        materialization_id: UUID,
+        builder_id: str,
+        lease_epoch: int,
+    ) -> bool:
+        return await self._mutate_task_image_materialization(
+            materialization_id=materialization_id,
+            operation="start",
+            payload={"builder_id": builder_id, "lease_epoch": lease_epoch},
+        )
+
+    async def heartbeat_task_image_materialization(
+        self,
+        *,
+        materialization_id: UUID,
+        builder_id: str,
+        lease_epoch: int,
+    ) -> bool:
+        return await self._mutate_task_image_materialization(
+            materialization_id=materialization_id,
+            operation="heartbeat",
+            payload={"builder_id": builder_id, "lease_epoch": lease_epoch},
+        )
+
+    async def complete_task_image_materialization(
+        self,
+        *,
+        materialization_id: UUID,
+        builder_id: str,
+        lease_epoch: int,
+        registry_images: Mapping[str, str],
+    ) -> bool:
+        return await self._mutate_task_image_materialization(
+            materialization_id=materialization_id,
+            operation="complete",
+            payload={
+                "builder_id": builder_id,
+                "lease_epoch": lease_epoch,
+                "registry_images": dict(registry_images),
+            },
+        )
+
+    async def fail_task_image_materialization(
+        self,
+        *,
+        materialization_id: UUID,
+        builder_id: str,
+        lease_epoch: int,
+        retryable: bool,
+        failure_reason: str,
+        failure_message: str,
+    ) -> bool:
+        return await self._mutate_task_image_materialization(
+            materialization_id=materialization_id,
+            operation="fail",
+            payload={
+                "builder_id": builder_id,
+                "lease_epoch": lease_epoch,
+                "retryable": retryable,
+                "failure_reason": failure_reason,
+                "failure_message": failure_message,
+            },
+        )
