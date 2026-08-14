@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from scripts.ci_behavior_stage1_image import (
     Stage1ImageEvidenceError,
+    _parse_attestation_verification,
     _record,
     _record_index,
     _validate_index_record,
@@ -22,6 +23,44 @@ def _digest(path: Path) -> str:
 
 def _canonical(path: Path, value: object) -> None:
     path.write_bytes(json.dumps(value, separators=(",", ":"), sort_keys=True).encode() + b"\n")
+
+
+def _verification(
+    *, predicate_type: str, subject_name: str, subject_digest: str
+) -> list[dict[str, object]]:
+    return [
+        {
+            "attestation": {
+                "bundle": {"mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json"},
+                "bundle_url": "oci://ghcr.io/qianyi-sun/loom-behavior-stage1-sim",
+                "initiator": "",
+            },
+            "verificationResult": {
+                "mediaType": (
+                    "application/vnd.dev.sigstore.verificationresult+json;version=0.1"
+                ),
+                "signature": {"certificate": {"issuer": "https://token.actions.githubusercontent.com"}},
+                "statement": {
+                    "_type": "https://in-toto.io/Statement/v1",
+                    "predicate": {},
+                    "predicateType": predicate_type,
+                    "subject": [
+                        {
+                            "digest": {"sha256": subject_digest.removeprefix("sha256:")},
+                            "name": subject_name,
+                        }
+                    ],
+                },
+                "verifiedIdentity": {
+                    "issuer": "https://token.actions.githubusercontent.com",
+                    "subjectAlternativeName": (
+                        "https://github.com/qianyi-sun/loom/.github/workflows/images.yml@refs/heads/dev"
+                    ),
+                },
+                "verifiedTimestamps": [{"type": "transparency-log"}],
+            },
+        }
+    ]
 
 
 def _args(tmp_path: Path) -> argparse.Namespace:
@@ -131,8 +170,22 @@ def test_index_record_requires_one_exact_amd64_child(tmp_path: Path) -> None:
     )
     provenance = tmp_path / "provenance.json"
     sbom = tmp_path / "sbom-verification.json"
-    _canonical(provenance, {"verificationResult": "success"})
-    _canonical(sbom, {"verificationResult": "success"})
+    _canonical(
+        provenance,
+        _verification(
+            predicate_type="https://slsa.dev/provenance/v1",
+            subject_name=args.subject_name,
+            subject_digest=args.subject_digest,
+        ),
+    )
+    _canonical(
+        sbom,
+        _verification(
+            predicate_type="https://spdx.dev/Document/v2.3",
+            subject_name=args.subject_name,
+            subject_digest=args.subject_digest,
+        ),
+    )
     index_args = argparse.Namespace(
         child_record=args.output,
         index_manifest=index,
@@ -153,6 +206,139 @@ def test_index_record_requires_one_exact_amd64_child(tmp_path: Path) -> None:
         _record_index(index_args)
 
 
+@pytest.mark.parametrize(
+    ("replacement", "message"),
+    [
+        ({}, "singleton verification array"),
+        ([], "singleton verification array"),
+        ([{}, {}], "singleton verification array"),
+        (["not-an-object"], "result must be an object"),
+    ],
+)
+def test_index_record_rejects_non_singleton_attestation_verification(
+    tmp_path: Path,
+    replacement: object,
+    message: str,
+) -> None:
+    args = _args(tmp_path)
+    args.mode = "trusted-publish"
+    args.event_name = "push"
+    args.ref_name = "dev"
+    _write(args.output, _record(args))
+    index = tmp_path / "index.json"
+    _canonical(
+        index,
+        {
+            "manifests": [
+                {
+                    "digest": args.subject_digest,
+                    "platform": {"architecture": "amd64", "os": "linux"},
+                }
+            ],
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+        },
+    )
+    provenance = tmp_path / "provenance.json"
+    sbom = tmp_path / "sbom.json"
+    _canonical(provenance, replacement)
+    _canonical(
+        sbom,
+        _verification(
+            predicate_type="https://spdx.dev/Document/v2.3",
+            subject_name=args.subject_name,
+            subject_digest=args.subject_digest,
+        ),
+    )
+    index_args = argparse.Namespace(
+        child_record=args.output,
+        index_manifest=index,
+        output=tmp_path / "index-record.json",
+        provenance_verification=provenance,
+        sbom_verification=sbom,
+        subject_digest="sha256:" + "d" * 64,
+        subject_name="ghcr.io/qianyi-sun/loom-behavior-stage1-sim",
+    )
+
+    with pytest.raises(Stage1ImageEvidenceError, match=message):
+        _record_index(index_args)
+
+
+@pytest.mark.parametrize("drift", ["predicate", "subject"])
+def test_index_record_rejects_attestation_statement_drift(
+    tmp_path: Path, drift: str
+) -> None:
+    args = _args(tmp_path)
+    args.mode = "trusted-publish"
+    args.event_name = "push"
+    args.ref_name = "dev"
+    _write(args.output, _record(args))
+    index = tmp_path / "index.json"
+    _canonical(
+        index,
+        {
+            "manifests": [
+                {
+                    "digest": args.subject_digest,
+                    "platform": {"architecture": "amd64", "os": "linux"},
+                }
+            ],
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+        },
+    )
+    verification = _verification(
+        predicate_type="https://slsa.dev/provenance/v1",
+        subject_name=args.subject_name,
+        subject_digest=args.subject_digest,
+    )
+    verification_result = verification[0]["verificationResult"]
+    assert isinstance(verification_result, dict)
+    statement = verification_result["statement"]
+    assert isinstance(statement, dict)
+    if drift == "predicate":
+        statement["predicateType"] = "https://example.invalid/predicate"
+    else:
+        statement["subject"] = []
+    provenance = tmp_path / "provenance.json"
+    sbom = tmp_path / "sbom.json"
+    _canonical(provenance, verification)
+    _canonical(
+        sbom,
+        _verification(
+            predicate_type="https://spdx.dev/Document/v2.3",
+            subject_name=args.subject_name,
+            subject_digest=args.subject_digest,
+        ),
+    )
+    index_args = argparse.Namespace(
+        child_record=args.output,
+        index_manifest=index,
+        output=tmp_path / "index-record.json",
+        provenance_verification=provenance,
+        sbom_verification=sbom,
+        subject_digest="sha256:" + "d" * 64,
+        subject_name="ghcr.io/qianyi-sun/loom-behavior-stage1-sim",
+    )
+
+    with pytest.raises(Stage1ImageEvidenceError, match=drift):
+        _record_index(index_args)
+
+
+def test_sbom_attestation_verification_is_bounded(tmp_path: Path) -> None:
+    oversized = tmp_path / "oversized-sbom-verification.json"
+    with oversized.open("wb") as handle:
+        handle.truncate(32 * 1024 * 1024 + 1)
+
+    with pytest.raises(Stage1ImageEvidenceError, match="bounded private regular file"):
+        _parse_attestation_verification(
+            oversized,
+            label="SBOM verification",
+            predicate_type="https://spdx.dev/Document/v2.3",
+            subject_name="ghcr.io/qianyi-sun/loom-behavior-stage1-sim",
+            subject_digest="sha256:" + "a" * 64,
+            max_bytes=32 * 1024 * 1024,
+        )
+
+
 @pytest.mark.parametrize("event_name", ["push", "workflow_dispatch"])
 def test_trusted_record_accepts_only_protected_branch_release_events(
     tmp_path: Path, event_name: str
@@ -164,8 +350,12 @@ def test_trusted_record_accepts_only_protected_branch_release_events(
 
     record = _record(args)
 
-    assert record["build"]["mode"] == "trusted-publish"
-    assert record["source"]["event_name"] == event_name
+    build = record["build"]
+    source = record["source"]
+    assert isinstance(build, dict)
+    assert isinstance(source, dict)
+    assert build["mode"] == "trusted-publish"
+    assert source["event_name"] == event_name
     args.ref_name = "feature"
     with pytest.raises(Stage1ImageEvidenceError, match="ref"):
         _record(args)
