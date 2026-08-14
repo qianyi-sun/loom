@@ -119,6 +119,8 @@ class SlurmNodeResource:
     cpu_load: float | None
     idle_cpus: int | None = None
     available_memory_mib: int | None = None
+    total_memory_mib: int | None = None
+    schedulable_memory_mib: int | None = None
 
 
 @dataclass(frozen=True)
@@ -483,10 +485,15 @@ def compute_node_capacity_plan(
             safe_slots=0,
             reason="insufficient_cpu",
         )
-    usable_memory_mib = (
+    physically_available_memory_mib = (
         resource.available_memory_mib
         if resource.available_memory_mib is not None
         else resource.free_memory_mib
+    )
+    usable_memory_mib = (
+        physically_available_memory_mib
+        if resource.schedulable_memory_mib is None
+        else min(physically_available_memory_mib, resource.schedulable_memory_mib)
     )
     memory_slots = (usable_memory_mib - config.reserved_memory_mib) // config.memory_mib_per_slot
     if memory_slots < 1:
@@ -925,6 +932,31 @@ class SubprocessSlurmCommandRunner:
             timeout=config.command_timeout_seconds,
         )
         resources = parse_sinfo_node_resources(sinfo.stdout)
+        allocated = await _run_command(
+            (
+                config.sinfo_path,
+                "-h",
+                "-N",
+                "-n",
+                ",".join(nodes),
+                "-O",
+                "NodeList:200,AllocMem:20",
+            ),
+            timeout=config.command_timeout_seconds,
+        )
+        allocated_memory = _parse_sinfo_allocated_memory(allocated.stdout)
+        if set(allocated_memory) != set(resources):
+            raise RuntimeError("Slurm allocated memory snapshot is incomplete")
+        for node, node_resource in tuple(resources.items()):
+            if node_resource.total_memory_mib is None:
+                raise RuntimeError("Slurm total memory snapshot is incomplete")
+            resources[node] = replace(
+                node_resource,
+                schedulable_memory_mib=max(
+                    0,
+                    node_resource.total_memory_mib - allocated_memory[node],
+                ),
+            )
         if config.probe_mem_available:
             for node in nodes:
                 resource = resources.get(node)
@@ -1136,9 +1168,16 @@ def parse_sinfo_node_resources(output: str) -> dict[str, SlurmNodeResource]:
         hostname = parts[0].strip()
         state = parts[1].strip()
         cpus_total = _parse_optional_int(parts[2])
+        total_memory_mib = _parse_optional_int(parts[3])
         free_memory_mib = _parse_optional_int(parts[4])
         cpu_load = _parse_optional_float(parts[5])
-        if not hostname or cpus_total is None or free_memory_mib is None:
+        allocated_memory_mib = _parse_optional_int(parts[7]) if len(parts) > 7 else None
+        if (
+            not hostname
+            or cpus_total is None
+            or total_memory_mib is None
+            or free_memory_mib is None
+        ):
             continue
         resources[hostname] = SlurmNodeResource(
             hostname=hostname,
@@ -1147,8 +1186,31 @@ def parse_sinfo_node_resources(output: str) -> dict[str, SlurmNodeResource]:
             free_memory_mib=free_memory_mib,
             cpu_load=cpu_load,
             idle_cpus=_parse_idle_cpus(parts[6]) if len(parts) > 6 else None,
+            total_memory_mib=total_memory_mib,
+            schedulable_memory_mib=(
+                None
+                if allocated_memory_mib is None
+                else max(0, total_memory_mib - allocated_memory_mib)
+            ),
         )
     return resources
+
+
+def _parse_sinfo_allocated_memory(output: str) -> dict[str, int]:
+    allocated: dict[str, int] = {}
+    for raw_line in output.splitlines():
+        parts = raw_line.split()
+        if len(parts) != 2:
+            continue
+        hostname = parts[0]
+        allocated_memory_mib = _parse_optional_int(parts[1])
+        if not hostname or allocated_memory_mib is None or allocated_memory_mib < 0:
+            continue
+        previous = allocated.get(hostname)
+        if previous is not None and previous != allocated_memory_mib:
+            raise RuntimeError("Slurm allocated memory snapshot is ambiguous")
+        allocated[hostname] = allocated_memory_mib
+    return allocated
 
 
 async def load_capacity_snapshot(
