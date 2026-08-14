@@ -715,6 +715,81 @@ async def test_live_preparation_runtime_converges_fixtures_then_exact_generation
 
 
 @pytest.mark.asyncio
+async def test_capacity_installer_configuration_uses_candidate_publication_digest(
+    tmp_path: Path,
+) -> None:
+    """Real ready candidates may have different source and publication digests."""
+
+    class _Kubectl:
+        def __init__(self) -> None:
+            self.secrets: dict[str, dict[str, bytes]] = {}
+
+        async def read_secret_optional(self, namespace, name):
+            assert namespace == "loom-dev-alice"
+            return self.secrets.get(name)
+
+        async def apply(self, manifest):
+            for document in yaml.safe_load_all(manifest):
+                if document and document["kind"] == "Secret":
+                    self.secrets[document["metadata"]["name"]] = {  # type: ignore[index]
+                        key: base64.b64decode(value)
+                        for key, value in document["data"].items()  # type: ignore[index,union-attr]
+                    }
+
+    class _Database:
+        def __init__(self) -> None:
+            self.configuration = None
+
+        async def converge(self, *, configuration, credentials, **_kwargs):
+            self.configuration = configuration
+            return CapacityDatabaseInstallation(
+                protected_admission_sha256="7" * 64,
+                agent_database_url=(
+                    "postgresql+psycopg://agent:"
+                    + credentials.agent_password
+                    + "@loom-dev-postgres/loom_dev_alice"
+                ),
+            )
+
+    def credential(name: str, payload: str) -> Path:
+        path = tmp_path / name
+        path.write_text(payload)
+        path.chmod(0o600)
+        return path
+
+    database = _Database()
+    installer = KubectlPersonalDevCapacityInstaller(
+        kubectl=_Kubectl(),  # type: ignore[arg-type]
+        database=database,
+        config=PersonalDevCapacityRuntimeConfig(
+            manager_origin="https://loom-capacity-manager.loom-dev.svc.cluster.local:8443",
+            tls_files=DemandReporterTLSFiles(
+                ca_file=credential("ca.pem", "ca"),
+                certificate_file=credential("certificate.pem", "certificate"),
+                private_key_file=credential("private-key.pem", "private-key"),
+            ),
+            trusted_agent_image="registry.example/loom-service@sha256:" + "1" * 64,
+            pool_capabilities=(
+                AgentPoolCapabilityV1(
+                    capability_id="oldlab-x86-none",
+                    pool_id="oldlab",
+                    operating_system="linux",
+                    cpu_architecture="x86_64",
+                    gpu_vendor="none",
+                    network_policies=("public",),
+                ),
+            ),
+        ),
+    )
+
+    await installer.converge(_claim())
+
+    assert database.configuration is not None
+    assert database.configuration.candidate_digest == "a" * 64
+    assert database.configuration.candidate_publication_sha256 == "f" * 64
+
+
+@pytest.mark.asyncio
 async def test_capacity_installer_is_idempotent_and_rotates_only_for_replacement(
     tmp_path: Path,
 ) -> None:

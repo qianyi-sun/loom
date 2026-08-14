@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from collections.abc import Iterator
@@ -19,9 +20,12 @@ from psycopg.errors import InsufficientPrivilege
 from sqlalchemy import Engine, create_engine, inspect, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError, ProgrammingError
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.db.schema import Task, Team, TeamQuota, Trial
+from loom_capacity_agent.contracts import AgentRegistrationV1
+from loom_capacity_agent.store import CapacityAgentStore
+from loom_capacity_guard.contracts import GuardFenceV1, canonical_digest
 from loom_capacity_guard.schema_startup import assert_capacity_guard_schema_at_head
 from loom_capacity_manager.contracts import ResourceVectorV1
 from loom_capacity_manager.executable_contracts import (
@@ -69,6 +73,17 @@ def _value(database: dict[str, object], key: str) -> str:
     value = database[key]
     assert isinstance(value, str)
     return value
+
+
+def _digest_payload(payload: dict[str, object]) -> str:
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 @pytest.mark.asyncio
@@ -885,6 +900,124 @@ def test_guard_0014_downgrade_restores_executor_only_observation(
     finally:
         executor.dispose()
         observer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_guard_0015_backfills_legacy_agent_registration_audit_for_replay(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    """Upgraded guard_0014 agent registrations must replay against current audits."""
+
+    cfg = _guard_config(capacity_guard_database)
+    owner_role = _value(capacity_guard_database, "owner_role")
+    agent_role = _value(capacity_guard_database, "agent_role")
+    fence = GuardFenceV1(
+        environment_id="dev-legacy-audit",
+        subject_id=uuid4(),
+        subject_incarnation=uuid4(),
+        authority_incarnation=uuid4(),
+        reporter_incarnation=uuid4(),
+        deployment_generation=7,
+        configuration_generation=11,
+        candidate_digest="c" * 64,
+    )
+    registration = AgentRegistrationV1(
+        environment_id=fence.environment_id,
+        subject_id=fence.subject_id,
+        subject_incarnation=fence.subject_incarnation,
+        authority_incarnation=fence.authority_incarnation,
+        agent_incarnation=uuid4(),
+        reporter_incarnation=fence.reporter_incarnation,
+        candidate_digest=fence.candidate_digest,
+        deployment_generation=fence.deployment_generation,
+        configuration_generation=fence.configuration_generation,
+    )
+    legacy_registration_payload = registration.model_dump(mode="json", exclude_none=False)
+    for field in (
+        "candidate_identity_algorithm",
+        "candidate_identity",
+        "candidate_publication_sha256",
+    ):
+        legacy_registration_payload.pop(field)
+
+    command.downgrade(cfg, "guard_0014")
+    with _owner_connection(capacity_guard_database) as connection:
+        connection.execute(
+            text(
+                "INSERT INTO loom_capacity_guard.authority_state "
+                "(singleton_id, schema_version, environment_id, subject_id, "
+                "subject_incarnation, authority_mode, authority_incarnation, "
+                "reporter_incarnation, reporter_high_water, allocation_epoch, "
+                "deployment_generation, configuration_generation, candidate_digest) "
+                "VALUES (1, 1, :environment_id, :subject_id, :subject_incarnation, "
+                "'disabled', :authority_incarnation, :reporter_incarnation, 0, 0, "
+                ":deployment_generation, :configuration_generation, :candidate_digest)"
+            ),
+            fence.model_dump(mode="python", exclude_none=False),
+        )
+        connection.execute(
+            text(
+                "INSERT INTO loom_capacity_guard.audit_events "
+                "(event_type, payload, payload_digest) "
+                "VALUES ('authority_initialized.v1', CAST(:payload AS jsonb), :digest)"
+            ),
+            {
+                "payload": json.dumps(fence.model_dump(mode="json", exclude_none=False)),
+                "digest": canonical_digest(fence),
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO loom_capacity_guard.agent_registrations "
+                "(agent_incarnation, singleton_id, schema_version, environment_id, "
+                "subject_id, subject_incarnation, authority_incarnation, "
+                "reporter_incarnation, authority_mode, allocation_epoch, "
+                "candidate_digest, deployment_generation, configuration_generation, "
+                "registration_state) "
+                "VALUES (:agent_incarnation, 1, 1, :environment_id, :subject_id, "
+                ":subject_incarnation, :authority_incarnation, :reporter_incarnation, "
+                "'disabled', 0, :candidate_digest, :deployment_generation, "
+                ":configuration_generation, 'registered')"
+            ),
+            registration.model_dump(mode="python", exclude_none=False),
+        )
+        connection.execute(
+            text(
+                "INSERT INTO loom_capacity_guard.agent_reporter_state "
+                "(agent_incarnation, high_water) VALUES (:agent_incarnation, 0)"
+            ),
+            {"agent_incarnation": registration.agent_incarnation},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO loom_capacity_guard.audit_events "
+                "(event_type, payload, payload_digest) "
+                "VALUES ('agent_registered.v1', CAST(:payload AS jsonb), :digest)"
+            ),
+            {
+                "payload": json.dumps(legacy_registration_payload),
+                "digest": _digest_payload(legacy_registration_payload),
+            },
+        )
+
+    command.upgrade(cfg, "head")
+    engine = create_async_engine(
+        make_url(_value(capacity_guard_database, "migrator_url")),
+        isolation_level="SERIALIZABLE",
+    )
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    quoted_owner = engine.sync_engine.dialect.identifier_preparer.quote(owner_role)
+    try:
+        async with factory() as session, session.begin():
+            await session.execute(text(f"SET LOCAL ROLE {quoted_owner}"))
+            store = CapacityAgentStore(
+                session,
+                expected_owner_role=owner_role,
+                expected_agent_role=agent_role,
+            )
+            assert await store.register_agent(registration) == registration
+    finally:
+        await engine.dispose()
 
 
 def test_guard_0013_observation_requires_the_exact_prepared_event(

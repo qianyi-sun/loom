@@ -59,10 +59,22 @@ def upgrade() -> None:
     )
     op.execute(
         f"""
+        ALTER TABLE {SCHEMA}.agent_registrations
+        DISABLE TRIGGER agent_registrations_monotonic_row
+        """
+    )
+    op.execute(
+        f"""
         UPDATE {SCHEMA}.agent_registrations
            SET candidate_identity_algorithm = 'source-sha256',
                candidate_identity = candidate_digest,
                candidate_publication_sha256 = candidate_digest
+        """
+    )
+    op.execute(
+        f"""
+        ALTER TABLE {SCHEMA}.agent_registrations
+        ENABLE TRIGGER agent_registrations_monotonic_row
         """
     )
     for column in (
@@ -71,6 +83,71 @@ def upgrade() -> None:
         "candidate_publication_sha256",
     ):
         op.alter_column("agent_registrations", column, nullable=False, schema=SCHEMA)
+    op.execute(
+        f"""
+        ALTER TABLE {SCHEMA}.audit_events
+        DISABLE TRIGGER audit_events_append_only_row
+        """
+    )
+    op.execute(
+        f"""
+        UPDATE {SCHEMA}.audit_events AS event
+           SET payload = event.payload || jsonb_build_object(
+               'candidate_identity_algorithm', registration.candidate_identity_algorithm,
+               'candidate_identity', registration.candidate_identity,
+               'candidate_publication_sha256', registration.candidate_publication_sha256
+           )
+          FROM {SCHEMA}.agent_registrations AS registration
+         WHERE event.event_type IN ('agent_registered.v1', 'agent_reconfigured.v1')
+           AND event.payload->>'agent_incarnation'
+               = registration.agent_incarnation::text
+           AND (
+               NOT (event.payload ? 'candidate_identity_algorithm')
+               OR NOT (event.payload ? 'candidate_identity')
+               OR NOT (event.payload ? 'candidate_publication_sha256')
+           )
+        """
+    )
+    op.execute(
+        f"""
+        UPDATE {SCHEMA}.audit_events
+           SET payload_digest = encode(sha256(convert_to(
+               '{{"agent_incarnation":' ||
+                 to_jsonb(payload->>'agent_incarnation')::text ||
+               ',"allocation_epoch":' || (payload->>'allocation_epoch') ||
+               ',"authority_incarnation":' ||
+                 to_jsonb(payload->>'authority_incarnation')::text ||
+               ',"authority_mode":' || to_jsonb(payload->>'authority_mode')::text ||
+               ',"candidate_digest":' || to_jsonb(payload->>'candidate_digest')::text ||
+               ',"candidate_identity":' ||
+                 to_jsonb(payload->>'candidate_identity')::text ||
+               ',"candidate_identity_algorithm":' ||
+                 to_jsonb(payload->>'candidate_identity_algorithm')::text ||
+               ',"candidate_publication_sha256":' ||
+                 to_jsonb(payload->>'candidate_publication_sha256')::text ||
+               ',"configuration_generation":' ||
+                 (payload->>'configuration_generation') ||
+               ',"deployment_generation":' || (payload->>'deployment_generation') ||
+               ',"environment_id":' || to_jsonb(payload->>'environment_id')::text ||
+               ',"reporter_high_water":' || (payload->>'reporter_high_water') ||
+               ',"reporter_incarnation":' ||
+                 to_jsonb(payload->>'reporter_incarnation')::text ||
+               ',"schema_version":' || (payload->>'schema_version') ||
+               ',"subject_id":' || to_jsonb(payload->>'subject_id')::text ||
+               ',"subject_incarnation":' ||
+                 to_jsonb(payload->>'subject_incarnation')::text ||
+               '}}',
+               'UTF8'
+           )), 'hex')
+         WHERE event_type IN ('agent_registered.v1', 'agent_reconfigured.v1')
+        """
+    )
+    op.execute(
+        f"""
+        ALTER TABLE {SCHEMA}.audit_events
+        ENABLE TRIGGER audit_events_append_only_row
+        """
+    )
     op.create_check_constraint(
         "agent_registrations_candidate_identity_check",
         "agent_registrations",

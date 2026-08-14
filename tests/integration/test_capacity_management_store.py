@@ -418,6 +418,59 @@ async def test_activation_seeds_static_candidate_provenance_for_executable_looku
     assert candidate.publication_sha256 == provenance.publication_sha256
 
 
+async def test_activation_rejects_unmatched_static_candidate_provenance(
+    capacity_session: AsyncSession,
+) -> None:
+    """Extra static provenance must not be silently ignored during activation."""
+
+    store = CapacityManagementStore()
+    fleet_proposal = await store.propose_fleet_configuration(
+        capacity_session,
+        fleet_manifest(),
+        actor="fleet-operator",
+        idempotency_key=uuid4(),
+    )
+    subject = subject_configuration()
+    subject_proposal = await store.propose_subject_configuration(
+        capacity_session,
+        subject,
+        actor="environment-state",
+        idempotency_key=uuid4(),
+    )
+    matched = StaticCandidateProvenanceV1(
+        subject_id=subject.subject_id,
+        subject_incarnation=subject.subject_incarnation,
+        candidate_generation=subject.candidate_generation,
+        algorithm="source-sha256",
+        identity="1" * 64,
+        publication_sha256="2" * 64,
+    )
+    unmatched = StaticCandidateProvenanceV1(
+        subject_id=UUID("00000000-0000-4000-8000-00000000f001"),
+        subject_incarnation=subject.subject_incarnation,
+        candidate_generation=subject.candidate_generation,
+        algorithm="source-sha256",
+        identity="3" * 64,
+        publication_sha256="4" * 64,
+    )
+
+    with pytest.raises(ConfigurationConflictError, match="static candidate provenance"):
+        await store.activate_configuration(
+            capacity_session,
+            configuration_activation(
+                fleet=fleet_proposal,
+                subjects=(subject_proposal,),
+                static_candidate_provenance=(matched, unmatched),
+            ),
+            actor="fleet-operator",
+            idempotency_key=uuid4(),
+        )
+
+    assert (
+        await capacity_session.execute(select(func.count()).select_from(CapacityCandidate))
+    ).scalar_one() == 0
+
+
 async def test_dynamic_development_projection_is_atomic_idempotent_and_shadow_only(
     capacity_session: AsyncSession,
 ) -> None:

@@ -271,6 +271,41 @@ async def test_drain_telemetry_accepts_retained_same_epoch_active_registration(
     assert ingested.inventory_digest == canonical_executable_digest(inventory)
 
 
+# Production break caught: writer transfer during drain advances the mutable
+# writer fence, but retained executor telemetry remains bound to the active
+# writer epoch frozen when the executor was registered.
+async def test_drain_telemetry_accepts_retained_active_registration_after_writer_failover(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityExecutionStore()
+    active, _allocation_epoch = await _active_plan(capacity_session)
+    manager, drained = await _drain_active(capacity_session, active)
+    successor = await manager.register_writer(
+        capacity_session,
+        active.authority_incarnation,
+        expected_epoch=active.writer_epoch,
+    )
+    executor = executor_binding("gb10")
+
+    heartbeat = await store.heartbeat_executor(
+        capacity_session,
+        ExecutableExecutorHeartbeatV2(
+            execution=active,
+            executor_id=executor.executor_id,
+            executor_incarnation=executor.executor_incarnation,
+            pool_id=executor.pool_id,
+            pool_generation=executor.pool_generation,
+            heartbeat_sequence=1,
+            journal_sequence=0,
+            journal_digest="0" * 64,
+        ),
+    )
+
+    assert drained.execution_state == "drain-only"
+    assert successor.writer_epoch == active.writer_epoch + 1
+    assert heartbeat.heartbeat_sequence == 1
+
+
 @pytest.mark.parametrize("telemetry_kind", ("heartbeat", "inventory"))
 @pytest.mark.parametrize(
     "changed_field",

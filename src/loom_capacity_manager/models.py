@@ -1840,7 +1840,7 @@ class CapacityExecutableExecutorState(Base):
             name="capacity_executable_executor_state_check",
         ),
         CheckConstraint(
-            "(retirement_safe AND retirement_inventory_digest IS NOT NULL "
+            "((retirement_safe AND retirement_inventory_digest IS NOT NULL "
             "AND retirement_inventory_digest ~ '^[0-9a-f]{64}$' "
             "AND retirement_inventory_digest = last_inventory_digest "
             "AND inventory_high_water > 0 AND inventory_payload IS NOT NULL "
@@ -1863,7 +1863,7 @@ class CapacityExecutableExecutorState(Base):
             "AND inventory_payload -> 'execution' -> 'execution_epoch' "
             "= to_jsonb(execution_epoch) "
             "AND inventory_payload -> 'execution' ->> 'execution_manifest_sha256' "
-            "= execution_manifest_sha256) OR "
+            "= execution_manifest_sha256) IS TRUE) OR "
             "(NOT retirement_safe AND retirement_inventory_digest IS NULL)",
             name="capacity_executable_executor_retirement_check",
         ),

@@ -261,7 +261,7 @@ def _retained_drain_context_matches(
         and epoch.effective_ceiling == 0
         and epoch.effective_rate_per_minute == 0
         and authority.authority_incarnation == execution.authority_incarnation
-        and execution.writer_epoch == epoch.current_writer_epoch
+        and execution.writer_epoch == epoch.prepared_writer_epoch
         and authority.execution_epoch == execution.execution_epoch
         and authority.execution_manifest_sha256 == execution.execution_manifest_sha256
         and execution.execution_state == "active"

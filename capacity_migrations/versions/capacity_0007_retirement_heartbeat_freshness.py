@@ -17,7 +17,7 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 _RETIREMENT_CHECK = (
-    "(retirement_safe AND retirement_inventory_digest IS NOT NULL "
+    "((retirement_safe AND retirement_inventory_digest IS NOT NULL "
     "AND retirement_inventory_digest ~ '^[0-9a-f]{64}$' "
     "AND retirement_inventory_digest = last_inventory_digest "
     "AND inventory_high_water > 0 AND inventory_payload IS NOT NULL "
@@ -37,7 +37,7 @@ _RETIREMENT_CHECK = (
     "AND inventory_confirmation_journal_digest = journal_digest)) "
     "AND inventory_payload -> 'execution' -> 'execution_epoch' = to_jsonb(execution_epoch) "
     "AND inventory_payload -> 'execution' ->> 'execution_manifest_sha256' "
-    "= execution_manifest_sha256) OR "
+    "= execution_manifest_sha256) IS TRUE) OR "
     "(NOT retirement_safe AND retirement_inventory_digest IS NULL)"
 )
 

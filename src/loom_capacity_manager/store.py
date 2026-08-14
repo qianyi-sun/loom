@@ -837,6 +837,12 @@ class CapacityManagementStore:
         provenance: tuple[StaticCandidateProvenanceV1, ...],
     ) -> None:
         by_subject = {item.subject_id: item for item in provenance}
+        activated_subject_ids = {subject.subject_id for subject in subjects}
+        if extra_subject_ids := set(by_subject) - activated_subject_ids:
+            extra = ", ".join(sorted(str(subject_id) for subject_id in extra_subject_ids))
+            raise ConfigurationConflictError(
+                f"static candidate provenance has no activated subject: {extra}"
+            )
         for subject in subjects:
             row = (
                 await session.execute(

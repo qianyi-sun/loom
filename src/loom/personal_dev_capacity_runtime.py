@@ -1081,6 +1081,11 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
         credentials: _CapacityCredentials,
     ) -> ReporterConfigurationV1:
         operation = claim.operation
+        publication_sha256 = claim.candidate.publication_sha256
+        if publication_sha256 is None:
+            raise PersonalDevCapacityInstallationError(
+                "protected capacity candidate publication digest is unavailable"
+            )
         authority_incarnation = uuid5(
             NAMESPACE_URL,
             f"loom:{operation.subject_incarnation}:capacity-authority",
@@ -1098,7 +1103,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
             reporter_incarnation=credentials.reporter_incarnation,
             candidate_digest=operation.candidate_sha,
             candidate_identity=operation.candidate_sha,
-            candidate_publication_sha256=operation.candidate_sha,
+            candidate_publication_sha256=publication_sha256,
             deployment_generation=operation.deployment_generation,
             configuration_generation=operation.operation_epoch,
             pool_capabilities=self._config.pool_capabilities,

@@ -12,7 +12,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import CheckConstraint, create_engine, inspect, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from testcontainers.postgres import PostgresContainer
@@ -1905,3 +1905,47 @@ def test_dev_instance_capacity_coordinates_are_derived_from_personal_name(
                 )
     finally:
         engine.dispose()
+
+
+def test_dev_instance_capacity_coordinate_constraint_matches_model_and_migration(
+    postgres_url: str,
+) -> None:
+    """The 0097 derived-coordinate constraint must be present in ORM and database."""
+
+    expected_model_sql = (
+        "(candidate_id IS NULL AND capacity_namespace IS NULL AND capacity_database IS NULL) "
+        "OR (candidate_id IS NOT NULL AND capacity_namespace = 'loom-dev-' || name "
+        "AND capacity_database = 'loom_dev_' || replace(name, '-', '_'))"
+    )
+    model_checks = {
+        constraint.name: str(constraint.sqltext)
+        for constraint in DevInstance.__table__.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+
+    assert model_checks["dev_instances_personal_capacity_identity_check"] == expected_model_sql
+
+    engine = create_engine(postgres_url)
+    try:
+        with engine.connect() as connection:
+            database_checks = {
+                constraint["name"]: constraint["sqltext"]
+                for constraint in inspect(connection).get_check_constraints("dev_instances")
+            }
+    finally:
+        engine.dispose()
+
+    normalized_database_sql = (
+        " ".join(database_checks["dev_instances_personal_capacity_identity_check"].lower().split())
+        .replace("( ", "(")
+        .replace(" )", ")")
+    )
+    assert "candidate_id is null" in normalized_database_sql
+    assert "capacity_namespace is null" in normalized_database_sql
+    assert "capacity_database is null" in normalized_database_sql
+    assert "candidate_id is not null" in normalized_database_sql
+    assert "capacity_namespace = ('loom-dev-'::text || name)" in normalized_database_sql
+    assert (
+        "capacity_database = ('loom_dev_'::text || replace(name, '-'::text, '_'::text))"
+        in normalized_database_sql
+    )

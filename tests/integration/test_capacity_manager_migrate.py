@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import time
@@ -346,7 +347,7 @@ def test_retirement_lifecycle_schema_matches_model_and_migration(
             "AND octet_length(retirement_request_payload::text) <= 8388608))"
         ),
         "capacity_executable_executor_retirement_check": (
-            "(retirement_safe AND retirement_inventory_digest IS NOT NULL "
+            "((retirement_safe AND retirement_inventory_digest IS NOT NULL "
             "AND retirement_inventory_digest ~ '^[0-9a-f]{64}$' "
             "AND retirement_inventory_digest = last_inventory_digest "
             "AND inventory_high_water > 0 AND inventory_payload IS NOT NULL "
@@ -369,7 +370,7 @@ def test_retirement_lifecycle_schema_matches_model_and_migration(
             "AND inventory_payload -> 'execution' -> 'execution_epoch' "
             "= to_jsonb(execution_epoch) "
             "AND inventory_payload -> 'execution' ->> 'execution_manifest_sha256' "
-            "= execution_manifest_sha256) OR "
+            "= execution_manifest_sha256) IS TRUE) OR "
             "(NOT retirement_safe AND retirement_inventory_digest IS NULL)"
         ),
     }
@@ -389,7 +390,7 @@ def test_retirement_lifecycle_schema_matches_model_and_migration(
             "AND octet_length(retirement_request_payload::text) <= 8388608"
         ),
         "capacity_executable_executor_retirement_check": (
-            "retirement_safe AND retirement_inventory_digest IS NOT NULL AND "
+            "(retirement_safe AND retirement_inventory_digest IS NOT NULL AND "
             "retirement_inventory_digest ~ '^[0-9a-f]{64}$'::text AND "
             "retirement_inventory_digest = last_inventory_digest AND "
             "inventory_high_water > 0 AND inventory_payload IS NOT NULL AND "
@@ -415,7 +416,7 @@ def test_retirement_lifecycle_schema_matches_model_and_migration(
             "((inventory_payload -> 'execution'::text) -> "
             "'execution_epoch'::text) = to_jsonb(execution_epoch) AND "
             "((inventory_payload -> 'execution'::text) ->> "
-            "'execution_manifest_sha256'::text) = execution_manifest_sha256 OR "
+            "'execution_manifest_sha256'::text) = execution_manifest_sha256) IS TRUE OR "
             "NOT retirement_safe AND retirement_inventory_digest IS NULL"
         ),
     }
@@ -780,6 +781,93 @@ def test_executor_retirement_safety_rejects_noncanonical_inventory_payload(
                         "id": uuid4(),
                         "execution_epoch": execution_epoch,
                         "executor_incarnation": UUID(int=12011),
+                    },
+                )
+    finally:
+        transaction.rollback()
+        connection.close()
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    (
+        "schema_version",
+        "inventory_sequence",
+        "executor_id",
+        "executor_incarnation",
+        "pool_id",
+        "pool_generation",
+        "journal_sequence",
+        "journal_digest",
+        "execution.execution_epoch",
+        "execution.execution_manifest_sha256",
+    ),
+)
+def test_executor_retirement_safety_rejects_missing_inventory_binding_fields(
+    capacity_postgres_url: str,
+    missing_field: str,
+) -> None:
+    """Missing JSON fields must not satisfy retirement safety by SQL UNKNOWN."""
+
+    engine = create_engine(capacity_postgres_url)
+    connection = engine.connect()
+    transaction = connection.begin()
+    try:
+        execution_epoch = _seed_active_execution(connection)
+        executor_incarnation = UUID(int=12011)
+        payload: dict[str, object] = {
+            "schema_version": 2,
+            "execution": {
+                "execution_epoch": execution_epoch,
+                "execution_manifest_sha256": "4" * 64,
+            },
+            "executor_id": "gb10-executor",
+            "executor_incarnation": str(executor_incarnation),
+            "pool_id": "gb10",
+            "pool_generation": 1,
+            "inventory_sequence": 1,
+            "journal_sequence": 0,
+            "journal_digest": "0" * 64,
+            "journal_checkpoint_sequence": 0,
+            "journal_checkpoint_digest": "0" * 64,
+            "complete": True,
+            "records": [],
+            "executable": True,
+        }
+        if missing_field.startswith("execution."):
+            execution = payload["execution"]
+            assert isinstance(execution, dict)
+            execution.pop(missing_field.removeprefix("execution."))
+        else:
+            payload.pop(missing_field)
+
+        with pytest.raises(IntegrityError):
+            with connection.begin_nested():
+                connection.execute(
+                    text(
+                        "INSERT INTO capacity_executable_executor_states "
+                        "(id, execution_epoch, execution_manifest_sha256, executor_id, "
+                        "executor_incarnation, pool_id, pool_generation, state, "
+                        "journal_high_water, journal_digest, inventory_high_water, "
+                        "last_inventory_digest, inventory_payload, "
+                        "inventory_confirmation_journal_digest, last_inventory_at, "
+                        "retirement_safe, retirement_inventory_digest, lease_expires_at, "
+                        "last_heartbeat_at) VALUES "
+                        "(:id, :execution_epoch, repeat('4', 64), 'gb10-executor', "
+                        ":executor_incarnation, 'gb10', 1, 'current', 0, repeat('0', 64), "
+                        "1, repeat('f', 64), CAST(:payload AS jsonb), "
+                        "repeat('0', 64), CAST(:observed_at AS timestamptz), true, "
+                        "repeat('f', 64), CAST(:observed_at AS timestamptz) + "
+                        "interval '1 minute', CAST(:observed_at AS timestamptz) + "
+                        "interval '1 second')"
+                    ),
+                    {
+                        "id": uuid4(),
+                        "execution_epoch": execution_epoch,
+                        "executor_incarnation": executor_incarnation,
+                        "payload": json.dumps(payload),
+                        "observed_at": "2026-08-14T12:00:00+00:00",
                     },
                 )
     finally:
