@@ -9,7 +9,7 @@ import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 _COMMANDS = ("scontrol", "sacctmgr", "squeue", "sbatch", "scancel", "sacct")
 
@@ -111,14 +111,29 @@ elif command == "sacctmgr":
         state["qos"],
     )) + "\n")
 elif command == "squeue":
-    requested = None
+    requested_clusters = None
+    requested_users = None
+    requested_accounts = None
+    requested_jobs = None
     for argument in sys.argv[1:]:
-        if argument.startswith("--jobs="):
-            requested = argument.split("=", 1)[1]
-    jobs = state["jobs"].values()
-    if requested is not None:
-        jobs = (job for job in jobs if job["job_id"] == requested)
-    for job in jobs:
+        if argument.startswith("--clusters="):
+            requested_clusters = set(argument.split("=", 1)[1].split(","))
+        elif argument.startswith("--user="):
+            requested_users = set(argument.split("=", 1)[1].split(","))
+        elif argument.startswith("--account="):
+            requested_accounts = set(argument.split("=", 1)[1].split(","))
+        elif argument.startswith("--jobs="):
+            requested_jobs = set(argument.split("=", 1)[1].split(","))
+    jobs = list(state["jobs"].values()) + list(state["foreign_jobs"].values())
+    jobs = (
+        job
+        for job in jobs
+        if (requested_clusters is None or state["cluster"] in requested_clusters)
+        and (requested_users is None or job["submitter"] in requested_users)
+        and (requested_accounts is None or job["account"] in requested_accounts)
+        and (requested_jobs is None or job["job_id"] in requested_jobs)
+    )
+    for job in sorted(jobs, key=lambda item: int(item["job_id"])):
         reason_or_nodes = (
             job["pending_reason"] if job["state"] == "PENDING" else ",".join(job["nodes"])
         )
@@ -179,6 +194,9 @@ elif command == "sbatch":
         "direct_argv": sys.argv[1 + direct_index:] if direct_index is not None else [],
     }
     secure_write(state_path, state)
+    if fault == "after_mutation_failure":
+        sys.stderr.write("controlled post-submit failure")
+        raise SystemExit(2)
     sys.stdout.write(job_id + ";" + state["cluster"] + "\n")
 elif command == "scancel":
     job_id = sys.argv[-1]
@@ -224,21 +242,33 @@ class FakeSlurmCall:
 class FakeSlurm:
     """Own local command files and mutable fake controller state."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        cluster: str = "oldlab",
+        controller: str = "ctl.oldlab.internal",
+        partition: str = "loom",
+        account: str = "loom-executor",
+        submitter: str = "loom-oldlab",
+        qos: str = "loom",
+        next_job_id: int = 101,
+    ) -> None:
         self.root = root
         self.bin = root / "bin"
         self.bin.mkdir(parents=True)
         self._state_path = root / "state.json"
         self._calls_path = root / "calls.jsonl"
         self._state: dict[str, Any] = {
-            "cluster": "oldlab",
-            "controller": "ctl.oldlab.internal",
-            "partition": "loom",
-            "account": "loom-executor",
-            "submitter": "loom-oldlab",
-            "qos": "loom",
-            "next_job_id": 101,
+            "cluster": cluster,
+            "controller": controller,
+            "partition": partition,
+            "account": account,
+            "submitter": submitter,
+            "qos": qos,
+            "next_job_id": next_job_id,
             "jobs": {},
+            "foreign_jobs": {},
             "terminal_jobs": [],
             "faults": {},
             "outputs": {},
@@ -288,13 +318,14 @@ class FakeSlurm:
                 owner_uid=os.geteuid(),
             )
 
+        self._load_state()
         authority = SlurmAuthorityV2(
-            cluster="oldlab",
-            controller_host="ctl.oldlab.internal",
-            partition="loom",
-            account="loom-executor",
-            submitter="loom-oldlab",
-            qos="loom",
+            cluster=self._state["cluster"],
+            controller_host=self._state["controller"],
+            partition=self._state["partition"],
+            account=self._state["account"],
+            submitter=self._state["submitter"],
+            qos=self._state["qos"],
             local_uid=os.geteuid(),
             executables=SlurmExecutablesV2(
                 scontrol=identity("scontrol"),
@@ -350,6 +381,7 @@ class FakeSlurm:
         submitter: str | None = None,
         account: str | None = None,
     ) -> None:
+        self._load_state()
         self._state["jobs"][job_id] = {
             "job_id": job_id,
             "state": state,
@@ -368,11 +400,13 @@ class FakeSlurm:
         self._write_state()
 
     def set_job_state(self, job_id: str, state: str) -> None:
+        self._load_state()
         self._state["jobs"][job_id]["state"] = state
         self._state["jobs"][job_id]["pending_reason"] = "Resources" if state == "PENDING" else ""
         self._write_state()
 
     def set_controller(self, *, cluster: str | None = None, host: str | None = None) -> None:
+        self._load_state()
         if cluster is not None:
             self._state["cluster"] = cluster
         if host is not None:
@@ -380,14 +414,96 @@ class FakeSlurm:
         self._write_state()
 
     def set_output(self, command: str, output: str) -> None:
+        self._load_state()
         self._state["outputs"][command] = output
         self._write_state()
 
     def set_fault(self, command: str, fault: str) -> None:
+        self._load_state()
         self._state["faults"][command] = fault
         self._write_state()
 
+    def clear_fault(self, command: str) -> None:
+        self._load_state()
+        self._state["faults"].pop(command, None)
+        self._write_state()
+
+    def add_foreign_job(self, job_id: str) -> str:
+        """Add a real same-cluster job excluded only by Loom user/account filters."""
+
+        self._load_state()
+        self._state["foreign_jobs"][job_id] = {
+            "job_id": job_id,
+            "state": "RUNNING",
+            "submitter": f"foreign-{self._state['submitter']}",
+            "account": f"foreign-{self._state['account']}",
+            "partition": self._state["partition"],
+            "cpus": 1,
+            "memory_bytes": 1024 * 1024 * 1024,
+            "gpus": 0,
+            "generic_tres": {},
+            "gres": "N/A",
+            "nodes": [f"foreign-{self._state['cluster']}-node"],
+            "pending_reason": "",
+            "ownership_token": "F" * 43,
+        }
+        self._write_state()
+        return job_id
+
+    def job_snapshot(self, job_id: str) -> dict[str, Any]:
+        self._load_state()
+        value = self._state["jobs"].get(job_id)
+        if value is None:
+            value = self._state["foreign_jobs"].get(job_id)
+        if value is None:
+            raise KeyError(job_id)
+        return cast(dict[str, Any], json.loads(json.dumps(value, sort_keys=True)))
+
+    def replace_job(self, job_id: str, **changes: object) -> None:
+        self._load_state()
+        if job_id not in self._state["jobs"]:
+            raise KeyError(job_id)
+        self._state["jobs"][job_id].update(changes)
+        self._write_state()
+
+    def restore_job(self, job_id: str, snapshot: dict[str, Any]) -> None:
+        self._load_state()
+        self._state["jobs"][job_id] = json.loads(json.dumps(snapshot, sort_keys=True))
+        self._write_state()
+
+    def live_jobs(self) -> tuple[dict[str, Any], ...]:
+        self._load_state()
+        return tuple(
+            json.loads(json.dumps(value, sort_keys=True))
+            for _, value in sorted(self._state["jobs"].items(), key=lambda item: int(item[0]))
+        )
+
+    def foreign_jobs(self) -> tuple[dict[str, Any], ...]:
+        self._load_state()
+        return tuple(
+            json.loads(json.dumps(value, sort_keys=True))
+            for _, value in sorted(
+                self._state["foreign_jobs"].items(), key=lambda item: int(item[0])
+            )
+        )
+
+    def unscoped_squeue_job_ids(self) -> tuple[str, ...]:
+        """Run the fake subprocess without Loom's user/account query scope."""
+
+        result = subprocess.run(
+            [str(self.bin / "squeue")],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            env={"LANG": "C", "LC_ALL": "C", "PATH": "/usr/bin:/bin"},
+            check=True,
+            timeout=1,
+        )
+        return tuple(
+            line.split("|", 1)[0] for line in result.stdout.decode("utf-8").splitlines() if line
+        )
+
     def add_terminal_job(self, *, job_id: str = "99", state: str = "COMPLETED") -> None:
+        self._load_state()
         self._state["terminal_jobs"].append(
             {
                 "job_id": job_id,
@@ -411,7 +527,7 @@ class FakeSlurm:
 
     def terminalize_job(self, job_id: str) -> None:
         self._load_state()
-        job = dict(self._state["jobs"][job_id])
+        job = dict(self._state["jobs"].pop(job_id))
         job.update(
             {
                 "state": "COMPLETED",
