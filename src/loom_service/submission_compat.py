@@ -67,30 +67,38 @@ def _resolved_submission_agents(
     return resolved
 
 
-async def validate_submission_agent_task_compatibility(
+def _resolved_agent_task_pairs(
+    agent_task_pairs: Sequence[tuple[str, str]],
+) -> list[tuple[str, str, AgentEntry]]:
+    """Resolve ``(task_id, agent_name)`` pairs without expanding coordinates."""
+    resolved: list[tuple[str, str, AgentEntry]] = []
+    canonical_pairs: set[tuple[str, str]] = set()
+    for task_id, requested_name in agent_task_pairs:
+        entry = get_agent(requested_name)
+        if entry is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"unknown agent_name {requested_name!r}. "
+                    "GET /api/v1/agents for the catalog."
+                ),
+            )
+        canonical_pair = (task_id, entry.name)
+        if canonical_pair not in canonical_pairs:
+            canonical_pairs.add(canonical_pair)
+            resolved.append((task_id, requested_name, entry))
+    return resolved
+
+
+async def _visible_task_contracts(
     session: Any,
     *,
     team_id: UUID | None,
     task_ids: Sequence[str],
-    combinations: Sequence[Combination | Mapping[str, Any]] = (),
-    trial_config: Mapping[str, Any],
-) -> None:
-    """Reject missing/invisible tasks and incompatible agent/task pairs.
-
-    Every lookup is constrained by ``visible_tasks`` so an inaccessible
-    TaskSet task is indistinguishable from a missing task. The original
-    requested agent spelling is retained in errors; aliases are resolved only
-    for their immutable catalog capabilities.
-    """
+) -> dict[str, tuple[Mapping[str, Any], Any, str | None]]:
     requested_task_ids = list(dict.fromkeys(task_ids))
-    requested_agents = _submission_agent_names(
-        combinations=combinations,
-        trial_config=trial_config,
-    )
-    agents = _resolved_submission_agents(requested_agents)
     if not requested_task_ids:
-        return
-
+        return {}
     rows = (
         await session.execute(
             visible_tasks(team_id=team_id)
@@ -113,37 +121,54 @@ async def validate_submission_agent_task_compatibility(
     }
     if set(tasks) != set(requested_task_ids):
         raise HTTPException(status_code=404, detail="task not found")
-    if not agents:
-        return
+    return tasks
 
-    offenders: list[tuple[str, list[tuple[str, frozenset[str], frozenset[str]]]]] = []
-    for requested_name, entry in agents:
-        failures: list[tuple[str, frozenset[str], frozenset[str]]] = []
-        for task_id in requested_task_ids:
-            config, raw_tags, benchmark_id = tasks[task_id]
-            compatibility = agent_task_compatibility(
-                config,
-                agent_requires=entry.requires_capabilities,
-                agent_provides=entry.provides_capabilities,
-                tags=dict(raw_tags) if isinstance(raw_tags, Mapping) else None,
-                benchmark_id=benchmark_id,
+
+async def validate_submission_agent_task_pairs(
+    session: Any,
+    *,
+    team_id: UUID | None,
+    agent_task_pairs: Sequence[tuple[str, str]],
+) -> None:
+    """Reject missing/invisible tasks and incompatible exact coordinates.
+
+    Each pair is ``(task_id, agent_name)``. Unlike ordinary submission
+    admission, this function never creates an agent×task cross-product.
+    """
+    resolved_pairs = _resolved_agent_task_pairs(agent_task_pairs)
+    if not resolved_pairs:
+        return
+    requested_task_ids = list(dict.fromkeys(task_id for task_id, _, _ in resolved_pairs))
+    tasks = await _visible_task_contracts(
+        session,
+        team_id=team_id,
+        task_ids=requested_task_ids,
+    )
+
+    offenders: dict[str, list[tuple[str, frozenset[str], frozenset[str]]]] = {}
+    for task_id, requested_name, entry in resolved_pairs:
+        config, raw_tags, benchmark_id = tasks[task_id]
+        compatibility = agent_task_compatibility(
+            config,
+            agent_requires=entry.requires_capabilities,
+            agent_provides=entry.provides_capabilities,
+            tags=dict(raw_tags) if isinstance(raw_tags, Mapping) else None,
+            benchmark_id=benchmark_id,
+        )
+        if not compatibility.compatible:
+            offenders.setdefault(requested_name, []).append(
+                (
+                    task_id,
+                    compatibility.missing_from_task,
+                    compatibility.missing_from_agent,
+                ),
             )
-            if not compatibility.compatible:
-                failures.append(
-                    (
-                        task_id,
-                        compatibility.missing_from_task,
-                        compatibility.missing_from_agent,
-                    ),
-                )
-        if failures:
-            offenders.append((requested_name, failures))
 
     if not offenders:
         return
 
     pairs: list[str] = []
-    for name, failures in offenders:
+    for name, failures in offenders.items():
         task_id, missing_from_task, missing_from_agent = failures[0]
         reasons: list[str] = []
         if missing_from_task:
@@ -156,4 +181,45 @@ async def validate_submission_agent_task_compatibility(
         "cannot run these tasks at the platform level (e.g. oracle requires a "
         "benchmark adapter that ships `solution/solve.sh`). Choose a compatible "
         "agent or task.",
+    )
+
+
+async def validate_submission_agent_task_compatibility(
+    session: Any,
+    *,
+    team_id: UUID | None,
+    task_ids: Sequence[str],
+    combinations: Sequence[Combination | Mapping[str, Any]] = (),
+    trial_config: Mapping[str, Any],
+) -> None:
+    """Reject missing/invisible tasks and incompatible agent/task pairs.
+
+    Every lookup is constrained by ``visible_tasks`` so an inaccessible
+    TaskSet task is indistinguishable from a missing task. The original
+    requested agent spelling is retained in errors; aliases are resolved only
+    for their immutable catalog capabilities.
+    """
+    requested_task_ids = list(dict.fromkeys(task_ids))
+    requested_agents = _submission_agent_names(
+        combinations=combinations,
+        trial_config=trial_config,
+    )
+    if not requested_task_ids:
+        _resolved_submission_agents(requested_agents)
+        return
+    if not requested_agents:
+        await _visible_task_contracts(
+            session,
+            team_id=team_id,
+            task_ids=requested_task_ids,
+        )
+        return
+    await validate_submission_agent_task_pairs(
+        session,
+        team_id=team_id,
+        agent_task_pairs=[
+            (task_id, agent_name)
+            for agent_name in requested_agents
+            for task_id in requested_task_ids
+        ],
     )

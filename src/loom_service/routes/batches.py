@@ -86,6 +86,7 @@ from loom_service.stale_running_debug import batch_stale_running_decisions
 from loom_service.submission_compat import (
     AgentTaskIncompatibilityError,
     validate_submission_agent_task_compatibility,
+    validate_submission_agent_task_pairs,
 )
 from loom_service.task_config_validation import (
     expected_trial_count,
@@ -2333,12 +2334,46 @@ async def rerun_failed_batch(
             status_code=400,
             detail="rerun target tasks are missing or no longer runnable",
         )
-    await validate_submission_agent_task_compatibility(
+    agent_task_pairs: list[tuple[str, str]] = []
+    combinations = list(b.combinations or [])
+    for target in targets:
+        task_id = str(target["task_id"])
+        combination_idx = int(target["combination_idx"])
+        if combination_idx < 0 or (
+            combinations and combination_idx >= len(combinations)
+        ):
+            _reject_submission(
+                reason="invalid_input",
+                status_code=400,
+                detail=f"rerun target combination_idx {combination_idx} is invalid",
+            )
+        if combinations:
+            agent_name = combinations[combination_idx].get("agent_name")
+            if not isinstance(agent_name, str) or not agent_name:
+                _reject_submission(
+                    reason="invalid_input",
+                    status_code=400,
+                    detail=(
+                        f"combinations[{combination_idx}].agent_name must be a "
+                        "non-empty string"
+                    ),
+                )
+        else:
+            if combination_idx != 0:
+                _reject_submission(
+                    reason="invalid_input",
+                    status_code=400,
+                    detail=f"rerun target combination_idx {combination_idx} is invalid",
+                )
+            raw_agent_name = b.trial_config.get("agent_name")
+            if not isinstance(raw_agent_name, str) or not raw_agent_name:
+                continue
+            agent_name = raw_agent_name
+        agent_task_pairs.append((task_id, agent_name))
+    await validate_submission_agent_task_pairs(
         s,
         team_id=b.team_id,
-        task_ids=task_ids,
-        combinations=b.combinations or [],
-        trial_config=b.trial_config,
+        agent_task_pairs=agent_task_pairs,
     )
     token_prefix = ctx.token_hash.hex()[:8] if ctx.token_hash else "00000000"
     rerun_id = uuid4()
