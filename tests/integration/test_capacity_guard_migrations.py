@@ -1020,6 +1020,176 @@ async def test_guard_0015_backfills_legacy_agent_registration_audit_for_replay(
         await engine.dispose()
 
 
+def test_guard_0015_backfills_legacy_agent_audits_from_event_time_candidate_digest(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    """Legacy register/reconfigure audits keep their event-time candidate identity."""
+
+    cfg = _guard_config(capacity_guard_database)
+    fence_a = GuardFenceV1(
+        environment_id="dev-legacy-audit-history",
+        subject_id=uuid4(),
+        subject_incarnation=uuid4(),
+        authority_incarnation=uuid4(),
+        reporter_incarnation=uuid4(),
+        deployment_generation=7,
+        configuration_generation=11,
+        candidate_digest="c" * 64,
+    )
+    registration_a = AgentRegistrationV1(
+        environment_id=fence_a.environment_id,
+        subject_id=fence_a.subject_id,
+        subject_incarnation=fence_a.subject_incarnation,
+        authority_incarnation=fence_a.authority_incarnation,
+        agent_incarnation=uuid4(),
+        reporter_incarnation=fence_a.reporter_incarnation,
+        candidate_digest=fence_a.candidate_digest,
+        deployment_generation=fence_a.deployment_generation,
+        configuration_generation=fence_a.configuration_generation,
+    )
+    registration_b = AgentRegistrationV1(
+        environment_id=fence_a.environment_id,
+        subject_id=fence_a.subject_id,
+        subject_incarnation=fence_a.subject_incarnation,
+        authority_incarnation=fence_a.authority_incarnation,
+        agent_incarnation=registration_a.agent_incarnation,
+        reporter_incarnation=uuid4(),
+        candidate_digest="d" * 64,
+        deployment_generation=8,
+        configuration_generation=12,
+    )
+
+    def legacy_payload(registration: AgentRegistrationV1) -> dict[str, object]:
+        payload = registration.model_dump(mode="json", exclude_none=False)
+        for field in (
+            "candidate_identity_algorithm",
+            "candidate_identity",
+            "candidate_publication_sha256",
+        ):
+            payload.pop(field)
+        return payload
+
+    legacy_payload_a = legacy_payload(registration_a)
+    legacy_payload_b = legacy_payload(registration_b)
+
+    command.downgrade(cfg, "guard_0014")
+    with _owner_connection(capacity_guard_database) as connection:
+        connection.execute(
+            text(
+                "INSERT INTO loom_capacity_guard.authority_state "
+                "(singleton_id, schema_version, environment_id, subject_id, "
+                "subject_incarnation, authority_mode, authority_incarnation, "
+                "reporter_incarnation, reporter_high_water, allocation_epoch, "
+                "deployment_generation, configuration_generation, candidate_digest) "
+                "VALUES (1, 1, :environment_id, :subject_id, :subject_incarnation, "
+                "'disabled', :authority_incarnation, :reporter_incarnation, 0, 0, "
+                ":deployment_generation, :configuration_generation, :candidate_digest)"
+            ),
+            fence_a.model_dump(mode="python", exclude_none=False),
+        )
+        connection.execute(
+            text(
+                "INSERT INTO loom_capacity_guard.agent_registrations "
+                "(agent_incarnation, singleton_id, schema_version, environment_id, "
+                "subject_id, subject_incarnation, authority_incarnation, "
+                "reporter_incarnation, authority_mode, allocation_epoch, "
+                "candidate_digest, deployment_generation, configuration_generation, "
+                "registration_state) "
+                "VALUES (:agent_incarnation, 1, 1, :environment_id, :subject_id, "
+                ":subject_incarnation, :authority_incarnation, :reporter_incarnation, "
+                "'disabled', 0, :candidate_digest, :deployment_generation, "
+                ":configuration_generation, 'registered')"
+            ),
+            registration_a.model_dump(mode="python", exclude_none=False),
+        )
+        connection.execute(
+            text(
+                "INSERT INTO loom_capacity_guard.agent_reporter_state "
+                "(agent_incarnation, high_water) VALUES (:agent_incarnation, 0)"
+            ),
+            {"agent_incarnation": registration_a.agent_incarnation},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO loom_capacity_guard.audit_events "
+                "(event_type, payload, payload_digest) "
+                "VALUES ('agent_registered.v1', CAST(:payload AS jsonb), :digest)"
+            ),
+            {
+                "payload": json.dumps(legacy_payload_a),
+                "digest": _digest_payload(legacy_payload_a),
+            },
+        )
+        connection.execute(
+            text(
+                "UPDATE loom_capacity_guard.authority_state "
+                "SET reporter_incarnation = :reporter_incarnation, "
+                "candidate_digest = :candidate_digest, "
+                "deployment_generation = :deployment_generation, "
+                "configuration_generation = :configuration_generation, "
+                "updated_at = updated_at + interval '1 second' "
+                "WHERE singleton_id = 1"
+            ),
+            registration_b.model_dump(mode="python", exclude_none=False),
+        )
+        connection.execute(
+            text(
+                "UPDATE loom_capacity_guard.agent_registrations "
+                "SET reporter_incarnation = :reporter_incarnation, "
+                "candidate_digest = :candidate_digest, "
+                "deployment_generation = :deployment_generation, "
+                "configuration_generation = :configuration_generation "
+                "WHERE agent_incarnation = :agent_incarnation"
+            ),
+            registration_b.model_dump(mode="python", exclude_none=False),
+        )
+        connection.execute(
+            text(
+                "INSERT INTO loom_capacity_guard.audit_events "
+                "(event_type, payload, payload_digest) "
+                "VALUES ('agent_reconfigured.v1', CAST(:payload AS jsonb), :digest)"
+            ),
+            {
+                "payload": json.dumps(legacy_payload_b),
+                "digest": _digest_payload(legacy_payload_b),
+            },
+        )
+
+    command.upgrade(cfg, "head")
+    engine = create_engine(_value(capacity_guard_database, "admin_url"))
+    try:
+        with engine.connect() as connection:
+            rows = (
+                connection.execute(
+                    text(
+                        "SELECT event_type, payload, payload_digest "
+                        "FROM loom_capacity_guard.audit_events "
+                        "WHERE event_type IN "
+                        "('agent_registered.v1', 'agent_reconfigured.v1') "
+                        "ORDER BY event_id"
+                    )
+                )
+                .mappings()
+                .all()
+            )
+    finally:
+        engine.dispose()
+
+    expected = [
+        (
+            "agent_registered.v1",
+            registration_a.model_dump(mode="json", exclude_none=False),
+            canonical_digest(registration_a),
+        ),
+        (
+            "agent_reconfigured.v1",
+            registration_b.model_dump(mode="json", exclude_none=False),
+            canonical_digest(registration_b),
+        ),
+    ]
+    assert [(row["event_type"], row["payload"], row["payload_digest"]) for row in rows] == expected
+
+
 def test_guard_0013_observation_requires_the_exact_prepared_event(
     capacity_guard_database: dict[str, object],
 ) -> None:
