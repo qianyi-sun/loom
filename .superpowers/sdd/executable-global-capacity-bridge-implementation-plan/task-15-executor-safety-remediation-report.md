@@ -103,3 +103,57 @@ An attempted full-repository `ruff format --check src tests capacity_guard_migra
 
 - First fresh focused-unit rerun hit one transient fake Slurm authority-validation timeout; the isolated parametrized test immediately passed (`7 passed`) and the full focused unit suite then passed (`119 passed`).
 - Full-repository Ruff format remains noisy from unrelated baseline drift, so formatting verification is scoped to the Task 15B touched files.
+
+## Fix round 1 — executor mutation/recovery review remediation
+
+Review findings addressed:
+
+1. Final pending cancellation was derived from a live observation instead of the protected physical binding and signed launch shape. The proof digest field was carried but not enforced.
+2. Submission recovery adopted live evidence without also considering accounting, and adopted terminal evidence while ignoring conflicting live rows.
+3. Pending-cancel recovery ignored same-job live conflicts before classifying an older accounting row as already terminal.
+4. Terminal accounting evidence did not include partition, so partition drift could not be rejected.
+
+Root cause:
+
+- `_exact_matches()` ignored pending node constraints and did not anchor close-time cancellation to the durable `PhysicalJobBindingV2.slurm_job_id`.
+- `_cancel_request_from_job()` copied job ID/resources/nodes from whichever live observation matched loosely, rather than building the expected cancel request from the signed launch request plus protected physical binding.
+- `_recover_pending_cancel()` filtered live rows down to exact matches before checking for same-job conflicts.
+- `recover()` branched on live matches before querying accounting and did not treat same-token live/terminal contradictions as ambiguous.
+- `SlurmTerminalEvidenceV2` and the sacct parser omitted partition.
+
+RED:
+
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_slurm_backend.py::test_cancel_pending_rejects_proof_digest_mismatch_before_scancel tests/unit/test_capacity_executor_slurm_backend.py::test_accounting_high_water_returns_only_exact_terminal_evidence -q` → `2 failed`: digest mismatch did not raise before `scancel`; partition-aware sacct output was rejected as a malformed field count.
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_executable.py::test_close_never_cancels_unbound_duplicate_pending_job_after_drain tests/unit/test_capacity_executor_executable.py::test_close_never_cancels_bound_pending_job_with_node_mismatch tests/unit/test_capacity_executor_recovery.py::test_unknown_submission_recovery_quarantines_exact_live_and_terminal_conflict tests/unit/test_capacity_executor_recovery.py::test_unknown_submission_recovery_quarantines_changed_live_with_exact_terminal tests/unit/test_capacity_executor_recovery.py::test_unknown_submission_recovery_rejects_terminal_partition_mismatch tests/unit/test_capacity_executor_recovery.py::test_pending_cancel_recovery_quarantines_same_job_live_terminal_conflict -q` → `6 failed`: duplicate/mismatched pending jobs were cancelled or closed, live/terminal submission conflicts were adopted, partition-mismatched terminal evidence was adopted, and same-job cancel replay conflict was classified `pending-cancelled`.
+
+Implementation:
+
+- `cancel_pending()` now decodes the scheduler-safe ownership token and requires it to equal `ownership_evidence_sha256` before authority validation or mutation.
+- `SlurmTerminalEvidenceV2` now carries `partition`; `sacct` queries request `Partition`, parser validates it against authority, and terminal matching includes it.
+- Close-time pending cancellation now loads the durable protected physical binding, builds cancel requests from signed launch shape plus `PhysicalJobBindingV2.slurm_job_id`, and quarantines unbound duplicates or bound same-job field/node drift without `scancel`.
+- `_exact_matches()` now requires nodes for pending and non-pending observations.
+- Submission recovery now queries live inventory and accounting together before adoption; exact-live plus terminal, same-token changed live, terminal partition/resource drift, duplicates, and insufficient terminal evidence remain quarantined/charged.
+- Pending-cancel recovery now checks same-job live conflicts before terminal classification and quarantines live/terminal contradictions without `scancel`.
+
+GREEN/regression:
+
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_slurm_backend.py::test_cancel_pending_rejects_proof_digest_mismatch_before_scancel tests/unit/test_capacity_executor_slurm_backend.py::test_accounting_high_water_returns_only_exact_terminal_evidence -q` → `2 passed in 0.21s`.
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_executable.py::test_close_never_cancels_unbound_duplicate_pending_job_after_drain tests/unit/test_capacity_executor_executable.py::test_close_never_cancels_bound_pending_job_with_node_mismatch tests/unit/test_capacity_executor_recovery.py::test_unknown_submission_recovery_quarantines_exact_live_and_terminal_conflict tests/unit/test_capacity_executor_recovery.py::test_unknown_submission_recovery_quarantines_changed_live_with_exact_terminal tests/unit/test_capacity_executor_recovery.py::test_unknown_submission_recovery_rejects_terminal_partition_mismatch tests/unit/test_capacity_executor_recovery.py::test_pending_cancel_recovery_quarantines_same_job_live_terminal_conflict -q` → `6 passed in 0.16s`.
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_slurm_backend.py::test_cancel_pending_rejects_proof_digest_mismatch_before_scancel tests/unit/test_capacity_executor_slurm_backend.py::test_accounting_high_water_returns_only_exact_terminal_evidence tests/unit/test_capacity_executor_executable.py::test_close_never_cancels_unbound_duplicate_pending_job_after_drain tests/unit/test_capacity_executor_executable.py::test_close_never_cancels_bound_pending_job_with_node_mismatch tests/unit/test_capacity_executor_recovery.py::test_unknown_submission_recovery_quarantines_exact_live_and_terminal_conflict tests/unit/test_capacity_executor_recovery.py::test_unknown_submission_recovery_quarantines_changed_live_with_exact_terminal tests/unit/test_capacity_executor_recovery.py::test_unknown_submission_recovery_rejects_terminal_partition_mismatch tests/unit/test_capacity_executor_recovery.py::test_pending_cancel_recovery_quarantines_same_job_live_terminal_conflict -q` → `8 passed in 0.32s`.
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_slurm_backend.py tests/unit/test_capacity_executor_executable.py tests/unit/test_capacity_executor_recovery.py tests/unit/test_capacity_executor_client.py tests/unit/test_capacity_executor_admission_client.py -q` → `126 passed in 6.69s`.
+- `uv run --no-sync pytest tests/integration/test_capacity_agent_executable_admission.py -q` → `33 passed in 10.30s`.
+- `uv run --no-sync pytest tests/integration/test_capacity_guard_migrations.py tests/integration/test_capacity_agent_migrations.py tests/integration/test_capacity_management_migrations.py -q` → `43 passed in 19.17s`.
+- `uv run --no-sync pytest tests/integration/test_executable_global_capacity_bridge.py -q` → `4 passed in 38.00s`.
+- `uv run --no-sync pytest tests/ops/test_global_fleet_pool_executor_once.py tests/ops/test_global_fleet_capacity_shadow_once.py tests/ops/test_capacity_mutation_inventory.py tests/ops/test_capacity_guard_package_boundary.py -q` → `34 passed in 0.82s`.
+
+Static verification:
+
+- `uv run --no-sync ruff format --check src/loom_capacity_executor/executable.py src/loom_capacity_executor/slurm_backend.py src/loom_capacity_executor/slurm_contracts.py tests/support/fake_slurm.py tests/unit/test_capacity_executor_executable.py tests/unit/test_capacity_executor_recovery.py tests/unit/test_capacity_executor_slurm_backend.py` → `7 files already formatted`.
+- `uv run --no-sync ruff check src/loom_capacity_executor/executable.py src/loom_capacity_executor/slurm_backend.py src/loom_capacity_executor/slurm_contracts.py tests/support/fake_slurm.py tests/unit/test_capacity_executor_executable.py tests/unit/test_capacity_executor_recovery.py tests/unit/test_capacity_executor_slurm_backend.py` → `All checks passed!`.
+- `uv run --no-sync mypy` → `Success: no issues found in 805 source files`.
+- `git diff --check` → passed.
+
+Concerns:
+
+- Full-repository Ruff format still has unrelated baseline drift; this round keeps Ruff formatting/checking scoped to the seven amended files while retaining full MyPy and task-required test gates.
+- Physical-bind retrieval is intentionally fail-closed from the durable current intent record available at close entry; the protected observation contract still does not expose physical job ID after later intent events.

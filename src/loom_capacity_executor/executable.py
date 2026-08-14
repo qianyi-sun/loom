@@ -580,6 +580,7 @@ class ExecutablePoolExecutor:
             and terminal.job_id == cancel.job_id
             and terminal.submitter == cancel.submitter
             and terminal.account == cancel.account
+            and terminal.partition == cancel.partition
             and terminal.cpus == cancel.cpus
             and terminal.memory_bytes == cancel.memory_bytes
             and terminal.gpus == cancel.gpus
@@ -596,10 +597,24 @@ class ExecutablePoolExecutor:
     ) -> ExecutorTickResult:
         self._validate_cancel_replay(record, cancel)
         jobs = await self.slurm.inventory()
-        live_matches = tuple(job for job in jobs if self._cancel_matches_job(cancel, job))
+        same_job_live = tuple(job for job in jobs if job.job_id == cancel.job_id)
+        live_matches = tuple(job for job in same_job_live if self._cancel_matches_job(cancel, job))
         payload = record.durable_payload()
         if payload is None:
             raise JournalRegressionError("pending cancellation request is absent from journal")
+        if any(not self._cancel_matches_job(cancel, job) for job in same_job_live):
+            self.journal.append(
+                "pending-cancel-ambiguous-quarantined",
+                record.payload_digest,
+                object_kind=record.object_kind,
+                object_id=record.object_id,
+                payload=payload,
+            )
+            await self._publish_inventory(checkpoint, jobs=jobs, quarantine_all=True)
+            return ExecutorTickResult(
+                "quarantined",
+                detail="pending cancellation recovery found conflicting live scheduler state",
+            )
         if len(live_matches) == 1 and live_matches[0].state == "PENDING":
             await self.slurm.cancel_pending(cancel)
             self.journal.append(
@@ -628,6 +643,19 @@ class ExecutablePoolExecutor:
         terminal_matches = tuple(
             item for item in high_water.terminal_jobs if self._cancel_matches_terminal(cancel, item)
         )
+        if same_job_live and terminal_matches:
+            self.journal.append(
+                "pending-cancel-ambiguous-quarantined",
+                record.payload_digest,
+                object_kind=record.object_kind,
+                object_id=record.object_id,
+                payload=payload,
+            )
+            await self._publish_inventory(checkpoint, jobs=jobs, quarantine_all=True)
+            return ExecutorTickResult(
+                "quarantined",
+                detail="pending cancellation recovery found live and terminal scheduler state",
+            )
         if not live_matches and len(terminal_matches) == 1:
             self.journal.append(
                 "pending-cancel-already-terminal",
@@ -859,26 +887,48 @@ class ExecutablePoolExecutor:
             event="physical-bind-confirmed",
         )
 
+    def _physical_binding(
+        self,
+        envelope: _LaunchEnvelope | None,
+    ) -> PhysicalJobBindingV2 | None:
+        if envelope is None:
+            return None
+        binding = envelope.rendered.ownership_proof.metadata.binding
+        retained = self.journal.latest("intent", str(binding.intent_id))
+        if retained is None or retained.event_kind != "physical-bind-confirmed":
+            return None
+        payload = retained.durable_payload()
+        if payload is None:
+            raise JournalRegressionError("physical binding request is absent from journal")
+        physical = PhysicalJobBindingV2.model_validate_json(payload)
+        expected_digest = canonical_executable_digest(envelope.rendered.ownership_proof)
+        if (
+            physical.binding != binding
+            or physical.slurm_job_id == ""
+            or physical.ownership_evidence_sha256 != expected_digest
+        ):
+            raise JournalRegressionError("physical binding request changed after confirmation")
+        return physical
+
     @staticmethod
-    def _cancel_request_from_job(
+    def _cancel_request_from_physical(
         envelope: _LaunchEnvelope,
-        job: SlurmJobObservationV2,
+        physical: PhysicalJobBindingV2,
     ) -> SlurmCancelRequestV2:
+        request = envelope.rendered.request
         return SlurmCancelRequestV2(
-            cluster=job.cluster,
-            job_id=job.job_id,
-            submitter=job.submitter,
-            account=job.account,
-            partition=job.partition,
-            cpus=job.cpus,
-            memory_bytes=job.memory_bytes,
-            gpus=job.gpus,
-            generic_tres=job.generic_tres,
-            nodes=job.nodes,
-            ownership_token=job.ownership_token,
-            ownership_evidence_sha256=canonical_executable_digest(
-                envelope.rendered.ownership_proof
-            ),
+            cluster=request.cluster,
+            job_id=physical.slurm_job_id,
+            submitter=request.submitter,
+            account=request.account,
+            partition=request.partition,
+            cpus=request.cpus,
+            memory_bytes=request.memory_bytes,
+            gpus=request.gpus,
+            generic_tres=request.generic_tres,
+            nodes=request.nodes,
+            ownership_token=request.ownership_token,
+            ownership_evidence_sha256=physical.ownership_evidence_sha256,
         )
 
     async def _withdraw_unregistered(
@@ -927,8 +977,11 @@ class ExecutablePoolExecutor:
     async def _close(self, close: ExecutableIntentCloseV2, checkpoint: Any) -> ExecutorTickResult:
         observation = await self.admission.observe_intent(close.binding)
         envelope = self._load_launch(close.binding.intent_id)
+        physical = self._physical_binding(envelope)
         jobs = await self.slurm.inventory()
-        matches = self._exact_matches(envelope, jobs) if envelope is not None else ()
+        matches = self._bound_exact_matches(envelope, physical, jobs)
+        bound_conflicts = self._bound_live_conflicts(envelope, physical, jobs)
+        unbound_exact_matches = self._exact_matches(envelope, jobs) if envelope is not None else ()
         if observation.worker_id is not None and observation.worker_incarnation is not None:
             if observation.drain is None:
                 drain = ExecutableDrainRequestV2(
@@ -957,9 +1010,9 @@ class ExecutablePoolExecutor:
                 )
             if len(matches) == 1 and matches[0].state == "PENDING":
                 job = matches[0]
-                if envelope is None:
+                if envelope is None or physical is None:
                     raise JournalRegressionError("pending cancellation lacks ownership proof")
-                cancel = self._cancel_request_from_job(envelope, job)
+                cancel = self._cancel_request_from_physical(envelope, physical)
                 cancel_payload = json.dumps(
                     cancel.model_dump(mode="json"),
                     sort_keys=True,
@@ -988,10 +1041,23 @@ class ExecutablePoolExecutor:
                 return ExecutorTickResult("pending-cancelled", close.binding.intent_id)
             if matches:
                 return ExecutorTickResult("draining", close.binding.intent_id)
+            if bound_conflicts:
+                return ExecutorTickResult(
+                    "quarantined",
+                    close.binding.intent_id,
+                    "protected physical job changed scheduler identity",
+                )
+            if unbound_exact_matches:
+                return ExecutorTickResult(
+                    "quarantined",
+                    close.binding.intent_id,
+                    "physical job differs from protected binding",
+                )
         if (
             observation.worker_id is None
             and observation.worker_incarnation is None
             and envelope is not None
+            and physical is not None
             and len(matches) == 1
             and matches[0].state == "PENDING"
         ):
@@ -1002,7 +1068,7 @@ class ExecutablePoolExecutor:
                 observation=observation,
                 job=job,
             )
-            cancel = self._cancel_request_from_job(envelope, job)
+            cancel = self._cancel_request_from_physical(envelope, physical)
             cancel_payload = json.dumps(
                 cancel.model_dump(mode="json"),
                 sort_keys=True,
@@ -1034,6 +1100,18 @@ class ExecutablePoolExecutor:
                 "quarantined",
                 close.binding.intent_id,
                 "physical job exists without protected worker drain identity",
+            )
+        if bound_conflicts:
+            return ExecutorTickResult(
+                "quarantined",
+                close.binding.intent_id,
+                "protected physical job changed scheduler identity",
+            )
+        if unbound_exact_matches:
+            return ExecutorTickResult(
+                "quarantined",
+                close.binding.intent_id,
+                "physical job differs from protected binding",
             )
         await self._central_command(
             close,
@@ -1106,7 +1184,7 @@ class ExecutablePoolExecutor:
             and item.gpus == request.gpus
             and item.generic_tres == request.generic_tres
             and item.ownership_token == request.ownership_token
-            and (item.state == "PENDING" or item.nodes == request.nodes)
+            and item.nodes == request.nodes
         )
 
     def _exact_terminal_matches(
@@ -1123,12 +1201,70 @@ class ExecutablePoolExecutor:
             if item.cluster == request.cluster
             and item.submitter == request.submitter
             and item.account == request.account
+            and item.partition == request.partition
             and item.cpus == request.cpus
             and item.memory_bytes == request.memory_bytes
             and item.gpus == request.gpus
             and item.generic_tres == request.generic_tres
             and item.nodes == request.nodes
             and item.ownership_token == request.ownership_token
+        )
+
+    def _bound_exact_matches(
+        self,
+        envelope: _LaunchEnvelope | None,
+        physical: PhysicalJobBindingV2 | None,
+        jobs: tuple[SlurmJobObservationV2, ...],
+    ) -> tuple[SlurmJobObservationV2, ...]:
+        if physical is None:
+            return ()
+        return tuple(
+            item
+            for item in self._exact_matches(envelope, jobs)
+            if item.job_id == physical.slurm_job_id
+        )
+
+    def _bound_live_conflicts(
+        self,
+        envelope: _LaunchEnvelope | None,
+        physical: PhysicalJobBindingV2 | None,
+        jobs: tuple[SlurmJobObservationV2, ...],
+    ) -> tuple[SlurmJobObservationV2, ...]:
+        if physical is None:
+            return ()
+        exact = self._bound_exact_matches(envelope, physical, jobs)
+        return tuple(
+            item for item in jobs if item.job_id == physical.slurm_job_id and item not in exact
+        )
+
+    def _live_ownership_conflicts(
+        self,
+        envelope: _LaunchEnvelope | None,
+        jobs: tuple[SlurmJobObservationV2, ...],
+    ) -> tuple[SlurmJobObservationV2, ...]:
+        if envelope is None:
+            return ()
+        request = envelope.rendered.request
+        return tuple(
+            item
+            for item in jobs
+            if item.ownership_token == request.ownership_token
+            and item not in self._exact_matches(envelope, jobs)
+        )
+
+    def _terminal_ownership_conflicts(
+        self,
+        envelope: _LaunchEnvelope | None,
+        jobs: tuple[SlurmTerminalEvidenceV2, ...],
+    ) -> tuple[SlurmTerminalEvidenceV2, ...]:
+        if envelope is None:
+            return ()
+        request = envelope.rendered.request
+        return tuple(
+            item
+            for item in jobs
+            if item.ownership_token == request.ownership_token
+            and item not in self._exact_terminal_matches(envelope, jobs)
         )
 
     def _bound_live_matches(
@@ -1214,19 +1350,40 @@ class ExecutablePoolExecutor:
         record = min(recovering, key=lambda item: item.sequence)
         intent_id = UUID(record.object_id)
         envelope = self._load_launch(intent_id)
+        if envelope is None:
+            await self._publish_inventory(checkpoint, jobs=jobs, quarantine_all=True)
+            return ExecutorTickResult(
+                "quarantined",
+                intent_id,
+                "scheduler association is absent, duplicate, foreign, or resource-mismatched",
+            )
+        submitted_at = envelope.rendered.ownership_proof.metadata.submitted_at
+        high_water = await self.slurm.accounting_high_water(since=submitted_at)
         matches = self._exact_matches(envelope, jobs)
-        if envelope is not None and len(matches) == 1:
+        terminal_matches = self._exact_terminal_matches(envelope, high_water.terminal_jobs)
+        live_conflicts = self._live_ownership_conflicts(envelope, jobs)
+        terminal_conflicts = self._terminal_ownership_conflicts(envelope, high_water.terminal_jobs)
+        if (
+            live_conflicts
+            or terminal_conflicts
+            or (matches and terminal_matches)
+            or len(matches) > 1
+            or len(terminal_matches) > 1
+        ):
+            await self._publish_inventory(checkpoint, jobs=jobs, quarantine_all=True)
+            return ExecutorTickResult(
+                "quarantined",
+                intent_id,
+                "scheduler association is absent, duplicate, foreign, or resource-mismatched",
+            )
+        if len(matches) == 1:
             await self._bind_physical(envelope=envelope, job_id=matches[0].job_id)
             await self._publish_inventory(checkpoint, jobs=jobs)
             return ExecutorTickResult("adopted", intent_id, matches[0].job_id)
-        if envelope is not None and len(matches) == 0:
-            submitted_at = envelope.rendered.ownership_proof.metadata.submitted_at
-            high_water = await self.slurm.accounting_high_water(since=submitted_at)
-            terminal_matches = self._exact_terminal_matches(envelope, high_water.terminal_jobs)
-            if high_water.observed_through >= submitted_at and len(terminal_matches) == 1:
-                await self._bind_physical(envelope=envelope, job_id=terminal_matches[0].job_id)
-                await self._publish_inventory(checkpoint, jobs=jobs)
-                return ExecutorTickResult("adopted", intent_id, terminal_matches[0].job_id)
+        if high_water.observed_through >= submitted_at and len(terminal_matches) == 1:
+            await self._bind_physical(envelope=envelope, job_id=terminal_matches[0].job_id)
+            await self._publish_inventory(checkpoint, jobs=jobs)
+            return ExecutorTickResult("adopted", intent_id, terminal_matches[0].job_id)
         await self._publish_inventory(checkpoint, jobs=jobs, quarantine_all=True)
         return ExecutorTickResult(
             "quarantined",

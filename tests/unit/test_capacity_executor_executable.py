@@ -326,7 +326,7 @@ class FakeSlurm:
                 memory_bytes=request.memory_bytes,
                 gpus=request.gpus,
                 generic_tres=request.generic_tres,
-                nodes=(),
+                nodes=request.nodes,
                 pending_reason="Resources",
                 ownership_token=request.ownership_token,
             )
@@ -632,6 +632,7 @@ async def test_idle_inventory_publishes_exact_owned_terminal_accounting_evidence
         state="COMPLETED",
         submitter=job.submitter,
         account=job.account,
+        partition=job.partition,
         submitted_at=_NOW,
         started_at=_NOW,
         ended_at=_NOW + timedelta(minutes=1),
@@ -888,6 +889,66 @@ async def test_close_withdraws_bound_unregistered_pending_job_before_cancel(
     assert withdrawal.protected_registration_epoch == 2
     retained = journal.latest("intent", str(launch.binding.intent_id))
     assert retained is not None and retained.event_kind == "intent-close-confirmed"
+    journal.close()
+
+
+# Production break caught: after a protected drain, cancellation was selected from
+# any exact-looking pending observation instead of the protected physical binding.
+async def test_close_never_cancels_unbound_duplicate_pending_job_after_drain(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    executor, journal, manager, admission, slurm, _launch = executor_fixture(
+        tmp_path,
+        work=permit_fixture(launch.binding),
+    )
+    await executor.tick()
+    bound = slurm.jobs[0]
+    duplicate = bound.model_copy(update={"job_id": "202"})
+    slurm.jobs[:] = [duplicate]
+    manager.work = ExecutableIntentCloseV2(binding=launch.binding, command_sequence=2)
+    admission.observations[launch.binding.intent_id] = ProtectedIntentObservationV2(
+        binding=launch.binding,
+        bootstrap_registration_epoch=1,
+        worker_id=UUID(int=501),
+        worker_incarnation=UUID(int=502),
+        protected_registration_epoch=2,
+        claim_high_water=0,
+    )
+
+    result = await executor.tick()
+
+    assert result.status == "quarantined"
+    assert admission.observations[launch.binding.intent_id].drain is not None
+    assert slurm.cancel_requests == []
+    assert slurm.jobs == [duplicate]
+    assert manager.work is not None
+    journal.close()
+
+
+# Production break caught: pending observations with missing or changed requested
+# nodes were treated as cancellable because PENDING node sets were ignored.
+async def test_close_never_cancels_bound_pending_job_with_node_mismatch(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    executor, journal, manager, admission, slurm, _launch = executor_fixture(
+        tmp_path,
+        work=permit_fixture(launch.binding),
+    )
+    await executor.tick()
+    pending = slurm.jobs[0]
+    changed = pending.model_copy(update={"nodes": ("oldlab-6",)})
+    slurm.jobs[0] = changed
+    manager.work = ExecutableIntentCloseV2(binding=launch.binding, command_sequence=2)
+
+    result = await executor.tick()
+
+    assert result.status == "quarantined"
+    assert admission.withdraw_requests == []
+    assert slurm.cancel_requests == []
+    assert slurm.jobs == [changed]
+    assert manager.work is not None
     journal.close()
 
 

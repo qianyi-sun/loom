@@ -10,7 +10,11 @@ import pytest
 from loom_capacity_executor.executable import ExecutablePoolExecutor, ProtectedIntentObservationV2
 from loom_capacity_executor.journal import ExecutorJournal, JournalRegressionError
 from loom_capacity_executor.launch_renderer import TrustedLaunchContextV2
-from loom_capacity_executor.slurm_contracts import SlurmTerminalEvidenceV2
+from loom_capacity_executor.slurm_contracts import (
+    SlurmCancelRequestV2,
+    SlurmJobObservationV2,
+    SlurmTerminalEvidenceV2,
+)
 from loom_capacity_manager.executable_contracts import ExecutableIntentCloseV2
 from tests.unit.test_capacity_executor_executable import (
     _NOW,
@@ -81,6 +85,32 @@ def _write_changed_launch_journal(
             object_id=str(intent_id),
             payload=changed,
         )
+
+
+def _terminal_from_job(
+    job: SlurmJobObservationV2,
+    *,
+    partition: str | None = None,
+) -> SlurmTerminalEvidenceV2:
+    return SlurmTerminalEvidenceV2(
+        cluster=job.cluster,
+        job_id=job.job_id,
+        state="COMPLETED",
+        submitter=job.submitter,
+        account=job.account,
+        partition=partition or job.partition,
+        submitted_at=_NOW,
+        started_at=_NOW,
+        ended_at=_NOW,
+        elapsed_seconds=0,
+        exit_code="0:0",
+        cpus=job.cpus,
+        memory_bytes=job.memory_bytes,
+        gpus=job.gpus,
+        generic_tres=job.generic_tres,
+        nodes=job.nodes,
+        ownership_token=job.ownership_token,
+    )
 
 
 # Production break caught: treating an interrupted sbatch as safely absent would
@@ -412,6 +442,7 @@ async def test_unknown_submission_recovery_adopts_exact_terminal_accounting_matc
             state="COMPLETED",
             submitter=submitted.submitter,
             account=submitted.account,
+            partition=submitted.partition,
             submitted_at=_NOW,
             started_at=_NOW,
             ended_at=_NOW,
@@ -440,3 +471,133 @@ async def test_unknown_submission_recovery_adopts_exact_terminal_accounting_matc
     assert record.state == "terminal"
     assert record.ownership_proof is not None
     reopened.close()
+
+
+# Production break caught: recovery adopted a live match before checking
+# accounting, so contradictory live and terminal evidence was inferred released.
+async def test_unknown_submission_recovery_quarantines_exact_live_and_terminal_conflict(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    executor, journal, manager, admission, slurm, launch = executor_fixture(
+        tmp_path, work=permit_fixture(launch.binding)
+    )
+    slurm.crash_after_submit = True
+    with pytest.raises(SimulatedCrash):
+        await executor.tick()
+    submitted = slurm.jobs[0]
+    slurm.terminal_jobs = (_terminal_from_job(submitted),)
+    journal.close()
+
+    slurm.crash_after_submit = False
+    recovered, reopened = _restart(journal.path, manager, admission, slurm, launch)
+    result = await recovered.recover()
+
+    assert result.status == "quarantined"
+    assert slurm.submit_count == 1
+    assert admission.bound == {}
+    reopened.close()
+
+
+# Production break caught: a changed live record with the same signed ownership
+# token was ignored when one exact terminal row existed.
+async def test_unknown_submission_recovery_quarantines_changed_live_with_exact_terminal(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    executor, journal, manager, admission, slurm, launch = executor_fixture(
+        tmp_path, work=permit_fixture(launch.binding)
+    )
+    slurm.crash_after_submit = True
+    with pytest.raises(SimulatedCrash):
+        await executor.tick()
+    submitted = slurm.jobs[0]
+    slurm.jobs[0] = submitted.model_copy(update={"cpus": submitted.cpus + 1})
+    slurm.terminal_jobs = (_terminal_from_job(submitted),)
+    journal.close()
+
+    slurm.crash_after_submit = False
+    recovered, reopened = _restart(journal.path, manager, admission, slurm, launch)
+    result = await recovered.recover()
+
+    assert result.status == "quarantined"
+    assert slurm.submit_count == 1
+    assert admission.bound == {}
+    reopened.close()
+
+
+# Production break caught: terminal evidence lacked partition matching, allowing
+# a terminal row from a changed partition to be adopted as exact.
+async def test_unknown_submission_recovery_rejects_terminal_partition_mismatch(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    executor, journal, manager, admission, slurm, launch = executor_fixture(
+        tmp_path, work=permit_fixture(launch.binding)
+    )
+    slurm.crash_after_submit = True
+    with pytest.raises(SimulatedCrash):
+        await executor.tick()
+    submitted = slurm.jobs.pop()
+    slurm.terminal_jobs = (_terminal_from_job(submitted, partition="loom-debug"),)
+    journal.close()
+
+    slurm.crash_after_submit = False
+    recovered, reopened = _restart(journal.path, manager, admission, slurm, launch)
+    result = await recovered.recover()
+
+    assert result.status == "quarantined"
+    assert slurm.submit_count == 1
+    assert admission.bound == {}
+    reopened.close()
+
+
+# Production break caught: cancellation replay filtered away same-job live
+# conflicts and classified an older accounting row as already terminal.
+async def test_pending_cancel_recovery_quarantines_same_job_live_terminal_conflict(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    executor, journal, manager, admission, slurm, launch = executor_fixture(
+        tmp_path, work=permit_fixture(launch.binding)
+    )
+    await executor.tick()
+    submitted = slurm.jobs[0]
+    cancel = SlurmCancelRequestV2(
+        cluster=submitted.cluster,
+        job_id=submitted.job_id,
+        submitter=submitted.submitter,
+        account=submitted.account,
+        partition=submitted.partition,
+        cpus=submitted.cpus,
+        memory_bytes=submitted.memory_bytes,
+        gpus=submitted.gpus,
+        generic_tres=submitted.generic_tres,
+        nodes=submitted.nodes,
+        ownership_token=submitted.ownership_token,
+        ownership_evidence_sha256=admission.bind_requests[0].ownership_evidence_sha256,
+    )
+    payload = json.dumps(
+        cancel.model_dump(mode="json"),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+    journal.append(
+        "pending-cancel-requested",
+        hashlib.sha256(payload).hexdigest(),
+        object_kind="job",
+        object_id=submitted.job_id,
+        payload=payload,
+    )
+    slurm.jobs[0] = submitted.model_copy(update={"cpus": submitted.cpus + 1})
+    slurm.terminal_jobs = (_terminal_from_job(submitted),)
+    manager.reject_work_fetch = True
+
+    result = await executor.tick()
+
+    assert result.status == "quarantined"
+    assert slurm.cancel_requests == []
+    retained = journal.latest("job", submitted.job_id)
+    assert retained is not None
+    assert retained.event_kind == "pending-cancel-ambiguous-quarantined"
+    journal.close()

@@ -220,7 +220,7 @@ elif command == "sacct":
         )
         sys.stdout.write("|".join((
             job["job_id"], job["state"], job["submitter"], job["account"],
-            state["cluster"], job["submitted_at"], job["started_at"],
+            state["cluster"], job["partition"], job["submitted_at"], job["started_at"],
             job["ended_at"], str(job["elapsed_seconds"]), job["exit_code"],
             str(job["cpus"]), str(job["memory_bytes"] // 1048576) + "M",
             ",".join(allocated_tres),
@@ -502,7 +502,13 @@ class FakeSlurm:
             line.split("|", 1)[0] for line in result.stdout.decode("utf-8").splitlines() if line
         )
 
-    def add_terminal_job(self, *, job_id: str = "99", state: str = "COMPLETED") -> None:
+    def add_terminal_job(
+        self,
+        *,
+        job_id: str = "99",
+        state: str = "COMPLETED",
+        partition: str | None = None,
+    ) -> None:
         self._load_state()
         self._state["terminal_jobs"].append(
             {
@@ -510,6 +516,7 @@ class FakeSlurm:
                 "state": state,
                 "submitter": self._state["submitter"],
                 "account": self._state["account"],
+                "partition": partition or self._state["partition"],
                 "submitted_at": "2026-08-13T12:00:00Z",
                 "started_at": "2026-08-13T12:01:00Z",
                 "ended_at": "2026-08-13T12:03:00Z",
@@ -531,6 +538,7 @@ class FakeSlurm:
         job.update(
             {
                 "state": "COMPLETED",
+                "partition": job["partition"],
                 "submitted_at": "2026-08-13T12:00:00Z",
                 "started_at": "2026-08-13T12:01:00Z",
                 "ended_at": "2026-08-13T12:03:00Z",

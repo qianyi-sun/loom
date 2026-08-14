@@ -73,7 +73,7 @@ def cancel_request(job_id: str = "101") -> SlurmCancelRequestV2:
         generic_tres=(),
         nodes=("oldlab-5",),
         ownership_token="A" * 43,
-        ownership_evidence_sha256="d" * 64,
+        ownership_evidence_sha256="0" * 64,
     )
 
 
@@ -547,6 +547,19 @@ async def test_cancel_pending_rejects_missing_unknown_or_duplicate_evidence_befo
 
 
 @pytest.mark.asyncio
+async def test_cancel_pending_rejects_proof_digest_mismatch_before_scancel(
+    fake_slurm: FakeSlurm,
+) -> None:
+    fake_slurm.add_job()
+    request = cancel_request().model_copy(update={"ownership_evidence_sha256": "1" * 64})
+
+    with pytest.raises(SlurmStateConflictError):
+        await fake_slurm.backend().cancel_pending(request)
+
+    assert fake_slurm.scancel_calls == ()
+
+
+@pytest.mark.asyncio
 async def test_cancel_pending_uses_scheduler_predicates_after_exact_reobservation(
     fake_slurm: FakeSlurm,
 ) -> None:
@@ -591,6 +604,7 @@ async def test_accounting_high_water_returns_only_exact_terminal_evidence(
     assert result.since == datetime(2026, 8, 13, 0, 0, tzinfo=UTC)
     assert result.terminal_jobs[0].job_id == "99"
     assert result.terminal_jobs[0].state == "COMPLETED"
+    assert result.terminal_jobs[0].partition == "loom"
     assert result.terminal_jobs[0].ended_at == datetime(2026, 8, 13, 12, 3, tzinfo=UTC)
 
     fake_slurm.add_terminal_job(job_id="100", state="RUNNING")

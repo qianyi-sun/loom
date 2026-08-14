@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import contextlib
 import hashlib
 import hmac
@@ -898,6 +900,17 @@ class AsyncSlurmBackend:
     async def cancel_pending(self, request: SlurmCancelRequestV2) -> SlurmJobObservationV2:
         if not isinstance(request, SlurmCancelRequestV2):
             raise TypeError("Slurm cancellation requires typed SlurmCancelRequestV2")
+        try:
+            padded_token = request.ownership_token + "=" * (-len(request.ownership_token) % 4)
+            if (
+                base64.urlsafe_b64decode(padded_token.encode("ascii")).hex()
+                != request.ownership_evidence_sha256
+            ):
+                raise ValueError
+        except (ValueError, binascii.Error):
+            raise SlurmStateConflictError(
+                "pending cancellation proof digest does not match ownership token"
+            ) from None
         await self.validate_authority()
         try:
             self._assert_scope(
@@ -953,7 +966,7 @@ class AsyncSlurmBackend:
             allow_empty=True,
         ):
             fields = line.split("|")
-            if len(fields) != 15:
+            if len(fields) != 16:
                 raise SlurmOutputError("sacct terminal record has an invalid field count")
             if fields[0] in seen:
                 raise SlurmOutputError("sacct returned duplicate terminal evidence")
@@ -962,14 +975,15 @@ class AsyncSlurmBackend:
                 fields[2] != self.authority.submitter
                 or fields[3] != self.authority.account
                 or fields[4] != self.authority.cluster
+                or fields[5] != self.authority.partition
             ):
                 raise SlurmOutputError("sacct returned foreign terminal evidence")
             try:
-                cpus = int(fields[10])
-                nodes = tuple(fields[13].split(",")) if fields[13] else ()
-                requested_memory_bytes = _memory_bytes(fields[11], cpus=cpus, nodes=len(nodes))
+                cpus = int(fields[11])
+                nodes = tuple(fields[14].split(",")) if fields[14] else ()
+                requested_memory_bytes = _memory_bytes(fields[12], cpus=cpus, nodes=len(nodes))
                 gpus, generic_tres = _allocated_resources(
-                    fields[12],
+                    fields[13],
                     cpus=cpus,
                     nodes=len(nodes),
                     requested_memory_bytes=requested_memory_bytes,
@@ -984,17 +998,18 @@ class AsyncSlurmBackend:
                         "state": fields[1],
                         "submitter": fields[2],
                         "account": fields[3],
-                        "submitted_at": strict_datetime(fields[5]),
-                        "started_at": strict_datetime(fields[6]) if fields[6] else None,
-                        "ended_at": strict_datetime(fields[7]),
-                        "elapsed_seconds": int(fields[8]),
-                        "exit_code": fields[9],
+                        "partition": fields[5],
+                        "submitted_at": strict_datetime(fields[6]),
+                        "started_at": strict_datetime(fields[7]) if fields[7] else None,
+                        "ended_at": strict_datetime(fields[8]),
+                        "elapsed_seconds": int(fields[9]),
+                        "exit_code": fields[10],
                         "cpus": cpus,
                         "memory_bytes": requested_memory_bytes,
                         "gpus": gpus,
                         "generic_tres": generic_tres,
                         "nodes": nodes,
-                        "ownership_token": fields[14],
+                        "ownership_token": fields[15],
                     }
                 )
             except (ValueError, ValidationError):
@@ -1023,7 +1038,8 @@ class AsyncSlurmBackend:
                 f"--starttime={since_utc.isoformat()}",
                 "--state=BOOT_FAIL,CANCELLED,COMPLETED,DEADLINE,FAILED,NODE_FAIL,"
                 "OUT_OF_MEMORY,PREEMPTED,REVOKED,TIMEOUT",
-                "--format=JobIDRaw,State,User,Account,Cluster,Submit,Start,End,ElapsedRaw,"
+                "--format=JobIDRaw,State,User,Account,Cluster,Partition,Submit,Start,End,"
+                "ElapsedRaw,"
                 "ExitCode,AllocCPUS,ReqMem,AllocTRES,NodeList,Comment",
             ),
         )

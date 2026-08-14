@@ -347,6 +347,7 @@ class SlurmTerminalEvidenceV2(StrictSlurmV2Model):
     state: SlurmTerminalState
     submitter: SlurmIdentifier
     account: SlurmIdentifier
+    partition: SlurmIdentifier
     submitted_at: datetime
     started_at: datetime | None
     ended_at: datetime
