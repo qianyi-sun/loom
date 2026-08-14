@@ -31,6 +31,9 @@ from loom_capacity_manager.executable_contracts import ExecutableIntentBindingV2
 
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 _MAX_RESPONSE_BYTES = 64 * 1024
+_EXECUTABLE_INTENT_STATES = frozenset(
+    {"submitting-unknown", "bound", "observed", "terminal", "closing", "released", "quarantined"}
+)
 
 
 class PersonalDevCapacityProjectionError(RuntimeError):
@@ -266,7 +269,9 @@ class _SubjectStatusResponseV2(BaseModel):
     @model_validator(mode="after")
     def _coherent_status(self) -> _SubjectStatusResponseV2:
         state_counts = self.intent_state_counts
-        if any(type(value) is not int or value < 0 for value in state_counts.values()):
+        if not set(state_counts) <= _EXECUTABLE_INTENT_STATES or any(
+            type(value) is not int or value < 0 for value in state_counts.values()
+        ):
             raise ValueError("capacity manager intent state counts are invalid")
         if self.quarantined_intent_count != state_counts.get("quarantined", 0):
             raise ValueError("capacity manager quarantine count is inconsistent")

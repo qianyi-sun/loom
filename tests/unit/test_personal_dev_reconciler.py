@@ -206,9 +206,7 @@ def _destroy_claim(
         keep_data=keep_data,
         local_activation_sha256="5" * 64,
         capacity_expected_configuration_epoch=expected_capacity_epoch,
-        capacity_reporter_incarnation=UUID(
-            "00000000-0000-0000-0000-000000000031"
-        ),
+        capacity_reporter_incarnation=UUID("00000000-0000-0000-0000-000000000031"),
         capacity_reporter_token_sha256=(
             "9620a6302cf6bd606b15d74072424d9c70135ba56a686618dbba4dfa2d554476"
         ),
@@ -231,13 +229,9 @@ def _destroy_claim(
             capacity_reporter_token_sha256=operation.capacity_reporter_token_sha256,
             local_activation_sha256=operation.local_activation_sha256,
             protected_admission_sha256=operation.protected_admission_sha256,
-            capacity_agent_installation_sha256=(
-                operation.capacity_agent_installation_sha256
-            ),
+            capacity_agent_installation_sha256=(operation.capacity_agent_installation_sha256),
             capacity_supported_pool_ids=operation.capacity_supported_pool_ids,
-            capacity_supported_architectures=(
-                operation.capacity_supported_architectures
-            ),
+            capacity_supported_architectures=(operation.capacity_supported_architectures),
         ),
         operation=operation,
         attempt=replace(
@@ -306,9 +300,7 @@ class _Authority:
     async def record_capacity_projection(self, *, result, **_kwargs):
         self.projected_capacity.append(result)
 
-    async def advance_destroy_checkpoint(
-        self, *, expected_checkpoint, checkpoint, **_kwargs
-    ):
+    async def advance_destroy_checkpoint(self, *, expected_checkpoint, checkpoint, **_kwargs):
         self.destroy_checkpoints.append((expected_checkpoint, checkpoint))
 
 
@@ -884,9 +876,7 @@ async def test_capacity_installer_is_idempotent_and_rotates_only_for_replacement
                         "matchLabels": {"kubernetes.io/metadata.name": "loom-dev"}
                     },
                     "podSelector": {
-                        "matchLabels": {
-                            "app.kubernetes.io/name": "loom-capacity-manager"
-                        }
+                        "matchLabels": {"app.kubernetes.io/name": "loom-capacity-manager"}
                     },
                 }
             ],
@@ -898,9 +888,7 @@ async def test_capacity_installer_is_idempotent_and_rotates_only_for_replacement
                     "namespaceSelector": {
                         "matchLabels": {"kubernetes.io/metadata.name": "loom-dev"}
                     },
-                    "podSelector": {
-                        "matchLabels": {"app": "loom-dev-postgres"}
-                    },
+                    "podSelector": {"matchLabels": {"app": "loom-dev-postgres"}},
                 }
             ],
             "ports": [{"protocol": "TCP", "port": 5432}],
@@ -941,8 +929,7 @@ async def test_capacity_installer_persists_credentials_before_database_mutation(
                 if document and document["kind"] == "Secret":
                     name = document["metadata"]["name"]
                     self.secrets[name] = {
-                        key: base64.b64decode(value)
-                        for key, value in document["data"].items()
+                        key: base64.b64decode(value) for key, value in document["data"].items()
                     }
                     if self.mutate_seed and name == "loom-capacity-agent-credentials":
                         self.secrets[name]["unexpected"] = b"mutation"
@@ -999,11 +986,24 @@ async def test_capacity_installer_persists_credentials_before_database_mutation(
         await installer.converge(_claim())
     first_seed = dict(kubectl.secrets["loom-capacity-agent-credentials"])
 
+    legacy_seed = dict(first_seed)
+    observer_password = legacy_seed.pop("observer-password")
+    kubectl.secrets["loom-capacity-agent-credentials"] = legacy_seed
+
     with pytest.raises(RuntimeError, match="database failed"):
         await installer.converge(_claim())
 
-    assert kubectl.secrets["loom-capacity-agent-credentials"] == first_seed
-    assert database.reporters[0] == database.reporters[1]
+    upgraded_seed = kubectl.secrets["loom-capacity-agent-credentials"]
+    assert upgraded_seed["observer-password"]
+    assert upgraded_seed["observer-password"] != observer_password
+    for key in ("agent-password", "reporter-incarnation", "reporter-token"):
+        assert upgraded_seed[key] == legacy_seed[key]
+    assert len(set(database.reporters)) == 1
+
+    with pytest.raises(RuntimeError, match="database failed"):
+        await installer.converge(_claim())
+    assert kubectl.secrets["loom-capacity-agent-credentials"] == upgraded_seed
+    assert len(set(database.reporters)) == 1
     assert "loom-capacity-agent" not in kubectl.secrets
 
     kubectl.mutate_seed = True
@@ -1012,4 +1012,4 @@ async def test_capacity_installer_persists_credentials_before_database_mutation(
         match="seed was not installed exactly",
     ):
         await installer.converge(_claim())
-    assert len(database.reporters) == 2
+    assert len(database.reporters) == 3

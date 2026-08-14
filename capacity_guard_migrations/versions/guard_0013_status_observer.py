@@ -79,7 +79,7 @@ def upgrade() -> None:
             RAISE EXCEPTION 'executable intent observer identity is invalid' USING ERRCODE = '42501';
           END IF;
           SELECT * INTO v_state FROM {SCHEMA}.executable_claim_state WHERE intent_id=p_intent_id AND subject_id=p_subject_id AND subject_incarnation=p_subject_incarnation;
-          SELECT * INTO v_prepared FROM {SCHEMA}.executable_admission_events WHERE intent_id=p_intent_id AND subject_id=p_subject_id AND subject_incarnation=p_subject_incarnation;
+          SELECT * INTO v_prepared FROM {SCHEMA}.executable_admission_events WHERE intent_id=p_intent_id AND subject_id=p_subject_id AND subject_incarnation=p_subject_incarnation AND event_kind='prepared';
           IF v_state.intent_id IS NULL OR v_prepared.operation_id IS NULL OR v_state.binding IS DISTINCT FROM v_prepared.binding THEN
             RAISE EXCEPTION 'protected executable intent was not found at the exact subject binding' USING ERRCODE = '55000';
           END IF;

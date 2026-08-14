@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Iterator
 from configparser import ConfigParser
@@ -22,6 +23,12 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from loom.db.schema import Task, Team, TeamQuota, Trial
 from loom_capacity_guard.schema_startup import assert_capacity_guard_schema_at_head
+from loom_capacity_manager.contracts import ResourceVectorV1
+from loom_capacity_manager.executable_contracts import (
+    CandidateBindingV2,
+    ExecutableIntentBindingV2,
+    ExecutionFenceV2,
+)
 
 EXPECTED_GUARD_TABLES = {
     "capacity_guard_alembic_version",
@@ -182,6 +189,176 @@ def _insert_foundation_rows(connection: Any, trial_id: UUID) -> tuple[UUID, UUID
         },
     )
     return protected_attempt_id, subject_id
+
+
+def _executable_binding(subject_id: UUID, subject_incarnation: UUID) -> ExecutableIntentBindingV2:
+    return ExecutableIntentBindingV2(
+        execution=ExecutionFenceV2(
+            authority_incarnation=UUID(int=101),
+            writer_epoch=3,
+            configuration_epoch=5,
+            execution_epoch=7,
+            execution_manifest_sha256="1" * 64,
+            execution_state="active",
+            executable_new_capacity_ceiling=1,
+            executable_new_capacity_rate_per_minute=1,
+            trusted_fleet_release_sha256="2" * 64,
+            allocation_epoch=11,
+        ),
+        tranche_id=UUID(int=102),
+        intent_id=UUID(int=103),
+        shape_instance_id="oldlab-shape-0001",
+        subject_id=subject_id,
+        subject_incarnation=subject_incarnation,
+        account_id="owner-alice",
+        tier_id="development",
+        candidate=CandidateBindingV2(
+            algorithm="git-sha1",
+            identity="a" * 40,
+            publication_sha256="a" * 64,
+        ),
+        candidate_generation=7,
+        deployment_generation=7,
+        pool_id="oldlab",
+        pool_generation=13,
+        executor_id="oldlab-executor",
+        executor_incarnation=UUID(int=104),
+        shape_id="oldlab-cpu-small",
+        profile_id="oldlab-default",
+        profile_generation=17,
+        profile_digest="3" * 64,
+        concurrency_slots=1,
+        resources=ResourceVectorV1(slots=1, cpu_millicores=1000, memory_bytes=1024),
+        node_ids=("oldlab-node-01",),
+    )
+
+
+def _seed_executable_observation_rows(
+    connection: Any,
+    *,
+    include_prepared: bool = True,
+) -> tuple[UUID, UUID, UUID, UUID, UUID]:
+    subject_id = uuid4()
+    subject_incarnation = uuid4()
+    agent_incarnation = uuid4()
+    worker_id = uuid4()
+    worker_incarnation = uuid4()
+    binding = _executable_binding(subject_id, subject_incarnation)
+    binding_json = json.dumps(binding.model_dump(mode="json"), sort_keys=True)
+    connection.execute(
+        text(
+            "INSERT INTO loom_capacity_guard.authority_state "
+            "(singleton_id, schema_version, environment_id, subject_id, subject_incarnation, "
+            "authority_mode, authority_incarnation, reporter_incarnation, "
+            "reporter_high_water, allocation_epoch, deployment_generation, "
+            "configuration_generation, candidate_digest) "
+            "VALUES (1, 1, 'dev-observer', :subject_id, :subject_incarnation, "
+            "'disabled', :authority_incarnation, :reporter_incarnation, 0, 0, 7, 5, :digest)"
+        ),
+        {
+            "subject_id": subject_id,
+            "subject_incarnation": subject_incarnation,
+            "authority_incarnation": binding.execution.authority_incarnation,
+            "reporter_incarnation": uuid4(),
+            "digest": "b" * 64,
+        },
+    )
+    connection.execute(
+        text(
+            "INSERT INTO loom_capacity_guard.agent_registrations "
+            "(agent_incarnation, singleton_id, schema_version, environment_id, subject_id, "
+            "subject_incarnation, authority_incarnation, reporter_incarnation, authority_mode, "
+            "allocation_epoch, candidate_digest, deployment_generation, "
+            "configuration_generation, registration_state) "
+            "VALUES (:agent_incarnation, 1, 1, 'dev-observer', :subject_id, "
+            ":subject_incarnation, :authority_incarnation, :reporter_incarnation, "
+            "'disabled', 0, :digest, 7, 5, 'registered')"
+        ),
+        {
+            "agent_incarnation": agent_incarnation,
+            "subject_id": subject_id,
+            "subject_incarnation": subject_incarnation,
+            "authority_incarnation": binding.execution.authority_incarnation,
+            "reporter_incarnation": uuid4(),
+            "digest": "c" * 64,
+        },
+    )
+    connection.execute(
+        text(
+            "INSERT INTO loom_capacity_guard.executable_claim_state "
+            "(intent_id, subject_id, subject_incarnation, binding, claim_high_water, "
+            "terminal_high_water, draining) "
+            "VALUES (:intent_id, :subject_id, :subject_incarnation, CAST(:binding AS jsonb), "
+            "0, 0, false)"
+        ),
+        {
+            "intent_id": binding.intent_id,
+            "subject_id": subject_id,
+            "subject_incarnation": subject_incarnation,
+            "binding": binding_json,
+        },
+    )
+    connection.execute(
+        text(
+            "INSERT INTO loom_capacity_guard.executable_admission_events "
+            "(operation_id, event_kind, agent_incarnation, subject_id, subject_incarnation, "
+            "intent_id, bootstrap_registration_epoch, protected_registration_epoch, "
+            "physical_job_id, worker_id, worker_incarnation, worker_credential_sha256, "
+            "bootstrap_revoked, predecessor_credential_revoked, worker_credential_revoked, "
+            "binding, request_payload, request_digest, receipt) "
+            "VALUES (:operation_id, 'worker-registered', :agent_incarnation, :subject_id, "
+            ":subject_incarnation, :intent_id, 19, 23, 'oldlab-12345', :worker_id, "
+            ":worker_incarnation, :worker_credential_sha256, true, false, false, "
+            "CAST(:binding AS jsonb), CAST(:request_payload AS jsonb), :request_digest, "
+            "CAST(:receipt AS jsonb))"
+        ),
+        {
+            "operation_id": uuid4(),
+            "agent_incarnation": agent_incarnation,
+            "subject_id": subject_id,
+            "subject_incarnation": subject_incarnation,
+            "intent_id": binding.intent_id,
+            "worker_id": worker_id,
+            "worker_incarnation": worker_incarnation,
+            "worker_credential_sha256": "d" * 64,
+            "binding": binding_json,
+            "request_payload": '{"schema_version":2}',
+            "request_digest": "e" * 64,
+            "receipt": '{"schema_version":2}',
+        },
+    )
+    if include_prepared:
+        connection.execute(
+            text(
+                "INSERT INTO loom_capacity_guard.executable_admission_events "
+                "(operation_id, event_kind, agent_incarnation, subject_id, subject_incarnation, "
+                "intent_id, bootstrap_registration_epoch, bootstrap_sha256, binding, "
+                "request_payload, request_digest, receipt) "
+                "VALUES (:operation_id, 'prepared', :agent_incarnation, :subject_id, "
+                ":subject_incarnation, :intent_id, 19, :bootstrap_sha256, "
+                "CAST(:binding AS jsonb), CAST(:request_payload AS jsonb), :request_digest, "
+                "CAST(:receipt AS jsonb))"
+            ),
+            {
+                "operation_id": uuid4(),
+                "agent_incarnation": agent_incarnation,
+                "subject_id": subject_id,
+                "subject_incarnation": subject_incarnation,
+                "intent_id": binding.intent_id,
+                "bootstrap_sha256": "f" * 64,
+                "binding": binding_json,
+                "request_payload": '{"schema_version":2}',
+                "request_digest": "0" * 64,
+                "receipt": '{"schema_version":2}',
+            },
+        )
+    return (
+        subject_id,
+        subject_incarnation,
+        binding.intent_id,
+        worker_id,
+        worker_incarnation,
+    )
 
 
 def test_guard_schema_has_exact_owner_and_preserves_public_application_tables(
@@ -632,6 +809,90 @@ def test_guard_migration_downgrades_and_reupgrades_without_public_changes(
             )
     finally:
         engine.dispose()
+
+
+def test_guard_0013_downgrade_restores_executor_only_observation(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    cfg = _guard_config(capacity_guard_database)
+    executor = create_engine(
+        _value(capacity_guard_database, "executor_url"), isolation_level="SERIALIZABLE"
+    )
+    observer = create_engine(
+        _value(capacity_guard_database, "observer_url"), isolation_level="SERIALIZABLE"
+    )
+    try:
+        command.downgrade(cfg, "guard_0012")
+        statement = text(
+            "SELECT loom_capacity_guard.observe_executable_intent("
+            "'00000000-0000-0000-0000-000000000001'::uuid, "
+            "'00000000-0000-0000-0000-000000000002'::uuid, "
+            "'00000000-0000-0000-0000-000000000003'::uuid)"
+        )
+        # The executor reaches the restored function and fails only because
+        # the exact protected binding is absent; observer has no EXECUTE grant.
+        with executor.connect() as connection, pytest.raises(DBAPIError) as caught:
+            connection.execute(statement)
+        assert getattr(caught.value.orig, "sqlstate", None) == "55000"
+        with observer.connect() as connection, pytest.raises(DBAPIError) as caught:
+            connection.execute(statement)
+        assert getattr(caught.value.orig, "sqlstate", None) == "42501"
+        command.upgrade(cfg, "head")
+        with executor.connect() as connection, pytest.raises(DBAPIError) as caught:
+            connection.execute(statement)
+        assert getattr(caught.value.orig, "sqlstate", None) == "55000"
+        with create_engine(_value(capacity_guard_database, "admin_url")).connect() as connection:
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
+                    )
+                ).scalar_one()
+                == "guard_0013"
+            )
+    finally:
+        executor.dispose()
+        observer.dispose()
+
+
+def test_guard_0013_observation_requires_the_exact_prepared_event(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    with _owner_connection(capacity_guard_database) as connection:
+        (
+            subject_id,
+            subject_incarnation,
+            intent_id,
+            _worker_id,
+            _worker_incarnation,
+        ) = _seed_executable_observation_rows(connection, include_prepared=False)
+        connection.exec_driver_sql(
+            "GRANT USAGE ON SCHEMA loom_capacity_guard TO "
+            f'"{_value(capacity_guard_database, "observer_role")}"'
+        )
+
+    observer = create_engine(
+        _value(capacity_guard_database, "observer_url"), isolation_level="SERIALIZABLE"
+    )
+    try:
+        with observer.connect() as connection:
+            connection.exec_driver_sql("SET LOCAL enable_bitmapscan = off")
+            connection.exec_driver_sql("SET LOCAL enable_indexscan = off")
+            with pytest.raises(DBAPIError) as caught:
+                connection.execute(
+                    text(
+                        "SELECT loom_capacity_guard.observe_executable_intent("
+                        ":subject_id, :subject_incarnation, :intent_id)"
+                    ),
+                    {
+                        "subject_id": subject_id,
+                        "subject_incarnation": subject_incarnation,
+                        "intent_id": intent_id,
+                    },
+                ).scalar_one()
+        assert getattr(caught.value.orig, "sqlstate", None) == "55000"
+    finally:
+        observer.dispose()
 
 
 def test_lifecycle_projection_backfills_existing_terminal_public_blocker(
