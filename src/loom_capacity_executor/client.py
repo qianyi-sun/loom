@@ -711,6 +711,13 @@ class ExecutableCapacityExecutorClient:
             raise ExecutorTransportError("capacity manager checkpoint binding changed")
         return receipt
 
+    async def current_execution_context(self) -> ExecutionContextV2:
+        return await self._request(
+            "GET",
+            f"/v2/executors/{self.registration.pool_id}/context",
+            ExecutionContextV2,
+        )
+
     async def heartbeat_executable_executor(
         self,
         value: ExecutableExecutorHeartbeatV2,

@@ -8,6 +8,7 @@ from uuid import UUID
 import pytest
 
 from loom_capacity_agent.admission import ExecutableWorkerWithdrawalRequestV2
+from loom_capacity_executor.bootstrap_handoff import BootstrapHandoffStore
 from loom_capacity_executor.executable import ExecutablePoolExecutor, ProtectedIntentObservationV2
 from loom_capacity_executor.journal import ExecutorJournal, JournalRegressionError
 from loom_capacity_executor.launch_renderer import TrustedLaunchContextV2
@@ -17,7 +18,9 @@ from loom_capacity_executor.slurm_contracts import (
     SlurmTerminalEvidenceV2,
 )
 from loom_capacity_manager.executable_contracts import (
+    ExecutableExecutorRegistrationV2,
     ExecutableIntentCloseV2,
+    ExecutionContextV2,
     canonical_executable_bytes,
     canonical_executable_digest,
 )
@@ -39,9 +42,16 @@ def _restart(
     admission: FakeAdmission,
     slurm: FakeSlurm,
     launch: TrustedLaunchContextV2,
+    *,
+    bootstrap_handoff_store: BootstrapHandoffStore | None = None,
 ) -> tuple[ExecutablePoolExecutor, ExecutorJournal]:
     journal = ExecutorJournal(path)
     journal.__enter__()
+    bootstrap_kwargs = (
+        {"bootstrap_handoff_store": bootstrap_handoff_store}
+        if bootstrap_handoff_store is not None
+        else {"bootstrap_digest": lambda _binding: "b" * 64}
+    )
     return (
         ExecutablePoolExecutor(
             manager.registration,
@@ -53,7 +63,7 @@ def _restart(
             controller_authority=launch.controller_authority,
             ownership_key=launch.ownership_key,
             now=lambda: _NOW,
-            bootstrap_digest=lambda _binding: "b" * 64,
+            **bootstrap_kwargs,
         ),
         journal,
     )
@@ -138,6 +148,70 @@ async def test_crash_after_submit_never_resubmits(tmp_path: Path) -> None:
     assert slurm.submit_count == 1
     assert admission.bound[launch.binding.intent_id].slurm_job_id == "101"
     assert manager.inventories[-1].records[0].ownership_proof is not None
+    reopened.close()
+
+
+async def test_recovery_reconstructs_launch_with_handoff_reference(tmp_path: Path) -> None:
+    launch = launch_context_fixture()
+    context = ExecutionContextV2.model_validate(
+        launch.binding.execution.model_dump(exclude={"allocation_epoch", "executable"})
+    )
+    registration = ExecutableExecutorRegistrationV2(
+        execution=context,
+        executor_id=launch.binding.executor_id,
+        executor_incarnation=launch.binding.executor_incarnation,
+        pool_id=launch.binding.pool_id,
+        pool_generation=launch.binding.pool_generation,
+        signing_key_id=launch.ownership_key.signing_key_id,
+        signing_key_sha256=launch.ownership_key.public_key_sha256,
+        local_authority_sha256="a" * 64,
+        controller_authority_sha256=launch.controller_authority.controller_authority_sha256,
+    )
+    manager = FakeManager(registration, permit_fixture(launch.binding))
+    admission = FakeAdmission()
+    slurm = FakeSlurm()
+    handoff_directory = tmp_path / "handoff"
+    handoff_directory.mkdir(mode=0o700)
+    handoff_store = BootstrapHandoffStore(handoff_directory)
+    journal = ExecutorJournal(tmp_path / "executor.journal")
+    journal.__enter__()
+    executor = ExecutablePoolExecutor(
+        registration,
+        journal,
+        manager,
+        admission,
+        slurm,
+        profile=launch.profile,
+        controller_authority=launch.controller_authority,
+        ownership_key=launch.ownership_key,
+        now=lambda: _NOW,
+        bootstrap_handoff_store=handoff_store,
+    )
+    slurm.crash_after_submit = True
+
+    with pytest.raises(SimulatedCrash):
+        await executor.tick()
+    stored = journal.latest("job", str(launch.binding.intent_id))
+    assert stored is not None and stored.durable_payload() is not None
+    stored_payload = json.loads(stored.durable_payload().decode("ascii"))
+    assert stored_payload["request"]["bootstrap_handoff_reference"] == handoff_store.reference_for(
+        launch.binding
+    )
+    journal.close()
+
+    slurm.crash_after_submit = False
+    recovered, reopened = _restart(
+        journal.path,
+        manager,
+        admission,
+        slurm,
+        launch,
+        bootstrap_handoff_store=handoff_store,
+    )
+    result = await recovered.recover()
+
+    assert result.status == "adopted"
+    assert slurm.submit_count == 1
     reopened.close()
 
 

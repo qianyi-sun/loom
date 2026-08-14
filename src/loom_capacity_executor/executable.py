@@ -16,6 +16,7 @@ from loom_capacity_agent.admission import (
     PhysicalJobBindingV2,
     ProtectedIntentObservationV2,
 )
+from loom_capacity_executor.bootstrap_handoff import BootstrapHandoffStore
 from loom_capacity_executor.client import ExecutorRejectedError
 from loom_capacity_executor.journal import (
     ExecutorJournal,
@@ -27,10 +28,12 @@ from loom_capacity_executor.launch_renderer import (
     OperatorLaunchProfileV2,
     RenderedTrustedLaunchV2,
     TrustedLaunchContextV2,
+    canonical_launch_policy_digest,
     executable_ownership_token,
     render_signed_launch,
 )
 from loom_capacity_executor.slurm_contracts import (
+    SlurmAuthorityV2,
     SlurmCancelRequestV2,
     SlurmJobObservationV2,
     SlurmLaunchRequestV2,
@@ -114,6 +117,8 @@ class _SlurmBackend(Protocol):
 
     async def cancel_pending(self, request: SlurmCancelRequestV2) -> Any: ...
 
+    async def validate_authority(self) -> Any: ...
+
 
 @dataclass(frozen=True, slots=True)
 class ExecutorTickResult:
@@ -158,18 +163,35 @@ class ExecutablePoolExecutor:
         profile: OperatorLaunchProfileV2,
         controller_authority: PoolControllerAuthorityV2,
         ownership_key: ExecutorOwnershipKey,
+        profiles: tuple[OperatorLaunchProfileV2, ...] | None = None,
         now: Callable[[], datetime] | None = None,
         bootstrap_digest: Callable[[ExecutableIntentBindingV2], str] | None = None,
+        bootstrap_handoff_store: BootstrapHandoffStore | None = None,
     ) -> None:
         if not isinstance(registration, ExecutableExecutorRegistrationV2):
             raise TypeError("executable executor requires its exact registration")
         if not isinstance(journal, ExecutorJournal):
             raise TypeError("executable executor requires its locked journal")
-        if registration.pool_id != profile.pool_id or (
+        approved_profiles = profiles or (profile,)
+        if not approved_profiles:
+            raise ValueError("executable runtime requires at least one launch profile")
+        if profile not in approved_profiles:
+            raise ValueError("current executable profile is absent from approved profile set")
+        if (
             registration.controller_authority_sha256
             != controller_authority.controller_authority_sha256
         ):
             raise ValueError("executor launch authority differs from registration")
+        for approved_profile in approved_profiles:
+            if (
+                registration.pool_id != approved_profile.pool_id
+                or registration.pool_generation != approved_profile.pool_generation
+                or approved_profile.controller_authority_sha256
+                != controller_authority.controller_authority_sha256
+                or canonical_launch_policy_digest(approved_profile)
+                != controller_authority.controller_authority_sha256
+            ):
+                raise ValueError("executor launch authority differs from approved profiles")
         if (
             registration.signing_key_id != ownership_key.signing_key_id
             or registration.signing_key_sha256 != ownership_key.public_key_sha256
@@ -180,13 +202,19 @@ class ExecutablePoolExecutor:
         self.client = client
         self.admission = admission
         self.slurm = slurm
+        slurm_authority = getattr(slurm, "authority", None)
+        self.expected_slurm_authority = (
+            slurm_authority if isinstance(slurm_authority, SlurmAuthorityV2) else None
+        )
         self.profile = profile
+        self.profiles = tuple(approved_profiles)
         self.controller_authority = controller_authority
         self.ownership_key = ownership_key
         self._now = now or (lambda: datetime.now(UTC))
-        self._bootstrap_digest = bootstrap_digest or (
-            lambda binding: hashlib.sha256(canonical_executable_bytes(binding)).hexdigest()
-        )
+        self._bootstrap_digest = bootstrap_digest
+        self._bootstrap_handoff_store = bootstrap_handoff_store
+        if self._bootstrap_digest is None and self._bootstrap_handoff_store is None:
+            raise ValueError("executable runtime requires a bootstrap handoff store")
 
     def _assert_binding(self, binding: ExecutableIntentBindingV2) -> None:
         if (
@@ -203,6 +231,27 @@ class ExecutablePoolExecutor:
         expected = self.registration.execution.model_dump(exclude={"executable"})
         if actual != expected:
             raise ValueError("manager work differs from exact executable execution")
+
+    def _profile_for(self, binding: ExecutableIntentBindingV2) -> OperatorLaunchProfileV2:
+        matches = tuple(
+            profile
+            for profile in self.profiles
+            if binding.pool_id == profile.pool_id
+            and binding.pool_generation == profile.pool_generation
+            and binding.profile_id == profile.profile_id
+            and binding.profile_generation == profile.profile_generation
+            and binding.profile_digest == profile.profile_digest
+            and binding.shape_id == profile.shape_id
+            and binding.concurrency_slots == profile.concurrency_slots
+            and binding.resources == profile.resources
+            and profile.controller_authority_sha256
+            == self.controller_authority.controller_authority_sha256
+            and canonical_launch_policy_digest(profile)
+            == self.controller_authority.controller_authority_sha256
+        )
+        if len(matches) != 1:
+            raise ValueError("manager work does not match one approved runtime profile")
+        return matches[0]
 
     async def _checkpoint(self) -> Any:
         checkpoint = await self.client.executable_checkpoint()
@@ -280,15 +329,28 @@ class ExecutablePoolExecutor:
 
     def render_launch(self, binding: ExecutableIntentBindingV2) -> RenderedTrustedLaunchV2:
         self._assert_binding(binding)
-        return render_signed_launch(
+        profile = self._profile_for(binding)
+        rendered = render_signed_launch(
             TrustedLaunchContextV2(
                 binding=binding,
-                profile=self.profile,
+                profile=profile,
                 controller_authority=self.controller_authority,
                 ownership_key=self.ownership_key,
                 submitted_at=self._now(),
             )
         )
+        reference = self._handoff_reference(binding)
+        if reference is None:
+            return rendered
+        return RenderedTrustedLaunchV2(
+            request=rendered.request.model_copy(update={"bootstrap_handoff_reference": reference}),
+            ownership_proof=rendered.ownership_proof,
+        )
+
+    def _handoff_reference(self, binding: ExecutableIntentBindingV2) -> str | None:
+        if self._bootstrap_handoff_store is None:
+            return None
+        return self._bootstrap_handoff_store.reference_for(binding)
 
     def _remember_launch(
         self,
@@ -360,12 +422,20 @@ class ExecutablePoolExecutor:
             expected = render_signed_launch(
                 TrustedLaunchContextV2(
                     binding=proof.metadata.binding,
-                    profile=self.profile,
+                    profile=self._profile_for(proof.metadata.binding),
                     controller_authority=self.controller_authority,
                     ownership_key=self.ownership_key,
                     submitted_at=proof.metadata.submitted_at,
                 )
             )
+            reference = self._handoff_reference(proof.metadata.binding)
+            if reference is not None:
+                expected = RenderedTrustedLaunchV2(
+                    request=expected.request.model_copy(
+                        update={"bootstrap_handoff_reference": reference}
+                    ),
+                    ownership_proof=expected.ownership_proof,
+                )
         except (TypeError, ValueError) as exc:
             raise JournalRegressionError(
                 "stored ownership evidence differs from launch authority"
@@ -389,11 +459,26 @@ class ExecutablePoolExecutor:
     ) -> ExecutableBootstrapRegistrationV2:
         latest = self.journal.latest("bootstrap", str(binding.intent_id))
         if latest is None:
+            if self._bootstrap_handoff_store is not None:
+                lease = self._bootstrap_handoff_store.prepare(
+                    binding,
+                    bootstrap_registration_epoch=1,
+                    expires_at=self._now() + timedelta(minutes=30),
+                    trusted_launcher_release_sha256=(
+                        binding.execution.trusted_fleet_release_sha256
+                    ),
+                    protected_admission_route_sha256=self._handoff_route_sha256(binding),
+                )
+                bootstrap_evidence_sha256 = lease.bootstrap_sha256
+            elif self._bootstrap_digest is not None:
+                bootstrap_evidence_sha256 = self._bootstrap_digest(binding)
+            else:
+                raise JournalRegressionError("bootstrap handoff store is unavailable")
             return ExecutableBootstrapRegistrationV2(
                 binding=binding,
                 command_sequence=command_sequence,
                 bootstrap_registration_epoch=1,
-                bootstrap_evidence_sha256=self._bootstrap_digest(binding),
+                bootstrap_evidence_sha256=bootstrap_evidence_sha256,
             )
         if latest.event_kind not in {
             "protected-bootstrap-requested",
@@ -408,6 +493,19 @@ class ExecutablePoolExecutor:
             raise JournalRegressionError("protected bootstrap request binding changed")
         return registration
 
+    def _handoff_route_sha256(self, binding: ExecutableIntentBindingV2) -> str:
+        route = getattr(self.admission, "bootstrap_handoff_route_sha256", None)
+        if not callable(route):
+            raise JournalRegressionError("bootstrap handoff admission route is unavailable")
+        value = route(binding)
+        if (
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(item not in "0123456789abcdef" for item in value)
+        ):
+            raise JournalRegressionError("bootstrap handoff admission route is invalid")
+        return value
+
     async def tick(self) -> ExecutorTickResult:
         checkpoint = await self._checkpoint()
         replayed_local = await self._replay_local_request(checkpoint)
@@ -420,6 +518,40 @@ class ExecutablePoolExecutor:
         if work is None:
             return await self._publish_inventory(checkpoint)
         return await self._apply_one(work, checkpoint)
+
+    async def tick_drain_only(self) -> ExecutorTickResult:
+        """Apply one structurally drain-only operation without new capacity work."""
+
+        checkpoint = await self._checkpoint()
+        replayed_local = await self._replay_local_request(checkpoint)
+        if replayed_local is not None:
+            return replayed_local
+        if self._has_recovering_launch():
+            return await self.recover()
+        replayed = await self._replay_drain_only_central_request(checkpoint)
+        if replayed is not None:
+            return replayed
+        work = await self.client.next_executable_work(checkpoint.command_sequence)
+        if work is None:
+            return await self._publish_inventory(checkpoint)
+        if isinstance(work, (ExecutableIntentCloseV2, ExecutablePartialReleaseV2)):
+            return await self._apply_one(work, checkpoint)
+        raise ValueError("drain-only executor rejected new capacity work")
+
+    def _has_recovering_launch(self) -> bool:
+        return any(
+            record.event_kind
+            in {
+                "slurm-submit-requested",
+                "slurm-submit-unknown",
+                "slurm-submit-confirmed",
+                "physical-bind-requested",
+            }
+            for record in (
+                *self.journal.latest_records("job"),
+                *self.journal.latest_records("intent"),
+            )
+        )
 
     def _validate_central_replay(
         self,
@@ -535,6 +667,35 @@ class ExecutablePoolExecutor:
             operation=lambda: self.client.release_executable_shapes(release),
         )
         return ExecutorTickResult("released")
+
+    async def _replay_drain_only_central_request(
+        self,
+        checkpoint: Any,
+    ) -> ExecutorTickResult | None:
+        records = tuple(
+            record
+            for record in self.journal.pending_requests()
+            if record.event_kind
+            in {
+                "reservation-accept-requested",
+                "bootstrap-register-requested",
+                "permit-consume-requested",
+                "intent-close-requested",
+                "reservation-release-requested",
+            }
+        )
+        if not records:
+            return None
+        if len(records) != 1:
+            raise JournalRegressionError("multiple central commands remain unresolved")
+        if records[0].event_kind not in {
+            "intent-close-requested",
+            "reservation-release-requested",
+        }:
+            raise JournalRegressionError(
+                "drain-only executor cannot replay capacity-increasing central work"
+            )
+        return await self._replay_central_request(checkpoint)
 
     def _validate_cancel_replay(
         self,

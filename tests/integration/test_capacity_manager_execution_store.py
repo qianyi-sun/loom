@@ -271,6 +271,52 @@ async def test_drain_telemetry_accepts_retained_same_epoch_active_registration(
     assert ingested.inventory_digest == canonical_executable_digest(inventory)
 
 
+async def test_inventory_ingest_advances_central_journal_high_water(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityExecutionStore()
+    active, _allocation_epoch = await _active_plan(capacity_session)
+    executor = executor_binding("gb10")
+    await store.heartbeat_executor(
+        capacity_session,
+        ExecutableExecutorHeartbeatV2(
+            execution=active,
+            executor_id=executor.executor_id,
+            executor_incarnation=executor.executor_incarnation,
+            pool_id=executor.pool_id,
+            pool_generation=executor.pool_generation,
+            heartbeat_sequence=1,
+            journal_sequence=0,
+            journal_digest="0" * 64,
+        ),
+    )
+    inventory = ExecutableExecutorInventoryV2(
+        execution=active,
+        executor_id=executor.executor_id,
+        executor_incarnation=executor.executor_incarnation,
+        pool_id=executor.pool_id,
+        pool_generation=executor.pool_generation,
+        inventory_sequence=1,
+        journal_sequence=2,
+        journal_digest="1" * 64,
+        journal_checkpoint_sequence=0,
+        journal_checkpoint_digest="0" * 64,
+    )
+
+    await store.ingest_executor_inventory(capacity_session, inventory)
+    state = (
+        await capacity_session.execute(
+            select(CapacityExecutableExecutorState).where(
+                CapacityExecutableExecutorState.execution_epoch == active.execution_epoch,
+                CapacityExecutableExecutorState.pool_id == "gb10",
+            )
+        )
+    ).scalar_one()
+
+    assert state.journal_high_water == 2
+    assert state.journal_digest == "1" * 64
+
+
 # Production break caught: writer transfer during drain advances the mutable
 # writer fence, but retained executor telemetry remains bound to the active
 # writer epoch frozen when the executor was registered.
@@ -454,6 +500,14 @@ async def _publish_pool_retirement_evidence(
     await store.ingest_executor_inventory(session, inventory)
     if later_heartbeat:
         heartbeat_sequence += 1
+        state = (
+            await session.execute(
+                select(CapacityExecutableExecutorState).where(
+                    CapacityExecutableExecutorState.execution_epoch == drained.execution_epoch,
+                    CapacityExecutableExecutorState.pool_id == pool_id,
+                )
+            )
+        ).scalar_one()
         confirmed_journal_sequence, confirmed_journal_digest = (
             canonical_inventory_confirmation_journal_head(inventory)
         )
@@ -464,8 +518,8 @@ async def _publish_pool_retirement_evidence(
                 heartbeat_sequence=heartbeat_sequence,
                 journal_sequence=confirmed_journal_sequence,
                 journal_digest=confirmed_journal_digest,
-                journal_checkpoint_sequence=journal_sequence,
-                journal_checkpoint_digest=journal_digest,
+                journal_checkpoint_sequence=state.journal_high_water,
+                journal_checkpoint_digest=state.journal_digest,
             ),
         )
     state = (

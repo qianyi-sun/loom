@@ -43,6 +43,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutablePermitConsumptionV2,
     ExecutableReleasedShapeV2,
     ExecutableReservationAcceptanceV2,
+    ExecutableReservationProposalV2,
     ExecutionContextV2,
     PoolControllerAuthorityV2,
     PreparedExecutorBindingV2,
@@ -50,6 +51,7 @@ from loom_capacity_manager.executable_contracts import (
     canonical_executable_bytes,
     canonical_executable_digest,
 )
+from loom_capacity_manager.grant_contracts import ReservationShapeV1
 from tests.unit.test_capacity_executor_launch_renderer import launch_context_fixture
 
 _NOW = datetime(2026, 8, 13, 16, 0, tzinfo=UTC)
@@ -436,6 +438,77 @@ def permit_fixture(binding: ExecutableIntentBindingV2) -> ExecutableLaunchPermit
         launch_rank=1,
         expires_at=_NOW + timedelta(minutes=1),
     )
+
+
+def proposal_fixture(binding: ExecutableIntentBindingV2) -> ExecutableReservationProposalV2:
+    return ExecutableReservationProposalV2(
+        tranche_id=binding.tranche_id,
+        execution=binding.execution,
+        subject_id=binding.subject_id,
+        subject_incarnation=binding.subject_incarnation,
+        account_id=binding.account_id,
+        tier_id=binding.tier_id,
+        candidate=binding.candidate,
+        candidate_generation=binding.candidate_generation,
+        deployment_generation=binding.deployment_generation,
+        pool_id=binding.pool_id,
+        pool_generation=binding.pool_generation,
+        executor_id=binding.executor_id,
+        executor_incarnation=binding.executor_incarnation,
+        shapes=(
+            ReservationShapeV1(
+                shape_instance_id=binding.shape_instance_id,
+                intent_id=binding.intent_id,
+                shape_id=binding.shape_id,
+                profile_id=binding.profile_id,
+                profile_generation=binding.profile_generation,
+                profile_digest=binding.profile_digest,
+                concurrency_slots=binding.concurrency_slots,
+                resources=binding.resources,
+                node_ids=binding.node_ids,
+            ),
+        ),
+    )
+
+
+@pytest.mark.parametrize("fresh_work", ("proposal", "permit"))
+async def test_drain_only_tick_rejects_new_capacity_work_without_side_effects(
+    tmp_path: Path,
+    fresh_work: str,
+) -> None:
+    launch = launch_context_fixture()
+    work = (
+        proposal_fixture(launch.binding)
+        if fresh_work == "proposal"
+        else permit_fixture(launch.binding)
+    )
+    executor, journal, manager, _admission, slurm, _launch = executor_fixture(
+        tmp_path,
+        work=work,
+    )
+
+    with pytest.raises(Exception, match="drain-only"):
+        await executor.tick_drain_only()
+
+    assert manager.central_requests == []
+    assert slurm.submit_count == 0
+    journal.close()
+
+
+async def test_drain_only_tick_allows_close_work(tmp_path: Path) -> None:
+    launch = launch_context_fixture()
+    close = ExecutableIntentCloseV2(binding=launch.binding, command_sequence=1)
+    executor, journal, manager, _admission, slurm, _launch = executor_fixture(
+        tmp_path,
+        work=close,
+    )
+
+    result = await executor.tick_drain_only()
+
+    assert result.status == "draining"
+    assert manager.central_requests == [close]
+    assert slurm.submit_count == 0
+    journal.close()
 
 
 def _durable_central_request(

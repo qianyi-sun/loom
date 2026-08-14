@@ -497,6 +497,7 @@ def _assert_exact_approved_routes(app: FastAPI) -> None:
         ),
         ("/v2/executors/{pool_id}/heartbeat", ("PUT",)),
         ("/v2/executors/{pool_id}/checkpoint", ("GET",)),
+        ("/v2/executors/{pool_id}/context", ("GET",)),
         ("/v2/executors/{pool_id}/work", ("GET",)),
         ("/v2/executors/{pool_id}/inventory", ("PUT",)),
         (
@@ -725,10 +726,14 @@ def test_v2_executor_work_route_is_exactly_pool_bound(
 
     own_pool = client.get("/v2/executors/oldlab/work", headers=headers)
     crossed_pool = client.get("/v2/executors/gb10/work", headers=headers)
+    own_context = client.get("/v2/executors/oldlab/context", headers=headers)
+    crossed_context = client.get("/v2/executors/gb10/context", headers=headers)
 
     assert own_pool.status_code == 200
     assert own_pool.json() is None
     assert crossed_pool.status_code == 403
+    assert own_context.status_code == 409
+    assert crossed_context.status_code == 403
 
 
 def test_lifecycle_can_project_and_authenticate_a_personal_demand_reporter(

@@ -14,7 +14,10 @@ from loom_capacity_executor.client import (
     ExecutorTransportError,
 )
 from loom_capacity_executor.dry_run import DryRunExecutorBinding
-from loom_capacity_manager.executable_contracts import ExecutableExecutorRegistrationV2
+from loom_capacity_manager.executable_contracts import (
+    ExecutableExecutorRegistrationV2,
+    ExecutionContextV2,
+)
 from loom_capacity_manager.grant_contracts import (
     DryRunExecutorHeartbeatV1,
     DryRunReservationAcceptanceV1,
@@ -252,4 +255,53 @@ async def test_executable_work_fetch_aborts_streaming_body_once_byte_bound_is_cr
 
     assert parsed is False
     assert transport.stream.read_past_limit is False
+    await http.aclose()
+
+
+# Production break caught: the executable daemon had no authenticated route to
+# read the manager's current execution context before constructing a mutating
+# scheduler/protected-database runtime.
+async def test_executable_client_fetches_exact_current_execution_context() -> None:
+    expected = ExecutionContextV2(
+        authority_incarnation=UUID(int=50),
+        writer_epoch=7,
+        configuration_epoch=9,
+        execution_epoch=11,
+        execution_manifest_sha256="c" * 64,
+        execution_state="drain-only",
+        executable_new_capacity_ceiling=0,
+        executable_new_capacity_rate_per_minute=0,
+        trusted_fleet_release_sha256="d" * 64,
+    )
+    registration = ExecutableExecutorRegistrationV2.model_construct(
+        execution=expected,
+        executor_id="oldlab-executor",
+        executor_incarnation=UUID(int=51),
+        pool_id="oldlab",
+        pool_generation=2,
+        signing_key_id="oldlab-key",
+        signing_key_sha256="a" * 64,
+        local_authority_sha256="b" * 64,
+        controller_authority_sha256="e" * 64,
+        executable=True,
+    )
+    seen: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=expected.model_dump(mode="json"))
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = ExecutableCapacityExecutorClient(
+        registration,
+        manager_origin="https://capacity.example.test",
+        bearer_token="executor-secret",
+        http_client=http,
+    )
+
+    current = await client.current_execution_context()
+
+    assert current == expected
+    assert [request.url.path for request in seen] == ["/v2/executors/oldlab/context"]
+    assert seen[0].headers["authorization"] == "Bearer executor-secret"
     await http.aclose()

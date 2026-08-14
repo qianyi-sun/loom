@@ -216,6 +216,10 @@ class SlurmLaunchRequestV2(StrictSlurmV2Model):
     launcher_release_sha256: Sha256Digest
     image_digest: Annotated[str, Field(max_length=512, pattern=_IMAGE_DIGEST_PATTERN)]
     ownership_token: OwnershipToken
+    bootstrap_handoff_reference: Annotated[
+        str | None,
+        Field(max_length=128, pattern=r"^[0-9a-f]{64}\.json$"),
+    ] = None
 
     @field_validator("nodes")
     @classmethod
@@ -253,7 +257,7 @@ class SlurmLaunchRequestV2(StrictSlurmV2Model):
     def trusted_launcher_argv(self) -> tuple[str, ...]:
         """Render only typed, digest-bound arguments for the trusted wrapper."""
 
-        return (
+        argv = (
             self.launcher.path,
             f"--launcher-sha256={self.launcher.sha256}",
             f"--operation-id={self.operation_id}",
@@ -261,6 +265,9 @@ class SlurmLaunchRequestV2(StrictSlurmV2Model):
             f"--release-sha256={self.launcher_release_sha256}",
             f"--ownership-token={self.ownership_token}",
         )
+        if self.bootstrap_handoff_reference is not None:
+            return (*argv, f"--bootstrap-handoff={self.bootstrap_handoff_reference}")
+        return argv
 
 
 class SlurmSubmissionV2(StrictSlurmV2Model):

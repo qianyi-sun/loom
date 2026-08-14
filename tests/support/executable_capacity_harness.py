@@ -38,10 +38,15 @@ from loom_capacity_agent.contracts import AgentRegistrationV1
 from loom_capacity_agent.executable_admission import ExecutableAdmissionStore
 from loom_capacity_agent.lifecycle_store import CapacityAttemptLifecycleStore
 from loom_capacity_agent.store import CapacityAgentStore
+from loom_capacity_executor.bootstrap_handoff import (
+    BootstrapHandoffStore,
+    consume_bootstrap_handoff,
+)
 from loom_capacity_executor.client import (
     ExecutableCapacityExecutorClient,
 )
 from loom_capacity_executor.executable import ExecutablePoolExecutor, ExecutorTickResult
+from loom_capacity_executor.heartbeat import ExecutableHeartbeatLoop
 from loom_capacity_executor.journal import ExecutorJournal
 from loom_capacity_executor.keys import ExecutorOwnershipKey
 from loom_capacity_executor.launch_renderer import (
@@ -237,6 +242,7 @@ class _ProtectedAdmissionRouter:
 
     def __init__(self, harness: ExecutableCapacityHarness) -> None:
         self._harness = harness
+        self._registrations: dict[UUID, ExecutableWorkerRegistrationV2] = {}
 
     def _owner(self, binding: ExecutableIntentBindingV2) -> OwnerHandle:
         owner = self._harness._owners_by_subject.get(binding.subject_id)
@@ -270,6 +276,23 @@ class _ProtectedAdmissionRouter:
         async with self._store(request.binding) as store:
             return await store.prepare_worker(request, bootstrap_sha256=bootstrap_sha256)
 
+    def bootstrap_handoff_route_sha256(self, binding: ExecutableIntentBindingV2) -> str:
+        owner = self._owner(binding)
+        payload = {
+            "subject_id": str(binding.subject_id),
+            "subject_incarnation": str(binding.subject_incarnation),
+            "configuration_generation": binding.execution.configuration_epoch,
+            "deployment_generation": binding.deployment_generation,
+            "candidate_generation": binding.candidate_generation,
+            "protected_admission_sha256": owner.projection.protected_admission_sha256,
+            "database_url_sha256": hashlib.sha256(
+                _database_value(owner.database, "executor_url").encode("utf-8")
+            ).hexdigest(),
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("ascii")
+        ).hexdigest()
+
     async def bind_slurm_job(self, request: PhysicalJobBindingV2) -> Any:
         async with self._store(request.binding) as store:
             return await store.bind_slurm_job(request)
@@ -289,10 +312,18 @@ class _ProtectedAdmissionRouter:
         bootstrap_capability: str,
     ) -> Any:
         async with self._store(request.binding) as store:
-            return await store.register_worker(
+            receipt = await store.register_worker(
                 request,
                 bootstrap_capability=bootstrap_capability,
             )
+        self._registrations[request.binding.intent_id] = request
+        return receipt
+
+    def last_registration(self, intent_id: UUID) -> ExecutableWorkerRegistrationV2:
+        try:
+            return self._registrations[intent_id]
+        except KeyError as exc:
+            raise RuntimeError("protected worker registration was not recorded") from exc
 
     async def admit_claim(self, binding: ExecutableIntentBindingV2, request: Any) -> Any:
         async with self._store(binding) as store:
@@ -376,6 +407,10 @@ class PoolHarness:
         self.executor: ExecutablePoolExecutor | None = None
         self.journal: ExecutorJournal | None = None
         self.journal_path: Path | None = None
+        self.handoff_directory = harness.root / "bootstrap-handoff" / pool_id
+        self.handoff_directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+        self.handoff_directory.chmod(0o700)
+        self.handoff_store = BootstrapHandoffStore(self.handoff_directory)
         self.heartbeat_sequence = 0
         self.last_inventory: ExecutableExecutorInventoryV2 | None = None
 
@@ -418,7 +453,7 @@ class PoolHarness:
             controller_authority=authority,
             ownership_key=self.ownership_key,
             now=lambda: _FIXED_TIME,
-            bootstrap_digest=lambda binding: _token_sha256(f"bootstrap-{binding.intent_id}"),
+            bootstrap_handoff_store=self.handoff_store,
         )
 
     async def restart(self) -> None:
@@ -442,27 +477,12 @@ class PoolHarness:
     async def heartbeat(self) -> None:
         if self.journal is None or self.registration is None or self.client is None:
             raise RuntimeError("pool executor is not installed")
-        checkpoint = await self.client.executable_checkpoint() if self.heartbeat_sequence else None
-        selected = self.journal.head
-        self.heartbeat_sequence += 1
-        await self.client.heartbeat_executable_executor(
-            ExecutableExecutorHeartbeatV2(
-                execution=self.registration.execution,
-                executor_id=self.registration.executor_id,
-                executor_incarnation=self.registration.executor_incarnation,
-                pool_id=self.pool_id,
-                pool_generation=self.registration.pool_generation,
-                heartbeat_sequence=self.heartbeat_sequence,
-                journal_sequence=selected.sequence,
-                journal_digest=selected.digest,
-                journal_checkpoint_sequence=(
-                    0 if checkpoint is None else checkpoint.journal_sequence
-                ),
-                journal_checkpoint_digest=(
-                    "0" * 64 if checkpoint is None else checkpoint.journal_digest
-                ),
-            )
-        )
+        heartbeat = await ExecutableHeartbeatLoop(
+            self.registration,
+            self.journal,
+            self.client,
+        ).heartbeat()
+        self.heartbeat_sequence = heartbeat.heartbeat_sequence
 
     def owner_slots(self, subject_id: UUID) -> int:
         bindings = self.harness._pool_job_bindings(self.pool_id)
@@ -2007,7 +2027,7 @@ class ExecutableCapacityHarness:
             if result.status == "submitted":
                 if result.operation_id is None:
                     raise RuntimeError("submitted operation omitted its intent")
-                await self._trusted_register(result.operation_id, result.detail)
+                await self._trusted_register(pool_id, result.operation_id, result.detail)
                 pool.fake.set_job_state(result.detail, "RUNNING")
                 return result
             if result.status not in {
@@ -2033,24 +2053,31 @@ class ExecutableCapacityHarness:
         self._intent_launch_ranks[intent_id] = launch_rank
         return ExecutableIntentBindingV2.model_validate_json(json.dumps(payload))
 
-    async def _trusted_register(self, intent_id: UUID, job_id: str) -> _Worker:
+    def _physical_binding(self, pool_id: str, intent_id: UUID) -> PhysicalJobBindingV2:
+        pool = self.pools[pool_id]
+        if pool.journal is None:
+            raise RuntimeError("pool journal is unavailable")
+        retained = pool.journal.latest("intent", str(intent_id))
+        if retained is None or retained.event_kind != "physical-bind-confirmed":
+            raise RuntimeError("physical binding was not journaled before wrapper exchange")
+        payload = retained.durable_payload()
+        if payload is None:
+            raise RuntimeError("physical binding payload is absent")
+        return PhysicalJobBindingV2.model_validate_json(payload)
+
+    async def _trusted_register(self, pool_id: str, intent_id: UUID, job_id: str) -> _Worker:
         binding = await self._binding(intent_id)
-        capability = f"bootstrap-{intent_id}"
-        credential = f"worker-credential-{intent_id}"
-        registration = ExecutableWorkerRegistrationV2(
-            operation_id=_uuid(f"worker-register:{intent_id}"),
-            binding=binding,
-            bootstrap_registration_epoch=1,
-            protected_registration_epoch=2,
-            slurm_job_id=job_id,
-            worker_id=_uuid(f"worker:{intent_id}"),
-            worker_incarnation=_uuid(f"worker-incarnation:{intent_id}"),
-            worker_credential_sha256=_token_sha256(credential),
+        physical = self._physical_binding(pool_id, intent_id)
+        if physical.binding != binding or physical.slurm_job_id != job_id:
+            raise RuntimeError("physical binding differs from submitted operation")
+        credential = await consume_bootstrap_handoff(
+            self.pools[pool_id].handoff_directory,
+            self.pools[pool_id].handoff_store.reference_for(binding),
+            physical,
+            self._admission,
+            now=lambda: _FIXED_TIME,
         )
-        await self._admission.register_worker(
-            registration,
-            bootstrap_capability=capability,
-        )
+        registration = self._admission.last_registration(binding.intent_id)
         worker = _Worker(binding, job_id, registration, credential)
         self._workers[intent_id] = worker
         return worker
@@ -2063,7 +2090,7 @@ class ExecutableCapacityHarness:
         if result.status == "adopted":
             if result.operation_id is None:
                 raise RuntimeError("adopted operation omitted its intent")
-            await self._trusted_register(result.operation_id, result.detail)
+            await self._trusted_register(pool_id, result.operation_id, result.detail)
             self.pools[pool_id].fake.set_job_state(result.detail, "RUNNING")
         return result
 

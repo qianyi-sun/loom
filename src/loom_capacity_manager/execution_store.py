@@ -350,6 +350,33 @@ class CapacityExecutionStore:
             lease_expires_at=state.lease_expires_at,
         )
 
+    async def executor_current_context(
+        self,
+        session: AsyncSession,
+        executor: PreparedExecutorBindingV2,
+    ) -> ExecutionContextV2:
+        authority = await self._lock_authority(session)
+        if authority.execution_state == "shadow":
+            raise ExecutionConflictError("execution authority is shadow-only")
+        epoch = await self._lock_current_epoch(session, authority)
+        await self._exact_registration(session, epoch, executor)
+        return ExecutionContextV2(
+            authority_incarnation=authority.authority_incarnation,
+            writer_epoch=authority.writer_epoch,
+            configuration_epoch=epoch.configuration_epoch,
+            execution_epoch=epoch.execution_epoch,
+            execution_manifest_sha256=epoch.execution_manifest_sha256,
+            execution_state=cast(
+                Literal["prepared", "active", "drain-only"],
+                authority.execution_state,
+            ),
+            executable_new_capacity_ceiling=authority.executable_new_capacity_ceiling,
+            executable_new_capacity_rate_per_minute=(
+                0 if authority.execution_state == "drain-only" else epoch.effective_rate_per_minute
+            ),
+            trusted_fleet_release_sha256=epoch.trusted_fleet_release_sha256,
+        )
+
     async def _stored_inventory_is_retirement_safe(
         self,
         session: AsyncSession,
@@ -662,6 +689,12 @@ class CapacityExecutionStore:
                 )
             if inventory.inventory_sequence != state.inventory_high_water + 1:
                 raise ExecutionConflictError("executor inventory sequence has a gap")
+            if inventory.journal_sequence < state.journal_high_water:
+                raise _ExecutorFenceError(
+                    state.executor_incarnation,
+                    "fenced",
+                    "executor inventory journal regressed",
+                )
             if inventory.journal_checkpoint_sequence > state.journal_high_water or (
                 inventory.journal_checkpoint_sequence == state.journal_high_water
                 and inventory.journal_checkpoint_digest != state.journal_digest
@@ -674,6 +707,8 @@ class CapacityExecutionStore:
             state.inventory_high_water = inventory.inventory_sequence
             state.last_inventory_digest = digest
             state.inventory_payload = inventory.model_dump(mode="json", exclude_none=False)
+            state.journal_high_water = inventory.journal_sequence
+            state.journal_digest = inventory.journal_digest
             _, state.inventory_confirmation_journal_digest = (
                 canonical_inventory_confirmation_journal_head(inventory)
             )

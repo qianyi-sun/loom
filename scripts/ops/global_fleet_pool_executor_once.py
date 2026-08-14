@@ -20,11 +20,18 @@ from loom_capacity_agent.client import (
 from loom_capacity_executor.client import ExecutableCapacityExecutorClient
 from loom_capacity_executor.config import ExecutorConfigError, PoolExecutorConfig
 from loom_capacity_executor.executable import ExecutablePoolExecutor
+from loom_capacity_executor.heartbeat import ExecutableHeartbeatLoop
 from loom_capacity_executor.journal import ExecutorJournal
+from loom_capacity_executor.runtime import (
+    build_executable_runtime,
+    load_activation_runtime_artifact,
+)
 from loom_capacity_executor.slurm_backend import AsyncSlurmBackend
+from loom_capacity_executor.slurm_contracts import SlurmAuthorityV2
 from loom_capacity_manager.executable_contracts import (
     ExecutableExecutorInventoryV2,
     ExecutionAuthorityV2,
+    ExecutionContextV2,
     canonical_executable_bytes,
     canonical_executable_digest,
 )
@@ -64,16 +71,53 @@ async def run_daemon_once(
     *,
     pool_id: str | None = None,
     validate_only: bool = False,
+    activation_runtime_artifact: Path | None = None,
 ) -> ExecutorOnceResult:
     """Run the production inert daemon path and close the mTLS client reliably."""
 
     async with build_executable_client(config) as client:
-        return await run_executor_once(
-            config,
-            pool_id=pool_id,
-            client=client,
-            validate_only=validate_only,
+        if validate_only:
+            return await run_executor_once(
+                config,
+                pool_id=pool_id,
+                client=client,
+                validate_only=True,
+            )
+        current_context = ExecutionContextV2.model_validate(
+            await client.current_execution_context()
         )
+        if current_context.execution_state == "prepared":
+            return await run_executor_once(
+                config,
+                pool_id=pool_id,
+                client=client,
+                current_context=current_context,
+            )
+        if activation_runtime_artifact is None:
+            raise ExecutorConfigError(
+                "activation runtime artifact is required for executable authority"
+            )
+        artifact = load_activation_runtime_artifact(activation_runtime_artifact)
+        executor = build_executable_runtime(
+            config,
+            artifact,
+            manager_client=client,
+            current_context=current_context,
+        )
+        try:
+            return await run_executor_once(
+                config,
+                pool_id=pool_id,
+                client=client,
+                authority=ExecutionAuthorityV2.model_validate(
+                    current_context.model_dump(mode="python")
+                ),
+                executor=executor,
+            )
+        finally:
+            close = getattr(getattr(executor, "journal", None), "close", None)
+            if callable(close):
+                close()
 
 
 async def run_executor_once(
@@ -82,6 +126,7 @@ async def run_executor_once(
     pool_id: str | None = None,
     client: Any,
     validate_only: bool = False,
+    current_context: ExecutionContextV2 | None = None,
     authority: ExecutionAuthorityV2 | None = None,
     executor: ExecutablePoolExecutor | None = None,
 ) -> ExecutorOnceResult:
@@ -95,7 +140,11 @@ async def run_executor_once(
     if not isinstance(config, PoolExecutorConfig):
         raise TypeError("executor config must be PoolExecutorConfig")
     config.assert_pool(pool_id or config.pool_id)
+    if current_context is not None and authority is not None:
+        raise ExecutorConfigError("current context and execution authority are mutually exclusive")
     if authority is not None:
+        current_context = authority
+    if current_context is not None:
         expected = config.execution.model_dump(
             exclude={
                 "execution_state",
@@ -103,7 +152,7 @@ async def run_executor_once(
                 "executable_new_capacity_rate_per_minute",
             }
         )
-        actual = authority.model_dump(
+        actual = current_context.model_dump(
             exclude={
                 "execution_state",
                 "executable_new_capacity_ceiling",
@@ -113,23 +162,27 @@ async def run_executor_once(
         )
         if actual != expected:
             raise ExecutorConfigError("current execution authority differs from local binding")
-    current = authority or config.execution
+    current = current_context or config.execution
     if validate_only or current.execution_state == "prepared":
         # Deliberately do not evaluate backend_factory: no mutating scheduler object is
         # available in shadow, prepared, or validate-only operation.
         return await _publish_inert_inventory(config, client, validate_only=validate_only)
-    if not isinstance(authority, ExecutionAuthorityV2):
-        raise ExecutorConfigError("mutating executor requires current execution authority")
+    authority = ExecutionAuthorityV2.model_validate(current.model_dump(mode="python"))
     if not isinstance(executor, ExecutablePoolExecutor):
         raise ExecutorConfigError("current authority requires an executable runtime")
     _assert_executable_runtime(config, authority, executor)
+    await executor.slurm.validate_authority()
+    heartbeats = ExecutableHeartbeatLoop(executor.registration, executor.journal, executor.client)
+    await heartbeats.heartbeat()
     if authority.execution_state == "drain-only":
-        # Task 8 has one `tick()` that can consume all manager work, including
-        # reservation/permit scale-up. It has no drain-only command selector;
-        # invoking it here would accidentally expose capacity increase.
-        raise ExecutorConfigError("executable runtime has no drain-only command boundary")
-    await executor.tick()
-    return ExecutorOnceResult("scale-up")
+        result = await executor.tick_drain_only()
+        mode: Literal["drain-only", "scale-up"] = "drain-only"
+    else:
+        result = await executor.tick()
+        mode = "scale-up"
+    if result.status == "inventory-published":
+        await heartbeats.heartbeat()
+    return ExecutorOnceResult(mode)
 
 
 async def _publish_inert_inventory(
@@ -139,6 +192,10 @@ async def _publish_inert_inventory(
     validate_only: bool,
 ) -> ExecutorOnceResult:
     with ExecutorJournal(config.journal_file) as journal:
+        heartbeats = ExecutableHeartbeatLoop(config.registration, journal, client)
+        latest_inventory = journal.latest("inventory", str(config.executor_incarnation))
+        if latest_inventory is None or latest_inventory.event_kind != "inventory-publish-requested":
+            await heartbeats.heartbeat()
         checkpoint = await client.executable_checkpoint()
         journal_sequence = getattr(checkpoint, "journal_sequence", None)
         journal_digest = getattr(checkpoint, "journal_digest", None)
@@ -172,6 +229,7 @@ async def _publish_inert_inventory(
                 object_id=object_id,
                 payload=payload,
             )
+            await heartbeats.heartbeat()
             return ExecutorOnceResult("validate-only" if validate_only else "inventory-only")
         inventory = ExecutableExecutorInventoryV2(
             execution=config.execution,
@@ -200,6 +258,7 @@ async def _publish_inert_inventory(
             object_id=object_id,
             payload=payload,
         )
+        await heartbeats.heartbeat()
     return ExecutorOnceResult("validate-only" if validate_only else "inventory-only")
 
 
@@ -228,16 +287,32 @@ def _assert_executable_runtime(
     if not isinstance(backend, AsyncSlurmBackend):
         raise ExecutorConfigError("executable runtime requires typed Slurm backend")
     slurm = backend.authority
+    expected_slurm_authority = getattr(executor, "expected_slurm_authority", None)
     executable_paths = tuple(
         sorted(
             (name, Path(getattr(slurm.executables, name).path))
             for name in ("scontrol", "sacctmgr", "squeue", "sbatch", "scancel", "sacct")
         )
     )
+    registration_execution = executor.registration.execution.model_dump()
+    authority_execution = authority.model_dump(exclude={"executable"})
+    retained_drain_execution = (
+        authority.execution_state == "drain-only"
+        and authority.executable_new_capacity_ceiling == 0
+        and authority.executable_new_capacity_rate_per_minute == 0
+        and executor.registration.execution.execution_state == "active"
+        and registration_execution
+        | {
+            "execution_state": "drain-only",
+            "executable_new_capacity_ceiling": 0,
+            "executable_new_capacity_rate_per_minute": 0,
+        }
+        == authority_execution
+    )
+    execution_matches = registration_execution == authority_execution or retained_drain_execution
     if (
         actual_registration != expected_registration
-        or executor.registration.execution.model_dump()
-        != authority.model_dump(exclude={"executable"})
+        or not execution_matches
         or executor.journal.path != config.journal_file
         or executor.profile.pool_id != config.pool_id
         or executor.profile.pool_generation != config.pool_generation
@@ -253,6 +328,8 @@ def _assert_executable_runtime(
         or executor.controller_authority != config.controller_authority
         or executor.ownership_key != config.ownership_key
         or getattr(executor.client, "registration", None) != executor.registration
+        or not isinstance(expected_slurm_authority, SlurmAuthorityV2)
+        or slurm != expected_slurm_authority
         or slurm.cluster != config.manifest.slurm_cluster
         or slurm.controller_host != config.manifest.controller_host
         or slurm.partition != config.manifest.partition
@@ -271,11 +348,23 @@ def main() -> int:
     parser.add_argument("--expected-manifest-sha256", required=True)
     parser.add_argument("--pool", choices=("oldlab", "gb10"))
     parser.add_argument("--validate-only", action="store_true")
+    parser.add_argument("--activation-runtime-artifact")
     args = parser.parse_args()
     config = PoolExecutorConfig.from_files(
         args.config, expected_manifest_sha256=args.expected_manifest_sha256
     )
-    asyncio.run(_run_with_signals(config, pool_id=args.pool, validate_only=args.validate_only))
+    asyncio.run(
+        _run_with_signals(
+            config,
+            pool_id=args.pool,
+            validate_only=args.validate_only,
+            activation_runtime_artifact=(
+                Path(args.activation_runtime_artifact)
+                if args.activation_runtime_artifact is not None
+                else None
+            ),
+        )
+    )
     return 0
 
 
@@ -284,6 +373,7 @@ async def _run_with_signals(
     *,
     pool_id: str | None,
     validate_only: bool,
+    activation_runtime_artifact: Path | None = None,
 ) -> ExecutorOnceResult:
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()
@@ -301,7 +391,12 @@ async def _run_with_signals(
             # regular cancellation still leaves the requested journal record durable.
             pass
     task = asyncio.create_task(
-        run_daemon_once(config, pool_id=pool_id, validate_only=validate_only)
+        run_daemon_once(
+            config,
+            pool_id=pool_id,
+            validate_only=validate_only,
+            activation_runtime_artifact=activation_runtime_artifact,
+        )
     )
     stop_task = asyncio.create_task(stop.wait())
     try:

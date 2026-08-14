@@ -1129,6 +1129,21 @@ def create_app(
         except CapacityStoreError as exc:
             raise _store_error(exc) from exc
 
+    @app.get("/v2/executors/{pool_id}/context")
+    async def executable_executor_current_context(
+        pool_id: str,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:execute:pool")),
+    ) -> Any:
+        binding = executor_binding(actor, pool_id=pool_id)
+        session_factory, executions = execution_runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await executions.executor_current_context(session, binding)
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
     @app.get("/v2/executors/{pool_id}/work")
     async def next_executable_pool_work(
         pool_id: str,
