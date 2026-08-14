@@ -78,14 +78,14 @@ def upgrade() -> None:
           IF pg_has_role(session_user, current_user, 'MEMBER') OR p_subject_id IS NULL OR p_subject_incarnation IS NULL OR p_intent_id IS NULL THEN
             RAISE EXCEPTION 'executable intent observer identity is invalid' USING ERRCODE = '42501';
           END IF;
-          SELECT * INTO v_state FROM {SCHEMA}.executable_claim_state WHERE intent_id=p_intent_id AND subject_id=p_subject_id AND subject_incarnation=p_subject_incarnation FOR KEY SHARE;
-          SELECT * INTO v_prepared FROM {SCHEMA}.executable_admission_events WHERE intent_id=p_intent_id AND subject_id=p_subject_id AND subject_incarnation=p_subject_incarnation AND event_kind='prepared' FOR KEY SHARE;
+          SELECT * INTO v_state FROM {SCHEMA}.executable_claim_state WHERE intent_id=p_intent_id AND subject_id=p_subject_id AND subject_incarnation=p_subject_incarnation;
+          SELECT * INTO v_prepared FROM {SCHEMA}.executable_admission_events WHERE intent_id=p_intent_id AND subject_id=p_subject_id AND subject_incarnation=p_subject_incarnation;
           IF v_state.intent_id IS NULL OR v_prepared.operation_id IS NULL OR v_state.binding IS DISTINCT FROM v_prepared.binding THEN
             RAISE EXCEPTION 'protected executable intent was not found at the exact subject binding' USING ERRCODE = '55000';
           END IF;
-          SELECT * INTO v_current FROM {SCHEMA}.executable_admission_events WHERE intent_id=p_intent_id AND subject_id=p_subject_id AND subject_incarnation=p_subject_incarnation AND event_kind='worker-registered' ORDER BY protected_registration_epoch DESC,event_id DESC LIMIT 1 FOR KEY SHARE;
-          SELECT * INTO v_drain FROM {SCHEMA}.executable_admission_events WHERE intent_id=p_intent_id AND subject_id=p_subject_id AND subject_incarnation=p_subject_incarnation AND event_kind='draining' ORDER BY drain_epoch DESC,event_id DESC LIMIT 1 FOR KEY SHARE;
-          SELECT * INTO v_release FROM {SCHEMA}.executable_admission_events WHERE intent_id=p_intent_id AND subject_id=p_subject_id AND subject_incarnation=p_subject_incarnation AND event_kind='released' FOR KEY SHARE;
+          SELECT * INTO v_current FROM {SCHEMA}.executable_admission_events WHERE intent_id=p_intent_id AND subject_id=p_subject_id AND subject_incarnation=p_subject_incarnation AND event_kind='worker-registered' ORDER BY protected_registration_epoch DESC,event_id DESC LIMIT 1;
+          SELECT * INTO v_drain FROM {SCHEMA}.executable_admission_events WHERE intent_id=p_intent_id AND subject_id=p_subject_id AND subject_incarnation=p_subject_incarnation AND event_kind='draining' ORDER BY drain_epoch DESC,event_id DESC LIMIT 1;
+          SELECT * INTO v_release FROM {SCHEMA}.executable_admission_events WHERE intent_id=p_intent_id AND subject_id=p_subject_id AND subject_incarnation=p_subject_incarnation AND event_kind='released';
           RETURN jsonb_build_object('schema_version',2,'binding',v_state.binding,'bootstrap_registration_epoch',v_prepared.bootstrap_registration_epoch,'worker_id',v_current.worker_id,'worker_incarnation',v_current.worker_incarnation,'protected_registration_epoch',COALESCE(v_current.protected_registration_epoch,0),'claim_high_water',v_state.claim_high_water,'drain',v_drain.receipt,'release',v_release.receipt,'executable',true);
         END $function$
         """
@@ -102,6 +102,34 @@ def downgrade() -> None:
     op.execute(
         f"REVOKE EXECUTE ON FUNCTION {SCHEMA}.{FUNCTION} FROM {quoted_executor}, {quoted_observer}"
     )
+    # Restore the exact executor-only observation authority before removing
+    # the forward observer relation.  A downgrade must never leave a function
+    # whose body references a relation it just dropped.
+    op.execute(
+        f"""
+        CREATE OR REPLACE FUNCTION {SCHEMA}.observe_executable_intent(
+          p_subject_id uuid, p_subject_incarnation uuid, p_intent_id uuid
+        ) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $function$
+        DECLARE
+          v_executor_role text; v_prepared {SCHEMA}.executable_admission_events%ROWTYPE;
+          v_current {SCHEMA}.executable_admission_events%ROWTYPE; v_drain {SCHEMA}.executable_admission_events%ROWTYPE;
+          v_release {SCHEMA}.executable_admission_events%ROWTYPE; v_state {SCHEMA}.executable_claim_state%ROWTYPE;
+        BEGIN
+          IF current_setting('transaction_isolation') <> 'serializable' THEN RAISE EXCEPTION 'executable intent observation requires a SERIALIZABLE transaction' USING ERRCODE = '25000'; END IF;
+          SELECT executor_role_name INTO v_executor_role FROM {SCHEMA}.executable_admission_authority WHERE singleton_id = 1;
+          IF v_executor_role IS NULL OR session_user::text <> v_executor_role THEN RAISE EXCEPTION 'executable intent observer is not the bound executor role' USING ERRCODE = '42501'; END IF;
+          IF pg_has_role(session_user, current_user, 'MEMBER') THEN RAISE EXCEPTION 'executable intent observer unexpectedly holds owner membership' USING ERRCODE = '42501'; END IF;
+          IF p_subject_id IS NULL OR p_subject_incarnation IS NULL OR p_intent_id IS NULL THEN RAISE EXCEPTION 'executable intent observation requires an exact identity' USING ERRCODE = '22023'; END IF;
+          SELECT * INTO v_state FROM {SCHEMA}.executable_claim_state WHERE intent_id=p_intent_id AND subject_id=p_subject_id AND subject_incarnation=p_subject_incarnation FOR KEY SHARE;
+          SELECT * INTO v_prepared FROM {SCHEMA}.executable_admission_events WHERE intent_id=p_intent_id AND subject_id=p_subject_id AND subject_incarnation=p_subject_incarnation AND event_kind='prepared' FOR KEY SHARE;
+          IF v_state.intent_id IS NULL OR v_prepared.operation_id IS NULL OR v_state.binding IS DISTINCT FROM v_prepared.binding THEN RAISE EXCEPTION 'protected executable intent was not found at the exact subject binding' USING ERRCODE = '55000'; END IF;
+          SELECT * INTO v_current FROM {SCHEMA}.executable_admission_events WHERE intent_id=p_intent_id AND subject_id=p_subject_id AND subject_incarnation=p_subject_incarnation AND event_kind='worker-registered' ORDER BY protected_registration_epoch DESC,event_id DESC LIMIT 1 FOR KEY SHARE;
+          SELECT * INTO v_drain FROM {SCHEMA}.executable_admission_events WHERE intent_id=p_intent_id AND subject_id=p_subject_id AND subject_incarnation=p_subject_incarnation AND event_kind='draining' ORDER BY drain_epoch DESC,event_id DESC LIMIT 1 FOR KEY SHARE;
+          SELECT * INTO v_release FROM {SCHEMA}.executable_admission_events WHERE intent_id=p_intent_id AND subject_id=p_subject_id AND subject_incarnation=p_subject_incarnation AND event_kind='released' FOR KEY SHARE;
+          RETURN jsonb_build_object('schema_version',2,'binding',v_state.binding,'bootstrap_registration_epoch',v_prepared.bootstrap_registration_epoch,'worker_id',v_current.worker_id,'worker_incarnation',v_current.worker_incarnation,'protected_registration_epoch',COALESCE(v_current.protected_registration_epoch,0),'claim_high_water',v_state.claim_high_water,'drain',v_drain.receipt,'release',v_release.receipt,'executable',true);
+        END $function$
+        """
+    )
     op.execute(
         f"DROP TRIGGER executable_observer_authority_append_only_truncate ON {SCHEMA}.executable_observer_authority"
     )
@@ -109,3 +137,4 @@ def downgrade() -> None:
         f"DROP TRIGGER executable_observer_authority_append_only_row ON {SCHEMA}.executable_observer_authority"
     )
     op.execute(f"DROP TABLE {SCHEMA}.executable_observer_authority")
+    op.execute(f"GRANT EXECUTE ON FUNCTION {SCHEMA}.{FUNCTION} TO {quoted_executor}")

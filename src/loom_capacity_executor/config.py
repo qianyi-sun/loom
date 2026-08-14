@@ -63,6 +63,8 @@ class ImmutablePoolManifest:
     profile_generation: int
     profile_digest: str
     slurm_executables: tuple[tuple[str, Path], ...]
+    executor_image: str
+    service_user: str
 
     def sha256(self) -> str:
         value = asdict(self)
@@ -202,6 +204,8 @@ class PoolExecutorConfig:
     profile_id: str
     profile_generation: int
     profile_digest: str
+    executor_image: str
+    service_user: str
     manifest: ImmutablePoolManifest
     expected_manifest_sha256: str | None
     execution: ExecutionContextV2
@@ -252,6 +256,8 @@ class PoolExecutorConfig:
             "profile_id",
             "profile_generation",
             "profile_digest",
+            "executor_image",
+            "service_user",
         }
         if set(value) - allowed:
             raise ExecutorConfigError("configuration file contains unknown fields")
@@ -337,6 +343,14 @@ class PoolExecutorConfig:
         if type(profile_generation) is not int or profile_generation <= 0:
             raise ExecutorConfigError("profile generation is invalid")
         profile_digest = _digest(value.get("profile_digest"), label="profile digest")
+        executor_image = value.get("executor_image", "legacy-unbound")
+        if executor_image != "legacy-unbound" and (
+            not isinstance(executor_image, str) or "@sha256:" not in executor_image
+        ):
+            raise ExecutorConfigError("executor image must be immutable")
+        service_user = value.get("service_user", "legacy-unbound")
+        if not isinstance(service_user, str) or not service_user or len(service_user) > 32:
+            raise ExecutorConfigError("service user is invalid")
         executables = value.get("slurm_executables", {})
         if not isinstance(executables, dict):
             raise ExecutorConfigError("Slurm executables must be an object")
@@ -393,6 +407,8 @@ class PoolExecutorConfig:
             profile_generation=profile_generation,
             profile_digest=profile_digest,
             slurm_executables=tuple(sorted(executable_paths)),
+            executor_image=executor_image,
+            service_user=service_user,
         )
         if expected_manifest_sha256 is not None and manifest.sha256() != _digest(
             expected_manifest_sha256, label="expected manifest"
@@ -426,6 +442,8 @@ class PoolExecutorConfig:
             profile_id=retained["profile_id"],
             profile_generation=profile_generation,
             profile_digest=profile_digest,
+            executor_image=executor_image,
+            service_user=service_user,
             manifest=manifest,
             expected_manifest_sha256=expected_manifest_sha256,
             execution=execution,

@@ -60,6 +60,7 @@ def test_checked_in_executor_profile_is_inert_and_pool_complete() -> None:
             "controller_host",
             "execution_epoch",
             "execution_manifest_sha256",
+            "executor_image",
             "executor_id",
             "executor_incarnation",
             "journal_file",
@@ -79,6 +80,7 @@ def test_checked_in_executor_profile_is_inert_and_pool_complete() -> None:
             "slurm_cluster",
             "slurm_executables",
             "state_directory",
+            "service_user",
             "submitter",
             "tls_ca_file",
             "tls_certificate_file",
@@ -94,6 +96,28 @@ def test_checked_in_executor_profile_is_inert_and_pool_complete() -> None:
             f"{capacity_pool_executor_manifest_sha256(profile, pool.pool_id)}\n"
             f"LOOM_CAPACITY_EXECUTOR_POOL={pool.pool_id}\n"
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("executor_image", "ghcr.io/qianyi-sun/loom-capacity-executor@sha256:" + "2" * 64),
+        ("service_user", "loom_capacity_executor_next"),
+    ],
+)
+def test_executor_package_inputs_change_consumed_config_and_manifest(
+    field: str, value: str
+) -> None:
+    profile = load_capacity_pool_executor_profile(_EXECUTOR_PROFILE)
+    changed = profile.model_copy(update={field: value})
+    pool_id = profile.pools[0].pool_id
+    assert (
+        render_capacity_pool_executor_configs(profile)[pool_id]
+        != render_capacity_pool_executor_configs(changed)[pool_id]
+    )
+    assert capacity_pool_executor_manifest_sha256(
+        profile, pool_id
+    ) != capacity_pool_executor_manifest_sha256(changed, pool_id)
 
 
 def test_checked_in_executor_systemd_unit_is_validation_only() -> None:

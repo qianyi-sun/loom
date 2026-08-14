@@ -523,11 +523,6 @@ class PsycopgPersonalDevCapacityDatabase:
                     (list(protected),),
                 )
                 existing = {row[0] for row in await roles_result.fetchall()}
-                await connection.execute(
-                    "SELECT pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity "
-                    "WHERE usename = ANY(%s) AND pid <> pg_backend_pid()",
-                    (list(protected),),
-                )
                 if owner in existing and migrator in existing:
                     await connection.execute(
                         sql.SQL("REVOKE {} FROM {}").format(
@@ -542,6 +537,11 @@ class PsycopgPersonalDevCapacityDatabase:
                                 sql.Identifier(role)
                             )
                         )
+                await connection.execute(
+                    "SELECT pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity "
+                    "WHERE usename = ANY(%s) AND pid <> pg_backend_pid()",
+                    (list(protected),),
+                )
                 database_exists = await connection.execute(
                     "SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = %s)",
                     (identity.database,),
@@ -939,7 +939,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
                     _decode_secret_text(existing, "observer-password"),
                     label="observer database",
                 )
-                if persisted_seed
+                if persisted_seed and "observer-password" in existing
                 else secrets.token_urlsafe(48)
             ),
         )
@@ -1563,7 +1563,9 @@ class PersonalDevCapacityStatusReader:
                     value = await row.fetchone()
                     if value is None:
                         raise ValueError("protected observer did not return an intent")
-                    observation = ProtectedIntentObservationV2.model_validate(value[0])
+                    observation = ProtectedIntentObservationV2.model_validate_json(
+                        json.dumps(value[0], sort_keys=True, separators=(",", ":"))
+                    )
                     if canonical_executable_bytes(
                         observation.binding
                     ) != canonical_executable_bytes(binding):

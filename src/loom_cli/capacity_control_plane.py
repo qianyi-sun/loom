@@ -346,6 +346,7 @@ def _pool_executor_config(
         "controller_host": pool.controller_host,
         "execution_epoch": profile.execution_epoch,
         "execution_manifest_sha256": profile.execution_manifest_sha256,
+        "executor_image": profile.executor_image,
         "executor_id": pool.executor_id,
         "executor_incarnation": pool.executor_incarnation,
         "journal_file": pool.journal_file,
@@ -365,6 +366,7 @@ def _pool_executor_config(
         "slurm_cluster": pool.slurm_cluster,
         "slurm_executables": pool.slurm_executables.model_dump(),
         "state_directory": pool.state_directory,
+        "service_user": profile.service_user,
         "submitter": pool.submitter,
         "tls_ca_file": pool.tls_ca_file,
         "tls_certificate_file": pool.tls_certificate_file,
@@ -415,6 +417,8 @@ def capacity_pool_executor_manifest_sha256(
                 (name, Path(value)) for name, value in pool.slurm_executables.model_dump().items()
             )
         ),
+        executor_image=profile.executor_image,
+        service_user=profile.service_user,
     ).sha256()
 
 

@@ -11,7 +11,7 @@ from typing import Literal, Protocol, cast
 from uuid import UUID
 
 import httpx
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 from loom.personal_dev_environment import PersonalDevReconciliationClaim
 from loom_capacity_agent.client import (
@@ -51,6 +51,8 @@ class PersonalDevCapacityManagerCheckpoint:
     executable_new_capacity_ceiling: int
 
     def __post_init__(self) -> None:
+        if self.execution_state not in {"shadow", "prepared", "active", "drain-only"}:
+            raise ValueError("capacity manager checkpoint execution state is invalid")
         if type(self.configuration_epoch) is not int or self.configuration_epoch <= 0:
             raise ValueError("capacity manager checkpoint configuration epoch is invalid")
         if type(self.execution_epoch) is not int or self.execution_epoch < 0:
@@ -260,6 +262,45 @@ class _SubjectStatusResponseV2(BaseModel):
     quarantined_intent_count: int
     intent_state_counts: dict[str, int]
     blockers: tuple[str, ...]
+
+    @model_validator(mode="after")
+    def _coherent_status(self) -> _SubjectStatusResponseV2:
+        state_counts = self.intent_state_counts
+        if any(type(value) is not int or value < 0 for value in state_counts.values()):
+            raise ValueError("capacity manager intent state counts are invalid")
+        if self.quarantined_intent_count != state_counts.get("quarantined", 0):
+            raise ValueError("capacity manager quarantine count is inconsistent")
+        if self.active_capacity_intent_count != len(self.active_capacity_intents):
+            raise ValueError("capacity manager active binding count is inconsistent")
+        if self.active_capacity_slots != sum(
+            binding.concurrency_slots for binding in self.active_capacity_intents
+        ):
+            raise ValueError("capacity manager active binding slots are inconsistent")
+        if len({binding.intent_id for binding in self.active_capacity_intents}) != len(
+            self.active_capacity_intents
+        ):
+            raise ValueError("capacity manager active bindings are duplicated")
+        if self.execution_state == "shadow" and (
+            self.execution_epoch != 0
+            or self.executable_new_capacity_ceiling != 0
+            or self.capacity_status != "shadow"
+            or self.active_capacity_intents
+        ):
+            raise ValueError("capacity manager shadow status is inconsistent")
+        if self.execution_state in {"prepared", "drain-only"} and (
+            self.execution_epoch <= 0
+            or self.executable_new_capacity_ceiling != 0
+            or self.capacity_status != "prepared"
+            or self.active_capacity_intents
+        ):
+            raise ValueError("capacity manager prepared status is inconsistent")
+        if self.execution_state == "active" and (
+            self.execution_epoch <= 0
+            or self.executable_new_capacity_ceiling <= 0
+            or self.capacity_status != "waiting"
+        ):
+            raise ValueError("capacity manager active status is inconsistent")
+        return self
 
 
 class CapacityManagerPersonalDevProjector:
