@@ -82,7 +82,7 @@ class _FakeImages:
         self.get_calls.append(image)
         if image == "postgres:15":
             raise ImageNotFound("missing")
-        if image.startswith("loom-sidecar:"):
+        if image.startswith(("loom-sidecar:", "registry.example/")):
             raise ImageNotFound("missing")
         return object()
 
@@ -366,6 +366,35 @@ async def test_execution_sidecar_pulls_architecture_qualified_registry_image(
     assert fake_client.images.pull_calls == ["postgres:15", registry_ref]
     assert fake_client.images.build_calls == []
     assert fake_client.containers.create_calls[1]["image"] == registry_ref
+
+
+async def test_execution_sidecar_pulls_exact_materialized_digest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    api_context = tmp_path / ".loom-build" / "sidecars" / "api"
+    api_context.mkdir(parents=True)
+    (api_context / "Dockerfile").write_text("FROM python:3.11-slim\n")
+    fake_client = _FakeDockerClient()
+    monkeypatch.setattr(task_sidecars.docker, "from_env", lambda: fake_client)
+    immutable_ref = "registry.example/loom-task@sha256:" + "b" * 64
+    runtime = DockerTaskSidecarRuntime(
+        task_config=_task_config(),
+        task_dir=tmp_path,
+        task_checksum="abc123",
+        trial_id=uuid4(),
+        health_poll_interval_sec=0,
+        cpu_arch="arm64",
+        registry_images={"sidecar:api": immutable_ref},
+        pull_only=True,
+    )
+
+    await runtime.start(network_name="loom-task-net")
+    await runtime.stop()
+
+    assert fake_client.images.pull_calls == ["postgres:15", immutable_ref]
+    assert fake_client.images.build_calls == []
+    assert fake_client.containers.create_calls[1]["image"] == immutable_ref
 
 
 async def test_sidecar_runtime_removes_container_when_start_fails_after_create(

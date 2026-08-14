@@ -29,23 +29,32 @@ An independently autoscaled task-image builder pool consumes the queue. Builder
 jobs run with exclusive Slurm allocations, one Docker build at a time per host
 daemon. A builder materializes the immutable bundle, verifies its checksum and
 native architecture, builds every Dockerfile-backed component, pushes
-architecture-qualified immutable tags to the shared registry, records registry
-digests, and marks the row ready. Builders use lease epochs and heartbeats so a
+architecture-qualified content-addressed tags to the shared registry, records
+the returned immutable manifest digests, and marks the row ready. Builders use
+lease epochs and heartbeats so a
 stale process cannot publish readiness after its lease has been reclaimed.
 
 Ordinary Loom workers never wait for or perform a build. After the scheduler
-observes readiness, an execution worker pulls the architecture-qualified tags
-and starts the sandbox. A registry miss after readiness is an infrastructure
-consistency failure rather than permission to rebuild on a packed node.
+observes readiness, the trial claim carries the frozen task snapshot and exact
+per-component registry digests. The execution worker verifies the bundle and
+pulls those digest references—not re-derived tags—before starting the sandbox.
+A registry miss after readiness is an infrastructure consistency failure rather
+than permission to rebuild on a packed node.
 
 ## State and failure handling
 
-Materializations move through `queued`, `claimed`, `running`, `ready`, and
-`failed`. Expired `claimed` or `running` leases return to `queued`. Retryable
+Materializations move through `queued`, `claimed`, `running`, `ready`, `failed`,
+`retiring`, and `retired`. Expired `claimed` or `running` leases return to
+`queued`. Retryable
 failures use bounded backoff and a maximum attempt count; deterministic build
 failures become `failed` and keep dependent trials queued with an explicit
 image-materialization reason. Re-registration or an operator retry can enqueue
 a new attempt without changing the content key.
+
+Registry publication cannot be atomic across multiple component manifests.
+When a later component push fails, Loom records the already-published immutable
+digests on the failed materialization so they remain visible to retry and fenced
+retention rather than becoming untracked registry leaks.
 
 The builder autoscaler scales from zero using queued build demand. It dispatches
 only exclusive Slurm jobs and never converts the existing non-exclusive GB10
@@ -57,9 +66,10 @@ before exiting after an idle grace period, amortizing image and worker startup.
 Local builder and execution-node copies are caches. Loom labels all managed task
 images and evicts them by creation-age TTL with a free-space backstop. Registry
 artifacts remain pinned while referenced by the current registered task version
-or a nonterminal/recent trial. Unreferenced materializations receive a grace
+or a nonterminal trial. Unreferenced materializations receive a grace
 period before registry deletion and garbage collection. Content-addressed tags
-make deletion safe: a later request recreates the same queue key and image.
+make deletion safe: a later reference recreates the same queue key, rebuilds
+the components, and records fresh immutable digest evidence before scheduling.
 
 ## Rollout safety
 
@@ -67,8 +77,8 @@ The schema, queue, and builder endpoints are inert until the builder policy and
 registry are configured. Registration may enqueue while the policy is disabled,
 but trials requiring an unbuilt image remain queued rather than failing after
 claim. Existing prebuilt-image tasks are unaffected. The old worker-side build
-fallback remains available only on explicitly non-contained local workers during
-the transition and is disabled once builder readiness gating is active.
+fallback remains available to explicit local/CLI workflows; service trial
+workers are pull-only once builder readiness gating is active.
 
 ## Verification
 

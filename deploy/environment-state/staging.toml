@@ -138,6 +138,84 @@ probe_mem_available = true
 exclusive = false
 external_runner = true
 
+# Task-image builders are a separate capacity class. They remain inert until
+# dedicated task-image:build tokens, registry push credentials, builder QoS,
+# and exclusive-node authority are provisioned and their blockers removed.
+[[task_image_builder_policies]]
+pool_name = "task-image-builder-gb10"
+enabled = false
+slurm_cluster_id = "gb10"
+cpu_arch = "arm64"
+allowed_nodes = [
+  "trt-gb10-1",
+  "trt-gb10-2",
+  "trt-gb10-3",
+  "trt-gb10-4",
+  "trt-gb10-5",
+  "trt-gb10-6",
+  "trt-gb10-7",
+  "trt-gb10-8",
+  "trt-gb10-9",
+  "trt-gb10-11",
+  "trt-gb10-12",
+  "trt-gb10-13",
+  "trt-gb10-14",
+  "trt-gb10-15",
+]
+env_file = "/shared_work2/loom-staging-rollout/worker-envs/staging-task-image-builder-gb10-${IMAGE_TAG}.env"
+repo_dir = "/shared_work2/loom-staging-rollout/worker-repos/loom-remote-worker-${IMAGE_TAG}"
+partition = "gb10"
+time_limit = "04:00:00"
+requested_cpus = 20
+requested_memory_mib = 115000
+requested_concurrency = 1
+max_jobs = 1
+pending_job_cap = 1
+idle_exit_after_seconds = 120
+exclusive = true
+slurm_account = "loom-staging"
+slurm_qos = "loom-task-image-builder"
+job_output_dir = "/shared_work2/loom-staging-rollout/job-output"
+activation_blockers = [
+  "builder_token_not_provisioned",
+  "registry_push_credentials_not_provisioned",
+  "registry_retention_not_provisioned",
+  "slurm_builder_qos_not_provisioned",
+  "exclusive_gb10_nodes_not_provisioned",
+]
+
+[[task_image_builder_policies]]
+pool_name = "task-image-builder-oldlab"
+enabled = false
+slurm_cluster_id = "oldlab"
+cpu_arch = "x86_64"
+allowed_nodes = [
+  "trt-eai-oldlab-3",
+  "trt-eai-oldlab-4",
+  "trt-eai-oldlab-5",
+]
+env_file = "/shared_work/loom/staging-rollout/worker-envs/staging-task-image-builder-oldlab-${IMAGE_TAG}.env"
+repo_dir = "/shared_work/loom/staging-rollout/worker-repos/loom-remote-worker-${IMAGE_TAG}"
+partition = "all"
+time_limit = "04:00:00"
+requested_cpus = 12
+requested_memory_mib = 49152
+requested_concurrency = 1
+max_jobs = 1
+pending_job_cap = 1
+idle_exit_after_seconds = 120
+exclusive = true
+slurm_account = "loom-staging"
+slurm_qos = "loom-task-image-builder"
+job_output_dir = "/shared_work/loom/staging-rollout/job-output"
+activation_blockers = [
+  "builder_token_not_provisioned",
+  "registry_push_credentials_not_provisioned",
+  "registry_retention_not_provisioned",
+  "slurm_builder_qos_not_provisioned",
+  "exclusive_oldlab_nodes_not_provisioned",
+]
+
 [[gb10_worker_pool_desired_states]]
 pool_name = "gb10"
 image_tag = "${IMAGE_TAG}"
@@ -300,3 +378,68 @@ args = [
 ]
 enabled = true
 active = true
+
+# Builder supervisors are installed as disabled units. Activation is an
+# explicit environment-state change after every policy blocker is cleared.
+[[external_slurm_autoscaler_supervisors]]
+name = "task-image-builder-gb10-staging"
+pool_name = "task-image-builder-gb10"
+execution_host = "gx10-01c7"
+service_name = "loom-task-image-builder-gb10-staging.service"
+timer_name = "loom-task-image-builder-gb10-staging.timer"
+working_directory = "/opt/loom-staging-runner/candidates/${GIT_SHA}/repo"
+python_path = "/opt/loom-staging-runner/candidates/${GIT_SHA}/venv/bin/python"
+script_path = "/opt/loom-staging-runner/candidates/${GIT_SHA}/repo/scripts/ops/task_image_builder_autoscaler_external_once.py"
+args = [
+  "--environment", "staging",
+  "--pool-name", "task-image-builder-gb10",
+  "--profile", "/opt/loom-staging-runner/candidates/${GIT_SHA}/repo/deploy/environment-state/staging.toml",
+  "--image-tag", "${IMAGE_TAG}",
+  "--env-config-version", "${ENV_CONFIG_VERSION}",
+  "--git-sha", "${GIT_SHA}",
+  "--expected-slurm-cluster-name", "trt-gb10",
+  "--expected-slurm-controller-host", "gx10-01c7",
+  "--namespace", "loom-staging",
+  "--kubeconfig", "/var/lib/loom-staging-rollout/kubeconfig",
+  "--db-secret-name", "loom-external-slurm-autoscaler-db",
+  "--db-local-host", "127.0.0.1",
+  "--db-local-port", "15454",
+  "--db-service", "service/loom-postgres-rw",
+  "--db-remote-port", "5432",
+  "--db-port-forward-ready-timeout-sec", "10",
+  "--db-port-forward-stop-timeout-sec", "5",
+  "--db-connect-timeout-sec", "10",
+]
+enabled = false
+active = false
+
+[[external_slurm_autoscaler_supervisors]]
+name = "task-image-builder-oldlab-staging"
+pool_name = "task-image-builder-oldlab"
+execution_host = "TRT-EAI-OLDLAB-1"
+service_name = "loom-task-image-builder-oldlab-staging.service"
+timer_name = "loom-task-image-builder-oldlab-staging.timer"
+working_directory = "/opt/loom-staging-runner/candidates/${GIT_SHA}/repo"
+python_path = "/opt/loom-staging-runner/candidates/${GIT_SHA}/venv/bin/python"
+script_path = "/opt/loom-staging-runner/candidates/${GIT_SHA}/repo/scripts/ops/task_image_builder_autoscaler_external_once.py"
+args = [
+  "--environment", "staging",
+  "--pool-name", "task-image-builder-oldlab",
+  "--profile", "/opt/loom-staging-runner/candidates/${GIT_SHA}/repo/deploy/environment-state/staging.toml",
+  "--image-tag", "${IMAGE_TAG}",
+  "--env-config-version", "${ENV_CONFIG_VERSION}",
+  "--git-sha", "${GIT_SHA}",
+  "--expected-slurm-cluster-name", "trt-oldlab",
+  "--expected-slurm-controller-host", "TRT-EAI-OLDLAB-1",
+  "--namespace", "loom-staging",
+  "--kubeconfig", "/var/lib/loom-staging-rollout/kubeconfig",
+  "--db-local-host", "127.0.0.1",
+  "--db-local-port", "15453",
+  "--db-service", "service/loom-postgres-rw",
+  "--db-remote-port", "5432",
+  "--db-port-forward-ready-timeout-sec", "10",
+  "--db-port-forward-stop-timeout-sec", "5",
+  "--db-connect-timeout-sec", "10",
+]
+enabled = false
+active = false

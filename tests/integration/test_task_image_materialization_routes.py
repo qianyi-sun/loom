@@ -11,14 +11,36 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, delete, insert, select, update
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import TaskImageMaterialization, Token
+from loom.db.schema import (
+    Task,
+    TaskImageMaterialization,
+    Team,
+    Token,
+    Trial,
+    TrialTaskImageMaterialization,
+)
 from loom_control_plane.app import create_app
 from loom_control_plane.config import ControlPlaneSettings
 
 
 @pytest.fixture
-def materialization_namespace() -> str:
-    return f"task-image-route/{uuid4()}"
+def materialization_namespace(postgres_url: str) -> Iterator[str]:
+    namespace = f"task-image-route/{uuid4()}"
+    try:
+        yield namespace
+    finally:
+        engine = create_engine(postgres_url)
+        with sessionmaker(engine)() as session:
+            session.execute(delete(Trial).where(Trial.task_id.startswith(namespace)))
+            session.execute(
+                delete(TaskImageMaterialization).where(
+                    TaskImageMaterialization.task_id.startswith(namespace)
+                )
+            )
+            session.execute(delete(Task).where(Task.id.startswith(namespace)))
+            session.execute(delete(Team).where(Team.name.startswith(namespace)))
+            session.commit()
+        engine.dispose()
 
 
 @pytest.fixture
@@ -35,7 +57,7 @@ def builder_token(
             insert(Token).values(
                 token_hash=token_hash,
                 type="worker",
-                scopes=["worker:claim", "worker:report", "task-image:build"],
+                scopes=["task-image:build"],
                 team_id=None,
                 issued_at=datetime.now(UTC),
                 expires_at=None,
@@ -46,11 +68,36 @@ def builder_token(
         yield raw
     finally:
         with sessions() as session:
-            session.execute(
-                delete(TaskImageMaterialization).where(
-                    TaskImageMaterialization.task_id.startswith(materialization_namespace)
-                )
+            session.execute(delete(Token).where(Token.token_hash == token_hash))
+            session.commit()
+        engine.dispose()
+
+
+@pytest.fixture
+def registry_gc_token(
+    postgres_url: str,
+    materialization_namespace: str,
+) -> Iterator[str]:
+    engine = create_engine(postgres_url)
+    sessions = sessionmaker(engine)
+    raw = f"task_image_registry_gc_{uuid4().hex}"
+    token_hash = hashlib.sha256(raw.encode()).digest()
+    with sessions() as session:
+        session.execute(
+            insert(Token).values(
+                token_hash=token_hash,
+                type="worker",
+                scopes=["task-image:gc"],
+                team_id=None,
+                issued_at=datetime.now(UTC),
+                expires_at=None,
             )
+        )
+        session.commit()
+    try:
+        yield raw
+    finally:
+        with sessions() as session:
             session.execute(delete(Token).where(Token.token_hash == token_hash))
             session.commit()
         engine.dispose()
@@ -68,6 +115,7 @@ def client(
         "LOOM_CP_MINIO_SECRET_KEY": "y",
         "LOOM_CP_LLM_GATEWAY_URL": "http://gw:9100/",
         "LOOM_CP_TASK_IMAGE_BUILDER_LEASE_SECONDS": "17",
+        "LOOM_CP_TASK_IMAGE_REGISTRY_GRACE_HOURS": "48",
     }.items():
         monkeypatch.setenv(key, value)
     app = create_app(ControlPlaneSettings(_env_file=None))
@@ -88,6 +136,8 @@ def create_materialization(
         cpu_arch: str = "x86_64",
         max_attempts: int = 3,
         state: str = "queued",
+        registry_images: dict[str, str] | None = None,
+        unreferenced_at: datetime | None = None,
     ) -> UUID:
         materialization_id = uuid4()
         task_id = f"{materialization_namespace}/{materialization_id}"
@@ -115,6 +165,8 @@ def create_materialization(
                     task_source=f"s3://loom-tasks/{key}",
                     state=state,
                     max_attempts=max_attempts,
+                    registry_images=registry_images or {},
+                    unreferenced_at=unreferenced_at,
                 )
             )
             session.commit()
@@ -265,6 +317,69 @@ def test_start_heartbeat_and_complete_reject_stale_lease(
         engine.dispose()
 
 
+def test_complete_requires_every_dockerfile_component(
+    client: TestClient,
+    builder_token: str,
+    create_materialization: Callable[..., UUID],
+    postgres_url: str,
+) -> None:
+    materialization_id = create_materialization()
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            row = session.scalar(
+                select(TaskImageMaterialization).where(
+                    TaskImageMaterialization.id == materialization_id
+                )
+            )
+            assert row is not None
+            row.task_config = {
+                **row.task_config,
+                "environment": {
+                    **row.task_config["environment"],
+                    "sidecars": [
+                        {
+                            "name": "database",
+                            "dockerfile": "environment/database.Dockerfile",
+                        }
+                    ],
+                },
+            }
+            session.commit()
+    finally:
+        engine.dispose()
+
+    claim = _claim(client, builder_token, builder_id="builder-a").json()
+    started = _mutation(
+        client,
+        builder_token,
+        str(materialization_id),
+        "start",
+        builder_id="builder-a",
+        lease_epoch=claim["lease_epoch"],
+    )
+    assert started.status_code == 200, started.text
+
+    incomplete = _mutation(
+        client,
+        builder_token,
+        str(materialization_id),
+        "complete",
+        builder_id="builder-a",
+        lease_epoch=claim["lease_epoch"],
+        extra={
+            "registry_images": {
+                "task": "registry.example/loom/task@sha256:" + "b" * 64,
+            }
+        },
+    )
+
+    assert incomplete.status_code == 400, incomplete.text
+    assert incomplete.json()["detail"] == (
+        "registry_images do not match the task snapshot (missing=sidecar:database; unexpected=none)"
+    )
+
+
 def test_retryable_failure_requeues_and_reclaim_advances_epoch(
     client: TestClient,
     builder_token: str,
@@ -284,11 +399,15 @@ def test_retryable_failure_requeues_and_reclaim_advances_epoch(
             "retryable": True,
             "failure_reason": "registry_unavailable",
             "failure_message": "temporary outage",
+            "registry_images": {
+                "task": "registry.example/loom/task@sha256:" + "6" * 64,
+            },
         },
     )
     assert failed.status_code == 200, failed.text
     assert failed.json()["state"] == "queued"
     assert failed.json()["next_attempt_at"] is not None
+    assert failed.json()["registry_images"]["task"].endswith("6" * 64)
 
     engine = create_engine(postgres_url)
     try:
@@ -377,3 +496,470 @@ def test_builder_routes_require_worker_token(
     )
 
     assert response.status_code == 401
+
+
+def test_builder_routes_reject_tokens_with_additional_scopes(
+    client: TestClient,
+    create_materialization: Callable[..., UUID],
+    postgres_url: str,
+) -> None:
+    create_materialization()
+    raw = f"overprivileged_task_image_builder_{uuid4().hex}"
+    token_hash = hashlib.sha256(raw.encode()).digest()
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            session.execute(
+                insert(Token).values(
+                    token_hash=token_hash,
+                    type="worker",
+                    scopes=["task-image:build", "worker:claim"],
+                    team_id=None,
+                    issued_at=datetime.now(UTC),
+                )
+            )
+            session.commit()
+
+        response = _claim(client, raw, builder_id="overprivileged")
+
+        assert response.status_code == 401
+    finally:
+        with sessionmaker(engine)() as session:
+            session.execute(delete(Token).where(Token.token_hash == token_hash))
+            session.commit()
+        engine.dispose()
+
+
+def test_registry_gc_claim_and_complete_retires_unreferenced_image(
+    client: TestClient,
+    registry_gc_token: str,
+    create_materialization: Callable[..., UUID],
+) -> None:
+    materialization_id = create_materialization(
+        state="ready",
+        registry_images={
+            "task": "registry.example/loom/task@sha256:" + "d" * 64,
+        },
+        unreferenced_at=datetime.now(UTC) - timedelta(days=8),
+    )
+
+    claimed = client.post(
+        "/api/v1/internal/task-image-materializations/registry-gc/claim",
+        headers=_headers(registry_gc_token),
+        json={"gc_id": "registry-gc-a"},
+    )
+
+    assert claimed.status_code == 200, claimed.text
+    payload = claimed.json()
+    assert payload["id"] == str(materialization_id)
+    assert payload["state"] == "retiring"
+    assert payload["registry_images"]["task"].endswith("d" * 64)
+
+    completed = client.post(
+        f"/api/v1/internal/task-image-materializations/registry-gc/{materialization_id}/complete",
+        headers=_headers(registry_gc_token),
+        json={"gc_id": "registry-gc-a", "lease_epoch": payload["lease_epoch"]},
+    )
+
+    assert completed.status_code == 200, completed.text
+    assert completed.json()["state"] == "retired"
+    assert completed.json()["registry_images"] == {}
+
+
+def test_registry_gc_retires_unreferenced_partial_failed_publication(
+    client: TestClient,
+    registry_gc_token: str,
+    create_materialization: Callable[..., UUID],
+) -> None:
+    materialization_id = create_materialization(
+        state="failed",
+        registry_images={
+            "task": "registry.example/loom/task@sha256:" + "5" * 64,
+        },
+        unreferenced_at=datetime.now(UTC) - timedelta(days=8),
+    )
+
+    claimed = client.post(
+        "/api/v1/internal/task-image-materializations/registry-gc/claim",
+        headers=_headers(registry_gc_token),
+        json={"gc_id": "registry-gc-partial"},
+    )
+
+    assert claimed.status_code == 200, claimed.text
+    assert claimed.json()["id"] == str(materialization_id)
+    assert claimed.json()["registry_images"]["task"].endswith("5" * 64)
+
+
+def test_registry_gc_does_not_claim_current_task_image(
+    client: TestClient,
+    registry_gc_token: str,
+    create_materialization: Callable[..., UUID],
+    postgres_url: str,
+) -> None:
+    materialization_id = create_materialization(
+        state="ready",
+        registry_images={
+            "task": "registry.example/loom/task@sha256:" + "f" * 64,
+        },
+        unreferenced_at=datetime.now(UTC) - timedelta(days=8),
+    )
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            row = session.scalar(
+                select(TaskImageMaterialization).where(
+                    TaskImageMaterialization.id == materialization_id
+                )
+            )
+            assert row is not None
+            session.execute(
+                insert(Task).values(
+                    id=row.task_id,
+                    checksum="sha256:" + row.task_checksum,
+                    config=row.task_config,
+                )
+            )
+            session.commit()
+    finally:
+        engine.dispose()
+
+    response = client.post(
+        "/api/v1/internal/task-image-materializations/registry-gc/claim",
+        headers=_headers(registry_gc_token),
+        json={"gc_id": "registry-gc-current"},
+    )
+
+    assert response.status_code == 204
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            row = session.scalar(
+                select(TaskImageMaterialization).where(
+                    TaskImageMaterialization.id == materialization_id
+                )
+            )
+            assert row is not None
+            assert row.unreferenced_at is None
+    finally:
+        engine.dispose()
+
+
+def test_registry_gc_does_not_claim_image_linked_to_nonterminal_trial(
+    client: TestClient,
+    registry_gc_token: str,
+    create_materialization: Callable[..., UUID],
+    materialization_namespace: str,
+    postgres_url: str,
+) -> None:
+    materialization_id = create_materialization(
+        state="ready",
+        registry_images={
+            "task": "registry.example/loom/task@sha256:" + "c" * 64,
+        },
+        unreferenced_at=datetime.now(UTC) - timedelta(days=8),
+    )
+    team_id = uuid4()
+    trial_id = uuid4()
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            row = session.scalar(
+                select(TaskImageMaterialization).where(
+                    TaskImageMaterialization.id == materialization_id
+                )
+            )
+            assert row is not None
+            session.execute(
+                insert(Team).values(
+                    id=team_id,
+                    name=f"{materialization_namespace}/team",
+                )
+            )
+            session.execute(
+                insert(Task).values(
+                    id=row.task_id,
+                    checksum="b" * 64,
+                    config=row.task_config,
+                )
+            )
+            session.execute(
+                insert(Trial).values(
+                    id=trial_id,
+                    team_id=team_id,
+                    task_id=row.task_id,
+                    config={},
+                    requires_caps={},
+                    state="queued",
+                )
+            )
+            session.execute(
+                insert(TrialTaskImageMaterialization).values(
+                    trial_id=trial_id,
+                    materialization_id=materialization_id,
+                )
+            )
+            session.commit()
+    finally:
+        engine.dispose()
+
+    response = client.post(
+        "/api/v1/internal/task-image-materializations/registry-gc/claim",
+        headers=_headers(registry_gc_token),
+        json={"gc_id": "registry-gc-live-trial"},
+    )
+
+    assert response.status_code == 204
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            session.execute(update(Trial).where(Trial.id == trial_id).values(state="failed"))
+            session.execute(
+                update(TaskImageMaterialization)
+                .where(TaskImageMaterialization.id == materialization_id)
+                .values(unreferenced_at=datetime.now(UTC) - timedelta(hours=49))
+            )
+            session.commit()
+    finally:
+        engine.dispose()
+
+    after_terminal = client.post(
+        "/api/v1/internal/task-image-materializations/registry-gc/claim",
+        headers=_headers(registry_gc_token),
+        json={"gc_id": "registry-gc-terminal-trial"},
+    )
+    assert after_terminal.status_code == 200, after_terminal.text
+    assert after_terminal.json()["id"] == str(materialization_id)
+
+
+def test_registry_gc_recovers_expired_lease_and_fences_old_owner(
+    client: TestClient,
+    registry_gc_token: str,
+    create_materialization: Callable[..., UUID],
+    postgres_url: str,
+) -> None:
+    materialization_id = create_materialization(
+        state="ready",
+        registry_images={
+            "task": "registry.example/loom/task@sha256:" + "9" * 64,
+        },
+        unreferenced_at=datetime.now(UTC) - timedelta(days=8),
+    )
+    first = client.post(
+        "/api/v1/internal/task-image-materializations/registry-gc/claim",
+        headers=_headers(registry_gc_token),
+        json={"gc_id": "registry-gc-old"},
+    ).json()
+
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            session.execute(
+                update(TaskImageMaterialization)
+                .where(TaskImageMaterialization.id == materialization_id)
+                .values(lease_expires_at=datetime.now(UTC) - timedelta(seconds=1))
+            )
+            session.commit()
+    finally:
+        engine.dispose()
+
+    reclaimed = client.post(
+        "/api/v1/internal/task-image-materializations/registry-gc/claim",
+        headers=_headers(registry_gc_token),
+        json={"gc_id": "registry-gc-new"},
+    )
+
+    assert reclaimed.status_code == 200, reclaimed.text
+    second = reclaimed.json()
+    assert second["id"] == str(materialization_id)
+    assert second["lease_epoch"] == first["lease_epoch"] + 1
+
+    stale = client.post(
+        f"/api/v1/internal/task-image-materializations/registry-gc/{materialization_id}/complete",
+        headers=_headers(registry_gc_token),
+        json={
+            "gc_id": "registry-gc-old",
+            "lease_epoch": first["lease_epoch"],
+        },
+    )
+    assert stale.status_code == 409
+
+
+def test_registry_gc_requeues_referenced_image_after_gc_lease_expires(
+    client: TestClient,
+    registry_gc_token: str,
+    create_materialization: Callable[..., UUID],
+    postgres_url: str,
+) -> None:
+    materialization_id = create_materialization(
+        state="ready",
+        registry_images={
+            "task": "registry.example/loom/task@sha256:" + "8" * 64,
+        },
+        unreferenced_at=datetime.now(UTC) - timedelta(days=8),
+    )
+    claimed = client.post(
+        "/api/v1/internal/task-image-materializations/registry-gc/claim",
+        headers=_headers(registry_gc_token),
+        json={"gc_id": "registry-gc-abandoned"},
+    )
+    assert claimed.status_code == 200, claimed.text
+
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            row = session.scalar(
+                select(TaskImageMaterialization).where(
+                    TaskImageMaterialization.id == materialization_id
+                )
+            )
+            assert row is not None
+            session.execute(
+                insert(Task).values(
+                    id=row.task_id,
+                    checksum=row.task_checksum,
+                    config=row.task_config,
+                )
+            )
+            row.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            session.commit()
+    finally:
+        engine.dispose()
+
+    response = client.post(
+        "/api/v1/internal/task-image-materializations/registry-gc/claim",
+        headers=_headers(registry_gc_token),
+        json={"gc_id": "registry-gc-recovery"},
+    )
+    assert response.status_code == 204
+
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            row = session.scalar(
+                select(TaskImageMaterialization).where(
+                    TaskImageMaterialization.id == materialization_id
+                )
+            )
+            assert row is not None
+            assert row.state == "queued"
+            assert row.registry_images == {}
+            assert row.claimed_by is None
+            assert row.unreferenced_at is None
+    finally:
+        engine.dispose()
+
+
+def test_registry_gc_marks_unreferenced_images_and_uses_configured_grace(
+    client: TestClient,
+    registry_gc_token: str,
+    create_materialization: Callable[..., UUID],
+    postgres_url: str,
+) -> None:
+    materialization_id = create_materialization(
+        state="ready",
+        registry_images={
+            "task": "registry.example/loom/task@sha256:" + "7" * 64,
+        },
+    )
+
+    first = client.post(
+        "/api/v1/internal/task-image-materializations/registry-gc/claim",
+        headers=_headers(registry_gc_token),
+        json={"gc_id": "registry-gc-mark"},
+    )
+    assert first.status_code == 204
+
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            row = session.scalar(
+                select(TaskImageMaterialization).where(
+                    TaskImageMaterialization.id == materialization_id
+                )
+            )
+            assert row is not None
+            assert row.unreferenced_at is not None
+            row.unreferenced_at = datetime.now(UTC) - timedelta(hours=47)
+            session.commit()
+    finally:
+        engine.dispose()
+
+    before_grace = client.post(
+        "/api/v1/internal/task-image-materializations/registry-gc/claim",
+        headers=_headers(registry_gc_token),
+        json={"gc_id": "registry-gc-early"},
+    )
+    assert before_grace.status_code == 204
+
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            session.execute(
+                update(TaskImageMaterialization)
+                .where(TaskImageMaterialization.id == materialization_id)
+                .values(unreferenced_at=datetime.now(UTC) - timedelta(hours=49))
+            )
+            session.commit()
+    finally:
+        engine.dispose()
+
+    after_grace = client.post(
+        "/api/v1/internal/task-image-materializations/registry-gc/claim",
+        headers=_headers(registry_gc_token),
+        json={"gc_id": "registry-gc-eligible"},
+    )
+    assert after_grace.status_code == 200, after_grace.text
+    assert after_grace.json()["id"] == str(materialization_id)
+
+
+def test_registry_gc_completion_requeues_image_referenced_during_delete(
+    client: TestClient,
+    registry_gc_token: str,
+    create_materialization: Callable[..., UUID],
+    postgres_url: str,
+) -> None:
+    materialization_id = create_materialization(
+        state="ready",
+        registry_images={
+            "task": "registry.example/loom/task@sha256:" + "e" * 64,
+        },
+        unreferenced_at=datetime.now(UTC) - timedelta(days=8),
+    )
+    claimed = client.post(
+        "/api/v1/internal/task-image-materializations/registry-gc/claim",
+        headers=_headers(registry_gc_token),
+        json={"gc_id": "registry-gc-race"},
+    ).json()
+
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            row = session.scalar(
+                select(TaskImageMaterialization).where(
+                    TaskImageMaterialization.id == materialization_id
+                )
+            )
+            assert row is not None
+            session.execute(
+                insert(Task).values(
+                    id=row.task_id,
+                    checksum=row.task_checksum,
+                    config=row.task_config,
+                )
+            )
+            session.commit()
+    finally:
+        engine.dispose()
+
+    completed = client.post(
+        f"/api/v1/internal/task-image-materializations/registry-gc/{materialization_id}/complete",
+        headers=_headers(registry_gc_token),
+        json={
+            "gc_id": "registry-gc-race",
+            "lease_epoch": claimed["lease_epoch"],
+        },
+    )
+
+    assert completed.status_code == 200, completed.text
+    assert completed.json()["state"] == "queued"
+    assert completed.json()["registry_images"] == {}

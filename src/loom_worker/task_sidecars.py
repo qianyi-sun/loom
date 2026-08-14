@@ -12,7 +12,7 @@ import asyncio
 import contextlib
 import hashlib
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -117,6 +117,7 @@ class DockerTaskSidecarRuntime:
         runtime_identity_labels: tuple[tuple[str, str], ...] = (),
         cpu_arch: str | None = None,
         registry_repo: str | None = None,
+        registry_images: Mapping[str, str] | None = None,
         pull_only: bool = False,
     ) -> None:
         self.task_config = task_config
@@ -135,6 +136,7 @@ class DockerTaskSidecarRuntime:
         self.runtime_identity_labels = runtime_identity_labels
         self.cpu_arch = cpu_arch
         self.registry_repo = registry_repo
+        self.registry_images = dict(registry_images) if registry_images is not None else None
         self.pull_only = pull_only
         self._client: Any | None = None
         self._containers: list[Any] = []
@@ -233,6 +235,30 @@ class DockerTaskSidecarRuntime:
             dockerfile=dockerfile,
             docker_build_context=sidecar.docker_build_context,
         )
+        component = f"sidecar:{sidecar.name}"
+        if self.registry_images is not None:
+            registry_ref = self.registry_images.get(component)
+            if registry_ref is None:
+                raise TaskImageBuildError(
+                    f"materialized image grant is missing component {component!r}"
+                )
+            if re.fullmatch(r"[^\s@]+@sha256:[0-9a-f]{64}", registry_ref) is None:
+                raise TaskImageBuildError(
+                    f"materialized sidecar image {component!r} is not an immutable digest"
+                )
+            if await asyncio.to_thread(self._image_exists, registry_ref):
+                return registry_ref
+            client = self._client
+            assert client is not None
+            try:
+                async with self._setup_slot():
+                    await asyncio.to_thread(client.images.pull, registry_ref)
+            except (ImageNotFound, NotFound, APIError) as exc:
+                raise TaskImageBuildError(
+                    f"materialized sidecar image {registry_ref!r} is unavailable; "
+                    "execution is fenced to the recorded registry digest"
+                ) from exc
+            return registry_ref
         tag = task_sidecar_image_tag(
             self.task_config,
             sidecar,
@@ -243,9 +269,11 @@ class DockerTaskSidecarRuntime:
             return tag
         if self.registry_repo:
             registry_ref = _registry_tag_for(tag, self.registry_repo)
+            client = self._client
+            assert client is not None
             try:
                 async with self._setup_slot():
-                    await asyncio.to_thread(self._client.images.pull, registry_ref)
+                    await asyncio.to_thread(client.images.pull, registry_ref)
             except (ImageNotFound, NotFound, APIError) as exc:
                 if self.pull_only:
                     raise TaskImageBuildError(

@@ -248,6 +248,7 @@ class _FakeCPClient:
         self.patch_calls: list[dict[str, object]] = []
         self.retry_calls: list[dict[str, object]] = []
         self.pre_start_heartbeat_calls: list[dict[str, object]] = []
+        self.bundle_requests = 0
         self.bundle = {
             "id": "fake",
             "checksum": "0" * 64,
@@ -263,6 +264,7 @@ class _FakeCPClient:
         }
 
     async def get_task_bundle(self, _task_id: str) -> dict:
+        self.bundle_requests += 1
         return self.bundle
 
     async def get_trial_llm_calls(self, _trial_id) -> list:  # type: ignore[no-untyped-def]
@@ -645,6 +647,111 @@ async def test_spawn_uses_resolved_task_image_for_dockerfile_task() -> None:
     assert resolve_kwargs["task_config"].environment.dockerfile.as_posix() == (
         "environment/Dockerfile"
     )
+
+
+async def test_spawn_uses_frozen_materialization_and_exact_registry_digests() -> None:
+    from loom_worker.vllm_registry import WorkerVLLMRegistry
+
+    settings = _FakeSettings()
+    settings.trial_cache_registry_repo = "registry.example/wrong-derived-tag"
+    cp = _FakeCPClient()
+    pool = RunnerPool(max_concurrent=1)
+    captured: dict[str, object] = {}
+    main_ref = "registry.example/loom-task@sha256:" + "a" * 64
+    sidecar_ref = "registry.example/loom-task@sha256:" + "b" * 64
+    checksummed_paths: list[Path] = []
+    metadata_paths: list[Path] = []
+
+    class _CapturingRunner:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        async def run(self) -> None:
+            return None
+
+    async def fake_resolve_task_image(**kwargs: object) -> str:
+        captured["resolve_kwargs"] = kwargs
+        return str(kwargs["registry_image"])
+
+    payload = {
+        "trial_id": str(uuid4()),
+        "team_id": str(uuid4()),
+        "task_id": "mutable-current-task",
+        "config": {"agent_name": "oracle", "agent_model": None},
+        "task_image_materialization": {
+            "schema_version": "loom.task-image-execution-grant.v1",
+            "materialization_id": str(uuid4()),
+            "materialization_key": "1" * 64,
+            "cpu_arch": "x86_64",
+            "task_checksum": "2" * 64,
+            "task_config": {
+                "schema_version": "1",
+                "task": {"id": "frozen/task", "name": "Frozen task"},
+                "environment": {
+                    "os": "linux",
+                    "dockerfile": "environment/Dockerfile",
+                    "sidecars": [
+                        {
+                            "name": "api",
+                            "dockerfile": "sidecars/api/Dockerfile",
+                        }
+                    ],
+                },
+                "agent": {"name": "oracle"},
+                "verifier": {"name": "pytest"},
+                "steps": [{"name": "main"}],
+            },
+            "task_source": None,
+            "task_source_provenance": {
+                "snapshot": "frozen",
+                "bundle_file_metadata_sha256": "sha256:" + "3" * 64,
+            },
+            "registry_images": {
+                "task": main_ref,
+                "sidecar:api": sidecar_ref,
+            },
+        },
+    }
+
+    with (
+        patch.object(ml, "LocalTrialRunner", _CapturingRunner),
+        patch.object(ml, "resolve_task_image", fake_resolve_task_image),
+        patch.object(ml, "_host_cpu_arch", lambda: "x86_64"),
+        patch.object(
+            ml,
+            "sha256_of_dir",
+            lambda path: checksummed_paths.append(path) or "2" * 64,
+        ),
+        patch.object(
+            ml,
+            "bundle_file_metadata_sha256",
+            lambda path: metadata_paths.append(path) or "sha256:" + "3" * 64,
+        ),
+    ):
+        await ml._spawn_trial(
+            pool=pool,
+            settings=settings,  # type: ignore[arg-type]
+            cp_client=cp,  # type: ignore[arg-type]
+            gateway_client=None,  # type: ignore[arg-type]
+            object_store=None,  # type: ignore[arg-type]
+            worker_id=uuid4(),
+            payload=payload,
+            vllm_registry=WorkerVLLMRegistry(enabled=False),
+        )
+        await pool.wait_all(timeout=2.0)
+
+    assert cp.bundle_requests == 0
+    assert len(checksummed_paths) == 1
+    assert metadata_paths == checksummed_paths
+    resolve_kwargs = captured["resolve_kwargs"]
+    assert resolve_kwargs["registry_image"] == main_ref
+    assert resolve_kwargs["task_checksum"] == "2" * 64
+    assert captured["task_config"].task.id == "frozen/task"
+    sidecar_runtime = captured["sidecar_runtime_factory"]()
+    assert sidecar_runtime.registry_images == {
+        "task": main_ref,
+        "sidecar:api": sidecar_ref,
+    }
 
 
 async def test_task_image_setup_failure_records_diagnostic_message() -> None:

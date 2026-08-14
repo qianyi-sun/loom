@@ -6,17 +6,55 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
-from loom.db.schema import TaskImageMaterialization
+from loom.db.schema import (
+    Task,
+    TaskImageMaterialization,
+    Trial,
+    TrialTaskImageMaterialization,
+)
+from loom.models.task import TaskConfig
+from loom.task_image_materialization import required_task_image_components
 
 DEFAULT_TASK_IMAGE_LEASE_SECONDS = 300.0
 _MAX_RETRY_BACKOFF_SECONDS = 600.0
+_TERMINAL_TRIAL_STATES = ("succeeded", "failed", "cancelled")
 
 
 class TaskImageLeaseConflictError(Exception):
     """The caller no longer owns the materialization lease."""
+
+
+class TaskImageCompletionError(ValueError):
+    """Published component evidence does not match the immutable task snapshot."""
+
+
+class TaskImageRetryConflictError(RuntimeError):
+    """The requested materialization cannot be safely requeued."""
+
+
+def _expected_registry_image_components(task_config: dict[str, Any]) -> set[str]:
+    task = TaskConfig.model_validate(task_config)
+    return required_task_image_components(task)
+
+
+def _durable_reference_exists(row: Any) -> ColumnElement[bool]:
+    current_task = exists().where(
+        Task.id == row.task_id,
+        or_(
+            Task.checksum == row.task_checksum,
+            Task.checksum == func.concat("sha256:", row.task_checksum),
+        ),
+    )
+    live_trial = exists().where(
+        TrialTaskImageMaterialization.materialization_id == row.id,
+        Trial.id == TrialTaskImageMaterialization.trial_id,
+        Trial.state.not_in(_TERMINAL_TRIAL_STATES),
+    )
+    return or_(current_task, live_trial)
 
 
 def _lease_deadline(*, now: datetime, lease_seconds: float) -> datetime:
@@ -183,6 +221,15 @@ async def complete_task_image_materialization(
         allowed_states=("running",),
         now=now,
     )
+    expected_components = _expected_registry_image_components(row.task_config)
+    actual_components = set(registry_images)
+    if actual_components != expected_components:
+        missing = ",".join(sorted(expected_components - actual_components)) or "none"
+        unexpected = ",".join(sorted(actual_components - expected_components)) or "none"
+        raise TaskImageCompletionError(
+            "registry_images do not match the task snapshot "
+            f"(missing={missing}; unexpected={unexpected})"
+        )
     row.state = "ready"
     row.registry_images = dict(registry_images)
     row.claimed_by = None
@@ -203,6 +250,7 @@ async def fail_task_image_materialization(
     retryable: bool,
     failure_reason: str,
     failure_message: str,
+    registry_images: dict[str, str],
 ) -> TaskImageMaterialization:
     now = datetime.now(UTC)
     row = await _locked_owned_materialization(
@@ -217,6 +265,7 @@ async def fail_task_image_materialization(
     row.lease_expires_at = None
     row.failure_reason = failure_reason
     row.failure_message = failure_message
+    row.registry_images = {**row.registry_images, **registry_images}
     row.updated_at = now
     if retryable and row.attempt_count < row.max_attempts:
         backoff_seconds = min(
@@ -229,6 +278,175 @@ async def fail_task_image_materialization(
     else:
         row.state = "failed"
         row.next_attempt_at = None
+        row.finished_at = now
+    await session.flush()
+    return row
+
+
+async def retry_task_image_materialization(
+    session: AsyncSession,
+    *,
+    materialization_id: UUID,
+) -> TaskImageMaterialization:
+    """Requeue an exhausted or suspect ready image under an admin decision."""
+    now = datetime.now(UTC)
+    row = await session.scalar(
+        select(TaskImageMaterialization)
+        .where(TaskImageMaterialization.id == materialization_id)
+        .with_for_update()
+    )
+    if row is None:
+        raise TaskImageRetryConflictError("task image materialization does not exist")
+    if row.state not in {"failed", "ready"}:
+        raise TaskImageRetryConflictError(
+            f"task image materialization in state {row.state!r} cannot be retried"
+        )
+    row.state = "queued"
+    row.attempt_count = 0
+    row.next_attempt_at = None
+    row.claimed_by = None
+    row.lease_epoch += 1
+    row.lease_expires_at = None
+    row.failure_reason = None
+    row.failure_message = None
+    row.claimed_at = None
+    row.started_at = None
+    row.ready_at = None
+    row.finished_at = None
+    row.last_referenced_at = now
+    row.unreferenced_at = None
+    row.updated_at = now
+    await session.flush()
+    return row
+
+
+async def claim_task_image_registry_gc(
+    session: AsyncSession,
+    *,
+    gc_id: str,
+    grace_hours: int,
+    lease_seconds: float = DEFAULT_TASK_IMAGE_LEASE_SECONDS,
+) -> TaskImageMaterialization | None:
+    """Fence one grace-expired registry image set for external deletion."""
+    if grace_hours < 0:
+        raise ValueError("grace_hours must be non-negative")
+    now = datetime.now(UTC)
+    cutoff = now - timedelta(hours=grace_hours)
+    await session.execute(
+        update(TaskImageMaterialization)
+        .where(
+            TaskImageMaterialization.state.in_(("ready", "failed")),
+            TaskImageMaterialization.registry_images != {},
+            _durable_reference_exists(TaskImageMaterialization),
+        )
+        .values(
+            last_referenced_at=now,
+            unreferenced_at=None,
+            updated_at=now,
+        )
+    )
+    await session.execute(
+        update(TaskImageMaterialization)
+        .where(
+            TaskImageMaterialization.state.in_(("ready", "failed")),
+            TaskImageMaterialization.registry_images != {},
+            TaskImageMaterialization.unreferenced_at.is_(None),
+            ~_durable_reference_exists(TaskImageMaterialization),
+        )
+        .values(unreferenced_at=now, updated_at=now)
+    )
+    await session.execute(
+        update(TaskImageMaterialization)
+        .where(
+            TaskImageMaterialization.state == "retiring",
+            TaskImageMaterialization.lease_expires_at <= now,
+            _durable_reference_exists(TaskImageMaterialization),
+        )
+        .values(
+            state="queued",
+            attempt_count=0,
+            next_attempt_at=None,
+            claimed_by=None,
+            lease_expires_at=None,
+            registry_images={},
+            failure_reason=None,
+            failure_message=None,
+            ready_at=None,
+            finished_at=None,
+            last_referenced_at=now,
+            unreferenced_at=None,
+            updated_at=now,
+        )
+    )
+    row = await session.scalar(
+        select(TaskImageMaterialization)
+        .where(
+            or_(
+                and_(
+                    TaskImageMaterialization.state.in_(("ready", "failed")),
+                    TaskImageMaterialization.registry_images != {},
+                    TaskImageMaterialization.unreferenced_at <= cutoff,
+                ),
+                and_(
+                    TaskImageMaterialization.state == "retiring",
+                    TaskImageMaterialization.lease_expires_at <= now,
+                ),
+            ),
+            ~_durable_reference_exists(TaskImageMaterialization),
+        )
+        .order_by(
+            TaskImageMaterialization.unreferenced_at,
+            TaskImageMaterialization.id,
+        )
+        .limit(1)
+        .with_for_update(skip_locked=True)
+    )
+    if row is None:
+        return None
+    row.state = "retiring"
+    row.claimed_by = gc_id
+    row.lease_epoch += 1
+    row.lease_expires_at = _lease_deadline(now=now, lease_seconds=lease_seconds)
+    row.claimed_at = now
+    row.updated_at = now
+    await session.flush()
+    return row
+
+
+async def complete_task_image_registry_gc(
+    session: AsyncSession,
+    *,
+    materialization_id: UUID,
+    gc_id: str,
+    lease_epoch: int,
+) -> TaskImageMaterialization:
+    """Commit deletion only for the current owner, requeuing raced references."""
+    now = datetime.now(UTC)
+    row = await _locked_owned_materialization(
+        session,
+        materialization_id=materialization_id,
+        builder_id=gc_id,
+        lease_epoch=lease_epoch,
+        allowed_states=("retiring",),
+        now=now,
+    )
+    referenced = bool(await session.scalar(select(_durable_reference_exists(row))))
+    row.registry_images = {}
+    row.claimed_by = None
+    row.lease_expires_at = None
+    row.updated_at = now
+    if referenced:
+        row.state = "queued"
+        row.attempt_count = 0
+        row.next_attempt_at = None
+        row.failure_reason = None
+        row.failure_message = None
+        row.ready_at = None
+        row.finished_at = None
+        row.last_referenced_at = now
+        row.unreferenced_at = None
+    else:
+        row.state = "retired"
         row.finished_at = now
     await session.flush()
     return row

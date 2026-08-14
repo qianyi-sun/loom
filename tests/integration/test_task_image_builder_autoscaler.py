@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
-from sqlalchemy import delete, insert, update
+from sqlalchemy import delete, insert, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.db.schema import SlurmWorkerJob, TaskImageMaterialization
@@ -37,6 +38,9 @@ def _config(namespace: str, *, cpu_arch: str = "arm64") -> TaskImageBuilderPoolC
         scancel_path="scancel",
         command_timeout_seconds=20.0,
         exclusive=True,
+        slurm_account="loom-test",
+        slurm_qos="loom-builder",
+        job_output_dir="/shared/loom/job-output",
     )
 
 
@@ -51,6 +55,16 @@ class _FakeRunner:
 
     async def cancel_pending_job(self, job_id: str) -> None:
         self.cancelled_jobs.append(job_id)
+
+
+class _MissingJobRunner(_FakeRunner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.queried_job_ids: list[tuple[str, ...]] = []
+
+    async def query_jobs(self, job_ids: tuple[str, ...]) -> list[object]:
+        self.queried_job_ids.append(job_ids)
+        return []
 
 
 async def test_reconcile_scales_from_zero_and_cancels_pending_without_demand(
@@ -149,6 +163,72 @@ async def test_reconcile_isolates_demand_by_native_architecture(
             )
         assert result.submitted_job_ids == ()
         assert runner.submitted_nodes == []
+    finally:
+        async with sessions() as session, session.begin():
+            await session.execute(
+                delete(SlurmWorkerJob).where(SlurmWorkerJob.pool_name == config.pool_name)
+            )
+            await session.execute(
+                delete(TaskImageMaterialization).where(TaskImageMaterialization.task_id == task_id)
+            )
+        await engine.dispose()
+
+
+async def test_reconcile_replaces_old_jobs_missing_from_slurm(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    namespace = uuid4().hex[:8]
+    config = _config(namespace)
+    runner = _MissingJobRunner()
+    task_id = f"builder-autoscaler/{namespace}"
+    stale_job_id = "old-missing-job"
+    try:
+        async with sessions() as session, session.begin():
+            session.add(
+                TaskImageMaterialization(
+                    id=uuid4(),
+                    materialization_key=hashlib.sha256(task_id.encode()).hexdigest(),
+                    task_id=task_id,
+                    task_checksum="c" * 64,
+                    cpu_arch="arm64",
+                    task_config={},
+                    state="queued",
+                )
+            )
+            session.add(
+                SlurmWorkerJob(
+                    slurm_cluster_id="gb10",
+                    environment=config.environment,
+                    pool_name=config.pool_name,
+                    nodelist=config.allowed_nodes[0],
+                    requested_cpus=config.requested_cpus,
+                    requested_memory_mib=config.requested_memory_mib,
+                    requested_concurrency=1,
+                    requested_gpus=0,
+                    job_id=stale_job_id,
+                    slurm_state="PENDING",
+                    state="pending",
+                    submitted_at=datetime.now(UTC) - timedelta(minutes=10),
+                )
+            )
+
+        async with sessions() as session, session.begin():
+            result = await reconcile_task_image_builder_autoscaler_once(
+                session,
+                config=config,
+                runner=runner,
+            )
+
+        assert runner.queried_job_ids == [(stale_job_id,)]
+        assert result.submitted_job_ids == ("10001",)
+        async with sessions() as session:
+            stale_job = await session.scalar(
+                select(SlurmWorkerJob).where(SlurmWorkerJob.job_id == stale_job_id)
+            )
+            assert stale_job is not None
+            assert stale_job.state == "stale"
     finally:
         async with sessions() as session, session.begin():
             await session.execute(

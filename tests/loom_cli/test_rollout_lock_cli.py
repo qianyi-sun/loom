@@ -368,6 +368,7 @@ def _empty_environment_profile(
         environment=environment,
         control_plane_environment=control_plane_environment,
         autoscaler_policies=[],
+        task_image_builder_policies=[],
         gb10_desired_states=[],
         catalog_provisioning={},
         rate_card_sync={},

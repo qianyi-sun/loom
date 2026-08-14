@@ -1856,7 +1856,7 @@ class TaskImageMaterialization(Base):
             name="task_image_materializations_cpu_arch_check",
         ),
         CheckConstraint(
-            "state IN ('queued', 'claimed', 'running', 'ready', 'failed')",
+            "state IN ('queued', 'claimed', 'running', 'ready', 'failed', 'retiring', 'retired')",
             name="task_image_materializations_state_check",
         ),
         CheckConstraint(
@@ -1884,6 +1884,12 @@ class TaskImageMaterialization(Base):
             "task_image_materializations_reference_idx",
             "task_id",
             "task_checksum",
+        ),
+        Index(
+            "task_image_materializations_registry_gc_idx",
+            "state",
+            "unreferenced_at",
+            "lease_expires_at",
         ),
     )
 

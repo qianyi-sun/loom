@@ -170,6 +170,7 @@ async def resolve_task_image(
     build_slot_provider: BuildSlotProvider | None = None,
     require_containment: bool = False,
     registry_repo: str | None = None,
+    registry_image: str | None = None,
     registry_pull_timeout_sec: float = 15.0,
     cpu_arch: str | None = None,
     build_if_missing: bool = True,
@@ -203,6 +204,33 @@ async def resolve_task_image(
         dockerfile=dockerfile,
         docker_build_context=task_config.environment.docker_build_context,
     )
+    if registry_image is not None:
+        if re.fullmatch(r"[^\s@]+@sha256:[0-9a-f]{64}", registry_image) is None:
+            raise TaskImageBuildError(
+                "materialized task image must be an immutable registry digest reference"
+            )
+        if await asyncio.to_thread(
+            _task_image_locally_cached,
+            tag=registry_image,
+            docker_api_timeout_sec=docker_api_timeout_sec,
+        ):
+            return registry_image
+        exact_pull_slot_ctx: contextlib.AbstractAsyncContextManager[Any] = (
+            build_slot_provider() if build_slot_provider is not None else contextlib.nullcontext()
+        )
+        try:
+            async with exact_pull_slot_ctx:
+                await _pull_exact_registry_image(
+                    registry_image=registry_image,
+                    pull_timeout_sec=registry_pull_timeout_sec,
+                    docker_api_timeout_sec=docker_api_timeout_sec,
+                )
+        except (TimeoutError, ImageNotFound, NotFound, APIError) as exc:
+            raise TaskImageBuildError(
+                f"materialized task image {registry_image!r} is unavailable; "
+                "execution is fenced to the recorded registry digest"
+            ) from exc
+        return registry_image
     tag = task_image_tag(
         task_config,
         task_checksum=task_checksum,
@@ -270,6 +298,27 @@ async def resolve_task_image(
             f"{timeout:g}s",
         ) from exc
     return tag
+
+
+async def _pull_exact_registry_image(
+    *,
+    registry_image: str,
+    pull_timeout_sec: float,
+    docker_api_timeout_sec: int | None,
+) -> None:
+    client: Any = (
+        docker.from_env()
+        if docker_api_timeout_sec is None
+        else docker.from_env(timeout=docker_api_timeout_sec)
+    )
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(client.images.pull, registry_image),
+            timeout=pull_timeout_sec,
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            client.close()
 
 
 def _task_image_locally_cached(

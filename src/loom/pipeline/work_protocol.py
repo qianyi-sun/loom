@@ -40,6 +40,7 @@ from loom.pipeline.spec import (
     reject_secret_literals,
 )
 from loom.pipeline.state import RetryClass, StageResultV1
+from loom.task_image_materialization import TaskImageExecutionGrantV1
 
 WorkKind = Literal["trial", "execution_attempt"]
 _OpaqueReference = Annotated[
@@ -95,7 +96,7 @@ class WorkClaimRequestV1(PipelineModel):
 
 
 class TrialClaimV1(PipelineModel):
-    """The existing Trial claim payload, unchanged and wrapped by WorkClaimV1."""
+    """Trial claim plus an immutable task-image grant when one is required."""
 
     trial_id: UUID
     team_id: UUID
@@ -107,6 +108,7 @@ class TrialClaimV1(PipelineModel):
     family_key: str | None
     family_state_uri: str | None
     family_run_spec: dict[str, Any] | None
+    task_image_materialization: TaskImageExecutionGrantV1 | None = None
     state: Literal["claimed"]
 
 

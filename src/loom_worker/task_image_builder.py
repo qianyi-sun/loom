@@ -17,8 +17,9 @@ import platform
 import shutil
 import socket
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any, Protocol
+from uuid import UUID
 
 from loom.driver.task_image import (
     TaskImageBuildError,
@@ -27,6 +28,7 @@ from loom.driver.task_image import (
 )
 from loom.models.task import TaskConfig
 from loom.task_image_materialization import required_task_image_architectures
+from loom.trajectory.storage import bundle_file_metadata_sha256
 from loom_worker.config import WorkerSettings
 from loom_worker.control_plane_client import HttpControlPlaneClient, TaskImageBuildClaim
 from loom_worker.task_sidecars import build_task_sidecar_images
@@ -36,17 +38,54 @@ logger = logging.getLogger(__name__)
 
 
 class TaskImageBuilderControlPlane(Protocol):
-    async def start_task_image_materialization(self, **kwargs: Any) -> bool: ...
+    async def start_task_image_materialization(
+        self,
+        *,
+        materialization_id: UUID,
+        builder_id: str,
+        lease_epoch: int,
+    ) -> bool: ...
 
-    async def heartbeat_task_image_materialization(self, **kwargs: Any) -> bool: ...
+    async def heartbeat_task_image_materialization(
+        self,
+        *,
+        materialization_id: UUID,
+        builder_id: str,
+        lease_epoch: int,
+    ) -> bool: ...
 
-    async def complete_task_image_materialization(self, **kwargs: Any) -> bool: ...
+    async def complete_task_image_materialization(
+        self,
+        *,
+        materialization_id: UUID,
+        builder_id: str,
+        lease_epoch: int,
+        registry_images: Mapping[str, str],
+    ) -> bool: ...
 
-    async def fail_task_image_materialization(self, **kwargs: Any) -> bool: ...
+    async def fail_task_image_materialization(
+        self,
+        *,
+        materialization_id: UUID,
+        builder_id: str,
+        lease_epoch: int,
+        retryable: bool,
+        failure_reason: str,
+        failure_message: str,
+        registry_images: Mapping[str, str],
+    ) -> bool: ...
 
 
 class TaskImageLeaseLostError(RuntimeError):
     pass
+
+
+class TaskImagePublicationError(TaskImageBuildError):
+    """A component push failed after other immutable manifests were published."""
+
+    def __init__(self, message: str, *, registry_images: Mapping[str, str]) -> None:
+        super().__init__(message)
+        self.registry_images = dict(registry_images)
 
 
 def sha256_of_dir(directory) -> str:  # type: ignore[no-untyped-def]
@@ -116,6 +155,15 @@ async def materialize_and_publish_task_images(
                 "materialized task bundle checksum mismatch "
                 f"expected={claim.task_checksum} actual={actual_checksum}"
             )
+        expected_metadata_checksum = claim.task_source_provenance.get("bundle_file_metadata_sha256")
+        if expected_metadata_checksum is not None:
+            actual_metadata_checksum = bundle_file_metadata_sha256(task_dir)
+            if actual_metadata_checksum != expected_metadata_checksum:
+                raise TaskImageBuildError(
+                    "materialized task bundle metadata mismatch "
+                    f"expected={expected_metadata_checksum} "
+                    f"actual={actual_metadata_checksum}"
+                )
 
         local_images: dict[str, str] = {}
         if task_config.environment.dockerfile is not None:
@@ -141,14 +189,20 @@ async def materialize_and_publish_task_images(
 
         published: dict[str, str] = {}
         for component, tag in local_images.items():
-            published[component] = await publish_local_image_to_registry(
-                tag=tag,
-                registry_repo=registry_repo,
-                docker_api_timeout_sec=settings.docker_api_timeout_sec,
-            )
+            try:
+                published[component] = await publish_local_image_to_registry(
+                    tag=tag,
+                    registry_repo=registry_repo,
+                    docker_api_timeout_sec=settings.docker_api_timeout_sec,
+                )
+            except Exception as exc:
+                raise TaskImagePublicationError(
+                    f"registry publication failed for component {component!r}: {exc}",
+                    registry_images=published,
+                ) from exc
         return published
     finally:
-        shutil.rmtree(task_dir)
+        shutil.rmtree(task_dir, ignore_errors=True)
 
 
 async def _heartbeat_lease(
@@ -217,6 +271,7 @@ async def process_task_image_claim(
             lease_lost=lease_lost,
         )
     )
+    registry_images: dict[str, str] = {}
     try:
         registry_images = await materialize_and_publish_task_images(claim, settings)
         if lease_lost.is_set():
@@ -232,6 +287,11 @@ async def process_task_image_claim(
     except TaskImageLeaseLostError:
         raise
     except Exception as exc:
+        partial_registry_images = (
+            exc.registry_images
+            if isinstance(exc, TaskImagePublicationError)
+            else registry_images
+        )
         reported = await control_plane.fail_task_image_materialization(
             materialization_id=claim.id,
             builder_id=builder_id,
@@ -239,6 +299,7 @@ async def process_task_image_claim(
             retryable=_retryable_failure(exc),
             failure_reason="task_image_build_failed",
             failure_message=str(exc)[:4000] or type(exc).__name__,
+            registry_images=partial_registry_images,
         )
         if not reported:
             raise TaskImageLeaseLostError(

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
+from loom_control_plane import task_image_builder_autoscaler as autoscaler
 from loom_control_plane.task_image_builder_autoscaler import (
+    SubprocessTaskImageBuilderSlurmRunner,
     TaskImageBuilderPoolConfig,
     build_task_image_builder_sbatch_request,
 )
@@ -35,6 +38,7 @@ def _config() -> TaskImageBuilderPoolConfig:
         exclusive=True,
         slurm_account="loom-staging",
         slurm_qos="loom-builder",
+        job_output_dir="/shared/loom/job-output",
     )
 
 
@@ -43,6 +47,29 @@ def test_builder_pool_requires_exclusive_single_build_allocations() -> None:
         replace(_config(), exclusive=False)
     with pytest.raises(ValueError, match="concurrency"):
         replace(_config(), requested_concurrency=2)
+
+
+def test_builder_pool_bounds_jobs_to_declared_nodes() -> None:
+    with pytest.raises(ValueError, match="max_jobs"):
+        replace(_config(), max_jobs=3)
+    with pytest.raises(ValueError, match="pending_job_cap"):
+        replace(_config(), pending_job_cap=3)
+
+
+@pytest.mark.parametrize(
+    ("field", "message"),
+    [
+        ("slurm_account", "slurm_account"),
+        ("slurm_qos", "slurm_qos"),
+        ("job_output_dir", "job_output_dir"),
+    ],
+)
+def test_builder_pool_requires_explicit_slurm_and_output_authority(
+    field: str,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        replace(_config(), **{field: ""})
 
 
 def test_builder_sbatch_is_exclusive_and_runs_only_builder_entrypoint() -> None:
@@ -58,6 +85,7 @@ def test_builder_sbatch_is_exclusive_and_runs_only_builder_entrypoint() -> None:
     assert "LOOM_WORKER_TASK_IMAGE_BUILDER_IDLE_EXIT_SECONDS=120" in request.args[-1]
     assert "LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS" not in request.args[-1]
     assert "docker compose" in request.stdin
+    assert "export HOME=" not in request.stdin
     assert "run --rm --no-deps worker python -m loom_worker.task_image_builder" in request.stdin
     assert (
         "docker compose"
@@ -65,3 +93,44 @@ def test_builder_sbatch_is_exclusive_and_runs_only_builder_entrypoint() -> None:
             "run --rm --no-deps worker python -m loom_worker.task_image_builder"
         )[1]
     )
+
+
+async def test_builder_job_query_falls_back_to_sacct_for_terminal_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[tuple[str, ...]] = []
+
+    async def run_command(
+        args: tuple[str, ...],
+        **_kwargs: object,
+    ) -> SimpleNamespace:
+        commands.append(args)
+        if args[0] == "squeue":
+            raise RuntimeError("squeue: Invalid job id specified")
+        return SimpleNamespace(
+            stdout="31619|COMPLETED|gb10-1|None\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(autoscaler, "_run_command", run_command)
+    runner = SubprocessTaskImageBuilderSlurmRunner(_config())
+
+    observations = await runner.query_jobs(("31619",))
+
+    assert [(row.job_id, row.slurm_state) for row in observations] == [
+        ("31619", "COMPLETED"),
+    ]
+    assert [command[0] for command in commands] == ["squeue", "sacct"]
+
+
+async def test_builder_job_query_keeps_controller_errors_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run_command(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        raise RuntimeError("squeue: Unable to contact slurm controller")
+
+    monkeypatch.setattr(autoscaler, "_run_command", run_command)
+    runner = SubprocessTaskImageBuilderSlurmRunner(_config())
+
+    with pytest.raises(RuntimeError, match="Unable to contact"):
+        await runner.query_jobs(("31619",))

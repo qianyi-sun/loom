@@ -59,6 +59,7 @@ class _FakeImages:
         self.cached_images = cached_images or set()
         self.image_attrs = image_attrs or {}
         self.get_calls: list[str] = []
+        self.pull_calls: list[str] = []
         self.build_calls: list[dict[str, Any]] = []
 
     def get(self, image: str) -> object:
@@ -73,6 +74,11 @@ class _FakeImages:
         if isinstance(tag, str):
             self.cached_images.add(tag)
         return object(), []
+
+    def pull(self, image: str) -> object:
+        self.pull_calls.append(image)
+        self.cached_images.add(image)
+        return object()
 
 
 class _FakeDockerClient:
@@ -157,6 +163,33 @@ async def test_resolve_task_image_builds_and_caches_dockerfile_image(
         "loom.task_dockerfile": "environment/Dockerfile",
         "loom.created-at": build["labels"]["loom.created-at"],
     }
+    assert fake_client.closed is True
+
+
+async def test_resolve_task_image_pulls_exact_materialized_digest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    task_dir = tmp_path / "task"
+    dockerfile = task_dir / "environment" / "Dockerfile"
+    dockerfile.parent.mkdir(parents=True)
+    dockerfile.write_text("FROM alpine:3.19\n")
+    fake_images = _FakeImages()
+    fake_client = _FakeDockerClient(fake_images)
+    monkeypatch.setattr(task_image.docker, "from_env", lambda: fake_client)
+    immutable_ref = "registry.example/loom-task@sha256:" + "a" * 64
+
+    image = await resolve_task_image(
+        task_config=_task_config(dockerfile="environment/Dockerfile"),
+        task_dir=task_dir,
+        task_checksum="abc123",
+        registry_image=immutable_ref,
+        build_if_missing=False,
+    )
+
+    assert image == immutable_ref
+    assert fake_images.pull_calls == [immutable_ref]
+    assert fake_images.build_calls == []
     assert fake_client.closed is True
 
 

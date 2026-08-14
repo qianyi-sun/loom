@@ -13,10 +13,12 @@ from loom.db.schema import (
     GB10WorkerNodeStatus,
     GB10WorkerPoolDesiredState,
     Task,
+    TaskImageMaterialization,
     Team,
     TeamQuota,
     Token,
     Trial,
+    TrialTaskImageMaterialization,
     Worker,
     WorkerPoolAutoscalerPolicy,
 )
@@ -73,6 +75,7 @@ def claim_seed(postgres_url: str) -> Iterator[tuple[UUID, str, UUID]]:
             s.execute(delete(GB10WorkerNodeStatus))
             s.execute(delete(GB10WorkerPoolDesiredState))
             s.execute(delete(Trial))
+            s.execute(delete(TaskImageMaterialization))
             s.execute(delete(Worker))
             s.execute(delete(Token))
             s.execute(delete(TeamQuota))
@@ -128,6 +131,97 @@ def test_claim_returns_trial(app, claim_seed):  # type: ignore[no-untyped-def]
         assert "trial_id" in body
         assert body["state"] == "claimed"
         assert body["attempt_count"] == 1
+
+
+def test_claim_carries_frozen_task_image_execution_grant(
+    app,
+    claim_seed,
+    postgres_url: str,
+):  # type: ignore[no-untyped-def]
+    worker_id, raw_worker, _ = claim_seed
+    materialization_id = uuid4()
+    main_ref = "registry.example/loom-task@sha256:" + "a" * 64
+    sidecar_ref = "registry.example/loom-task@sha256:" + "b" * 64
+    engine = create_engine(postgres_url)
+    with sessionmaker(engine)() as session:
+        trial_id = session.execute(select(Trial.id)).scalar_one()
+        session.execute(
+            insert(TaskImageMaterialization).values(
+                id=materialization_id,
+                materialization_key="1" * 64,
+                task_id="t",
+                task_checksum="0" * 64,
+                cpu_arch="x86_64",
+                task_config={
+                    "schema_version": "1",
+                    "task": {"id": "t", "name": "Frozen task"},
+                    "environment": {
+                        "os": "linux",
+                        "cpu_arch": "x86_64",
+                        "dockerfile": "environment/Dockerfile",
+                        "sidecars": [
+                            {
+                                "name": "api",
+                                "dockerfile": "sidecars/api/Dockerfile",
+                            }
+                        ],
+                    },
+                    "agent": {"name": "oracle"},
+                    "verifier": {"name": "pytest"},
+                    "steps": [{"name": "main"}],
+                },
+                task_source="s3://loom-task-bundles/frozen.tar.zst",
+                task_source_provenance={"snapshot": "frozen"},
+                state="ready",
+                registry_images={"task": main_ref, "sidecar:api": sidecar_ref},
+            )
+        )
+        session.execute(
+            insert(TrialTaskImageMaterialization).values(
+                trial_id=trial_id,
+                materialization_id=materialization_id,
+            )
+        )
+        session.commit()
+    engine.dispose()
+
+    cap = {**_LINUX_PUBLIC_CAP, "cpu_arch": "x86_64"}
+    with TestClient(app) as client:
+        response = client.post(
+            "/trials/claim",
+            headers={"Authorization": f"Bearer {raw_worker}"},
+            json={"worker_id": str(worker_id), "caps": [cap]},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["task_image_materialization"] == {
+        "schema_version": "loom.task-image-execution-grant.v1",
+        "materialization_id": str(materialization_id),
+        "materialization_key": "1" * 64,
+        "cpu_arch": "x86_64",
+        "task_checksum": "0" * 64,
+        "task_config": {
+            "schema_version": "1",
+            "task": {"id": "t", "name": "Frozen task"},
+            "environment": {
+                "os": "linux",
+                "cpu_arch": "x86_64",
+                "dockerfile": "environment/Dockerfile",
+                "sidecars": [
+                    {
+                        "name": "api",
+                        "dockerfile": "sidecars/api/Dockerfile",
+                    }
+                ],
+            },
+            "agent": {"name": "oracle"},
+            "verifier": {"name": "pytest"},
+            "steps": [{"name": "main"}],
+        },
+        "task_source": "s3://loom-task-bundles/frozen.tar.zst",
+        "task_source_provenance": {"snapshot": "frozen"},
+        "registry_images": {"task": main_ref, "sidecar:api": sidecar_ref},
+    }
 
 
 def test_prod_pressure_controller_fences_claim_and_recovers_after_agent_confirmation(

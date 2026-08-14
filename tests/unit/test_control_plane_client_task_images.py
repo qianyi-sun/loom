@@ -144,6 +144,9 @@ async def test_task_image_mutations_serialize_fence_and_surface_conflict() -> No
             retryable=True,
             failure_reason="registry_unavailable",
             failure_message="temporary outage",
+            registry_images={
+                "task": "registry.example/task@sha256:" + "e" * 64,
+            },
         )
     finally:
         await http.aclose()
@@ -174,6 +177,9 @@ async def test_task_image_mutations_serialize_fence_and_surface_conflict() -> No
                 "retryable": True,
                 "failure_reason": "registry_unavailable",
                 "failure_message": "temporary outage",
+                "registry_images": {
+                    "task": "registry.example/task@sha256:" + "e" * 64,
+                },
             },
         ),
     ]

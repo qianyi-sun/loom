@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -192,7 +193,9 @@ async def test_materialization_builds_and_publishes_every_dockerfile_component(
     monkeypatch.setattr(task_image_builder, "build_task_sidecar_images", sidecars)
     monkeypatch.setattr(task_image_builder, "publish_local_image_to_registry", publish)
     monkeypatch.setattr(
-        task_image_builder.shutil, "rmtree", lambda path: observed.setdefault("removed", path)
+        task_image_builder.shutil,
+        "rmtree",
+        lambda path, **_kwargs: observed.setdefault("removed", path),
     )
 
     registry_images = await task_image_builder.materialize_and_publish_task_images(
@@ -213,11 +216,53 @@ async def test_materialization_builds_and_publishes_every_dockerfile_component(
     assert observed["removed"] == task_dir
 
 
+async def test_materialization_rejects_bundle_metadata_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    claim = replace(
+        _claim(),
+        task_source_provenance={
+            "bundle_file_metadata_sha256": "sha256:" + "0" * 64,
+        },
+    )
+    task_dir = tmp_path / "task"
+    (task_dir / "environment").mkdir(parents=True)
+    (task_dir / "environment" / "Dockerfile").write_text("FROM alpine\n")
+    monkeypatch.setattr(task_image_builder, "host_cpu_arch", lambda: "arm64")
+    monkeypatch.setattr(task_image_builder, "_build_worker_object_store", lambda _s: object())
+
+    async def materialize(**_kwargs: Any) -> Path:
+        return task_dir
+
+    async def resolve(**_kwargs: Any) -> str:
+        return "loom-task:base"
+
+    async def publish(**_kwargs: Any) -> str:
+        return "registry.example/loom-task@sha256:" + "1" * 64
+
+    async def sidecars(**_kwargs: Any) -> dict[str, str]:
+        return {}
+
+    monkeypatch.setattr(task_image_builder, "_materialize_task_dir", materialize)
+    monkeypatch.setattr(task_image_builder, "sha256_of_dir", lambda _path: claim.task_checksum)
+    monkeypatch.setattr(task_image_builder, "resolve_task_image", resolve)
+    monkeypatch.setattr(task_image_builder, "build_task_sidecar_images", sidecars)
+    monkeypatch.setattr(task_image_builder, "publish_local_image_to_registry", publish)
+
+    with pytest.raises(task_image_builder.TaskImageBuildError, match="metadata"):
+        await task_image_builder.materialize_and_publish_task_images(
+            claim,
+            _settings(),  # type: ignore[arg-type]
+        )
+
+
 class _FakeControlPlane:
     def __init__(self) -> None:
         self.heartbeats = 0
         self.completed: dict[str, str] | None = None
         self.failed = False
+        self.failed_registry_images: dict[str, str] = {}
 
     async def start_task_image_materialization(self, **_kwargs: Any) -> bool:
         return True
@@ -235,8 +280,9 @@ class _FakeControlPlane:
         self.completed = registry_images
         return True
 
-    async def fail_task_image_materialization(self, **_kwargs: Any) -> bool:
+    async def fail_task_image_materialization(self, **kwargs: Any) -> bool:
         self.failed = True
+        self.failed_registry_images = dict(kwargs["registry_images"])
         return True
 
 
@@ -267,3 +313,62 @@ async def test_process_claim_heartbeats_and_completes_fenced_lease(
         "task": "registry.example/task@sha256:" + "d" * 64,
     }
     assert control_plane.failed is False
+
+
+async def test_process_claim_reports_partial_registry_publication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control_plane = _FakeControlPlane()
+    published = {"task": "registry.example/task@sha256:" + "e" * 64}
+
+    async def materialize(_claim: Any, _settings: Any) -> dict[str, str]:
+        raise task_image_builder.TaskImagePublicationError(
+            "sidecar publication failed",
+            registry_images=published,
+        )
+
+    monkeypatch.setattr(
+        task_image_builder,
+        "materialize_and_publish_task_images",
+        materialize,
+    )
+
+    await task_image_builder.process_task_image_claim(
+        control_plane,  # type: ignore[arg-type]
+        claim=_claim(),
+        builder_id="builder-a",
+        settings=_settings(),  # type: ignore[arg-type]
+    )
+
+    assert control_plane.failed is True
+    assert control_plane.failed_registry_images == published
+
+
+async def test_process_claim_preserves_publication_evidence_when_completion_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    published = {"task": "registry.example/task@sha256:" + "f" * 64}
+
+    class _CompletionFailsControlPlane(_FakeControlPlane):
+        async def complete_task_image_materialization(self, **_kwargs: Any) -> bool:
+            raise RuntimeError("control-plane connection unavailable")
+
+    control_plane = _CompletionFailsControlPlane()
+
+    async def materialize(_claim: Any, _settings: Any) -> dict[str, str]:
+        return published
+
+    monkeypatch.setattr(
+        task_image_builder,
+        "materialize_and_publish_task_images",
+        materialize,
+    )
+
+    await task_image_builder.process_task_image_claim(
+        control_plane,  # type: ignore[arg-type]
+        claim=_claim(),
+        builder_id="builder-a",
+        settings=_settings(),  # type: ignore[arg-type]
+    )
+
+    assert control_plane.failed_registry_images == published

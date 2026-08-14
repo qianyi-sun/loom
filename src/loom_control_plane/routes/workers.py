@@ -36,6 +36,7 @@ from loom.pipeline.work_protocol import (
     WorkClaimRequestV1,
     WorkClaimV1,
 )
+from loom.task_image_materialization import get_trial_task_image_execution_grant
 from loom_control_plane.metrics import CLAIM_LATENCY_SEC
 from loom_control_plane.scheduler.claim import (
     WorkClaimConflictError,
@@ -122,6 +123,17 @@ async def claim_trial(
             worker_network_policies=worker_network,
             enforce_shared_slot=True,
         )
+        task_image_materialization = None
+        if row is not None:
+            try:
+                task_image_materialization = await get_trial_task_image_execution_grant(
+                    session,
+                    trial_id=row["id"],
+                    cpu_arches=worker_cpu_arches,
+                )
+            except RuntimeError:
+                await session.rollback()
+                return Response(status_code=204)
         await session.commit()
     elapsed = _time.perf_counter() - t0
 
@@ -150,6 +162,11 @@ async def claim_trial(
             "family_key": family_key,
             "family_state_uri": family_state_uri,
             "family_run_spec": family_run_spec,
+            "task_image_materialization": (
+                task_image_materialization.model_dump(mode="json")
+                if task_image_materialization is not None
+                else None
+            ),
             "state": "claimed",
         }
     )
@@ -204,6 +221,15 @@ async def claim_any_work(
         row, lease_token = claimed
         claim_payload: TrialClaimV1 | ExecutionAttemptClaimV1
         if row["work_kind"] == "trial":
+            try:
+                task_image_materialization = await get_trial_task_image_execution_grant(
+                    session,
+                    trial_id=row["id"],
+                    cpu_arches=worker_cpu_arches,
+                )
+            except RuntimeError:
+                await session.rollback()
+                return Response(status_code=204)
             family_row = None
             if row["batch_id"] is not None and row["family_key"] is not None:
                 family_row = (
@@ -233,6 +259,7 @@ async def claim_any_work(
                 family_key=row["family_key"],
                 family_state_uri=family_row["state_uri"] if family_row else None,
                 family_run_spec=family_row["family_run_spec"] if family_row else None,
+                task_image_materialization=task_image_materialization,
                 state="claimed",
             )
         else:

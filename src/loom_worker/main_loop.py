@@ -1,9 +1,9 @@
 """Worker main loop — wires settings → register → heartbeat thread →
 claim loop → runner pool → drain.
 
-The claim payload carries the trial's id + team + task_id + trial config
-+ requires_caps; the full TaskConfig body lives behind a second
-round-trip to `GET /tasks/{task_id}/bundle` (Plan 7 Task 1).
+Dockerfile-backed claims carry the immutable task snapshot and registry
+digests selected by the scheduler. Prebuilt-image tasks retain the historic
+second round-trip to `GET /tasks/{task_id}/bundle`.
 
 Remaining v1 limitation: the worker uses a tempfile mkdtemp() for the
 task directory. The solution/ + tests/ + environment/ subtrees that live
@@ -65,6 +65,7 @@ from loom.startup_retry import (
     retry_startup_dependency_sync,
 )
 from loom.task_bundle_compat import validate_task_dir_compatibility
+from loom.task_image_materialization import TaskImageExecutionGrantV1
 from loom.trajectory.cp_event_sink import CpEventSink
 from loom.trajectory.storage import (
     MinioObjectStore,
@@ -103,7 +104,7 @@ from loom_worker.sandbox_singleton import (
 )
 from loom_worker.signal_handler import ShutdownState, install_signal_handlers
 from loom_worker.step_gateway_client import StepTokenGatewayClient
-from loom_worker.task_image import resolve_task_image
+from loom_worker.task_image import TaskImageBuildError, resolve_task_image
 from loom_worker.task_sidecars import DockerTaskSidecarRuntime
 from loom_worker.trial_cache import (
     _daemon_build_slot,
@@ -1124,7 +1125,29 @@ async def _spawn_trial(
         )
         try:
             trial_config = TrialConfig.model_validate(payload.get("config") or {})
-            bundle = await cp_client.get_task_bundle(str(payload["task_id"]))
+            raw_task_image_materialization = payload.get("task_image_materialization")
+            task_image_materialization = (
+                TaskImageExecutionGrantV1.model_validate(raw_task_image_materialization)
+                if raw_task_image_materialization is not None
+                else None
+            )
+            if task_image_materialization is None:
+                bundle = await cp_client.get_task_bundle(str(payload["task_id"]))
+            else:
+                host_arch = _host_cpu_arch()
+                if task_image_materialization.cpu_arch != host_arch:
+                    raise TaskImageBuildError(
+                        "task image materialization architecture mismatch "
+                        f"expected={host_arch} "
+                        f"granted={task_image_materialization.cpu_arch}"
+                    )
+                bundle = {
+                    "id": str(payload["task_id"]),
+                    "checksum": task_image_materialization.task_checksum,
+                    "config": task_image_materialization.task_config,
+                    "source": task_image_materialization.task_source,
+                    "source_provenance": (task_image_materialization.task_source_provenance),
+                }
             task_config = TaskConfig.model_validate(bundle["config"])
             task_checksum = str(bundle["checksum"])
             raw_provenance = bundle.get("source_provenance")
@@ -1157,6 +1180,25 @@ async def _spawn_trial(
                 benchmark_cache=settings.benchmark_cache,
                 timeout_sec=settings.task_materialize_timeout_sec,
             )
+            if task_image_materialization is not None:
+                actual_checksum = sha256_of_dir(task_dir)
+                if actual_checksum != task_image_materialization.task_checksum:
+                    raise TaskImageBuildError(
+                        "materialized task bundle checksum mismatch "
+                        f"expected={task_image_materialization.task_checksum} "
+                        f"actual={actual_checksum}"
+                    )
+                expected_metadata_checksum = task_image_materialization.task_source_provenance.get(
+                    "bundle_file_metadata_sha256"
+                )
+                if expected_metadata_checksum is not None:
+                    actual_metadata_checksum = bundle_file_metadata_sha256(task_dir)
+                    if actual_metadata_checksum != expected_metadata_checksum:
+                        raise TaskImageBuildError(
+                            "materialized task bundle metadata mismatch "
+                            f"expected={expected_metadata_checksum} "
+                            f"actual={actual_metadata_checksum}"
+                        )
             if task_config.task.id.startswith("terminal-bench-2@tb2.1-r6/"):
                 _verify_materialized_tb21_bundle_checksum(
                     task_dir=task_dir,
@@ -1187,6 +1229,11 @@ async def _spawn_trial(
                 # the require_cgroup_parent line above so partial/fake settings
                 # degrade gracefully (registry disabled).
                 registry_repo=(getattr(settings, "trial_cache_registry_repo", "") or None),
+                registry_image=(
+                    task_image_materialization.registry_images.get("task")
+                    if task_image_materialization is not None
+                    else None
+                ),
                 registry_pull_timeout_sec=getattr(
                     settings, "trial_cache_registry_pull_timeout_sec", 15.0
                 ),
@@ -1379,6 +1426,11 @@ async def _spawn_trial(
                 runtime_identity_labels=_runtime_identity_labels(settings),
                 cpu_arch=_host_cpu_arch(),
                 registry_repo=(getattr(settings, "trial_cache_registry_repo", "") or None),
+                registry_images=(
+                    task_image_materialization.registry_images
+                    if task_image_materialization is not None
+                    else None
+                ),
                 pull_only=True,
                 setup_slot_provider=lambda: _daemon_build_slot(
                     cp_client,

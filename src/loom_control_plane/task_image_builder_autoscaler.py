@@ -59,16 +59,22 @@ class TaskImageBuilderPoolConfig:
             raise ValueError("task image builder concurrency must equal one")
         if not self.allowed_nodes:
             raise ValueError("task image builder allowed_nodes must not be empty")
+        if self.max_jobs > len(self.allowed_nodes):
+            raise ValueError("task image builder max_jobs must not exceed allowed_nodes")
+        if self.pending_job_cap > self.max_jobs:
+            raise ValueError("task image builder pending_job_cap must not exceed max_jobs")
         if self.cpu_arch == "arm64" and self.slurm_cluster_id != "gb10":
             raise ValueError("arm64 task image builders require the gb10 Slurm cluster")
         if self.cpu_arch == "x86_64" and self.slurm_cluster_id != "oldlab":
             raise ValueError("x86_64 task image builders require the oldlab Slurm cluster")
-        for name, value in (
+        for name, string_value in (
             ("environment", self.environment),
             ("pool_name", self.pool_name),
             ("partition", self.partition),
+            ("slurm_account", self.slurm_account),
+            ("slurm_qos", self.slurm_qos),
         ):
-            if not value or _SAFE_NAME_RE.fullmatch(value) is None:
+            if not string_value or _SAFE_NAME_RE.fullmatch(string_value) is None:
                 raise ValueError(f"task image builder {name} is invalid")
         for node in self.allowed_nodes:
             if _SAFE_NAME_RE.fullmatch(node) is None:
@@ -76,16 +82,16 @@ class TaskImageBuilderPoolConfig:
         for name, value in (("env_file", self.env_file), ("repo_dir", self.repo_dir)):
             if _SAFE_ABSOLUTE_PATH_RE.fullmatch(value) is None:
                 raise ValueError(f"task image builder {name} must be a safe absolute path")
-        if self.job_output_dir and _SAFE_ABSOLUTE_PATH_RE.fullmatch(self.job_output_dir) is None:
+        if _SAFE_ABSOLUTE_PATH_RE.fullmatch(self.job_output_dir) is None:
             raise ValueError("task image builder job_output_dir must be a safe absolute path")
-        for name, value in (
+        for name, numeric_value in (
             ("requested_cpus", self.requested_cpus),
             ("requested_memory_mib", self.requested_memory_mib),
             ("max_jobs", self.max_jobs),
             ("pending_job_cap", self.pending_job_cap),
             ("idle_exit_after_seconds", self.idle_exit_after_seconds),
         ):
-            if value <= 0:
+            if numeric_value <= 0:
                 raise ValueError(f"task image builder {name} must be positive")
         if self.command_timeout_seconds <= 0:
             raise ValueError("task image builder command timeout must be positive")
@@ -167,14 +173,13 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 umask 077
-export HOME="$job_runtime_dir/home"
 export DOCKER_CONFIG="$job_runtime_dir/docker"
 export XDG_CONFIG_HOME="$job_runtime_dir/xdg-config"
 export XDG_RUNTIME_DIR="$job_runtime_dir/xdg-runtime"
 export TMPDIR="$job_runtime_dir/tmp"
 export LOOM_WORKER_SLURM_JOB_ID="$SLURM_JOB_ID"
 export LOOM_WORKER_COMPOSE_PROJECT="loom-task-builder-${SLURM_JOB_ID//[^A-Za-z0-9_-]/-}"
-/usr/bin/mkdir -p "$HOME" "$DOCKER_CONFIG" "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR" "$TMPDIR"
+/usr/bin/mkdir -p "$DOCKER_CONFIG" "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR" "$TMPDIR"
 cd "$LOOM_REMOTE_WORKER_REPO_DIR"
 docker compose --project-name "$LOOM_WORKER_COMPOSE_PROJECT" \
   --env-file "$LOOM_REMOTE_WORKER_ENV_FILE" \
@@ -217,30 +222,54 @@ class SubprocessTaskImageBuilderSlurmRunner:
     ) -> list[SlurmWorkerJobObservation]:
         if not job_ids:
             return []
-        result = await _run_command(
-            (
-                self.config.squeue_path,
-                "-h",
-                "-o",
-                "%i|%T|%N|%R",
-                "-j",
-                ",".join(job_ids),
-            ),
-            timeout=self.config.command_timeout_seconds,
-        )
-        observations: list[SlurmWorkerJobObservation] = []
-        for line in result.stdout.splitlines():
-            parts = line.split("|", 3)
-            if len(parts) == 4 and parts[0] in job_ids:
-                observations.append(
-                    SlurmWorkerJobObservation(
+        observations: dict[str, SlurmWorkerJobObservation] = {}
+
+        def collect(output: str, expected_ids: tuple[str, ...]) -> None:
+            expected = set(expected_ids)
+            for line in output.splitlines():
+                parts = line.split("|", 3)
+                if len(parts) == 4 and parts[0] in expected:
+                    observations[parts[0]] = SlurmWorkerJobObservation(
                         job_id=parts[0],
                         slurm_state=parts[1],
                         nodelist=parts[2] or None,
                         pending_reason=parts[3] or None,
                     )
-                )
-        return observations
+
+        try:
+            result = await _run_command(
+                (
+                    self.config.squeue_path,
+                    "-h",
+                    "-o",
+                    "%i|%T|%N|%R",
+                    "-j",
+                    ",".join(job_ids),
+                ),
+                timeout=self.config.command_timeout_seconds,
+            )
+        except RuntimeError as exc:
+            if "Invalid job id specified" not in str(exc):
+                raise
+        else:
+            collect(result.stdout, job_ids)
+
+        missing = tuple(job_id for job_id in job_ids if job_id not in observations)
+        if missing:
+            result = await _run_command(
+                (
+                    self.config.sacct_path,
+                    "-n",
+                    "-P",
+                    "-o",
+                    "JobIDRaw,State,NodeList,Reason",
+                    "-j",
+                    ",".join(missing),
+                ),
+                timeout=self.config.command_timeout_seconds,
+            )
+            collect(result.stdout, missing)
+        return [observations[job_id] for job_id in job_ids if job_id in observations]
 
 
 async def _load_active_jobs(
@@ -278,16 +307,15 @@ async def reconcile_task_image_builder_autoscaler_once(
     active_job_ids = tuple(job.job_id for job in active_jobs if job.job_id)
     if query_jobs is not None and active_job_ids:
         observations = await query_jobs(active_job_ids)
-        if observations:
-            await reconcile_slurm_worker_jobs(
-                session,
-                observations,
-                stale_after_seconds=300,
-                slurm_cluster_id=config.slurm_cluster_id,
-                environment=config.environment,
-                pool_name=config.pool_name,
-            )
-            active_jobs = await _load_active_jobs(session, config)
+        await reconcile_slurm_worker_jobs(
+            session,
+            observations,
+            stale_after_seconds=300,
+            slurm_cluster_id=config.slurm_cluster_id,
+            environment=config.environment,
+            pool_name=config.pool_name,
+        )
+        active_jobs = await _load_active_jobs(session, config)
 
     now = datetime.now(UTC)
     queued = int(

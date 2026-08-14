@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -126,3 +127,57 @@ async def test_new_task_checksum_creates_new_immutable_materializations(
             ).scalars()
         )
         assert checksums == {original_checksum, replacement_checksum}
+
+
+async def test_ensure_requeues_retired_images_and_marks_retiring_images_referenced(
+    materialization_session: async_sessionmaker[AsyncSession],
+) -> None:
+    task_id = f"materialization/{uuid4()}"
+    checksum = "4" * 64
+    old_reference = datetime.now(UTC) - timedelta(days=10)
+    async with materialization_session() as session:
+        await session.execute(
+            insert(Task).values(**_task_values(task_id=task_id, checksum=checksum))
+        )
+        await session.commit()
+        task = (await session.execute(select(Task).where(Task.id == task_id))).scalar_one()
+        created = await ensure_task_image_materializations(session, task_row=task)
+        await session.execute(
+            update(TaskImageMaterialization)
+            .where(TaskImageMaterialization.id == created[0].id)
+            .values(
+                state="retired",
+                attempt_count=3,
+                failure_reason="registry_retired",
+                failure_message="registry images were deleted",
+                last_referenced_at=old_reference,
+                unreferenced_at=old_reference,
+            )
+        )
+        await session.execute(
+            update(TaskImageMaterialization)
+            .where(TaskImageMaterialization.id == created[1].id)
+            .values(
+                state="retiring",
+                claimed_by="registry-gc-active",
+                lease_epoch=2,
+                lease_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+                last_referenced_at=old_reference,
+                unreferenced_at=old_reference,
+            )
+        )
+        await session.commit()
+
+        rows = await ensure_task_image_materializations(session, task_row=task)
+        await session.commit()
+
+        assert rows[0].state == "queued"
+        assert rows[0].attempt_count == 0
+        assert rows[0].failure_reason is None
+        assert rows[0].failure_message is None
+        assert rows[0].unreferenced_at is None
+        assert rows[0].last_referenced_at > old_reference
+        assert rows[1].state == "retiring"
+        assert rows[1].claimed_by == "registry-gc-active"
+        assert rows[1].unreferenced_at is None
+        assert rows[1].last_referenced_at > old_reference

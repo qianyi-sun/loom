@@ -49,7 +49,10 @@ def upgrade() -> None:
           CONSTRAINT task_image_materializations_cpu_arch_check
             CHECK (cpu_arch IN ('x86_64', 'arm64')),
           CONSTRAINT task_image_materializations_state_check
-            CHECK (state IN ('queued', 'claimed', 'running', 'ready', 'failed')),
+            CHECK (state IN (
+              'queued', 'claimed', 'running', 'ready', 'failed',
+              'retiring', 'retired'
+            )),
           CONSTRAINT task_image_materializations_counters_check
             CHECK (attempt_count >= 0 AND max_attempts > 0 AND lease_epoch >= 0),
           CONSTRAINT task_image_materializations_key_uidx UNIQUE (materialization_key),
@@ -62,6 +65,9 @@ def upgrade() -> None:
           (cpu_arch, state, next_attempt_at, created_at);
         CREATE INDEX task_image_materializations_reference_idx
           ON task_image_materializations (task_id, task_checksum);
+        CREATE INDEX task_image_materializations_registry_gc_idx
+          ON task_image_materializations
+          (state, unreferenced_at, lease_expires_at);
 
         CREATE TABLE trial_task_image_materializations (
           trial_id UUID NOT NULL REFERENCES trials(id) ON DELETE CASCADE,

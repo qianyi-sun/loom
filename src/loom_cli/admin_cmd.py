@@ -431,7 +431,12 @@ def _mint_worker_token(args: argparse.Namespace) -> int:
         sys.stderr.write(f"error: {e}\n")
         return 2
 
-    url = f"{args.cp_url.rstrip('/')}/admin/worker-tokens"
+    kind = getattr(args, "kind", "trial")
+    endpoint = {
+        "task-image-builder": "task-image-builder-tokens",
+        "task-image-registry-gc": "task-image-registry-gc-tokens",
+    }.get(kind, "worker-tokens")
+    url = f"{args.cp_url.rstrip('/')}/admin/{endpoint}"
     body: dict[str, int] = {}
     if args.expires_in_days is not None:
         body["expires_in_days"] = args.expires_in_days
@@ -462,25 +467,59 @@ def _mint_worker_token(args: argparse.Namespace) -> int:
         json.dump(data, sys.stdout, indent=2)
         sys.stdout.write("\n")
     elif args.show_secret:
+        if kind == "task-image-builder":
+            label = "task-image builder"
+            next_step = (
+                "write it as LOOM_WORKER_TOKEN in the dedicated builder env file; "
+                "do not install it on trial workers"
+            )
+        elif kind == "task-image-registry-gc":
+            label = "task-image registry GC"
+            next_step = (
+                "install it only in the registry-retention controller; "
+                "do not install it on builders or trial workers"
+            )
+        else:
+            label = "worker"
+            next_step = (
+                "update the `worker-token` key in `loom-secrets` and restart "
+                "`deploy/loom-worker`"
+            )
         sys.stdout.write(
-            f"New worker token minted.\n"
+            f"New {label} token minted.\n"
             f"  prefix: {data['token_hash_prefix']}\n"
             f"  token:  {data['token']}\n"
-            f"\nNext: update the `worker-token` key in `loom-secrets` "
-            f"and restart `deploy/loom-worker`.\n",
+            f"\nNext: {next_step}.\n",
         )
     else:
+        if kind == "task-image-builder":
+            install_hint = (
+                "  loom admin tokens worker mint --kind task-image-builder "
+                "--format json | jq -r '\"LOOM_WORKER_TOKEN=\" + .token' \\\n"
+                "    > /secure/staging-task-image-builder.env\n"
+            )
+        elif kind == "task-image-registry-gc":
+            install_hint = (
+                "  loom admin tokens worker mint --kind task-image-registry-gc "
+                "--format json | jq -r .token \\\n"
+                "    > /secure/staging-task-image-registry-gc.token\n"
+            )
+        else:
+            install_hint = (
+                "  loom admin tokens worker mint --format json | jq -r .token \\\n"
+                "    | kubectl create secret generic loom-secrets \\\n"
+                "        --from-file=worker-token=/dev/stdin \\\n"
+                "        --dry-run=client -o yaml | kubectl apply -f -\n"
+            )
         sys.stdout.write(
-            f"New worker token minted.\n"
+            f"New {('task-image builder' if kind == 'task-image-builder' else 'task-image registry GC' if kind == 'task-image-registry-gc' else 'worker')} "
+            f"token minted.\n"
             f"  prefix: {data['token_hash_prefix']}\n"
             f"\nThe raw token was NOT printed (terminal scrollback risk).\n"
             f"Pipe it straight into the secret store without exposing it\n"
             f"via shell history or `ps`:\n"
             f"\n"
-            f"  loom admin tokens worker mint --format json | jq -r .token \\\n"
-            f"    | kubectl create secret generic loom-secrets \\\n"
-            f"        --from-file=worker-token=/dev/stdin \\\n"
-            f"        --dry-run=client -o yaml | kubectl apply -f -\n"
+            f"{install_hint}"
             f"\n"
             f"Or re-run with --show-secret to print the raw token to stdout.\n",
         )
@@ -2082,6 +2121,15 @@ def dispatch(argv: list[str]) -> int:
             f"Token lifetime in days "
             f"(default: {_DEFAULT_EXPIRES_DAYS}). Pass 0 to omit the "
             f"expires_in_days field (server keeps default)."
+        ),
+    )
+    p_mint.add_argument(
+        "--kind",
+        choices=["trial", "task-image-builder", "task-image-registry-gc"],
+        default="trial",
+        help=(
+            "Mint an ordinary trial worker, least-privilege task-image builder, "
+            "or registry-GC token."
         ),
     )
     p_mint.add_argument(

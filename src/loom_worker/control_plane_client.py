@@ -1470,6 +1470,7 @@ class HttpControlPlaneClient:
         retryable: bool,
         failure_reason: str,
         failure_message: str,
+        registry_images: Mapping[str, str],
     ) -> bool:
         return await self._mutate_task_image_materialization(
             materialization_id=materialization_id,
@@ -1480,5 +1481,6 @@ class HttpControlPlaneClient:
                 "retryable": retryable,
                 "failure_reason": failure_reason,
                 "failure_message": failure_message,
+                "registry_images": dict(registry_images),
             },
         )

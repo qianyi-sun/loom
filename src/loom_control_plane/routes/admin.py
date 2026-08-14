@@ -12,7 +12,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import insert, select, text, update
 
 from loom.auth import verify_bearer_token
@@ -38,6 +38,11 @@ from loom_control_plane.slurm_worker_jobs import (
     reconcile_slurm_worker_jobs,
     record_slurm_worker_job,
     slurm_worker_job_to_dict,
+)
+from loom_control_plane.task_image_materializations import (
+    TaskImageRetryConflictError,
+    retry_task_image_materialization,
+    task_image_materialization_payload,
 )
 from loom_control_plane.worker_pool_autoscaler import (
     autoscaler_policy_to_dict,
@@ -144,6 +149,12 @@ class _AutoscalerPolicyPayload(BaseModel):
     force: bool = False
     disabled_reason: str | None = None
     actuator_config: dict[str, Any] = Field(default_factory=dict)
+
+
+class _TaskImageServiceTokenPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    expires_in_days: int = Field(default=90, ge=1, le=365)
 
 
 async def _require_admin_scope(
@@ -260,6 +271,89 @@ async def issue_batch_runner_token(
         "token": raw,
         "token_hash_prefix": token_hash.hex()[:8],
     }
+
+
+@router.post("/task-image-builder-tokens", status_code=201)
+async def issue_task_image_builder_token(
+    request: Request,
+    payload: _TaskImageServiceTokenPayload,
+    authorization: str | None = Header(default=None),
+) -> dict[str, str]:
+    """Mint a least-privilege credential for exclusive image builders."""
+    await _require_admin_scope(request, authorization, "admin:tokens")
+
+    raw = "loom_tib_" + secrets.token_bytes(32).hex()
+    token_hash = hashlib.sha256(raw.encode()).digest()
+    expires_at = datetime.now(UTC) + timedelta(days=payload.expires_in_days)
+
+    async with request.app.state.session_factory() as session:
+        await session.execute(
+            insert(Token).values(
+                token_hash=token_hash,
+                type="worker",
+                scopes=["task-image:build"],
+                team_id=None,
+                issued_at=datetime.now(UTC),
+                expires_at=expires_at,
+            )
+        )
+        await session.commit()
+
+    return {
+        "token": raw,
+        "token_hash_prefix": token_hash.hex()[:8],
+    }
+
+
+@router.post("/task-image-registry-gc-tokens", status_code=201)
+async def issue_task_image_registry_gc_token(
+    request: Request,
+    payload: _TaskImageServiceTokenPayload,
+    authorization: str | None = Header(default=None),
+) -> dict[str, str]:
+    """Mint a least-privilege credential for the registry-retention controller."""
+    await _require_admin_scope(request, authorization, "admin:tokens")
+
+    raw = "loom_tigc_" + secrets.token_bytes(32).hex()
+    token_hash = hashlib.sha256(raw.encode()).digest()
+    expires_at = datetime.now(UTC) + timedelta(days=payload.expires_in_days)
+
+    async with request.app.state.session_factory() as session:
+        await session.execute(
+            insert(Token).values(
+                token_hash=token_hash,
+                type="worker",
+                scopes=["task-image:gc"],
+                team_id=None,
+                issued_at=datetime.now(UTC),
+                expires_at=expires_at,
+            )
+        )
+        await session.commit()
+
+    return {
+        "token": raw,
+        "token_hash_prefix": token_hash.hex()[:8],
+    }
+
+
+@router.post("/task-image-materializations/{materialization_id}/retry")
+async def retry_task_image_materialization_route(
+    materialization_id: UUID,
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Requeue an exhausted or registry-inconsistent task image."""
+    await _require_admin_scope(request, authorization, "admin:tokens")
+    try:
+        async with request.app.state.session_factory() as session, session.begin():
+            row = await retry_task_image_materialization(
+                session,
+                materialization_id=materialization_id,
+            )
+    except TaskImageRetryConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return task_image_materialization_payload(row)
 
 
 @router.post("/family-orchestrator-tokens", status_code=201)

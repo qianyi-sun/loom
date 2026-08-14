@@ -4,6 +4,7 @@ import pytest
 
 from loom.models.task import TaskConfig
 from loom.task_image_materialization import (
+    TaskImageExecutionGrantV1,
     canonical_task_checksum,
     required_task_image_architectures,
     task_image_materialization_key,
@@ -124,4 +125,26 @@ def test_materialization_key_rejects_malformed_checksum() -> None:
             task_id="benchmark/task-1",
             task_checksum="not-a-checksum",
             cpu_arch="arm64",
+        )
+
+
+def test_execution_grant_requires_exact_snapshot_component_set() -> None:
+    with pytest.raises(ValueError, match="registry_images do not match"):
+        TaskImageExecutionGrantV1.model_validate(
+            {
+                "schema_version": "loom.task-image-execution-grant.v1",
+                "materialization_id": "00000000-0000-0000-0000-000000000123",
+                "materialization_key": "1" * 64,
+                "cpu_arch": "x86_64",
+                "task_checksum": "2" * 64,
+                "task_config": _task_config(
+                    cpu_arch="x86_64",
+                    dockerfile="environment/Dockerfile",
+                ).model_dump(mode="json"),
+                "task_source": None,
+                "task_source_provenance": {},
+                "registry_images": {
+                    "sidecar:unexpected": ("registry.example/loom-task@sha256:" + "3" * 64),
+                },
+            }
         )
