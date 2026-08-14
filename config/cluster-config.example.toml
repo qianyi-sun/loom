@@ -33,6 +33,8 @@ ingress_host = "loom.example.com"
 ingress_redirect_hosts = []
 # TLS Secret name referenced by the public Web/API ingress.
 ingress_tls_secret_name = "loom-tls"
+# Additional exact legacy object-store buckets that staging lifecycle maintenance must inventory alongside the configured trajectories and artifacts write buckets.
+lifecycle_legacy_buckets = []
 minio_image = "minio/minio"
 minio_storage_gi = 500
 namespace = "loom"
