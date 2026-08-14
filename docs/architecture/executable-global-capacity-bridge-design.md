@@ -1,8 +1,8 @@
 # Executable Global Capacity Bridge Design
 
-Status: approved for implementation under the delegated autonomous-development mandate  
-Package: 5B  
-Date: 2026-08-12  
+Status: approved for implementation under the delegated autonomous-development mandate
+Package: 5B
+Date: 2026-08-12
 Live activation: prohibited by this package
 
 ## Decision
