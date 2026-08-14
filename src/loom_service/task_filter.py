@@ -163,8 +163,8 @@ async def resolve_task_filter_with_diagnostics(
     - `"random_n"`: N randomly-chosen task ids. Requires `seed` so
       the same call reproduces the same selection (Python's seeded
       `random.sample` on the materialized candidate list).
-    - `"explicit"`: returns `task_ids` verbatim (after the existence
-      check below).
+    - `"explicit"`: returns the requested task ids only when every id
+      resolves to a visible candidate.
     """
     unknown = set(task_filter.keys()) - FILTER_KEYS
     if unknown:
@@ -301,12 +301,9 @@ async def resolve_task_filter_with_diagnostics(
             benchmark_selection_provenance=benchmark_selection_provenance,
         )
     if subset_kind == "explicit":
-        # Explicit mode REQUIRES `task_ids` to be supplied AND the
-        # existence check above runs via the `Task.id.in_(ids)`
-        # predicate. The returned `candidates` is the intersection
-        # of the supplied list and the live tasks table; any supplied
-        # id not present in the table is silently dropped (the higher
-        # route layer checks for empty-result).
+        requested_ids = {str(task_id) for task_id in task_filter.get("task_ids", [])}
+        if requested_ids != set(candidates):
+            raise HTTPException(status_code=404, detail="task not found")
         return TaskFilterResult(
             task_ids=candidates,
             benchmark_selection_provenance=benchmark_selection_provenance,

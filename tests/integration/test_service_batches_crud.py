@@ -608,6 +608,103 @@ async def test_post_batch_rejects_cross_team_explicit_task_set_task_id(
     assert r.json()["detail"] == "task not found"
 
 
+async def test_post_batch_rejects_mixed_visible_and_cross_team_explicit_task_ids_atomically(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, _raw_a, team_a = camp_setup
+    team_b = uuid4()
+    user_b = uuid4()
+    raw_b = f"loom_team_{uuid4().hex}"
+    task_set_id = f"ts/{team_a}/mixed-explicit-private-taskset"
+    private_task_id = f"{task_set_id}/tasks/row-1"
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(insert(Team).values(id=team_b, name=f"t-{team_b}"))
+        conn.execute(
+            insert(User).values(
+                id=user_b,
+                username=f"BatchMixedExplicitOther-{team_b.hex[:8]}",
+                username_normalized=f"batchmixedexplicitother-{team_b.hex[:8]}",
+                status="active",
+                is_platform_admin=False,
+            ),
+        )
+        conn.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(raw_b.encode()).digest(),
+                type="team",
+                scopes=["submit", "read:own"],
+                team_id=team_b,
+                created_by_user_id=user_b,
+                issued_at=datetime.now(UTC),
+            ),
+        )
+        conn.execute(
+            insert(TeamMembership).values(
+                team_id=team_b,
+                user_id=user_b,
+                role="owner",
+            ),
+        )
+        conn.execute(
+            insert(TaskSet).values(
+                id=task_set_id,
+                owning_team_id=team_a,
+                slug="mixed-explicit-private-taskset",
+                display_name="Mixed Explicit Private TaskSet",
+                status="ready",
+                intents=["trajectory_generation"],
+                evaluation_ready=False,
+                task_count=1,
+                manifest_blob_uri=(
+                    f"s3://bucket/tasksets/user/{team_a}/mixed-explicit-private-taskset/"
+                    "manifest.yaml"
+                ),
+            ),
+        )
+        conn.execute(
+            insert(Task).values(
+                id=private_task_id,
+                checksum="x" * 64,
+                config=_valid_task_config(private_task_id),
+                source=(
+                    f"s3://bucket/tasksets/user/{team_a}/mixed-explicit-private-taskset/"
+                    "tasks/row-1/"
+                ),
+                task_set_id=task_set_id,
+                benchmark_id=None,
+            ),
+        )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw_b}"},
+            json={
+                "name": "Mixed visible and private explicit tasks",
+                "task_filter": {
+                    "task_ids": ["local/mit-0", private_task_id],
+                    "subset_kind": "explicit",
+                },
+                "trial_config": {"agent": {"name": "oracle"}},
+            },
+        )
+
+    with sync_engine.connect() as conn:
+        batch_count = conn.execute(select(func.count(Batch.id))).scalar_one()
+    sync_engine.dispose()
+
+    assert r.status_code == 404, r.text
+    assert r.json()["detail"] == "task not found"
+    assert batch_count == 0
+
+
 async def test_admin_submit_on_behalf_records_represented_user_owner_access_and_audit(
     camp_setup: tuple[FastAPI, str, UUID],
     postgres_url: str,

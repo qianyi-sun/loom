@@ -542,7 +542,7 @@ async def test_count_owned_task_set_id_filter(
     assert r.json() == {"count": 1}
 
 
-async def test_count_cross_team_explicit_task_set_task_id_returns_zero(
+async def test_count_rejects_cross_team_explicit_task_set_task_id(
     tasks_setup: tuple[FastAPI, str],
     postgres_url: str,
 ) -> None:
@@ -598,8 +598,8 @@ async def test_count_cross_team_explicit_task_set_task_id_returns_zero(
                 }
             },
         )
-    assert r.status_code == 200
-    assert r.json() == {"count": 0}
+    assert r.status_code == 404
+    assert r.json()["detail"] == "task not found"
 
 
 async def test_count_excludes_unsupported_ui_benchmarks(
