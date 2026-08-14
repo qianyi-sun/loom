@@ -48,6 +48,12 @@ def _database_url(path: Path) -> str:
         payload = read_owner_only_bytes(path, max_bytes=_MAX_DATABASE_URL_BYTES)
     except (OSError, ValueError) as exc:
         raise ExecutableAdmissionClientError(str(exc)) from exc
+    return _database_url_from_bytes(payload)
+
+
+def _database_url_from_bytes(payload: bytes) -> str:
+    if not payload or len(payload) > _MAX_DATABASE_URL_BYTES:
+        raise ExecutableAdmissionClientError("database URL exceeds its byte bound")
     try:
         value = payload.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -73,6 +79,23 @@ def _database_url(path: Path) -> str:
             "database URL must be credential-scoped PostgreSQL with verify-full TLS"
         )
     return value
+
+
+def _connection_bounds(
+    *,
+    timeout_seconds: int,
+    pool_timeout_seconds: int | None,
+) -> tuple[int, int]:
+    if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 60:
+        raise ExecutableAdmissionClientError(
+            "database connection timeout must be an integer between 1 and 60 seconds"
+        )
+    pool_timeout = timeout_seconds if pool_timeout_seconds is None else pool_timeout_seconds
+    if type(pool_timeout) is not int or not 1 <= pool_timeout <= 60:
+        raise ExecutableAdmissionClientError(
+            "database pool timeout must be an integer between 1 and 60 seconds"
+        )
+    return timeout_seconds, pool_timeout
 
 
 class DatabaseExecutableAdmissionClient:
@@ -128,16 +151,39 @@ class DatabaseExecutableAdmissionClient:
         lock_timeout_ms: int = 5_000,
         operation_timeout_seconds: float = 10.0,
     ) -> DatabaseExecutableAdmissionClient:
-        if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 60:
-            raise ExecutableAdmissionClientError(
-                "database connection timeout must be an integer between 1 and 60 seconds"
-            )
-        pool_timeout = timeout_seconds if pool_timeout_seconds is None else pool_timeout_seconds
-        if type(pool_timeout) is not int or not 1 <= pool_timeout <= 60:
-            raise ExecutableAdmissionClientError(
-                "database pool timeout must be an integer between 1 and 60 seconds"
-            )
-        url = _database_url(path)
+        try:
+            payload = read_owner_only_bytes(path, max_bytes=_MAX_DATABASE_URL_BYTES)
+        except (OSError, ValueError) as exc:
+            raise ExecutableAdmissionClientError(str(exc)) from exc
+        return cls.from_database_url_bytes(
+            payload,
+            subject_id=subject_id,
+            subject_incarnation=subject_incarnation,
+            timeout_seconds=timeout_seconds,
+            pool_timeout_seconds=pool_timeout_seconds,
+            statement_timeout_ms=statement_timeout_ms,
+            lock_timeout_ms=lock_timeout_ms,
+            operation_timeout_seconds=operation_timeout_seconds,
+        )
+
+    @classmethod
+    def from_database_url_bytes(
+        cls,
+        payload: bytes,
+        *,
+        subject_id: UUID,
+        subject_incarnation: UUID,
+        timeout_seconds: int = 10,
+        pool_timeout_seconds: int | None = None,
+        statement_timeout_ms: int = 10_000,
+        lock_timeout_ms: int = 5_000,
+        operation_timeout_seconds: float = 10.0,
+    ) -> DatabaseExecutableAdmissionClient:
+        timeout_seconds, pool_timeout = _connection_bounds(
+            timeout_seconds=timeout_seconds,
+            pool_timeout_seconds=pool_timeout_seconds,
+        )
+        url = _database_url_from_bytes(payload)
         engine = create_async_engine(
             url,
             connect_args={"connect_timeout": timeout_seconds},

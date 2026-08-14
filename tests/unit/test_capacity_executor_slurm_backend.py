@@ -21,6 +21,7 @@ from loom_capacity_executor.slurm_backend import (
 from loom_capacity_executor.slurm_contracts import (
     SlurmCancelRequestV2,
     SlurmExecutableIdentityV2,
+    SlurmFileIdentityV2,
     SlurmLaunchRequestV2,
     SlurmResourceV2,
     SlurmTresValueV2,
@@ -53,6 +54,11 @@ def slurm_launch_request_fixture(fake_slurm: FakeSlurm) -> SlurmLaunchRequestV2:
             path=str(fake_slurm.launcher),
             sha256=fake_slurm.launcher_sha256,
             owner_uid=fake_slurm.launcher.stat().st_uid,
+        ),
+        trusted_launcher_config=SlurmFileIdentityV2(
+            path=str(fake_slurm.root / "trusted-launcher.json"),
+            sha256="d" * 64,
+            owner_uid=os.geteuid(),
         ),
         launcher_release_sha256="b" * 64,
         image_digest="registry.internal/loom/worker@sha256:" + "c" * 64,

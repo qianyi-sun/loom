@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import base64
 import hashlib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -12,8 +14,11 @@ import loom_capacity_executor.bootstrap_handoff as handoff_module
 from loom_capacity_agent.admission import ExecutableWorkerRegistrationV2, PhysicalJobBindingV2
 from loom_capacity_executor.bootstrap_handoff import (
     BootstrapHandoffError,
+    BootstrapHandoffLaunchV2,
     BootstrapHandoffRecordV2,
     BootstrapHandoffStore,
+    bind_bootstrap_handoff_ownership,
+    claim_bootstrap_handoff_launch,
     consume_bootstrap_handoff,
 )
 from loom_capacity_manager.executable_contracts import (
@@ -71,6 +76,10 @@ class _CommitThenCrashAdmission(_Admission):
             self.crashes_remaining -= 1
             raise RuntimeError("protected registration committed before response loss")
         return result
+
+
+class _ExecBoundaryError(Exception):
+    """Raised by tests when the trusted wrapper reaches the process exec boundary."""
 
 
 def _physical(binding: ExecutableIntentBindingV2) -> PhysicalJobBindingV2:
@@ -249,6 +258,421 @@ async def test_trusted_wrapper_replays_credential_after_success_before_candidate
     assert len(admission.capabilities) == 1
 
 
+# Production break caught: after the trusted wrapper reaches the candidate exec
+# boundary, the persisted crash-recovery credential must be consumed and a later
+# wrapper invocation must fail closed instead of launching the candidate again.
+async def test_trusted_wrapper_exec_boundary_makes_handoff_non_reusable(
+    tmp_path: Path,
+) -> None:
+    from loom_capacity_executor.trusted_launcher import (
+        WORKER_CREDENTIAL_ENV,
+        exec_bootstrap_handoff_candidate,
+    )
+
+    directory = tmp_path / "handoff"
+    directory.mkdir(mode=0o700)
+    binding = launch_context_fixture().binding
+    store = BootstrapHandoffStore(directory)
+    lease = store.prepare(
+        binding,
+        bootstrap_registration_epoch=1,
+        expires_at=_NOW + timedelta(minutes=5),
+        trusted_launcher_release_sha256=binding.execution.trusted_fleet_release_sha256,
+        protected_admission_route_sha256=_Admission.route_sha256,
+    )
+    physical = _physical(binding)
+    admission = _Admission()
+    exec_calls: list[tuple[str, tuple[str, ...], dict[str, str]]] = []
+
+    def fake_execvpe(file: str, argv: tuple[str, ...], env: dict[str, str]) -> None:
+        assert not (directory / lease.reference).exists()
+        assert not (directory / lease.reference).with_suffix(".used").exists()
+        assert not (directory / lease.reference).with_suffix(".credential").exists()
+        assert admission.capabilities[0] not in "\n".join(
+            item.read_text(encoding="utf-8") for item in directory.iterdir() if item.is_file()
+        )
+        exec_calls.append((file, argv, env))
+        raise _ExecBoundaryError
+
+    with pytest.raises(_ExecBoundaryError):
+        await exec_bootstrap_handoff_candidate(
+            directory,
+            lease.reference,
+            physical,
+            admission,
+            candidate_argv=("/opt/loom/bin/worker", "--once"),
+            now=lambda: _NOW,
+            environment={"LOOM_EXISTING": "1"},
+            execvpe=fake_execvpe,
+        )
+
+    assert len(exec_calls) == 1
+    assert exec_calls[0][0] == "/opt/loom/bin/worker"
+    assert exec_calls[0][1] == ("/opt/loom/bin/worker", "--once")
+    worker_credential = exec_calls[0][2][WORKER_CREDENTIAL_ENV]
+    assert exec_calls[0][2]["LOOM_EXISTING"] == "1"
+    assert (
+        admission.requests[0].worker_credential_sha256
+        == hashlib.sha256(worker_credential.encode("ascii")).hexdigest()
+    )
+    with pytest.raises(BootstrapHandoffError, match="already"):
+        await consume_bootstrap_handoff(
+            directory,
+            lease.reference,
+            physical,
+            admission,
+            now=lambda: _NOW,
+        )
+
+
+# Production break caught: if the trusted wrapper crashes after claiming the
+# irreversible launch boundary but before execvpe transfers control, recovery
+# must fail closed without minting another worker or revealing the credential.
+async def test_trusted_wrapper_crash_after_launch_claim_is_irrecoverable_fail_closed(
+    tmp_path: Path,
+) -> None:
+    from loom_capacity_executor.trusted_launcher import exec_bootstrap_handoff_candidate
+
+    directory = tmp_path / "handoff"
+    directory.mkdir(mode=0o700)
+    binding = launch_context_fixture().binding
+    store = BootstrapHandoffStore(directory)
+    lease = store.prepare(
+        binding,
+        bootstrap_registration_epoch=1,
+        expires_at=_NOW + timedelta(minutes=5),
+        trusted_launcher_release_sha256=binding.execution.trusted_fleet_release_sha256,
+        protected_admission_route_sha256=_Admission.route_sha256,
+    )
+    physical = _physical(binding)
+    admission = _Admission()
+    credential = await consume_bootstrap_handoff(
+        directory,
+        lease.reference,
+        physical,
+        admission,
+        now=lambda: _NOW,
+    )
+
+    launched_credential = claim_bootstrap_handoff_launch(
+        directory,
+        lease.reference,
+        physical,
+        admission,
+        now=lambda: _NOW,
+    )
+
+    assert launched_credential == credential
+    assert len(admission.requests) == 1
+    assert not (directory / lease.reference).exists()
+    assert not (directory / lease.reference).with_suffix(".used").exists()
+    assert not (directory / lease.reference).with_suffix(".credential").exists()
+    assert (directory / lease.reference).with_suffix(".launched").exists()
+    with pytest.raises(BootstrapHandoffError, match="already"):
+        await exec_bootstrap_handoff_candidate(
+            directory,
+            lease.reference,
+            physical,
+            admission,
+            candidate_argv=("/opt/loom/bin/worker",),
+            now=lambda: _NOW,
+            environment={},
+            execvpe=lambda *_args: (_ for _ in ()).throw(_ExecBoundaryError),
+        )
+    assert len(admission.requests) == 1
+
+
+# Production break caught: a trusted-wrapper crash after protected registration
+# but before candidate exec must recover the exact persisted worker credential
+# without registering a second worker.
+async def test_trusted_wrapper_recovers_successful_exchange_before_exec_boundary(
+    tmp_path: Path,
+) -> None:
+    from loom_capacity_executor.trusted_launcher import (
+        WORKER_CREDENTIAL_ENV,
+        exec_bootstrap_handoff_candidate,
+    )
+
+    directory = tmp_path / "handoff"
+    directory.mkdir(mode=0o700)
+    binding = launch_context_fixture().binding
+    store = BootstrapHandoffStore(directory)
+    lease = store.prepare(
+        binding,
+        bootstrap_registration_epoch=1,
+        expires_at=_NOW + timedelta(minutes=5),
+        trusted_launcher_release_sha256=binding.execution.trusted_fleet_release_sha256,
+        protected_admission_route_sha256=_Admission.route_sha256,
+    )
+    physical = _physical(binding)
+    admission = _Admission()
+    recovered: list[str] = []
+
+    credential = await consume_bootstrap_handoff(
+        directory,
+        lease.reference,
+        physical,
+        admission,
+        now=lambda: _NOW,
+    )
+
+    def fake_execvpe(_file: str, _argv: tuple[str, ...], env: dict[str, str]) -> None:
+        recovered.append(env[WORKER_CREDENTIAL_ENV])
+        raise _ExecBoundaryError
+
+    with pytest.raises(_ExecBoundaryError):
+        await exec_bootstrap_handoff_candidate(
+            directory,
+            lease.reference,
+            physical,
+            admission,
+            candidate_argv=("/opt/loom/bin/worker",),
+            now=lambda: _NOW,
+            environment={},
+            execvpe=fake_execvpe,
+        )
+
+    assert recovered == [credential]
+    assert len(admission.requests) == 1
+    assert len(admission.capabilities) == 1
+
+
+# Production break caught: competing trusted-wrapper recoveries may replay the
+# protected registration, but only one process may claim the candidate exec
+# boundary and expose the worker credential to candidate code.
+async def test_trusted_wrapper_concurrent_recovery_launches_candidate_once(
+    tmp_path: Path,
+) -> None:
+    from loom_capacity_executor.trusted_launcher import (
+        WORKER_CREDENTIAL_ENV,
+        exec_bootstrap_handoff_candidate,
+    )
+
+    directory = tmp_path / "handoff"
+    directory.mkdir(mode=0o700)
+    binding = launch_context_fixture().binding
+    store = BootstrapHandoffStore(directory)
+    lease = store.prepare(
+        binding,
+        bootstrap_registration_epoch=1,
+        expires_at=_NOW + timedelta(minutes=5),
+        trusted_launcher_release_sha256=binding.execution.trusted_fleet_release_sha256,
+        protected_admission_route_sha256=_Admission.route_sha256,
+    )
+    physical = _physical(binding)
+    admission = _Admission()
+    credential = await consume_bootstrap_handoff(
+        directory,
+        lease.reference,
+        physical,
+        admission,
+        now=lambda: _NOW,
+    )
+    exec_credentials: list[str] = []
+
+    def fake_execvpe(_file: str, _argv: tuple[str, ...], env: dict[str, str]) -> None:
+        exec_credentials.append(env[WORKER_CREDENTIAL_ENV])
+        raise _ExecBoundaryError
+
+    async def run_one() -> str:
+        try:
+            await exec_bootstrap_handoff_candidate(
+                directory,
+                lease.reference,
+                physical,
+                admission,
+                candidate_argv=("/opt/loom/bin/worker",),
+                now=lambda: _NOW,
+                environment={},
+                execvpe=fake_execvpe,
+            )
+        except _ExecBoundaryError:
+            return "exec"
+        except BootstrapHandoffError as exc:
+            return str(exc)
+        raise AssertionError("candidate exec returned")
+
+    results = await asyncio.gather(run_one(), run_one())
+
+    assert results.count("exec") == 1
+    assert exec_credentials == [credential]
+    assert any("already" in result for result in results)
+
+
+# Production break caught: the shipped trusted-launcher process entry must
+# construct the physical binding and admission route from Slurm launch inputs
+# instead of relying on a test-only helper to inject them.
+async def test_trusted_launcher_process_entry_derives_physical_binding_from_slurm_inputs(
+    tmp_path: Path,
+) -> None:
+    from dataclasses import replace
+
+    from loom_capacity_executor.launch_renderer import (
+        canonical_launch_policy_digest,
+        render_signed_launch,
+    )
+    from loom_capacity_executor.slurm_contracts import (
+        SlurmExecutableIdentityV2,
+        SlurmFileIdentityV2,
+    )
+    from loom_capacity_executor.trusted_launcher import (
+        WORKER_CREDENTIAL_ENV,
+        TrustedLauncherConfigV2,
+        run_trusted_launcher_process,
+    )
+
+    directory = tmp_path / "handoff"
+    directory.mkdir(mode=0o700)
+    admission_directory = tmp_path / "admission"
+    admission_directory.mkdir(mode=0o700)
+    launcher_path = tmp_path / "trusted-launcher"
+    launcher_path.write_text("#!/bin/sh\nexit 70\n", encoding="utf-8")
+    launcher_path.chmod(0o755)
+    context = launch_context_fixture()
+    trusted_config = TrustedLauncherConfigV2(
+        handoff_directory=str(directory),
+        admission_directory=str(admission_directory),
+        admission_directory_sha256=_Admission.route_sha256,
+        candidate_argv=("/opt/loom/bin/worker", "--once"),
+    )
+    config_path = tmp_path / "trusted-launcher-config.json"
+    config_path.write_bytes(canonical_executable_bytes(trusted_config))
+    config_path.chmod(0o600)
+    profile = context.profile.model_copy(
+        update={
+            "launcher": SlurmExecutableIdentityV2(
+                path=str(launcher_path),
+                sha256=hashlib.sha256(launcher_path.read_bytes()).hexdigest(),
+                owner_uid=launcher_path.stat().st_uid,
+            ),
+            "trusted_launcher_config": SlurmFileIdentityV2(
+                path=str(config_path),
+                sha256=hashlib.sha256(config_path.read_bytes()).hexdigest(),
+                owner_uid=config_path.stat().st_uid,
+            ),
+        }
+    )
+    profile = profile.model_copy(update={"controller_authority_sha256": "0" * 64})
+    profile = profile.model_copy(
+        update={"controller_authority_sha256": canonical_launch_policy_digest(profile)}
+    )
+    rendered = render_signed_launch(
+        replace(
+            context,
+            profile=profile,
+            controller_authority=context.controller_authority.model_copy(
+                update={"controller_authority_sha256": profile.controller_authority_sha256}
+            ),
+        )
+    )
+    store = BootstrapHandoffStore(directory)
+    lease = store.prepare(
+        context.binding,
+        bootstrap_registration_epoch=1,
+        expires_at=_NOW + timedelta(minutes=5),
+        trusted_launcher_release_sha256=context.binding.execution.trusted_fleet_release_sha256,
+        protected_admission_route_sha256=_Admission.route_sha256,
+    )
+    bind_bootstrap_handoff_ownership(
+        directory,
+        lease.reference,
+        context.binding,
+        bootstrap_registration_epoch=1,
+        ownership_evidence_sha256=canonical_executable_digest(rendered.ownership_proof),
+        trusted_launcher_release_sha256=context.binding.execution.trusted_fleet_release_sha256,
+        now=lambda: _NOW,
+    )
+    launch_request = rendered.request.model_copy(
+        update={"bootstrap_handoff_reference": lease.reference}
+    )
+    admission = _Admission()
+    exec_calls: list[tuple[str, tuple[str, ...], dict[str, str]]] = []
+
+    def admission_factory(directory_arg: Path, *, expected_directory_sha256: str) -> _Admission:
+        assert directory_arg == admission_directory
+        assert expected_directory_sha256 == _Admission.route_sha256
+        return admission
+
+    def fake_execvpe(file: str, argv: tuple[str, ...], env: dict[str, str]) -> None:
+        exec_calls.append((file, argv, env))
+        raise _ExecBoundaryError
+
+    with pytest.raises(_ExecBoundaryError):
+        await run_trusted_launcher_process(
+            launch_request.trusted_launcher_argv(),
+            environment={"SLURM_JOB_ID": "101"},
+            now=lambda: _NOW,
+            admission_factory=admission_factory,
+            execvpe=fake_execvpe,
+        )
+
+    assert len(exec_calls) == 1
+    assert exec_calls[0][0] == "/opt/loom/bin/worker"
+    assert exec_calls[0][1] == ("/opt/loom/bin/worker", "--once")
+    worker_credential = exec_calls[0][2][WORKER_CREDENTIAL_ENV]
+    assert (
+        admission.requests[0].worker_credential_sha256
+        == hashlib.sha256(worker_credential.encode("ascii")).hexdigest()
+    )
+    assert admission.requests[0].binding == context.binding
+    assert admission.requests[0].slurm_job_id == "101"
+    launch = BootstrapHandoffLaunchV2.model_validate_json(
+        (directory / lease.reference).with_suffix(".launched").read_bytes()
+    )
+    assert launch.physical.binding == context.binding
+    assert launch.physical.slurm_job_id == "101"
+    assert launch.physical.ownership_evidence_sha256 == canonical_executable_digest(
+        rendered.ownership_proof
+    )
+
+
+# Production break caught: the wrapper must not accept an arbitrary changed
+# Slurm ownership token and derive a different local physical binding; the
+# expected signed ownership evidence digest is pinned before registration.
+def test_handoff_physical_resolution_rejects_changed_ownership_token(
+    tmp_path: Path,
+) -> None:
+    from loom_capacity_executor.bootstrap_handoff import (
+        bind_bootstrap_handoff_ownership,
+        resolve_bootstrap_handoff_physical_binding,
+    )
+    from loom_capacity_executor.launch_renderer import render_signed_launch
+
+    directory = tmp_path / "handoff"
+    directory.mkdir(mode=0o700)
+    context = launch_context_fixture()
+    rendered = render_signed_launch(context)
+    store = BootstrapHandoffStore(directory)
+    lease = store.prepare(
+        context.binding,
+        bootstrap_registration_epoch=1,
+        expires_at=_NOW + timedelta(minutes=5),
+        trusted_launcher_release_sha256=context.binding.execution.trusted_fleet_release_sha256,
+        protected_admission_route_sha256=_Admission.route_sha256,
+    )
+    bind_bootstrap_handoff_ownership(
+        directory,
+        lease.reference,
+        context.binding,
+        bootstrap_registration_epoch=1,
+        ownership_evidence_sha256=canonical_executable_digest(rendered.ownership_proof),
+        trusted_launcher_release_sha256=context.binding.execution.trusted_fleet_release_sha256,
+        now=lambda: _NOW,
+    )
+    wrong_token = base64.urlsafe_b64encode(b"\x00" * 32).rstrip(b"=").decode("ascii")
+
+    with pytest.raises(BootstrapHandoffError, match="ownership"):
+        resolve_bootstrap_handoff_physical_binding(
+            directory,
+            lease.reference,
+            operation_id=context.binding.intent_id,
+            slurm_job_id="101",
+            ownership_token=wrong_token,
+            trusted_launcher_release_sha256=context.binding.execution.trusted_fleet_release_sha256,
+            now=lambda: _NOW,
+        )
+
+
 def test_prepare_keeps_concurrent_existing_capability_without_replacement(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -293,6 +717,80 @@ def test_prepare_keeps_concurrent_existing_capability_without_replacement(
     assert lease.bootstrap_sha256 == winner.capability_sha256
     stored = BootstrapHandoffRecordV2.model_validate_json(path.read_bytes())
     assert stored.capability == winner.capability
+
+
+# Production break caught: an existing handoff record is reusable only for the
+# exact requested UTC-normalized expiry; otherwise a stale long-lived capability
+# can be silently rebound to a new launch request.
+def test_prepare_rejects_existing_record_when_expiry_changes(tmp_path: Path) -> None:
+    directory = tmp_path / "handoff"
+    directory.mkdir(mode=0o700)
+    binding = launch_context_fixture().binding
+    store = BootstrapHandoffStore(directory)
+    original_expiry = _NOW + timedelta(minutes=5)
+    changed_expiry = _NOW + timedelta(minutes=10)
+
+    store.prepare(
+        binding,
+        bootstrap_registration_epoch=1,
+        expires_at=original_expiry,
+        trusted_launcher_release_sha256=binding.execution.trusted_fleet_release_sha256,
+        protected_admission_route_sha256=_Admission.route_sha256,
+    )
+
+    with pytest.raises(BootstrapHandoffError, match="expiry"):
+        store.prepare(
+            binding,
+            bootstrap_registration_epoch=1,
+            expires_at=changed_expiry,
+            trusted_launcher_release_sha256=binding.execution.trusted_fleet_release_sha256,
+            protected_admission_route_sha256=_Admission.route_sha256,
+        )
+
+
+# Production break caught: a concurrently published winner must match the same
+# requested expiry as the losing preparer, not just the same binding/profile.
+def test_prepare_rejects_concurrent_record_when_expiry_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    directory = tmp_path / "handoff"
+    directory.mkdir(mode=0o700)
+    binding = launch_context_fixture().binding
+    store = BootstrapHandoffStore(directory)
+    reference = store.reference_for(binding)
+    path = directory / reference
+    winner = BootstrapHandoffRecordV2(
+        binding=binding,
+        bootstrap_registration_epoch=1,
+        capability="w" * 43,
+        capability_sha256=hashlib.sha256(("w" * 43).encode("ascii")).hexdigest(),
+        expires_at=_NOW + timedelta(minutes=5),
+        trusted_launcher_release_sha256=binding.execution.trusted_fleet_release_sha256,
+        protected_admission_route_sha256=_Admission.route_sha256,
+    )
+    original_exists = Path.exists
+    injected = False
+
+    def racing_exists(candidate: Path) -> bool:
+        nonlocal injected
+        if candidate == path and not injected:
+            injected = True
+            path.write_bytes(canonical_executable_bytes(winner))
+            path.chmod(0o600)
+            return False
+        return original_exists(candidate)
+
+    monkeypatch.setattr(Path, "exists", racing_exists)
+
+    with pytest.raises(BootstrapHandoffError, match="expiry"):
+        store.prepare(
+            binding,
+            bootstrap_registration_epoch=1,
+            expires_at=_NOW + timedelta(minutes=10),
+            trusted_launcher_release_sha256=binding.execution.trusted_fleet_release_sha256,
+            protected_admission_route_sha256=_Admission.route_sha256,
+        )
 
 
 async def test_consumer_uses_concurrent_claim_without_replacing_it(

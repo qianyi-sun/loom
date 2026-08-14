@@ -102,6 +102,30 @@ class SlurmExecutableIdentityV2(StrictSlurmV2Model):
         return value
 
 
+class SlurmFileIdentityV2(StrictSlurmV2Model):
+    """Absolute regular file path bound to owner and content digest."""
+
+    path: Annotated[str, Field(min_length=1, max_length=4096)]
+    sha256: Sha256Digest
+    owner_uid: Annotated[int, Field(ge=0, le=(1 << 31) - 1)]
+
+    @field_validator("path")
+    @classmethod
+    def _absolute_path(cls, value: str) -> str:
+        components = value.split("/")[1:]
+        if (
+            "\0" in value
+            or not Path(value).is_absolute()
+            or value == "/"
+            or value.startswith("//")
+            or value.endswith("/")
+            or any(component in {"", ".", ".."} for component in components)
+            or posixpath.normpath(value) != value
+        ):
+            raise ValueError("Slurm file path must be canonical and absolute")
+        return value
+
+
 class SlurmExecutablesV2(StrictSlurmV2Model):
     scontrol: SlurmExecutableIdentityV2
     sacctmgr: SlurmExecutableIdentityV2
@@ -213,6 +237,7 @@ class SlurmLaunchRequestV2(StrictSlurmV2Model):
     generic_tres: Annotated[tuple[SlurmTresValueV2, ...], Field(max_length=MAX_GENERIC_TRES)] = ()
     time_limit_seconds: Annotated[int, Field(gt=0, le=7 * 24 * 60 * 60)]
     launcher: SlurmExecutableIdentityV2
+    trusted_launcher_config: SlurmFileIdentityV2
     launcher_release_sha256: Sha256Digest
     image_digest: Annotated[str, Field(max_length=512, pattern=_IMAGE_DIGEST_PATTERN)]
     ownership_token: OwnershipToken
@@ -260,6 +285,10 @@ class SlurmLaunchRequestV2(StrictSlurmV2Model):
         argv = (
             self.launcher.path,
             f"--launcher-sha256={self.launcher.sha256}",
+            f"--launcher-owner-uid={self.launcher.owner_uid}",
+            f"--launcher-config={self.trusted_launcher_config.path}",
+            f"--launcher-config-sha256={self.trusted_launcher_config.sha256}",
+            f"--launcher-config-owner-uid={self.trusted_launcher_config.owner_uid}",
             f"--operation-id={self.operation_id}",
             f"--image-digest={self.image_digest}",
             f"--release-sha256={self.launcher_release_sha256}",
@@ -445,6 +474,7 @@ __all__ = [
     "SlurmCancelRequestV2",
     "SlurmExecutableIdentityV2",
     "SlurmExecutablesV2",
+    "SlurmFileIdentityV2",
     "SlurmJobObservationV2",
     "SlurmLaunchRequestV2",
     "SlurmResourceV2",

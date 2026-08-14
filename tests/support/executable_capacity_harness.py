@@ -40,11 +40,11 @@ from loom_capacity_agent.lifecycle_store import CapacityAttemptLifecycleStore
 from loom_capacity_agent.store import CapacityAgentStore
 from loom_capacity_executor.bootstrap_handoff import (
     BootstrapHandoffStore,
-    consume_bootstrap_handoff,
 )
 from loom_capacity_executor.client import (
     ExecutableCapacityExecutorClient,
 )
+from loom_capacity_executor.config import ImmutablePoolManifest, PoolExecutorConfig
 from loom_capacity_executor.executable import ExecutablePoolExecutor, ExecutorTickResult
 from loom_capacity_executor.heartbeat import ExecutableHeartbeatLoop
 from loom_capacity_executor.journal import ExecutorJournal
@@ -54,7 +54,25 @@ from loom_capacity_executor.launch_renderer import (
     OperatorResourceDomainV2,
     canonical_launch_policy_digest,
 )
-from loom_capacity_executor.slurm_contracts import SlurmExecutableIdentityV2
+from loom_capacity_executor.runtime import (
+    ActivationRuntimeArtifactV2,
+    AdmissionBindingEntryV2,
+    RoutedExecutableAdmissionClient,
+    build_executable_runtime,
+    canonical_admission_directory_digest,
+    canonical_approved_profiles_digest,
+    write_admission_binding_directory,
+)
+from loom_capacity_executor.slurm_contracts import (
+    SlurmExecutableIdentityV2,
+    SlurmFileIdentityV2,
+    SlurmLaunchRequestV2,
+)
+from loom_capacity_executor.trusted_launcher import (
+    WORKER_CREDENTIAL_ENV,
+    TrustedLauncherConfigV2,
+    run_trusted_launcher_process,
+)
 from loom_capacity_guard.contracts import (
     GuardFenceV1,
     ProtectedAttemptV1,
@@ -153,8 +171,25 @@ def _token_sha256(token: str) -> str:
 
 
 def _write_private(path: Path, value: str) -> Path:
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
     path.write_text(value, encoding="utf-8")
     path.chmod(0o600)
+    return path
+
+
+def _write_private_bytes(path: Path, value: bytes) -> Path:
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    descriptor = os.open(
+        path,
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC | os.O_NOFOLLOW,
+        0o600,
+    )
+    try:
+        os.fchmod(descriptor, 0o600)
+        os.write(descriptor, value)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
     return path
 
 
@@ -204,6 +239,13 @@ class _Worker:
     job_id: str
     registration: ExecutableWorkerRegistrationV2
     credential: str
+
+
+@dataclass(frozen=True, slots=True)
+class _TrustedProcessEntry:
+    process_argv: tuple[str, ...]
+    submitted_launcher_argv: tuple[str, ...]
+    worker_credential: str | None
 
 
 @dataclass(slots=True)
@@ -316,6 +358,7 @@ class _ProtectedAdmissionRouter:
                 request,
                 bootstrap_capability=bootstrap_capability,
             )
+        self._harness._record_worker_registration(request)
         self._registrations[request.binding.intent_id] = request
         return receipt
 
@@ -341,6 +384,100 @@ class _ProtectedAdmissionRouter:
                 request,
                 current_worker_credential=current_worker_credential,
             )
+
+
+class _HarnessAdmissionClient:
+    """Per-subject local test DB client reached only after routed resolution."""
+
+    def __init__(
+        self,
+        harness: ExecutableCapacityHarness,
+        database_url: bytes,
+        *,
+        subject_id: UUID,
+        subject_incarnation: UUID,
+    ) -> None:
+        self._harness = harness
+        self.subject_id = subject_id
+        self.subject_incarnation = subject_incarnation
+        try:
+            resolved_url = database_url.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise RuntimeError("resolved admission URL is not UTF-8") from exc
+        owner = harness._owners_by_subject.get(subject_id)
+        if owner is None or owner.subject_incarnation != subject_incarnation:
+            raise RuntimeError("resolved admission subject is not installed in harness")
+        if resolved_url != _database_value(owner.database, "executor_url"):
+            raise RuntimeError("resolved admission URL differs from subject binding")
+        self._owner = owner
+        self._engine = create_async_engine(
+            make_url(resolved_url),
+            isolation_level="SERIALIZABLE",
+        )
+        self._factory = async_sessionmaker(self._engine, expire_on_commit=False)
+
+    async def aclose(self) -> None:
+        await self._engine.dispose()
+
+    @asynccontextmanager
+    async def _store(self) -> AsyncIterator[ExecutableAdmissionStore]:
+        async with self._factory() as session, session.begin():
+            yield ExecutableAdmissionStore(session, registration=self._owner.registration)
+
+    async def prepare_worker(
+        self,
+        request: ExecutableBootstrapRegistrationV2,
+        *,
+        bootstrap_sha256: str,
+    ) -> Any:
+        async with self._store() as store:
+            return await store.prepare_worker(request, bootstrap_sha256=bootstrap_sha256)
+
+    async def bind_slurm_job(self, request: PhysicalJobBindingV2) -> Any:
+        async with self._store() as store:
+            return await store.bind_slurm_job(request)
+
+    async def observe_intent(self, binding: ExecutableIntentBindingV2) -> Any:
+        async with self._store() as store:
+            return await store.observe_intent(binding)
+
+    async def begin_drain(self, request: Any) -> Any:
+        async with self._store() as store:
+            return await store.begin_drain(request)
+
+    async def withdraw_unregistered_worker(self, request: Any) -> Any:
+        async with self._store() as store:
+            return await store.withdraw_unregistered_worker(request)
+
+    async def register_worker(
+        self,
+        request: ExecutableWorkerRegistrationV2,
+        *,
+        bootstrap_capability: str,
+    ) -> Any:
+        async with self._store() as store:
+            receipt = await store.register_worker(
+                request,
+                bootstrap_capability=bootstrap_capability,
+            )
+        self._harness._record_worker_registration(request)
+        return receipt
+
+    async def acknowledge_release(
+        self,
+        request: ExecutableReleaseRequestV2,
+        *,
+        current_worker_credential: str,
+    ) -> Any:
+        async with self._store() as store:
+            return await store.acknowledge_release(
+                request,
+                current_worker_credential=current_worker_credential,
+            )
+
+    async def admit_claim(self, proposal: ExecutableClaimProposalV2) -> Any:
+        async with self._store() as store:
+            return await store.admit_claim(proposal)
 
 
 @dataclass(slots=True)
@@ -407,6 +544,8 @@ class PoolHarness:
         self.executor: ExecutablePoolExecutor | None = None
         self.journal: ExecutorJournal | None = None
         self.journal_path: Path | None = None
+        self.runtime_config: PoolExecutorConfig | None = None
+        self.runtime_artifact: ActivationRuntimeArtifactV2 | None = None
         self.handoff_directory = harness.root / "bootstrap-handoff" / pool_id
         self.handoff_directory.mkdir(parents=True, mode=0o700, exist_ok=True)
         self.handoff_directory.chmod(0o700)
@@ -425,44 +564,152 @@ class PoolHarness:
         self.registration = registration
         self.ownership_key = ownership_key
         self.journal_path = journal_path
-        self.journal = ExecutorJournal(journal_path)
-        self.journal.__enter__()
         self.heartbeat_sequence = 0
-        self._rebuild_executor()
+        await self._rebuild_executor()
 
-    def _rebuild_executor(self) -> None:
-        if self.registration is None or self.ownership_key is None or self.journal is None:
+    async def _rebuild_executor(self) -> None:
+        if self.registration is None or self.ownership_key is None or self.journal_path is None:
             raise RuntimeError("pool runtime is incomplete")
+        state_directory = self.journal_path.parent
+        state_directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+        state_directory.chmod(0o700)
         self.client = ExecutableCapacityExecutorClient(
             self.registration,
             manager_origin="https://capacity.test",
             bearer_token=_EXECUTOR_TOKENS[self.pool_id],
             http_client=self.harness.http,
         )
-        authority = PoolControllerAuthorityV2(
+        current_context = await self.client.current_execution_context()
+        profiles = self.harness.approved_profiles(self.pool_id)
+        approved_profiles_sha256 = canonical_approved_profiles_digest(profiles)
+        authority = self.fake.backend().authority
+        key_path = _write_private_bytes(
+            self.harness.root
+            / "executor-keys"
+            / f"epoch-{self.harness._epoch_number}"
+            / f"{self.pool_id}.raw",
+            self.ownership_key.private_key.private_bytes_raw(),
+        )
+        bearer_path = _write_private(
+            self.harness.root
+            / "executor-tokens"
+            / f"epoch-{self.harness._epoch_number}"
+            / f"{self.pool_id}.token",
+            _EXECUTOR_TOKENS[self.pool_id],
+        )
+        executables = authority.executables
+        manifest = ImmutablePoolManifest(
             pool_id=cast(Any, self.pool_id),
-            controller_authority_sha256=self.profile.controller_authority_sha256,
+            pool_generation=self.registration.pool_generation,
+            controller_authority_sha256=self.registration.controller_authority_sha256,
+            approved_profiles_sha256=approved_profiles_sha256,
+            executor_id=self.registration.executor_id,
+            executor_incarnation=self.registration.executor_incarnation,
+            local_authority_sha256=self.registration.local_authority_sha256,
+            signing_key_id=self.registration.signing_key_id,
+            signing_key_sha256=self.registration.signing_key_sha256,
+            ownership_key_file=key_path,
+            manager_origin="https://capacity.test",
+            bearer_token_file=bearer_path,
+            tls_ca_file=self.harness._ca_path,
+            tls_certificate_file=self.harness._cert_path,
+            tls_private_key_file=self.harness._key_path,
+            state_directory=state_directory,
+            journal_file=self.journal_path,
+            local_uid=os.geteuid(),
+            slurm_cluster=authority.cluster,
+            controller_host=authority.controller_host,
+            partition=authority.partition,
+            association=authority.account,
+            submitter=authority.submitter,
+            qos=authority.qos,
+            profile_id=self.profile.profile_id,
+            profile_generation=self.profile.profile_generation,
+            profile_digest=self.profile.profile_digest,
+            slurm_executables=tuple(
+                sorted(
+                    (
+                        (name, Path(getattr(executables, name).path))
+                        for name in ("sacct", "sacctmgr", "sbatch", "scancel", "scontrol", "squeue")
+                    ),
+                    key=lambda item: item[0],
+                )
+            ),
+            executor_image=self.profile.image_digest,
+            service_user=self.profile.submitter,
         )
-        self.executor = ExecutablePoolExecutor(
-            self.registration,
-            self.journal,
-            self.client,
-            self.harness._admission,
-            self.fake.backend(),
-            profile=self.profile,
-            controller_authority=authority,
+        self.runtime_config = PoolExecutorConfig(
+            pool_id=cast(Any, self.pool_id),
+            pool_generation=self.registration.pool_generation,
+            executor_id=self.registration.executor_id,
+            executor_incarnation=self.registration.executor_incarnation,
+            controller_authority_sha256=self.registration.controller_authority_sha256,
+            approved_profiles_sha256=approved_profiles_sha256,
+            local_authority_sha256=self.registration.local_authority_sha256,
+            signing_key_id=self.registration.signing_key_id,
+            signing_key_sha256=self.registration.signing_key_sha256,
+            ownership_key_file=key_path,
             ownership_key=self.ownership_key,
-            now=lambda: _FIXED_TIME,
-            bootstrap_handoff_store=self.handoff_store,
+            manager_origin="https://capacity.test",
+            local_uid=os.geteuid(),
+            bearer_token_file=bearer_path,
+            tls_ca_file=self.harness._ca_path,
+            tls_certificate_file=self.harness._cert_path,
+            tls_private_key_file=self.harness._key_path,
+            state_directory=state_directory,
+            journal_file=self.journal_path,
+            slurm_cluster=authority.cluster,
+            controller_host=authority.controller_host,
+            partition=authority.partition,
+            association=authority.account,
+            submitter=authority.submitter,
+            qos=authority.qos,
+            profile_id=self.profile.profile_id,
+            profile_generation=self.profile.profile_generation,
+            profile_digest=self.profile.profile_digest,
+            executor_image=self.profile.image_digest,
+            service_user=self.profile.submitter,
+            manifest=manifest,
+            expected_manifest_sha256=manifest.sha256(),
+            execution=self.registration.execution,
         )
+        admission_directory = self.harness.admission_directory(self.pool_id)
+        admission_directory_sha256 = canonical_admission_directory_digest(admission_directory)
+        self.runtime_artifact = ActivationRuntimeArtifactV2(
+            execution=self.registration.execution,
+            pool_id=cast(Any, self.pool_id),
+            pool_generation=self.registration.pool_generation,
+            executor_id=self.registration.executor_id,
+            executor_incarnation=self.registration.executor_incarnation,
+            controller_authority_sha256=self.registration.controller_authority_sha256,
+            approved_profiles_sha256=approved_profiles_sha256,
+            local_authority_sha256=self.registration.local_authority_sha256,
+            signing_key_id=self.registration.signing_key_id,
+            signing_key_sha256=self.registration.signing_key_sha256,
+            immutable_manifest_sha256=manifest.sha256(),
+            admission_directory=str(admission_directory),
+            admission_directory_sha256=admission_directory_sha256,
+            handoff_directory=str(self.handoff_directory),
+            journal_file=str(self.journal_path),
+            state_directory=str(state_directory),
+            slurm_authority=authority,
+            profiles=profiles,
+        )
+        self.executor = build_executable_runtime(
+            self.runtime_config,
+            self.runtime_artifact,
+            manager_client=self.client,
+            current_context=current_context,
+            admission_client_factory=self.harness.routed_admission_factory,
+            slurm_backend_factory=lambda _authority: self.fake.backend(),
+        )
+        self.journal = self.executor.journal
 
     async def restart(self) -> None:
         if self.journal is None or self.journal_path is None:
             raise RuntimeError("pool executor is not installed")
         self.journal.close()
-        self.journal = ExecutorJournal(self.journal_path)
-        self.journal.__enter__()
-        self._rebuild_executor()
+        await self._rebuild_executor()
 
     async def tick(self) -> ExecutorTickResult:
         if self.executor is None:
@@ -539,6 +786,21 @@ class PoolHarness:
     def cancelled_job_ids(self) -> tuple[str, ...]:
         return tuple(call.argv[-1] for call in self.fake.scancel_calls)
 
+    def runtime_entry_components(self) -> dict[str, object]:
+        if self.executor is None or self.runtime_artifact is None:
+            raise RuntimeError("pool runtime is not installed")
+        config_path = Path(self.profile.trusted_launcher_config.path)
+        return {
+            "runtime_artifact": type(self.runtime_artifact).__name__,
+            "admission_client": type(self.executor.admission).__name__,
+            "profile_count": len(self.executor.profiles),
+            "trusted_launcher_config_verified": (
+                config_path.is_file()
+                and hashlib.sha256(config_path.read_bytes()).hexdigest()
+                == self.profile.trusted_launcher_config.sha256
+            ),
+        }
+
     def close(self) -> None:
         if self.journal is not None:
             self.journal.close()
@@ -568,6 +830,8 @@ class ExecutableCapacityHarness:
         self._owners: dict[str, OwnerHandle] = {}
         self._owners_by_subject: dict[UUID, OwnerHandle] = {}
         self._workers: dict[UUID, _Worker] = {}
+        self._worker_registrations: dict[UUID, ExecutableWorkerRegistrationV2] = {}
+        self._trusted_process_entries: dict[UUID, _TrustedProcessEntry] = {}
         self._intent_launch_ranks: dict[UUID, int] = {}
         self._claims: list[_Claim] = []
         self._admission = _ProtectedAdmissionRouter(self)
@@ -584,6 +848,16 @@ class ExecutableCapacityHarness:
             tuple[PreparedExecutorBindingV2, ExecutorOwnershipKey],
         ] = {}
         self._static_tokens = {index: f"task-13-static-{index}-reporter" for index in (1, 2)}
+        self._admission_root = root / "admission-bindings"
+        self._db_url_root = root / "admission-db-urls"
+        self._trusted_launcher_root = root / "trusted-launcher"
+        for directory in (
+            self._admission_root,
+            self._db_url_root,
+            self._trusted_launcher_root,
+        ):
+            directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+            directory.chmod(0o700)
 
         self.fakes = {
             "gb10": FakeSlurm(
@@ -872,6 +1146,11 @@ class ExecutableCapacityHarness:
                         path=str(self.fakes[pool_id].launcher),
                         sha256=self.fakes[pool_id].launcher_sha256,
                         owner_uid=self.fakes[pool_id].launcher.stat().st_uid,
+                    ),
+                    trusted_launcher_config=SlurmFileIdentityV2(
+                        path=str(self.root / "trusted-launcher" / f"{pool_id}.json"),
+                        sha256=_sha(f"{pool_id}:trusted-launcher-config"),
+                        owner_uid=os.geteuid(),
                     ),
                     trusted_launcher_release_sha256=_TRUSTED_RELEASE,
                     image_digest=(
@@ -1713,8 +1992,141 @@ class ExecutableCapacityHarness:
         )
         response.raise_for_status()
 
+    def admission_directory(self, pool_id: str) -> Path:
+        return self._admission_root / f"epoch-{self._epoch_number}" / pool_id
+
+    def approved_profiles(self, pool_id: str) -> tuple[OperatorLaunchProfileV2, ...]:
+        variants = self.profile_variants[pool_id]
+        return tuple(variants[slots] for slots in sorted(variants))
+
+    def _record_worker_registration(self, request: ExecutableWorkerRegistrationV2) -> None:
+        self._worker_registrations[request.binding.intent_id] = request
+
+    def _worker_registration(self, intent_id: UUID) -> ExecutableWorkerRegistrationV2:
+        try:
+            return self._worker_registrations[intent_id]
+        except KeyError as exc:
+            raise RuntimeError("protected worker registration was not recorded") from exc
+
+    def _routed_admission_client(
+        self,
+        database_url: bytes,
+        *,
+        subject_id: UUID,
+        subject_incarnation: UUID,
+    ) -> _HarnessAdmissionClient:
+        return _HarnessAdmissionClient(
+            self,
+            database_url,
+            subject_id=subject_id,
+            subject_incarnation=subject_incarnation,
+        )
+
+    def routed_admission_factory(
+        self,
+        directory: Path,
+        *,
+        expected_directory_sha256: str,
+    ) -> RoutedExecutableAdmissionClient:
+        return RoutedExecutableAdmissionClient(
+            directory,
+            expected_directory_sha256=expected_directory_sha256,
+            client_factory=self._routed_admission_client,
+        )
+
+    def _admission_entries(self, pool_id: str) -> tuple[AdmissionBindingEntryV2, ...]:
+        entries = []
+        url_directory = self._db_url_root / f"epoch-{self._epoch_number}" / pool_id
+        url_directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+        url_directory.chmod(0o700)
+        for owner in sorted(self._owners.values(), key=lambda item: item.subject_id.hex):
+            if not owner.active:
+                continue
+            database_url = _database_value(owner.database, "executor_url").encode("utf-8")
+            url_file = _write_private_bytes(
+                url_directory / f"{owner.subject_id.hex}-{owner.subject_incarnation.hex}.url",
+                database_url,
+            )
+            entries.append(
+                AdmissionBindingEntryV2(
+                    subject_id=owner.subject_id,
+                    subject_incarnation=owner.subject_incarnation,
+                    configuration_generation=self._configuration_epoch,
+                    deployment_generation=owner.deployment_generation,
+                    candidate_generation=owner.candidate_generation,
+                    protected_admission_sha256=owner.projection.protected_admission_sha256,
+                    database_url_file=str(url_file),
+                    database_url_sha256=hashlib.sha256(database_url).hexdigest(),
+                    environment_name=f"loom-dev-{owner.name}",
+                )
+            )
+        return tuple(entries)
+
+    def _publish_epoch_runtime_files(self) -> None:
+        for pool_id in _POOL_ORDER:
+            admission_directory = self.admission_directory(pool_id)
+            admission_directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+            admission_directory.chmod(0o700)
+            write_admission_binding_directory(
+                admission_directory,
+                self._admission_entries(pool_id),
+            )
+            admission_digest = canonical_admission_directory_digest(admission_directory)
+            config = TrustedLauncherConfigV2(
+                handoff_directory=str(self.pools[pool_id].handoff_directory),
+                admission_directory=str(admission_directory),
+                admission_directory_sha256=admission_digest,
+                candidate_argv=("/usr/bin/true",),
+            )
+            payload = canonical_executable_bytes(config)
+            config_path = _write_private_bytes(
+                self._trusted_launcher_root / f"epoch-{self._epoch_number}" / f"{pool_id}.json",
+                payload,
+            )
+            config_identity = SlurmFileIdentityV2(
+                path=str(config_path),
+                sha256=hashlib.sha256(payload).hexdigest(),
+                owner_uid=os.geteuid(),
+            )
+            self.profile_variants[pool_id] = {
+                slots: (
+                    updated := profile.model_copy(
+                        update={
+                            "trusted_launcher_config": config_identity,
+                            "controller_authority_sha256": "0" * 64,
+                        }
+                    )
+                ).model_copy(
+                    update={"controller_authority_sha256": canonical_launch_policy_digest(updated)}
+                )
+                for slots, profile in self.profile_variants[pool_id].items()
+            }
+
     def _select_execution_profiles(self) -> None:
         for pool_id in _POOL_ORDER:
+            template = cast(
+                DevelopmentSubjectTemplateV1,
+                self.fleet.development_subject_template,
+            )
+            reference = next(item for item in template.profiles if item.pool_id == pool_id)
+            refreshed_variants: dict[int, OperatorLaunchProfileV2] = {}
+            for shape in reference.worker_shapes:
+                profile = self.profile_variants[pool_id][shape.concurrency_slots]
+                refreshed = profile.model_copy(
+                    update={
+                        "profile_id": shape.shape_id,
+                        "profile_generation": reference.profile_generation,
+                        "profile_digest": reference.profile_digest,
+                        "shape_id": shape.shape_id,
+                        "controller_authority_sha256": "0" * 64,
+                    }
+                )
+                refreshed_variants[shape.concurrency_slots] = refreshed.model_copy(
+                    update={
+                        "controller_authority_sha256": canonical_launch_policy_digest(refreshed)
+                    }
+                )
+            self.profile_variants[pool_id] = refreshed_variants
             demanding = tuple(
                 owner
                 for owner in self._owners.values()
@@ -1727,32 +2139,10 @@ class ExecutableCapacityHarness:
                 )
             )
             slots = max((owner.demand_count for owner in demanding), default=1)
-            profile = self.profile_variants[pool_id][slots]
-            template = cast(
-                DevelopmentSubjectTemplateV1,
-                self.fleet.development_subject_template,
-            )
-            reference = next(item for item in template.profiles if item.pool_id == pool_id)
-            shape = next(
-                item for item in reference.worker_shapes if item.concurrency_slots == slots
-            )
-            profile = profile.model_copy(
-                update={
-                    "profile_id": shape.shape_id,
-                    "profile_generation": reference.profile_generation,
-                    "profile_digest": reference.profile_digest,
-                    "shape_id": shape.shape_id,
-                    "controller_authority_sha256": "0" * 64,
-                }
-            )
-            profile = profile.model_copy(
-                update={"controller_authority_sha256": canonical_launch_policy_digest(profile)}
-            )
-            self.profiles[pool_id] = profile
-            self.pools[pool_id].profile = profile
+            self.profiles[pool_id] = self.profile_variants[pool_id][slots]
+            self.pools[pool_id].profile = self.profiles[pool_id]
 
     def _new_executor_material(self) -> None:
-        self._epoch_number += 1
         self._executor_material = {}
         for pool_id in _POOL_ORDER:
             private = Ed25519PrivateKey.from_private_bytes(
@@ -1850,6 +2240,8 @@ class ExecutableCapacityHarness:
     async def _activate_epoch(self) -> None:
         for pool in self.pools.values():
             pool.close()
+        self._epoch_number += 1
+        self._publish_epoch_runtime_files()
         self._select_execution_profiles()
         self._new_executor_material()
         policy = self._execution_policy()
@@ -2020,6 +2412,27 @@ class ExecutableCapacityHarness:
             return ()
         return tuple(dict(item) for item in row.complete_payload["hypothetical_launch_rank"])
 
+    def pool_runtime_entry_components(self, pool_id: str) -> dict[str, object]:
+        return self.pools[pool_id].runtime_entry_components()
+
+    def trusted_launcher_process_entry(
+        self,
+        pool_id: str,
+        intent_id: UUID,
+    ) -> dict[str, bool]:
+        entry = self._trusted_process_entries[intent_id]
+        worker = self._workers[intent_id]
+        if worker.binding.pool_id != pool_id:
+            raise RuntimeError("trusted process evidence differs from pool binding")
+        return {
+            "process_argv_matches_submitted_slurm_argv": (
+                entry.process_argv == entry.submitted_launcher_argv
+            ),
+            "candidate_exec_received_worker_credential": (
+                entry.worker_credential == worker.credential
+            ),
+        }
+
     async def drive_pool(self, pool_id: str) -> ExecutorTickResult:
         pool = self.pools[pool_id]
         for _ in range(8):
@@ -2065,19 +2478,61 @@ class ExecutableCapacityHarness:
             raise RuntimeError("physical binding payload is absent")
         return PhysicalJobBindingV2.model_validate_json(payload)
 
+    def _launch_request(self, pool_id: str, intent_id: UUID) -> SlurmLaunchRequestV2:
+        pool = self.pools[pool_id]
+        if pool.journal is None:
+            raise RuntimeError("pool journal is unavailable")
+        retained = pool.journal.latest("job", str(intent_id))
+        if retained is None:
+            raise RuntimeError("submitted launch request was not journaled")
+        payload = retained.durable_payload()
+        if payload is None:
+            raise RuntimeError("submitted launch request payload is absent")
+        value = json.loads(payload.decode("ascii"))
+        return SlurmLaunchRequestV2.model_validate_json(json.dumps(value["request"]))
+
     async def _trusted_register(self, pool_id: str, intent_id: UUID, job_id: str) -> _Worker:
         binding = await self._binding(intent_id)
         physical = self._physical_binding(pool_id, intent_id)
         if physical.binding != binding or physical.slurm_job_id != job_id:
             raise RuntimeError("physical binding differs from submitted operation")
-        credential = await consume_bootstrap_handoff(
-            self.pools[pool_id].handoff_directory,
-            self.pools[pool_id].handoff_store.reference_for(binding),
-            physical,
-            self._admission,
-            now=lambda: _FIXED_TIME,
+        request = self._launch_request(pool_id, intent_id)
+        process_argv = request.trusted_launcher_argv()
+        submitted_job = self.pools[pool_id].fake.job_snapshot(job_id)
+        batch_script = str(submitted_job.get("batch_script", ""))
+        submitted_argv = process_argv if repr(process_argv) in batch_script else ()
+        captured: dict[str, str | None] = {"credential": None}
+
+        class CandidateExecBoundaryError(Exception):
+            pass
+
+        def capture_execvpe(
+            _file: str,
+            _argv: tuple[str, ...],
+            environment: Mapping[str, str],
+        ) -> None:
+            captured["credential"] = environment.get(WORKER_CREDENTIAL_ENV)
+            raise CandidateExecBoundaryError
+
+        try:
+            await run_trusted_launcher_process(
+                process_argv,
+                environment={"SLURM_JOB_ID": job_id},
+                now=lambda: _FIXED_TIME,
+                admission_factory=self.routed_admission_factory,
+                execvpe=cast(Any, capture_execvpe),
+            )
+        except CandidateExecBoundaryError:
+            pass
+        credential = captured["credential"]
+        if not isinstance(credential, str) or not credential:
+            raise RuntimeError("trusted launcher did not expose a worker credential")
+        registration = self._worker_registration(binding.intent_id)
+        self._trusted_process_entries[intent_id] = _TrustedProcessEntry(
+            process_argv=process_argv,
+            submitted_launcher_argv=submitted_argv,
+            worker_credential=credential,
         )
-        registration = self._admission.last_registration(binding.intent_id)
         worker = _Worker(binding, job_id, registration, credential)
         self._workers[intent_id] = worker
         return worker

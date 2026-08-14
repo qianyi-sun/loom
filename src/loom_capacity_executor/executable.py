@@ -16,7 +16,10 @@ from loom_capacity_agent.admission import (
     PhysicalJobBindingV2,
     ProtectedIntentObservationV2,
 )
-from loom_capacity_executor.bootstrap_handoff import BootstrapHandoffStore
+from loom_capacity_executor.bootstrap_handoff import (
+    BootstrapHandoffStore,
+    bind_bootstrap_handoff_ownership,
+)
 from loom_capacity_executor.client import ExecutorRejectedError
 from loom_capacity_executor.journal import (
     ExecutorJournal,
@@ -967,6 +970,18 @@ class ExecutablePoolExecutor:
                 operation=lambda: self.client.consume_executable_permit(consumption),
             )
             rendered = self.render_launch(work.binding)
+            if self._bootstrap_handoff_store is not None:
+                bind_bootstrap_handoff_ownership(
+                    self._bootstrap_handoff_store.directory,
+                    self._bootstrap_handoff_store.reference_for(work.binding),
+                    work.binding,
+                    bootstrap_registration_epoch=bootstrap_epoch,
+                    ownership_evidence_sha256=canonical_executable_digest(rendered.ownership_proof),
+                    trusted_launcher_release_sha256=(
+                        work.binding.execution.trusted_fleet_release_sha256
+                    ),
+                    now=self._now,
+                )
             self._remember_launch(
                 rendered,
                 bootstrap_registration_epoch=bootstrap_epoch,
@@ -1528,10 +1543,9 @@ class ExecutablePoolExecutor:
     def _observed_generic_resources(
         self,
         item: SlurmJobObservationV2,
+        profile: OperatorLaunchProfileV2,
     ) -> dict[str, int]:
-        mappings = {
-            mapping.tres_name: mapping.resource_name for mapping in self.profile.generic_tres
-        }
+        mappings = {mapping.tres_name: mapping.resource_name for mapping in profile.generic_tres}
         generic: dict[str, int] = {}
         for tres in item.generic_tres:
             resource_name = mappings.get(tres.name)
@@ -1674,8 +1688,13 @@ class ExecutablePoolExecutor:
                 terminal_matches = self._exact_terminal_matches(envelope, terminals)
                 if envelope is not None and len(terminal_matches) == 1:
                     terminal_proofs[terminal_matches[0].job_id] = envelope.rendered.ownership_proof
-        live_records = tuple(
-            ExecutableInventoryRecordV2(
+
+        def live_record(item: SlurmJobObservationV2) -> ExecutableInventoryRecordV2:
+            proof = proofs.get(item.job_id)
+            profile = (
+                self._profile_for(proof.metadata.binding) if proof is not None else self.profile
+            )
+            return ExecutableInventoryRecordV2(
                 physical_identity=item.job_id,
                 physical_kind="slurm-job",
                 authority_scope="dedicated-loom-association",
@@ -1687,22 +1706,18 @@ class ExecutablePoolExecutor:
                     else "unknown"
                 ),
                 resources=ResourceVectorV1(
-                    slots=(
-                        proofs[item.job_id].metadata.binding.resources.slots
-                        if item.job_id in proofs
-                        else 1
-                    ),
+                    slots=(proof.metadata.binding.resources.slots if proof is not None else 1),
                     cpu_millicores=item.cpus * 1_000,
                     memory_bytes=item.memory_bytes,
                     gpu_count=item.gpus,
-                    generic=self._observed_generic_resources(item),
+                    generic=self._observed_generic_resources(item, profile),
                 ),
                 node_ids=item.nodes,
                 controller_evidence_sha256=self._slurm_evidence_digest(item),
-                ownership_proof=proofs.get(item.job_id),
+                ownership_proof=proof,
             )
-            for item in observed
-        )
+
+        live_records = tuple(live_record(item) for item in observed)
         live_identities = {item.physical_identity for item in live_records}
         terminal_records = tuple(
             ExecutableInventoryRecordV2(

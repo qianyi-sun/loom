@@ -87,7 +87,7 @@ async def test_executor_once_heartbeats_before_and_after_complete_inventory(
     assert first.journal_checkpoint_digest == "0" * 64
     assert first.journal_sequence == 0
     assert first.journal_digest == "0" * 64
-    assert inventory.journal_sequence == 2
+    assert inventory.journal_sequence == 3
     assert second.journal_checkpoint_sequence == 0
     assert second.journal_checkpoint_digest == "0" * 64
     assert second.journal_sequence == inventory.journal_sequence + 2
@@ -134,7 +134,7 @@ async def test_response_lost_inventory_is_replayed_byte_for_byte_before_new_inve
     assert result.mode == "inventory-only"
     assert client.inventory_sequence == 1
     assert client.events == [("inventory", 1), ("heartbeat", 2)]
-    assert client.inventories[0].journal_sequence == 2
+    assert client.inventories[0].journal_sequence == 3
 
 
 @pytest.mark.asyncio

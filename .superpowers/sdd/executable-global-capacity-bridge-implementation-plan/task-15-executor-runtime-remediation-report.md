@@ -156,3 +156,100 @@ Final verification on the exact source state before report/ledger:
 
 - Non-blocking existing warning remains in manager integration tests: `StarletteDeprecationWarning` from `fastapi.testclient` importing Starlette `TestClient`.
 - No live activation was performed by design; production activation remains gated on a later operator-supplied non-rendered activation artifact.
+
+## 2026-08-14 resumed controller addendum
+
+This addendum records the follow-up remediation performed after the first
+Task 15C implementation/report commit. It closes the remaining production-entry
+harness and runtime-binding gaps without performing live activation.
+
+### Additional RED evidence
+
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_executable.py -q`
+  - RED: failed in `_publish_inventory` with `UnboundLocalError: cannot access local variable 'envelope'`.
+- `uv run --no-sync pytest tests/integration/test_executable_global_capacity_bridge.py::test_harness_uses_public_runtime_and_trusted_process_entry -q`
+  - RED: failed with `AttributeError: 'ExecutableCapacityHarness' object has no attribute 'pool_runtime_entry_components'`.
+- `uv run --no-sync pytest tests/integration/test_executable_global_capacity_bridge.py::test_harness_uses_public_runtime_and_trusted_process_entry -q`
+  - RED after adding the production-entry assertion: failed with `RuntimeAssemblyError: current execution context differs from activation artifact`.
+- `uv run --no-sync pytest tests/integration/test_executable_global_capacity_bridge.py -q`
+  - RED during second-epoch runtime assembly: failed because the activation artifact approved profile set differed from the controller-local binding.
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_recovery.py -q`
+  - RED: the direct-permit recovery regression reached launch reconstruction without the deterministic bootstrap handoff record that production replay now requires.
+- `uv run --no-sync pytest tests/ops/test_global_fleet_pool_executor_once.py -q`
+  - RED: stale inventory heartbeat sequence expectations still asserted journal sequence `2` after the journal-first heartbeat path now correctly advances to sequence `3`.
+
+### Additional remediation summary
+
+- Fixed terminal inventory publication so the terminal proof envelope is
+  initialized before use.
+- Added `test_harness_uses_public_runtime_and_trusted_process_entry`.
+- Converted the bridge harness to use `current_execution_context()`,
+  `PoolExecutorConfig`, `ActivationRuntimeArtifactV2`,
+  `build_executable_runtime()`, `RoutedExecutableAdmissionClient`, the public
+  heartbeat loop, and `run_trusted_launcher_process()` with the exact
+  `SlurmLaunchRequestV2.trusted_launcher_argv()`.
+- Published owner-only per-epoch admission bindings, trusted launcher config
+  files, and approved profile-set digests from the harness.
+- Normalized runtime current-context comparison so a base
+  `ExecutionContextV2` from the manager can match the logically equivalent
+  artifact `ExecutionAuthorityV2` fields while still rejecting fence drift.
+- Added complete approved profile-set digest binding through
+  `ApprovedLaunchProfileSetV2`, activation artifact config, immutable pool
+  manifest, runtime assembly, and inert checked-in CLI rendering. Positive
+  runtime assembly rejects the zero digest.
+- Updated recovery and ops expectations for deterministic handoff replay and
+  journal-first heartbeat sequencing.
+
+### Additional GREEN evidence on source state before report/ledger append
+
+- `uv run --no-sync pytest tests/integration/test_executable_global_capacity_bridge.py::test_harness_uses_public_runtime_and_trusted_process_entry -q`
+  - `1 passed in 8.69s`
+- `uv run --no-sync pytest tests/integration/test_executable_global_capacity_bridge.py -q`
+  - pass 1: `5 passed in 41.95s`
+  - pass 2: `5 passed in 51.36s`
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_slurm_backend.py tests/unit/test_capacity_executor_executable.py tests/unit/test_capacity_executor_recovery.py tests/unit/test_capacity_executor_client.py tests/unit/test_capacity_executor_admission_client.py tests/unit/test_capacity_executor_config.py tests/unit/test_capacity_executor_runtime.py tests/unit/test_capacity_executor_bootstrap_handoff.py tests/unit/test_capacity_executor_heartbeat.py tests/unit/test_capacity_executor_launch_renderer.py -q`
+  - `205 passed in 10.77s`
+- `uv run --no-sync pytest tests/integration/test_capacity_manager_api.py tests/integration/test_capacity_manager_execution_store.py tests/integration/test_capacity_manager_execution_epoch.py -q`
+  - `112 passed, 1 warning in 27.73s`
+  - later rerun of the same suite: `112 passed, 1 warning in 31.33s`
+- `uv run --no-sync pytest tests/ops/test_global_fleet_pool_executor_once.py tests/ops/test_global_fleet_capacity_shadow_once.py tests/ops/test_capacity_mutation_inventory.py tests/ops/test_capacity_guard_package_boundary.py -q`
+  - `39 passed in 1.55s`
+- `uv run --no-sync pytest tests/loom_cli/test_capacity_control_plane.py -q`
+  - `36 passed in 0.64s`
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_bootstrap_handoff.py tests/unit/test_capacity_executor_heartbeat.py tests/unit/test_capacity_executor_launch_renderer.py -q`
+  - `39 passed in 1.04s`
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_bootstrap_handoff.py tests/unit/test_capacity_executor_executable.py tests/unit/test_capacity_executor_runtime.py -q`
+  - `58 passed in 0.65s`
+- `uv run --no-sync ruff format --check <changed-python-files> && uv run --no-sync ruff check <changed-python-files>`
+  - `23 files already formatted`
+  - `All checks passed!`
+- `uv run --no-sync mypy`
+  - `Success: no issues found in 809 source files`
+- `git diff --check && find docs -maxdepth 1 -type d -name superpowers -print`
+  - exit 0; no output.
+
+Full-repository `ruff format --check .` remains intentionally excluded from the
+Task 15C gate because this repository currently has 845 pre-existing
+unformatted files outside the touched set. The scoped changed-file Ruff format
+and check gates above passed.
+
+### Final verification after report/ledger append
+
+- `uv run --no-sync ruff format --check <23 pending Python files> && uv run --no-sync ruff check <23 pending Python files>`
+  - `23 files already formatted`
+  - `All checks passed!`
+- `uv run --no-sync mypy`
+  - `Success: no issues found in 809 source files`
+- `git diff --check && find docs -maxdepth 1 -type d -name superpowers -print`
+  - exit 0; no output.
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_slurm_backend.py tests/unit/test_capacity_executor_executable.py tests/unit/test_capacity_executor_recovery.py tests/unit/test_capacity_executor_client.py tests/unit/test_capacity_executor_admission_client.py tests/unit/test_capacity_executor_config.py tests/unit/test_capacity_executor_runtime.py tests/unit/test_capacity_executor_bootstrap_handoff.py tests/unit/test_capacity_executor_heartbeat.py tests/unit/test_capacity_executor_launch_renderer.py -q`
+  - `205 passed in 10.82s`
+- `uv run --no-sync pytest tests/integration/test_capacity_manager_api.py tests/integration/test_capacity_manager_execution_store.py tests/integration/test_capacity_manager_execution_epoch.py -q`
+  - `112 passed, 1 warning in 27.35s`
+- `uv run --no-sync pytest tests/integration/test_executable_global_capacity_bridge.py -q`
+  - pass 1: `5 passed in 51.50s`
+  - pass 2: `5 passed in 50.33s`
+- `uv run --no-sync pytest tests/ops/test_global_fleet_pool_executor_once.py tests/ops/test_global_fleet_capacity_shadow_once.py tests/ops/test_capacity_mutation_inventory.py tests/ops/test_capacity_guard_package_boundary.py -q`
+  - `39 passed in 3.14s`
+- `uv run --no-sync pytest tests/loom_cli/test_capacity_control_plane.py -q`
+  - `36 passed in 0.68s`

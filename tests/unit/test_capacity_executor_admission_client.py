@@ -68,6 +68,47 @@ def test_database_client_loads_only_bounded_owner_only_tls_urls(
         )
 
 
+# Production break caught: routed admission resolution already has exact pinned
+# URL bytes, so the database client must be constructible without reopening a
+# mutable pathname after validation.
+def test_database_client_constructs_from_pinned_url_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class Engine:
+        def dispose(self) -> None:  # pragma: no cover - constructor test only
+            return None
+
+    def engine_factory(url: str, **kwargs: object) -> Engine:
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        return Engine()
+
+    monkeypatch.setattr(
+        "loom_capacity_executor.admission_client.create_async_engine", engine_factory
+    )
+
+    client = DatabaseExecutableAdmissionClient.from_database_url_bytes(
+        b"postgresql+psycopg://admission:secret@db.internal/loom_dev_alice?sslmode=verify-full\n",
+        subject_id=UUID(int=1),
+        subject_incarnation=UUID(int=2),
+        timeout_seconds=9,
+    )
+
+    assert client.subject_id == UUID(int=1)
+    assert (
+        captured["url"]
+        == "postgresql+psycopg://admission:secret@db.internal/loom_dev_alice?sslmode=verify-full"
+    )
+    assert captured["kwargs"] == {
+        "connect_args": {"connect_timeout": 9},
+        "isolation_level": "SERIALIZABLE",
+        "pool_timeout": 9,
+        "pool_pre_ping": True,
+    }
+
+
 def test_database_client_configures_pool_and_transaction_timeouts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -23,7 +23,12 @@ from loom_capacity_executor.executable import (
     ProtectedIntentObservationV2,
 )
 from loom_capacity_executor.journal import ExecutorJournal
-from loom_capacity_executor.launch_renderer import TrustedLaunchContextV2
+from loom_capacity_executor.launch_renderer import (
+    OperatorGenericTresMappingV2,
+    OperatorLaunchProfileV2,
+    TrustedLaunchContextV2,
+    canonical_launch_policy_digest,
+)
 from loom_capacity_executor.slurm_contracts import (
     SlurmAccountingHighWaterV2,
     SlurmCancelRequestV2,
@@ -32,6 +37,7 @@ from loom_capacity_executor.slurm_contracts import (
     SlurmTerminalEvidenceV2,
     SlurmTresValueV2,
 )
+from loom_capacity_manager.contracts import ResourceVectorV1
 from loom_capacity_manager.executable_contracts import (
     ExecutableBootstrapRegistrationV2,
     ExecutableExecutorInventoryV2,
@@ -383,6 +389,7 @@ def executor_fixture(
     tmp_path: Path,
     *,
     work: object | None,
+    profiles: tuple[OperatorLaunchProfileV2, ...] | None = None,
 ) -> tuple[
     ExecutablePoolExecutor,
     ExecutorJournal,
@@ -392,6 +399,8 @@ def executor_fixture(
     TrustedLaunchContextV2,
 ]:
     launch = launch_context_fixture()
+    approved_profiles = profiles or (launch.profile,)
+    primary_profile = approved_profiles[0]
     context = ExecutionContextV2.model_validate(
         launch.binding.execution.model_dump(exclude={"allocation_epoch", "executable"})
     )
@@ -418,16 +427,64 @@ def executor_fixture(
         manager,
         admission,
         slurm,
-        profile=launch.profile,
+        profile=primary_profile,
         controller_authority=PoolControllerAuthorityV2(
             pool_id="oldlab",
-            controller_authority_sha256=launch.profile.controller_authority_sha256,
+            controller_authority_sha256=primary_profile.controller_authority_sha256,
         ),
         ownership_key=launch.ownership_key,
+        profiles=approved_profiles,
         now=lambda: _NOW,
         bootstrap_digest=lambda _binding: "b" * 64,
     )
     return executor, journal, manager, admission, slurm, launch
+
+
+def _alternate_generic_profile(base: OperatorLaunchProfileV2) -> OperatorLaunchProfileV2:
+    draft = base.model_copy(
+        update={
+            "profile_id": "oldlab-asic",
+            "profile_generation": base.profile_generation + 1,
+            "profile_digest": "9" * 64,
+            "shape_id": "oldlab-asic-one-slot",
+            "resources": ResourceVectorV1(
+                slots=1,
+                cpu_millicores=base.cpus * 1_000,
+                memory_bytes=base.resources.memory_bytes,
+                gpu_count=0,
+                generic={"asic": 3},
+            ),
+            "generic_tres": (
+                OperatorGenericTresMappingV2(resource_name="asic", tres_name="gres/asic"),
+            ),
+            "controller_authority_sha256": "0" * 64,
+        }
+    )
+    return OperatorLaunchProfileV2.model_validate(
+        draft.model_copy(
+            update={"controller_authority_sha256": canonical_launch_policy_digest(draft)}
+        ).model_dump(mode="python")
+    )
+
+
+def _binding_for_profile(
+    binding: ExecutableIntentBindingV2,
+    profile: OperatorLaunchProfileV2,
+    *,
+    intent_id: UUID,
+) -> ExecutableIntentBindingV2:
+    return binding.model_copy(
+        update={
+            "intent_id": intent_id,
+            "shape_instance_id": f"shape-{profile.shape_id}-{intent_id.int}",
+            "profile_id": profile.profile_id,
+            "profile_generation": profile.profile_generation,
+            "profile_digest": profile.profile_digest,
+            "shape_id": profile.shape_id,
+            "concurrency_slots": profile.concurrency_slots,
+            "resources": profile.resources,
+        }
+    )
 
 
 def permit_fixture(binding: ExecutableIntentBindingV2) -> ExecutableLaunchPermitV2:
@@ -782,6 +839,94 @@ async def test_resource_mismatch_inventory_retains_owned_binding_for_quarantine(
         "gpu_a100": 2,
         unexpected_resource: 1,
     }
+    journal.close()
+
+
+# Production break caught: live owned-job inventory must decode Slurm generic
+# TRES with the profile bound in that job's ownership proof, not the executor's
+# arbitrary primary profile.
+async def test_live_inventory_maps_generic_tres_with_each_owned_job_profile(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    primary = launch.profile
+    secondary = _alternate_generic_profile(primary)
+    binding = _binding_for_profile(
+        launch.binding,
+        secondary,
+        intent_id=UUID("00000000-0000-0000-0000-000000000302"),
+    )
+    executor, journal, manager, _admission, _slurm, _launch = executor_fixture(
+        tmp_path,
+        work=permit_fixture(binding),
+        profiles=(primary, secondary),
+    )
+
+    await executor.tick()
+    manager.work = None
+    result = await executor.tick()
+
+    assert result.status == "inventory-published"
+    record = manager.inventories[-1].records[0]
+    assert record.ownership_proof is not None
+    assert record.ownership_proof.metadata.binding == binding
+    assert record.resources.generic == {"asic": 3}
+    assert record.resources == binding.resources
+    journal.close()
+
+
+# Production break caught: terminal owned-job inventory must retain the exact
+# profile-bound resources for a non-primary profile so retirement evidence is
+# not decoded through the wrong resource vocabulary.
+async def test_terminal_inventory_keeps_generic_resources_from_owned_job_profile(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    primary = launch.profile
+    secondary = _alternate_generic_profile(primary)
+    binding = _binding_for_profile(
+        launch.binding,
+        secondary,
+        intent_id=UUID("00000000-0000-0000-0000-000000000303"),
+    )
+    executor, journal, manager, _admission, slurm, _launch = executor_fixture(
+        tmp_path,
+        work=permit_fixture(binding),
+        profiles=(primary, secondary),
+    )
+
+    await executor.tick()
+    job = slurm.jobs.pop()
+    slurm.terminal_jobs = (
+        SlurmTerminalEvidenceV2(
+            cluster=job.cluster,
+            job_id=job.job_id,
+            state="COMPLETED",
+            submitter=job.submitter,
+            account=job.account,
+            partition=job.partition,
+            submitted_at=_NOW,
+            started_at=_NOW,
+            ended_at=_NOW + timedelta(minutes=1),
+            elapsed_seconds=60,
+            exit_code="0:0",
+            cpus=job.cpus,
+            memory_bytes=job.memory_bytes,
+            gpus=job.gpus,
+            generic_tres=job.generic_tres,
+            nodes=binding.node_ids,
+            ownership_token=job.ownership_token,
+        ),
+    )
+    manager.work = None
+    result = await executor.tick()
+
+    assert result.status == "inventory-published"
+    record = manager.inventories[-1].records[0]
+    assert record.state == "terminal"
+    assert record.ownership_proof is not None
+    assert record.ownership_proof.metadata.binding == binding
+    assert record.resources == binding.resources
     journal.close()
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import errno
 import hashlib
 import os
@@ -89,6 +90,41 @@ class BootstrapHandoffCredentialV2(StrictV2Model):
         return value.astimezone(UTC)
 
 
+class BootstrapHandoffOwnershipV2(StrictV2Model):
+    binding: ExecutableIntentBindingV2
+    bootstrap_registration_epoch: Annotated[int, Field(gt=0, le=(1 << 63) - 1)]
+    ownership_evidence_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    expires_at: datetime
+    trusted_launcher_release_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+
+    @field_validator("expires_at")
+    @classmethod
+    def _expires_at(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("handoff ownership expiry must be timezone-aware")
+        return value.astimezone(UTC)
+
+
+class BootstrapHandoffLaunchV2(StrictV2Model):
+    binding: ExecutableIntentBindingV2
+    bootstrap_registration_epoch: Annotated[int, Field(gt=0, le=(1 << 63) - 1)]
+    capability_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    expires_at: datetime
+    trusted_launcher_release_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    protected_admission_route_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    physical: PhysicalJobBindingV2
+    worker_registration: ExecutableWorkerRegistrationV2
+    worker_credential_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    launched_at: datetime
+
+    @field_validator("expires_at", "launched_at")
+    @classmethod
+    def _aware_timestamp(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("handoff launch timestamp must be timezone-aware")
+        return value.astimezone(UTC)
+
+
 def _private_directory(path: Path) -> None:
     try:
         metadata = path.lstat()
@@ -167,6 +203,12 @@ def _record_path(directory: Path, reference: str) -> Path:
     return directory / reference
 
 
+def _normalize_expiry(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise BootstrapHandoffError("handoff expiry must be timezone-aware")
+    return value.astimezone(UTC)
+
+
 def _publish_private_new(path: Path, payload: bytes) -> bool:
     temporary = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp")
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
@@ -234,6 +276,7 @@ class BootstrapHandoffStore:
         trusted_launcher_release_sha256: str,
         protected_admission_route_sha256: str,
     ) -> BootstrapHandoffLease:
+        expected_expires_at = _normalize_expiry(expires_at)
         reference = self.reference_for(binding)
         path = _record_path(self.directory, reference)
         if path.exists():
@@ -244,6 +287,7 @@ class BootstrapHandoffStore:
                 bootstrap_registration_epoch=bootstrap_registration_epoch,
                 trusted_launcher_release_sha256=trusted_launcher_release_sha256,
                 protected_admission_route_sha256=protected_admission_route_sha256,
+                expected_expires_at=expected_expires_at,
                 now=None,
             )
             return BootstrapHandoffLease(
@@ -256,7 +300,7 @@ class BootstrapHandoffStore:
             bootstrap_registration_epoch=bootstrap_registration_epoch,
             capability=capability,
             capability_sha256=hashlib.sha256(capability.encode("ascii")).hexdigest(),
-            expires_at=expires_at,
+            expires_at=expected_expires_at,
             trusted_launcher_release_sha256=trusted_launcher_release_sha256,
             protected_admission_route_sha256=protected_admission_route_sha256,
         )
@@ -268,6 +312,7 @@ class BootstrapHandoffStore:
                 bootstrap_registration_epoch=bootstrap_registration_epoch,
                 trusted_launcher_release_sha256=trusted_launcher_release_sha256,
                 protected_admission_route_sha256=protected_admission_route_sha256,
+                expected_expires_at=expected_expires_at,
                 now=None,
             )
         return BootstrapHandoffLease(reference=reference, bootstrap_sha256=record.capability_sha256)
@@ -286,6 +331,7 @@ class BootstrapHandoffStore:
         bootstrap_registration_epoch: int,
         trusted_launcher_release_sha256: str,
         protected_admission_route_sha256: str,
+        expected_expires_at: datetime | None,
         now: datetime | None,
     ) -> None:
         if record.protected_admission_route_sha256 != protected_admission_route_sha256:
@@ -298,6 +344,8 @@ class BootstrapHandoffStore:
             != record.capability_sha256
         ):
             raise BootstrapHandoffError("handoff record binding changed")
+        if expected_expires_at is not None and record.expires_at != expected_expires_at:
+            raise BootstrapHandoffError("handoff record expiry changed")
         if now is not None and record.expires_at <= now:
             raise BootstrapHandoffError("handoff record expired")
 
@@ -314,6 +362,20 @@ def _load_credential(path: Path) -> BootstrapHandoffCredentialV2:
         return BootstrapHandoffCredentialV2.model_validate_json(_open_private_regular(path))
     except ValueError as exc:
         raise BootstrapHandoffError("handoff credential is invalid") from exc
+
+
+def _load_ownership(path: Path) -> BootstrapHandoffOwnershipV2:
+    try:
+        return BootstrapHandoffOwnershipV2.model_validate_json(_open_private_regular(path))
+    except ValueError as exc:
+        raise BootstrapHandoffError("handoff ownership binding is invalid") from exc
+
+
+def _load_launch(path: Path) -> BootstrapHandoffLaunchV2:
+    try:
+        return BootstrapHandoffLaunchV2.model_validate_json(_open_private_regular(path))
+    except ValueError as exc:
+        raise BootstrapHandoffError("handoff launch marker is invalid") from exc
 
 
 def _claim_for(
@@ -352,6 +414,25 @@ def _credential_for(claim: BootstrapHandoffClaimV2) -> BootstrapHandoffCredentia
     )
 
 
+def _launch_for(
+    credential: BootstrapHandoffCredentialV2, *, launched_at: datetime
+) -> BootstrapHandoffLaunchV2:
+    return BootstrapHandoffLaunchV2(
+        binding=credential.binding,
+        bootstrap_registration_epoch=credential.bootstrap_registration_epoch,
+        capability_sha256=credential.capability_sha256,
+        expires_at=credential.expires_at,
+        trusted_launcher_release_sha256=credential.trusted_launcher_release_sha256,
+        protected_admission_route_sha256=credential.protected_admission_route_sha256,
+        physical=credential.physical,
+        worker_registration=credential.worker_registration,
+        worker_credential_sha256=hashlib.sha256(
+            credential.worker_credential.encode("ascii")
+        ).hexdigest(),
+        launched_at=launched_at,
+    )
+
+
 def _assert_claim(
     claim: BootstrapHandoffClaimV2,
     *,
@@ -365,6 +446,7 @@ def _assert_claim(
         bootstrap_registration_epoch=physical.bootstrap_registration_epoch,
         trusted_launcher_release_sha256=physical.binding.execution.trusted_fleet_release_sha256,
         protected_admission_route_sha256=protected_admission_route_sha256,
+        expected_expires_at=None,
         now=now,
     )
     registration = claim.worker_registration
@@ -410,6 +492,35 @@ def _assert_credential(
         raise BootstrapHandoffError("handoff credential registration changed")
 
 
+def _assert_launch(
+    launch: BootstrapHandoffLaunchV2,
+    *,
+    physical: PhysicalJobBindingV2,
+    protected_admission_route_sha256: str,
+    now: datetime,
+) -> None:
+    if (
+        launch.binding != physical.binding
+        or launch.bootstrap_registration_epoch != physical.bootstrap_registration_epoch
+        or launch.trusted_launcher_release_sha256
+        != physical.binding.execution.trusted_fleet_release_sha256
+        or launch.protected_admission_route_sha256 != protected_admission_route_sha256
+        or launch.physical != physical
+    ):
+        raise BootstrapHandoffError("handoff launch binding changed")
+    if launch.expires_at <= now:
+        raise BootstrapHandoffError("handoff launch expired")
+    registration = launch.worker_registration
+    if (
+        registration.binding != physical.binding
+        or registration.bootstrap_registration_epoch != physical.bootstrap_registration_epoch
+        or registration.protected_registration_epoch != physical.bootstrap_registration_epoch + 1
+        or registration.slurm_job_id != physical.slurm_job_id
+        or registration.worker_credential_sha256 != launch.worker_credential_sha256
+    ):
+        raise BootstrapHandoffError("handoff launch registration changed")
+
+
 def _route_sha256(admission: object, binding: ExecutableIntentBindingV2) -> str:
     route = getattr(admission, "bootstrap_handoff_route_sha256", None)
     if not callable(route):
@@ -422,6 +533,151 @@ def _route_sha256(admission: object, binding: ExecutableIntentBindingV2) -> str:
     ):
         raise BootstrapHandoffError("handoff admission route binding is invalid")
     return value
+
+
+def _ownership_digest_from_token(token: str) -> str:
+    try:
+        decoded = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4))
+    except (ValueError, TypeError) as exc:
+        raise BootstrapHandoffError("handoff ownership token is invalid") from exc
+    if len(decoded) != 32:
+        raise BootstrapHandoffError("handoff ownership token digest is invalid")
+    return decoded.hex()
+
+
+def bind_bootstrap_handoff_ownership(
+    directory: Path,
+    reference: str,
+    binding: ExecutableIntentBindingV2,
+    *,
+    bootstrap_registration_epoch: int,
+    ownership_evidence_sha256: str,
+    trusted_launcher_release_sha256: str,
+    now: Callable[[], datetime],
+) -> None:
+    """Durably bind the expected signed ownership evidence before Slurm launch."""
+
+    _private_directory(directory)
+    path = _record_path(directory, reference)
+    current = now()
+    if current.tzinfo is None or current.utcoffset() is None:
+        raise BootstrapHandoffError("handoff ownership time must be timezone-aware")
+    current = current.astimezone(UTC)
+    record = BootstrapHandoffStore(directory)._load(path)
+    BootstrapHandoffStore._assert_record(
+        record,
+        binding=binding,
+        bootstrap_registration_epoch=bootstrap_registration_epoch,
+        trusted_launcher_release_sha256=trusted_launcher_release_sha256,
+        protected_admission_route_sha256=record.protected_admission_route_sha256,
+        expected_expires_at=None,
+        now=current,
+    )
+    ownership = BootstrapHandoffOwnershipV2(
+        binding=binding,
+        bootstrap_registration_epoch=bootstrap_registration_epoch,
+        ownership_evidence_sha256=ownership_evidence_sha256,
+        expires_at=record.expires_at,
+        trusted_launcher_release_sha256=trusted_launcher_release_sha256,
+    )
+    ownership_path = path.with_suffix(".ownership")
+    if not _publish_private_new(ownership_path, canonical_executable_bytes(ownership)):
+        retained = _load_ownership(ownership_path)
+        if retained != ownership:
+            raise BootstrapHandoffError("handoff ownership binding changed")
+
+
+def _physical_binding_for(
+    *,
+    binding: ExecutableIntentBindingV2,
+    bootstrap_registration_epoch: int,
+    slurm_job_id: str,
+    ownership_token: str,
+) -> PhysicalJobBindingV2:
+    return PhysicalJobBindingV2(
+        operation_id=uuid5(_OPERATION_NAMESPACE, f"physical-bind:{binding.intent_id}"),
+        binding=binding,
+        bootstrap_registration_epoch=bootstrap_registration_epoch,
+        slurm_job_id=slurm_job_id,
+        ownership_evidence_sha256=_ownership_digest_from_token(ownership_token),
+    )
+
+
+def resolve_bootstrap_handoff_physical_binding(
+    directory: Path,
+    reference: str,
+    *,
+    operation_id: UUID,
+    slurm_job_id: str,
+    ownership_token: str,
+    trusted_launcher_release_sha256: str,
+    now: Callable[[], datetime],
+) -> PhysicalJobBindingV2:
+    """Derive the protected physical binding from Slurm argv/env plus handoff state."""
+
+    _private_directory(directory)
+    path = _record_path(directory, reference)
+    current = now()
+    if current.tzinfo is None or current.utcoffset() is None:
+        raise BootstrapHandoffError("handoff physical binding time must be timezone-aware")
+    current = current.astimezone(UTC)
+    launched = path.with_suffix(".launched")
+    credential_path = path.with_suffix(".credential")
+    used = path.with_suffix(".used")
+    ownership_path = path.with_suffix(".ownership")
+    retained_physical: PhysicalJobBindingV2 | None = None
+    if launched.exists() or launched.is_symlink():
+        launch = _load_launch(launched)
+        binding = launch.binding
+        bootstrap_registration_epoch = launch.bootstrap_registration_epoch
+        expires_at = launch.expires_at
+        retained_physical = launch.physical
+        release = launch.trusted_launcher_release_sha256
+    elif credential_path.exists() or credential_path.is_symlink():
+        credential = _load_credential(credential_path)
+        binding = credential.binding
+        bootstrap_registration_epoch = credential.bootstrap_registration_epoch
+        expires_at = credential.expires_at
+        retained_physical = credential.physical
+        release = credential.trusted_launcher_release_sha256
+    elif used.exists() or used.is_symlink():
+        claim = _load_claim(used)
+        binding = claim.record.binding
+        bootstrap_registration_epoch = claim.record.bootstrap_registration_epoch
+        expires_at = claim.record.expires_at
+        retained_physical = claim.physical
+        release = claim.record.trusted_launcher_release_sha256
+    else:
+        record = BootstrapHandoffStore(directory)._load(path)
+        binding = record.binding
+        bootstrap_registration_epoch = record.bootstrap_registration_epoch
+        expires_at = record.expires_at
+        release = record.trusted_launcher_release_sha256
+    if operation_id != binding.intent_id:
+        raise BootstrapHandoffError("handoff operation id differs from launch binding")
+    if release != trusted_launcher_release_sha256:
+        raise BootstrapHandoffError("handoff trusted launcher release changed")
+    if expires_at <= current:
+        raise BootstrapHandoffError("handoff record expired")
+    physical = _physical_binding_for(
+        binding=binding,
+        bootstrap_registration_epoch=bootstrap_registration_epoch,
+        slurm_job_id=slurm_job_id,
+        ownership_token=ownership_token,
+    )
+    if retained_physical is None:
+        ownership = _load_ownership(ownership_path)
+        if (
+            ownership.binding != binding
+            or ownership.bootstrap_registration_epoch != bootstrap_registration_epoch
+            or ownership.trusted_launcher_release_sha256 != trusted_launcher_release_sha256
+            or ownership.expires_at <= current
+            or ownership.ownership_evidence_sha256 != physical.ownership_evidence_sha256
+        ):
+            raise BootstrapHandoffError("handoff ownership binding changed")
+    if retained_physical is not None and retained_physical != physical:
+        raise BootstrapHandoffError("handoff physical binding changed")
+    return physical
 
 
 async def consume_bootstrap_handoff(
@@ -438,11 +694,21 @@ async def consume_bootstrap_handoff(
     path = _record_path(directory, reference)
     used = path.with_suffix(".used")
     credential_path = path.with_suffix(".credential")
+    launched = path.with_suffix(".launched")
     current = now()
     if current.tzinfo is None or current.utcoffset() is None:
         raise BootstrapHandoffError("handoff consumer time must be timezone-aware")
     current = current.astimezone(UTC)
     protected_admission_route_sha256 = _route_sha256(admission, physical.binding)
+    if launched.exists() or launched.is_symlink():
+        launch = _load_launch(launched)
+        _assert_launch(
+            launch,
+            physical=physical,
+            protected_admission_route_sha256=protected_admission_route_sha256,
+            now=current,
+        )
+        raise BootstrapHandoffError("handoff already launched")
     if credential_path.exists() or credential_path.is_symlink():
         credential = _load_credential(credential_path)
         _assert_credential(
@@ -469,6 +735,7 @@ async def consume_bootstrap_handoff(
                     physical.binding.execution.trusted_fleet_release_sha256
                 ),
                 protected_admission_route_sha256=protected_admission_route_sha256,
+                expected_expires_at=None,
                 now=current,
             )
             claim = _claim_for(record, physical)
@@ -511,12 +778,80 @@ async def consume_bootstrap_handoff(
     return credential.worker_credential
 
 
+def claim_bootstrap_handoff_launch(
+    directory: Path,
+    reference: str,
+    physical: PhysicalJobBindingV2,
+    admission: object,
+    *,
+    now: Callable[[], datetime],
+) -> str:
+    """Atomically claim the candidate-exec boundary for a recovered credential."""
+
+    _private_directory(directory)
+    path = _record_path(directory, reference)
+    used = path.with_suffix(".used")
+    credential_path = path.with_suffix(".credential")
+    launched = path.with_suffix(".launched")
+    current = now()
+    if current.tzinfo is None or current.utcoffset() is None:
+        raise BootstrapHandoffError("handoff launch time must be timezone-aware")
+    current = current.astimezone(UTC)
+    protected_admission_route_sha256 = _route_sha256(admission, physical.binding)
+    if launched.exists() or launched.is_symlink():
+        launch = _load_launch(launched)
+        _assert_launch(
+            launch,
+            physical=physical,
+            protected_admission_route_sha256=protected_admission_route_sha256,
+            now=current,
+        )
+        raise BootstrapHandoffError("handoff already launched")
+    try:
+        credential = _load_credential(credential_path)
+    except BootstrapHandoffError as exc:
+        raise BootstrapHandoffError(
+            "handoff credential is unavailable or already launched"
+        ) from exc
+    _assert_credential(
+        credential,
+        physical=physical,
+        protected_admission_route_sha256=protected_admission_route_sha256,
+        now=current,
+    )
+    launch = _launch_for(credential, launched_at=current)
+    if not _publish_private_new(launched, canonical_executable_bytes(launch)):
+        launch = _load_launch(launched)
+        _assert_launch(
+            launch,
+            physical=physical,
+            protected_admission_route_sha256=protected_admission_route_sha256,
+            now=current,
+        )
+        raise BootstrapHandoffError("handoff already launched")
+    changed = _unlink_private_if_present(credential_path, label="handoff credential")
+    changed = _unlink_private_if_present(used, label="handoff claim") or changed
+    changed = _unlink_private_if_present(path, label="handoff record") or changed
+    changed = (
+        _unlink_private_if_present(path.with_suffix(".ownership"), label="handoff ownership")
+        or changed
+    )
+    if changed:
+        _fsync_directory(directory)
+    return credential.worker_credential
+
+
 __all__ = [
     "BootstrapHandoffClaimV2",
     "BootstrapHandoffCredentialV2",
     "BootstrapHandoffError",
+    "BootstrapHandoffLaunchV2",
     "BootstrapHandoffLease",
+    "BootstrapHandoffOwnershipV2",
     "BootstrapHandoffRecordV2",
     "BootstrapHandoffStore",
+    "bind_bootstrap_handoff_ownership",
+    "claim_bootstrap_handoff_launch",
     "consume_bootstrap_handoff",
+    "resolve_bootstrap_handoff_physical_binding",
 ]

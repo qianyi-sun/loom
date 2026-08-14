@@ -20,6 +20,32 @@ from tests.support.executable_capacity_harness import ExecutableCapacityHarness
 pytestmark = pytest.mark.asyncio
 
 
+async def test_harness_uses_public_runtime_and_trusted_process_entry(
+    executable_capacity_harness: ExecutableCapacityHarness,
+) -> None:
+    alice = await executable_capacity_harness.add_owner("alice", "a" * 64)
+    await alice.publish_x86_demand(1)
+    await executable_capacity_harness.activate_next_epoch()
+
+    assert executable_capacity_harness.pool_runtime_entry_components("oldlab") == {
+        "runtime_artifact": "ActivationRuntimeArtifactV2",
+        "admission_client": "RoutedExecutableAdmissionClient",
+        "profile_count": 2,
+        "trusted_launcher_config_verified": True,
+    }
+
+    await executable_capacity_harness.reconcile()
+    submitted = await executable_capacity_harness.drive_pool("oldlab")
+    assert submitted.operation_id is not None
+    assert executable_capacity_harness.trusted_launcher_process_entry(
+        "oldlab",
+        submitted.operation_id,
+    ) == {
+        "process_argv_matches_submitted_slurm_argv": True,
+        "candidate_exec_received_worker_credential": True,
+    }
+
+
 async def test_two_owners_share_both_pools_without_cross_binding(
     executable_capacity_harness: ExecutableCapacityHarness,
 ) -> None:

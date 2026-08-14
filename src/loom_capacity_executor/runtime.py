@@ -5,10 +5,12 @@ from __future__ import annotations
 import errno
 import hashlib
 import hmac
+import json
 import os
 import secrets
 import stat
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, Literal
 from uuid import UUID
@@ -58,6 +60,15 @@ class AdmissionBindingResolutionError(RuntimeError):
 
 class RuntimeAssemblyError(RuntimeError):
     """A positive executor runtime artifact failed exact immutable validation."""
+
+
+def _execution_context_payload(value: ExecutionContextV2) -> dict[str, Any]:
+    if not isinstance(value, ExecutionContextV2):
+        raise RuntimeAssemblyError("execution context is invalid")
+    return value.model_dump(
+        mode="json",
+        exclude={"allocation_epoch", "executable"},
+    )
 
 
 class AdmissionBindingEntryV2(StrictV2Model):
@@ -122,6 +133,65 @@ class AdmissionBindingDirectoryV2(StrictV2Model):
         )
 
 
+class ApprovedLaunchProfileSetV2(StrictV2Model):
+    """Complete positive approved profile set for one pool runtime."""
+
+    profiles: Annotated[tuple[OperatorLaunchProfileV2, ...], Field(min_length=1)]
+
+    @field_validator("profiles")
+    @classmethod
+    def _canonical_profiles(
+        cls,
+        value: tuple[OperatorLaunchProfileV2, ...],
+    ) -> tuple[OperatorLaunchProfileV2, ...]:
+        def resource_digest(item: OperatorLaunchProfileV2) -> str:
+            encoded = json.dumps(
+                item.resources.model_dump(mode="json"),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            ).encode("ascii")
+            return hashlib.sha256(encoded).hexdigest()
+
+        keys = [
+            (
+                item.pool_id,
+                item.pool_generation,
+                item.profile_id,
+                item.profile_generation,
+                item.profile_digest,
+                item.shape_id,
+                item.concurrency_slots,
+                resource_digest(item),
+            )
+            for item in value
+        ]
+        if len(keys) != len(set(keys)):
+            raise ValueError("duplicate approved runtime profile")
+        return tuple(
+            sorted(
+                value,
+                key=lambda item: (
+                    item.pool_id,
+                    item.pool_generation,
+                    item.profile_id,
+                    item.profile_generation,
+                    item.profile_digest,
+                    item.shape_id,
+                    item.concurrency_slots,
+                    resource_digest(item),
+                ),
+            )
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedAdmissionBinding:
+    entry: AdmissionBindingEntryV2
+    database_url: bytes
+
+
 class ActivationRuntimeArtifactV2(StrictV2Model):
     """Operator-supplied immutable positive runtime artifact for one pool executor."""
 
@@ -131,6 +201,7 @@ class ActivationRuntimeArtifactV2(StrictV2Model):
     executor_id: Annotated[str, Field(min_length=1, max_length=128)]
     executor_incarnation: UUID
     controller_authority_sha256: Digest
+    approved_profiles_sha256: Digest
     local_authority_sha256: Digest
     signing_key_id: Annotated[str, Field(min_length=1, max_length=128)]
     signing_key_sha256: Digest
@@ -297,7 +368,9 @@ def build_executable_runtime(
         raise RuntimeAssemblyError("executor config is invalid")
     if not isinstance(artifact, ActivationRuntimeArtifactV2):
         raise RuntimeAssemblyError("activation runtime artifact is invalid")
-    if current_context != artifact.execution:
+    if _execution_context_payload(current_context) != _execution_context_payload(
+        artifact.execution
+    ):
         raise RuntimeAssemblyError("current execution context differs from activation artifact")
     _assert_config_artifact_binding(config, artifact)
     _assert_profiles(config, artifact)
@@ -345,6 +418,13 @@ def _assert_config_artifact_binding(
     config: PoolExecutorConfig,
     artifact: ActivationRuntimeArtifactV2,
 ) -> None:
+    if not hmac.compare_digest(
+        artifact.approved_profiles_sha256,
+        config.approved_profiles_sha256,
+    ):
+        raise RuntimeAssemblyError(
+            "activation artifact approved profile set differs from controller-local binding"
+        )
     if (
         artifact.pool_id != config.pool_id
         or artifact.pool_generation != config.pool_generation
@@ -365,6 +445,11 @@ def _assert_config_artifact_binding(
 
 
 def _assert_profiles(config: PoolExecutorConfig, artifact: ActivationRuntimeArtifactV2) -> None:
+    profile_set_digest = canonical_approved_profiles_digest(artifact.profiles)
+    if not hmac.compare_digest(profile_set_digest, artifact.approved_profiles_sha256):
+        raise RuntimeAssemblyError("activation artifact approved profile set digest changed")
+    if artifact.approved_profiles_sha256 == "0" * 64:
+        raise RuntimeAssemblyError("activation artifact approved profile set is not activated")
     seen: set[tuple[str, int, str, str, int, str]] = set()
     for profile in artifact.profiles:
         policy_digest = canonical_launch_policy_digest(profile)
@@ -398,6 +483,15 @@ def _assert_profiles(config: PoolExecutorConfig, artifact: ActivationRuntimeArti
         for profile in artifact.profiles
     ):
         raise RuntimeAssemblyError("activation artifact does not contain local runtime profile")
+
+
+def canonical_approved_profiles_digest(profiles: tuple[OperatorLaunchProfileV2, ...]) -> str:
+    """Digest the complete approved profile set, including per-profile TRES mappings."""
+
+    try:
+        return canonical_executable_digest(ApprovedLaunchProfileSetV2(profiles=profiles))
+    except ValueError as exc:
+        raise RuntimeAssemblyError("approved profile set is invalid") from exc
 
 
 def _private_directory(path: Path) -> None:
@@ -544,13 +638,13 @@ def canonical_admission_directory_digest(directory: Path) -> str:
 
 
 def _default_client_factory(
-    path: Path,
+    database_url: bytes,
     *,
     subject_id: UUID,
     subject_incarnation: UUID,
 ) -> DatabaseExecutableAdmissionClient:
-    return DatabaseExecutableAdmissionClient.from_database_url_file(
-        path,
+    return DatabaseExecutableAdmissionClient.from_database_url_bytes(
+        database_url,
         subject_id=subject_id,
         subject_incarnation=subject_incarnation,
     )
@@ -578,7 +672,7 @@ class RoutedExecutableAdmissionClient:
             raise AdmissionBindingResolutionError("admission directory digest changed")
         return document
 
-    def _resolve(self, binding: ExecutableIntentBindingV2) -> AdmissionBindingEntryV2:
+    def _resolve(self, binding: ExecutableIntentBindingV2) -> _ResolvedAdmissionBinding:
         if not isinstance(binding, ExecutableIntentBindingV2):
             raise AdmissionBindingResolutionError("admission binding is not executable-v2")
         matches = tuple(
@@ -597,12 +691,11 @@ class RoutedExecutableAdmissionClient:
         ):
             raise AdmissionBindingResolutionError("protected admission generation binding changed")
         url_path = Path(entry.database_url_file)
-        digest = hashlib.sha256(
-            _private_regular(url_path, label="database URL file", maximum=16 * 1024)
-        ).hexdigest()
+        database_url = _private_regular(url_path, label="database URL file", maximum=16 * 1024)
+        digest = hashlib.sha256(database_url).hexdigest()
         if digest != entry.database_url_sha256:
             raise AdmissionBindingResolutionError("protected admission URL binding changed")
-        return entry
+        return _ResolvedAdmissionBinding(entry=entry, database_url=database_url)
 
     async def _call(
         self,
@@ -611,9 +704,10 @@ class RoutedExecutableAdmissionClient:
         *args: object,
         **kwargs: object,
     ) -> Any:
-        entry = self._resolve(binding)
+        resolved = self._resolve(binding)
+        entry = resolved.entry
         client = self._client_factory(
-            Path(entry.database_url_file),
+            resolved.database_url,
             subject_id=entry.subject_id,
             subject_incarnation=entry.subject_incarnation,
         )
@@ -638,7 +732,7 @@ class RoutedExecutableAdmissionClient:
         )
 
     def bootstrap_handoff_route_sha256(self, binding: ExecutableIntentBindingV2) -> str:
-        return canonical_executable_digest(self._resolve(binding))
+        return canonical_executable_digest(self._resolve(binding).entry)
 
     async def bind_slurm_job(self, request: PhysicalJobBindingV2) -> Any:
         return await self._call(request.binding, "bind_slurm_job", request)
@@ -694,10 +788,12 @@ __all__ = [
     "AdmissionBindingDirectoryV2",
     "AdmissionBindingEntryV2",
     "AdmissionBindingResolutionError",
+    "ApprovedLaunchProfileSetV2",
     "RoutedExecutableAdmissionClient",
     "RuntimeAssemblyError",
     "build_executable_runtime",
     "canonical_admission_directory_digest",
+    "canonical_approved_profiles_digest",
     "load_activation_runtime_artifact",
     "load_admission_binding_directory",
     "resolve_runtime_profile",

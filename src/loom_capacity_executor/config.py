@@ -39,6 +39,7 @@ class ImmutablePoolManifest:
     pool_id: Literal["gb10", "oldlab"]
     pool_generation: int
     controller_authority_sha256: str
+    approved_profiles_sha256: str
     executor_id: str
     executor_incarnation: UUID
     local_authority_sha256: str
@@ -182,6 +183,7 @@ class PoolExecutorConfig:
     executor_id: str
     executor_incarnation: UUID
     controller_authority_sha256: str
+    approved_profiles_sha256: str
     local_authority_sha256: str
     signing_key_id: str
     signing_key_sha256: str
@@ -228,6 +230,7 @@ class PoolExecutorConfig:
             "executor_id",
             "executor_incarnation",
             "controller_authority_sha256",
+            "approved_profiles_sha256",
             "local_authority_sha256",
             "signing_key_id",
             "signing_key_sha256",
@@ -278,6 +281,10 @@ class PoolExecutorConfig:
             raise ExecutorConfigError("executor authority identity is invalid") from exc
         controller_digest = _digest(
             value.get("controller_authority_sha256"), label="controller authority"
+        )
+        approved_profiles_digest = _digest(
+            value.get("approved_profiles_sha256", "0" * 64),
+            label="approved profiles",
         )
         local_digest = _digest(value.get("local_authority_sha256"), label="local authority")
         signing_key_id = _identifier(value.get("signing_key_id"), label="signing key id")
@@ -383,6 +390,7 @@ class PoolExecutorConfig:
             pool_id=pool,
             pool_generation=pool_generation,
             controller_authority_sha256=controller_digest,
+            approved_profiles_sha256=approved_profiles_digest,
             executor_id=executor_id,
             executor_incarnation=incarnation,
             local_authority_sha256=local_digest,
@@ -420,6 +428,7 @@ class PoolExecutorConfig:
             executor_id=executor_id,
             executor_incarnation=incarnation,
             controller_authority_sha256=controller_digest,
+            approved_profiles_sha256=approved_profiles_digest,
             local_authority_sha256=local_digest,
             signing_key_id=signing_key_id,
             signing_key_sha256=signing_key_sha,

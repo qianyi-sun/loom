@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import timedelta
 from pathlib import Path
 from uuid import UUID
 
@@ -173,6 +174,13 @@ async def test_recovery_reconstructs_launch_with_handoff_reference(tmp_path: Pat
     handoff_directory = tmp_path / "handoff"
     handoff_directory.mkdir(mode=0o700)
     handoff_store = BootstrapHandoffStore(handoff_directory)
+    handoff_store.prepare(
+        launch.binding,
+        bootstrap_registration_epoch=1,
+        expires_at=_NOW + timedelta(minutes=30),
+        trusted_launcher_release_sha256=launch.binding.execution.trusted_fleet_release_sha256,
+        protected_admission_route_sha256="1" * 64,
+    )
     journal = ExecutorJournal(tmp_path / "executor.journal")
     journal.__enter__()
     executor = ExecutablePoolExecutor(

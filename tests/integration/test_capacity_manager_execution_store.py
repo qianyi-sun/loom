@@ -21,7 +21,7 @@ from loom_capacity_executor.launch_renderer import (
     canonical_launch_policy_digest,
     render_signed_launch,
 )
-from loom_capacity_executor.slurm_contracts import SlurmExecutableIdentityV2
+from loom_capacity_executor.slurm_contracts import SlurmExecutableIdentityV2, SlurmFileIdentityV2
 from loom_capacity_manager.executable_contracts import (
     ExecutableBootstrapRegistrationV2,
     ExecutableExecutorHeartbeatV2,
@@ -842,6 +842,11 @@ async def test_real_manager_profile_digest_is_not_reinterpreted_as_launch_policy
         launcher=SlurmExecutableIdentityV2(
             path="/opt/loom/bin/trusted-worker-launcher",
             sha256="a" * 64,
+            owner_uid=0,
+        ),
+        trusted_launcher_config=SlurmFileIdentityV2(
+            path="/opt/loom/etc/trusted-worker-launcher.json",
+            sha256="c" * 64,
             owner_uid=0,
         ),
         trusted_launcher_release_sha256=TRUSTED_RELEASE,

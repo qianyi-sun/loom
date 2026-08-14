@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from loom_capacity_executor.config import PoolExecutorConfig
 from loom_capacity_executor.launch_renderer import (
+    OperatorGenericTresMappingV2,
     OperatorLaunchProfileV2,
     canonical_launch_policy_digest,
 )
@@ -23,6 +24,7 @@ from loom_capacity_executor.runtime import (
     RuntimeAssemblyError,
     build_executable_runtime,
     canonical_admission_directory_digest,
+    canonical_approved_profiles_digest,
     load_activation_runtime_artifact,
     resolve_runtime_profile,
     write_admission_binding_directory,
@@ -98,15 +100,20 @@ def _entry_name(entry: AdmissionBindingEntryV2) -> str:
 
 
 class _FakeAdmission:
-    def __init__(self, path: Path, subject_id: UUID, subject_incarnation: UUID) -> None:
-        self.path = path
+    def __init__(
+        self,
+        database_url: bytes,
+        subject_id: UUID,
+        subject_incarnation: UUID,
+    ) -> None:
+        self.database_url = database_url
         self.subject_id = subject_id
         self.subject_incarnation = subject_incarnation
         self.closed = False
 
     async def observe_intent(self, binding: ExecutableIntentBindingV2) -> dict[str, Any]:
         return {
-            "path": str(self.path),
+            "database_url": self.database_url.decode("utf-8"),
             "subject_id": str(binding.subject_id),
             "subject_incarnation": str(binding.subject_incarnation),
         }
@@ -146,12 +153,12 @@ async def test_routed_admission_resolver_uses_exact_subject_binding_per_operatio
     opened: list[_FakeAdmission] = []
 
     def factory(
-        path: Path,
+        database_url: bytes,
         *,
         subject_id: UUID,
         subject_incarnation: UUID,
     ) -> _FakeAdmission:
-        client = _FakeAdmission(path, subject_id, subject_incarnation)
+        client = _FakeAdmission(database_url, subject_id, subject_incarnation)
         opened.append(client)
         return client
 
@@ -164,12 +171,53 @@ async def test_routed_admission_resolver_uses_exact_subject_binding_per_operatio
     first = await resolver.observe_intent(alice)
     second = await resolver.observe_intent(bob)
 
-    assert json.loads(json.dumps(first))["path"].endswith("alice.url")
-    assert json.loads(json.dumps(second))["path"].endswith("bob.url")
+    assert json.loads(json.dumps(first))["database_url"] == _database_url("alice")
+    assert json.loads(json.dumps(second))["database_url"] == _database_url("bob")
     assert len(opened) == 2
     assert all(client.closed for client in opened)
     with pytest.raises(AdmissionBindingResolutionError, match="generation"):
         await resolver.observe_intent(bob.model_copy(update={"deployment_generation": 2}))
+
+
+# Production break caught: the routed client must pass the exact URL bytes it
+# securely opened and hashed; passing the pathname lets an atomic replacement
+# race swap credentials between validation and client construction.
+async def test_routed_admission_resolver_uses_pinned_url_bytes_after_replacement_race(
+    tmp_path: Path,
+) -> None:
+    binding = launch_context_fixture().binding
+    directory = tmp_path / "admission-url-race"
+    directory.mkdir(mode=0o700)
+    entry = _entry(tmp_path, binding, "alice")
+    write_admission_binding_directory(directory, (entry,))
+    digest = canonical_admission_directory_digest(directory)
+    original = _database_url("alice").encode("utf-8")
+    changed = _database_url("mallory").encode("utf-8")
+    observed: list[bytes] = []
+    url_path = Path(entry.database_url_file)
+
+    def factory(
+        database_url: bytes | Path,
+        *,
+        subject_id: UUID,
+        subject_incarnation: UUID,
+    ) -> _FakeAdmission:
+        replacement = _write_private(tmp_path / "replacement.url", changed.decode("utf-8"))
+        replacement.replace(url_path)
+        payload = database_url.read_bytes() if isinstance(database_url, Path) else database_url
+        observed.append(payload)
+        return _FakeAdmission(payload, subject_id, subject_incarnation)
+
+    resolver = RoutedExecutableAdmissionClient(
+        directory,
+        expected_directory_sha256=digest,
+        client_factory=factory,
+    )
+
+    result = await resolver.observe_intent(binding)
+
+    assert observed == [original]
+    assert result["database_url"] == original.decode("utf-8")
 
 
 # Production break caught: admission binding publication must never follow a
@@ -354,8 +402,10 @@ def test_activation_runtime_artifact_builds_exact_executor_runtime(tmp_path: Pat
         update={"controller_authority_sha256": canonical_launch_policy_digest(profile)}
     )
     profile = OperatorLaunchProfileV2.model_validate(profile.model_dump(mode="python"))
+    profiles = (profile, _two_slot_profile(profile))
     payload = json.loads(files.config.read_text(encoding="utf-8"))
     payload["controller_authority_sha256"] = profile.controller_authority_sha256
+    payload["approved_profiles_sha256"] = canonical_approved_profiles_digest(profiles)
     _write_private(files.config, json.dumps(payload))
     config = PoolExecutorConfig.from_files(files.config)
     active = config.execution.model_copy(
@@ -378,6 +428,7 @@ def test_activation_runtime_artifact_builds_exact_executor_runtime(tmp_path: Pat
         executor_id=config.executor_id,
         executor_incarnation=config.executor_incarnation,
         controller_authority_sha256=profile.controller_authority_sha256,
+        approved_profiles_sha256=canonical_approved_profiles_digest(profiles),
         local_authority_sha256=config.local_authority_sha256,
         signing_key_id=config.signing_key_id,
         signing_key_sha256=config.signing_key_sha256,
@@ -388,7 +439,7 @@ def test_activation_runtime_artifact_builds_exact_executor_runtime(tmp_path: Pat
         journal_file=str(config.journal_file),
         state_directory=str(config.state_directory),
         slurm_authority=_slurm_authority(tmp_path / "slurm-bin", profile),
-        profiles=(profile, _two_slot_profile(profile)),
+        profiles=profiles,
     )
     manager = object()
     admission = object()
@@ -412,6 +463,103 @@ def test_activation_runtime_artifact_builds_exact_executor_runtime(tmp_path: Pat
     assert executor.admission is admission
     assert seen == [artifact.slurm_authority]
     assert len(executor.profiles) == 2
+
+
+# Production break caught: per-profile manager-resource to Slurm-TRES mappings
+# are profile-scoped and intentionally excluded from the pool-wide controller
+# digest; positive runtime assembly must still reject a mutable mapping unless
+# the controller-local approved-profile-set commitment changes too.
+def test_activation_runtime_rejects_profile_set_not_pinned_by_local_manifest(
+    tmp_path: Path,
+) -> None:
+    files = executor_files(tmp_path)
+    config = PoolExecutorConfig.from_files(files.config)
+    context = launch_context_fixture()
+    active = config.execution.model_copy(
+        update={
+            "execution_state": "active",
+            "executable_new_capacity_ceiling": 1,
+            "executable_new_capacity_rate_per_minute": 1,
+        }
+    )
+    profile = context.profile.model_copy(
+        update={
+            "pool_generation": config.pool_generation,
+            "profile_id": config.profile_id,
+            "profile_generation": config.profile_generation,
+            "profile_digest": config.profile_digest,
+            "slurm_cluster": config.slurm_cluster,
+            "controller_host": config.controller_host,
+            "partition": config.partition,
+            "association": config.association,
+            "submitter": config.submitter,
+            "qos": config.qos,
+            "trusted_launcher_release_sha256": active.trusted_fleet_release_sha256,
+            "controller_authority_sha256": "0" * 64,
+        }
+    )
+    profile = OperatorLaunchProfileV2.model_validate(
+        profile.model_copy(
+            update={"controller_authority_sha256": canonical_launch_policy_digest(profile)}
+        ).model_dump(mode="python")
+    )
+    tampered = OperatorLaunchProfileV2.model_validate(
+        profile.model_copy(
+            update={
+                "generic_tres": (
+                    OperatorGenericTresMappingV2(
+                        resource_name="fpga",
+                        tres_name="gres/fpga-v2",
+                    ),
+                    profile.generic_tres[1],
+                )
+            }
+        ).model_dump(mode="python")
+    )
+    assert canonical_launch_policy_digest(tampered) == profile.controller_authority_sha256
+    assert canonical_approved_profiles_digest((tampered,)) != canonical_approved_profiles_digest(
+        (profile,)
+    )
+    payload = json.loads(files.config.read_text(encoding="utf-8"))
+    payload["controller_authority_sha256"] = profile.controller_authority_sha256
+    payload["approved_profiles_sha256"] = canonical_approved_profiles_digest((profile,))
+    _write_private(files.config, json.dumps(payload))
+    config = PoolExecutorConfig.from_files(files.config)
+    directory = tmp_path / "admission-profile-set"
+    directory.mkdir(mode=0o700)
+    write_admission_binding_directory(directory, (_entry(tmp_path, context.binding, "alice"),))
+    handoff = tmp_path / "handoff-profile-set"
+    handoff.mkdir(mode=0o700)
+    artifact = ActivationRuntimeArtifactV2(
+        execution=active,
+        pool_id=config.pool_id,
+        pool_generation=config.pool_generation,
+        executor_id=config.executor_id,
+        executor_incarnation=config.executor_incarnation,
+        controller_authority_sha256=profile.controller_authority_sha256,
+        approved_profiles_sha256=canonical_approved_profiles_digest((tampered,)),
+        local_authority_sha256=config.local_authority_sha256,
+        signing_key_id=config.signing_key_id,
+        signing_key_sha256=config.signing_key_sha256,
+        immutable_manifest_sha256=config.manifest.sha256(),
+        admission_directory=str(directory),
+        admission_directory_sha256=canonical_admission_directory_digest(directory),
+        handoff_directory=str(handoff),
+        journal_file=str(config.journal_file),
+        state_directory=str(config.state_directory),
+        slurm_authority=_slurm_authority(tmp_path / "slurm-bin-profile-set", profile),
+        profiles=(tampered,),
+    )
+
+    with pytest.raises(RuntimeAssemblyError, match="profile set"):
+        build_executable_runtime(
+            config,
+            artifact,
+            manager_client=object(),
+            current_context=active,
+            admission_client_factory=lambda *_args, **_kwargs: object(),
+            slurm_backend_factory=lambda _authority: object(),
+        )
 
 
 # Production break caught: the activation artifact journal binding must be
@@ -479,6 +627,7 @@ def test_activation_runtime_artifact_rejects_group_readable_journal_file(
             executor_id=config.executor_id,
             executor_incarnation=config.executor_incarnation,
             controller_authority_sha256=profile.controller_authority_sha256,
+            approved_profiles_sha256=canonical_approved_profiles_digest((profile,)),
             local_authority_sha256=config.local_authority_sha256,
             signing_key_id=config.signing_key_id,
             signing_key_sha256=config.signing_key_sha256,

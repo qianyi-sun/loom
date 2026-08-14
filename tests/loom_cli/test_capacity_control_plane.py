@@ -53,6 +53,7 @@ def test_checked_in_executor_profile_is_inert_and_pool_complete() -> None:
         payload = json.loads(rendered[pool.pool_id])
         assert set(payload) == {
             "association",
+            "approved_profiles_sha256",
             "authority_incarnation",
             "bearer_token_file",
             "configuration_epoch",
@@ -88,6 +89,7 @@ def test_checked_in_executor_profile_is_inert_and_pool_complete() -> None:
             "trusted_fleet_release_sha256",
             "writer_epoch",
         }
+        assert payload["approved_profiles_sha256"] == "0" * 64
         environment = render_capacity_pool_executor_service_environment(profile, pool.pool_id)
         assert environment == (
             f"LOOM_CAPACITY_EXECUTOR_CONFIG={pool.config_file}\n"

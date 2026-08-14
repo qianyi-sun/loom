@@ -20,6 +20,7 @@ from loom_capacity_executor.slurm_contracts import (
     MAX_SLURM_NODES,
     MEBIBYTE,
     SlurmExecutableIdentityV2,
+    SlurmFileIdentityV2,
     SlurmLaunchRequestV2,
     SlurmTresValueV2,
 )
@@ -59,6 +60,7 @@ _PROFILE_SCOPED_POLICY_FIELDS = {
     "concurrency_slots",
     "cpus",
     "resources",
+    "generic_tres",
 }
 
 SlurmIdentifier = Annotated[
@@ -144,6 +146,7 @@ class OperatorLaunchProfileV2(StrictV2Model):
     generic_tres: Annotated[tuple[OperatorGenericTresMappingV2, ...], Field(max_length=64)] = ()
     time_limit_seconds: Annotated[int, Field(gt=0, le=7 * 24 * 60 * 60)]
     launcher: SlurmExecutableIdentityV2
+    trusted_launcher_config: SlurmFileIdentityV2
     trusted_launcher_release_sha256: Digest
     image_digest: Annotated[str, Field(max_length=512, pattern=_IMAGE_DIGEST_PATTERN)]
 
@@ -407,6 +410,7 @@ def render_signed_launch(context: TrustedLaunchContextV2) -> RenderedTrustedLaun
         generic_tres=generic_tres,
         time_limit_seconds=profile.time_limit_seconds,
         launcher=profile.launcher,
+        trusted_launcher_config=profile.trusted_launcher_config,
         launcher_release_sha256=profile.trusted_launcher_release_sha256,
         image_digest=profile.image_digest,
         ownership_token=executable_ownership_token(proof),

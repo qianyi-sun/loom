@@ -21,7 +21,7 @@ from loom_capacity_executor.launch_renderer import (
     render_launch_request,
     render_signed_launch,
 )
-from loom_capacity_executor.slurm_contracts import SlurmExecutableIdentityV2
+from loom_capacity_executor.slurm_contracts import SlurmExecutableIdentityV2, SlurmFileIdentityV2
 from loom_capacity_manager.contracts import ResourceVectorV1
 from loom_capacity_manager.executable_contracts import (
     CandidateBindingV2,
@@ -85,6 +85,11 @@ def operator_profile_fixture() -> OperatorLaunchProfileV2:
         launcher=SlurmExecutableIdentityV2(
             path="/opt/loom/bin/trusted-worker-launcher",
             sha256="2" * 64,
+            owner_uid=0,
+        ),
+        trusted_launcher_config=SlurmFileIdentityV2(
+            path="/opt/loom/etc/trusted-worker-launcher.json",
+            sha256="6" * 64,
             owner_uid=0,
         ),
         trusted_launcher_release_sha256="3" * 64,
@@ -513,6 +518,41 @@ def test_distinct_profiles_and_shapes_share_one_pool_controller_authority() -> N
     assert request.operation_id == second_context.binding.intent_id
 
 
+def test_distinct_generic_tres_profiles_share_one_pool_controller_authority() -> None:
+    context = launch_context_fixture()
+    profile = context.profile
+    second_resources = ResourceVectorV1(
+        slots=1,
+        cpu_millicores=profile.cpus * 1_000,
+        memory_bytes=profile.resources.memory_bytes,
+        gpu_count=0,
+        generic={"asic": 3},
+    )
+    second_profile = profile.model_copy(
+        update={
+            "profile_id": "oldlab-asic",
+            "profile_generation": 10,
+            "profile_digest": "9" * 64,
+            "shape_id": "oldlab-asic-one-slot",
+            "resources": second_resources,
+            "generic_tres": (
+                OperatorGenericTresMappingV2(resource_name="asic", tres_name="gres/asic"),
+            ),
+        }
+    )
+    second_context = replace(
+        context,
+        binding=intent_fixture(second_profile),
+        profile=second_profile,
+    )
+
+    assert canonical_launch_policy_digest(second_profile) == (
+        context.controller_authority.controller_authority_sha256
+    )
+    request = render_launch_request(second_context)
+    assert tuple((item.name, item.value) for item in request.generic_tres) == (("gres/asic", 3),)
+
+
 def test_every_pool_wide_scheduler_field_is_committed_by_launch_policy_digest() -> None:
     context = launch_context_fixture()
     profile = context.profile
@@ -524,14 +564,6 @@ def test_every_pool_wide_scheduler_field_is_committed_by_launch_policy_digest() 
     )
     other_domain_nodes = (
         profile.resource_domains[0].model_copy(update={"node_ids": ("oldlab-5",)}),
-    )
-    other_tres_name = (
-        OperatorGenericTresMappingV2(resource_name="fpga", tres_name="gres/other"),
-        profile.generic_tres[1],
-    )
-    other_resource_name = (
-        OperatorGenericTresMappingV2(resource_name="other", tres_name="gres/fpga"),
-        profile.generic_tres[1],
     )
     changed_fields: tuple[tuple[str, object], ...] = (
         ("pool_id", "gb10"),
@@ -546,8 +578,6 @@ def test_every_pool_wide_scheduler_field_is_committed_by_launch_policy_digest() 
         ("resource_domains", other_domain_features),
         ("resource_domains", other_domain_id),
         ("resource_domains", other_domain_nodes),
-        ("generic_tres", other_tres_name),
-        ("generic_tres", other_resource_name),
         ("time_limit_seconds", 7_200),
         (
             "launcher",
