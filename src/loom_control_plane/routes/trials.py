@@ -13,7 +13,12 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from loom.auth import is_admin, verify_bearer_token
 from loom.benchmark_profiles import reject_non_runnable_benchmark_profiles
 from loom.data_lifecycle_registry import ensure_trial_lifecycle_authority
-from loom.db.schema import Batch, LlmCall, TeamQuota
+from loom.db.schema import (
+    Batch,
+    LlmCall,
+    TeamQuota,
+    TrialTaskImageMaterialization,
+)
 from loom.db.schema import Task as TaskRow
 from loom.db.schema import Trial as TrialRow
 from loom.db.task_set_visibility import visible_tasks
@@ -21,6 +26,7 @@ from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
 from loom.request_params import coerce_request_params
 from loom.submission_identity import require_submitting_user
+from loom.task_image_materialization import ensure_task_image_materializations
 from loom_control_plane.scheduler.requires_caps import derive_requires_caps
 from loom_service.submission_compat import validate_submission_agent_task_compatibility
 
@@ -349,6 +355,24 @@ async def submit_trial(
         )
         if lifecycle_result.rowcount != 1:
             raise RuntimeError("trial lifecycle authority binding is stale")
+        materializations = await ensure_task_image_materializations(
+            session,
+            task_row=task_row,
+        )
+        if materializations:
+            await session.execute(
+                pg_insert(TrialTaskImageMaterialization)
+                .values(
+                    [
+                        {
+                            "trial_id": trial_id,
+                            "materialization_id": materialization.id,
+                        }
+                        for materialization in materializations
+                    ]
+                )
+                .on_conflict_do_nothing(index_elements=["trial_id", "materialization_id"])
+            )
         await session.commit()
 
     return {

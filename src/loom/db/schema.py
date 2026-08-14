@@ -1978,6 +1978,34 @@ class TaskImageMaterialization(Base):
     )
 
 
+class TrialTaskImageMaterialization(Base):
+    """Immutable readiness prerequisite attached to one submitted trial."""
+
+    __tablename__ = "trial_task_image_materializations"
+    __table_args__ = (
+        Index(
+            "trial_task_image_materializations_materialization_idx",
+            "materialization_id",
+        ),
+    )
+
+    trial_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("trials.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    materialization_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("task_image_materializations.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
 class Benchmark(Base):
     """One row per registered benchmark suite (Plan 13)."""
 

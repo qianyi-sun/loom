@@ -62,9 +62,23 @@ def upgrade() -> None:
           (cpu_arch, state, next_attempt_at, created_at);
         CREATE INDEX task_image_materializations_reference_idx
           ON task_image_materializations (task_id, task_checksum);
+
+        CREATE TABLE trial_task_image_materializations (
+          trial_id UUID NOT NULL REFERENCES trials(id) ON DELETE CASCADE,
+          materialization_id UUID NOT NULL
+            REFERENCES task_image_materializations(id) ON DELETE RESTRICT,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          CONSTRAINT trial_task_image_materializations_pkey
+            PRIMARY KEY (trial_id, materialization_id)
+        );
+
+        CREATE INDEX trial_task_image_materializations_materialization_idx
+          ON trial_task_image_materializations (materialization_id);
         """
     )
 
 
 def downgrade() -> None:
-    op.execute("DROP TABLE task_image_materializations")
+    op.execute(
+        "DROP TABLE trial_task_image_materializations; DROP TABLE task_image_materializations"
+    )
