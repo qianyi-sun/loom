@@ -251,8 +251,45 @@ def test_parse_sinfo_node_resources_reads_state_memory_load_and_idle_cpus() -> N
         free_memory_mib=56_273,
         cpu_load=28.96,
         idle_cpus=16,
+        total_memory_mib=120_000,
     )
     assert resources["trt-eai-oldlab-2"].idle_cpus == 24
+
+
+def test_resource_aware_decision_rejects_memory_already_allocated_by_slurm() -> None:
+    config = _config(
+        allowed_nodes=("trt-gb10-3",),
+        requested_concurrency=1,
+        resource_aware=True,
+        cpu_per_slot=2,
+        memory_mib_per_slot=11_500,
+        reserved_cpus=0,
+        reserved_memory_mib=0,
+        max_concurrency_per_node=10,
+    )
+    resources = parse_sinfo_node_resources(
+        "trt-gb10-3|mixed|20|115000|12000|0.76|16/4/0/20|115000\n",
+    )
+
+    decision = compute_controller_decision(
+        config,
+        SlurmWorkerCapacitySnapshot(
+            queued_trials=1,
+            running_trials=0,
+            pending_jobs=0,
+            running_jobs=0,
+            active_slots=0,
+            pending_slots=0,
+            active_nodes=set(),
+            cancellable_pending_job_ids=(),
+            active_job_ids=(),
+            node_resources=resources,
+        ),
+    )
+
+    assert decision.submit_nodes == ()
+    assert decision.reason == "no_safe_nodes"
+    assert decision.node_capacity["trt-gb10-3"].reason == "insufficient_memory"
 
 
 async def test_with_node_resource_snapshot_queries_runner_when_resource_aware() -> None:
@@ -1075,6 +1112,65 @@ async def test_cancel_pending_job_uses_scheduler_atomic_state_filter(
     assert commands == [("scancel", "--state=PENDING", "31619")]
 
 
+async def test_query_node_resources_clamps_os_free_memory_to_slurm_allocations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[tuple[str, ...]] = []
+
+    async def fake_run_command(
+        args: tuple[str, ...],
+        *,
+        timeout: float,
+        stdin: str | None = None,
+    ) -> controller._CommandResult:
+        del timeout, stdin
+        commands.append(args)
+        if "-O" in args:
+            return controller._CommandResult(
+                stdout="trt-gb10-3 115000\n",
+                stderr="",
+            )
+        return controller._CommandResult(
+            stdout="trt-gb10-3|mixed|20|115000|12000|0.76|16/4/0/20\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(controller, "_run_command", fake_run_command)
+    config = _config(
+        allowed_nodes=("trt-gb10-3",),
+        requested_concurrency=1,
+        resource_aware=True,
+        cpu_per_slot=2,
+        memory_mib_per_slot=11_500,
+        reserved_cpus=0,
+        reserved_memory_mib=0,
+        max_concurrency_per_node=10,
+    )
+    runner = SubprocessSlurmCommandRunner().bind_config(config)
+
+    resources = await runner.query_node_resources(("trt-gb10-3",))
+    decision = compute_controller_decision(
+        config,
+        SlurmWorkerCapacitySnapshot(
+            queued_trials=1,
+            running_trials=0,
+            pending_jobs=0,
+            running_jobs=0,
+            active_slots=0,
+            pending_slots=0,
+            active_nodes=set(),
+            cancellable_pending_job_ids=(),
+            active_job_ids=(),
+            node_resources=resources,
+        ),
+    )
+
+    assert decision.submit_nodes == ()
+    assert decision.node_capacity["trt-gb10-3"].reason == "insufficient_memory"
+    assert len(commands) == 2
+    assert commands[1][-2:] == ("-O", "NodeList:200,AllocMem:20")
+
+
 async def test_query_node_resources_probes_linux_available_memory_when_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1088,6 +1184,8 @@ async def test_query_node_resources_probes_linux_available_memory_when_enabled(
     ) -> controller._CommandResult:
         del timeout, stdin
         commands.append(args)
+        if "-O" in args:
+            return controller._CommandResult(stdout="oldlab-3 0\n", stderr="")
         if args[0] == "sinfo":
             return controller._CommandResult(
                 stdout="oldlab-3|mixed|24|120000|50000|1.0|0/24/0/24\n",
@@ -1112,8 +1210,8 @@ async def test_query_node_resources_probes_linux_available_memory_when_enabled(
 
     assert resources["oldlab-3"].free_memory_mib == 50_000
     assert resources["oldlab-3"].available_memory_mib == 122_915
-    assert [command[0] for command in commands] == ["sinfo", "/usr/bin/srun"]
-    probe = commands[1]
+    assert [command[0] for command in commands] == ["sinfo", "sinfo", "/usr/bin/srun"]
+    probe = commands[2]
     assert "--nodelist=oldlab-3" in probe
     assert "--partition=all" in probe
     assert "--immediate=3" in probe
@@ -1140,6 +1238,8 @@ async def test_query_node_resources_falls_back_to_slurm_free_memory_on_probe_err
         stdin: str | None = None,
     ) -> controller._CommandResult:
         del timeout, stdin
+        if "-O" in args:
+            return controller._CommandResult(stdout="oldlab-3 0\n", stderr="")
         if args[0] == "sinfo":
             return controller._CommandResult(
                 stdout="oldlab-3|mixed|24|120000|27500|1.0|0/24/0/24\n",
@@ -1192,6 +1292,8 @@ async def test_query_node_resources_does_not_probe_linux_memory_when_disabled(
     ) -> controller._CommandResult:
         del timeout, stdin
         commands.append(args)
+        if "-O" in args:
+            return controller._CommandResult(stdout="gb10-16 0\n", stderr="")
         return controller._CommandResult(
             stdout="gb10-16|idle|20|115000|1000|0.0|0/20/0/20\n",
             stderr="",
@@ -1209,4 +1311,4 @@ async def test_query_node_resources_does_not_probe_linux_memory_when_disabled(
     resources = await runner.query_node_resources(("gb10-16",))
 
     assert resources["gb10-16"].available_memory_mib is None
-    assert [command[0] for command in commands] == ["sinfo"]
+    assert [command[0] for command in commands] == ["sinfo", "sinfo"]
