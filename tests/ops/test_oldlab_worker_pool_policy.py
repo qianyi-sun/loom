@@ -36,10 +36,13 @@ def _supervisor() -> dict[str, Any]:
 
 def test_oldlab_current_policy_uses_the_declared_staging_nodes() -> None:
     policy = _policy()
+    actuator = policy["actuator_config"]
 
     assert policy["enabled"] is True
     assert policy["actuator"] == "slurm"
-    assert tuple(policy["actuator_config"]["allowed_nodes"]) == _EXPECTED_NODES
+    assert tuple(actuator["allowed_nodes"]) == _EXPECTED_NODES
+    assert actuator["partition"] == "loom-staging"
+    assert actuator["time_limit"] == "2-00:00:00"
     assert policy["min_slots"] == 0
     assert policy["max_slots"] == 18
 
@@ -101,5 +104,8 @@ def test_oldlab_readme_matches_current_policy_authority() -> None:
     assert "scales from zero to 18 slots" in readme
     for node in _EXPECTED_NODES:
         assert node in readme
+    assert "dedicated `loom-staging` Slurm partition" in readme
+    assert "`PriorityTier=100`" in readme
+    assert "never cancels or preempts foreign jobs" in readme
     assert "loom-autoscaler-oldlab-staging.timer" in readme
     assert "/shared_work/loom/staging-rollout/" in readme

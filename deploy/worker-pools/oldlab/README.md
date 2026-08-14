@@ -22,6 +22,16 @@ returns malformed data falls back to `FreeMem` and remains closed. The worker
 setup guard also delays Docker setup and build work when I/O pressure, swap, or
 D-state process thresholds are unsafe.
 
+Autoscaled jobs use the dedicated `loom-staging` Slurm partition on those same
+three nodes. The partition has `PriorityTier=100`, is limited to the
+`loom-rollout` group, and shares already-running allocations without
+preemption. It gives new on-demand Loom work precedence over future shared
+partition reservations only while Loom demand exists; the zero-slot minimum
+and five-minute idle drain bound that use. The controller-root
+`deploy/slurm/converge-loom-oldlab-slurm-partition.sh` transition is bounded.
+It never cancels or preempts foreign jobs and fails closed on configuration
+drift.
+
 ## Disabled Pipeline GPU admission surface
 
 Issue #1213 adds a separate repository-owned Pipeline contract in

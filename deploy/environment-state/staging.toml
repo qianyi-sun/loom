@@ -101,7 +101,7 @@ backend = "docker"
 cpu_arch = "x86_64"
 slurm_cluster_name = "trt-oldlab"
 slurm_controller_host = "TRT-EAI-OLDLAB-1"
-partition = "all"
+partition = "loom-staging"
 allowed_nodes = [
   "trt-eai-oldlab-3",
   "trt-eai-oldlab-4",
