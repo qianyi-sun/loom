@@ -648,6 +648,19 @@ def _git_run(arguments: list[str]):
     return subprocess.run(arguments, capture_output=True, check=False, text=True)
 
 
+@pytest.fixture(scope="module")
+def secure_candidate_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    source = Path(__file__).resolve().parents[4]
+    candidate = tmp_path_factory.mktemp("installed-deep-preflight") / "candidate"
+    subprocess.run(
+        ("git", "clone", "--shared", "--quiet", str(source), str(candidate)),
+        check=True,
+    )
+    (candidate / "deploy/environment-state/staging.toml").chmod(0o644)
+    (candidate / "scripts/ops/worker_pool_autoscaler_external_once.py").chmod(0o755)
+    return candidate
+
+
 def _installed_predecessor_context(
     candidate_root: Path,
     *,
@@ -822,8 +835,9 @@ def test_installed_predecessor_recognizes_exact_pr1342_gb10_activation(
 
 def test_installed_gb10_predecessor_source_uses_remote_typed_observation_and_unit_dir(
     monkeypatch: pytest.MonkeyPatch,
+    secure_candidate_root: Path,
 ) -> None:
-    candidate_root = Path(__file__).resolve().parents[4]
+    candidate_root = secure_candidate_root
     candidate_sha = _git_run(["git", "-C", str(candidate_root), "rev-parse", "HEAD"]).stdout.strip()
     candidate_tree = _git_run(
         ["git", "-C", str(candidate_root), "rev-parse", "HEAD^{tree}"]
@@ -874,8 +888,10 @@ def test_installed_gb10_predecessor_source_uses_remote_typed_observation_and_uni
     assert snapshot.runtime_ready is True
 
 
-def test_installed_gb10_canonical_predecessor_rejects_oldlab_unit_directory() -> None:
-    candidate_root = Path(__file__).resolve().parents[4]
+def test_installed_gb10_canonical_predecessor_rejects_oldlab_unit_directory(
+    secure_candidate_root: Path,
+) -> None:
+    candidate_root = secure_candidate_root
     candidate_sha = _git_run(["git", "-C", str(candidate_root), "rev-parse", "HEAD"]).stdout.strip()
     candidate_tree = _git_run(
         ["git", "-C", str(candidate_root), "rev-parse", "HEAD^{tree}"]
@@ -1004,12 +1020,13 @@ def test_installed_predecessor_sources_share_one_pool_identity_snapshot() -> Non
 def test_installed_gb10_absent_retry_fits_inside_predecessor_check_deadline(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    secure_candidate_root: Path,
     elapsed_prework: float,
     first_attempt_elapsed: int,
     expected_timeouts: list[int],
     expected_success: bool,
 ) -> None:
-    candidate_root = Path(__file__).resolve().parents[4]
+    candidate_root = secure_candidate_root
     context = _installed_predecessor_context(candidate_root)
     expected = SimpleNamespace()
     attempts: list[dict[str, object]] = []
@@ -1086,8 +1103,9 @@ def test_installed_gb10_absent_retry_fits_inside_predecessor_check_deadline(
 
 def test_installed_gb10_observation_binds_context_candidate_to_typed_transport(
     monkeypatch: pytest.MonkeyPatch,
+    secure_candidate_root: Path,
 ) -> None:
-    candidate_root = Path(__file__).resolve().parents[4]
+    candidate_root = secure_candidate_root
     context = _installed_predecessor_context(candidate_root)
     expected = SimpleNamespace()
     captured: dict[str, object] = {}
@@ -1132,8 +1150,9 @@ def test_installed_gb10_observation_binds_context_candidate_to_typed_transport(
 
 def test_installed_external_supervisor_predecessor_uses_live_schema_after_migration(
     monkeypatch: pytest.MonkeyPatch,
+    secure_candidate_root: Path,
 ) -> None:
-    candidate_root = Path(__file__).resolve().parents[4]
+    candidate_root = secure_candidate_root
     candidate_sha = _git_run(["git", "-C", str(candidate_root), "rev-parse", "HEAD"]).stdout.strip()
     candidate_tree = _git_run(
         ["git", "-C", str(candidate_root), "rev-parse", "HEAD^{tree}"]
