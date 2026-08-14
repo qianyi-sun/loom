@@ -147,12 +147,21 @@ class ProtectedExternalSupervisorComponent:
         )
         if state is ComponentState.EXACT:
             canonical = live.canonical_identity
-            if (
-                canonical is None
-                or canonical.plan_digest != plan.plan_digest
+            if canonical is None:
+                state = ComponentState.DRIFTED
+            elif (
+                canonical.plan_digest != plan.plan_digest
                 or canonical.attestation_digest != plan.attestation_digest
             ):
-                state = ComponentState.DRIFTED
+                # Exact target bytes may already belong to the canonical
+                # predecessor. Re-attest them only through that complete,
+                # plan-bound predecessor authority.
+                try:
+                    self._verify_predecessor_binding(plan, artifact, live, controller)
+                except (RuntimeError, ValueError):
+                    state = ComponentState.DRIFTED
+                else:
+                    state = ComponentState.READY
         elif state is ComponentState.READY:
             try:
                 self._verify_predecessor_binding(plan, artifact, live, controller)
@@ -175,14 +184,12 @@ class ProtectedExternalSupervisorComponent:
         authority = self._plan_authority(plan, controller)
         live = self.transport.observe(artifact, authority)
         self._verify_predecessor_binding(plan, artifact, live, controller)
-        if (
-            classify_external_supervisor_live_state(
-                artifact,
-                live,
-                unit_dir=self.unit_dir,
-            )
-            != "ready"
-        ):
+        live_state = classify_external_supervisor_live_state(
+            artifact,
+            live,
+            unit_dir=self.unit_dir,
+        )
+        if live_state not in {"exact", "ready"}:
             raise RuntimeError("protected external supervisor state changed before apply")
         self.transport.apply(
             artifact,

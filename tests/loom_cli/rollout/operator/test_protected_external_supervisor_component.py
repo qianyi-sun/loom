@@ -15,11 +15,13 @@ import loom_cli.rollout.operator.protected_external_supervisor_transport as tran
 from loom_cli.rollout.external_supervisor_controller import (
     ExternalSupervisorControllerBinding,
     encode_external_supervisor_controller_bindings,
+    parse_external_supervisor_controller_bindings,
 )
 from loom_cli.rollout.external_supervisor_predecessor import (
     ABSENT_PREDECESSOR_DIGEST,
     GB10_CANONICAL_UNIT_DIR,
     ExternalSupervisorCanonicalIdentity,
+    ExternalSupervisorCanonicalPointer,
     ExternalSupervisorPredecessorAuthority,
     external_supervisor_unit_directory,
     external_supervisor_unit_set_digest,
@@ -595,6 +597,109 @@ def test_component_classifies_bound_predecessor_partial_and_exact_states(tmp_pat
     assert component.classify(plan).state is ComponentState.EXACT
 
 
+def _bind_primary_controller_to_canonical_predecessor(
+    plan,
+    artifact: ExternalSupervisorArtifact,
+    live: ExternalSupervisorLiveObservation,
+):
+    canonical = live.canonical_identity
+    assert canonical is not None
+    execution_host = artifact.supervisors[0].execution_host
+    unit_directory = external_supervisor_unit_directory(execution_host)
+    predecessor_pointer = ExternalSupervisorCanonicalPointer.build(canonical).pointer_digest
+    predecessor_unit_set = external_supervisor_unit_set_digest(canonical.unit_sha256)
+    binding = ExternalSupervisorControllerBinding.build(
+        execution_host=execution_host,
+        candidate_sha=plan.candidate_sha,
+        candidate_tree=plan.candidate_tree,
+        environment=plan.environment,
+        predecessor_kind="canonical",
+        predecessor_digest=canonical.evidence_digest,
+        predecessor_pointer_digest=predecessor_pointer,
+        predecessor_unit_sha256=canonical.unit_sha256,
+        predecessor_unit_set_digest=predecessor_unit_set,
+        predecessor_live_evidence_digest=live.evidence_digest,
+        predecessor_pending_transition_digest=live.pending_transition_digest,
+        unit_directory=unit_directory,
+        target_artifact_digest=artifact.artifact_digest,
+        target_profile_sha256=artifact.profile_sha256,
+        target_script_sha256=artifact.script_sha256,
+        target_unit_sha256=artifact.unit_sha256,
+        target_unit_set_digest=external_supervisor_unit_set_digest(artifact.unit_sha256),
+    )
+    bindings = dict(
+        parse_external_supervisor_controller_bindings(plan.supervisor_controller_bindings)
+    )
+    bindings[execution_host] = binding
+    aggregate_target_units = {
+        name: digest for name, digest in plan.systemd_unit_digests.items() if name not in UNIT_PATHS
+    }
+    aggregate_transition = external_supervisor_transition_digest(
+        unit_directory=unit_directory,
+        candidate_sha=plan.candidate_sha,
+        candidate_tree=plan.candidate_tree,
+        environment=plan.environment,
+        predecessor_kind="canonical",
+        predecessor_digest=canonical.evidence_digest,
+        predecessor_pointer_digest=predecessor_pointer,
+        predecessor_unit_sha256=canonical.unit_sha256,
+        predecessor_unit_set_digest=predecessor_unit_set,
+        predecessor_live_evidence_digest=live.evidence_digest,
+        predecessor_pending_transition_digest=live.pending_transition_digest,
+        target_artifact_digest=plan.supervisor_artifact_digest,
+        target_profile_sha256=plan.supervisor_profile_sha256,
+        target_script_sha256=plan.supervisor_script_digests,
+        target_unit_sha256=aggregate_target_units,
+        target_unit_set_digest=external_supervisor_unit_set_digest(aggregate_target_units),
+    )
+    payload = plan.to_dict()
+    payload.pop("plan_digest")
+    payload.update(
+        {
+            "supervisor_predecessor_kind": "canonical",
+            "supervisor_predecessor_digest": canonical.evidence_digest,
+            "supervisor_predecessor_pointer_digest": predecessor_pointer,
+            "supervisor_predecessor_unit_sha256": dict(canonical.unit_sha256),
+            "supervisor_predecessor_unit_set_digest": predecessor_unit_set,
+            "supervisor_predecessor_live_evidence_digest": live.evidence_digest,
+            "supervisor_predecessor_pending_transition_digest": (live.pending_transition_digest),
+            "supervisor_transition_digest": aggregate_transition,
+            "supervisor_controller_bindings": (
+                encode_external_supervisor_controller_bindings(bindings)
+            ),
+        }
+    )
+    return type(plan).from_dict({**payload, "plan_digest": _hash_json(payload)})
+
+
+def test_component_reattests_exact_attested_predecessor_for_new_plan(tmp_path: Path) -> None:
+    plan, candidate_root, artifact = _bound_artifact(tmp_path)
+    live = _observation(
+        artifact,
+        files="exact",
+        runtime="exact",
+        plan_digest="1" * 64,
+        attestation_digest="2" * 64,
+    )
+    plan = _bind_primary_controller_to_canonical_predecessor(plan, artifact, live)
+    transport = _Transport(artifact, live)
+    component = ProtectedExternalSupervisorComponent(
+        candidate_root=candidate_root,
+        transport=transport,
+        epoch_guard=lambda value: _epoch(value),
+        execution_host=artifact.supervisors[0].execution_host,
+        unit_dir=Path(external_supervisor_unit_directory(artifact.supervisors[0].execution_host)),
+        artifact_builder=_build_active_artifact,
+    )
+
+    assert component.classify(plan).state is ComponentState.READY
+
+    component.apply(plan)
+
+    assert transport.applied == 1
+    assert component.classify(plan).state is ComponentState.EXACT
+
+
 def test_component_identity_is_scoped_to_its_execution_host(tmp_path: Path) -> None:
     plan, candidate_root, artifact = _bound_artifact(tmp_path)
     execution_host = artifact.supervisors[0].execution_host
@@ -1113,6 +1218,36 @@ def test_fixed_transport_runs_closed_convergence_sequence(tmp_path: Path) -> Non
         "canonical",
     ]
     assert store.compensation_blockers() == {}
+
+
+def test_fixed_transport_reattests_exact_candidate_for_new_plan(tmp_path: Path) -> None:
+    _plan, _root, artifact = _bound_artifact(tmp_path)
+    store = _Store()
+    control = _Control(artifact, store)
+    transport = FixedExternalSupervisorTransport(store=store, control=control)
+    transport.apply(
+        artifact,
+        transport.observe(artifact, _absent_authority()),
+        plan_digest="a" * 64,
+        attestation_digest="b" * 64,
+        transition_digest="c" * 64,
+    )
+    predecessor = transport.observe(artifact)
+    assert classify_external_supervisor_live_state(artifact, predecessor) == "exact"
+
+    transport.apply(
+        artifact,
+        predecessor,
+        plan_digest="d" * 64,
+        attestation_digest="e" * 64,
+        transition_digest="f" * 64,
+    )
+
+    current = transport.observe(artifact)
+    assert current.canonical_identity is not None
+    assert current.canonical_identity.plan_digest == "d" * 64
+    assert current.canonical_identity.attestation_digest == "e" * 64
+    assert classify_external_supervisor_live_state(artifact, current) == "exact"
 
 
 def test_fixed_transport_converges_active_canonical_to_disabled_target(

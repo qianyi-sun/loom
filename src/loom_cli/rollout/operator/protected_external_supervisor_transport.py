@@ -1688,15 +1688,14 @@ class FixedExternalSupervisorTransport:
         transition_digest: str,
     ) -> None:
         current = self.observe(artifact, expected.predecessor_authority)
-        if (
-            current != expected
-            or classify_external_supervisor_live_state(
-                artifact,
-                current,
-                unit_dir=self.unit_dir,
-            )
-            != "ready"
-        ):
+        live_state = classify_external_supervisor_live_state(
+            artifact,
+            current,
+            unit_dir=self.unit_dir,
+        )
+        # A verified caller may re-attest an already exact canonical
+        # predecessor to a new request-bound plan without changing unit bytes.
+        if current != expected or live_state not in {"exact", "ready"}:
             raise RuntimeError("protected external supervisor state changed before apply")
         transition_group_id = uuid4().hex
         target = ExternalSupervisorCanonicalIdentity.build(
