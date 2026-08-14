@@ -604,8 +604,8 @@ async def test_post_batch_rejects_cross_team_explicit_task_set_task_id(
             },
         )
 
-    assert r.status_code == 400, r.text
-    assert "zero tasks" in r.json()["detail"]
+    assert r.status_code == 404, r.text
+    assert r.json()["detail"] == "task not found"
 
 
 async def test_admin_submit_on_behalf_records_represented_user_owner_access_and_audit(

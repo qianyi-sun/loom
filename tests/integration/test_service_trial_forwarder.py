@@ -127,6 +127,22 @@ async def fwd_setup(
                 issued_at=now,
             )
         )
+        for task_id in ("local/task-1", "local/t"):
+            s.execute(
+                insert(Task).values(
+                    id=task_id,
+                    checksum=hashlib.sha256(task_id.encode()).hexdigest(),
+                    config={
+                        "schema_version": "1",
+                        "task": {"id": task_id, "name": task_id},
+                        "environment": {"os": "linux", "docker_image": "alpine"},
+                        "agent": {"name": "oracle"},
+                        "verifier": {"name": "pytest"},
+                        "steps": [{"name": "main"}],
+                    },
+                    source="local",
+                ),
+            )
         s.commit()
     try:
         yield app, raw, team_id, captured
