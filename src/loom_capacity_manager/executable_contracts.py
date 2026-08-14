@@ -17,6 +17,7 @@ from loom_capacity_manager.contracts import (
     MAX_CONTRACT_BYTES,
     MAX_FIXED_CLAIMS_PER_REPORT,
     MAX_SHAPES_PER_PROFILE,
+    MAX_SUBJECTS,
     Digest,
     Identifier,
     PositiveQuantity,
@@ -92,14 +93,26 @@ class ExecutionContextV2(StrictV2Model):
     execution_manifest_sha256: Digest
     execution_state: Literal["prepared", "active", "drain-only"]
     executable_new_capacity_ceiling: Quantity
+    executable_new_capacity_rate_per_minute: Quantity
     trusted_fleet_release_sha256: Digest
 
     @model_validator(mode="after")
     def _state_matches_ceiling(self) -> ExecutionContextV2:
         if self.execution_state == "prepared" and self.executable_new_capacity_ceiling != 0:
             raise ValueError("prepared execution context requires a zero ceiling")
+        if self.execution_state == "prepared" and self.executable_new_capacity_rate_per_minute != 0:
+            raise ValueError("prepared execution context requires a zero rate")
         if self.execution_state == "active" and self.executable_new_capacity_ceiling == 0:
             raise ValueError("active execution authority requires a positive ceiling")
+        if self.execution_state == "active" and self.executable_new_capacity_rate_per_minute == 0:
+            raise ValueError("active execution authority requires a positive rate")
+        if self.execution_state == "drain-only" and self.executable_new_capacity_ceiling != 0:
+            raise ValueError("drain-only execution authority requires a zero ceiling")
+        if (
+            self.execution_state == "drain-only"
+            and self.executable_new_capacity_rate_per_minute != 0
+        ):
+            raise ValueError("drain-only execution authority requires a zero rate")
         return self
 
 
@@ -107,12 +120,293 @@ class ExecutionAuthorityV2(ExecutionContextV2):
     """Active or drain-only authority independent of one allocation plan."""
 
     execution_state: Literal["active", "drain-only"]
+    executable: Literal[True] = True
 
 
 class ExecutionFenceV2(ExecutionAuthorityV2):
     """Execution authority bound to one committed allocation epoch."""
 
     allocation_epoch: PositiveQuantity
+
+
+class PreparedExecutorBindingV2(StrictV2Model):
+    """One exact controller-local executor admitted to a prepared epoch."""
+
+    pool_id: Literal["gb10", "oldlab"]
+    pool_generation: PositiveQuantity
+    executor_id: Identifier
+    executor_incarnation: UUID
+    signing_key_sha256: Digest
+    local_authority_sha256: Digest
+    controller_authority_sha256: Digest
+
+
+class SubjectExecutionAcknowledgementV2(StrictV2Model):
+    """Protected subject acknowledgement of one prepared global authority."""
+
+    subject_id: UUID
+    subject_incarnation: UUID
+    configuration_generation: PositiveQuantity
+    deployment_generation: PositiveQuantity
+    candidate: CandidateBindingV2
+    reporter_incarnation: UUID
+    protected_admission_sha256: Digest
+    legacy_writer_high_water: Quantity
+    acknowledgement_sha256: Digest
+
+
+class LegacyWriterFenceV2(StrictV2Model):
+    """Exact high-water and freeze evidence for one legacy mutation writer."""
+
+    writer_id: Identifier
+    writer_kind: Literal[
+        "allocation",
+        "submission",
+        "claim",
+        "pressure",
+        "cancellation",
+        "release",
+    ]
+    scope_kind: Literal["global", "pool", "environment"]
+    scope_id: Identifier
+    high_water: Quantity
+    freeze_evidence_sha256: Digest
+    state: Literal["frozen", "retired"]
+
+
+class PoolControllerAuthorityV2(StrictV2Model):
+    """Operator-owned controller trust root for one physical pool."""
+
+    pool_id: Literal["gb10", "oldlab"]
+    controller_authority_sha256: Digest
+
+
+class ExecutionPreparationPolicyV2(StrictV2Model):
+    """Owner-only policy that makes execution preparation possible."""
+
+    trusted_fleet_release_sha256: Digest
+    executable_new_capacity_ceiling: PositiveQuantity
+    executable_new_capacity_rate_per_minute: PositiveQuantity
+    executors: Annotated[
+        tuple[PreparedExecutorBindingV2, ...],
+        Field(min_length=2, max_length=2),
+    ]
+    subject_acknowledgements: Annotated[
+        tuple[SubjectExecutionAcknowledgementV2, ...],
+        Field(max_length=MAX_SUBJECTS),
+    ]
+    rollback_evidence_sha256: Digest
+    controller_authorities: Annotated[
+        tuple[PoolControllerAuthorityV2, ...],
+        Field(min_length=2, max_length=2),
+    ]
+    legacy_writer_fences: Annotated[
+        tuple[LegacyWriterFenceV2, ...],
+        Field(min_length=1, max_length=MAX_FIXED_CLAIMS_PER_REPORT),
+    ]
+
+    @field_validator("executors")
+    @classmethod
+    def _complete_executors(
+        cls,
+        value: tuple[PreparedExecutorBindingV2, ...],
+    ) -> tuple[PreparedExecutorBindingV2, ...]:
+        return ExecutionPreparationV2._complete_executors(value)
+
+    @field_validator("subject_acknowledgements")
+    @classmethod
+    def _canonical_subjects(
+        cls,
+        value: tuple[SubjectExecutionAcknowledgementV2, ...],
+    ) -> tuple[SubjectExecutionAcknowledgementV2, ...]:
+        subject_ids = [item.subject_id for item in value]
+        if len(subject_ids) != len(set(subject_ids)):
+            raise ValueError("execution policy contains duplicate subject acknowledgement")
+        return tuple(sorted(value, key=lambda item: item.subject_id.int))
+
+    @field_validator("controller_authorities")
+    @classmethod
+    def _complete_controllers(
+        cls,
+        value: tuple[PoolControllerAuthorityV2, ...],
+    ) -> tuple[PoolControllerAuthorityV2, ...]:
+        if {item.pool_id for item in value} != {"gb10", "oldlab"}:
+            raise ValueError("execution policy requires exactly gb10 and oldlab")
+        return tuple(sorted(value, key=lambda item: item.pool_id))
+
+    @field_validator("legacy_writer_fences")
+    @classmethod
+    def _complete_legacy_writer_inventory(
+        cls,
+        value: tuple[LegacyWriterFenceV2, ...],
+    ) -> tuple[LegacyWriterFenceV2, ...]:
+        keys = [
+            (item.scope_kind, item.scope_id, item.writer_kind, item.writer_id) for item in value
+        ]
+        if not keys or len(keys) != len(set(keys)):
+            raise ValueError("execution policy requires a complete legacy writer inventory")
+        return tuple(
+            sorted(
+                value,
+                key=lambda item: (
+                    item.scope_kind,
+                    item.scope_id,
+                    item.writer_kind,
+                    item.writer_id,
+                ),
+            )
+        )
+
+
+class ExecutionPreparationV2(StrictV2Model):
+    """Complete immutable evidence needed to prepare an execution epoch."""
+
+    authority_incarnation: UUID
+    expected_writer_epoch: PositiveQuantity
+    configuration_epoch: PositiveQuantity
+    fleet_generation: PositiveQuantity
+    fleet_digest: Digest
+    trusted_fleet_release_sha256: Digest
+    requested_ceiling: PositiveQuantity
+    requested_rate_per_minute: PositiveQuantity
+    executors: Annotated[
+        tuple[PreparedExecutorBindingV2, ...],
+        Field(min_length=2, max_length=2),
+    ]
+    subject_acknowledgements: Annotated[
+        tuple[SubjectExecutionAcknowledgementV2, ...],
+        Field(max_length=MAX_SUBJECTS),
+    ] = ()
+    legacy_writer_fences: Annotated[
+        tuple[LegacyWriterFenceV2, ...],
+        Field(max_length=MAX_FIXED_CLAIMS_PER_REPORT),
+    ] = ()
+    rollback_evidence_sha256: Digest
+    executable: Literal[True] = True
+
+    @field_validator("executors")
+    @classmethod
+    def _complete_executors(
+        cls,
+        value: tuple[PreparedExecutorBindingV2, ...],
+    ) -> tuple[PreparedExecutorBindingV2, ...]:
+        if {item.pool_id for item in value} != {"gb10", "oldlab"}:
+            raise ValueError("execution preparation requires exactly gb10 and oldlab")
+        if len({item.executor_id for item in value}) != len(value) or len(
+            {item.executor_incarnation for item in value}
+        ) != len(value):
+            raise ValueError("execution preparation requires distinct pool executors")
+        return tuple(sorted(value, key=lambda item: item.pool_id))
+
+    @field_validator("subject_acknowledgements")
+    @classmethod
+    def _canonical_subjects(
+        cls,
+        value: tuple[SubjectExecutionAcknowledgementV2, ...],
+    ) -> tuple[SubjectExecutionAcknowledgementV2, ...]:
+        subject_ids = [item.subject_id for item in value]
+        if len(subject_ids) != len(set(subject_ids)):
+            raise ValueError("duplicate subject acknowledgement")
+        return tuple(sorted(value, key=lambda item: item.subject_id.int))
+
+    @field_validator("legacy_writer_fences")
+    @classmethod
+    def _canonical_legacy_writers(
+        cls,
+        value: tuple[LegacyWriterFenceV2, ...],
+    ) -> tuple[LegacyWriterFenceV2, ...]:
+        writer_keys = [
+            (item.scope_kind, item.scope_id, item.writer_kind, item.writer_id) for item in value
+        ]
+        if len(writer_keys) != len(set(writer_keys)):
+            raise ValueError("duplicate legacy writer fence")
+        return tuple(
+            sorted(
+                value,
+                key=lambda item: (
+                    item.scope_kind,
+                    item.scope_id,
+                    item.writer_kind,
+                    item.writer_id,
+                ),
+            )
+        )
+
+
+class ExecutionActivationV2(StrictV2Model):
+    """One explicit bounded transition of an exact prepared epoch."""
+
+    authority_incarnation: UUID
+    expected_writer_epoch: PositiveQuantity
+    execution_epoch: PositiveQuantity
+    execution_manifest_sha256: Digest
+    executable_new_capacity_ceiling: PositiveQuantity
+    executable_new_capacity_rate_per_minute: PositiveQuantity
+    executable: Literal[True] = True
+
+
+class ExecutionDrainV2(StrictV2Model):
+    """One explicit zeroing transition of an exact active epoch."""
+
+    authority_incarnation: UUID
+    expected_writer_epoch: PositiveQuantity
+    execution_epoch: PositiveQuantity
+    execution_manifest_sha256: Digest
+    expected_executable_new_capacity_ceiling: PositiveQuantity
+    expected_executable_new_capacity_rate_per_minute: PositiveQuantity
+    executable: Literal[True] = True
+
+
+class ExecutionRetirementExecutorCheckpointV2(StrictV2Model):
+    """One executor's exact final heartbeat, journal, and inventory evidence."""
+
+    executor_id: Identifier
+    executor_incarnation: UUID
+    pool_id: Literal["gb10", "oldlab"]
+    pool_generation: PositiveQuantity
+    heartbeat_sequence: PositiveQuantity
+    command_sequence: Quantity
+    journal_sequence: Quantity
+    journal_digest: Digest
+    inventory_sequence: PositiveQuantity
+    inventory_digest: Digest
+
+    @model_validator(mode="after")
+    def _canonical_journal(self) -> ExecutionRetirementExecutorCheckpointV2:
+        _validate_journal_head(self.journal_sequence, self.journal_digest)
+        return self
+
+
+class ExecutionRetirementV2(StrictV2Model):
+    """Retire one exact drain-only epoch against both final pool checkpoints."""
+
+    authority_incarnation: UUID
+    expected_writer_epoch: PositiveQuantity
+    execution_epoch: PositiveQuantity
+    execution_manifest_sha256: Digest
+    executor_checkpoints: Annotated[
+        tuple[ExecutionRetirementExecutorCheckpointV2, ...],
+        Field(min_length=2, max_length=2),
+    ]
+    executable: Literal[True] = True
+
+    @field_validator("executor_checkpoints")
+    @classmethod
+    def _canonical_executor_checkpoints(
+        cls,
+        value: tuple[ExecutionRetirementExecutorCheckpointV2, ...],
+    ) -> tuple[ExecutionRetirementExecutorCheckpointV2, ...]:
+        pool_ids = tuple(item.pool_id for item in value)
+        if set(pool_ids) != {"gb10", "oldlab"}:
+            raise ValueError("execution retirement requires exactly gb10 and oldlab")
+        if pool_ids != ("gb10", "oldlab"):
+            raise ValueError("execution retirement requires canonical pool order")
+        if (
+            len({item.executor_id for item in value}) != 2
+            or len({item.executor_incarnation for item in value}) != 2
+        ):
+            raise ValueError("execution retirement requires distinct pool executors")
+        return value
 
 
 class ExecutableReservationProposalV2(StrictV2Model):
@@ -377,6 +671,7 @@ class ExecutableReservationAcceptanceV2(StrictV2Model):
     execution: ExecutionFenceV2
     tranche_id: UUID
     proposal_digest: Digest
+    pool_generation: PositiveQuantity
     executor_id: Identifier
     executor_incarnation: UUID
     command_sequence: PositiveQuantity
@@ -537,11 +832,21 @@ __all__ = [
     "ExecutableReleasedShapeV2",
     "ExecutableReservationAcceptanceV2",
     "ExecutableReservationProposalV2",
+    "ExecutionActivationV2",
     "ExecutionAuthorityV2",
     "ExecutionContextV2",
+    "ExecutionDrainV2",
     "ExecutionFenceV2",
+    "ExecutionPreparationPolicyV2",
+    "ExecutionPreparationV2",
+    "ExecutionRetirementExecutorCheckpointV2",
+    "ExecutionRetirementV2",
+    "LegacyWriterFenceV2",
+    "PoolControllerAuthorityV2",
+    "PreparedExecutorBindingV2",
     "SignedExecutableOwnershipProofV2",
     "StrictV2Model",
+    "SubjectExecutionAcknowledgementV2",
     "canonical_executable_bytes",
     "canonical_executable_digest",
 ]

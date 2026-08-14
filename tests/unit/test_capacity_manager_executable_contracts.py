@@ -32,6 +32,7 @@ def _authority(*, state: str = "active", ceiling: int = 2):
         execution_manifest_sha256="c" * 64,
         execution_state=state,
         executable_new_capacity_ceiling=ceiling,
+        executable_new_capacity_rate_per_minute=0 if state == "drain-only" else 1,
         trusted_fleet_release_sha256="d" * 64,
     )
 
@@ -70,6 +71,78 @@ def _candidate():
         algorithm="source-sha256",
         identity="a" * 64,
         publication_sha256="b" * 64,
+    )
+
+
+def _execution_policy():
+    contracts = _contracts()
+    controller_digests = {"gb10": "c" * 64, "oldlab": "d" * 64}
+    executor_incarnations = {"gb10": UUID(int=71), "oldlab": UUID(int=72)}
+    return contracts.ExecutionPreparationPolicyV2(
+        trusted_fleet_release_sha256="e" * 64,
+        executable_new_capacity_ceiling=1,
+        executable_new_capacity_rate_per_minute=1,
+        executors=tuple(
+            contracts.PreparedExecutorBindingV2(
+                pool_id=pool_id,
+                pool_generation=1,
+                executor_id=f"{pool_id}-executor",
+                executor_incarnation=executor_incarnations[pool_id],
+                signing_key_sha256=("a" if pool_id == "gb10" else "b") * 64,
+                local_authority_sha256=("1" if pool_id == "gb10" else "2") * 64,
+                controller_authority_sha256=controller_digests[pool_id],
+            )
+            for pool_id in ("gb10", "oldlab")
+        ),
+        subject_acknowledgements=(
+            contracts.SubjectExecutionAcknowledgementV2(
+                subject_id=UUID(int=81),
+                subject_incarnation=UUID(int=82),
+                configuration_generation=1,
+                deployment_generation=1,
+                candidate=_candidate(),
+                reporter_incarnation=UUID(int=83),
+                protected_admission_sha256="3" * 64,
+                legacy_writer_high_water=0,
+                acknowledgement_sha256="4" * 64,
+            ),
+        ),
+        rollback_evidence_sha256="6" * 64,
+        controller_authorities=tuple(
+            contracts.PoolControllerAuthorityV2(
+                pool_id=pool_id,
+                controller_authority_sha256=controller_digests[pool_id],
+            )
+            for pool_id in ("gb10", "oldlab")
+        ),
+        legacy_writer_fences=(
+            contracts.LegacyWriterFenceV2(
+                writer_id="global-dev-supervisor",
+                writer_kind="allocation",
+                scope_kind="global",
+                scope_id="development",
+                high_water=9,
+                freeze_evidence_sha256="5" * 64,
+                state="frozen",
+            ),
+        ),
+    )
+
+
+def _retirement_checkpoint(pool_id: str):
+    contracts = _contracts()
+    suffix = 1 if pool_id == "gb10" else 2
+    return contracts.ExecutionRetirementExecutorCheckpointV2(
+        executor_id=f"{pool_id}-executor",
+        executor_incarnation=UUID(int=100 + suffix),
+        pool_id=pool_id,
+        pool_generation=1,
+        heartbeat_sequence=2,
+        command_sequence=0,
+        journal_sequence=0,
+        journal_digest="0" * 64,
+        inventory_sequence=1,
+        inventory_digest=str(suffix) * 64,
     )
 
 
@@ -173,11 +246,13 @@ def test_execution_authority_distinguishes_active_from_drain_only() -> None:
         **common,
         execution_state="active",
         executable_new_capacity_ceiling=1,
+        executable_new_capacity_rate_per_minute=1,
     )
     drain = contracts.ExecutionAuthorityV2(
         **common,
         execution_state="drain-only",
         executable_new_capacity_ceiling=0,
+        executable_new_capacity_rate_per_minute=0,
     )
 
     assert active.executable_new_capacity_ceiling == 1
@@ -187,13 +262,156 @@ def test_execution_authority_distinguishes_active_from_drain_only() -> None:
             **common,
             execution_state="active",
             executable_new_capacity_ceiling=0,
+            executable_new_capacity_rate_per_minute=1,
         )
     with pytest.raises(ValidationError):
         contracts.ExecutionAuthorityV2(
             **common,
             execution_state="active",
             executable_new_capacity_ceiling=MAX_QUANTITY + 1,
+            executable_new_capacity_rate_per_minute=1,
         )
+
+
+def test_execution_drain_contract_binds_the_exact_positive_active_envelope() -> None:
+    """Dropping any active compare-and-set field must fail this drain request."""
+
+    contracts = _contracts()
+    request = contracts.ExecutionDrainV2(
+        authority_incarnation=UUID(int=1),
+        expected_writer_epoch=2,
+        execution_epoch=4,
+        execution_manifest_sha256="c" * 64,
+        expected_executable_new_capacity_ceiling=2,
+        expected_executable_new_capacity_rate_per_minute=1,
+    )
+
+    assert request.model_dump(mode="json") == {
+        "schema_version": 2,
+        "authority_incarnation": str(UUID(int=1)),
+        "expected_writer_epoch": 2,
+        "execution_epoch": 4,
+        "execution_manifest_sha256": "c" * 64,
+        "expected_executable_new_capacity_ceiling": 2,
+        "expected_executable_new_capacity_rate_per_minute": 1,
+        "executable": True,
+    }
+    for field in (
+        "expected_writer_epoch",
+        "execution_epoch",
+        "expected_executable_new_capacity_ceiling",
+        "expected_executable_new_capacity_rate_per_minute",
+    ):
+        with pytest.raises(ValidationError):
+            contracts.ExecutionDrainV2.model_validate(
+                request.model_dump(mode="python") | {field: 0}
+            )
+    with pytest.raises(ValidationError):
+        contracts.ExecutionDrainV2.model_validate(
+            request.model_dump(mode="python") | {"executable": False}
+        )
+
+
+def test_execution_retirement_contract_requires_canonical_distinct_pool_evidence() -> None:
+    """Duplicate, missing, reordered, or cross-pool executor evidence must fail."""
+
+    contracts = _contracts()
+    gb10 = _retirement_checkpoint("gb10")
+    oldlab = _retirement_checkpoint("oldlab")
+    request = contracts.ExecutionRetirementV2(
+        authority_incarnation=UUID(int=1),
+        expected_writer_epoch=2,
+        execution_epoch=4,
+        execution_manifest_sha256="c" * 64,
+        executor_checkpoints=(gb10, oldlab),
+    )
+
+    assert tuple(item.pool_id for item in request.executor_checkpoints) == (
+        "gb10",
+        "oldlab",
+    )
+    with pytest.raises(ValidationError, match="exactly gb10 and oldlab"):
+        contracts.ExecutionRetirementV2.model_validate(
+            request.model_dump(mode="python") | {"executor_checkpoints": (gb10, gb10.model_copy())}
+        )
+    with pytest.raises(ValidationError):
+        contracts.ExecutionRetirementV2.model_validate(
+            request.model_dump(mode="python") | {"executor_checkpoints": (gb10,)}
+        )
+    with pytest.raises(ValidationError, match="canonical pool order"):
+        contracts.ExecutionRetirementV2.model_validate(
+            request.model_dump(mode="python") | {"executor_checkpoints": (oldlab, gb10)}
+        )
+    with pytest.raises(ValidationError, match="distinct pool executors"):
+        contracts.ExecutionRetirementV2.model_validate(
+            request.model_dump(mode="python")
+            | {
+                "executor_checkpoints": (
+                    gb10,
+                    oldlab.model_copy(
+                        update={
+                            "executor_id": gb10.executor_id,
+                            "executor_incarnation": gb10.executor_incarnation,
+                        }
+                    ),
+                )
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("heartbeat_sequence", 0, None),
+        ("heartbeat_sequence", -1, None),
+        ("command_sequence", -1, None),
+        ("journal_sequence", -1, None),
+        ("inventory_sequence", 0, None),
+        ("inventory_sequence", -1, None),
+        ("journal_digest", "f" * 64, "canonical zero digest"),
+    ],
+)
+def test_execution_retirement_checkpoint_rejects_invalid_sequences_and_journal(
+    field: str,
+    value: object,
+    message: str | None,
+) -> None:
+    """Weakening sequence or journal-head validation must fail final evidence."""
+
+    contracts = _contracts()
+    checkpoint = _retirement_checkpoint("oldlab")
+    expectation = (
+        pytest.raises(ValidationError, match=message) if message else pytest.raises(ValidationError)
+    )
+    with expectation:
+        contracts.ExecutionRetirementExecutorCheckpointV2.model_validate(
+            checkpoint.model_dump(mode="python") | {field: value}
+        )
+
+
+def test_owner_policy_accepts_finite_two_slot_ceiling() -> None:
+    """Pinning the policy to one slot would reject an approved finite envelope."""
+
+    payload = _execution_policy().model_dump(mode="python")
+    payload["executable_new_capacity_ceiling"] = 2
+    assert (
+        _contracts()
+        .ExecutionPreparationPolicyV2.model_validate(payload)
+        .executable_new_capacity_ceiling
+        == 2
+    )
+
+
+@pytest.mark.parametrize("ceiling", (0, -1, True, 1.0, MAX_QUANTITY + 1))
+def test_owner_policy_rejects_nonpositive_or_nonstrict_finite_ceiling(
+    ceiling: object,
+) -> None:
+    """Widening the owner envelope beyond strict positive quantities must fail."""
+
+    payload = _execution_policy().model_dump(mode="python")
+    payload["executable_new_capacity_ceiling"] = ceiling
+    with pytest.raises(ValidationError):
+        _contracts().ExecutionPreparationPolicyV2.model_validate(payload)
 
 
 def test_prepared_execution_context_is_zero_ceiling_and_not_authority() -> None:
@@ -209,6 +427,7 @@ def test_prepared_execution_context_is_zero_ceiling_and_not_authority() -> None:
         execution_manifest_sha256="c" * 64,
         execution_state="prepared",
         executable_new_capacity_ceiling=0,
+        executable_new_capacity_rate_per_minute=0,
         trusted_fleet_release_sha256="d" * 64,
     )
 
@@ -234,6 +453,7 @@ def test_execution_fence_adds_exact_allocation_epoch() -> None:
         execution_manifest_sha256="c" * 64,
         execution_state="active",
         executable_new_capacity_ceiling=1,
+        executable_new_capacity_rate_per_minute=1,
         trusted_fleet_release_sha256="d" * 64,
         allocation_epoch=5,
     )
@@ -387,7 +607,9 @@ def test_executable_operation_family_is_v2_true_and_exactly_bound() -> None:
     assert all(hasattr(contracts, name) for name in required)
     binding = _intent_binding()
     context = contracts.ExecutionContextV2(
-        **_authority(state="drain-only", ceiling=0).model_dump(mode="python")
+        **_authority(state="drain-only", ceiling=0).model_dump(
+            mode="python", exclude={"executable"}
+        )
     )
     registration = contracts.ExecutableExecutorRegistrationV2(
         execution=context,
@@ -425,6 +647,7 @@ def test_executable_operation_family_is_v2_true_and_exactly_bound() -> None:
         execution=binding.execution,
         tranche_id=binding.tranche_id,
         proposal_digest="4" * 64,
+        pool_generation=binding.pool_generation,
         executor_id=binding.executor_id,
         executor_incarnation=binding.executor_incarnation,
         command_sequence=1,
