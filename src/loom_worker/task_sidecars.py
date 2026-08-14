@@ -13,6 +13,7 @@ import contextlib
 import hashlib
 import re
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -318,10 +319,12 @@ class DockerTaskSidecarRuntime:
             labels={
                 "loom.setup-build": "true",
                 "loom.setup-kind": "task-sidecar",
+                "loom.task-sidecar": "true",
                 "loom.task_id": self.task_config.task.id,
                 "loom.task_checksum": self.task_checksum,
                 "loom.task_sidecar": sidecar.name,
                 "loom.task_dockerfile": rel_dockerfile,
+                "loom.created-at": datetime.now(UTC).isoformat(),
             },
         )
 

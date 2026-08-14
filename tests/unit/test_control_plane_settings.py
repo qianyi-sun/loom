@@ -38,6 +38,8 @@ def test_loads_from_env(monkeypatch: pytest.MonkeyPatch):
     assert s.slurm_worker_controller_enabled is False
     assert s.slurm_worker_controller_pool_name == "oldlab"
     assert s.slurm_worker_controller_requested_concurrency == 6
+    assert s.task_image_builder_lease_seconds == 300.0
+    assert s.task_image_registry_grace_hours == 168
     assert s.minio_access_key.get_secret_value() == "ak"
 
 

@@ -71,6 +71,8 @@ class ControlPlaneSettings(BaseSettings):
     step_jwt_signing_key: SecretStr
     storage_auth_kind: str = "static_keys"
     storage_backend: str = "minio"
+    task_image_builder_lease_seconds: float = 300.0
+    task_image_registry_grace_hours: int = 168
     trajectories_bucket: str = "trajectories"
     trial_retry_default_backoff_base_sec: float = 30.0
     trial_retry_default_backoff_jitter: float = 0.2

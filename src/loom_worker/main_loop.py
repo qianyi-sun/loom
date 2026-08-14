@@ -107,7 +107,7 @@ from loom_worker.task_image import resolve_task_image
 from loom_worker.task_sidecars import DockerTaskSidecarRuntime
 from loom_worker.trial_cache import (
     _daemon_build_slot,
-    evict_stale_cache,
+    evict_stale_managed_images_from_env,
     resolve_trial_image,
 )
 from loom_worker.trial_cancellation_watchdog import (
@@ -388,6 +388,25 @@ class _IdleExitTracker:
         return self._idle_for_seconds >= self.after_seconds
 
 
+@dataclass
+class _PeriodicMaintenanceTracker:
+    interval_seconds: float
+    now: Callable[[], float] = time.monotonic
+    _last_run_at: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.interval_seconds <= 0:
+            raise ValueError("maintenance interval must be positive")
+        self._last_run_at = self.now()
+
+    def due(self) -> bool:
+        current = self.now()
+        if current - self._last_run_at < self.interval_seconds:
+            return False
+        self._last_run_at = current
+        return True
+
+
 def _resolve_blocking_io_max_workers(settings: WorkerSettings) -> int:
     configured = settings.blocking_io_max_workers
     if configured is not None:
@@ -572,6 +591,7 @@ async def run_worker(
             idle_exit = _IdleExitTracker(
                 after_seconds=settings.idle_exit_after_seconds,
             )
+            image_eviction = _PeriodicMaintenanceTracker(interval_seconds=3_600)
             # PR-E: per-worker vLLM registry. Opt-in via settings; the
             # `enabled=False` path still constructs the object so the
             # trial runner gets a deterministic AgentError instead of
@@ -624,6 +644,8 @@ async def run_worker(
                     sandbox_allocator=sandbox_allocator,
                     sandbox_singleton=sandbox_singleton,
                 )
+                if image_eviction.due():
+                    await asyncio.to_thread(_run_trial_cache_eviction, settings)
                 should_idle_exit = idle_exit.observe(
                     claimed=claimed,
                     in_flight=pool.in_flight,
@@ -792,18 +814,12 @@ def _run_orphan_sandbox_cleanup(
 
 
 def _run_trial_cache_eviction(settings: WorkerSettings) -> None:
-    """Best-effort prune of stale layered images at worker startup.
+    """Best-effort prune of all Loom-managed images.
 
-    TTL (trial_cache_ttl_hours) + free-space backstop
-    (trial_cache_min_free_gb). Docker errors are logged and swallowed —
-    eviction is opportunistic and must not fail worker boot."""
-    import docker as _docker
-
-    try:
-        client = _docker.from_env()
-        evict_stale_cache(client, settings)
-    except Exception:
-        logger.exception("trial_cache eviction failed at startup")
+    Docker errors are logged and swallowed by the shared eviction helper;
+    opportunistic cleanup must not fail worker boot or claim processing.
+    """
+    evict_stale_managed_images_from_env(settings)
 
 
 async def _ensure_runtime_buckets(

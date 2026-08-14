@@ -249,6 +249,8 @@ async def test_sidecar_runtime_builds_and_starts_in_dependency_order(
     assert fake_client.images.pull_calls == ["postgres:15"]
     assert fake_client.images.build_calls[0]["path"] == str(api_context)
     assert fake_client.images.build_calls[0]["dockerfile"] == "Dockerfile"
+    assert fake_client.images.build_calls[0]["labels"]["loom.task-sidecar"] == "true"
+    assert fake_client.images.build_calls[0]["labels"]["loom.created-at"]
     assert [c["name"] for c in fake_client.containers.create_calls] == [
         f"loom-sidecar-{trial_id}-db",
         f"loom-sidecar-{trial_id}-api",

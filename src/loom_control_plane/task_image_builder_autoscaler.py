@@ -123,7 +123,7 @@ def build_task_image_builder_sbatch_request(
         f"LOOM_WORKER_HOSTNAME={node}",
         f"LOOM_REMOTE_WORKER_ENV_FILE={config.env_file}",
         f"LOOM_REMOTE_WORKER_REPO_DIR={config.repo_dir}",
-        f"LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS={config.idle_exit_after_seconds}",
+        f"LOOM_WORKER_TASK_IMAGE_BUILDER_IDLE_EXIT_SECONDS={config.idle_exit_after_seconds}",
         "LOOM_WORKER_REQUIRE_CGROUP_PARENT=0",
         "LOOM_WORKER_RESTART_POLICY=no",
     ]
@@ -353,7 +353,9 @@ async def reconcile_task_image_builder_autoscaler_once(
                     {
                         "LOOM_REMOTE_WORKER_ENV_FILE": config.env_file,
                         "LOOM_REMOTE_WORKER_REPO_DIR": config.repo_dir,
-                        "LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS": str(config.idle_exit_after_seconds),
+                        "LOOM_WORKER_TASK_IMAGE_BUILDER_IDLE_EXIT_SECONDS": str(
+                            config.idle_exit_after_seconds
+                        ),
                     }
                 ),
                 submitted_at=now,

@@ -85,6 +85,7 @@ async def claim_route(
             session,
             builder_id=payload.builder_id,
             cpu_arch=payload.cpu_arch,
+            lease_seconds=request.app.state.settings.task_image_builder_lease_seconds,
         )
     if row is None:
         return Response(status_code=204)
@@ -120,6 +121,7 @@ async def start_route(
             materialization_id=materialization_id,
             builder_id=payload.builder_id,
             lease_epoch=payload.lease_epoch,
+            lease_seconds=request.app.state.settings.task_image_builder_lease_seconds,
         ),
     )
 
@@ -139,6 +141,7 @@ async def heartbeat_route(
             materialization_id=materialization_id,
             builder_id=payload.builder_id,
             lease_epoch=payload.lease_epoch,
+            lease_seconds=request.app.state.settings.task_image_builder_lease_seconds,
         ),
     )
 

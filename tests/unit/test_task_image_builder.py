@@ -58,6 +58,92 @@ def _settings() -> SimpleNamespace:
     )
 
 
+class _Secret:
+    def get_secret_value(self) -> str:
+        return "builder-token"
+
+
+async def test_builder_uses_dedicated_idle_exit_setting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    claims = 0
+
+    class _IdleControlPlane:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        async def claim_task_image_materialization(self, **_kwargs: Any) -> None:
+            nonlocal claims
+            claims += 1
+            if claims > 2:
+                raise AssertionError("builder did not exit after its dedicated idle limit")
+            return None
+
+    clock = iter((0.0, 0.0, 121.0))
+    monkeypatch.setattr(task_image_builder, "HttpControlPlaneClient", _IdleControlPlane)
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(task_image_builder.asyncio, "sleep", no_sleep)
+
+    await task_image_builder.run_builder(  # type: ignore[arg-type]
+        SimpleNamespace(
+            control_plane_url="http://cp:8080",
+            token=_Secret(),
+            docker_api_timeout_sec=30,
+            task_image_builder_idle_exit_seconds=120,
+            idle_exit_after_seconds=None,
+            claim_poll_interval_sec=1,
+        ),
+        now=lambda: next(clock),
+    )
+
+    assert claims == 2
+
+
+async def test_builder_evicts_managed_images_at_startup_and_after_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    claims = iter((_claim(), None))
+    evictions: list[object] = []
+
+    class _OneClaimControlPlane:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        async def claim_task_image_materialization(
+            self, **_kwargs: Any
+        ) -> TaskImageBuildClaim | None:
+            return next(claims)
+
+    async def process(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(task_image_builder, "HttpControlPlaneClient", _OneClaimControlPlane)
+    monkeypatch.setattr(task_image_builder, "process_task_image_claim", process)
+    monkeypatch.setattr(
+        task_image_builder,
+        "evict_stale_managed_images_from_env",
+        lambda settings: evictions.append(settings),
+        raising=False,
+    )
+
+    settings = SimpleNamespace(
+        control_plane_url="http://cp:8080",
+        token=_Secret(),
+        docker_api_timeout_sec=30,
+        task_image_builder_idle_exit_seconds=0,
+        claim_poll_interval_sec=1,
+    )
+    await task_image_builder.run_builder(  # type: ignore[arg-type]
+        settings,
+        now=lambda: 0.0,
+    )
+
+    assert evictions == [settings, settings]
+
+
 async def test_materialization_rejects_non_native_builder_architecture(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

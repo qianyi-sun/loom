@@ -24,6 +24,9 @@ _LOOM_WORKER_ENVS = [
     "LOOM_WORKER_POOL_NAME",
     "LOOM_WORKER_BLOCKING_IO_MAX_WORKERS",
     "LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS",
+    "LOOM_WORKER_TASK_IMAGE_BUILDER_IDLE_EXIT_SECONDS",
+    "LOOM_WORKER_TASK_IMAGE_LOCAL_TTL_HOURS",
+    "LOOM_WORKER_TASK_IMAGE_MIN_FREE_GB",
     "LOOM_WORKER_TRAJECTORY_CACHE_DIR",
     "LOOM_WORKER_SUBPROCESS_GATEWAY_URL",
     "LOOM_WORKER_HOSTNAME",
@@ -138,6 +141,23 @@ def test_idle_exit_is_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> No
     assert s.setup_health_dstate_max == 32
     assert s.setup_health_wait_timeout_sec == 300.0
     assert s.setup_health_poll_interval_sec == 5.0
+
+
+def test_task_image_lifecycle_defaults_are_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LOOM_WORKER_CONTROL_PLANE_URL", "http://cp:8080")
+    monkeypatch.setenv("LOOM_WORKER_GATEWAY_URL", "http://gw:9100")
+    monkeypatch.setenv("LOOM_WORKER_TOKEN", "loom_w_test")
+    monkeypatch.setenv("LOOM_WORKER_MINIO_ENDPOINT", "http://minio:9000")
+    monkeypatch.setenv("LOOM_WORKER_MINIO_ACCESS_KEY", "x")
+    monkeypatch.setenv("LOOM_WORKER_MINIO_SECRET_KEY", "y")
+
+    settings = WorkerSettings(_env_file=None)
+
+    assert settings.task_image_local_ttl_hours == 168
+    assert settings.task_image_min_free_gb == 20
+    assert settings.task_image_builder_idle_exit_seconds == 120
 
 
 def test_container_caps_parse_from_env(monkeypatch: pytest.MonkeyPatch) -> None:

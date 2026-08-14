@@ -55,7 +55,8 @@ def test_builder_sbatch_is_exclusive_and_runs_only_builder_entrypoint() -> None:
     assert "--account=loom-staging" in request.args
     assert "--qos=loom-builder" in request.args
     assert "LOOM_WORKER_MAX_CONCURRENT=1" in request.args[-1]
-    assert "LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS=120" in request.args[-1]
+    assert "LOOM_WORKER_TASK_IMAGE_BUILDER_IDLE_EXIT_SECONDS=120" in request.args[-1]
+    assert "LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS" not in request.args[-1]
     assert "docker compose" in request.stdin
     assert "run --rm --no-deps worker python -m loom_worker.task_image_builder" in request.stdin
     assert (

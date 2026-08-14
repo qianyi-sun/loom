@@ -17,6 +17,7 @@ import platform
 import shutil
 import socket
 import time
+from collections.abc import Callable
 from typing import Any, Protocol
 
 from loom.driver.task_image import (
@@ -29,6 +30,7 @@ from loom.task_image_materialization import required_task_image_architectures
 from loom_worker.config import WorkerSettings
 from loom_worker.control_plane_client import HttpControlPlaneClient, TaskImageBuildClaim
 from loom_worker.task_sidecars import build_task_sidecar_images
+from loom_worker.trial_cache import evict_stale_managed_images_from_env
 
 logger = logging.getLogger(__name__)
 
@@ -250,27 +252,32 @@ async def process_task_image_claim(
             await heartbeat
 
 
-async def run_builder(settings: WorkerSettings) -> None:
+async def run_builder(
+    settings: WorkerSettings,
+    *,
+    now: Callable[[], float] = time.monotonic,
+) -> None:
     native_arch = host_cpu_arch()
+    await asyncio.to_thread(evict_stale_managed_images_from_env, settings)
     builder_id = f"{socket.gethostname()}:{os.getpid()}"[:128]
     control_plane = HttpControlPlaneClient(
         base_url=str(settings.control_plane_url),
         token=settings.token.get_secret_value(),
         timeout_sec=max(30.0, float(settings.docker_api_timeout_sec)),
     )
-    idle_since = time.monotonic()
+    idle_since = now()
     while True:
         claim = await control_plane.claim_task_image_materialization(
             builder_id=builder_id,
             cpu_arch=native_arch,  # type: ignore[arg-type]
         )
         if claim is None:
-            idle_limit = settings.idle_exit_after_seconds
-            if idle_limit is not None and time.monotonic() - idle_since >= idle_limit:
+            idle_limit = settings.task_image_builder_idle_exit_seconds
+            if idle_limit is not None and now() - idle_since >= idle_limit:
                 return
             await asyncio.sleep(settings.claim_poll_interval_sec)
             continue
-        idle_since = time.monotonic()
+        idle_since = now()
         try:
             await process_task_image_claim(
                 control_plane,
@@ -280,6 +287,8 @@ async def run_builder(settings: WorkerSettings) -> None:
             )
         except TaskImageLeaseLostError:
             logger.warning("task image lease lost id=%s", claim.id)
+        finally:
+            await asyncio.to_thread(evict_stale_managed_images_from_env, settings)
 
 
 def main() -> None:

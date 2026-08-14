@@ -67,6 +67,7 @@ def client(
         "LOOM_CP_MINIO_ACCESS_KEY": "x",
         "LOOM_CP_MINIO_SECRET_KEY": "y",
         "LOOM_CP_LLM_GATEWAY_URL": "http://gw:9100/",
+        "LOOM_CP_TASK_IMAGE_BUILDER_LEASE_SECONDS": "17",
     }.items():
         monkeypatch.setenv(key, value)
     app = create_app(ControlPlaneSettings(_env_file=None))
@@ -126,6 +127,12 @@ def _headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+def _assert_configured_lease(payload: dict[str, Any]) -> None:
+    lease_expires_at = datetime.fromisoformat(payload["lease_expires_at"])
+    remaining = (lease_expires_at - datetime.now(UTC)).total_seconds()
+    assert 14 <= remaining <= 18
+
+
 def _claim(
     client: TestClient,
     token: str,
@@ -178,6 +185,7 @@ def test_claim_is_native_architecture_specific_and_atomic(
     assert claim["lease_epoch"] == 1
     assert claim["attempt_count"] == 1
     assert claim["task_source"].startswith("s3://loom-tasks/")
+    _assert_configured_lease(claim)
     assert _claim(client, builder_token, builder_id="other-x86").status_code == 204
 
 
@@ -200,6 +208,7 @@ def test_start_heartbeat_and_complete_reject_stale_lease(
     )
     assert started.status_code == 200, started.text
     assert started.json()["state"] == "running"
+    _assert_configured_lease(started.json())
 
     stale = _mutation(
         client,
@@ -221,6 +230,7 @@ def test_start_heartbeat_and_complete_reject_stale_lease(
     )
     assert heartbeat.status_code == 200, heartbeat.text
     assert heartbeat.json()["state"] == "running"
+    _assert_configured_lease(heartbeat.json())
 
     completed = _mutation(
         client,

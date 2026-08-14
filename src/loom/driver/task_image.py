@@ -18,6 +18,7 @@ import re
 import tempfile
 import threading
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -498,9 +499,11 @@ def _ensure_dockerfile_image(
             forcerm=True,
             pull=False,
             labels={
+                "loom.task-image": "true",
                 "loom.task_id": task_config.task.id,
                 "loom.task_checksum": task_checksum,
                 "loom.task_dockerfile": rel_dockerfile,
+                "loom.created-at": datetime.now(UTC).isoformat(),
             },
         )
         # #1169: this (non-contained) builder populates the shared registry so

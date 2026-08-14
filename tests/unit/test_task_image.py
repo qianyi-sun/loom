@@ -140,21 +140,23 @@ async def test_resolve_task_image_builds_and_caches_dockerfile_image(
     # `_ensure_dockerfile_image`'s own pre-build check once the slot
     # has been claimed.
     assert fake_images.get_calls == [image, image]
-    assert fake_images.build_calls == [
-        {
-            "path": str(task_dir),
-            "dockerfile": "environment/Dockerfile",
-            "tag": image,
-            "rm": True,
-            "forcerm": True,
-            "pull": False,
-            "labels": {
-                "loom.task_id": "team-bench/task-1",
-                "loom.task_checksum": "abc123",
-                "loom.task_dockerfile": "environment/Dockerfile",
-            },
-        }
-    ]
+    assert len(fake_images.build_calls) == 1
+    build = fake_images.build_calls[0]
+    assert {key: value for key, value in build.items() if key != "labels"} == {
+        "path": str(task_dir),
+        "dockerfile": "environment/Dockerfile",
+        "tag": image,
+        "rm": True,
+        "forcerm": True,
+        "pull": False,
+    }
+    assert build["labels"] == {
+        "loom.task-image": "true",
+        "loom.task_id": "team-bench/task-1",
+        "loom.task_checksum": "abc123",
+        "loom.task_dockerfile": "environment/Dockerfile",
+        "loom.created-at": build["labels"]["loom.created-at"],
+    }
     assert fake_client.closed is True
 
 
