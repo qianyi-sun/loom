@@ -123,6 +123,13 @@ request-bound records and the protected backup-retention
 `inventory`/`apply` command; operators must not delete backup roots with path
 globs.
 
+If a verified detached backup crossed launch publication before rotation
+promotion, the protected backup-recovery `inventory`/`apply` command first
+converges that exact candidate using its immutable lease, attestation, request,
+and Attempt evidence. It preserves both payloads and queues the old active
+payload for ordinary retention; cleanup and retention never stand in for this
+cross-ledger recovery.
+
 See [protected staging rollout](staging-rollout.md) and
 [staging rollout preflight](staging-rollout-preflight.md) for the admission
 checks that consume this evidence.

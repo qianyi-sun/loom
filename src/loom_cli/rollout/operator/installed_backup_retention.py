@@ -11,6 +11,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import cast
 
 from loom_cli.rollout.lifecycle_protocol import LifecyclePhase
 
@@ -21,6 +22,8 @@ from .backup_rotation import (
     BackupRetirementRecord,
     BackupRotationState,
     acknowledge_retirement,
+    promote_candidate,
+    record_restore_verified,
     recover_failed_retirement,
 )
 from .config import OperatorConfig
@@ -32,6 +35,273 @@ _PRIVATE_FILE_MODE = 0o600
 
 class InstalledBackupRetentionError(RuntimeError):
     """Raised when exact rotation retirement cannot proceed safely."""
+
+
+class InstalledBackupRecoveryError(RuntimeError):
+    """Raised when a verified candidate cannot be recovered safely."""
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedBackupCandidateRecoveryPlan:
+    """Digest-approved authority to converge one restore-verified candidate."""
+
+    rotation_generation: int
+    rotation_sha256: str
+    candidate_before: BackupPayloadRecord
+    recovered_active: BackupPayloadRecord
+    previous_active: BackupPayloadRecord | None
+    lease_digest: str
+    preflight_attestation_sha256: str
+    job_sha256: str
+    job_state_sha256: str
+    request_sha256: str | None
+    attempt_sha256: str | None
+    job_phase: str
+    environment: str = "staging"
+    namespace: str = "loom-staging"
+
+    def __post_init__(self) -> None:
+        before = self.candidate_before
+        recovered = self.recovered_active
+        lease = recovered.lease
+        if (
+            self.rotation_generation < 0
+            or len(self.rotation_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in self.rotation_sha256)
+            or before.phase
+            not in {
+                BackupPayloadPhase.MANIFEST_VERIFIED,
+                BackupPayloadPhase.RESTORE_VERIFIED,
+            }
+            or recovered.phase is not BackupPayloadPhase.ACTIVE
+            or lease is None
+            or before.payload_id != recovered.payload_id
+            or before.request_id != recovered.request_id
+            or before.bundle_name != recovered.bundle_name
+            or before.created_at != recovered.created_at
+            or before.manifest_sha256 != recovered.manifest_sha256
+            or (
+                before.phase is BackupPayloadPhase.RESTORE_VERIFIED
+                and before.lease != recovered.lease
+            )
+            or lease.evidence_digest != self.lease_digest
+            or lease.source_request_id != before.request_id
+            or lease.manifest_sha256 != before.manifest_sha256
+            or lease.environment != self.environment
+            or lease.namespace != self.namespace
+            or self.job_phase
+            not in {
+                LifecyclePhase.BACKUP_VERIFIED.value,
+                LifecyclePhase.LAUNCH_PENDING.value,
+                LifecyclePhase.LAUNCH_RUNNING.value,
+            }
+            or len(self.preflight_attestation_sha256) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.preflight_attestation_sha256
+            )
+            or any(
+                len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)
+                for digest in (self.job_sha256, self.job_state_sha256)
+            )
+            or (
+                self.job_phase
+                in {
+                    LifecyclePhase.LAUNCH_PENDING.value,
+                    LifecyclePhase.LAUNCH_RUNNING.value,
+                }
+                and (
+                    self.request_sha256 is None
+                    or self.attempt_sha256 is None
+                    or len(self.request_sha256) != 64
+                    or len(self.attempt_sha256) != 64
+                    or any(
+                        character not in "0123456789abcdef"
+                        for digest in (self.request_sha256, self.attempt_sha256)
+                        for character in digest
+                    )
+                )
+            )
+            or (
+                self.job_phase == LifecyclePhase.BACKUP_VERIFIED.value
+                and (self.request_sha256 is not None or self.attempt_sha256 is not None)
+            )
+            or self.environment != "staging"
+            or self.namespace != "loom-staging"
+            or (
+                self.previous_active is not None
+                and (
+                    self.previous_active.phase is not BackupPayloadPhase.ACTIVE
+                    or self.previous_active.payload_id == recovered.payload_id
+                )
+            )
+        ):
+            raise ValueError("verified backup candidate recovery plan is invalid")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "candidate_before": self.candidate_before.to_dict(),
+            "environment": self.environment,
+            "attempt_sha256": self.attempt_sha256,
+            "job_phase": self.job_phase,
+            "job_sha256": self.job_sha256,
+            "job_state_sha256": self.job_state_sha256,
+            "lease_digest": self.lease_digest,
+            "namespace": self.namespace,
+            "preflight_attestation_sha256": self.preflight_attestation_sha256,
+            "previous_active": (
+                self.previous_active.to_dict() if self.previous_active is not None else None
+            ),
+            "recovered_active": self.recovered_active.to_dict(),
+            "request_sha256": self.request_sha256,
+            "rotation_generation": self.rotation_generation,
+            "rotation_sha256": self.rotation_sha256,
+            "schema_version": 1,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, object]) -> VerifiedBackupCandidateRecoveryPlan:
+        expected = {
+            "candidate_before",
+            "environment",
+            "attempt_sha256",
+            "job_phase",
+            "job_sha256",
+            "job_state_sha256",
+            "lease_digest",
+            "namespace",
+            "preflight_attestation_sha256",
+            "previous_active",
+            "recovered_active",
+            "request_sha256",
+            "rotation_generation",
+            "rotation_sha256",
+            "schema_version",
+        }
+        if (
+            set(data) != expected
+            or data["schema_version"] != 1
+            or type(data["rotation_generation"]) is not int
+            or not isinstance(data["rotation_sha256"], str)
+            or not isinstance(data["candidate_before"], dict)
+            or not isinstance(data["recovered_active"], dict)
+            or (
+                data["previous_active"] is not None
+                and not isinstance(data["previous_active"], dict)
+            )
+            or not all(
+                isinstance(data[field], str)
+                for field in (
+                    "environment",
+                    "job_phase",
+                    "lease_digest",
+                    "namespace",
+                    "preflight_attestation_sha256",
+                    "job_sha256",
+                    "job_state_sha256",
+                )
+            )
+            or any(
+                data[field] is not None and not isinstance(data[field], str)
+                for field in ("request_sha256", "attempt_sha256")
+            )
+        ):
+            raise ValueError("verified backup candidate recovery plan schema is invalid")
+        return cls(
+            rotation_generation=data["rotation_generation"],
+            rotation_sha256=data["rotation_sha256"],
+            candidate_before=BackupPayloadRecord.from_dict(data["candidate_before"]),
+            recovered_active=BackupPayloadRecord.from_dict(data["recovered_active"]),
+            previous_active=(
+                BackupPayloadRecord.from_dict(data["previous_active"])
+                if isinstance(data["previous_active"], dict)
+                else None
+            ),
+            lease_digest=cast(str, data["lease_digest"]),
+            preflight_attestation_sha256=cast(
+                str,
+                data["preflight_attestation_sha256"],
+            ),
+            job_sha256=cast(str, data["job_sha256"]),
+            job_state_sha256=cast(str, data["job_state_sha256"]),
+            request_sha256=cast(str | None, data["request_sha256"]),
+            attempt_sha256=cast(str | None, data["attempt_sha256"]),
+            job_phase=cast(str, data["job_phase"]),
+            environment=cast(str, data["environment"]),
+            namespace=cast(str, data["namespace"]),
+        )
+
+    @property
+    def plan_digest(self) -> str:
+        return hashlib.sha256(_json_bytes(self.to_dict())).hexdigest()
+
+
+def converge_verified_backup_candidate(
+    store: RequestStore,
+    *,
+    request_id: str,
+    payload_id: str,
+    bundle_name: str,
+    manifest_sha256: str,
+    lease_digest: str,
+    activate_payload: Callable[[BackupPayloadRecord], None],
+) -> BackupPayloadRecord:
+    """CAS-converge the rotation ledger before a verified job may launch."""
+    if store.read_backup_retention_claim() is not None:
+        raise InstalledBackupRecoveryError("backup maintenance blocks verified convergence")
+    lease = store.read_backup_lease(lease_digest)
+    state = store.read_backup_rotation()
+    active = state.active
+    if active is not None and active.payload_id == payload_id and state.candidate is None:
+        if (
+            active.request_id != request_id
+            or active.bundle_name != bundle_name
+            or active.manifest_sha256 != manifest_sha256
+            or active.lease != lease
+        ):
+            raise InstalledBackupRecoveryError("verified active backup authority drifted")
+        activate_payload(active)
+        return active
+    candidate = state.candidate
+    if (
+        candidate is None
+        or candidate.payload_id != payload_id
+        or candidate.request_id != request_id
+        or candidate.bundle_name != bundle_name
+        or candidate.manifest_sha256 != manifest_sha256
+        or candidate.phase
+        not in {
+            BackupPayloadPhase.MANIFEST_VERIFIED,
+            BackupPayloadPhase.RESTORE_VERIFIED,
+        }
+    ):
+        raise InstalledBackupRecoveryError("verified backup candidate authority drifted")
+    if candidate.phase is BackupPayloadPhase.MANIFEST_VERIFIED:
+        restored = record_restore_verified(
+            state,
+            payload_id=payload_id,
+            lease=lease,
+        )
+        store.replace_backup_rotation(
+            restored.state,
+            expected_generation=state.generation,
+        )
+        state = store.read_backup_rotation()
+    promoted = promote_candidate(
+        state,
+        payload_id=payload_id,
+        referenced_payload_ids=store.referenced_backup_payload_ids(),
+    )
+    store.replace_backup_rotation(
+        promoted.state,
+        expected_generation=state.generation,
+    )
+    active = store.read_backup_rotation().active
+    if active is None or active.payload_id != payload_id or active.lease != lease:
+        raise InstalledBackupRecoveryError("verified backup promotion did not converge")
+    activate_payload(active)
+    return active
 
 
 @dataclass(frozen=True, slots=True)
@@ -784,6 +1054,386 @@ class InstalledBackupRetentionService:
         return self.evidence_root / f"{digest}.plan.json"
 
 
+@dataclass(slots=True)
+class InstalledBackupRecoveryService:
+    """Recover one cross-ledger verified candidate without deleting payloads."""
+
+    config: OperatorConfig
+    service_uid: int
+    store: RequestStore
+    activate_payload: Callable[[BackupPayloadRecord], None]
+
+    def __post_init__(self) -> None:
+        if (
+            self.service_uid < 1
+            or self.config.source_mode != "sealed-cumulative"
+            or self.config.environment != "staging"
+            or self.config.namespace != "loom-staging"
+        ):
+            raise ValueError("installed backup recovery authority is invalid")
+
+    @property
+    def evidence_root(self) -> Path:
+        return self.config.state_root / "backup-recovery-maintenance"
+
+    def _plan_path(self, plan_digest: str) -> Path:
+        return self.evidence_root / f"{plan_digest}.plan.json"
+
+    def inventory(self) -> VerifiedBackupCandidateRecoveryPlan:
+        existing_claim = self.store.read_backup_retention_claim()
+        if existing_claim is not None:
+            return self.load_claim(existing_claim[0])
+        plan = self._build_plan()
+        _publish_exact(self._plan_path(plan.plan_digest), plan.to_dict(), self.service_uid)
+        return plan
+
+    def load_claim(self, approved_plan_digest: str) -> VerifiedBackupCandidateRecoveryPlan:
+        if len(approved_plan_digest) != 64 or any(
+            character not in "0123456789abcdef" for character in approved_plan_digest
+        ):
+            raise InstalledBackupRecoveryError("backup recovery approval is invalid")
+        try:
+            plan = VerifiedBackupCandidateRecoveryPlan.from_dict(
+                _read_exact(self._plan_path(approved_plan_digest), self.service_uid)
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            raise InstalledBackupRecoveryError("backup recovery approval is unavailable") from exc
+        if plan.plan_digest != approved_plan_digest:
+            raise InstalledBackupRecoveryError("backup recovery plan digest drifted")
+        existing_claim = self.store.read_backup_retention_claim()
+        if existing_claim is not None and existing_claim != (approved_plan_digest, ()):
+            raise InstalledBackupRecoveryError("another backup maintenance claim is active")
+        self._validate_current(plan, allow_recovered=True)
+        return plan
+
+    def claim(self, plan: VerifiedBackupCandidateRecoveryPlan) -> None:
+        self._validate_current(plan, allow_recovered=True)
+        try:
+            self.store.claim_backup_retention(plan.plan_digest, ())
+        except RequestStoreError as exc:
+            raise InstalledBackupRecoveryError(
+                "backup recovery claim could not be acquired"
+            ) from exc
+
+    def apply(self, plan: VerifiedBackupCandidateRecoveryPlan) -> dict[str, object]:
+        with self._execution_guard():
+            self.claim(plan)
+            result = self._apply_claimed(plan)
+            self.store.clear_backup_retention_claim(plan.plan_digest)
+            return result
+
+    def _apply_claimed(
+        self,
+        plan: VerifiedBackupCandidateRecoveryPlan,
+    ) -> dict[str, object]:
+        self._require_claim(plan)
+        applied_path = self.evidence_root / f"{plan.plan_digest}.applied.json"
+        try:
+            existing = _read_exact(applied_path, self.service_uid)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None:
+            self._validate_applied(plan, existing)
+            self._validate_current(plan, allow_recovered=True)
+            self.activate_payload(plan.recovered_active)
+            return existing
+
+        state = self.store.read_backup_rotation()
+        self._validate_current(plan, state=state, allow_recovered=True)
+        candidate = state.candidate
+        if candidate is not None and candidate.phase is BackupPayloadPhase.MANIFEST_VERIFIED:
+            lease = self.store.read_backup_lease(plan.lease_digest)
+            restored = record_restore_verified(
+                state,
+                payload_id=candidate.payload_id,
+                lease=lease,
+            )
+            self.store.replace_backup_rotation(
+                restored.state,
+                expected_generation=state.generation,
+            )
+            state = self.store.read_backup_rotation()
+            self._require_claim(plan)
+        if state.candidate is not None:
+            promoted = promote_candidate(
+                state,
+                payload_id=plan.recovered_active.payload_id,
+                referenced_payload_ids=frozenset(),
+            )
+            self.store.replace_backup_rotation(
+                promoted.state,
+                expected_generation=state.generation,
+            )
+        final = self.store.read_backup_rotation()
+        self._require_claim(plan)
+        self._validate_current(plan, state=final, allow_recovered=True)
+        try:
+            self.activate_payload(plan.recovered_active)
+        except Exception:
+            raise InstalledBackupRecoveryError(
+                "recovered backup activation did not complete"
+            ) from None
+        result: dict[str, object] = {
+            "approved_plan_sha256": plan.plan_digest,
+            "environment": self.config.environment,
+            "final_rotation_generation": final.generation,
+            "final_rotation_sha256": final.evidence_digest,
+            "namespace": self.config.namespace,
+            "queued_retirement_payload_ids": [
+                record.payload_id for record in final.retirements
+            ],
+            "recovered_payload_id": plan.recovered_active.payload_id,
+            "schema_version": 1,
+        }
+        self._validate_applied(plan, result)
+        _publish_exact(applied_path, result, self.service_uid)
+        return result
+
+    def _build_plan(self) -> VerifiedBackupCandidateRecoveryPlan:
+        if self.store.read_active() is not None:
+            raise InstalledBackupRecoveryError("active rollout blocks backup recovery")
+        state = self.store.read_backup_rotation()
+        if state.retirements:
+            raise InstalledBackupRecoveryError(
+                "queued backup retirements must converge before candidate recovery"
+            )
+        candidate = state.candidate
+        if candidate is None or candidate.phase not in {
+            BackupPayloadPhase.MANIFEST_VERIFIED,
+            BackupPayloadPhase.RESTORE_VERIFIED,
+        }:
+            raise InstalledBackupRecoveryError(
+                "backup rotation has no recoverable verified candidate"
+            )
+        job = self.store.read_preflight_backup_job(candidate.request_id)
+        job_state = self.store.read_preflight_backup_job_state(candidate.request_id)
+        if (
+            job.payload_id != candidate.payload_id
+            or job.request_id != candidate.request_id
+            or job.bundle_name != candidate.bundle_name
+            or job_state.job_id != job.job_id
+            or job_state.request_id != job.request_id
+            or job_state.phase
+            not in {
+                LifecyclePhase.BACKUP_VERIFIED,
+                LifecyclePhase.LAUNCH_PENDING,
+                LifecyclePhase.LAUNCH_RUNNING,
+            }
+            or job_state.manifest_sha256 != candidate.manifest_sha256
+            or job_state.lease_digest is None
+            or job_state.preflight_attestation_sha256 is None
+        ):
+            raise InstalledBackupRecoveryError(
+                "verified candidate backup job authority drifted"
+            )
+        try:
+            lease = self.store.read_backup_lease(job_state.lease_digest)
+        except RequestStoreError as exc:
+            raise InstalledBackupRecoveryError(
+                "verified candidate lease authority is unavailable"
+            ) from exc
+        recovered_active = replace(
+            candidate,
+            phase=BackupPayloadPhase.ACTIVE,
+            lease=lease,
+        )
+        request_sha256: str | None = None
+        attempt_sha256: str | None = None
+        if job_state.phase in {
+            LifecyclePhase.LAUNCH_PENDING,
+            LifecyclePhase.LAUNCH_RUNNING,
+        }:
+            try:
+                request = self.store.read_request(candidate.request_id)
+                attempt = self.store.read_attempt_envelope(candidate.request_id, 1)
+            except RequestStoreError as exc:
+                raise InstalledBackupRecoveryError(
+                    "launched candidate attempt authority is unavailable"
+                ) from exc
+            if (
+                request.candidate.resolved_sha != job.candidate_sha
+                or attempt.request_id != candidate.request_id
+                or attempt.attempt_number != 1
+                or attempt.resolved_sha != job.candidate_sha
+                or attempt.backup_manifest_sha256 != candidate.manifest_sha256
+                or attempt.preflight_attestation_sha256
+                != job_state.preflight_attestation_sha256
+            ):
+                raise InstalledBackupRecoveryError(
+                    "launched candidate attempt authority drifted"
+                )
+            request_sha256 = hashlib.sha256(_json_bytes(request.to_dict())).hexdigest()
+            attempt_sha256 = hashlib.sha256(_json_bytes(attempt.to_dict())).hexdigest()
+        return VerifiedBackupCandidateRecoveryPlan(
+            rotation_generation=state.generation,
+            rotation_sha256=state.evidence_digest,
+            candidate_before=candidate,
+            recovered_active=recovered_active,
+            previous_active=state.active,
+            lease_digest=job_state.lease_digest,
+            preflight_attestation_sha256=job_state.preflight_attestation_sha256,
+            job_sha256=job.evidence_digest,
+            job_state_sha256=hashlib.sha256(_json_bytes(job_state.to_dict())).hexdigest(),
+            request_sha256=request_sha256,
+            attempt_sha256=attempt_sha256,
+            job_phase=job_state.phase.value,
+            namespace=self.config.namespace,
+        )
+
+    def _validate_current(
+        self,
+        plan: VerifiedBackupCandidateRecoveryPlan,
+        *,
+        state: BackupRotationState | None = None,
+        allow_recovered: bool,
+    ) -> None:
+        if self.store.read_active() is not None:
+            raise InstalledBackupRecoveryError("active rollout blocks backup recovery")
+        current = state or self.store.read_backup_rotation()
+        initial = BackupRotationState(
+            generation=plan.rotation_generation,
+            active=plan.previous_active,
+            candidate=plan.candidate_before,
+        )
+        if initial.evidence_digest != plan.rotation_sha256:
+            raise InstalledBackupRecoveryError("backup recovery plan authority drifted")
+        restored = initial
+        if plan.candidate_before.phase is BackupPayloadPhase.MANIFEST_VERIFIED:
+            lease = plan.recovered_active.lease
+            if lease is None:
+                raise InstalledBackupRecoveryError("backup recovery lease is unavailable")
+            restored = record_restore_verified(
+                initial,
+                payload_id=plan.candidate_before.payload_id,
+                lease=lease,
+            ).state
+        promoted = promote_candidate(
+            restored,
+            payload_id=plan.recovered_active.payload_id,
+            referenced_payload_ids=frozenset(),
+        ).state
+        allowed = (initial, restored, promoted) if allow_recovered else (initial, restored)
+        if current not in allowed:
+            if not (
+                allow_recovered
+                and current.candidate is None
+                and current.active == plan.recovered_active
+                and all(
+                    record.payload_id
+                    != (
+                        None
+                        if plan.previous_active is None
+                        else plan.previous_active.payload_id
+                    )
+                    or self.store.has_backup_retirement_receipt(record.payload_id)
+                    for record in promoted.retirements
+                    if record not in current.retirements
+                )
+            ):
+                raise InstalledBackupRecoveryError("backup recovery state changed concurrently")
+        self._validate_job_authority(plan)
+
+    def _validate_job_authority(self, plan: VerifiedBackupCandidateRecoveryPlan) -> None:
+        candidate = plan.candidate_before
+        job = self.store.read_preflight_backup_job(candidate.request_id)
+        state = self.store.read_preflight_backup_job_state(candidate.request_id)
+        lease = self.store.read_backup_lease(plan.lease_digest)
+        request_sha256: str | None = None
+        attempt_sha256: str | None = None
+        if state.phase in {
+            LifecyclePhase.LAUNCH_PENDING,
+            LifecyclePhase.LAUNCH_RUNNING,
+        }:
+            request = self.store.read_request(candidate.request_id)
+            attempt = self.store.read_attempt_envelope(candidate.request_id, 1)
+            request_sha256 = hashlib.sha256(_json_bytes(request.to_dict())).hexdigest()
+            attempt_sha256 = hashlib.sha256(_json_bytes(attempt.to_dict())).hexdigest()
+        if (
+            job.payload_id != candidate.payload_id
+            or job.bundle_name != candidate.bundle_name
+            or state.job_id != job.job_id
+            or state.phase.value != plan.job_phase
+            or state.manifest_sha256 != candidate.manifest_sha256
+            or state.lease_digest != plan.lease_digest
+            or state.preflight_attestation_sha256 != plan.preflight_attestation_sha256
+            or lease != plan.recovered_active.lease
+            or job.evidence_digest != plan.job_sha256
+            or hashlib.sha256(_json_bytes(state.to_dict())).hexdigest()
+            != plan.job_state_sha256
+            or request_sha256 != plan.request_sha256
+            or attempt_sha256 != plan.attempt_sha256
+        ):
+            raise InstalledBackupRecoveryError("backup recovery job authority drifted")
+
+    def _validate_applied(
+        self,
+        plan: VerifiedBackupCandidateRecoveryPlan,
+        document: dict[str, object],
+    ) -> None:
+        queued = document.get("queued_retirement_payload_ids")
+        if (
+            set(document)
+            != {
+                "approved_plan_sha256",
+                "environment",
+                "final_rotation_generation",
+                "final_rotation_sha256",
+                "namespace",
+                "queued_retirement_payload_ids",
+                "recovered_payload_id",
+                "schema_version",
+            }
+            or document.get("schema_version") != 1
+            or document.get("approved_plan_sha256") != plan.plan_digest
+            or document.get("environment") != self.config.environment
+            or document.get("namespace") != self.config.namespace
+            or document.get("recovered_payload_id") != plan.recovered_active.payload_id
+            or type(document.get("final_rotation_generation")) is not int
+            or not isinstance(document.get("final_rotation_sha256"), str)
+            or not isinstance(queued, list)
+            or not all(isinstance(item, str) for item in queued)
+        ):
+            raise InstalledBackupRecoveryError("backup recovery applied evidence is invalid")
+
+    def _require_claim(self, plan: VerifiedBackupCandidateRecoveryPlan) -> None:
+        if self.store.read_backup_retention_claim() != (plan.plan_digest, ()):
+            raise InstalledBackupRecoveryError("backup recovery execution claim drifted")
+
+    @contextmanager
+    def _execution_guard(self) -> Iterator[None]:
+        _ensure_private_directory(self.evidence_root, self.service_uid)
+        path = self.evidence_root / ".apply.lock"
+        flags = (
+            os.O_RDWR
+            | os.O_CREAT
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        fd = os.open(path, flags, _PRIVATE_FILE_MODE)
+        locked = False
+        try:
+            os.fchmod(fd, _PRIVATE_FILE_MODE)
+            metadata = os.fstat(fd)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != self.service_uid
+                or stat.S_IMODE(metadata.st_mode) != _PRIVATE_FILE_MODE
+                or metadata.st_nlink != 1
+            ):
+                raise InstalledBackupRecoveryError("backup recovery execution lock is unsafe")
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+            except BlockingIOError:
+                raise InstalledBackupRecoveryError(
+                    "backup recovery execution is already running"
+                ) from None
+            yield
+        finally:
+            if locked:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
 def _json_bytes(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
 
@@ -884,6 +1534,10 @@ def _read_exact(path: Path, service_uid: int) -> dict[str, object]:
 
 __all__ = [
     "BackupRotationRetentionPlan",
+    "InstalledBackupRecoveryError",
+    "InstalledBackupRecoveryService",
     "InstalledBackupRetentionError",
     "InstalledBackupRetentionService",
+    "VerifiedBackupCandidateRecoveryPlan",
+    "converge_verified_backup_candidate",
 ]
