@@ -30,6 +30,7 @@ that should restrict can be overridden in `_ADAPTER_OVERRIDES`).
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
@@ -478,6 +479,26 @@ def get_agent(name: str, *, include_internal: bool = False) -> AgentEntry | None
         if e.name == name or name in e.aliases:
             return e
     return None
+
+
+def resolve_agents(
+    names: Iterable[str],
+    *,
+    include_internal: bool = False,
+) -> list[AgentEntry]:
+    """Resolve canonical names and aliases, deduplicated in catalog order."""
+    catalog = list_agents(include_internal=include_internal)
+    by_name = {
+        name: entry
+        for entry in catalog
+        for name in (entry.name, *entry.aliases)
+    }
+    requested = set(names)
+    unknown = sorted(requested - set(by_name))
+    if unknown:
+        raise ValueError(f"unknown agent(s): {', '.join(unknown)}")
+    canonical_names = {by_name[name].name for name in requested}
+    return [entry for entry in catalog if entry.name in canonical_names]
 
 
 def validate_agent_model_compat(

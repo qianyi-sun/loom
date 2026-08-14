@@ -46,6 +46,16 @@ def test_runtime_audit_marks_present_catalog_ready_agents_ready() -> None:
     assert by_name["opencode"].blocker_reason is None
 
 
+def test_runtime_audit_resolves_and_deduplicates_legacy_alias() -> None:
+    items = build_runtime_audit_items(
+        image="loom-sandbox:test",
+        agents=["litellm", "direct-completion"],
+        check_runner=lambda _check: True,
+    )
+
+    assert [item.name for item in items] == ["direct-completion"]
+
+
 def test_runtime_audit_renderers_are_stable() -> None:
     items = build_runtime_audit_items(
         image="loom-sandbox:test",

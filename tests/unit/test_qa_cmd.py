@@ -4,9 +4,37 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import httpx
 import pytest
 
 from loom_cli import qa_cmd
+
+
+class _CatalogClient:
+    def get(self, path: str) -> httpx.Response:
+        request = httpx.Request("GET", f"http://loom.test{path}")
+        if path == "/api/v1/agents":
+            return httpx.Response(
+                200,
+                request=request,
+                json={
+                    "items": [
+                        {
+                            "name": "direct-completion",
+                            "aliases": ["litellm"],
+                            "service_mode_ready": True,
+                        },
+                        {
+                            "name": "oracle",
+                            "aliases": [],
+                            "service_mode_ready": True,
+                        },
+                    ],
+                },
+            )
+        if path == "/api/v1/benchmarks":
+            return httpx.Response(200, request=request, json={"items": []})
+        raise AssertionError(f"unexpected path {path}")
 
 # ─── _provider_compatible ──────────────────────────────────────────
 
@@ -30,6 +58,16 @@ def test_provider_compatible_empty_treated_as_no_match() -> None:
     needs_model=False so this branch isn't hit in practice)."""
     a = {"supported_providers": []}
     assert qa_cmd._provider_compatible(a, "openai") is False
+
+
+def test_fetch_catalogs_resolves_legacy_agent_alias_to_canonical_entry() -> None:
+    agents, _benchmarks = qa_cmd._fetch_catalogs(
+        _CatalogClient(),  # type: ignore[arg-type]
+        agent_filter={"litellm", "direct-completion"},
+        benchmark_filter=None,
+    )
+
+    assert [agent["name"] for agent in agents] == ["direct-completion"]
 
 
 # ─── _build_cells_and_combinations ─────────────────────────────────
