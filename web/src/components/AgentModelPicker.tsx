@@ -76,11 +76,14 @@ export interface AgentModelPickerProps {
 
 interface AgentEntry extends AgentReadinessLike {
   name: string;
+  aliases?: string[];
   needs_model: boolean;
   kind: "builtin" | "adapter";
   description: string;
   supported_providers: string[];
   supported_model_sources: string[];
+  requires_capabilities?: string[];
+  provides_capabilities?: string[];
   readiness_status?: "ready" | "unavailable";
   catalog_visibility?: "displayed" | "internal";
 }
@@ -138,7 +141,7 @@ export function AgentModelPicker({
   onChange,
   disabled,
   specificAgentToggle = false,
-  defaultAgentName = "litellm",
+  defaultAgentName = "direct-completion",
 }: AgentModelPickerProps): JSX.Element {
   const [showRaw, setShowRaw] = useState(false);
   const [modelSearch, setModelSearch] = useState("");

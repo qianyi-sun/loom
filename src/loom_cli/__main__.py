@@ -61,7 +61,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_run.add_argument("--split", default="test")
     p_run.add_argument("--agent", required=True,
-                       help="Agent name (oracle / litellm / claude-code / ...)")
+                       help="Agent name (oracle / direct-completion / claude-code / ...)")
     p_run.add_argument(
         "--model", action="append", default=None,
         help=(

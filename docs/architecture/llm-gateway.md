@@ -31,7 +31,7 @@ contract against provider SDKs in-process. See [`cli-mode.md`](cli-mode.md).
    Prompt bodies, messages, headers, API keys, and raw credentials are
    omitted.
    Service-mode `TrialConfig.request_params` is the user-facing input
-   for those controls on the `litellm` worker path; the worker filters
+   for those controls on the `direct-completion` worker path; the worker filters
    that object through the same allowlist before forwarding it to the
    Gateway.
 5. **Raw provider handoff logs** — provider-facade success paths also
@@ -154,13 +154,13 @@ breaking client parsing. Workers populate the headers from
 `bind_trial_context` (see [`cli-mode.md`](cli-mode.md) for the
 contextvars helper).
 
-For `LiteLLMAgent` service-mode trials, callers may include
+For `direct-completion` service-mode trials, callers may include
 `trial_config.request_params` with safe generation controls, for
 example:
 
 ```json
 {
-  "agent_name": "litellm",
+  "agent_name": "direct-completion",
   "agent_model": {"provider": "openai", "name": "gpt-4o-mini"},
   "request_params": {
     "temperature": 0,

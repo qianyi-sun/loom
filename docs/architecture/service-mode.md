@@ -78,7 +78,18 @@ provider-smoke evidence is optional and merged from sanitized JSON; absent live
 evidence leaves usage, diagnostics, and other runtime dimensions as
 `pending_live_smoke` rather than treating the cell as validated.
 
-Model-backed `litellm` submissions may include
+Agent/task compatibility is bidirectional. Catalog entries expose
+`requires_capabilities` for task features the runtime depends on and
+`provides_capabilities` for execution surfaces it supplies. Tasks declare
+`required_agent_capabilities` in their version-1 config. Batch and single-trial
+submission reject any pair with a missing capability before persistence or
+fan-out. `workspace_exec` is the first task execution requirement:
+workspace-oriented agents provide it, while `direct-completion` does not.
+The API exposes `aliases=["litellm"]` on the canonical completion entry for
+backward-compatible clients without displaying a duplicate agent.
+
+Model-backed `direct-completion` submissions (including the deprecated
+`litellm` alias) may include
 `trial_config.request_params` for safe request controls such as
 `temperature`, `top_p`, `seed`, max output limits, reasoning effort,
 tool-choice mode, and provider decoding extras. The Control Plane

@@ -70,7 +70,7 @@ export function providerSmokeBatchCommand(
     "  --benchmark humaneval",
     "  --subset first_n",
     "  --n 1",
-    "  --agent litellm",
+    "  --agent direct-completion",
     `  --provider ${providerName}`,
     `  --model ${modelName}`,
     "  --n-per-task 1",

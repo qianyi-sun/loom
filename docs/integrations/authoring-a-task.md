@@ -38,7 +38,7 @@ docker_image = "python:3.11-alpine"
 # dockerfile = "environment/Dockerfile"
 
 [agent]
-name = "oracle"  # or "litellm", "claude-code"
+name = "oracle"  # or "direct-completion", "claude-code"
 # [agent.model]
 # provider = "anthropic"
 # name = "claude-opus-4-7"
@@ -58,8 +58,22 @@ required_artifacts = ["result.txt"]
 | name | When | Notes |
 |---|---|---|
 | `oracle` | Baseline + dev fixtures | Runs `solution/solve.sh` inside the sandbox. Tasks that set `[agent].name = "oracle"` must include it. |
-| `litellm` | Out-of-box LLM agent | Tool-loop over Gateway calls; requires `[agent.model]`. |
+| `direct-completion` | Response-only LLM agent | One direct completion through the Gateway, with exact-path text projection; no workspace tools. The legacy `litellm` name is accepted as an alias. |
 | `claude-code` | Launcher CLI agent | Runs `claude` inside the container; workers resolve its pinned install contract into a content-addressed task image. |
+
+Workspace-oriented tasks must declare their execution requirement at the top
+level of `task.toml`:
+
+```toml
+required_agent_capabilities = ["workspace_exec"]
+```
+
+Submission preflight rejects agents that do not provide every declared
+capability. Use this for tasks that expect the agent to inspect workspace
+files, run commands, or create artifacts through task tooling. Do not infer
+the requirement from filename extensions: a JSON output can still require a
+workspace workflow, while a response-only benchmark may legitimately project
+one exact text or source-code artifact.
 
 ### The `oracle_eligible` task tag
 
@@ -177,8 +191,10 @@ artifact is missing, Loom marks the trial evidence invalid/retryable with
 `missing_required_artifacts` instead of treating the row as an ordinary
 reward-0 score failure.
 
-For `litellm` service-mode runs, the platform can write the final model
-response into declared step artifacts before verification. Keep benchmark
+For `direct-completion` service-mode runs, the platform can write the final
+model response into exact declared step artifact paths before verification.
+Glob patterns are collection rules, not projection destinations, and are
+rejected by this agent. Keep benchmark
 scoring rules in the verifier, not in the agent. `final_answer.txt` receives
 the model's final response with fenced helper code blocks removed so official
 or upstream-style extractors such as `Answer: ...`, `Exact Answer: ...`, or

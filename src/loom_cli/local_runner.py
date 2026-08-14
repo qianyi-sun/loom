@@ -3,7 +3,7 @@
 Constructs a TrialContext against:
   - LocalDiskObjectStore (trajectory + ATIF land on local disk)
   - UpstreamDirectGatewayClient (no Gateway service required)
-  - CLI agent factory (oracle / litellm / launcher subprocess)
+  - CLI agent factory (oracle / direct-completion / launcher subprocess)
   - PytestVerifier (the same verifier the worker uses)
   - A no-op state_patch_callback (no Control Plane)
 
