@@ -198,3 +198,69 @@ uv run --no-sync mypy src/loom_capacity_executor/executable.py src/loom_capacity
 git diff --check
 # no output
 ```
+
+## Fix round 3: publish per-pool retirement-safe evidence before delayed pool converges
+
+Added missing public-boundary coverage:
+
+- The reporter-delay flow now requires Alice/oldlab to publish a fresh complete post-release inventory and a later heartbeat while Bob/gb10 remains centrally `closing`.
+- The proof reads `/v2/status/executors` and asserts oldlab is `retirement_safe`, has no executor blockers, and has an empty final inventory before the retirement attempt.
+- Bob/gb10's delayed protected-intent snapshot is asserted unchanged before and after oldlab's final inventory/heartbeat publication.
+- The harness operation uses the existing journaled executor heartbeat path and `pool.tick()` inventory publication path, which call the real executor client and manager ASGI `/v2/executors/{pool}/heartbeat` and `/v2/executors/{pool}/inventory` routes. It does not mutate manager state or call store helpers.
+- The all-commitments-clear release path now reuses the same per-pool final-evidence helper before exact global retirement.
+
+Focused RED evidence on 2026-08-15:
+
+```bash
+uv run --no-sync pytest -q tests/integration/test_executable_global_capacity_bridge.py -k 'reporter_delay' -s --tb=short
+# FAILED tests/integration/test_executable_global_capacity_bridge.py::test_protected_release_reporter_delay_keeps_pools_isolated
+# AssertionError: assert False is True
+# Failing assertion: executor_items["oldlab"]["retirement_safe"] is True
+# 1 failed, 8 deselected in 8.73s
+```
+
+Focused GREEN evidence:
+
+```bash
+uv run --no-sync pytest -q tests/integration/test_executable_global_capacity_bridge.py -k 'reporter_delay' -s --tb=short
+# 1 passed, 8 deselected in 7.73s
+
+uv run --no-sync ruff format tests/support/executable_capacity_harness.py tests/integration/test_executable_global_capacity_bridge.py
+# 2 files left unchanged
+
+uv run --no-sync pytest -q tests/integration/test_executable_global_capacity_bridge.py -k 'reporter_delay' -s --tb=short
+# 1 passed, 8 deselected in 7.76s
+```
+
+Fresh verification on 2026-08-15:
+
+```bash
+uv run --no-sync pytest -q tests/integration/test_executable_global_capacity_bridge.py -k 'prepared_unused or unregistered_withdrawn or protected_release' -s
+# CANONICAL_DIGEST prepared_unused allocation=79d2184b6567e72bfc2ab6086c2025df8ef704a87f955a3332c9bd6d989ca941 inventory=895811ed81b6908a4ab1f2b3fb68e661d7613b0349509f917cd6219a66300773 release=8db5e4081049a5f57962a96ecd5a5d1251079157dab8a4c0c853671e41a62f63
+# CANONICAL_DIGEST unregistered_withdrawn allocation=79d2184b6567e72bfc2ab6086c2025df8ef704a87f955a3332c9bd6d989ca941 inventory=fb4cac6b0e55fb691ea2511a0c5fa4a2ed232665c4baa1130c2d8b6a44866e56 release=735df734c2121524ebb699628701c2289bcb06f8bc11fb69b601e7e6ae6b25df
+# CANONICAL_DIGEST prepared_unused_repeat allocation=79d2184b6567e72bfc2ab6086c2025df8ef704a87f955a3332c9bd6d989ca941 inventory=895811ed81b6908a4ab1f2b3fb68e661d7613b0349509f917cd6219a66300773 release=7fe13ce6cd54064c5b9fd18ac5227dc38e93fd2f9c557556c08de6900316ff90
+# CANONICAL_DIGEST unregistered_withdrawn_repeat allocation=79d2184b6567e72bfc2ab6086c2025df8ef704a87f955a3332c9bd6d989ca941 inventory=fb4cac6b0e55fb691ea2511a0c5fa4a2ed232665c4baa1130c2d8b6a44866e56 release=4b8ee90f3036ee6ca616782625f6ac121810b58e83e23b8e609204e0e250df9d
+# 4 passed, 5 deselected in 24.44s
+
+uv run --no-sync pytest -q tests/integration/test_executable_global_capacity_bridge.py -k 'prepared_unused or unregistered_withdrawn or protected_release' -s
+# CANONICAL_DIGEST prepared_unused allocation=79d2184b6567e72bfc2ab6086c2025df8ef704a87f955a3332c9bd6d989ca941 inventory=895811ed81b6908a4ab1f2b3fb68e661d7613b0349509f917cd6219a66300773 release=d364167a6a447e86fa8d3c665f3173e091476c94bc54603a4d57e0c68d477eec
+# CANONICAL_DIGEST unregistered_withdrawn allocation=79d2184b6567e72bfc2ab6086c2025df8ef704a87f955a3332c9bd6d989ca941 inventory=fb4cac6b0e55fb691ea2511a0c5fa4a2ed232665c4baa1130c2d8b6a44866e56 release=2f36a8101029add900266c1621129cb0df4f91d67e95ddc520d42c47afb10861
+# CANONICAL_DIGEST prepared_unused_repeat allocation=79d2184b6567e72bfc2ab6086c2025df8ef704a87f955a3332c9bd6d989ca941 inventory=895811ed81b6908a4ab1f2b3fb68e661d7613b0349509f917cd6219a66300773 release=1b72e16ce4a766fef689e7649352291703fa0df62e439ee935cc9796e21ef7bb
+# CANONICAL_DIGEST unregistered_withdrawn_repeat allocation=79d2184b6567e72bfc2ab6086c2025df8ef704a87f955a3332c9bd6d989ca941 inventory=fb4cac6b0e55fb691ea2511a0c5fa4a2ed232665c4baa1130c2d8b6a44866e56 release=9f34657554c6a2d6dd747b36813afdb3034d41b385340318203730cab3223e0f
+# 4 passed, 5 deselected in 30.49s
+
+uv run --no-sync pytest -q tests/unit/test_capacity_agent_*.py tests/unit/test_capacity_executor_*.py tests/integration/test_capacity_agent_*.py tests/integration/test_capacity_guard_migrations.py tests/integration/test_capacity_manager_execution_store.py tests/integration/test_capacity_manager_execution_epoch.py tests/integration/test_executable_global_capacity_bridge.py tests/ops/test_global_fleet_pool_executor_once.py
+# 624 passed in 118.65s (0:01:58)
+
+uv run --no-sync ruff format --check src/loom_capacity_executor/executable.py src/loom_capacity_manager/execution_store.py tests/support/executable_capacity_harness.py tests/integration/test_executable_global_capacity_bridge.py
+# 4 files already formatted
+
+uv run --no-sync ruff check src/loom_capacity_executor/executable.py src/loom_capacity_manager/execution_store.py tests/support/executable_capacity_harness.py tests/integration/test_executable_global_capacity_bridge.py
+# All checks passed!
+
+uv run --no-sync mypy src/loom_capacity_executor/executable.py src/loom_capacity_manager/execution_store.py
+# Success: no issues found in 2 source files
+
+git diff --check
+# no output
+```

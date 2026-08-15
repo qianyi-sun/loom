@@ -2804,24 +2804,29 @@ class ExecutableCapacityHarness:
         if result.status != "released":
             raise RuntimeError(f"intent did not release centrally: {result}")
         if await self.manager_commitments() == ():
-            for pool in self.pools.values():
-                await pool.heartbeat()
-                final_inventory = await pool.tick()
-                if final_inventory.status != "inventory-published":
-                    raise RuntimeError(
-                        f"pool {pool.pool_id} final inventory was not published: {final_inventory}"
-                    )
-                await pool.heartbeat()
-                if pool.journal is None or pool.registration is None:
-                    raise RuntimeError("pool executor runtime is unavailable")
-                latest = pool.journal.latest(
-                    "inventory",
-                    str(pool.registration.executor_incarnation),
-                )
-                if latest is not None and (payload := latest.durable_payload()) is not None:
-                    pool.last_inventory = ExecutableExecutorInventoryV2.model_validate_json(payload)
+            for final_pool_id in self.pools:
+                await self.publish_retirement_safe_executor_evidence(final_pool_id)
             await self._retire_exact()
         return result
+
+    async def publish_retirement_safe_executor_evidence(self, pool_id: str) -> None:
+        pool = self.pools[pool_id]
+        await pool.heartbeat()
+        final_inventory = await pool.tick()
+        if final_inventory.status != "inventory-published":
+            raise RuntimeError(
+                f"pool {pool.pool_id} final inventory was not published: {final_inventory}"
+            )
+        await pool.heartbeat()
+        if pool.journal is None or pool.registration is None:
+            raise RuntimeError("pool executor runtime is unavailable")
+        latest = pool.journal.latest(
+            "inventory",
+            str(pool.registration.executor_incarnation),
+        )
+        if latest is None or (payload := latest.durable_payload()) is None:
+            raise RuntimeError("final executor inventory is absent from journal")
+        pool.last_inventory = ExecutableExecutorInventoryV2.model_validate_json(payload)
 
     async def retirement_is_blocked(self) -> bool:
         try:

@@ -322,6 +322,16 @@ async def test_protected_release_reporter_delay_keeps_pools_isolated(
         await executable_capacity_harness.protected_intent_snapshot("gb10", bob_binding)
         == bob_delayed
     )
+    await executable_capacity_harness.publish_retirement_safe_executor_evidence("oldlab")
+    assert (
+        await executable_capacity_harness.protected_intent_snapshot("gb10", bob_binding)
+        == bob_delayed
+    )
+    executor_status = await executable_capacity_harness.executable_executor_status()
+    executor_items = {item["pool_id"]: item for item in executor_status["items"]}
+    assert executor_items["oldlab"]["retirement_safe"] is True
+    assert executor_items["oldlab"]["blockers"] == []
+    assert executor_items["oldlab"]["inventory_record_counts"] == {}
     assert {
         (item.subject_id, item.pool_id, item.state)
         for item in await executable_capacity_harness.manager_commitments()
