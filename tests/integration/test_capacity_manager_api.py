@@ -17,7 +17,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, update
+from sqlalchemy import delete, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom_capacity_manager.allocator import allocate_shadow
@@ -103,6 +103,12 @@ async def _reset_capacity_database(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory() as session, session.begin():
+        await session.execute(
+            text(
+                "ALTER TABLE capacity_authority_state DISABLE TRIGGER "
+                "capacity_authority_execution_transition_guard"
+            )
+        )
         for table in reversed(Base.metadata.sorted_tables):
             if table.name != CapacityAuthorityState.__tablename__:
                 await session.execute(delete(table))
@@ -116,9 +122,18 @@ async def _reset_capacity_database(
                 increase_freeze=True,
                 increase_freeze_reason="initial_shadow_freeze",
                 executable_new_capacity_ceiling=0,
+                execution_epoch=0,
+                execution_state="shadow",
+                execution_manifest_sha256=None,
                 global_pending_slot_ceiling=0,
                 global_pending_job_ceiling=0,
                 global_submission_rate_ceiling=0,
+            )
+        )
+        await session.execute(
+            text(
+                "ALTER TABLE capacity_authority_state ENABLE TRIGGER "
+                "capacity_authority_execution_transition_guard"
             )
         )
 
@@ -506,8 +521,7 @@ def test_lifecycle_can_retire_personal_subject_and_fence_its_reporter(
     subjects = client.get("/v1/status/subjects", headers=operator_headers)
     assert subjects.status_code == 200
     assert all(
-        item["subject_id"] != str(DEVELOPMENT_SUBJECT_ID)
-        for item in subjects.json()["items"]
+        item["subject_id"] != str(DEVELOPMENT_SUBJECT_ID) for item in subjects.json()["items"]
     )
 
 
@@ -729,7 +743,21 @@ def test_body_limit_and_status_pagination_are_bounded(
     )
     assert oversized.status_code == 413
     assert client.get("/v1/status/subjects?limit=501", headers=operator_headers).status_code == 422
-    assert client.get("/v1/status", headers=operator_headers).status_code == 200
+    status_response = client.get("/v1/status", headers=operator_headers)
+    assert status_response.status_code == 200
+    status_body = status_response.json()
+    assert status_body["execution_state"] == "shadow"
+    assert status_body["execution_epoch"] == 0
+    assert status_body["execution_manifest_sha256"] is None
+    assert status_body["executable_new_capacity_ceiling"] == 0
+    assert (
+        client.post(
+            "/v1/execution-activations",
+            headers=operator_headers | {"Idempotency-Key": str(uuid4())},
+            json={},
+        ).status_code
+        == 404
+    )
 
 
 def test_metrics_have_no_subject_or_environment_labels(

@@ -8,7 +8,7 @@ from threading import Event
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -150,6 +150,12 @@ async def _reset_committed_capacity_state(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory() as session, session.begin():
+        await session.execute(
+            text(
+                "ALTER TABLE capacity_authority_state DISABLE TRIGGER "
+                "capacity_authority_execution_transition_guard"
+            )
+        )
         for table in reversed(Base.metadata.sorted_tables):
             if table.name != CapacityAuthorityState.__tablename__:
                 await session.execute(delete(table))
@@ -162,8 +168,17 @@ async def _reset_committed_capacity_state(
                 increase_freeze=True,
                 increase_freeze_reason="initial_shadow_freeze",
                 executable_new_capacity_ceiling=0,
+                execution_epoch=0,
+                execution_state="shadow",
+                execution_manifest_sha256=None,
                 global_pending_slot_ceiling=0,
                 global_pending_job_ceiling=0,
+            )
+        )
+        await session.execute(
+            text(
+                "ALTER TABLE capacity_authority_state ENABLE TRIGGER "
+                "capacity_authority_execution_transition_guard"
             )
         )
 
@@ -392,6 +407,10 @@ async def test_dynamic_development_projection_is_atomic_idempotent_and_shadow_on
     assert (
         await capacity_session.execute(select(func.count()).select_from(CapacityCandidate))
     ).scalar_one() == 1
+    candidate = (await capacity_session.execute(select(CapacityCandidate))).scalar_one()
+    assert candidate.candidate_digest == request.candidate_sha256
+    assert candidate.candidate_identity_algorithm == "source-sha256"
+    assert candidate.candidate_identity == request.candidate_sha256
     assert (
         await capacity_session.execute(
             select(func.count()).select_from(CapacityDeploymentGeneration)
@@ -584,8 +603,7 @@ async def test_destroy_projection_requires_an_active_subject_and_retires_owner_a
             select(func.count())
             .select_from(CapacityAccountPolicy)
             .where(
-                CapacityAccountPolicy.configuration_epoch
-                == retired.configuration_epoch,
+                CapacityAccountPolicy.configuration_epoch == retired.configuration_epoch,
                 CapacityAccountPolicy.kind == "owner",
             )
         )

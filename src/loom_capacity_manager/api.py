@@ -1009,7 +1009,10 @@ def create_app(
             "pool_slots": dict(sorted(pools.items())),
             "blocker_counts": dict(sorted(blockers.items())),
             "increase_freeze": authority.increase_freeze,
-            "executable_new_capacity_ceiling": 0,
+            "execution_epoch": authority.execution_epoch,
+            "execution_state": authority.execution_state,
+            "execution_manifest_sha256": authority.execution_manifest_sha256,
+            "executable_new_capacity_ceiling": authority.executable_new_capacity_ceiling,
         }
 
     @app.get("/v1/status/subjects")

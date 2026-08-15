@@ -38,6 +38,16 @@ from loom_capacity_manager.contracts import (
     canonical_digest,
     canonical_digest_excluding,
 )
+from loom_capacity_manager.executable_contracts import (
+    ExecutableExecutorRegistrationV2,
+    ExecutionActivationV2,
+    ExecutionAuthorityV2,
+    ExecutionContextV2,
+    ExecutionPreparationPolicyV2,
+    ExecutionPreparationV2,
+    LegacyWriterFenceV2,
+    canonical_executable_digest,
+)
 from loom_capacity_manager.fleet_state import (
     FleetStateError,
     validate_fleet_manifest_digests,
@@ -56,6 +66,8 @@ from loom_capacity_manager.models import (
     CapacityDemandSnapshot,
     CapacityDeploymentGeneration,
     CapacityDevelopmentProjection,
+    CapacityExecutionEpoch,
+    CapacityExecutionExecutor,
     CapacityFairnessState,
     CapacityObservedCommitment,
     CapacityPool,
@@ -102,6 +114,14 @@ class ReportEquivocationError(CapacityStoreError):
 
 
 class StaleAllocationInputError(CapacityStoreError):
+    pass
+
+
+class ExecutionConflictError(CapacityStoreError):
+    pass
+
+
+class ExecutionPreparationDisabledError(ExecutionConflictError):
     pass
 
 
@@ -164,6 +184,9 @@ class CapacityStatusPageV1:
     configuration_epoch: int
     configuration_digest: str | None
     latest_allocation_epoch: int | None
+    execution_epoch: int
+    execution_state: Literal["shadow", "prepared", "active", "drain-only"]
+    execution_manifest_sha256: str | None
     executable_new_capacity_ceiling: int
     increase_freeze: bool
     items: tuple[dict[str, Any], ...]
@@ -260,6 +283,13 @@ async def _db_now(session: AsyncSession) -> datetime:
 
 
 async def _lock_authority(session: AsyncSession) -> CapacityAuthorityState:
+    authority = await _lock_any_authority(session)
+    if authority.executable_new_capacity_ceiling != 0:
+        raise AuthorityRecoveryError("capacity authority is not shadow-only")
+    return authority
+
+
+async def _lock_any_authority(session: AsyncSession) -> CapacityAuthorityState:
     authority = (
         await session.execute(
             select(CapacityAuthorityState)
@@ -269,8 +299,6 @@ async def _lock_authority(session: AsyncSession) -> CapacityAuthorityState:
     ).scalar_one_or_none()
     if authority is None:
         raise AuthorityRecoveryError("capacity authority row is missing")
-    if authority.executable_new_capacity_ceiling != 0:
-        raise AuthorityRecoveryError("capacity authority is not shadow-only")
     return authority
 
 
@@ -279,6 +307,24 @@ def _bounded_detail(detail: dict[str, Any]) -> dict[str, Any]:
     if len(encoded.encode("utf-8")) > 16 * 1024:
         raise CapacityStoreError("audit detail exceeds 16 KiB")
     return detail
+
+
+def _canonical_json_digest(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+        default=str,
+    ).encode("ascii")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _legacy_writer_key(
+    value: LegacyWriterFenceV2,
+) -> tuple[str, str, str, str]:
+    return (value.scope_kind, value.scope_id, value.writer_kind, value.writer_id)
 
 
 def _audit(
@@ -332,12 +378,18 @@ def _derive_owner_account(
 
 
 class CapacityManagementStore:
-    """Database-time, serializable management store with no execution path."""
+    """Database-time, serializable store with separately fenced execution authority."""
 
-    def __init__(self, *, freshness_seconds: int = 120) -> None:
+    def __init__(
+        self,
+        *,
+        freshness_seconds: int = 120,
+        execution_policy: ExecutionPreparationPolicyV2 | None = None,
+    ) -> None:
         if type(freshness_seconds) is not int or freshness_seconds <= 0:
             raise ValueError("freshness_seconds must be a positive integer")
         self._freshness = timedelta(seconds=freshness_seconds)
+        self._execution_policy = execution_policy
 
     async def propose_fleet_configuration(
         self,
@@ -775,9 +827,7 @@ class CapacityManagementStore:
             existing_pair = active_subjects.get(request.subject_id)
             existing = None if existing_pair is None else existing_pair[1]
             if request.operation_kind == "destroy" and existing is None:
-                raise ConfigurationConflictError(
-                    "dynamic development subject is not active"
-                )
+                raise ConfigurationConflictError("dynamic development subject is not active")
             display_name = f"dev-{request.environment_name}"
             if any(
                 subject.display_name == display_name and subject.subject_id != request.subject_id
@@ -815,10 +865,14 @@ class CapacityManagementStore:
                 raise ConfigurationConflictError(
                     "dynamic development deployment generation is not monotonic"
                 )
-            if request.operation_kind in {"capacity", "destroy"} and existing is not None and (
-                request.deployment_generation != existing.deployment_generation
-                or request.candidate_generation != existing.candidate_generation
-                or request.demand_reporter_incarnation != existing.demand_reporter_incarnation
+            if (
+                request.operation_kind in {"capacity", "destroy"}
+                and existing is not None
+                and (
+                    request.deployment_generation != existing.deployment_generation
+                    or request.candidate_generation != existing.candidate_generation
+                    or request.demand_reporter_incarnation != existing.demand_reporter_incarnation
+                )
             ):
                 raise ConfigurationConflictError(
                     "non-deployment projection must retain its deployment and reporter binding"
@@ -885,6 +939,8 @@ class CapacityManagementStore:
                     or current_deployment is None
                     or current_reporter is None
                     or current_candidate.candidate_digest != request.candidate_sha256
+                    or current_candidate.candidate_identity_algorithm != "source-sha256"
+                    or current_candidate.candidate_identity != request.candidate_sha256
                     or current_candidate.source_payload
                     != {"publication_sha256": request.candidate_publication_sha256}
                     or current_candidate.architecture_payload != expected_architecture
@@ -928,9 +984,7 @@ class CapacityManagementStore:
                 raise ConfigurationConflictError("development owner exceeds max_live_subjects")
             if not retiring and sum(
                 subject.min_slots for subject in owner_subjects
-            ) + request.min_slots > (
-                account.min_reservation_slots
-            ):
+            ) + request.min_slots > (account.min_reservation_slots):
                 raise ConfigurationConflictError(
                     "development owner minimum aggregate exceeds its reservation"
                 )
@@ -987,9 +1041,7 @@ class CapacityManagementStore:
                 )
             }
             owner_accounts[account.account_id] = account
-            active_owner_account_ids = {
-                value.account_id for value in next_subjects
-            }
+            active_owner_account_ids = {value.account_id for value in next_subjects}
             derived_accounts = tuple(
                 value
                 for account_id, value in owner_accounts.items()
@@ -1019,6 +1071,8 @@ class CapacityManagementStore:
                         subject_incarnation=request.subject_incarnation,
                         candidate_generation=request.candidate_generation,
                         candidate_digest=request.candidate_sha256,
+                        candidate_identity_algorithm="source-sha256",
+                        candidate_identity=request.candidate_sha256,
                         source_payload={"publication_sha256": request.candidate_publication_sha256},
                         artifact_payload={"candidate_sha256": request.candidate_sha256},
                         architecture_payload={
@@ -1126,9 +1180,7 @@ class CapacityManagementStore:
                     {}
                     if retiring
                     else {
-                        request.demand_reporter_incarnation: (
-                            request.demand_reporter_token_sha256
-                        )
+                        request.demand_reporter_incarnation: (request.demand_reporter_token_sha256)
                     }
                 ),
             )
@@ -1137,8 +1189,7 @@ class CapacityManagementStore:
                     update(CapacityDemandReporter)
                     .where(
                         CapacityDemandReporter.subject_id == request.subject_id,
-                        CapacityDemandReporter.subject_incarnation
-                        == request.subject_incarnation,
+                        CapacityDemandReporter.subject_incarnation == request.subject_incarnation,
                         CapacityDemandReporter.reporter_incarnation
                         == request.demand_reporter_incarnation,
                         CapacityDemandReporter.state == "current",
@@ -1507,15 +1558,112 @@ class CapacityManagementStore:
         expected_epoch: int,
     ) -> WriterFence:
         async with _write_transaction(session):
-            authority = await _lock_authority(session)
+            authority = await _lock_any_authority(session)
             if authority.authority_incarnation != authority_incarnation:
                 raise AuthorityRecoveryError("authority incarnation mismatch")
             if authority.writer_epoch != expected_epoch:
                 raise StaleWriterError("writer epoch compare-and-set failed")
-            authority.writer_epoch += 1
+            now = await _db_now(session)
+            successor_epoch = authority.writer_epoch + 1
+            if authority.execution_state == "prepared":
+                if authority.execution_epoch <= 0:
+                    raise AuthorityRecoveryError("prepared execution epoch binding is incomplete")
+                prepared = (
+                    await session.execute(
+                        select(CapacityExecutionEpoch)
+                        .where(CapacityExecutionEpoch.execution_epoch == authority.execution_epoch)
+                        .with_for_update()
+                    )
+                ).scalar_one_or_none()
+                if (
+                    prepared is None
+                    or prepared.state != "prepared"
+                    or prepared.execution_manifest_sha256 != authority.execution_manifest_sha256
+                    or prepared.effective_ceiling != 0
+                ):
+                    raise AuthorityRecoveryError(
+                        "prepared execution epoch does not match authority"
+                    )
+                prepared.state = "retired"
+                prepared.retired_at = now
+                authority.execution_epoch = 0
+                authority.execution_state = "shadow"
+                authority.execution_manifest_sha256 = None
+                authority.executable_new_capacity_ceiling = 0
+                session.add(
+                    _audit(
+                        actor_kind="manager",
+                        actor_id=str(authority_incarnation),
+                        event_kind="capacity_execution_epoch_retired_writer_change",
+                        object_binding={"execution_epoch": prepared.execution_epoch},
+                        detail={"prepared_writer_epoch": prepared.prepared_writer_epoch},
+                    )
+                )
+            elif authority.execution_state == "active":
+                active = (
+                    await session.execute(
+                        select(CapacityExecutionEpoch)
+                        .where(CapacityExecutionEpoch.execution_epoch == authority.execution_epoch)
+                        .with_for_update()
+                    )
+                ).scalar_one_or_none()
+                if (
+                    active is None
+                    or active.state != "active"
+                    or active.execution_manifest_sha256 != authority.execution_manifest_sha256
+                    or active.current_writer_epoch != authority.writer_epoch
+                    or active.effective_ceiling <= 0
+                ):
+                    raise AuthorityRecoveryError("active execution epoch does not match authority")
+                active.state = "drain-only"
+                active.effective_ceiling = 0
+                active.effective_rate_per_minute = 0
+                active.current_writer_epoch = successor_epoch
+                active.drain_only_at = now
+                authority.execution_state = "drain-only"
+                authority.executable_new_capacity_ceiling = 0
+                session.add(
+                    _audit(
+                        actor_kind="manager",
+                        actor_id=str(authority_incarnation),
+                        event_kind="capacity_execution_epoch_drained_writer_change",
+                        object_binding={"execution_epoch": active.execution_epoch},
+                        detail={"previous_writer_epoch": authority.writer_epoch},
+                    )
+                )
+            elif authority.execution_state == "drain-only":
+                draining = (
+                    await session.execute(
+                        select(CapacityExecutionEpoch)
+                        .where(CapacityExecutionEpoch.execution_epoch == authority.execution_epoch)
+                        .with_for_update()
+                    )
+                ).scalar_one_or_none()
+                if (
+                    draining is None
+                    or draining.state != "drain-only"
+                    or draining.execution_manifest_sha256 != authority.execution_manifest_sha256
+                    or draining.current_writer_epoch != authority.writer_epoch
+                    or draining.effective_ceiling != 0
+                    or draining.effective_rate_per_minute != 0
+                ):
+                    raise AuthorityRecoveryError(
+                        "drain-only execution epoch does not match authority"
+                    )
+                draining.current_writer_epoch = successor_epoch
+                session.add(
+                    _audit(
+                        actor_kind="manager",
+                        actor_id=str(authority_incarnation),
+                        event_kind="capacity_execution_epoch_refenced_writer_change",
+                        object_binding={"execution_epoch": draining.execution_epoch},
+                        detail={"previous_writer_epoch": authority.writer_epoch},
+                    )
+                )
+            authority.writer_epoch = successor_epoch
             authority.increase_freeze = True
             authority.increase_freeze_reason = "writer_epoch_changed"
-            authority.updated_at = await _db_now(session)
+            authority.updated_at = now
             session.add(
                 _audit(
                     actor_kind="manager",
@@ -1529,6 +1677,706 @@ class CapacityManagementStore:
                 authority_incarnation=authority.authority_incarnation,
                 writer_epoch=authority.writer_epoch,
             )
+
+    async def prepare_execution_epoch(
+        self,
+        session: AsyncSession,
+        request: ExecutionPreparationV2,
+        *,
+        actor: str,
+        idempotency_key: UUID,
+    ) -> ExecutionContextV2:
+        """Persist one exact prepared epoch while retaining a zero ceiling."""
+
+        self._validate_execution_actor(actor)
+        request_digest = canonical_executable_digest(request)
+        request_payload = request.model_dump(mode="json", exclude_none=False)
+        async with _write_transaction(session):
+            authority = await _lock_any_authority(session)
+            replay = (
+                await session.execute(
+                    select(CapacityExecutionEpoch).where(
+                        CapacityExecutionEpoch.idempotency_key == idempotency_key
+                    )
+                )
+            ).scalar_one_or_none()
+            if replay is not None:
+                if (
+                    replay.actor != actor
+                    or replay.request_digest != request_digest
+                    or replay.manifest_payload != request_payload
+                ):
+                    raise IdempotencyConflictError(
+                        "execution preparation idempotency key was reused"
+                    )
+                if (
+                    replay.state != "prepared"
+                    or authority.execution_state != "prepared"
+                    or authority.execution_epoch != replay.execution_epoch
+                    or authority.execution_manifest_sha256 != replay.execution_manifest_sha256
+                    or authority.executable_new_capacity_ceiling != 0
+                    or replay.current_writer_epoch != authority.writer_epoch
+                ):
+                    raise ExecutionConflictError(
+                        "execution preparation can replay only while prepared"
+                    )
+                await self._validate_execution_preparation(session, authority, request)
+                return self._execution_context(authority, replay)
+
+            if authority.execution_state != "shadow":
+                raise ExecutionConflictError("another execution epoch already owns authority")
+            await self._validate_execution_preparation(session, authority, request)
+            latest_epoch = (
+                await session.execute(select(func.max(CapacityExecutionEpoch.execution_epoch)))
+            ).scalar_one()
+            execution_epoch = 1 if latest_epoch is None else latest_epoch + 1
+            executors = {item.pool_id: item for item in request.executors}
+            row = CapacityExecutionEpoch(
+                execution_epoch=execution_epoch,
+                authority_incarnation=request.authority_incarnation,
+                prepared_writer_epoch=request.expected_writer_epoch,
+                current_writer_epoch=request.expected_writer_epoch,
+                configuration_epoch=request.configuration_epoch,
+                fleet_generation=request.fleet_generation,
+                fleet_digest=request.fleet_digest,
+                execution_manifest_sha256=request_digest,
+                manifest_payload=request_payload,
+                trusted_fleet_release_sha256=request.trusted_fleet_release_sha256,
+                oldlab_executor_id=executors["oldlab"].executor_id,
+                oldlab_executor_incarnation=executors["oldlab"].executor_incarnation,
+                oldlab_pool_id="oldlab",
+                oldlab_pool_generation=executors["oldlab"].pool_generation,
+                oldlab_signing_key_sha256=executors["oldlab"].signing_key_sha256,
+                oldlab_local_authority_sha256=executors["oldlab"].local_authority_sha256,
+                oldlab_controller_authority_sha256=(
+                    executors["oldlab"].controller_authority_sha256
+                ),
+                gb10_executor_id=executors["gb10"].executor_id,
+                gb10_executor_incarnation=executors["gb10"].executor_incarnation,
+                gb10_pool_id="gb10",
+                gb10_pool_generation=executors["gb10"].pool_generation,
+                gb10_signing_key_sha256=executors["gb10"].signing_key_sha256,
+                gb10_local_authority_sha256=executors["gb10"].local_authority_sha256,
+                gb10_controller_authority_sha256=(executors["gb10"].controller_authority_sha256),
+                environment_acknowledgements_sha256=_canonical_json_digest(
+                    [
+                        item.model_dump(mode="json", exclude_none=False)
+                        for item in request.subject_acknowledgements
+                    ]
+                ),
+                legacy_writer_manifest_sha256=_canonical_json_digest(
+                    [
+                        item.model_dump(mode="json", exclude_none=False)
+                        for item in request.legacy_writer_fences
+                    ]
+                ),
+                rollback_evidence_sha256=request.rollback_evidence_sha256,
+                requested_ceiling=request.requested_ceiling,
+                effective_ceiling=0,
+                requested_rate_per_minute=request.requested_rate_per_minute,
+                effective_rate_per_minute=0,
+                state="prepared",
+                actor=actor,
+                idempotency_key=idempotency_key,
+                request_digest=request_digest,
+                activation_actor=None,
+                activation_idempotency_key=None,
+                activation_request_digest=None,
+            )
+            session.add(row)
+            await session.flush()
+            authority.execution_epoch = execution_epoch
+            authority.execution_state = "prepared"
+            authority.execution_manifest_sha256 = request_digest
+            authority.executable_new_capacity_ceiling = 0
+            authority.increase_freeze = True
+            authority.increase_freeze_reason = "execution_epoch_prepared"
+            authority.updated_at = await _db_now(session)
+            session.add(
+                _audit(
+                    actor_kind="operator",
+                    actor_id=actor,
+                    event_kind="capacity_execution_epoch_prepared",
+                    object_binding={
+                        "execution_epoch": execution_epoch,
+                        "execution_manifest_sha256": request_digest,
+                    },
+                    detail={
+                        "configuration_epoch": request.configuration_epoch,
+                        "requested_ceiling": request.requested_ceiling,
+                        "subject_count": len(request.subject_acknowledgements),
+                        "legacy_writer_count": len(request.legacy_writer_fences),
+                    },
+                )
+            )
+            return self._execution_context(authority, row)
+
+    async def register_execution_executor(
+        self,
+        session: AsyncSession,
+        request: ExecutableExecutorRegistrationV2,
+        *,
+        actor: str,
+        idempotency_key: UUID,
+    ) -> ExecutionContextV2:
+        """Persist explicit v2 executor provenance for one prepared epoch."""
+
+        self._validate_execution_actor(actor)
+        request_digest = canonical_executable_digest(request)
+        request_payload = request.model_dump(mode="json", exclude_none=False)
+        async with _write_transaction(session):
+            authority = await _lock_any_authority(session)
+            replay = (
+                await session.execute(
+                    select(CapacityExecutionExecutor).where(
+                        CapacityExecutionExecutor.idempotency_key == idempotency_key
+                    )
+                )
+            ).scalar_one_or_none()
+            if replay is not None:
+                if (
+                    replay.actor != actor
+                    or replay.registration_digest != request_digest
+                    or replay.registration_payload != request_payload
+                ):
+                    raise IdempotencyConflictError(
+                        "execution executor registration idempotency key was reused"
+                    )
+                replay_epoch = (
+                    await session.execute(
+                        select(CapacityExecutionEpoch).where(
+                            CapacityExecutionEpoch.execution_epoch == replay.execution_epoch
+                        )
+                    )
+                ).scalar_one()
+                if (
+                    replay_epoch.state != "prepared"
+                    or authority.execution_state != "prepared"
+                    or authority.execution_epoch != replay_epoch.execution_epoch
+                    or authority.execution_manifest_sha256 != replay_epoch.execution_manifest_sha256
+                    or authority.executable_new_capacity_ceiling != 0
+                    or replay_epoch.current_writer_epoch != authority.writer_epoch
+                ):
+                    raise ExecutionConflictError(
+                        "execution executor registration can replay only while prepared"
+                    )
+                context = self._execution_context(authority, replay_epoch)
+                if request.execution != context:
+                    raise ExecutionConflictError(
+                        "execution executor registration can replay only while prepared"
+                    )
+                preparation = self._execution_preparation_from_row(replay_epoch)
+                await self._validate_execution_preparation(
+                    session,
+                    authority,
+                    preparation,
+                )
+                return context
+
+            if authority.execution_state != "prepared":
+                raise ExecutionConflictError(
+                    "executable executor registration requires prepared authority"
+                )
+            current_epoch = (
+                await session.execute(
+                    select(CapacityExecutionEpoch)
+                    .where(
+                        CapacityExecutionEpoch.execution_epoch == request.execution.execution_epoch
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if current_epoch is None or current_epoch.state != "prepared":
+                raise ExecutionConflictError("prepared execution epoch is unavailable")
+            context = self._execution_context(authority, current_epoch)
+            if request.execution != context:
+                raise ExecutionConflictError("execution executor fence changed")
+            policy = self._execution_policy
+            if policy is None:
+                raise ExecutionPreparationDisabledError(
+                    "execution registration requires owner-configured policy"
+                )
+            if request.pool_id not in {"gb10", "oldlab"}:
+                raise ExecutionConflictError("executable executor pool is invalid")
+            pool_id = cast(Literal["gb10", "oldlab"], request.pool_id)
+            expected = {item.pool_id: item for item in policy.executors}.get(pool_id)
+            if expected is None or (
+                request.executor_id != expected.executor_id
+                or request.executor_incarnation != expected.executor_incarnation
+                or request.pool_generation != expected.pool_generation
+                or request.signing_key_sha256 != expected.signing_key_sha256
+                or request.local_authority_sha256 != expected.local_authority_sha256
+                or request.controller_authority_sha256 != expected.controller_authority_sha256
+            ):
+                raise ExecutionConflictError("executable executor differs from owner policy")
+            existing_pool = (
+                await session.execute(
+                    select(CapacityExecutionExecutor.id).where(
+                        CapacityExecutionExecutor.execution_epoch == current_epoch.execution_epoch,
+                        CapacityExecutionExecutor.pool_id == request.pool_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing_pool is not None:
+                raise ExecutionConflictError(
+                    "execution executor pool is already registered with another key"
+                )
+            session.add(
+                CapacityExecutionExecutor(
+                    execution_epoch=current_epoch.execution_epoch,
+                    execution_manifest_sha256=current_epoch.execution_manifest_sha256,
+                    executor_id=request.executor_id,
+                    executor_incarnation=request.executor_incarnation,
+                    pool_id=request.pool_id,
+                    pool_generation=request.pool_generation,
+                    signing_key_id=request.signing_key_id,
+                    signing_key_sha256=request.signing_key_sha256,
+                    local_authority_sha256=request.local_authority_sha256,
+                    controller_authority_sha256=request.controller_authority_sha256,
+                    actor=actor,
+                    idempotency_key=idempotency_key,
+                    registration_digest=request_digest,
+                    registration_payload=request_payload,
+                )
+            )
+            await session.flush()
+            return context
+
+    async def activate_execution_epoch(
+        self,
+        session: AsyncSession,
+        request: ExecutionActivationV2,
+        *,
+        actor: str,
+        idempotency_key: UUID,
+    ) -> ExecutionAuthorityV2:
+        """Atomically activate only the exact still-current prepared epoch."""
+
+        self._validate_execution_actor(actor)
+        request_digest = canonical_executable_digest(request)
+        async with _write_transaction(session):
+            authority = await _lock_any_authority(session)
+            replay = (
+                await session.execute(
+                    select(CapacityExecutionEpoch).where(
+                        CapacityExecutionEpoch.activation_idempotency_key == idempotency_key
+                    )
+                )
+            ).scalar_one_or_none()
+            if replay is not None:
+                if (
+                    replay.activation_actor != actor
+                    or replay.activation_request_digest != request_digest
+                ):
+                    raise IdempotencyConflictError(
+                        "execution activation idempotency key was reused"
+                    )
+                if (
+                    replay.state != "active"
+                    or authority.execution_state != "active"
+                    or authority.authority_incarnation != request.authority_incarnation
+                    or authority.writer_epoch != request.expected_writer_epoch
+                    or authority.execution_epoch != request.execution_epoch
+                    or authority.execution_manifest_sha256 != request.execution_manifest_sha256
+                    or replay.current_writer_epoch != request.expected_writer_epoch
+                    or replay.execution_epoch != request.execution_epoch
+                    or replay.execution_manifest_sha256 != request.execution_manifest_sha256
+                    or replay.effective_ceiling != request.executable_new_capacity_ceiling
+                    or replay.effective_rate_per_minute
+                    != request.executable_new_capacity_rate_per_minute
+                ):
+                    raise ExecutionConflictError(
+                        "execution activation replay requires the exact active fence"
+                    )
+                preparation = self._execution_preparation_from_row(replay)
+                try:
+                    await self._validate_execution_preparation(
+                        session,
+                        authority,
+                        preparation,
+                    )
+                except (ExecutionConflictError, ExecutionPreparationDisabledError) as exc:
+                    raise ExecutionConflictError(
+                        "execution activation replay owner policy changed"
+                    ) from exc
+                await self._validate_execution_executor_bindings(
+                    session,
+                    replay,
+                    preparation,
+                )
+                context = self._execution_context(authority, replay)
+                if not isinstance(context, ExecutionAuthorityV2):
+                    raise ExecutionConflictError("execution activation replay is not authoritative")
+                return context
+
+            row = (
+                await session.execute(
+                    select(CapacityExecutionEpoch)
+                    .where(CapacityExecutionEpoch.execution_epoch == request.execution_epoch)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if row is None or row.state != "prepared":
+                raise ExecutionConflictError("exact prepared execution epoch is unavailable")
+            if (
+                authority.authority_incarnation != request.authority_incarnation
+                or authority.writer_epoch != request.expected_writer_epoch
+                or authority.execution_state != "prepared"
+                or authority.execution_epoch != request.execution_epoch
+                or authority.execution_manifest_sha256 != request.execution_manifest_sha256
+                or row.execution_manifest_sha256 != request.execution_manifest_sha256
+                or row.requested_ceiling != request.executable_new_capacity_ceiling
+                or row.requested_rate_per_minute != request.executable_new_capacity_rate_per_minute
+            ):
+                raise ExecutionConflictError("prepared execution fence changed")
+            if not authority.increase_freeze:
+                raise ExecutionConflictError("execution activation requires increase freeze")
+
+            preparation = self._execution_preparation_from_row(row)
+            await self._validate_execution_preparation(session, authority, preparation)
+            await self._validate_execution_executor_bindings(session, row, preparation)
+            now = await _db_now(session)
+            row.state = "active"
+            row.effective_ceiling = request.executable_new_capacity_ceiling
+            row.effective_rate_per_minute = request.executable_new_capacity_rate_per_minute
+            row.activation_actor = actor
+            row.activation_idempotency_key = idempotency_key
+            row.activation_request_digest = request_digest
+            row.activated_at = now
+            authority.execution_state = "active"
+            authority.executable_new_capacity_ceiling = request.executable_new_capacity_ceiling
+            authority.increase_freeze = False
+            authority.increase_freeze_reason = None
+            authority.updated_at = now
+            await session.flush()
+            session.add(
+                _audit(
+                    actor_kind="operator",
+                    actor_id=actor,
+                    event_kind="capacity_execution_epoch_activated",
+                    object_binding={
+                        "execution_epoch": row.execution_epoch,
+                        "execution_manifest_sha256": row.execution_manifest_sha256,
+                    },
+                    detail={
+                        "executable_new_capacity_ceiling": row.effective_ceiling,
+                        "idempotency_key": str(idempotency_key),
+                    },
+                )
+            )
+            context = self._execution_context(authority, row)
+            if not isinstance(context, ExecutionAuthorityV2):
+                raise ExecutionConflictError("activated execution authority is invalid")
+            return context
+
+    async def execution_authority(
+        self,
+        session: AsyncSession,
+    ) -> ExecutionContextV2 | None:
+        """Return the exact prepared/active checkpoint, or none in shadow mode."""
+
+        authority = (
+            await session.execute(
+                select(CapacityAuthorityState).where(CapacityAuthorityState.singleton_id == 1)
+            )
+        ).scalar_one_or_none()
+        if authority is None:
+            raise AuthorityRecoveryError("capacity authority row is missing")
+        if authority.execution_state == "shadow":
+            return None
+        if authority.execution_epoch <= 0:
+            raise AuthorityRecoveryError("execution authority binding is incomplete")
+        row = (
+            await session.execute(
+                select(CapacityExecutionEpoch).where(
+                    CapacityExecutionEpoch.execution_epoch == authority.execution_epoch
+                )
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            raise AuthorityRecoveryError("execution epoch row is missing")
+        if (
+            row.authority_incarnation != authority.authority_incarnation
+            or row.current_writer_epoch != authority.writer_epoch
+            or row.state != authority.execution_state
+            or row.execution_manifest_sha256 != authority.execution_manifest_sha256
+            or row.effective_ceiling != authority.executable_new_capacity_ceiling
+        ):
+            raise AuthorityRecoveryError("execution authority database binding changed")
+        try:
+            preparation = self._execution_preparation_from_row(row)
+            await self._validate_execution_preparation(
+                session,
+                authority,
+                preparation,
+                require_writer_binding=row.state != "drain-only",
+            )
+            if row.state in {"active", "drain-only"}:
+                await self._validate_execution_executor_bindings(
+                    session,
+                    row,
+                    preparation,
+                )
+        except (ExecutionConflictError, ExecutionPreparationDisabledError) as exc:
+            raise AuthorityRecoveryError(
+                "active execution authority executor binding or owner policy changed"
+            ) from exc
+        return self._execution_context(authority, row)
+
+    @staticmethod
+    def _execution_preparation_from_row(
+        row: CapacityExecutionEpoch,
+    ) -> ExecutionPreparationV2:
+        try:
+            preparation = ExecutionPreparationV2.model_validate_json(
+                json.dumps(row.manifest_payload, sort_keys=True, separators=(",", ":"))
+            )
+        except ValueError as exc:
+            raise ExecutionConflictError("prepared execution manifest is invalid") from exc
+        if (
+            canonical_executable_digest(preparation) != row.execution_manifest_sha256
+            or _canonical_json_digest(
+                [
+                    item.model_dump(mode="json", exclude_none=False)
+                    for item in preparation.subject_acknowledgements
+                ]
+            )
+            != row.environment_acknowledgements_sha256
+            or _canonical_json_digest(
+                [
+                    item.model_dump(mode="json", exclude_none=False)
+                    for item in preparation.legacy_writer_fences
+                ]
+            )
+            != row.legacy_writer_manifest_sha256
+            or preparation.rollback_evidence_sha256 != row.rollback_evidence_sha256
+        ):
+            raise ExecutionConflictError("prepared execution manifest digest changed")
+        return preparation
+
+    @staticmethod
+    def _execution_epoch_executor_binding(
+        row: CapacityExecutionEpoch,
+        pool_id: Literal["gb10", "oldlab"],
+    ) -> tuple[str, UUID, int, str, str, str]:
+        if pool_id == "oldlab":
+            return (
+                row.oldlab_executor_id,
+                row.oldlab_executor_incarnation,
+                row.oldlab_pool_generation,
+                row.oldlab_signing_key_sha256,
+                row.oldlab_local_authority_sha256,
+                row.oldlab_controller_authority_sha256,
+            )
+        return (
+            row.gb10_executor_id,
+            row.gb10_executor_incarnation,
+            row.gb10_pool_generation,
+            row.gb10_signing_key_sha256,
+            row.gb10_local_authority_sha256,
+            row.gb10_controller_authority_sha256,
+        )
+
+    async def _validate_execution_executor_bindings(
+        self,
+        session: AsyncSession,
+        row: CapacityExecutionEpoch,
+        preparation: ExecutionPreparationV2,
+    ) -> None:
+        executable_rows = (
+            (
+                await session.execute(
+                    select(CapacityExecutionExecutor).where(
+                        CapacityExecutionExecutor.execution_epoch == row.execution_epoch,
+                        CapacityExecutionExecutor.execution_manifest_sha256
+                        == row.execution_manifest_sha256,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        expected_executors = {item.pool_id: item for item in preparation.executors}
+        if {item.pool_id for item in executable_rows} != {"gb10", "oldlab"}:
+            raise ExecutionConflictError("both executable executor registrations are required")
+        for executable_row in executable_rows:
+            pool_id = cast(Literal["gb10", "oldlab"], executable_row.pool_id)
+            expected = expected_executors[pool_id]
+            durable = self._execution_epoch_executor_binding(row, pool_id)
+            observed = (
+                executable_row.executor_id,
+                executable_row.executor_incarnation,
+                executable_row.pool_generation,
+                executable_row.signing_key_sha256,
+                executable_row.local_authority_sha256,
+                executable_row.controller_authority_sha256,
+            )
+            requested = (
+                expected.executor_id,
+                expected.executor_incarnation,
+                expected.pool_generation,
+                expected.signing_key_sha256,
+                expected.local_authority_sha256,
+                expected.controller_authority_sha256,
+            )
+            if observed != requested or durable != requested:
+                raise ExecutionConflictError("executable executor binding changed")
+
+    async def _validate_execution_preparation(
+        self,
+        session: AsyncSession,
+        authority: CapacityAuthorityState,
+        request: ExecutionPreparationV2,
+        *,
+        require_writer_binding: bool = True,
+    ) -> None:
+        policy = self._execution_policy
+        if policy is None:
+            raise ExecutionPreparationDisabledError(
+                "execution preparation requires owner-configured policy"
+            )
+        if authority.authority_incarnation != request.authority_incarnation or (
+            require_writer_binding and authority.writer_epoch != request.expected_writer_epoch
+        ):
+            raise ExecutionConflictError("execution writer authority changed")
+        configuration = (
+            (
+                await session.execute(
+                    select(CapacityConfigurationEpoch).order_by(
+                        CapacityConfigurationEpoch.configuration_epoch.desc()
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if (
+            configuration is None
+            or configuration.configuration_epoch != request.configuration_epoch
+            or configuration.fleet_generation != request.fleet_generation
+            or configuration.fleet_digest != request.fleet_digest
+        ):
+            raise ExecutionConflictError("execution configuration or fleet changed")
+        if request.trusted_fleet_release_sha256 != policy.trusted_fleet_release_sha256:
+            raise ExecutionConflictError("trusted fleet release is not configured exactly")
+        if (
+            request.requested_ceiling != policy.executable_new_capacity_ceiling
+            or request.requested_rate_per_minute != policy.executable_new_capacity_rate_per_minute
+            or request.executors != policy.executors
+            or request.subject_acknowledgements != policy.subject_acknowledgements
+            or request.rollback_evidence_sha256 != policy.rollback_evidence_sha256
+            or request.legacy_writer_fences != policy.legacy_writer_fences
+        ):
+            raise ExecutionConflictError("execution preparation differs from owner policy")
+
+        controller_authorities = {
+            item.pool_id: item.controller_authority_sha256 for item in policy.controller_authorities
+        }
+        if any(
+            item.controller_authority_sha256 != controller_authorities[item.pool_id]
+            for item in request.executors
+        ):
+            raise ExecutionConflictError("executor controller authority changed")
+
+        pool_generation_rows = (
+            (
+                await session.execute(
+                    select(CapacityPool.pool_id, CapacityPool.pool_generation).where(
+                        CapacityPool.configuration_epoch == request.configuration_epoch
+                    )
+                )
+            )
+            .tuples()
+            .all()
+        )
+        active_pool_generations: dict[str, int] = dict(pool_generation_rows)
+        if any(
+            active_pool_generations.get(item.pool_id) != item.pool_generation
+            for item in request.executors
+        ):
+            raise ExecutionConflictError("executor pool generation changed")
+
+        subject_rows = (
+            (
+                await session.execute(
+                    select(CapacitySubject).where(
+                        CapacitySubject.configuration_epoch == request.configuration_epoch
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        acknowledgements = {item.subject_id: item for item in request.subject_acknowledgements}
+        if {row.subject_id for row in subject_rows} != set(acknowledgements):
+            raise ExecutionConflictError("subject execution acknowledgements are incomplete")
+        for subject_row in subject_rows:
+            acknowledgement = acknowledgements[subject_row.subject_id]
+            if (
+                acknowledgement.subject_incarnation != subject_row.subject_incarnation
+                or acknowledgement.configuration_generation != subject_row.configuration_generation
+                or acknowledgement.deployment_generation != subject_row.deployment_generation
+                or acknowledgement.reporter_incarnation != subject_row.demand_reporter_incarnation
+            ):
+                raise ExecutionConflictError("subject execution acknowledgement changed")
+            candidate = (
+                await session.execute(
+                    select(CapacityCandidate).where(
+                        CapacityCandidate.subject_id == subject_row.subject_id,
+                        CapacityCandidate.subject_incarnation == subject_row.subject_incarnation,
+                        CapacityCandidate.candidate_generation == subject_row.candidate_generation,
+                    )
+                )
+            ).scalar_one_or_none()
+            if (
+                candidate is None
+                or candidate.candidate_identity_algorithm != acknowledgement.candidate.algorithm
+                or candidate.candidate_identity != acknowledgement.candidate.identity
+                or candidate.source_payload.get("publication_sha256")
+                != acknowledgement.candidate.publication_sha256
+            ):
+                raise ExecutionConflictError("subject execution candidate provenance changed")
+
+        expected_legacy = {_legacy_writer_key(item) for item in policy.legacy_writer_fences}
+        supplied_legacy = {_legacy_writer_key(item) for item in request.legacy_writer_fences}
+        if supplied_legacy != expected_legacy:
+            raise ExecutionConflictError("legacy writer fence manifest is incomplete")
+
+    @staticmethod
+    def _validate_execution_actor(actor: str) -> None:
+        if not actor or len(actor.encode("utf-8")) > 256:
+            raise ValueError("execution actor is invalid")
+
+    @staticmethod
+    def _execution_context(
+        authority: CapacityAuthorityState,
+        row: CapacityExecutionEpoch,
+    ) -> ExecutionContextV2:
+        if (
+            authority.execution_epoch != row.execution_epoch
+            or authority.execution_state != row.state
+            or authority.execution_manifest_sha256 != row.execution_manifest_sha256
+            or authority.executable_new_capacity_ceiling != row.effective_ceiling
+            or authority.authority_incarnation != row.authority_incarnation
+            or authority.writer_epoch != row.current_writer_epoch
+        ):
+            raise AuthorityRecoveryError("execution authority does not match its epoch")
+        values = {
+            "authority_incarnation": authority.authority_incarnation,
+            "writer_epoch": authority.writer_epoch,
+            "configuration_epoch": row.configuration_epoch,
+            "execution_epoch": row.execution_epoch,
+            "execution_manifest_sha256": row.execution_manifest_sha256,
+            "execution_state": row.state,
+            "executable_new_capacity_ceiling": row.effective_ceiling,
+            "executable_new_capacity_rate_per_minute": row.effective_rate_per_minute,
+            "trusted_fleet_release_sha256": row.trusted_fleet_release_sha256,
+        }
+        if row.state in {"active", "drain-only"}:
+            return ExecutionAuthorityV2.model_validate(values)
+        if row.state == "prepared":
+            return ExecutionContextV2.model_validate(values)
+        raise AuthorityRecoveryError("execution epoch is not current authority")
 
     async def ingest_demand_snapshot(
         self,
@@ -2433,6 +3281,12 @@ class CapacityManagementStore:
             configuration_epoch=0 if configuration is None else configuration.configuration_epoch,
             configuration_digest=None if configuration is None else configuration.canonical_digest,
             latest_allocation_epoch=latest_allocation,
+            execution_epoch=authority.execution_epoch,
+            execution_state=cast(
+                Literal["shadow", "prepared", "active", "drain-only"],
+                authority.execution_state,
+            ),
+            execution_manifest_sha256=authority.execution_manifest_sha256,
             executable_new_capacity_ceiling=authority.executable_new_capacity_ceiling,
             increase_freeze=authority.increase_freeze,
             items=tuple(
@@ -2455,6 +3309,8 @@ __all__ = [
     "CapacityStoreError",
     "CommittedShadowEpoch",
     "ConfigurationConflictError",
+    "ExecutionConflictError",
+    "ExecutionPreparationDisabledError",
     "IdempotencyConflictError",
     "IngestResult",
     "ProposedConfiguration",
