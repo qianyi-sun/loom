@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -36,7 +37,7 @@ from loom_capacity_agent.claim_guard import (
     ExecutableClaimProposalV2,
     InertAttemptTransitionV1,
 )
-from loom_capacity_agent.client import DemandReporterClient
+from loom_capacity_agent.client import DemandPublishError, DemandReporterClient
 from loom_capacity_agent.contracts import (
     AgentPoolCapabilityV1,
     AgentRegistrationV1,
@@ -214,6 +215,7 @@ def _database_value(database: Mapping[str, object], key: str) -> str:
 class CanonicalDigests:
     allocation: str
     inventory: str
+    release: str
     evidence: str
 
 
@@ -281,6 +283,7 @@ class ProtectedDrainEvidence:
 class ProtectedReleaseReplayEvidence:
     intent_id: UUID
     event_kind: Literal["released", "withdrawn", "prepared-revoked"]
+    release_digest: str
     publish_attempts: int
     idempotency_keys: tuple[UUID, ...]
     manager_replayed_flags: tuple[bool, ...]
@@ -780,6 +783,7 @@ class PoolHarness:
             admission_client_factory=self.harness.routed_admission_factory,
             slurm_backend_factory=lambda _authority: self.fake.backend(),
         )
+        self.executor._now = lambda: _FIXED_TIME
         self.journal = self.executor.journal
 
     async def restart(self) -> None:
@@ -984,10 +988,13 @@ class ExecutableCapacityHarness:
         root: Path,
         postgres_url: str,
         guard_template: dict[str, object],
+        *,
+        database_suffix: str | None = None,
     ) -> ExecutableCapacityHarness:
         capacity_url, protected, cleanup = cls._provision_databases(
             postgres_url,
             guard_template,
+            database_suffix=database_suffix,
         )
         harness = cls(root, capacity_url, protected, cleanup)
         try:
@@ -1001,12 +1008,19 @@ class ExecutableCapacityHarness:
     def _provision_databases(
         postgres_url: str,
         template: dict[str, object],
+        *,
+        database_suffix: str | None = None,
     ) -> tuple[str, dict[str, dict[str, object]], Any]:
         source = make_url(postgres_url)
         cluster_admin = source.set(database="postgres")
         engine = create_engine(cluster_admin, isolation_level="AUTOCOMMIT")
         preparer = engine.dialect.identifier_preparer
-        suffix = f"{os.getpid()}_{_uuid(str(datetime.now(UTC).timestamp())).hex[:8]}"
+        if database_suffix is not None:
+            if re.fullmatch(r"[a-z0-9_]{1,48}", database_suffix) is None:
+                raise ValueError("test database suffix must be a safe postgres identifier segment")
+            suffix = database_suffix
+        else:
+            suffix = f"{os.getpid()}_{_uuid(str(datetime.now(UTC).timestamp())).hex[:8]}"
         capacity_name = f"loom_capacity_bridge_{suffix}"
         guard_names = {
             "alice": f"loom_guard_bridge_alice_{suffix}",
@@ -1015,6 +1029,18 @@ class ExecutableCapacityHarness:
         created = [capacity_name, *guard_names.values()]
         try:
             with engine.connect() as connection:
+                if database_suffix is not None:
+                    for database_name in created:
+                        connection.execute(
+                            text(
+                                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                                "WHERE datname = :database_name AND pid <> pg_backend_pid()"
+                            ),
+                            {"database_name": database_name},
+                        )
+                        connection.exec_driver_sql(
+                            f"DROP DATABASE IF EXISTS {preparer.quote(database_name)}"
+                        )
                 connection.exec_driver_sql(
                     f"CREATE DATABASE {preparer.quote(capacity_name)} TEMPLATE template0"
                 )
@@ -2728,8 +2754,9 @@ class ExecutableCapacityHarness:
             self._transport.online = False
             try:
                 await self._run_release_reporter_once(owner, publisher)
-            except RuntimeError:
-                pass
+            except DemandPublishError as exc:
+                if "transport failed" not in str(exc):
+                    raise
             finally:
                 self._transport.online = True
         if lose_response_after_manager_ack:
@@ -2745,6 +2772,7 @@ class ExecutableCapacityHarness:
         return ProtectedReleaseReplayEvidence(
             intent_id=first_publication.release.binding.intent_id,
             event_kind=first_publication.event_kind,
+            release_digest=first_publication.publication_digest,
             publish_attempts=len(publisher.calls),
             idempotency_keys=tuple(item[1] for item in publisher.calls),
             manager_replayed_flags=tuple(publisher.replayed),
@@ -3112,9 +3140,40 @@ class ExecutableCapacityHarness:
                 key=lambda item: (item["pool"], item["owner"], item["job"]),
             ),
         }
+        release_digests = []
+        for row in intents:
+            if row.protected_release_payload is None:
+                continue
+            release = ExecutableProtectedReleaseV2.model_validate_json(
+                json.dumps(row.protected_release_payload)
+            )
+            release_digest = canonical_executable_digest(release)
+            if row.protected_release_digest != release_digest:
+                raise RuntimeError("manager protected release digest diverged")
+            binding = ExecutableIntentBindingV2.model_validate_json(json.dumps(row.binding_payload))
+            release_digests.append(
+                {
+                    "rank": row.launch_rank,
+                    "owner": self._owners_by_subject[binding.subject_id].name,
+                    "pool": row.pool_id,
+                    "digest": release_digest,
+                }
+            )
+        release_digest = (
+            release_digests[0]["digest"]
+            if len(release_digests) == 1
+            else _sha(
+                json.dumps(
+                    release_digests,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+        )
         return CanonicalDigests(
             allocation=_sha(json.dumps(bindings, sort_keys=True, separators=(",", ":"))),
             inventory=_sha(json.dumps(inventory_evidence, sort_keys=True, separators=(",", ":"))),
+            release=release_digest,
             evidence=_sha(json.dumps(evidence, sort_keys=True, separators=(",", ":"))),
         )
 

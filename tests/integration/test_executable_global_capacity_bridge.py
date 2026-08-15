@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+from pathlib import Path
 
 import httpx
 import pytest
@@ -163,6 +165,7 @@ async def test_prepared_unused_retirement_uses_protected_release_reporter_runtim
     assert executable_capacity_harness.oldlab.sbatch_calls == ()
     assert executable_capacity_harness.oldlab.cancelled_job_ids() == ()
 
+    await executable_capacity_harness.restart_executor("oldlab")
     outage = await executable_capacity_harness.publish_next_protected_release_with_replay(
         alice,
         manager_outage_before_first_publish=True,
@@ -170,6 +173,7 @@ async def test_prepared_unused_retirement_uses_protected_release_reporter_runtim
     )
     assert outage.event_kind == "prepared-revoked"
     assert outage.publish_attempts == 3
+    assert len(set(outage.idempotency_keys)) == 1
     assert outage.idempotency_keys[1] == outage.idempotency_keys[2]
     assert outage.manager_replayed_flags == (False, True)
     assert outage.guard_publication_count == 1
@@ -177,6 +181,7 @@ async def test_prepared_unused_retirement_uses_protected_release_reporter_runtim
     released = await executable_capacity_harness.release_retired_intent("oldlab", binding)
     final = await executable_capacity_harness.canonical_digests()
     assert released.status == "released"
+    assert outage.release_digest == final.release
     assert executable_capacity_harness.execution_state == "shadow"
     assert executable_capacity_harness.total_loom_jobs() == 0
     assert await executable_capacity_harness.manager_commitments() == ()
@@ -184,7 +189,7 @@ async def test_prepared_unused_retirement_uses_protected_release_reporter_runtim
     print(
         "CANONICAL_DIGEST prepared_unused "
         f"allocation={final.allocation} inventory={final.inventory} "
-        f"evidence={final.evidence}"
+        f"release={final.release}"
     )
 
 
@@ -203,7 +208,6 @@ async def test_unregistered_withdrawn_retirement_cancels_only_exact_pending_job(
     assert executable_capacity_harness.trusted_launcher_process_count() == 0
 
     await executable_capacity_harness.begin_drain()
-    await executable_capacity_harness.restart_executor("oldlab")
     drained = await executable_capacity_harness.drain_unregistered_withdrawn(
         "oldlab",
         binding,
@@ -218,20 +222,29 @@ async def test_unregistered_withdrawn_retirement_cancels_only_exact_pending_job(
     assert foreign_job not in executable_capacity_harness.oldlab.cancelled_job_ids()
     assert not executable_capacity_harness.worker_registered(binding.intent_id)
 
-    published = await executable_capacity_harness.publish_next_protected_release_with_replay(alice)
+    await executable_capacity_harness.restart_executor("oldlab")
+    published = await executable_capacity_harness.publish_next_protected_release_with_replay(
+        alice,
+        manager_outage_before_first_publish=True,
+        lose_response_after_manager_ack=True,
+    )
     assert published.event_kind == "withdrawn"
+    assert published.publish_attempts == 3
+    assert len(set(published.idempotency_keys)) == 1
+    assert published.manager_replayed_flags == (False, True)
     assert published.guard_publication_count == 1
 
     released = await executable_capacity_harness.release_retired_intent("oldlab", binding)
     final = await executable_capacity_harness.canonical_digests()
     assert released.status == "released"
+    assert published.release_digest == final.release
     assert executable_capacity_harness.execution_state == "shadow"
     assert executable_capacity_harness.oldlab.job_snapshot(foreign_job) == foreign_before
     assert await executable_capacity_harness.manager_commitments() == ()
     print(
         "CANONICAL_DIGEST unregistered_withdrawn "
         f"allocation={final.allocation} inventory={final.inventory} "
-        f"evidence={final.evidence}"
+        f"release={final.release}"
     )
 
 
@@ -273,6 +286,128 @@ async def test_protected_release_reporter_delay_keeps_pools_isolated(
     await executable_capacity_harness.release_retired_intent("gb10", bob_binding)
     assert executable_capacity_harness.execution_state == "shadow"
     assert executable_capacity_harness.cross_owner_bindings() == []
+
+
+async def _prepared_unused_release_digests(
+    root: Path,
+    postgres_url: str,
+    capacity_guard_template_database: dict[str, object],
+    *,
+    database_suffix: str,
+) -> tuple[str, str, str]:
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True, exist_ok=False)
+    harness = await ExecutableCapacityHarness.create(
+        root,
+        postgres_url,
+        capacity_guard_template_database,
+        database_suffix=database_suffix,
+    )
+    try:
+        alice = await harness.add_owner("alice", "a" * 64)
+        await alice.publish_x86_demand(1)
+        await harness.activate_next_epoch()
+        await harness.reconcile()
+        binding = await harness.prepare_unused_intent("oldlab")
+        await harness.begin_drain()
+        await harness.drain_prepared_unused("oldlab", binding)
+        await harness.restart_executor("oldlab")
+        published = await harness.publish_next_protected_release_with_replay(
+            alice,
+            manager_outage_before_first_publish=True,
+            lose_response_after_manager_ack=True,
+        )
+        await harness.release_retired_intent("oldlab", binding)
+        final = await harness.canonical_digests()
+        assert published.release_digest == final.release
+        return final.allocation, final.inventory, final.release
+    finally:
+        await harness.aclose()
+
+
+async def _unregistered_withdrawn_release_digests(
+    root: Path,
+    postgres_url: str,
+    capacity_guard_template_database: dict[str, object],
+    *,
+    database_suffix: str,
+) -> tuple[str, str, str]:
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True, exist_ok=False)
+    harness = await ExecutableCapacityHarness.create(
+        root,
+        postgres_url,
+        capacity_guard_template_database,
+        database_suffix=database_suffix,
+    )
+    try:
+        alice = await harness.add_owner("alice", "a" * 64)
+        await alice.publish_x86_demand(1)
+        await harness.activate_next_epoch()
+        await harness.reconcile()
+        binding, job_id = await harness.submit_unregistered_intent("oldlab")
+        await harness.begin_drain()
+        await harness.drain_unregistered_withdrawn("oldlab", binding, job_id)
+        await harness.restart_executor("oldlab")
+        published = await harness.publish_next_protected_release_with_replay(
+            alice,
+            manager_outage_before_first_publish=True,
+            lose_response_after_manager_ack=True,
+        )
+        await harness.release_retired_intent("oldlab", binding)
+        final = await harness.canonical_digests()
+        assert published.release_digest == final.release
+        return final.allocation, final.inventory, final.release
+    finally:
+        await harness.aclose()
+
+
+async def test_protected_release_canonical_digests_are_stable_across_fresh_runs(
+    tmp_path: Path,
+    postgres_url: str,
+    capacity_guard_template_database: dict[str, object],
+) -> None:
+    del tmp_path
+    repeat_root = Path("/tmp/loom-task4-protected-release-repeat")
+    first_prepared = await _prepared_unused_release_digests(
+        repeat_root / "prepared",
+        postgres_url,
+        capacity_guard_template_database,
+        database_suffix="task4_prepared_repeat",
+    )
+    second_prepared = await _prepared_unused_release_digests(
+        repeat_root / "prepared",
+        postgres_url,
+        capacity_guard_template_database,
+        database_suffix="task4_prepared_repeat",
+    )
+    first_withdrawn = await _unregistered_withdrawn_release_digests(
+        repeat_root / "withdrawn",
+        postgres_url,
+        capacity_guard_template_database,
+        database_suffix="task4_withdrawn_repeat",
+    )
+    second_withdrawn = await _unregistered_withdrawn_release_digests(
+        repeat_root / "withdrawn",
+        postgres_url,
+        capacity_guard_template_database,
+        database_suffix="task4_withdrawn_repeat",
+    )
+
+    assert first_prepared == second_prepared
+    assert first_withdrawn == second_withdrawn
+    print(
+        "CANONICAL_DIGEST prepared_unused_repeat "
+        f"allocation={first_prepared[0]} inventory={first_prepared[1]} "
+        f"release={first_prepared[2]}"
+    )
+    print(
+        "CANONICAL_DIGEST unregistered_withdrawn_repeat "
+        f"allocation={first_withdrawn[0]} inventory={first_withdrawn[1]} "
+        f"release={first_withdrawn[2]}"
+    )
 
 
 async def test_failure_matrix_keeps_uncertainty_pool_and_owner_scoped(
