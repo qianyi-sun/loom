@@ -252,3 +252,119 @@ Success: no issues found in 17 source files
 ## Concerns
 
 - The exact Task 2 gate command checked the whole `src/loom_capacity_agent` package and surfaced pre-existing formatter drift in `src/loom_capacity_agent/reporter.py` and `src/loom_capacity_agent/secret_init.py`. I kept those changes mechanical-only so the requested final gate run passes on the committed tree.
+
+## Fix round 1: startup-failure independence and executable receipt-digest validation
+
+### Summary
+
+Addressed two post-review findings:
+
+- `CapacityAgentRuntime.run_forever()` now supervises initialization inside its retry loop, so a startup `CapacityAgentStoreError` no longer escapes the enclosing `TaskGroup` and cancel the release loop.
+- `ExecutableProtectedReleaseReporterRuntime.run_forever()` now uses the same initialization-supervision pattern for symmetric robustness.
+- `DemandReporterClient.publish_executable_protected_release()` now recomputes the manager receipt digest from `{intent_id, protected_release_sha256, executable}` and rejects mismatches before local protected acknowledgement can persist bad evidence.
+
+### Files changed in fix round 1
+
+- Modified: `src/loom_capacity_agent/client.py`
+- Modified: `src/loom_capacity_agent/runtime.py`
+- Modified: `src/loom_capacity_agent/executable_release_reporter.py`
+- Modified: `tests/unit/test_capacity_agent_client.py`
+- Modified: `tests/unit/test_capacity_agent_runtime.py`
+- Modified: `.superpowers/sdd/task-15-protected-release-bridge-plan/task-2-report.md`
+
+### RED 4: demand startup failure still cancels release progress
+
+Command:
+
+```bash
+uv run --no-sync pytest -q tests/unit/test_capacity_agent_runtime.py -k "demand_initialization_without_blocking_release_progress or release_iteration_without_blocking_demand_publication"
+```
+
+Relevant output:
+
+```text
+ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+loom_capacity_agent.store.CapacityAgentStoreError: demand init unavailable
+FAILED tests/unit/test_capacity_agent_runtime.py::test_service_runtime_retries_demand_initialization_without_blocking_release_progress
+```
+
+This confirmed the startup `initialize()` failure still escaped before retry supervision and collapsed service-level independence.
+
+### RED 5: tampered executable receipt digest accepted
+
+Command:
+
+```bash
+uv run --no-sync pytest -q tests/unit/test_capacity_agent_client.py -k tampered_receipt_digest
+```
+
+Relevant output:
+
+```text
+Failed: DID NOT RAISE <class 'loom_capacity_agent.client.DemandPublishError'>
+```
+
+This confirmed `publish_executable_protected_release()` accepted a syntactically valid but forged `receipt_digest`.
+
+### GREEN 4: focused fixes
+
+Commands:
+
+```bash
+uv run --no-sync pytest -q tests/unit/test_capacity_agent_runtime.py -k "demand_initialization_without_blocking_release_progress or release_iteration_without_blocking_demand_publication"
+uv run --no-sync pytest -q tests/unit/test_capacity_agent_client.py -k tampered_receipt_digest
+```
+
+Outputs:
+
+```text
+2 passed, 8 deselected in 0.16s
+1 passed, 23 deselected in 0.14s
+```
+
+### GREEN 5: full Task 2 suite after fix
+
+Command:
+
+```bash
+uv run --no-sync pytest -q tests/unit/test_capacity_agent_client.py tests/unit/test_capacity_agent_runtime.py tests/unit/test_capacity_agent_executable_release_reporter.py
+```
+
+Output:
+
+```text
+39 passed in 0.22s
+```
+
+### Final post-fix gates
+
+Final verification command:
+
+```bash
+uv run --no-sync pytest -q tests/unit/test_capacity_agent_client.py tests/unit/test_capacity_agent_runtime.py tests/unit/test_capacity_agent_executable_release_reporter.py
+uv run --no-sync ruff format --check src/loom_capacity_agent tests/unit/test_capacity_agent_client.py tests/unit/test_capacity_agent_runtime.py tests/unit/test_capacity_agent_executable_release_reporter.py
+uv run --no-sync ruff check src/loom_capacity_agent tests/unit/test_capacity_agent_client.py tests/unit/test_capacity_agent_runtime.py tests/unit/test_capacity_agent_executable_release_reporter.py
+uv run --no-sync mypy src/loom_capacity_agent
+git diff --check
+```
+
+Final outputs:
+
+```text
+39 passed in 0.22s
+20 files already formatted
+All checks passed!
+Success: no issues found in 17 source files
+```
+
+`git diff --check` returned cleanly.
+
+### Fix-round self-review
+
+- Demand startup failure is now retried in-place without collapsing the release loop.
+- Release iteration failure still does not block demand publication; the bidirectional service-runtime coverage now exercises both directions.
+- Executable manager receipts must now carry the canonical SHA-256 digest for the validated acknowledgement payload before the local store can advance.
+
+### Fix-round concerns
+
+- The runtime independence test necessarily uses fake storage and publisher boundaries, but it runs the real `CapacityAgentRuntime`, real `ExecutableProtectedReleaseReporterRuntime`, and real `CapacityAgentServiceRuntime` together to exercise the actual retry/cancellation path rather than a mocked control-flow shell.

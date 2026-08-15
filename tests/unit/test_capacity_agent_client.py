@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -134,6 +135,17 @@ def _executable_publication(configuration: ReporterConfigurationV1):  # type: ig
             "publication_digest": canonical_executable_digest(release),
         }
     )
+
+
+def _executable_receipt_digest(payload: dict[str, object]) -> str:
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        default=str,
+    ).encode("ascii")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 @pytest.mark.asyncio
@@ -291,17 +303,20 @@ async def test_publish_executable_protected_release_uses_exact_v2_reporter_reque
     configuration = _configuration()
     publication = _executable_publication(configuration)
     seen: list[httpx.Request] = []
+    payload = {
+        "intent_id": str(publication.release.binding.intent_id),
+        "protected_release_sha256": publication.release.protected_release_sha256,
+        "executable": True,
+    }
 
     async def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request)
         return httpx.Response(
             200,
             json={
-                "intent_id": str(publication.release.binding.intent_id),
-                "protected_release_sha256": publication.release.protected_release_sha256,
-                "receipt_digest": "6" * 64,
+                **payload,
+                "receipt_digest": _executable_receipt_digest(payload),
                 "replayed": False,
-                "executable": True,
             },
         )
 
@@ -516,6 +531,45 @@ async def test_publish_executable_protected_release_rejects_changed_receipt(
             )
     finally:
         await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_publish_executable_protected_release_rejects_tampered_receipt_digest() -> None:
+    configuration = _configuration()
+    publication = _executable_publication(configuration)
+    payload = {
+        "intent_id": str(publication.release.binding.intent_id),
+        "protected_release_sha256": publication.release.protected_release_sha256,
+        "executable": True,
+    }
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                **payload,
+                "receipt_digest": "0" * 64,
+                "replayed": False,
+            },
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = DemandReporterClient(
+        configuration,
+        manager_origin="https://capacity.internal",
+        bearer_token="reporter-secret",
+        http_client=http,
+    )
+    try:
+        with pytest.raises(DemandPublishError, match="digest"):
+            await client.publish_executable_protected_release(
+                publication,
+                idempotency_key=uuid4(),
+            )
+    finally:
+        await http.aclose()
+
+    assert _executable_receipt_digest(payload) != "0" * 64
 
 
 @pytest.mark.asyncio

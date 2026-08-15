@@ -186,9 +186,10 @@ class CapacityAgentRuntime:
     async def run_forever(self, *, poll_interval_seconds: float) -> None:
         if not 0 < poll_interval_seconds <= 300:
             raise ValueError("capacity agent poll interval must be between 0 and 300 seconds")
-        await self.initialize()
         while True:
             try:
+                if not self._initialized:
+                    await self.initialize()
                 await self.run_once()
             except asyncio.CancelledError:
                 raise

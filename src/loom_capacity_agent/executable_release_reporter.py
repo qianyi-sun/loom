@@ -125,20 +125,21 @@ class ExecutableProtectedReleaseReporterRuntime:
     async def run_forever(self, *, poll_interval_seconds: float) -> None:
         if not 0 < poll_interval_seconds <= 300:
             raise ValueError("capacity agent poll interval must be between 0 and 300 seconds")
-        await self.initialize()
         while True:
             try:
+                if not self._initialized:
+                    await self.initialize()
                 await self.run_once()
             except asyncio.CancelledError:
                 raise
             except CapacityAgentStoreError as exc:
+                self._initialized = False
                 self.ready = False
                 logger.error(
                     "capacity_agent_executable_release_store_error",
                     extra={"error_type": type(exc).__name__},
                 )
                 await asyncio.sleep(poll_interval_seconds)
-                await self.initialize()
                 continue
             except Exception as exc:
                 self.ready = False

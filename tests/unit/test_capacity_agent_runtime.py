@@ -16,7 +16,12 @@ from loom_capacity_agent.contracts import (
     GuardLifecycleDemandObservationV2,
     ReporterConfigurationV1,
 )
+from loom_capacity_agent.executable_release_reporter import (
+    ExecutableProtectedReleaseReporterRuntime,
+)
 from loom_capacity_agent.runtime import CapacityAgentRuntime, load_database_url
+from loom_capacity_manager.executable_contracts import canonical_executable_digest
+from tests.unit.test_capacity_agent_admission_contracts import publishable_release_fixture
 
 
 def _configuration() -> ReporterConfigurationV1:
@@ -52,6 +57,36 @@ def _observation(configuration: ReporterConfigurationV1, sequence: int):
         sequence=sequence,
         source_observed_at=datetime(2026, 8, 11, tzinfo=UTC),
         attempts=(),
+    )
+
+
+def _release_publication(configuration: ReporterConfigurationV1):  # type: ignore[no-untyped-def]
+    publication = publishable_release_fixture()
+    candidate = publication.release.binding.candidate.model_copy(
+        update={
+            "identity": configuration.candidate_digest,
+            "publication_sha256": configuration.candidate_digest,
+        }
+    )
+    binding = publication.release.binding.model_copy(
+        update={
+            "subject_id": configuration.subject_id,
+            "subject_incarnation": configuration.subject_incarnation,
+            "deployment_generation": configuration.deployment_generation,
+            "candidate": candidate,
+        }
+    )
+    release = publication.release.model_copy(
+        update={
+            "binding": binding,
+            "reporter_incarnation": configuration.reporter_incarnation,
+        }
+    )
+    return publication.model_copy(
+        update={
+            "release": release,
+            "publication_digest": canonical_executable_digest(release),
+        }
     )
 
 
@@ -99,6 +134,27 @@ class _LoopRuntime:
         except asyncio.CancelledError:
             self.cancelled = True
             raise
+
+
+class _ExecutablePublisher:
+    def __init__(self, *, fail_once: bool = False) -> None:
+        self.fail_once = fail_once
+        self.publications: list[object] = []
+
+    async def publish_executable_protected_release(self, publication, *, idempotency_key):
+        self.publications.append((publication, idempotency_key))
+        if self.fail_once:
+            self.fail_once = False
+            raise RuntimeError("release unavailable")
+
+        class _Receipt:
+            intent_id = publication.release.binding.intent_id
+            protected_release_sha256 = publication.release.protected_release_sha256
+            receipt_digest = "7" * 64
+            replayed = False
+            executable = True
+
+        return _Receipt()
 
 
 @pytest.mark.asyncio
@@ -275,6 +331,154 @@ async def test_service_runtime_runs_both_loops_and_cancels_them_together() -> No
     assert release.poll_intervals == [0.25]
     assert demand.cancelled is True
     assert release.cancelled is True
+
+
+@pytest.mark.asyncio
+async def test_service_runtime_retries_demand_initialization_without_blocking_release_progress() -> (
+    None
+):
+    configuration = _configuration()
+    release_publication = _release_publication(configuration)
+    demand_publisher = _Publisher()
+    release_publisher = _ExecutablePublisher()
+    demand_init_calls = 0
+    demand_started = asyncio.Event()
+    release_progress = asyncio.Event()
+    demand_progress = asyncio.Event()
+    release_reads = 0
+
+    async def demand_high_water(*_args: object, **_kwargs: object) -> int:
+        nonlocal demand_init_calls
+        demand_init_calls += 1
+        demand_started.set()
+        if demand_init_calls == 1:
+            raise runtime_module.CapacityAgentStoreError("demand init unavailable")
+        return 0
+
+    async def demand_recover(*_args: object, **_kwargs: object):
+        raise AssertionError("zero high-water must not recover")
+
+    async def demand_capture(*_args: object, **_kwargs: object):
+        observation = _observation(configuration, 1)
+        demand_progress.set()
+        return observation
+
+    async def release_read_next(*_args: object, **_kwargs: object):
+        nonlocal release_reads
+        release_reads += 1
+        if release_reads == 1:
+            return release_publication
+        await release_progress.wait()
+        return None
+
+    async def release_ack(*_args: object, **_kwargs: object):
+        release_progress.set()
+        return object()
+
+    demand_runtime = CapacityAgentRuntime(
+        configuration=configuration,
+        session_factory=_Factory(),  # type: ignore[arg-type]
+        publisher=demand_publisher,
+        max_attempts=100,
+        capture=demand_capture,
+        recover=demand_recover,
+        read_high_water=demand_high_water,
+    )
+    release_runtime = ExecutableProtectedReleaseReporterRuntime(
+        configuration=configuration,
+        session_factory=_Factory(),  # type: ignore[arg-type]
+        publisher=release_publisher,
+        read_next=release_read_next,
+        acknowledge=release_ack,
+    )
+    service = runtime_module.CapacityAgentServiceRuntime(
+        demand_runtime=demand_runtime,
+        release_runtime=release_runtime,
+    )
+
+    task = asyncio.create_task(service.run_forever(poll_interval_seconds=0.01))
+    await asyncio.wait_for(demand_started.wait(), timeout=1)
+    await asyncio.wait_for(release_progress.wait(), timeout=1)
+    await asyncio.wait_for(demand_progress.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert demand_init_calls >= 2
+    assert len(release_publisher.publications) == 1
+    assert len(demand_publisher.snapshots) == 1
+
+
+@pytest.mark.asyncio
+async def test_service_runtime_retries_release_iteration_without_blocking_demand_publication() -> (
+    None
+):
+    configuration = _configuration()
+    release_publication = _release_publication(configuration)
+    release_publisher = _ExecutablePublisher(fail_once=True)
+    demand_progress = asyncio.Event()
+    release_attempts = asyncio.Event()
+    release_reads = 0
+
+    async def demand_high_water(*_args: object, **_kwargs: object) -> int:
+        return 0
+
+    async def demand_recover(*_args: object, **_kwargs: object):
+        raise AssertionError("zero high-water must not recover")
+
+    async def demand_capture(*_args: object, **_kwargs: object):
+        return _observation(configuration, 1)
+
+    class _DemandPublisher(_Publisher):
+        async def publish(self, snapshot):
+            result = await super().publish(snapshot)
+            demand_progress.set()
+            return result
+
+    demand_publisher = _DemandPublisher()
+    demand_runtime = CapacityAgentRuntime(
+        configuration=configuration,
+        session_factory=_Factory(),  # type: ignore[arg-type]
+        publisher=demand_publisher,
+        max_attempts=100,
+        capture=demand_capture,
+        recover=demand_recover,
+        read_high_water=demand_high_water,
+    )
+
+    async def release_read_next(*_args: object, **_kwargs: object):
+        nonlocal release_reads
+        release_reads += 1
+        if release_reads <= 2:
+            return release_publication
+        await release_attempts.wait()
+        return None
+
+    async def release_ack(*_args: object, **_kwargs: object):
+        release_attempts.set()
+        return object()
+
+    release_runtime = ExecutableProtectedReleaseReporterRuntime(
+        configuration=configuration,
+        session_factory=_Factory(),  # type: ignore[arg-type]
+        publisher=release_publisher,
+        read_next=release_read_next,
+        acknowledge=release_ack,
+    )
+    service = runtime_module.CapacityAgentServiceRuntime(
+        demand_runtime=demand_runtime,
+        release_runtime=release_runtime,
+    )
+
+    task = asyncio.create_task(service.run_forever(poll_interval_seconds=0.01))
+    await asyncio.wait_for(demand_progress.wait(), timeout=1)
+    await asyncio.wait_for(release_attempts.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert len(demand_publisher.snapshots) >= 1
+    assert len(release_publisher.publications) >= 2
 
 
 @pytest.mark.asyncio
