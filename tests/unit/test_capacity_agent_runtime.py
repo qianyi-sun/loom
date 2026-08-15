@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import argparse
+import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -80,6 +82,23 @@ class _Publisher:
             self.fail_once = False
             raise RuntimeError("unavailable")
         return object()
+
+
+class _LoopRuntime:
+    def __init__(self, *, ready: bool = False) -> None:
+        self.ready = ready
+        self.started = asyncio.Event()
+        self.cancelled = False
+        self.poll_intervals: list[float] = []
+
+    async def run_forever(self, *, poll_interval_seconds: float) -> None:
+        self.poll_intervals.append(poll_interval_seconds)
+        self.started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
 
 
 @pytest.mark.asyncio
@@ -220,3 +239,141 @@ def test_capacity_agent_engine_uses_serializable_isolation(
         "url": "postgresql+psycopg://agent:secret@postgres/loom",
         "kwargs": {"isolation_level": "SERIALIZABLE"},
     }
+
+
+def test_service_runtime_is_ready_only_when_both_loops_are_ready() -> None:
+    service = runtime_module.CapacityAgentServiceRuntime(
+        demand_runtime=_LoopRuntime(ready=True),
+        release_runtime=_LoopRuntime(ready=False),
+    )
+    assert service.ready is False
+
+    service = runtime_module.CapacityAgentServiceRuntime(
+        demand_runtime=_LoopRuntime(ready=True),
+        release_runtime=_LoopRuntime(ready=True),
+    )
+    assert service.ready is True
+
+
+@pytest.mark.asyncio
+async def test_service_runtime_runs_both_loops_and_cancels_them_together() -> None:
+    demand = _LoopRuntime()
+    release = _LoopRuntime()
+    service = runtime_module.CapacityAgentServiceRuntime(
+        demand_runtime=demand,
+        release_runtime=release,
+    )
+
+    task = asyncio.create_task(service.run_forever(poll_interval_seconds=0.25))
+    await asyncio.wait_for(demand.started.wait(), timeout=1)
+    await asyncio.wait_for(release.started.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert demand.poll_intervals == [0.25]
+    assert release.poll_intervals == [0.25]
+    assert demand.cancelled is True
+    assert release.cancelled is True
+
+
+@pytest.mark.asyncio
+async def test_main_async_cancels_both_loops_and_closes_shared_resources(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    configuration = _configuration()
+    demand = _LoopRuntime()
+    release = _LoopRuntime()
+
+    class _Engine:
+        disposed = False
+
+        async def dispose(self) -> None:
+            self.disposed = True
+
+    class _PublisherClient:
+        closed = False
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    class _Server:
+        entered = False
+        exited = False
+
+        async def __aenter__(self):
+            self.entered = True
+            return self
+
+        async def __aexit__(self, *_exc: object) -> None:
+            self.exited = True
+
+    engine = _Engine()
+    publisher = _PublisherClient()
+    server = _Server()
+
+    monkeypatch.setattr(runtime_module, "load_reporter_configuration", lambda _path: configuration)
+    monkeypatch.setattr(
+        runtime_module,
+        "load_database_url",
+        lambda _path: "postgresql+psycopg://agent:secret@postgres/loom",
+    )
+    monkeypatch.setattr(runtime_module, "create_capacity_agent_engine", lambda _url: engine)
+    monkeypatch.setattr(runtime_module, "async_sessionmaker", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        runtime_module.DemandReporterClient,
+        "from_files",
+        classmethod(lambda _cls, _configuration, _connection: publisher),
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "CapacityAgentRuntime",
+        lambda **_kwargs: demand,
+    )
+    original_service_runtime = runtime_module.CapacityAgentServiceRuntime
+    monkeypatch.setattr(
+        runtime_module,
+        "ExecutableProtectedReleaseReporterRuntime",
+        lambda **_kwargs: release,
+    )
+
+    def _service_runtime(*, demand_runtime: object, release_runtime: object):
+        return original_service_runtime(
+            demand_runtime=demand_runtime,
+            release_runtime=release_runtime,
+        )
+
+    monkeypatch.setattr(runtime_module, "CapacityAgentServiceRuntime", _service_runtime)
+
+    async def _start_server(*_args: object, **_kwargs: object):
+        return server
+
+    monkeypatch.setattr(runtime_module.asyncio, "start_server", _start_server)
+
+    arguments = argparse.Namespace(
+        configuration_file=tmp_path / "configuration.json",
+        database_url_file=tmp_path / "database-url",
+        manager_origin="https://capacity.internal",
+        bearer_token_file=tmp_path / "bearer-token",
+        ca_file=tmp_path / "ca.pem",
+        certificate_file=tmp_path / "client.pem",
+        private_key_file=tmp_path / "client.key",
+        poll_interval_seconds=0.5,
+        max_attempts=100,
+        health_port=8081,
+    )
+
+    task = asyncio.create_task(runtime_module._main_async(arguments))
+    await asyncio.wait_for(demand.started.wait(), timeout=1)
+    await asyncio.wait_for(release.started.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert demand.cancelled is True
+    assert release.cancelled is True
+    assert publisher.closed is True
+    assert engine.disposed is True
+    assert server.entered is True
+    assert server.exited is True

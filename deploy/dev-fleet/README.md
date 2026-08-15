@@ -18,6 +18,12 @@ checkpoint. A ready lifecycle operation includes an initial non-executable
 capacity publication, but it does not activate the fixture or global autoscaler
 templates in this directory and does not grant physical worker capacity.
 
+The already-configured capacity-agent service now runs two independent trusted
+reporter loops with the same owner-only agent database URL, guard URL, and
+reporter bearer token: demand publication and executable protected-release
+publication. This adds no credential, install, start, enable, apply, or
+activation action, and the executable new-capacity ceiling remains exactly `0`.
+
 The global manager's permanent v1 dry-run pool-executor protocol is also
 separate from these legacy assets. Its reservation, permit, inventory, and
 release receipts remain `executable: false`. The distinct v2 contracts are

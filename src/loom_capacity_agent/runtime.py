@@ -30,6 +30,9 @@ from loom_capacity_agent.contracts import (
     GuardLifecycleDemandObservationV2,
     ReporterConfigurationV1,
 )
+from loom_capacity_agent.executable_release_reporter import (
+    ExecutableProtectedReleaseReporterRuntime,
+)
 from loom_capacity_agent.reporter import build_lifecycle_demand_snapshot
 from loom_capacity_agent.store import (
     CapacityAgentStoreError,
@@ -44,6 +47,13 @@ logger = logging.getLogger(__name__)
 
 class DemandPublisher(Protocol):
     async def publish(self, snapshot: DemandSnapshotV1) -> object: ...
+
+
+class LoopRuntime(Protocol):
+    @property
+    def ready(self) -> bool: ...
+
+    async def run_forever(self, *, poll_interval_seconds: float) -> None: ...
 
 
 Capture = Callable[..., Awaitable[GuardLifecycleDemandObservationV2]]
@@ -201,11 +211,37 @@ class CapacityAgentRuntime:
             await asyncio.sleep(poll_interval_seconds)
 
 
+class CapacityAgentServiceRuntime:
+    """Run both trusted publication loops with one composite health signal."""
+
+    def __init__(
+        self,
+        *,
+        demand_runtime: LoopRuntime,
+        release_runtime: LoopRuntime,
+    ) -> None:
+        self._demand_runtime = demand_runtime
+        self._release_runtime = release_runtime
+
+    @property
+    def ready(self) -> bool:
+        return self._demand_runtime.ready and self._release_runtime.ready
+
+    async def run_forever(self, *, poll_interval_seconds: float) -> None:
+        async with asyncio.TaskGroup() as tasks:
+            tasks.create_task(
+                self._demand_runtime.run_forever(poll_interval_seconds=poll_interval_seconds)
+            )
+            tasks.create_task(
+                self._release_runtime.run_forever(poll_interval_seconds=poll_interval_seconds)
+            )
+
+
 async def _health_response(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
     *,
-    runtime: CapacityAgentRuntime,
+    runtime: LoopRuntime,
 ) -> None:
     try:
         with contextlib.suppress(asyncio.TimeoutError):
@@ -256,11 +292,21 @@ async def _main_async(arguments: argparse.Namespace) -> None:
             ),
         ),
     )
-    runtime = CapacityAgentRuntime(
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    demand_runtime = CapacityAgentRuntime(
         configuration=configuration,
-        session_factory=async_sessionmaker(engine, expire_on_commit=False),
+        session_factory=session_factory,
         publisher=publisher,
         max_attempts=arguments.max_attempts,
+    )
+    release_runtime = ExecutableProtectedReleaseReporterRuntime(
+        configuration=configuration,
+        session_factory=session_factory,
+        publisher=publisher,
+    )
+    runtime = CapacityAgentServiceRuntime(
+        demand_runtime=demand_runtime,
+        release_runtime=release_runtime,
     )
     server = await asyncio.start_server(
         lambda reader, writer: _health_response(reader, writer, runtime=runtime),
@@ -286,7 +332,9 @@ if __name__ == "__main__":  # pragma: no cover - module entry point
 
 __all__ = [
     "CapacityAgentRuntime",
+    "CapacityAgentServiceRuntime",
     "DemandPublisher",
+    "ExecutableProtectedReleaseReporterRuntime",
     "create_capacity_agent_engine",
     "load_database_url",
     "load_reporter_configuration",

@@ -27,10 +27,15 @@ from loom_capacity_agent.contracts import (
 from loom_capacity_agent.reporter import build_demand_snapshot
 from loom_capacity_guard.contracts import canonical_digest as guard_canonical_digest
 from loom_capacity_manager.contracts import canonical_digest
+from loom_capacity_manager.executable_contracts import (
+    canonical_executable_bytes,
+    canonical_executable_digest,
+)
 from loom_capacity_manager.grant_contracts import (
     DryRunProtectedReleaseAcknowledgementV1,
     canonical_grant_digest,
 )
+from tests.unit.test_capacity_agent_admission_contracts import publishable_release_fixture
 
 
 def _configuration() -> ReporterConfigurationV1:
@@ -98,6 +103,36 @@ def _protected_release(
         bootstrap_registration_epoch=0,
         protected_registration_epoch=1,
         bootstrap_revoked=True,
+    )
+
+
+def _executable_publication(configuration: ReporterConfigurationV1):  # type: ignore[no-untyped-def]
+    publication = publishable_release_fixture()
+    candidate = publication.release.binding.candidate.model_copy(
+        update={
+            "identity": configuration.candidate_digest,
+            "publication_sha256": configuration.candidate_digest,
+        }
+    )
+    binding = publication.release.binding.model_copy(
+        update={
+            "subject_id": configuration.subject_id,
+            "subject_incarnation": configuration.subject_incarnation,
+            "deployment_generation": configuration.deployment_generation,
+            "candidate": candidate,
+        }
+    )
+    release = publication.release.model_copy(
+        update={
+            "binding": binding,
+            "reporter_incarnation": configuration.reporter_incarnation,
+        }
+    )
+    return publication.model_copy(
+        update={
+            "release": release,
+            "publication_digest": canonical_executable_digest(release),
+        }
     )
 
 
@@ -249,6 +284,288 @@ async def test_publish_protected_release_rejects_invalid_idempotency_before_netw
     finally:
         await http.aclose()
     assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_publish_executable_protected_release_uses_exact_v2_reporter_request() -> None:
+    configuration = _configuration()
+    publication = _executable_publication(configuration)
+    seen: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "intent_id": str(publication.release.binding.intent_id),
+                "protected_release_sha256": publication.release.protected_release_sha256,
+                "receipt_digest": "6" * 64,
+                "replayed": False,
+                "executable": True,
+            },
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = DemandReporterClient(
+        configuration,
+        manager_origin="https://capacity.internal",
+        bearer_token="reporter-secret",
+        http_client=http,
+    )
+    try:
+        receipt = await client.publish_executable_protected_release(
+            publication,
+            idempotency_key=uuid4(),
+        )
+    finally:
+        await http.aclose()
+
+    assert receipt.intent_id == publication.release.binding.intent_id
+    assert len(seen) == 1
+    request = seen[0]
+    assert request.method == "PUT"
+    assert request.url == httpx.URL(
+        "https://capacity.internal/v2/reports/protected-releases/"
+        f"{publication.release.binding.subject_id}/{publication.release.binding.shape_instance_id}"
+    )
+    assert request.headers["Authorization"] == "Bearer reporter-secret"
+    assert request.headers["Content-Type"] == "application/json"
+    assert request.content == canonical_executable_bytes(publication.release)
+
+
+@pytest.mark.asyncio
+async def test_publish_executable_protected_release_rejects_binding_mismatch_before_network() -> (
+    None
+):
+    configuration = _configuration()
+    stale_release = _executable_publication(configuration).release.model_copy(
+        update={"reporter_incarnation": uuid4()}
+    )
+    publication = _executable_publication(configuration).model_copy(
+        update={
+            "release": stale_release,
+            "publication_digest": canonical_executable_digest(stale_release),
+        }
+    )
+    calls = 0
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json={})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = DemandReporterClient(
+        configuration,
+        manager_origin="https://capacity.internal",
+        bearer_token="reporter-secret",
+        http_client=http,
+    )
+    try:
+        with pytest.raises(DemandPublishError, match="binding"):
+            await client.publish_executable_protected_release(
+                publication,
+                idempotency_key=uuid4(),
+            )
+    finally:
+        await http.aclose()
+
+    assert calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("release_update", "expected_message"),
+    (
+        ({"binding": {"subject_id": uuid4()}}, "subject_id"),
+        ({"binding": {"subject_incarnation": uuid4()}}, "subject_incarnation"),
+        ({"reporter_incarnation": uuid4()}, "reporter_incarnation"),
+    ),
+)
+async def test_publish_executable_protected_release_rejects_each_binding_mismatch_before_network(
+    release_update: dict[str, object],
+    expected_message: str,
+) -> None:
+    configuration = _configuration()
+    publication = _executable_publication(configuration)
+    release = publication.release
+    binding_update = release_update.get("binding")
+    if isinstance(binding_update, dict):
+        release = release.model_copy(
+            update={"binding": release.binding.model_copy(update=binding_update)}
+        )
+    release = release.model_copy(
+        update={key: value for key, value in release_update.items() if key != "binding"}
+    )
+    publication = publication.model_copy(
+        update={
+            "release": release,
+            "publication_digest": canonical_executable_digest(release),
+        }
+    )
+    calls = 0
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json={})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = DemandReporterClient(
+        configuration,
+        manager_origin="https://capacity.internal",
+        bearer_token="reporter-secret",
+        http_client=http,
+    )
+    try:
+        with pytest.raises(DemandPublishError, match=expected_message):
+            await client.publish_executable_protected_release(
+                publication,
+                idempotency_key=uuid4(),
+            )
+    finally:
+        await http.aclose()
+
+    assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_publish_executable_protected_release_rejects_invalid_idempotency_before_network() -> (
+    None
+):
+    configuration = _configuration()
+    publication = _executable_publication(configuration)
+    calls = 0
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json={})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = DemandReporterClient(
+        configuration,
+        manager_origin="https://capacity.internal",
+        bearer_token="reporter-secret",
+        http_client=http,
+    )
+    try:
+        with pytest.raises(DemandPublishError, match="idempotency"):
+            await client.publish_executable_protected_release(
+                publication,
+                idempotency_key="not-a-uuid",  # type: ignore[arg-type]
+            )
+    finally:
+        await http.aclose()
+
+    assert calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response_json",
+    (
+        {
+            "intent_id": str(uuid4()),
+            "protected_release_sha256": "4" * 64,
+            "receipt_digest": "6" * 64,
+            "replayed": False,
+            "executable": True,
+        },
+        {
+            "intent_id": str(uuid4()),
+            "protected_release_sha256": "0" * 64,
+            "receipt_digest": "6" * 64,
+            "replayed": False,
+            "executable": True,
+        },
+        {
+            "intent_id": str(uuid4()),
+            "protected_release_sha256": "4" * 64,
+            "receipt_digest": "6" * 64,
+            "replayed": False,
+            "executable": False,
+        },
+    ),
+)
+async def test_publish_executable_protected_release_rejects_changed_receipt(
+    response_json: dict[str, object],
+) -> None:
+    configuration = _configuration()
+    publication = _executable_publication(configuration)
+    response_json = {
+        **response_json,
+        "intent_id": str(response_json["intent_id"]),
+    }
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=response_json)
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = DemandReporterClient(
+        configuration,
+        manager_origin="https://capacity.internal",
+        bearer_token="reporter-secret",
+        http_client=http,
+    )
+    try:
+        with pytest.raises(DemandPublishError, match="receipt"):
+            await client.publish_executable_protected_release(
+                publication,
+                idempotency_key=uuid4(),
+            )
+    finally:
+        await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_publish_executable_protected_release_rejects_oversized_receipt() -> None:
+    configuration = _configuration()
+    publication = _executable_publication(configuration)
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"x" * (16 * 1024 + 1))
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = DemandReporterClient(
+        configuration,
+        manager_origin="https://capacity.internal",
+        bearer_token="reporter-secret",
+        http_client=http,
+    )
+    try:
+        with pytest.raises(DemandPublishError, match="byte bound"):
+            await client.publish_executable_protected_release(
+                publication,
+                idempotency_key=uuid4(),
+            )
+    finally:
+        await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_publish_executable_protected_release_rejects_non_200_response() -> None:
+    configuration = _configuration()
+    publication = _executable_publication(configuration)
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, json={"detail": "conflict"})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = DemandReporterClient(
+        configuration,
+        manager_origin="https://capacity.internal",
+        bearer_token="reporter-secret",
+        http_client=http,
+    )
+    try:
+        with pytest.raises(DemandPublishError, match="status 409"):
+            await client.publish_executable_protected_release(
+                publication,
+                idempotency_key=uuid4(),
+            )
+    finally:
+        await http.aclose()
 
 
 @pytest.mark.asyncio
