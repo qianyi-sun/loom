@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from loom_capacity_agent.admission import (
     ExecutableDrainRequestV2,
+    ExecutablePreparedBootstrapRevocationV2,
     ExecutableReleaseRequestV2,
     ExecutableWorkerRegistrationV2,
     ExecutableWorkerWithdrawalRequestV2,
@@ -552,6 +553,46 @@ async def test_withdraw_unregistered_physical_binding_revokes_bootstrap_and_fenc
         assert await store.withdraw_unregistered_worker(withdrawal) == receipt
         with pytest.raises(DBAPIError, match="delayed registration"):
             await store.register_worker(worker, bootstrap_capability=capability)
+
+
+@pytest.mark.asyncio
+async def test_prepared_bootstrap_revocation_fences_physical_binding_and_registration(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    _fence, registration = await _initialize_and_register(capacity_guard_database)
+    request = _bootstrap(registration.subject_id, registration.subject_incarnation)
+    capability = "single-use-bootstrap-capability"
+    revocation = ExecutablePreparedBootstrapRevocationV2(
+        operation_id=UUID(int=161),
+        binding=request.binding,
+        bootstrap_registration_epoch=request.bootstrap_registration_epoch,
+        protected_registration_epoch=request.bootstrap_registration_epoch + 1,
+    )
+
+    async with _serializable_executor_session(capacity_guard_database) as session:
+        store = ExecutableAdmissionStore(session, registration=registration)
+        await store.prepare_worker(
+            request,
+            bootstrap_sha256=hashlib.sha256(capability.encode("ascii")).hexdigest(),
+        )
+
+        receipt = await store.revoke_prepared_bootstrap(revocation)
+
+        assert receipt.binding == request.binding
+        assert receipt.reporter_incarnation == registration.reporter_incarnation
+        assert receipt.bootstrap_registration_epoch == request.bootstrap_registration_epoch
+        assert receipt.protected_registration_epoch == request.bootstrap_registration_epoch + 1
+        assert receipt.claim_high_water == 0
+        assert receipt.live_claim_count == 0
+        assert receipt.bootstrap_revoked is True
+        assert receipt.request_digest == receipt.protected_release_sha256
+        assert await store.revoke_prepared_bootstrap(revocation) == receipt
+        observed = await store.observe_intent(request.binding)
+        assert observed.prepared_revocation == receipt
+        with pytest.raises(DBAPIError, match="revoked"):
+            await store.bind_slurm_job(_physical(request))
+        with pytest.raises(DBAPIError, match="revoked"):
+            await store.register_worker(_worker(request), bootstrap_capability=capability)
 
 
 @pytest.mark.asyncio

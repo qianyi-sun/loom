@@ -19,7 +19,16 @@ _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 _EVENT_RE = re.compile(r"[a-z][a-z0-9-]{0,62}")
 _OBJECT_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,254}")
 _OBJECT_KINDS = frozenset(
-    {"bootstrap", "executor", "heartbeat", "intent", "inventory", "job", "tranche"}
+    {
+        "bootstrap",
+        "executor",
+        "heartbeat",
+        "intent",
+        "inventory",
+        "job",
+        "prepared-revocation",
+        "tranche",
+    }
 )
 _ZERO_DIGEST = "0" * 64
 _MAX_JOURNAL_BYTES = 64 * 1024 * 1024

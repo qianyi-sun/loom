@@ -317,6 +317,35 @@ class BootstrapHandoffStore:
             )
         return BootstrapHandoffLease(reference=reference, bootstrap_sha256=record.capability_sha256)
 
+    def revoke_prepared(
+        self,
+        binding: ExecutableIntentBindingV2,
+        *,
+        bootstrap_registration_epoch: int,
+    ) -> bool:
+        """Remove only an unconsumed handoff after protected revocation commits."""
+
+        reference = self.reference_for(binding)
+        path = _record_path(self.directory, reference)
+        for suffix in (".used", ".credential", ".ownership", ".launched"):
+            sidecar = path.with_suffix(suffix)
+            if sidecar.exists() or sidecar.is_symlink():
+                raise BootstrapHandoffError(
+                    "prepared handoff has physical or consumed local evidence"
+                )
+        if not path.exists() and not path.is_symlink():
+            return False
+        record = self._load(path)
+        if (
+            record.binding != binding
+            or record.bootstrap_registration_epoch != bootstrap_registration_epoch
+        ):
+            raise BootstrapHandoffError("prepared handoff revocation binding changed")
+        removed = _unlink_private_if_present(path, label="handoff record")
+        if removed:
+            _fsync_directory(self.directory)
+        return removed
+
     def _load(self, path: Path) -> BootstrapHandoffRecordV2:
         try:
             return BootstrapHandoffRecordV2.model_validate_json(_open_private_regular(path))

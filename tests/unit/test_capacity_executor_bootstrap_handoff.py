@@ -1299,6 +1299,114 @@ def test_prepare_rejects_existing_record_when_expiry_changes(tmp_path: Path) -> 
         )
 
 
+# Production break caught: after protected prepared revocation commits, the
+# clear local handoff capability must be physically removed and replaying that
+# deletion must be idempotent.
+def test_revoke_prepared_removes_only_the_exact_unconsumed_handoff(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "handoff"
+    directory.mkdir(mode=0o700)
+    binding = launch_context_fixture().binding
+    store = BootstrapHandoffStore(directory)
+    lease = store.prepare(
+        binding,
+        bootstrap_registration_epoch=1,
+        expires_at=_NOW + timedelta(minutes=5),
+        trusted_launcher_release_sha256=binding.execution.trusted_fleet_release_sha256,
+        protected_admission_route_sha256=_Admission.route_sha256,
+    )
+    path = directory / lease.reference
+
+    assert store.revoke_prepared(binding, bootstrap_registration_epoch=1) is True
+
+    assert not path.exists()
+    assert store.revoke_prepared(binding, bootstrap_registration_epoch=1) is False
+
+
+# Production break caught: a stale or replaced handoff record at the expected
+# reference must fail closed instead of deleting evidence for a different
+# protected bootstrap epoch.
+def test_revoke_prepared_rejects_changed_handoff_binding(tmp_path: Path) -> None:
+    directory = tmp_path / "handoff"
+    directory.mkdir(mode=0o700)
+    binding = launch_context_fixture().binding
+    store = BootstrapHandoffStore(directory)
+    lease = store.prepare(
+        binding,
+        bootstrap_registration_epoch=1,
+        expires_at=_NOW + timedelta(minutes=5),
+        trusted_launcher_release_sha256=binding.execution.trusted_fleet_release_sha256,
+        protected_admission_route_sha256=_Admission.route_sha256,
+    )
+    path = directory / lease.reference
+    changed = BootstrapHandoffRecordV2.model_validate_json(path.read_bytes()).model_copy(
+        update={"bootstrap_registration_epoch": 2}
+    )
+    path.write_bytes(canonical_executable_bytes(changed))
+    path.chmod(0o600)
+
+    with pytest.raises(BootstrapHandoffError, match="binding changed"):
+        store.revoke_prepared(binding, bootstrap_registration_epoch=1)
+
+    assert path.exists()
+
+
+# Production break caught: sidecar evidence means a worker, physical binding, or
+# launch handoff may already exist, so local prepared revocation must preserve
+# the capability and fail closed.
+@pytest.mark.parametrize("suffix", (".used", ".credential", ".ownership", ".launched"))
+def test_revoke_prepared_rejects_consumed_or_physical_handoff_evidence(
+    tmp_path: Path,
+    suffix: str,
+) -> None:
+    directory = tmp_path / "handoff"
+    directory.mkdir(mode=0o700)
+    binding = launch_context_fixture().binding
+    store = BootstrapHandoffStore(directory)
+    lease = store.prepare(
+        binding,
+        bootstrap_registration_epoch=1,
+        expires_at=_NOW + timedelta(minutes=5),
+        trusted_launcher_release_sha256=binding.execution.trusted_fleet_release_sha256,
+        protected_admission_route_sha256=_Admission.route_sha256,
+    )
+    path = directory / lease.reference
+    sidecar = path.with_suffix(suffix)
+    sidecar.write_bytes(b"evidence")
+    sidecar.chmod(0o600)
+
+    with pytest.raises(BootstrapHandoffError, match="physical or consumed"):
+        store.revoke_prepared(binding, bootstrap_registration_epoch=1)
+
+    assert path.exists()
+
+
+# Production break caught: symlink sidecar evidence must be treated as evidence,
+# not as an absent or unreadable regular file that permits deletion.
+def test_revoke_prepared_rejects_symlink_consumed_evidence(tmp_path: Path) -> None:
+    directory = tmp_path / "handoff"
+    directory.mkdir(mode=0o700)
+    binding = launch_context_fixture().binding
+    store = BootstrapHandoffStore(directory)
+    lease = store.prepare(
+        binding,
+        bootstrap_registration_epoch=1,
+        expires_at=_NOW + timedelta(minutes=5),
+        trusted_launcher_release_sha256=binding.execution.trusted_fleet_release_sha256,
+        protected_admission_route_sha256=_Admission.route_sha256,
+    )
+    path = directory / lease.reference
+    target = tmp_path / "target"
+    target.write_bytes(b"evidence")
+    path.with_suffix(".used").symlink_to(target)
+
+    with pytest.raises(BootstrapHandoffError, match="physical or consumed"):
+        store.revoke_prepared(binding, bootstrap_registration_epoch=1)
+
+    assert path.exists()
+
+
 # Production break caught: a concurrently published winner must match the same
 # requested expiry as the losing preparer, not just the same binding/profile.
 def test_prepare_rejects_concurrent_record_when_expiry_changes(

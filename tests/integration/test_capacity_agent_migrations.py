@@ -113,6 +113,7 @@ def test_executor_role_is_distinct_and_has_only_bounded_executable_procedures(
             "bind_executable_slurm_job",
             "observe_executable_intent",
             "prepare_executable_worker",
+            "revoke_prepared_executable_bootstrap",
             "register_executable_worker",
             "withdraw_unregistered_executable_worker",
         }

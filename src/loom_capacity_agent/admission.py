@@ -410,6 +410,23 @@ class ExecutableWorkerWithdrawalRequestV2(StrictV2Model):
         return self
 
 
+class ExecutablePreparedBootstrapRevocationV2(StrictV2Model):
+    """Fence one prepared bootstrap before any physical scheduler binding."""
+
+    operation_id: UUID
+    binding: ExecutableIntentBindingV2
+    bootstrap_registration_epoch: PositiveGeneration
+    protected_registration_epoch: PositiveGeneration
+    expected_claim_high_water: Literal[0] = 0
+    executable: Literal[True] = True
+
+    @model_validator(mode="after")
+    def _revocation_epoch(self) -> ExecutablePreparedBootstrapRevocationV2:
+        if self.protected_registration_epoch <= self.bootstrap_registration_epoch:
+            raise ValueError("prepared revocation epoch must advance past bootstrap")
+        return self
+
+
 class ExecutableReleaseRequestV2(StrictV2Model):
     """Fence delayed registration after protected claims and credentials close."""
 
@@ -509,6 +526,29 @@ class WithdrawnExecutableWorkerV2(StrictV2Model):
     executable: Literal[True] = True
 
 
+class RevokedExecutableBootstrapV2(StrictV2Model):
+    """Append-only protected proof that an unbound bootstrap was revoked."""
+
+    binding: ExecutableIntentBindingV2
+    reporter_incarnation: UUID
+    bootstrap_registration_epoch: PositiveGeneration
+    protected_registration_epoch: PositiveGeneration
+    claim_high_water: Literal[0] = 0
+    live_claim_count: Literal[0] = 0
+    bootstrap_revoked: Literal[True] = True
+    request_digest: Digest
+    protected_release_sha256: Digest
+    protected_high_water: PositiveGeneration
+    revocation_state: Literal["revoked"] = "revoked"
+    executable: Literal[True] = True
+
+    @model_validator(mode="after")
+    def _revocation_epoch(self) -> RevokedExecutableBootstrapV2:
+        if self.protected_registration_epoch <= self.bootstrap_registration_epoch:
+            raise ValueError("prepared revocation epoch must advance past bootstrap")
+        return self
+
+
 class ExecutableReleaseReceiptV2(StrictV2Model):
     """Append-only protected release proof consumed by the manager."""
 
@@ -539,6 +579,7 @@ class ProtectedIntentObservationV2(StrictV2Model):
     claim_high_water: NonNegativeSequence = 0
     drain: DrainedExecutableWorkerV2 | None = None
     release: ExecutableReleaseReceiptV2 | None = None
+    prepared_revocation: RevokedExecutableBootstrapV2 | None = None
     executable: Literal[True] = True
 
     @model_validator(mode="after")
@@ -563,6 +604,14 @@ class ProtectedIntentObservationV2(StrictV2Model):
             or self.release.claim_high_water != self.claim_high_water
         ):
             raise ValueError("protected release differs from current intent observation")
+        if self.prepared_revocation is not None and (
+            self.worker_id is not None
+            or self.prepared_revocation.binding != self.binding
+            or self.prepared_revocation.bootstrap_registration_epoch
+            != self.bootstrap_registration_epoch
+            or self.prepared_revocation.claim_high_water != self.claim_high_water
+        ):
+            raise ValueError("prepared revocation differs from current intent observation")
         return self
 
 
@@ -570,6 +619,7 @@ __all__ = [
     "BoundExecutableWorkerV2",
     "DrainedExecutableWorkerV2",
     "ExecutableDrainRequestV2",
+    "ExecutablePreparedBootstrapRevocationV2",
     "ExecutableReleaseReceiptV2",
     "ExecutableReleaseRequestV2",
     "ExecutableWorkerRegistrationV2",
@@ -584,5 +634,6 @@ __all__ = [
     "PreparedWorkerShapeV1",
     "ProtectedIntentObservationV2",
     "RegisteredExecutableWorkerV2",
+    "RevokedExecutableBootstrapV2",
     "WithdrawnExecutableWorkerV2",
 ]

@@ -14,10 +14,12 @@ from loom_capacity_agent.admission import (
     BoundExecutableWorkerV2,
     DrainedExecutableWorkerV2,
     ExecutableDrainRequestV2,
+    ExecutablePreparedBootstrapRevocationV2,
     ExecutableWorkerWithdrawalRequestV2,
     PhysicalJobBindingV2,
     PreparedExecutableAdmissionV2,
     ProtectedIntentObservationV2,
+    RevokedExecutableBootstrapV2,
     WithdrawnExecutableWorkerV2,
 )
 from loom_capacity_executor.bootstrap_handoff import (
@@ -134,6 +136,10 @@ class _AdmissionClient(Protocol):
     async def withdraw_unregistered_worker(
         self, request: ExecutableWorkerWithdrawalRequestV2
     ) -> WithdrawnExecutableWorkerV2: ...
+
+    async def revoke_prepared_bootstrap(
+        self, request: ExecutablePreparedBootstrapRevocationV2
+    ) -> RevokedExecutableBootstrapV2: ...
 
 
 class _SlurmBackend(Protocol):
@@ -878,9 +884,21 @@ class ExecutablePoolExecutor:
     async def _replay_local_request(
         self, checkpoint: ExecutableCheckpointReceiptV2
     ) -> ExecutorTickResult | None:
+        for record in self.journal.latest_records("prepared-revocation"):
+            if record.event_kind != "protected-prepared-revocation-confirmed":
+                continue
+            payload = record.durable_payload()
+            if payload is None:
+                raise JournalRegressionError(
+                    "prepared bootstrap revocation request is absent from journal"
+                )
+            if self._delete_prepared_handoff(record, payload):
+                revocation = ExecutablePreparedBootstrapRevocationV2.model_validate_json(payload)
+                return ExecutorTickResult("draining", revocation.binding.intent_id)
         local_events = {
             "protected-drain-requested",
             "protected-withdraw-requested",
+            "protected-prepared-revocation-requested",
             "pending-cancel-requested",
         }
         records = tuple(
@@ -926,6 +944,21 @@ class ExecutablePoolExecutor:
                 payload=payload,
             )
             return ExecutorTickResult("quarantined", withdrawal.binding.intent_id)
+        if record.event_kind == "protected-prepared-revocation-requested":
+            revocation = self._prepared_revocation_from_record(record, payload)
+            await self.admission.revoke_prepared_bootstrap(revocation)
+            self.journal.append(
+                "protected-prepared-revocation-confirmed",
+                record.payload_digest,
+                object_kind=record.object_kind,
+                object_id=record.object_id,
+                payload=payload,
+            )
+            confirmed = self.journal.latest(record.object_kind, record.object_id)
+            if confirmed is None:
+                raise JournalRegressionError("prepared bootstrap revocation confirmation is absent")
+            self._delete_prepared_handoff(confirmed, payload)
+            return ExecutorTickResult("draining", revocation.binding.intent_id)
         cancel = SlurmCancelRequestV2.model_validate_json(payload)
         return await self._recover_pending_cancel(record, cancel, checkpoint)
 
@@ -1242,6 +1275,101 @@ class ExecutablePoolExecutor:
             payload=payload,
         )
 
+    async def _revoke_prepared_bootstrap(
+        self,
+        *,
+        close: ExecutableIntentCloseV2,
+        observation: ProtectedIntentObservationV2,
+    ) -> None:
+        bootstrap_epoch = observation.bootstrap_registration_epoch
+        if bootstrap_epoch <= 0 or observation.claim_high_water != 0:
+            raise JournalRegressionError("prepared bootstrap revocation evidence is incomplete")
+        revocation = ExecutablePreparedBootstrapRevocationV2(
+            operation_id=uuid5(
+                _OPERATION_NAMESPACE,
+                f"revoke-prepared:{close.binding.intent_id}",
+            ),
+            binding=close.binding,
+            bootstrap_registration_epoch=bootstrap_epoch,
+            protected_registration_epoch=bootstrap_epoch + 1,
+        )
+        payload = canonical_executable_bytes(revocation)
+        digest = canonical_executable_digest(revocation)
+        latest = self.journal.latest("prepared-revocation", str(close.binding.intent_id))
+        if latest is None:
+            self.journal.append(
+                "protected-prepared-revocation-requested",
+                digest,
+                object_kind="prepared-revocation",
+                object_id=str(close.binding.intent_id),
+                payload=payload,
+            )
+        elif (
+            latest.event_kind
+            not in {
+                "protected-prepared-revocation-requested",
+                "protected-prepared-revocation-confirmed",
+                "prepared-handoff-deleted",
+            }
+            or latest.payload_digest != digest
+            or latest.durable_payload() != payload
+        ):
+            raise JournalRegressionError("prepared bootstrap revocation journal changed")
+        if latest is not None and latest.event_kind == "prepared-handoff-deleted":
+            self._prepared_revocation_from_record(latest, payload)
+            return
+        await self.admission.revoke_prepared_bootstrap(revocation)
+        latest = self.journal.latest("prepared-revocation", str(close.binding.intent_id))
+        if latest is None or latest.event_kind == "protected-prepared-revocation-requested":
+            self.journal.append(
+                "protected-prepared-revocation-confirmed",
+                digest,
+                object_kind="prepared-revocation",
+                object_id=str(close.binding.intent_id),
+                payload=payload,
+            )
+        latest = self.journal.latest("prepared-revocation", str(close.binding.intent_id))
+        if latest is None:
+            raise JournalRegressionError("prepared bootstrap revocation confirmation is absent")
+        self._delete_prepared_handoff(latest, payload)
+
+    def _prepared_revocation_from_record(
+        self,
+        record: JournalRecord,
+        payload: bytes,
+    ) -> ExecutablePreparedBootstrapRevocationV2:
+        revocation = ExecutablePreparedBootstrapRevocationV2.model_validate_json(payload)
+        if (
+            record.object_kind != "prepared-revocation"
+            or record.object_id != str(revocation.binding.intent_id)
+            or record.payload_digest != canonical_executable_digest(revocation)
+            or record.durable_payload() != payload
+        ):
+            raise JournalRegressionError("prepared bootstrap revocation request changed")
+        self._assert_binding(revocation.binding)
+        return revocation
+
+    def _delete_prepared_handoff(
+        self,
+        record: JournalRecord,
+        payload: bytes,
+    ) -> bool:
+        if self._bootstrap_handoff_store is None:
+            return False
+        revocation = self._prepared_revocation_from_record(record, payload)
+        self._bootstrap_handoff_store.revoke_prepared(
+            revocation.binding,
+            bootstrap_registration_epoch=revocation.bootstrap_registration_epoch,
+        )
+        self.journal.append(
+            "prepared-handoff-deleted",
+            record.payload_digest,
+            object_kind=record.object_kind,
+            object_id=record.object_id,
+            payload=payload,
+        )
+        return True
+
     async def _close(
         self,
         close: ExecutableIntentCloseV2,
@@ -1384,6 +1512,17 @@ class ExecutablePoolExecutor:
                 "quarantined",
                 close.binding.intent_id,
                 "physical job differs from protected binding",
+            )
+        if (
+            observation.worker_id is None
+            and observation.worker_incarnation is None
+            and observation.bootstrap_registration_epoch > 0
+            and envelope is None
+            and physical is None
+        ):
+            await self._revoke_prepared_bootstrap(
+                close=close,
+                observation=observation,
             )
         await self._central_command(
             close,

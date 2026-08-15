@@ -92,7 +92,7 @@ async def test_guard_schema_startup_returns_numeric_head(
 ) -> None:
     engine = create_async_engine(_value(capacity_guard_database, "migrator_url"))
     try:
-        assert await assert_capacity_guard_schema_at_head(engine) == 16
+        assert await assert_capacity_guard_schema_at_head(engine) == 17
     finally:
         await engine.dispose()
 
@@ -390,7 +390,7 @@ def test_guard_schema_has_exact_owner_and_preserves_public_application_tables(
             revision = connection.execute(
                 text("SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version")
             ).scalar_one()
-            assert revision == "guard_0016"
+            assert revision == "guard_0017"
             public_before = capacity_guard_database["public_tables_before"]
             assert isinstance(public_before, frozenset)
             assert frozenset(inspect(connection).get_table_names(schema="public")) == public_before
@@ -892,7 +892,7 @@ def test_guard_0014_downgrade_restores_executor_only_observation(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0016"
+                == "guard_0017"
             )
         with observer.connect() as connection, pytest.raises(DBAPIError) as caught:
             connection.execute(statement)
@@ -900,6 +900,256 @@ def test_guard_0014_downgrade_restores_executor_only_observation(
     finally:
         executor.dispose()
         observer.dispose()
+
+
+def test_guard_0017_routine_security_and_grant_inventory(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    engine = create_engine(_value(capacity_guard_database, "admin_url"))
+    owner = _value(capacity_guard_database, "owner_role")
+    executor_role = _value(capacity_guard_database, "executor_role")
+    observer_role = _value(capacity_guard_database, "observer_role")
+    observe_signature = "loom_capacity_guard.observe_executable_intent(uuid,uuid,uuid)"
+    revoke_signature = (
+        "loom_capacity_guard.revoke_prepared_executable_bootstrap(uuid,uuid,jsonb,bytea,text)"
+    )
+    try:
+        with engine.connect() as connection:
+            rows = (
+                connection.execute(
+                    text(
+                        "SELECT p.proname, pg_get_userbyid(p.proowner) AS owner, "
+                        "p.prosecdef, p.proconfig, pg_get_functiondef(p.oid) AS definition "
+                        "FROM pg_proc AS p JOIN pg_namespace AS n ON n.oid = p.pronamespace "
+                        "WHERE n.nspname = 'loom_capacity_guard' "
+                        "AND p.proname IN ("
+                        "'observe_executable_intent', "
+                        "'revoke_prepared_executable_bootstrap') "
+                        "ORDER BY p.proname"
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            assert [row["proname"] for row in rows] == [
+                "observe_executable_intent",
+                "revoke_prepared_executable_bootstrap",
+            ]
+            by_name = {row["proname"]: row for row in rows}
+            assert by_name["observe_executable_intent"]["owner"] == owner
+            assert by_name["observe_executable_intent"]["prosecdef"] is True
+            assert by_name["observe_executable_intent"]["proconfig"] == ["search_path=pg_catalog"]
+            assert (
+                "'prepared_revocation', v_prepared_revocation.receipt"
+                in by_name["observe_executable_intent"]["definition"]
+            )
+            assert by_name["revoke_prepared_executable_bootstrap"]["owner"] == owner
+            assert by_name["revoke_prepared_executable_bootstrap"]["prosecdef"] is True
+            assert by_name["revoke_prepared_executable_bootstrap"]["proconfig"] == [
+                "search_path=pg_catalog"
+            ]
+            assert (
+                connection.execute(
+                    text("SELECT has_function_privilege(:role, :function, 'EXECUTE')"),
+                    {"role": executor_role, "function": observe_signature},
+                ).scalar_one()
+                is True
+            )
+            assert (
+                connection.execute(
+                    text("SELECT has_function_privilege(:role, :function, 'EXECUTE')"),
+                    {"role": observer_role, "function": observe_signature},
+                ).scalar_one()
+                is True
+            )
+            assert (
+                connection.execute(
+                    text("SELECT has_function_privilege(:role, :function, 'EXECUTE')"),
+                    {"role": executor_role, "function": revoke_signature},
+                ).scalar_one()
+                is True
+            )
+            assert (
+                connection.execute(
+                    text("SELECT has_function_privilege(:role, :function, 'EXECUTE')"),
+                    {"role": observer_role, "function": revoke_signature},
+                ).scalar_one()
+                is False
+            )
+    finally:
+        engine.dispose()
+
+
+# Production break caught: guard_0017 downgrade must restore guard_0016's
+# observer-capable status routine, remove only the prepared-revocation primitive,
+# and then re-upgrade without losing fixed search_path/security/grants.
+def test_guard_0017_downgrades_to_0016_and_reupgrades_observation_faithfully(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    cfg = _guard_config(capacity_guard_database)
+    engine = create_engine(_value(capacity_guard_database, "admin_url"))
+    executor_role = _value(capacity_guard_database, "executor_role")
+    observer_role = _value(capacity_guard_database, "observer_role")
+    observe_signature = "loom_capacity_guard.observe_executable_intent(uuid,uuid,uuid)"
+    revoke_signature = (
+        "loom_capacity_guard.revoke_prepared_executable_bootstrap(uuid,uuid,jsonb,bytea,text)"
+    )
+    try:
+        command.downgrade(cfg, "guard_0016")
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
+                    )
+                ).scalar_one()
+                == "guard_0016"
+            )
+            row = (
+                connection.execute(
+                    text(
+                        "SELECT p.prosecdef, p.proconfig, pg_get_functiondef(p.oid) AS definition "
+                        "FROM pg_proc AS p JOIN pg_namespace AS n ON n.oid = p.pronamespace "
+                        "WHERE n.nspname = 'loom_capacity_guard' "
+                        "AND p.proname = 'observe_executable_intent'"
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            assert row["prosecdef"] is True
+            assert row["proconfig"] == ["search_path=pg_catalog"]
+            assert "prepared_revocation" not in row["definition"]
+            assert (
+                connection.execute(
+                    text("SELECT has_function_privilege(:role, :function, 'EXECUTE')"),
+                    {"role": executor_role, "function": observe_signature},
+                ).scalar_one()
+                is True
+            )
+            assert (
+                connection.execute(
+                    text("SELECT has_function_privilege(:role, :function, 'EXECUTE')"),
+                    {"role": observer_role, "function": observe_signature},
+                ).scalar_one()
+                is True
+            )
+            assert (
+                connection.execute(
+                    text("SELECT to_regprocedure(:function)"),
+                    {"function": revoke_signature},
+                ).scalar_one()
+                is None
+            )
+
+        command.upgrade(cfg, "head")
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
+                    )
+                ).scalar_one()
+                == "guard_0017"
+            )
+            row = (
+                connection.execute(
+                    text(
+                        "SELECT p.prosecdef, p.proconfig, pg_get_functiondef(p.oid) AS definition "
+                        "FROM pg_proc AS p JOIN pg_namespace AS n ON n.oid = p.pronamespace "
+                        "WHERE n.nspname = 'loom_capacity_guard' "
+                        "AND p.proname = 'observe_executable_intent'"
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            assert row["prosecdef"] is True
+            assert row["proconfig"] == ["search_path=pg_catalog"]
+            assert "'prepared_revocation', v_prepared_revocation.receipt" in row["definition"]
+            assert (
+                connection.execute(
+                    text("SELECT has_function_privilege(:role, :function, 'EXECUTE')"),
+                    {"role": observer_role, "function": observe_signature},
+                ).scalar_one()
+                is True
+            )
+            assert (
+                connection.execute(
+                    text("SELECT has_function_privilege(:role, :function, 'EXECUTE')"),
+                    {"role": executor_role, "function": revoke_signature},
+                ).scalar_one()
+                is True
+            )
+    finally:
+        engine.dispose()
+
+
+def test_guard_0017_refuses_downgrade_with_prepared_revocation_evidence(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    cfg = _guard_config(capacity_guard_database)
+    with _owner_connection(capacity_guard_database) as connection:
+        subject_id, subject_incarnation, intent_id, _worker_id, _worker_incarnation = (
+            _seed_executable_observation_rows(connection)
+        )
+        row = (
+            connection.execute(
+                text(
+                    "SELECT agent_incarnation, binding "
+                    "FROM loom_capacity_guard.executable_admission_events "
+                    "WHERE intent_id = :intent_id AND event_kind = 'prepared'"
+                ),
+                {"intent_id": intent_id},
+            )
+            .mappings()
+            .one()
+        )
+        receipt = json.dumps(
+            {
+                "schema_version": 2,
+                "binding": row["binding"],
+                "reporter_incarnation": str(uuid4()),
+                "bootstrap_registration_epoch": 19,
+                "protected_registration_epoch": 20,
+                "claim_high_water": 0,
+                "live_claim_count": 0,
+                "bootstrap_revoked": True,
+                "request_digest": "1" * 64,
+                "protected_release_sha256": "1" * 64,
+                "protected_high_water": 3,
+                "revocation_state": "revoked",
+                "executable": True,
+            },
+            sort_keys=True,
+        )
+        connection.execute(
+            text(
+                "INSERT INTO loom_capacity_guard.executable_admission_events "
+                "(operation_id, event_kind, agent_incarnation, subject_id, "
+                "subject_incarnation, intent_id, bootstrap_registration_epoch, "
+                "protected_registration_epoch, bootstrap_revoked, claim_high_water, "
+                "binding, request_payload, request_digest, receipt) "
+                "VALUES (:operation_id, 'prepared-revoked', :agent_incarnation, "
+                ":subject_id, :subject_incarnation, :intent_id, 19, 20, true, 0, "
+                ":binding, CAST(:request_payload AS jsonb), :request_digest, "
+                "CAST(:receipt AS jsonb))"
+            ),
+            {
+                "operation_id": uuid4(),
+                "agent_incarnation": row["agent_incarnation"],
+                "subject_id": subject_id,
+                "subject_incarnation": subject_incarnation,
+                "intent_id": intent_id,
+                "binding": json.dumps(row["binding"], sort_keys=True),
+                "request_payload": '{"schema_version":2}',
+                "request_digest": "1" * 64,
+                "receipt": receipt,
+            },
+        )
+
+    with pytest.raises(DBAPIError, match="cannot downgrade guard_0017"):
+        command.downgrade(cfg, "guard_0016")
 
 
 @pytest.mark.asyncio

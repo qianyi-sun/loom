@@ -8,12 +8,17 @@ import pytest
 from sqlalchemy.sql.elements import TextClause
 
 import loom_capacity_executor.admission_client as admission_client_module
-from loom_capacity_agent.admission import ProtectedIntentObservationV2
+from loom_capacity_agent.admission import (
+    ExecutablePreparedBootstrapRevocationV2,
+    ProtectedIntentObservationV2,
+    RevokedExecutableBootstrapV2,
+)
 from loom_capacity_agent.claim_guard import ExecutableClaimProposalV2
 from loom_capacity_executor.admission_client import (
     DatabaseExecutableAdmissionClient,
     ExecutableAdmissionClientError,
 )
+from loom_capacity_manager.executable_contracts import canonical_executable_digest
 from tests.unit.test_capacity_executor_launch_renderer import launch_context_fixture
 
 
@@ -303,3 +308,57 @@ async def test_database_client_observes_exact_protected_intent() -> None:
     client._store_call = store_call  # type: ignore[assignment]
 
     assert await client.observe_intent(binding) == expected
+
+
+# Production break caught: the routed database client must forward the exact
+# prepared-revocation request object and return only the exact V2 receipt type.
+@pytest.mark.asyncio
+async def test_database_client_sends_exact_prepared_revocation_to_protected_transaction() -> None:
+    binding = launch_context_fixture().binding
+    request = ExecutablePreparedBootstrapRevocationV2(
+        operation_id=UUID(int=301),
+        binding=binding,
+        bootstrap_registration_epoch=1,
+        protected_registration_epoch=2,
+    )
+    expected = RevokedExecutableBootstrapV2(
+        binding=binding,
+        reporter_incarnation=UUID(int=302),
+        bootstrap_registration_epoch=1,
+        protected_registration_epoch=2,
+        request_digest=canonical_executable_digest(request),
+        protected_release_sha256=canonical_executable_digest(request),
+        protected_high_water=3,
+    )
+    client = object.__new__(DatabaseExecutableAdmissionClient)
+
+    async def store_call(method: str, value: object) -> object:
+        assert method == "revoke_prepared_bootstrap"
+        assert value is request
+        return expected
+
+    client._store_call = store_call  # type: ignore[assignment]
+
+    assert await client.revoke_prepared_bootstrap(request) == expected
+
+
+# Production break caught: a mismatched protected-store method result must not be
+# treated as a valid prepared-revocation receipt by the executor admission client.
+@pytest.mark.asyncio
+async def test_database_client_rejects_prepared_revocation_receipt_type_mismatch() -> None:
+    binding = launch_context_fixture().binding
+    request = ExecutablePreparedBootstrapRevocationV2(
+        operation_id=UUID(int=303),
+        binding=binding,
+        bootstrap_registration_epoch=1,
+        protected_registration_epoch=2,
+    )
+    client = object.__new__(DatabaseExecutableAdmissionClient)
+
+    async def store_call(_method: str, _value: object) -> object:
+        return ProtectedIntentObservationV2(binding=binding)
+
+    client._store_call = store_call  # type: ignore[assignment]
+
+    with pytest.raises(AssertionError):
+        await client.revoke_prepared_bootstrap(request)

@@ -4,11 +4,14 @@ import hashlib
 import json
 from datetime import timedelta
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid5
 
 import pytest
 
-from loom_capacity_agent.admission import ExecutableWorkerWithdrawalRequestV2
+from loom_capacity_agent.admission import (
+    ExecutablePreparedBootstrapRevocationV2,
+    ExecutableWorkerWithdrawalRequestV2,
+)
 from loom_capacity_executor.bootstrap_handoff import BootstrapHandoffStore
 from loom_capacity_executor.executable import ExecutablePoolExecutor, ProtectedIntentObservationV2
 from loom_capacity_executor.journal import ExecutorJournal, JournalRegressionError
@@ -165,6 +168,233 @@ def _append_pending_cancel(
         object_id=cancel.job_id,
         payload=payload,
     )
+
+
+# Production break caught: losing the response after protected prepared-bootstrap
+# revocation committed left a durable local request unresolved, so recovery
+# fetched fresh central work before replaying the exact protected request.
+async def test_crash_after_prepared_revocation_replays_before_work_fetch(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    executor, journal, manager, admission, slurm, launch = executor_fixture(
+        tmp_path,
+        work=launch.binding,
+    )
+    await executor.tick()
+    close = ExecutableIntentCloseV2(binding=launch.binding, command_sequence=2)
+    manager.work = close
+    admission.crash_after_prepared_revocation = True
+
+    with pytest.raises(SimulatedCrash):
+        await executor.tick()
+
+    requested = journal.latest("prepared-revocation", str(launch.binding.intent_id))
+    assert requested is not None
+    assert requested.event_kind == "protected-prepared-revocation-requested"
+    assert manager.central_requests[-1].command_sequence == 1
+    assert slurm.submit_count == 0
+    journal.close()
+
+    admission.crash_after_prepared_revocation = False
+    manager.reject_work_fetch = True
+    recovered, reopened = _restart(journal.path, manager, admission, slurm, launch)
+    result = await recovered.tick()
+
+    assert result.status == "draining"
+    assert admission.prepared_revocation_requests[1] == admission.prepared_revocation_requests[0]
+    confirmed = reopened.latest("prepared-revocation", str(launch.binding.intent_id))
+    assert confirmed is not None
+    assert confirmed.event_kind == "protected-prepared-revocation-confirmed"
+    assert slurm.submit_count == 0
+    reopened.close()
+
+
+# Production break caught: a crash after protected revocation confirmation but
+# before deleting the clear local handoff capability let the next process fetch
+# central work while a revoked bootstrap secret still existed on disk.
+async def test_confirmed_prepared_revocation_deletes_handoff_before_work_fetch(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    handoff_directory = tmp_path / "handoff"
+    handoff_directory.mkdir(mode=0o700)
+    handoff_store = BootstrapHandoffStore(handoff_directory)
+    executor, journal, manager, admission, slurm, launch = executor_fixture(
+        tmp_path,
+        work=launch.binding,
+    )
+    executor._bootstrap_handoff_store = handoff_store
+    executor._bootstrap_digest = None
+    await executor.tick()
+    reference = handoff_store.reference_for(launch.binding)
+    assert (handoff_directory / reference).exists()
+    revocation = ExecutablePreparedBootstrapRevocationV2(
+        operation_id=UUID(int=1601),
+        binding=launch.binding,
+        bootstrap_registration_epoch=1,
+        protected_registration_epoch=2,
+    )
+    payload = canonical_executable_bytes(revocation)
+    digest = canonical_executable_digest(revocation)
+    journal.append(
+        "protected-prepared-revocation-requested",
+        digest,
+        object_kind="prepared-revocation",
+        object_id=str(launch.binding.intent_id),
+        payload=payload,
+    )
+    await admission.revoke_prepared_bootstrap(revocation)
+    journal.append(
+        "protected-prepared-revocation-confirmed",
+        digest,
+        object_kind="prepared-revocation",
+        object_id=str(launch.binding.intent_id),
+        payload=payload,
+    )
+    journal.close()
+
+    manager.reject_work_fetch = True
+    recovered, reopened = _restart(
+        journal.path,
+        manager,
+        admission,
+        slurm,
+        launch,
+        bootstrap_handoff_store=handoff_store,
+    )
+    result = await recovered.tick()
+
+    assert result.status == "draining"
+    assert not (handoff_directory / reference).exists()
+    deleted = reopened.latest("prepared-revocation", str(launch.binding.intent_id))
+    assert deleted is not None
+    assert deleted.event_kind == "prepared-handoff-deleted"
+    assert slurm.submit_count == 0
+    reopened.close()
+
+
+# Production break caught: replaying the cleanup after the clear handoff file
+# was already removed must still resolve the local journal state without
+# treating idempotent deletion as corruption.
+async def test_prepared_handoff_deletion_replay_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    handoff_directory = tmp_path / "handoff"
+    handoff_directory.mkdir(mode=0o700)
+    handoff_store = BootstrapHandoffStore(handoff_directory)
+    executor, journal, manager, admission, slurm, launch = executor_fixture(
+        tmp_path,
+        work=launch.binding,
+    )
+    executor._bootstrap_handoff_store = handoff_store
+    executor._bootstrap_digest = None
+    await executor.tick()
+    reference = handoff_store.reference_for(launch.binding)
+    (handoff_directory / reference).unlink()
+    revocation = ExecutablePreparedBootstrapRevocationV2(
+        operation_id=UUID(int=1602),
+        binding=launch.binding,
+        bootstrap_registration_epoch=1,
+        protected_registration_epoch=2,
+    )
+    payload = canonical_executable_bytes(revocation)
+    digest = canonical_executable_digest(revocation)
+    journal.append(
+        "protected-prepared-revocation-confirmed",
+        digest,
+        object_kind="prepared-revocation",
+        object_id=str(launch.binding.intent_id),
+        payload=payload,
+    )
+    journal.close()
+
+    manager.reject_work_fetch = True
+    recovered, reopened = _restart(
+        journal.path,
+        manager,
+        admission,
+        slurm,
+        launch,
+        bootstrap_handoff_store=handoff_store,
+    )
+    result = await recovered.tick()
+
+    assert result.status == "draining"
+    assert not (handoff_directory / reference).exists()
+    deleted = reopened.latest("prepared-revocation", str(launch.binding.intent_id))
+    assert deleted is not None
+    assert deleted.event_kind == "prepared-handoff-deleted"
+    assert slurm.submit_count == 0
+    reopened.close()
+
+
+# Production break caught: if the process stops after deleting the clear
+# prepared handoff but before central close, the repeated close must treat the
+# deletion marker as resolved protected revocation evidence.
+async def test_repeated_close_after_prepared_handoff_deleted_replays_central_close(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    handoff_directory = tmp_path / "handoff"
+    handoff_directory.mkdir(mode=0o700)
+    handoff_store = BootstrapHandoffStore(handoff_directory)
+    executor, journal, manager, admission, slurm, launch = executor_fixture(
+        tmp_path,
+        work=launch.binding,
+    )
+    executor._bootstrap_handoff_store = handoff_store
+    executor._bootstrap_digest = None
+    await executor.tick()
+    reference = handoff_store.reference_for(launch.binding)
+    revocation = ExecutablePreparedBootstrapRevocationV2(
+        operation_id=uuid5(
+            UUID("cb359b0c-a844-4bc5-9592-a4c35e344f3d"),
+            f"revoke-prepared:{launch.binding.intent_id}",
+        ),
+        binding=launch.binding,
+        bootstrap_registration_epoch=1,
+        protected_registration_epoch=2,
+    )
+    payload = canonical_executable_bytes(revocation)
+    digest = canonical_executable_digest(revocation)
+    await admission.revoke_prepared_bootstrap(revocation)
+    journal.append(
+        "protected-prepared-revocation-confirmed",
+        digest,
+        object_kind="prepared-revocation",
+        object_id=str(launch.binding.intent_id),
+        payload=payload,
+    )
+    assert handoff_store.revoke_prepared(launch.binding, bootstrap_registration_epoch=1) is True
+    journal.append(
+        "prepared-handoff-deleted",
+        digest,
+        object_kind="prepared-revocation",
+        object_id=str(launch.binding.intent_id),
+        payload=payload,
+    )
+    journal.close()
+
+    close = ExecutableIntentCloseV2(binding=launch.binding, command_sequence=2)
+    manager.work = close
+    recovered, reopened = _restart(
+        journal.path,
+        manager,
+        admission,
+        slurm,
+        launch,
+        bootstrap_handoff_store=handoff_store,
+    )
+    result = await recovered.tick()
+
+    assert result.status == "draining"
+    assert not (handoff_directory / reference).exists()
+    assert manager.central_requests[-1] == close
+    assert len(admission.prepared_revocation_requests) == 1
+    assert slurm.submit_count == 0
+    reopened.close()
 
 
 # Production break caught: treating an interrupted sbatch as safely absent would

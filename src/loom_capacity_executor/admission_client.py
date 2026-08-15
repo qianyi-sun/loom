@@ -15,6 +15,7 @@ from loom_capacity_agent.admission import (
     BoundExecutableWorkerV2,
     DrainedExecutableWorkerV2,
     ExecutableDrainRequestV2,
+    ExecutablePreparedBootstrapRevocationV2,
     ExecutableReleaseReceiptV2,
     ExecutableReleaseRequestV2,
     ExecutableWorkerRegistrationV2,
@@ -23,6 +24,7 @@ from loom_capacity_agent.admission import (
     PreparedExecutableAdmissionV2,
     ProtectedIntentObservationV2,
     RegisteredExecutableWorkerV2,
+    RevokedExecutableBootstrapV2,
     WithdrawnExecutableWorkerV2,
 )
 from loom_capacity_agent.claim_guard import (
@@ -267,6 +269,14 @@ class DatabaseExecutableAdmissionClient:
     ) -> WithdrawnExecutableWorkerV2:
         result = await self._store_call("withdraw_unregistered_worker", request)
         assert isinstance(result, WithdrawnExecutableWorkerV2)
+        return result
+
+    async def revoke_prepared_bootstrap(
+        self,
+        request: ExecutablePreparedBootstrapRevocationV2,
+    ) -> RevokedExecutableBootstrapV2:
+        result = await self._store_call("revoke_prepared_bootstrap", request)
+        assert isinstance(result, RevokedExecutableBootstrapV2)
         return result
 
     async def acknowledge_release(

@@ -15,6 +15,7 @@ from loom_capacity_agent.admission import (
     BoundExecutableWorkerV2,
     DrainedExecutableWorkerV2,
     ExecutableDrainRequestV2,
+    ExecutablePreparedBootstrapRevocationV2,
     ExecutableReleaseReceiptV2,
     ExecutableReleaseRequestV2,
     ExecutableWorkerRegistrationV2,
@@ -23,6 +24,7 @@ from loom_capacity_agent.admission import (
     PreparedExecutableAdmissionV2,
     ProtectedIntentObservationV2,
     RegisteredExecutableWorkerV2,
+    RevokedExecutableBootstrapV2,
     WithdrawnExecutableWorkerV2,
 )
 from loom_capacity_agent.claim_guard import (
@@ -289,6 +291,29 @@ class ExecutableAdmissionStore:
             or receipt.withdrawal_digest != receipt.request_digest
         ):
             raise ExecutableAdmissionError("protected worker withdrawal receipt changed")
+        return receipt
+
+    async def revoke_prepared_bootstrap(
+        self,
+        request: ExecutablePreparedBootstrapRevocationV2,
+    ) -> RevokedExecutableBootstrapV2:
+        if not isinstance(request, ExecutablePreparedBootstrapRevocationV2):
+            raise TypeError("prepared bootstrap revocation requires its schema-v2 contract")
+        receipt = await self._invoke(
+            "revoke_prepared_executable_bootstrap",
+            request,
+            RevokedExecutableBootstrapV2,
+        )
+        if (
+            receipt.binding != request.binding
+            or receipt.bootstrap_registration_epoch != request.bootstrap_registration_epoch
+            or receipt.protected_registration_epoch != request.protected_registration_epoch
+            or receipt.claim_high_water != request.expected_claim_high_water
+            or receipt.live_claim_count != 0
+            or receipt.bootstrap_revoked is not True
+            or receipt.protected_release_sha256 != receipt.request_digest
+        ):
+            raise ExecutableAdmissionError("protected prepared revocation receipt changed")
         return receipt
 
     async def acknowledge_release(

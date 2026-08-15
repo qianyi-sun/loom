@@ -205,9 +205,14 @@ class FakeAdmission:
         self.bind_failure: Exception | None = None
         self.bind_commits_before_failure = False
         self.withdraw_requests: list[Any] = []
+        self.prepared_revocation_requests: list[Any] = []
+        self.crash_after_prepared_revocation = False
         self.drain_requests: list[Any] = []
         self.crash_after_drain = False
         self.observations: dict[UUID, ProtectedIntentObservationV2] = {}
+
+    def bootstrap_handoff_route_sha256(self, _binding: object) -> str:
+        return "1" * 64
 
     async def prepare_worker(
         self,
@@ -228,6 +233,10 @@ class FakeAdmission:
             protected_high_water=1,
         )
         self.prepared[request.binding.intent_id] = receipt
+        self.observations[request.binding.intent_id] = ProtectedIntentObservationV2(
+            binding=request.binding,
+            bootstrap_registration_epoch=request.bootstrap_registration_epoch,
+        )
         if self.crash_after_prepare:
             raise SimulatedCrash("process stopped after protected preparation committed")
         return receipt
@@ -309,6 +318,26 @@ class FakeAdmission:
             withdrawal_state="withdrawn",
             executable=True,
         )
+
+    async def revoke_prepared_bootstrap(self, request: Any) -> SimpleNamespace:
+        self.prepared_revocation_requests.append(request)
+        receipt = SimpleNamespace(
+            binding=request.binding,
+            reporter_incarnation=UUID(int=9),
+            bootstrap_registration_epoch=request.bootstrap_registration_epoch,
+            protected_registration_epoch=request.protected_registration_epoch,
+            claim_high_water=0,
+            live_claim_count=0,
+            bootstrap_revoked=True,
+            request_digest=canonical_executable_digest(request),
+            protected_release_sha256=canonical_executable_digest(request),
+            protected_high_water=request.protected_registration_epoch,
+            revocation_state="revoked",
+            executable=True,
+        )
+        if self.crash_after_prepared_revocation:
+            raise SimulatedCrash("prepared revocation committed before response loss")
+        return receipt
 
 
 class FakeSlurm:
@@ -1152,6 +1181,41 @@ async def test_close_withdraws_bound_unregistered_pending_job_before_cancel(
     assert withdrawal.protected_registration_epoch == 2
     retained = journal.latest("intent", str(launch.binding.intent_id))
     assert retained is not None and retained.event_kind == "intent-close-confirmed"
+    journal.close()
+
+
+async def test_close_revokes_prepared_bootstrap_without_a_physical_job(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    executor, journal, manager, admission, slurm, _launch = executor_fixture(
+        tmp_path,
+        work=launch.binding,
+    )
+    prepared = await executor.tick()
+    assert prepared.status == "bootstrap-registered"
+    close = ExecutableIntentCloseV2(binding=launch.binding, command_sequence=2)
+    manager.work = close
+
+    result = await executor.tick()
+
+    assert result.status == "draining"
+    assert manager.work is None
+    assert slurm.jobs == []
+    assert len(admission.prepared_revocation_requests) == 1
+    revocation = admission.prepared_revocation_requests[0]
+    assert revocation.binding == launch.binding
+    assert revocation.bootstrap_registration_epoch == 1
+    assert revocation.protected_registration_epoch == 2
+    assert manager.central_requests[-1] == close
+    requested = journal.latest("prepared-revocation", str(launch.binding.intent_id))
+    central = journal.latest("intent", str(launch.binding.intent_id))
+    assert requested is not None
+    assert requested.event_kind == "protected-prepared-revocation-confirmed"
+    assert central is not None
+    assert central.event_kind == "intent-close-confirmed"
+    assert requested.sequence < central.sequence
+    assert slurm.submit_count == 0
     journal.close()
 
 
