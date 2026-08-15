@@ -199,8 +199,10 @@ class _LaunchEnvelope:
 @dataclass(frozen=True, slots=True)
 class _ProtectedTerminalFence:
     binding: ExecutableIntentBindingV2
+    receipt_kind: Literal["release", "withdrawal", "prepared-revocation"]
     protected_registration_epoch: int
     digest: str
+    slurm_job_id: str | None = None
 
 
 def _physical_binding_object_id(intent_id: UUID) -> str:
@@ -230,18 +232,22 @@ def _protected_terminal_fence(
     if observation.release is not None:
         return _ProtectedTerminalFence(
             binding=observation.release.binding,
+            receipt_kind="release",
             protected_registration_epoch=observation.release.protected_registration_epoch,
             digest=observation.release.protected_release_sha256,
         )
     if observation.withdrawal is not None:
         return _ProtectedTerminalFence(
             binding=observation.binding,
+            receipt_kind="withdrawal",
             protected_registration_epoch=observation.withdrawal.protected_registration_epoch,
             digest=observation.withdrawal.withdrawal_digest,
+            slurm_job_id=observation.withdrawal.slurm_job_id,
         )
     if observation.prepared_revocation is not None:
         return _ProtectedTerminalFence(
             binding=observation.prepared_revocation.binding,
+            receipt_kind="prepared-revocation",
             protected_registration_epoch=(
                 observation.prepared_revocation.protected_registration_epoch
             ),
@@ -475,6 +481,13 @@ class ExecutablePoolExecutor:
             "physical-bind-confirmed",
         }:
             return None
+        return self._launch_envelope_from_record(intent_id, record)
+
+    def _launch_envelope_from_record(
+        self,
+        intent_id: UUID,
+        record: JournalRecord,
+    ) -> _LaunchEnvelope:
         payload = record.durable_payload()
         if payload is None:
             raise JournalRegressionError("signed launch envelope is absent from journal")
@@ -490,6 +503,19 @@ class ExecutablePoolExecutor:
         )
         self._validate_stored_launch(intent_id, envelope)
         return envelope
+
+    def _historical_launch_envelopes(self, intent_id: UUID) -> tuple[_LaunchEnvelope, ...]:
+        envelopes: list[_LaunchEnvelope] = []
+        for record in self.journal.records("job", str(intent_id)):
+            if record.event_kind not in {
+                "slurm-submit-requested",
+                "slurm-submit-unknown",
+                "slurm-submit-confirmed",
+                "physical-bind-confirmed",
+            }:
+                continue
+            envelopes.append(self._launch_envelope_from_record(intent_id, record))
+        return tuple(envelopes)
 
     def _validate_stored_launch(self, intent_id: UUID, envelope: _LaunchEnvelope) -> None:
         rendered = envelope.rendered
@@ -1594,6 +1620,15 @@ class ExecutablePoolExecutor:
                 terminal_fence.binding != item.binding
                 or terminal_fence.protected_registration_epoch != item.protected_registration_epoch
                 or terminal_fence.digest != item.protected_release_sha256
+                or (
+                    terminal_fence.receipt_kind == "prepared-revocation"
+                    and item.terminal_kind != "unused"
+                )
+                or (terminal_fence.receipt_kind == "release" and item.terminal_kind == "unused")
+                or (
+                    terminal_fence.receipt_kind == "withdrawal"
+                    and item.terminal_kind != "slurm-job"
+                )
             ):
                 return ExecutorTickResult(
                     "quarantined",
@@ -1601,7 +1636,7 @@ class ExecutablePoolExecutor:
                     "protected terminal evidence is absent or changed",
                 )
             if item.terminal_kind == "unused":
-                unused_detail = self._unused_terminal_detail(item)
+                unused_detail = await self._unused_terminal_detail(item)
                 if unused_detail is not None:
                     return ExecutorTickResult(
                         "quarantined",
@@ -1609,7 +1644,14 @@ class ExecutablePoolExecutor:
                         unused_detail,
                     )
             else:
-                terminal = await self._terminal_for(item.terminal_identity)
+                terminal_identity = terminal_fence.slurm_job_id or item.terminal_identity
+                if item.terminal_identity != terminal_identity:
+                    return ExecutorTickResult(
+                        "quarantined",
+                        item.binding.intent_id,
+                        "physical terminal evidence is absent or changed",
+                    )
+                terminal = await self._terminal_for(terminal_identity)
                 if (
                     terminal is None
                     or self._slurm_evidence_digest(terminal) != item.terminal_evidence_sha256
@@ -1626,7 +1668,7 @@ class ExecutablePoolExecutor:
         )
         return ExecutorTickResult("released")
 
-    def _unused_terminal_detail(self, item: ExecutableReleasedShapeV2) -> str | None:
+    async def _unused_terminal_detail(self, item: ExecutableReleasedShapeV2) -> str | None:
         inventory = self._confirmed_inventory_for_release(item)
         if inventory is None:
             return "unused terminal inventory is absent or changed"
@@ -1637,35 +1679,68 @@ class ExecutablePoolExecutor:
         envelope = self._load_launch(item.binding.intent_id)
         if envelope is not None:
             return "unused terminal still has local physical ownership"
-        physical_record = self.journal.latest(
-            "intent",
-            _physical_binding_object_id(item.binding.intent_id),
-        )
-        if physical_record is not None:
+        if self._has_physical_binding(item.binding):
             return "unused terminal still has local physical ownership"
+        historical_envelopes = self._historical_launch_envelopes(item.binding.intent_id)
+        if historical_envelopes:
+            jobs = await self.slurm.inventory()
+            high_water = await self.slurm.accounting_high_water(
+                since=self._now() - _RECOVERY_LOOKBACK
+            )
+            for historical in historical_envelopes:
+                if self._exact_matches(historical, jobs) or self._exact_terminal_matches(
+                    historical,
+                    high_water.terminal_jobs,
+                ):
+                    return "unused terminal still has local physical ownership"
         return None
+
+    def _has_physical_binding(self, binding: ExecutableIntentBindingV2) -> bool:
+        record = self.journal.latest(
+            "executor",
+            _physical_binding_object_id(binding.intent_id),
+        )
+        if record is None or record.event_kind != "physical-bind-confirmed":
+            retained = self.journal.latest("intent", str(binding.intent_id))
+            if retained is None or retained.event_kind != "physical-bind-confirmed":
+                return False
+            record = retained
+        return record.object_id in {
+            _physical_binding_object_id(binding.intent_id),
+            str(binding.intent_id),
+        }
 
     def _confirmed_inventory_for_release(
         self,
         item: ExecutableReleasedShapeV2,
     ) -> ExecutableExecutorInventoryV2 | None:
-        record = self.journal.latest("inventory", str(self.registration.executor_incarnation))
-        if record is None or record.event_kind != "inventory-publish-confirmed":
-            return None
-        payload = record.durable_payload()
-        if payload is None or record.payload_digest != item.terminal_evidence_sha256:
-            return None
-        try:
-            inventory = ExecutableExecutorInventoryV2.model_validate_json(payload)
-            self._assert_inventory_binding(inventory)
-        except (ValueError, JournalRegressionError):
-            return None
-        if (
-            inventory.inventory_sequence != item.inventory_sequence
-            or canonical_executable_digest(inventory) != item.terminal_evidence_sha256
+        sequence_records = 0
+        matches: list[ExecutableExecutorInventoryV2] = []
+        for record in self.journal.records(
+            "inventory",
+            str(self.registration.executor_incarnation),
         ):
-            return None
-        return inventory
+            if record.event_kind != "inventory-publish-confirmed":
+                continue
+            payload = record.durable_payload()
+            if payload is None:
+                continue
+            try:
+                inventory = ExecutableExecutorInventoryV2.model_validate_json(payload)
+                self._assert_inventory_binding(inventory)
+            except (ValueError, JournalRegressionError):
+                continue
+            if inventory.inventory_sequence != item.inventory_sequence:
+                continue
+            sequence_records += 1
+            if (
+                record.payload_digest == item.terminal_evidence_sha256
+                and canonical_executable_digest(inventory) == item.terminal_evidence_sha256
+            ):
+                matches.append(inventory)
+        if sequence_records == 1 and len(matches) == 1:
+            return matches[0]
+        return None
 
     async def _terminal_for(self, job_id: str) -> SlurmTerminalEvidenceV2 | None:
         high_water = await self.slurm.accounting_high_water(since=self._now() - _RECOVERY_LOOKBACK)

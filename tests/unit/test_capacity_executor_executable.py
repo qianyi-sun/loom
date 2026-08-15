@@ -448,6 +448,42 @@ def _terminal_from_job(job: SlurmJobObservationV2) -> SlurmTerminalEvidenceV2:
     )
 
 
+def _job_from_launch(
+    launch: TrustedLaunchContextV2,
+    *,
+    rendered_request: Any,
+    job_id: str = "101",
+) -> SlurmJobObservationV2:
+    return SlurmJobObservationV2(
+        cluster=rendered_request.cluster,
+        job_id=job_id,
+        state="RUNNING",
+        submitter=rendered_request.submitter,
+        account=rendered_request.account,
+        partition=rendered_request.partition,
+        cpus=rendered_request.cpus,
+        memory_bytes=rendered_request.memory_bytes,
+        gpus=rendered_request.gpus,
+        generic_tres=rendered_request.generic_tres,
+        nodes=launch.binding.node_ids,
+        ownership_token=rendered_request.ownership_token,
+    )
+
+
+def _hide_latest_launch_record(journal: ExecutorJournal, intent_id: UUID) -> None:
+    retained = journal.latest("job", str(intent_id))
+    assert retained is not None
+    payload = retained.durable_payload()
+    assert payload is not None
+    journal.append(
+        "slurm-submit-terminal-observed",
+        retained.payload_digest,
+        object_kind="job",
+        object_id=str(intent_id),
+        payload=payload,
+    )
+
+
 def _protected_release_receipt(
     binding: ExecutableIntentBindingV2,
     *,
@@ -1623,6 +1659,257 @@ async def test_unused_release_uses_exact_confirmed_inventory_and_prepared_revoca
     assert result.status == "released"
     assert slurm.cancel_requests == []
     assert len(manager.releases) == 1
+    journal.close()
+
+
+# Production break caught: reducing protected terminal receipts to a digest let
+# prepared revocation authorize a Slurm terminal release instead of only unused.
+async def test_protected_terminal_prepared_revocation_rejects_slurm_terminal_kind(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    executor, journal, manager, admission, slurm, _launch = executor_fixture(
+        tmp_path,
+        work=launch.binding,
+    )
+    await executor.tick()
+    terminal = SlurmTerminalEvidenceV2(
+        cluster="oldlab",
+        job_id="101",
+        state="COMPLETED",
+        submitter="loom-oldlab",
+        account="loom-executor",
+        partition="batch",
+        submitted_at=_NOW,
+        started_at=_NOW,
+        ended_at=_NOW,
+        elapsed_seconds=0,
+        exit_code="0:0",
+        cpus=1,
+        memory_bytes=1024,
+        gpus=0,
+        generic_tres=(),
+        nodes=(),
+        ownership_token="a" * 43,
+    )
+    terminal_digest = executable_module.ExecutablePoolExecutor._slurm_evidence_digest(terminal)
+    protected_digest = "8" * 64
+    admission.observations[launch.binding.intent_id] = ProtectedIntentObservationV2(
+        binding=launch.binding,
+        bootstrap_registration_epoch=1,
+        claim_high_water=0,
+        prepared_revocation=_prepared_revocation_receipt(
+            launch.binding,
+            digest=protected_digest,
+        ),
+    )
+    slurm.terminal_jobs = (terminal,)
+    manager.work = _release_work(
+        launch.binding,
+        command_sequence=2,
+        terminal_kind="slurm-job",
+        terminal_identity="101",
+        terminal_evidence_sha256=terminal_digest,
+        protected_release_sha256=protected_digest,
+    )
+
+    result = await executor.tick()
+
+    assert result.status == "quarantined"
+    assert result.detail == "protected terminal evidence is absent or changed"
+    assert manager.releases == []
+    journal.close()
+
+
+# Production break caught: a withdrawal for one Slurm job could be released
+# using a different terminal job with the same withdrawal digest.
+async def test_withdrawal_release_rejects_changed_terminal_slurm_job_id(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    executor, journal, manager, admission, slurm, _launch = executor_fixture(
+        tmp_path,
+        work=permit_fixture(launch.binding),
+    )
+    await executor.tick()
+    job = slurm.jobs.pop().model_copy(update={"job_id": "999"})
+    terminal = _terminal_from_job(job)
+    terminal_digest = executable_module.ExecutablePoolExecutor._slurm_evidence_digest(terminal)
+    protected_digest = "9" * 64
+    admission.observations[launch.binding.intent_id] = ProtectedIntentObservationV2(
+        binding=launch.binding,
+        bootstrap_registration_epoch=1,
+        claim_high_water=0,
+        withdrawal=_withdrawal_receipt(
+            launch.binding,
+            digest=protected_digest,
+            slurm_job_id="101",
+        ),
+    )
+    slurm.terminal_jobs = (terminal,)
+    manager.work = _release_work(
+        launch.binding,
+        command_sequence=2,
+        terminal_identity="999",
+        terminal_evidence_sha256=terminal_digest,
+        protected_release_sha256=protected_digest,
+    )
+
+    result = await executor.tick()
+
+    assert result.status == "quarantined"
+    assert result.detail == "physical terminal evidence is absent or changed"
+    assert manager.releases == []
+    journal.close()
+
+
+# Production break caught: delayed release for inventory N was rejected after a
+# later confirmed complete inventory N+1 became the latest local inventory.
+async def test_unused_release_accepts_exact_historical_confirmed_inventory_sequence(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    executor, journal, manager, admission, _slurm, _launch = executor_fixture(
+        tmp_path,
+        work=launch.binding,
+    )
+    await executor.tick()
+    await executor.tick()
+    inventory_n = manager.inventories[-1]
+    await executor.tick()
+    assert manager.inventories[-1].inventory_sequence == inventory_n.inventory_sequence + 1
+    protected_digest = "a" * 64
+    admission.observations[launch.binding.intent_id] = ProtectedIntentObservationV2(
+        binding=launch.binding,
+        bootstrap_registration_epoch=1,
+        claim_high_water=0,
+        prepared_revocation=_prepared_revocation_receipt(
+            launch.binding,
+            digest=protected_digest,
+        ),
+    )
+    manager.work = _release_work(
+        launch.binding,
+        command_sequence=2,
+        inventory_sequence=inventory_n.inventory_sequence,
+        terminal_kind="unused",
+        terminal_identity="unused-101",
+        terminal_evidence_sha256=canonical_executable_digest(inventory_n),
+        protected_release_sha256=protected_digest,
+    )
+
+    result = await executor.tick()
+
+    assert result.status == "released"
+    assert len(manager.releases) == 1
+    journal.close()
+
+
+# Production break caught: unused release checked an impossible physical-bind
+# journal key and missed the real executor-scoped durable physical binding.
+async def test_unused_release_rejects_real_durable_physical_binding_record(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    executor, journal, manager, admission, _slurm, _launch = executor_fixture(
+        tmp_path,
+        work=launch.binding,
+    )
+    await executor.tick()
+    await executor.tick()
+    inventory = manager.inventories[-1]
+    physical = PhysicalJobBindingV2(
+        operation_id=UUID(int=901),
+        binding=launch.binding,
+        bootstrap_registration_epoch=1,
+        slurm_job_id="101",
+        ownership_evidence_sha256="e" * 64,
+    )
+    journal.append(
+        "physical-bind-confirmed",
+        canonical_executable_digest(physical),
+        object_kind="executor",
+        object_id=f"physical-bind:{launch.binding.intent_id}",
+        payload=canonical_executable_bytes(physical),
+    )
+    protected_digest = "b" * 64
+    admission.observations[launch.binding.intent_id] = ProtectedIntentObservationV2(
+        binding=launch.binding,
+        bootstrap_registration_epoch=1,
+        claim_high_water=0,
+        prepared_revocation=_prepared_revocation_receipt(
+            launch.binding,
+            digest=protected_digest,
+        ),
+    )
+    manager.work = _release_work(
+        launch.binding,
+        command_sequence=2,
+        inventory_sequence=inventory.inventory_sequence,
+        terminal_kind="unused",
+        terminal_identity="unused-101",
+        terminal_evidence_sha256=canonical_executable_digest(inventory),
+        protected_release_sha256=protected_digest,
+    )
+
+    result = await executor.tick()
+
+    assert result.status == "quarantined"
+    assert result.detail == "unused terminal still has local physical ownership"
+    assert manager.releases == []
+    journal.close()
+
+
+@pytest.mark.parametrize("scheduler_state", ("live", "terminal"))
+async def test_unused_release_rejects_exact_owned_current_slurm_match(
+    tmp_path: Path,
+    scheduler_state: str,
+) -> None:
+    launch = launch_context_fixture()
+    executor, journal, manager, admission, slurm, _launch = executor_fixture(
+        tmp_path,
+        work=launch.binding,
+    )
+    await executor.tick()
+    await executor.tick()
+    inventory = manager.inventories[-1]
+    rendered = executor.render_launch(launch.binding)
+    executor._remember_launch(
+        rendered,
+        bootstrap_registration_epoch=1,
+        event="slurm-submit-confirmed",
+    )
+    _hide_latest_launch_record(journal, launch.binding.intent_id)
+    job = _job_from_launch(launch, rendered_request=rendered.request, job_id="101")
+    if scheduler_state == "live":
+        slurm.jobs.append(job)
+    else:
+        slurm.terminal_jobs = (_terminal_from_job(job),)
+    protected_digest = "c" * 64
+    admission.observations[launch.binding.intent_id] = ProtectedIntentObservationV2(
+        binding=launch.binding,
+        bootstrap_registration_epoch=1,
+        claim_high_water=0,
+        prepared_revocation=_prepared_revocation_receipt(
+            launch.binding,
+            digest=protected_digest,
+        ),
+    )
+    manager.work = _release_work(
+        launch.binding,
+        command_sequence=2,
+        inventory_sequence=inventory.inventory_sequence,
+        terminal_kind="unused",
+        terminal_identity="unused-101",
+        terminal_evidence_sha256=canonical_executable_digest(inventory),
+        protected_release_sha256=protected_digest,
+    )
+
+    result = await executor.tick()
+
+    assert result.status == "quarantined"
+    assert result.detail == "unused terminal still has local physical ownership"
+    assert manager.releases == []
     journal.close()
 
 

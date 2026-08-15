@@ -160,6 +160,7 @@ class ExecutorJournal:
         self._journal_fd: int | None = None
         self._records: dict[int, str] = {0: _ZERO_DIGEST}
         self._latest: dict[tuple[str, str], JournalRecord] = {}
+        self._history: list[JournalRecord] = []
         self._head = JournalHead(0, _ZERO_DIGEST)
 
     @property
@@ -222,6 +223,7 @@ class ExecutorJournal:
             raise JournalCorruptionError("executor journal contains a torn record")
         self._records = {0: _ZERO_DIGEST}
         self._latest = {}
+        self._history = []
         prior = _ZERO_DIGEST
         for expected_sequence, encoded in enumerate(raw.splitlines(), start=1):
             if expected_sequence > _MAX_RECORDS or len(encoded) > _MAX_RECORD_BYTES:
@@ -235,6 +237,7 @@ class ExecutorJournal:
             record = self._validate_record(payload, expected_sequence, prior)
             self._records[record.sequence] = record.record_digest
             self._latest[(record.object_kind, record.object_id)] = record
+            self._history.append(record)
             prior = record.record_digest
         self._head = JournalHead(len(self._records) - 1, prior)
         os.lseek(self._journal_fd, 0, os.SEEK_END)
@@ -386,6 +389,7 @@ class ExecutorJournal:
         )
         self._records[record.sequence] = record.record_digest
         self._latest[(record.object_kind, record.object_id)] = record
+        self._history.append(record)
         self._head = JournalHead(record.sequence, record.record_digest)
         return record
 
@@ -408,6 +412,19 @@ class ExecutorJournal:
                 ),
                 key=lambda record: record.sequence,
             )
+        )
+
+    def records(self, object_kind: str, object_id: str) -> tuple[JournalRecord, ...]:
+        """Return durable records for one exact protocol object in sequence order."""
+
+        if object_kind not in _OBJECT_KINDS:
+            raise ValueError("journal object kind is invalid")
+        if _OBJECT_ID_RE.fullmatch(object_id) is None:
+            raise ValueError("journal object identity is invalid")
+        return tuple(
+            record
+            for record in self._history
+            if record.object_kind == object_kind and record.object_id == object_id
         )
 
     def pending_requests(self) -> tuple[JournalRecord, ...]:

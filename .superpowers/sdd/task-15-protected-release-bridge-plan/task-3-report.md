@@ -153,3 +153,144 @@ git diff --check
 
 - The initial RED output was partially truncated by the tool output cap; the report includes the exact visible summary and representative failure lines.
 - `_confirmed_inventory_for_release()` intentionally fails closed unless the matching confirmed inventory is the retained latest inventory journal record. The current journal API does not expose historical confirmed inventory payloads without adding a broader journal API outside the Task 3 file set.
+
+---
+
+# Fix round 1
+
+## Root cause
+
+- Protected terminal verification collapsed `release`, `withdrawal`, and `prepared_revocation` into only one digest/epoch/binding tuple. That discarded receipt kind and withdrawal `slurm_job_id`.
+- `unused` inventory verification checked only the latest confirmed inventory record, so a delayed release anchored to an earlier complete inventory sequence failed closed incorrectly.
+- `unused` physical absence checked the impossible journal key `("intent", "physical-bind:<intent>")`, while real physical-bind confirmations are under `("executor", "physical-bind:<intent>")`.
+- `unused` did not check exact current live/terminal Slurm matches from durable launch evidence.
+
+## Files changed in fix round 1
+
+- `src/loom_capacity_executor/executable.py`
+- `src/loom_capacity_executor/journal.py`
+- `tests/unit/test_capacity_executor_executable.py`
+- `tests/unit/test_capacity_executor_recovery.py`
+- `task-3-report.md`
+
+`src/loom_capacity_executor/journal.py` was added to the fix because exact historical inventory lookup needs bounded access to prior durable records for one exact object.
+
+## RED
+
+Executable regressions:
+
+```bash
+uv run --no-sync pytest -q tests/unit/test_capacity_executor_executable.py -k 'prepared_revocation_rejects_slurm or changed_terminal_slurm_job_id or historical_confirmed_inventory_sequence or real_durable_physical_binding_record or exact_owned_current_slurm_match'
+```
+
+```text
+FFFFFF                                                                   [100%]
+FAILED tests/unit/test_capacity_executor_executable.py::test_protected_terminal_prepared_revocation_rejects_slurm_terminal_kind
+FAILED tests/unit/test_capacity_executor_executable.py::test_withdrawal_release_rejects_changed_terminal_slurm_job_id
+FAILED tests/unit/test_capacity_executor_executable.py::test_unused_release_accepts_exact_historical_confirmed_inventory_sequence
+FAILED tests/unit/test_capacity_executor_executable.py::test_unused_release_rejects_real_durable_physical_binding_record
+FAILED tests/unit/test_capacity_executor_executable.py::test_unused_release_rejects_exact_owned_current_slurm_match[live]
+FAILED tests/unit/test_capacity_executor_executable.py::test_unused_release_rejects_exact_owned_current_slurm_match[terminal]
+6 failed, 43 deselected in 0.83s
+```
+
+Representative failures:
+
+```text
+E       AssertionError: assert 'released' == 'quarantined'
+E       AssertionError: assert 'quarantined' == 'released'
+```
+
+Replay regression:
+
+```bash
+uv run --no-sync pytest -q tests/unit/test_capacity_executor_recovery.py -k 'prepared_revocation_slurm_terminal_kind'
+```
+
+```text
+F                                                                        [100%]
+E       AssertionError: assert 'released' == 'quarantined'
+1 failed, 31 deselected in 0.28s
+```
+
+## GREEN
+
+Executable regressions:
+
+```bash
+uv run --no-sync pytest -q tests/unit/test_capacity_executor_executable.py -k 'prepared_revocation_rejects_slurm or changed_terminal_slurm_job_id or historical_confirmed_inventory_sequence or real_durable_physical_binding_record or exact_owned_current_slurm_match'
+```
+
+```text
+......                                                                   [100%]
+6 passed, 43 deselected in 0.26s
+```
+
+Replay regression:
+
+```bash
+uv run --no-sync pytest -q tests/unit/test_capacity_executor_recovery.py -k 'prepared_revocation_slurm_terminal_kind'
+```
+
+```text
+.                                                                        [100%]
+1 passed, 31 deselected in 0.15s
+```
+
+## Final gates
+
+```bash
+uv run --no-sync pytest -q tests/unit/test_capacity_executor_executable.py tests/unit/test_capacity_executor_recovery.py tests/integration/test_capacity_agent_executable_admission.py
+```
+
+```text
+........................................................................ [ 58%]
+...................................................                      [100%]
+123 passed in 17.40s
+```
+
+```bash
+uv run --no-sync ruff format --check src/loom_capacity_agent/admission.py src/loom_capacity_executor/executable.py src/loom_capacity_executor/journal.py capacity_guard_migrations/versions/guard_0018_executable_release_outbox.py tests/unit/test_capacity_executor_executable.py tests/unit/test_capacity_executor_recovery.py tests/integration/test_capacity_agent_executable_admission.py
+```
+
+```text
+7 files already formatted
+```
+
+```bash
+uv run --no-sync ruff check src/loom_capacity_agent/admission.py src/loom_capacity_executor/executable.py src/loom_capacity_executor/journal.py capacity_guard_migrations/versions/guard_0018_executable_release_outbox.py tests/unit/test_capacity_executor_executable.py tests/unit/test_capacity_executor_recovery.py tests/integration/test_capacity_agent_executable_admission.py
+```
+
+```text
+All checks passed!
+```
+
+```bash
+uv run --no-sync mypy src/loom_capacity_agent/admission.py src/loom_capacity_executor/executable.py src/loom_capacity_executor/journal.py
+```
+
+```text
+Success: no issues found in 3 source files
+```
+
+```bash
+git diff --check
+```
+
+```text
+<no output>
+```
+
+## Self-review
+
+- Prepared revocation now authorizes only `terminal_kind="unused"`.
+- Withdrawal now requires `terminal_kind="slurm-job"` and the exact `withdrawal.slurm_job_id`; terminal job `999` cannot satisfy withdrawal for job `101`.
+- Worker-backed releases still use exact Slurm terminal evidence and reject `unused`.
+- Durable replay uses the same `_release()` verification path and now preserves the receipt-kind rules.
+- Historical confirmed inventories are available through a bounded exact-object journal record lookup; `unused` release anchored to inventory N remains valid after inventory N+1.
+- `unused` checks real executor-scoped physical-bind confirmations.
+- `unused` checks exact current live and terminal Slurm matches using durable historical launch evidence while ignoring non-exact/foreign records.
+
+## Concerns
+
+- The journal now retains an in-memory history of validated records already bounded by `_MAX_RECORDS` and `_MAX_JOURNAL_BYTES`; this is intentionally narrow and exposed only as exact-object `records(object_kind, object_id)`.

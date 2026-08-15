@@ -34,6 +34,7 @@ from tests.unit.test_capacity_executor_executable import (
     FakeManager,
     FakeSlurm,
     SimulatedCrash,
+    _prepared_revocation_receipt,
     _release_work,
     executor_fixture,
     permit_fixture,
@@ -1209,6 +1210,58 @@ async def test_release_replay_rechecks_protected_terminal_fence_before_central_s
 
     assert result.status == "quarantined"
     assert result.detail == "protected terminal evidence is absent or ambiguous"
+    assert manager.releases == []
+    reopened.close()
+
+
+# Production break caught: durable release replay must preserve protected
+# terminal semantics, so prepared revocation cannot replay as a Slurm terminal.
+async def test_release_replay_rejects_prepared_revocation_slurm_terminal_kind(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    executor, journal, manager, admission, slurm, launch = executor_fixture(
+        tmp_path,
+        work=permit_fixture(launch.binding),
+    )
+    await executor.tick()
+    job = slurm.jobs.pop()
+    terminal = _terminal_from_job(job)
+    terminal_digest = ExecutablePoolExecutor._slurm_evidence_digest(terminal)
+    protected_digest = "8" * 64
+    admission.observations[launch.binding.intent_id] = ProtectedIntentObservationV2(
+        binding=launch.binding,
+        bootstrap_registration_epoch=1,
+        claim_high_water=0,
+        prepared_revocation=_prepared_revocation_receipt(
+            launch.binding,
+            digest=protected_digest,
+        ),
+    )
+    slurm.terminal_jobs = (terminal,)
+    release = _release_work(
+        launch.binding,
+        command_sequence=2,
+        terminal_kind="slurm-job",
+        terminal_identity=terminal.job_id,
+        terminal_evidence_sha256=terminal_digest,
+        protected_release_sha256=protected_digest,
+    )
+    journal.append(
+        "reservation-release-requested",
+        canonical_executable_digest(release),
+        object_kind="tranche",
+        object_id=str(launch.binding.tranche_id),
+        payload=canonical_executable_bytes(release),
+    )
+    journal.close()
+
+    manager.reject_work_fetch = True
+    recovered, reopened = _restart(journal.path, manager, admission, slurm, launch)
+    result = await recovered.tick()
+
+    assert result.status == "quarantined"
+    assert result.detail == "protected terminal evidence is absent or changed"
     assert manager.releases == []
     reopened.close()
 
