@@ -294,3 +294,104 @@ git diff --check
 ## Concerns
 
 - The journal now retains an in-memory history of validated records already bounded by `_MAX_RECORDS` and `_MAX_JOURNAL_BYTES`; this is intentionally narrow and exposed only as exact-object `records(object_kind, object_id)`.
+
+---
+
+# Fix round 2
+
+## Root cause
+
+`unused` release checked exact scheduler matches from durable launch evidence, but did not treat same ownership-token resource mismatches as authenticated ownership conflicts. A live/terminal Slurm record with the signed Loom ownership token but changed CPUs/resources is not proof of absence and cannot be inferred released.
+
+## Files changed in fix round 2
+
+- `src/loom_capacity_executor/executable.py`
+- `tests/unit/test_capacity_executor_executable.py`
+- `task-3-report.md`
+
+## RED
+
+```bash
+uv run --no-sync pytest -q tests/unit/test_capacity_executor_executable.py -k 'authenticated_ownership_conflict'
+```
+
+```text
+FF                                                                       [100%]
+FAILED tests/unit/test_capacity_executor_executable.py::test_unused_release_rejects_authenticated_ownership_conflict[live]
+FAILED tests/unit/test_capacity_executor_executable.py::test_unused_release_rejects_authenticated_ownership_conflict[terminal]
+2 failed, 49 deselected in 0.25s
+```
+
+Representative failure:
+
+```text
+E       AssertionError: assert 'released' == 'quarantined'
+```
+
+## GREEN
+
+```bash
+uv run --no-sync pytest -q tests/unit/test_capacity_executor_executable.py -k 'authenticated_ownership_conflict'
+```
+
+```text
+..                                                                       [100%]
+2 passed, 49 deselected in 0.15s
+```
+
+## Final gates
+
+```bash
+uv run --no-sync pytest -q tests/unit/test_capacity_executor_executable.py tests/unit/test_capacity_executor_recovery.py tests/integration/test_capacity_agent_executable_admission.py
+```
+
+```text
+........................................................................ [ 57%]
+.....................................................                    [100%]
+125 passed in 10.26s
+```
+
+```bash
+uv run --no-sync ruff format --check src/loom_capacity_executor/executable.py tests/unit/test_capacity_executor_executable.py
+```
+
+```text
+2 files already formatted
+```
+
+```bash
+uv run --no-sync ruff check src/loom_capacity_executor/executable.py tests/unit/test_capacity_executor_executable.py
+```
+
+```text
+All checks passed!
+```
+
+```bash
+uv run --no-sync mypy src/loom_capacity_executor/executable.py
+```
+
+```text
+Success: no issues found in 1 source file
+```
+
+```bash
+git diff --check
+```
+
+```text
+<no output>
+```
+
+## Self-review
+
+- `unused` now quarantines on exact current live Slurm matches.
+- `unused` now quarantines on exact current terminal Slurm matches.
+- `unused` now quarantines on authenticated live ownership conflicts with the same signed ownership token and changed resources.
+- `unused` now quarantines on authenticated terminal ownership conflicts with the same signed ownership token and changed resources.
+- Scheduler state is read-only in these paths; live and terminal fake Slurm records are retained unchanged and central release is not called.
+- Foreign/non-matching scheduler work still is not inferred released by these ownership-token predicates.
+
+## Concerns
+
+- None beyond the existing historical journal note from fix round 1.

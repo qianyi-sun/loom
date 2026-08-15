@@ -1688,9 +1688,19 @@ class ExecutablePoolExecutor:
                 since=self._now() - _RECOVERY_LOOKBACK
             )
             for historical in historical_envelopes:
-                if self._exact_matches(historical, jobs) or self._exact_terminal_matches(
+                live_matches = self._exact_matches(historical, jobs)
+                terminal_matches = self._exact_terminal_matches(
                     historical,
                     high_water.terminal_jobs,
+                )
+                if (
+                    live_matches
+                    or terminal_matches
+                    or self._live_ownership_conflicts(historical, jobs)
+                    or self._terminal_ownership_conflicts(
+                        historical,
+                        high_water.terminal_jobs,
+                    )
                 ):
                     return "unused terminal still has local physical ownership"
         return None

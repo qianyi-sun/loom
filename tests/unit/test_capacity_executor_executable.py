@@ -1913,6 +1913,67 @@ async def test_unused_release_rejects_exact_owned_current_slurm_match(
     journal.close()
 
 
+@pytest.mark.parametrize("scheduler_state", ("live", "terminal"))
+async def test_unused_release_rejects_authenticated_ownership_conflict(
+    tmp_path: Path,
+    scheduler_state: str,
+) -> None:
+    launch = launch_context_fixture()
+    executor, journal, manager, admission, slurm, _launch = executor_fixture(
+        tmp_path,
+        work=launch.binding,
+    )
+    await executor.tick()
+    await executor.tick()
+    inventory = manager.inventories[-1]
+    rendered = executor.render_launch(launch.binding)
+    executor._remember_launch(
+        rendered,
+        bootstrap_registration_epoch=1,
+        event="slurm-submit-confirmed",
+    )
+    _hide_latest_launch_record(journal, launch.binding.intent_id)
+    conflict = _job_from_launch(
+        launch,
+        rendered_request=rendered.request,
+        job_id="101",
+    ).model_copy(update={"cpus": rendered.request.cpus + 1})
+    if scheduler_state == "live":
+        slurm.jobs.append(conflict)
+    else:
+        slurm.terminal_jobs = (_terminal_from_job(conflict),)
+    protected_digest = "d" * 64
+    admission.observations[launch.binding.intent_id] = ProtectedIntentObservationV2(
+        binding=launch.binding,
+        bootstrap_registration_epoch=1,
+        claim_high_water=0,
+        prepared_revocation=_prepared_revocation_receipt(
+            launch.binding,
+            digest=protected_digest,
+        ),
+    )
+    manager.work = _release_work(
+        launch.binding,
+        command_sequence=2,
+        inventory_sequence=inventory.inventory_sequence,
+        terminal_kind="unused",
+        terminal_identity="unused-101",
+        terminal_evidence_sha256=canonical_executable_digest(inventory),
+        protected_release_sha256=protected_digest,
+    )
+
+    result = await executor.tick()
+
+    assert result.status == "quarantined"
+    assert result.detail == "unused terminal still has local physical ownership"
+    assert manager.releases == []
+    assert slurm.jobs == ([conflict] if scheduler_state == "live" else [])
+    assert slurm.terminal_jobs == (
+        (_terminal_from_job(conflict),) if scheduler_state == "terminal" else ()
+    )
+    journal.close()
+
+
 @pytest.mark.parametrize(
     ("case", "expected_detail"),
     (
