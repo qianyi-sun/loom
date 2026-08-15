@@ -273,7 +273,7 @@ def test_agent_can_execute_only_the_bounded_agent_functions(
                         "has_function_privilege(:agent, "
                         "'loom_capacity_guard."
                         "acknowledge_executable_protected_release_publication"
-                        "(uuid,bigint,jsonb,text,text)', 'EXECUTE') "
+                        "(uuid,bigint,jsonb,bytea,text,text)', 'EXECUTE') "
                         "AS release_outbox_ack_execute"
                     ),
                     {"agent": agent_role},

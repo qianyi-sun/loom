@@ -559,7 +559,8 @@ async def acknowledge_executable_protected_release_publication(
         raise CapacityAgentStoreError("manager acknowledgement digest is invalid")
     if canonical_executable_digest(publication.release) != publication.publication_digest:
         raise CapacityAgentStoreError("protected release publication digest changed")
-    release_payload = canonical_executable_bytes(publication.release).decode("ascii")
+    canonical_payload = canonical_executable_bytes(publication.release)
+    release_payload = canonical_payload.decode("ascii")
     async with session.begin_nested():
         returned = (
             await session.execute(
@@ -567,12 +568,14 @@ async def acknowledge_executable_protected_release_publication(
                     f"SELECT {_SCHEMA}."
                     "acknowledge_executable_protected_release_publication("
                     ":agent_incarnation, :event_id, CAST(:publication_payload AS jsonb), "
-                    ":publication_digest, :manager_acknowledgement_digest)"
+                    "CAST(:canonical_payload AS bytea), :publication_digest, "
+                    ":manager_acknowledgement_digest)"
                 ),
                 {
                     "agent_incarnation": registration.agent_incarnation,
                     "event_id": publication.event_id,
                     "publication_payload": release_payload,
+                    "canonical_payload": canonical_payload,
                     "publication_digest": publication.publication_digest,
                     "manager_acknowledgement_digest": manager_acknowledgement_digest,
                 },

@@ -18,7 +18,9 @@ depends_on: str | Sequence[str] | None = None
 
 SCHEMA = "loom_capacity_guard"
 READ_FUNCTION = "read_next_executable_protected_release(uuid)"
-ACK_FUNCTION = "acknowledge_executable_protected_release_publication(uuid,bigint,jsonb,text,text)"
+ACK_FUNCTION = (
+    "acknowledge_executable_protected_release_publication(uuid,bigint,jsonb,bytea,text,text)"
+)
 
 
 def _role(attribute: str = "capacity_guard_agent_role") -> tuple[str, str]:
@@ -123,6 +125,20 @@ def _install_read_function() -> None:
             RAISE EXCEPTION 'executable protected release digest is invalid'
               USING ERRCODE = '55000';
           END IF;
+          IF v_event.binding->>'subject_id' IS DISTINCT FROM v_registration.subject_id::text
+             OR v_event.binding->>'subject_incarnation'
+                IS DISTINCT FROM v_registration.subject_incarnation::text
+             OR (v_event.binding->>'deployment_generation')::bigint
+                IS DISTINCT FROM v_registration.deployment_generation
+             OR v_event.binding->'candidate'->>'algorithm'
+                IS DISTINCT FROM v_registration.candidate_identity_algorithm
+             OR v_event.binding->'candidate'->>'identity'
+                IS DISTINCT FROM v_registration.candidate_identity
+             OR v_event.binding->'candidate'->>'publication_sha256'
+                IS DISTINCT FROM v_registration.candidate_publication_sha256 THEN
+            RAISE EXCEPTION 'executable protected release event binding is stale'
+              USING ERRCODE = '55000';
+          END IF;
           v_release := jsonb_build_object(
             'schema_version', 2,
             'binding', v_event.binding,
@@ -152,6 +168,7 @@ def _install_ack_function() -> None:
           p_agent_incarnation uuid,
           p_admission_event_id bigint,
           p_publication_payload jsonb,
+          p_canonical_payload bytea,
           p_publication_digest text,
           p_manager_acknowledgement_digest text
         )
@@ -168,7 +185,6 @@ def _install_ack_function() -> None:
           v_existing_kind text;
           v_event record;
           v_release jsonb;
-          v_inserted_id bigint;
           v_updated bigint;
         BEGIN
           IF current_setting('transaction_isolation') <> 'serializable' THEN
@@ -190,8 +206,14 @@ def _install_ack_function() -> None:
              OR p_admission_event_id <= 0
              OR jsonb_typeof(p_publication_payload) IS DISTINCT FROM 'object'
              OR octet_length(p_publication_payload::text) > 8388608
+             OR p_canonical_payload IS NULL
+             OR octet_length(p_canonical_payload) > 8388608
+             OR convert_from(p_canonical_payload, 'UTF8')::jsonb
+                IS DISTINCT FROM p_publication_payload
              OR p_publication_digest IS NULL
              OR p_publication_digest !~ '^[0-9a-f]{{64}}$'
+             OR encode(sha256(p_canonical_payload), 'hex')
+                IS DISTINCT FROM p_publication_digest
              OR p_manager_acknowledgement_digest IS NULL
              OR p_manager_acknowledgement_digest !~ '^[0-9a-f]{{64}}$'
              OR p_publication_payload->>'protected_release_sha256' !~ '^[0-9a-f]{{64}}$' THEN
@@ -239,6 +261,8 @@ def _install_ack_function() -> None:
              WHERE event_id = p_admission_event_id;
             IF v_existing.agent_incarnation IS DISTINCT FROM p_agent_incarnation
                OR v_existing.publication_payload IS DISTINCT FROM p_publication_payload
+               OR v_existing.publication_canonical_payload
+                  IS DISTINCT FROM p_canonical_payload
                OR v_existing.publication_digest IS DISTINCT FROM p_publication_digest
                OR v_existing.manager_acknowledgement_digest IS DISTINCT FROM
                   p_manager_acknowledgement_digest THEN
@@ -280,6 +304,20 @@ def _install_ack_function() -> None:
             RAISE EXCEPTION 'executable protected release digest is invalid'
               USING ERRCODE = '55000';
           END IF;
+          IF v_event.binding->>'subject_id' IS DISTINCT FROM v_registration.subject_id::text
+             OR v_event.binding->>'subject_incarnation'
+                IS DISTINCT FROM v_registration.subject_incarnation::text
+             OR (v_event.binding->>'deployment_generation')::bigint
+                IS DISTINCT FROM v_registration.deployment_generation
+             OR v_event.binding->'candidate'->>'algorithm'
+                IS DISTINCT FROM v_registration.candidate_identity_algorithm
+             OR v_event.binding->'candidate'->>'identity'
+                IS DISTINCT FROM v_registration.candidate_identity
+             OR v_event.binding->'candidate'->>'publication_sha256'
+                IS DISTINCT FROM v_registration.candidate_publication_sha256 THEN
+            RAISE EXCEPTION 'executable protected release event binding is stale'
+              USING ERRCODE = '55000';
+          END IF;
           v_release := jsonb_build_object(
             'schema_version', 2,
             'binding', v_event.binding,
@@ -297,11 +335,12 @@ def _install_ack_function() -> None:
 
           INSERT INTO {SCHEMA}.executable_release_publication_events
             (agent_incarnation, admission_event_id, publication_payload,
-             publication_digest, manager_acknowledgement_digest)
+             publication_canonical_payload, publication_digest,
+             manager_acknowledgement_digest)
           VALUES
             (p_agent_incarnation, p_admission_event_id, p_publication_payload,
-             p_publication_digest, p_manager_acknowledgement_digest)
-          RETURNING publication_event_id INTO v_inserted_id;
+             p_canonical_payload, p_publication_digest,
+             p_manager_acknowledgement_digest);
 
           UPDATE {SCHEMA}.executable_release_publication_state
              SET last_event_id = p_admission_event_id
@@ -346,6 +385,9 @@ def upgrade() -> None:
           publication_payload jsonb NOT NULL CHECK (
             jsonb_typeof(publication_payload) = 'object'
             AND octet_length(publication_payload::text) <= 8388608
+          ),
+          publication_canonical_payload bytea NOT NULL CHECK (
+            octet_length(publication_canonical_payload) <= 8388608
           ),
           publication_digest text NOT NULL CHECK (publication_digest ~ '^[0-9a-f]{{64}}$'),
           manager_acknowledgement_digest text NOT NULL CHECK (

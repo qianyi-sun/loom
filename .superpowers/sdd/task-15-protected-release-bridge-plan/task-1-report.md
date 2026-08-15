@@ -100,3 +100,53 @@ Earlier exact broad Ruff format command from the original brief was also run and
 - The original brief named `tests/unit/test_capacity_agent_admission.py`, but this worktree has `tests/unit/test_capacity_agent_admission_contracts.py`; tests were added to and run from the existing file.
 - The exact broad Ruff format command from the original brief still fails on unrelated pre-existing formatting drift in `src/loom_capacity_agent/reporter.py` and `src/loom_capacity_agent/secret_init.py`. Per the preservation constraint, those files were not modified or staged.
 - The combined 117-test suite was not rerun after adding the final explicit skip-event assertion because the checkpoint instruction limited further execution to Ruff/MyPy/diff gates. The outbox-focused test containing the skip assertion was rerun and passed.
+
+## Fix round 1
+
+### Findings addressed
+
+- First acknowledgement now binds `publication_digest` to canonical executable release bytes in SQL, not just Python.
+- Publication evidence now stores `publication_canonical_payload` and exact replay compares it.
+- Read and ack SQL selection now fail closed when an event binding is stale against the current agent registration subject/incarnation, deployment generation, candidate algorithm, candidate identity, or candidate publication digest.
+- Wrong-agent acknowledgement, executor/observer ack denial, and append-only UPDATE/DELETE/TRUNCATE evidence table behavior are covered.
+- The unused `v_inserted_id` variable was removed.
+
+### Fix round 1 RED evidence
+
+- `uv run --no-sync pytest -q tests/integration/test_capacity_agent_executable_admission.py -k 'release_outbox'`
+  - RED: `2 failed, 4 passed, 34 deselected`.
+  - Failures showed the six-argument ack signature was absent and stale candidate/deployment binding was accepted by SQL.
+- `uv run --no-sync pytest -q tests/integration/test_capacity_guard_migrations.py -k '0018 or executable_release_publication_evidence_is_append_only'`
+  - RED: `2 failed, 1 passed, 23 deselected`.
+  - Failures showed the six-argument ack signature and `publication_canonical_payload` column were absent.
+- `uv run --no-sync pytest -q tests/integration/test_capacity_agent_migrations.py -k bounded_agent_functions`
+  - RED: `1 failed, 7 deselected`.
+  - Failure showed the agent grant inventory still exposed the old ack signature.
+
+### Fix round 1 GREEN evidence
+
+- `uv run --no-sync pytest -q tests/integration/test_capacity_agent_executable_admission.py -k 'release_outbox'`
+  - GREEN before formatting: `6 passed, 34 deselected`.
+- `uv run --no-sync pytest -q tests/integration/test_capacity_guard_migrations.py -k '0018 or executable_release_publication_evidence_is_append_only'`
+  - GREEN: `3 passed, 23 deselected`.
+- `uv run --no-sync pytest -q tests/integration/test_capacity_agent_migrations.py -k bounded_agent_functions`
+  - GREEN: `1 passed, 7 deselected`.
+- `uv run --no-sync pytest -q tests/integration/test_capacity_agent_executable_admission.py tests/integration/test_capacity_agent_migrations.py tests/integration/test_capacity_guard_migrations.py tests/integration/test_capacity_submission_store.py tests/unit/test_capacity_agent_admission_contracts.py`
+  - GREEN: `119 passed`.
+- `uv run --no-sync pytest -q tests/integration/test_capacity_agent_executable_admission.py -k 'release_outbox'`
+  - GREEN after formatting: `6 passed, 34 deselected`.
+
+### Fix round 1 quality gates
+
+- `uv run --no-sync ruff format --check capacity_guard_migrations/versions/guard_0018_executable_release_outbox.py src/loom_capacity_agent/admission.py src/loom_capacity_agent/store.py tests/unit/test_capacity_agent_admission_contracts.py tests/integration/test_capacity_agent_executable_admission.py tests/integration/test_capacity_agent_migrations.py tests/integration/test_capacity_guard_migrations.py tests/integration/test_capacity_submission_store.py`
+  - PASS: `8 files already formatted`.
+- `uv run --no-sync ruff check capacity_guard_migrations/versions/guard_0018_executable_release_outbox.py src/loom_capacity_agent/admission.py src/loom_capacity_agent/store.py tests/unit/test_capacity_agent_admission_contracts.py tests/integration/test_capacity_agent_executable_admission.py tests/integration/test_capacity_agent_migrations.py tests/integration/test_capacity_guard_migrations.py tests/integration/test_capacity_submission_store.py`
+  - PASS: `All checks passed!`
+- `uv run --no-sync mypy src/loom_capacity_agent/admission.py src/loom_capacity_agent/store.py`
+  - PASS: `Success: no issues found in 2 source files`.
+- `git diff --check`
+  - PASS.
+
+### Fix round 1 concerns
+
+- The unrelated unstaged retained-runtime/capacity migration files remain preserved.

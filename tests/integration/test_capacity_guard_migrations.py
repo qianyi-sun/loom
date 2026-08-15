@@ -1168,7 +1168,7 @@ def test_guard_0018_downgrades_to_0017_and_reupgrades_outbox_faithfully(
     read_signature = "loom_capacity_guard.read_next_executable_protected_release(uuid)"
     ack_signature = (
         "loom_capacity_guard.acknowledge_executable_protected_release_publication"
-        "(uuid,bigint,jsonb,text,text)"
+        "(uuid,bigint,jsonb,bytea,text,text)"
     )
     revoke_signature = (
         "loom_capacity_guard.revoke_prepared_executable_bootstrap(uuid,uuid,jsonb,bytea,text)"
@@ -1272,13 +1272,15 @@ def test_guard_0018_refuses_downgrade_with_publication_evidence(
             text(
                 "INSERT INTO loom_capacity_guard.executable_release_publication_events "
                 "(agent_incarnation, admission_event_id, publication_payload, "
-                "publication_digest, manager_acknowledgement_digest) "
-                "VALUES (:agent_incarnation, :event_id, '{}'::jsonb, :publication_digest, "
-                ":manager_acknowledgement_digest)"
+                "publication_canonical_payload, publication_digest, "
+                "manager_acknowledgement_digest) "
+                "VALUES (:agent_incarnation, :event_id, '{}'::jsonb, CAST(:canonical AS bytea), "
+                ":publication_digest, :manager_acknowledgement_digest)"
             ),
             {
                 "agent_incarnation": event["agent_incarnation"],
                 "event_id": event["event_id"],
+                "canonical": b"{}",
                 "publication_digest": "a" * 64,
                 "manager_acknowledgement_digest": "b" * 64,
             },
@@ -1286,6 +1288,56 @@ def test_guard_0018_refuses_downgrade_with_publication_evidence(
 
     with pytest.raises(DBAPIError, match="cannot downgrade guard_0018"):
         command.downgrade(cfg, "guard_0017")
+
+
+def test_executable_release_publication_evidence_is_append_only(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    with _owner_connection(capacity_guard_database) as connection:
+        _subject_id, _subject_incarnation, intent_id, _worker_id, _worker_incarnation = (
+            _seed_executable_observation_rows(connection)
+        )
+        event = (
+            connection.execute(
+                text(
+                    "SELECT event_id, agent_incarnation "
+                    "FROM loom_capacity_guard.executable_admission_events "
+                    "WHERE intent_id = :intent_id "
+                    "ORDER BY event_id LIMIT 1"
+                ),
+                {"intent_id": intent_id},
+            )
+            .mappings()
+            .one()
+        )
+        connection.execute(
+            text(
+                "INSERT INTO loom_capacity_guard.executable_release_publication_events "
+                "(agent_incarnation, admission_event_id, publication_payload, "
+                "publication_canonical_payload, publication_digest, "
+                "manager_acknowledgement_digest) "
+                "VALUES (:agent_incarnation, :event_id, '{}'::jsonb, CAST(:canonical AS bytea), "
+                ":publication_digest, :manager_acknowledgement_digest)"
+            ),
+            {
+                "agent_incarnation": event["agent_incarnation"],
+                "event_id": event["event_id"],
+                "canonical": b"{}",
+                "publication_digest": hashlib.sha256(b"{}").hexdigest(),
+                "manager_acknowledgement_digest": "b" * 64,
+            },
+        )
+
+    statements = (
+        "UPDATE loom_capacity_guard.executable_release_publication_events "
+        "SET publication_digest = publication_digest",
+        "DELETE FROM loom_capacity_guard.executable_release_publication_events",
+        "TRUNCATE loom_capacity_guard.executable_release_publication_events CASCADE",
+    )
+    for statement in statements:
+        with pytest.raises(DBAPIError, match="append-only"):
+            with _owner_connection(capacity_guard_database) as connection:
+                connection.execute(text(statement))
 
 
 @pytest.mark.asyncio

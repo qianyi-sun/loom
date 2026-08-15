@@ -44,6 +44,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableBootstrapRegistrationV2,
     ExecutableIntentBindingV2,
     ExecutionFenceV2,
+    canonical_executable_bytes,
     canonical_executable_digest,
 )
 from tests.integration.test_capacity_agent_store import (
@@ -553,12 +554,66 @@ async def test_agent_release_outbox_rejects_wrong_authority_and_changed_replay(
             )
 
     async with _serializable_agent_session(capacity_guard_database) as session:
+        canonical_payload = canonical_executable_bytes(publication.release)
+        changed_canonical_payload = canonical_payload.replace(
+            b'"executable":true', b'"executable":true '
+        )
+        with pytest.raises(DBAPIError, match=r"digest|canonical|publication"):
+            await session.execute(
+                text(
+                    "SELECT loom_capacity_guard."
+                    "acknowledge_executable_protected_release_publication("
+                    ":agent_incarnation, :event_id, CAST(:publication_payload AS jsonb), "
+                    "CAST(:canonical_payload AS bytea), :publication_digest, "
+                    ":manager_acknowledgement_digest)"
+                ),
+                {
+                    "agent_incarnation": registration.agent_incarnation,
+                    "event_id": publication.event_id,
+                    "publication_payload": canonical_payload.decode("ascii"),
+                    "canonical_payload": changed_canonical_payload,
+                    "publication_digest": "8" * 64,
+                    "manager_acknowledgement_digest": "9" * 64,
+                },
+            )
+
+    async with _serializable_agent_session(capacity_guard_database) as session:
+        assert await read_next_executable_protected_release(session, registration=registration) == (
+            publication
+        )
+    async with _owner_session(capacity_guard_database) as (_, _, session):
+        row = (
+            await session.execute(
+                text(
+                    "SELECT state.last_event_id, count(event.publication_event_id) AS evidence "
+                    "FROM loom_capacity_guard.executable_release_publication_state AS state "
+                    "LEFT JOIN loom_capacity_guard.executable_release_publication_events AS event "
+                    "ON event.agent_incarnation = state.agent_incarnation "
+                    "WHERE state.agent_incarnation = :agent_incarnation "
+                    "GROUP BY state.last_event_id"
+                ),
+                {"agent_incarnation": registration.agent_incarnation},
+            )
+        ).one()
+        assert row.last_event_id == 0
+        assert row.evidence == 0
+
+    async with _serializable_agent_session(capacity_guard_database) as session:
         skipped = publication.model_copy(update={"event_id": publication.event_id + 1})
         with pytest.raises(DBAPIError, match="next event"):
             await acknowledge_executable_protected_release_publication(
                 session,
                 registration=registration,
                 publication=skipped,
+                manager_acknowledgement_digest="9" * 64,
+            )
+
+    async with _serializable_agent_session(capacity_guard_database) as session:
+        with pytest.raises(DBAPIError, match="not registered"):
+            await acknowledge_executable_protected_release_publication(
+                session,
+                registration=other_registration,
+                publication=publication,
                 manager_acknowledgement_digest="9" * 64,
             )
 
@@ -619,6 +674,19 @@ async def test_release_outbox_privileges_are_bounded_to_agent_functions(
                     ).scalar_one()
                     is False
                 )
+                assert (
+                    connection.execute(
+                        text(
+                            "SELECT has_function_privilege(:role, "
+                            "'loom_capacity_guard."
+                            "acknowledge_executable_protected_release_publication"
+                            "(uuid,bigint,jsonb,bytea,text,text)', "
+                            "'EXECUTE')"
+                        ),
+                        {"role": _value(capacity_guard_database, role)},
+                    ).scalar_one()
+                    is False
+                )
     finally:
         admin.dispose()
 
@@ -628,9 +696,10 @@ async def test_release_outbox_privileges_are_bounded_to_agent_functions(
         "SET last_event_id = last_event_id",
         "SELECT * FROM loom_capacity_guard.executable_release_publication_events",
         "INSERT INTO loom_capacity_guard.executable_release_publication_events "
-        "(agent_incarnation, admission_event_id, publication_payload, publication_digest, "
-        "manager_acknowledgement_digest) "
-        "VALUES (:agent_incarnation, :event_id, '{}'::jsonb, :digest, :digest)",
+        "(agent_incarnation, admission_event_id, publication_payload, "
+        "publication_canonical_payload, publication_digest, manager_acknowledgement_digest) "
+        "VALUES (:agent_incarnation, :event_id, '{}'::jsonb, CAST(:canonical AS bytea), "
+        ":digest, :digest)",
     ):
         async with _serializable_agent_session(capacity_guard_database) as session:
             with pytest.raises(DBAPIError) as denied:
@@ -639,6 +708,7 @@ async def test_release_outbox_privileges_are_bounded_to_agent_functions(
                     {
                         "agent_incarnation": registration.agent_incarnation,
                         "event_id": publication.event_id,
+                        "canonical": b"{}",
                         "digest": "0" * 64,
                     },
                 )
@@ -662,6 +732,111 @@ async def test_release_outbox_privileges_are_bounded_to_agent_functions(
                 assert isinstance(denied.value.orig, InsufficientPrivilege)
         finally:
             await engine.dispose()
+
+    canonical_payload = canonical_executable_bytes(publication.release)
+    for url_key in ("executor_url", "observer_url"):
+        engine = create_async_engine(
+            make_url(_value(capacity_guard_database, url_key)), isolation_level="SERIALIZABLE"
+        )
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session, session.begin():
+                with pytest.raises(DBAPIError) as denied:
+                    await session.execute(
+                        text(
+                            "SELECT loom_capacity_guard."
+                            "acknowledge_executable_protected_release_publication("
+                            ":agent_incarnation, :event_id, CAST(:publication_payload AS jsonb), "
+                            "CAST(:canonical_payload AS bytea), :publication_digest, "
+                            ":manager_acknowledgement_digest)"
+                        ),
+                        {
+                            "agent_incarnation": registration.agent_incarnation,
+                            "event_id": publication.event_id,
+                            "publication_payload": canonical_payload.decode("ascii"),
+                            "canonical_payload": canonical_payload,
+                            "publication_digest": publication.publication_digest,
+                            "manager_acknowledgement_digest": "9" * 64,
+                        },
+                    )
+                assert isinstance(denied.value.orig, InsufficientPrivilege)
+        finally:
+            await engine.dispose()
+
+
+# Production break caught: the guard SQL selector must not publish a stale
+# executable release whose JSON binding no longer matches the current protected
+# agent registration's candidate/deployment.
+@pytest.mark.asyncio
+async def test_release_outbox_sql_rejects_stale_candidate_binding(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    _fence, registration = await _initialize_and_register(capacity_guard_database)
+    request = _bootstrap(registration.subject_id, registration.subject_incarnation)
+    stale_binding = request.binding.model_copy(
+        update={
+            "deployment_generation": registration.deployment_generation + 1,
+            "candidate": CandidateBindingV2(
+                algorithm=registration.candidate_identity_algorithm,
+                identity="8" * 64,
+                publication_sha256=registration.candidate_publication_sha256,
+            ),
+        }
+    )
+    stale_release = {
+        "schema_version": 2,
+        "binding": stale_binding.model_dump(mode="json", exclude_none=False),
+        "reporter_incarnation": str(registration.reporter_incarnation),
+        "bootstrap_registration_epoch": request.bootstrap_registration_epoch,
+        "protected_registration_epoch": request.bootstrap_registration_epoch + 1,
+        "bootstrap_revoked": True,
+        "protected_release_sha256": "7" * 64,
+        "executable": True,
+    }
+    async with _owner_session(capacity_guard_database) as (_, _, session):
+        await session.execute(
+            text(
+                "INSERT INTO loom_capacity_guard.executable_admission_events "
+                "(operation_id, event_kind, agent_incarnation, subject_id, subject_incarnation, "
+                "intent_id, bootstrap_registration_epoch, protected_registration_epoch, "
+                "worker_id, worker_incarnation, worker_credential_sha256, claim_high_water, "
+                "release_epoch, bootstrap_revoked, worker_credential_revoked, binding, "
+                "request_payload, request_digest, receipt) "
+                "VALUES (:operation_id, 'released', :agent_incarnation, :subject_id, "
+                ":subject_incarnation, :intent_id, :bootstrap_registration_epoch, "
+                ":protected_registration_epoch, :worker_id, :worker_incarnation, "
+                ":worker_credential_sha256, 0, 1, true, true, CAST(:binding AS jsonb), "
+                "'{}'::jsonb, :request_digest, CAST(:receipt AS jsonb))"
+            ),
+            {
+                "operation_id": UUID(int=170),
+                "agent_incarnation": registration.agent_incarnation,
+                "subject_id": registration.subject_id,
+                "subject_incarnation": registration.subject_incarnation,
+                "intent_id": stale_binding.intent_id,
+                "bootstrap_registration_epoch": request.bootstrap_registration_epoch,
+                "protected_registration_epoch": request.bootstrap_registration_epoch + 1,
+                "worker_id": UUID(int=171),
+                "worker_incarnation": UUID(int=172),
+                "worker_credential_sha256": "6" * 64,
+                "binding": json.dumps(
+                    stale_binding.model_dump(mode="json", exclude_none=False),
+                    sort_keys=True,
+                ),
+                "request_digest": "7" * 64,
+                "receipt": json.dumps(stale_release, sort_keys=True),
+            },
+        )
+
+    async with _serializable_agent_session(capacity_guard_database) as session:
+        with pytest.raises(DBAPIError, match="binding"):
+            await session.execute(
+                text(
+                    "SELECT loom_capacity_guard."
+                    "read_next_executable_protected_release(:agent_incarnation)"
+                ),
+                {"agent_incarnation": registration.agent_incarnation},
+            )
 
 
 @pytest.mark.asyncio
