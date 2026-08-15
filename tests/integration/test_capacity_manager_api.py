@@ -42,6 +42,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableReservationAcceptanceV2,
     ExecutableSubmissionRecoveryV2,
     ExecutionActivationV2,
+    ExecutionContextV2,
     ExecutionFenceV2,
 )
 from loom_capacity_manager.models import (
@@ -1165,6 +1166,101 @@ def test_v2_executor_work_route_is_exactly_pool_bound(
     assert crossed_pool.status_code == 403
     assert own_context.status_code == 409
     assert crossed_context.status_code == 403
+
+
+async def test_v2_executor_context_returns_public_execution_context_exactly(
+    tmp_path: Path,
+    isolated_capacity_api_url: str,
+) -> None:
+    registry_path = _owner_file(
+        tmp_path / "context-principals.json",
+        json.dumps(
+            {
+                "schema_version": 1,
+                "principals": [
+                    _principal(
+                        "fleet-operator",
+                        OPERATOR_TOKEN,
+                        ["capacity:reconcile"],
+                    ),
+                    _principal(
+                        "oldlab-executor-v2",
+                        OLDLAB_V2_EXECUTOR_TOKEN,
+                        ["capacity:execute:pool"],
+                        pool_id="oldlab",
+                        executor_id="oldlab-executor",
+                        executor_incarnation=OLDLAB_EXECUTOR_INCARNATION,
+                        executor_pool_generation=1,
+                    ),
+                ],
+            }
+        ),
+    )
+    settings = CapacityManagerSettings(
+        principals_file=registry_path,
+        db_url_file=_owner_file(tmp_path / "context-database-url", isolated_capacity_api_url),
+        expected_authority_incarnation=AUTHORITY_ID,
+        tls_cert_file=_owner_file(tmp_path / "context-server.crt", "test"),
+        tls_key_file=_owner_file(tmp_path / "context-server.key", "test"),
+        tls_client_ca_file=_owner_file(tmp_path / "context-client-ca.crt", "test"),
+    )
+    engine = create_async_engine(isolated_capacity_api_url, isolation_level="SERIALIZABLE")
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as capacity_session:
+            fixture = await setup_execution(capacity_session, execution_policy=execution_policy())
+            await capacity_session.commit()
+            injected_store = fixture.store
+            app = create_app(
+                settings,
+                verifier=CapacityPrincipalVerifier.from_file(registry_path),
+                management_store=injected_store,
+            )
+            with TestClient(app) as client:
+                assert client.get("/healthz").status_code == 200
+                prepared = await injected_store.prepare_execution_epoch(
+                    capacity_session,
+                    fixture.request.model_copy(
+                        update={"expected_writer_epoch": app.state.writer.writer_epoch}
+                    ),
+                    actor="activation-operator",
+                    idempotency_key=UUID(int=12321),
+                )
+                await register_execution_executors(capacity_session, fixture, prepared)
+                active = await injected_store.activate_execution_epoch(
+                    capacity_session,
+                    ExecutionActivationV2(
+                        authority_incarnation=prepared.authority_incarnation,
+                        expected_writer_epoch=prepared.writer_epoch,
+                        execution_epoch=prepared.execution_epoch,
+                        execution_manifest_sha256=prepared.execution_manifest_sha256,
+                        executable_new_capacity_ceiling=1,
+                        executable_new_capacity_rate_per_minute=1,
+                    ),
+                    actor="activation-operator",
+                    idempotency_key=UUID(int=12322),
+                )
+                await capacity_session.commit()
+
+                response = client.get(
+                    "/v2/executors/oldlab/context",
+                    headers={"Authorization": f"Bearer {OLDLAB_V2_EXECUTOR_TOKEN}"},
+                )
+
+            assert response.status_code == 200
+            expected = {
+                name: value
+                for name, value in active.model_dump(mode="json").items()
+                if name in ExecutionContextV2.model_fields
+            }
+            assert response.json() == expected
+            assert "executable" not in response.json()
+            assert (
+                ExecutionContextV2.model_validate_json(response.content).model_dump(mode="json")
+                == expected
+            )
+    finally:
+        await engine.dispose()
 
 
 def test_v2_work_rejects_legacy_executor_without_positive_pool_generation(

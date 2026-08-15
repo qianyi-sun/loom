@@ -57,6 +57,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableProtectedReleaseV2,
     ExecutableReservationAcceptanceV2,
     ExecutableSubmissionRecoveryV2,
+    ExecutionContextV2,
     PreparedExecutorBindingV2,
     canonical_executable_digest,
 )
@@ -1145,7 +1146,8 @@ def create_app(
                 result = await store.execution_authority(session)
             if result is None:
                 raise HTTPException(status_code=409, detail="execution context not available")
-            return jsonable_encoder(result)
+            public_payload = result.model_dump(include=set(ExecutionContextV2.model_fields))
+            return jsonable_encoder(ExecutionContextV2.model_validate(public_payload))
         except CapacityStoreError as exc:
             raise _store_error(exc) from exc
 
