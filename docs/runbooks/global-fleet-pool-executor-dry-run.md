@@ -202,10 +202,15 @@ manager refuses a non-zero executable ceiling. Existing executable capacity
 controllers are separate authorities and cannot treat these receipts as
 permission to launch, cancel, signal, or release physical capacity.
 
-The controller-local read-only observer is packaged separately as
-`loom_capacity_pool_executor`. It may use only `scontrol show nodes --json` and
-`squeue --json`, requires matching controller update epochs, and emits paired
-shadow/executable inventory contracts. This observer does not change the
-rehearsal rule above: it is not a daemon, all foreign or ambiguous records stay
-quarantined, and its presence does not permit installing or activating a pool
-executor.
+The controller-local read-only observer is the separate
+`loom_capacity_pool_executor` namespace in the Loom wheel. It may use only
+`scontrol show nodes --json` and `squeue --json`; the latter brackets the node
+read. It requires an allocation-stable queue, exact protected Slurm 23.11
+controller/parser identity, exact per-node resources and partitions, and
+digest-bound fixed binaries plus a root-owned protected Slurm config. Visible
+jobs are reconciled with node allocation counters; hidden residuals, compact
+arrays, and other ambiguity stay charged or quarantine the full affected
+capacity. The paired shadow/executable inventory carries the manager's exact
+journal checkpoint. This observer does not change the rehearsal rule above:
+it is not a daemon, all foreign or ambiguous records stay quarantined, and its
+presence does not permit installing or activating a pool executor.

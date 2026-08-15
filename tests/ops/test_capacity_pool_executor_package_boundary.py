@@ -27,7 +27,7 @@ def test_pool_executor_observer_has_no_scheduler_mutation_surface() -> None:
 
 
 def test_pool_executor_observer_is_not_imported_by_the_dry_run_package() -> None:
-    dry_run_sources = tuple(Path("src/loom_capacity_executor").glob("*.py"))
+    dry_run_sources = tuple(Path("src/loom_capacity_executor").rglob("*.py"))
 
     assert dry_run_sources
     assert not any(

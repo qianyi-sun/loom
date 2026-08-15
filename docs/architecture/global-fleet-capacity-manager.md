@@ -147,18 +147,28 @@ no apply, activation, or ceiling-changing command.
 
 ## Controller-local read-only Slurm inventory
 
-The separately packaged `loom_capacity_pool_executor` adapter can capture one
-controller-local Slurm 23.11 snapshot with exactly `scontrol show nodes --json`
-and `squeue --json`. It accepts the pair only when both documents carry the
-same finite positive `last_update`, contain no controller errors or warnings,
-and include every canonical pool node. The adapter maps OLDLAB's uppercase
-controller names back to canonical fleet IDs, keeps GB10 nodes 1 through 15 in
-scope, and ignores physical node 16 because it is outside Loom authority.
+The separate `loom_capacity_pool_executor` namespace in the Loom wheel can
+capture one controller-local Slurm 23.11 snapshot with only `scontrol show
+nodes --json` and `squeue --json`. It brackets the node read with two queue
+reads and accepts only allocation-identical queue documents whose finite
+positive `last_update`, exact cluster, Slurm patch release, and data-parser
+identity match the protected policy and node document. Every protected node
+must retain its exact CPU, memory, GPU, and partition envelope. The adapter
+maps OLDLAB's uppercase controller names back to canonical fleet IDs. The
+protected policy, rather than a compiled range, selects GB10 nodes; the current
+safe set is 1 through 9 and 11 through 15. Node 10 remains outside that set
+until it has the accepted partition envelope, while physical node 16 remains
+outside Loom authority.
 
 One accepted snapshot produces both `PoolObservationV1` and
 `ExecutableExecutorInventoryV2`. Healthy busy nodes remain visible; current
-jobs, pending jobs for any partition shared by a canonical node, GPU/TRES use,
-and unavailable canonical nodes stay charged. Until signed ownership and
+jobs, node-less nonterminal jobs, pending arrays, GPU/TRES use, and unavailable
+canonical nodes stay charged. Per-node allocation counters are reconciled
+against visible jobs, and any hidden residual or ambiguity becomes a
+quarantined node or full-pool charge. The subprocess runner owns fixed
+`/usr/bin` binaries, a digest-bound root-owned
+`/etc/loom/capacity/slurm.conf`, a minimal environment, bounded output and
+timeout, and cancellation-safe child reaping. Until signed ownership and
 terminal-release paths land, every foreign or ambiguous physical record is
 quarantined and therefore cannot authorize a capacity increase. The adapter is
 not imported by the dry-run executor package, has no scheduler-mutation
