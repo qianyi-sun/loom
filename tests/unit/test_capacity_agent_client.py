@@ -148,6 +148,11 @@ def _executable_receipt_digest(payload: dict[str, object]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _manager_executable_release_receipt_digest(configuration: ReporterConfigurationV1) -> str:
+    publication = _executable_publication(configuration)
+    return canonical_executable_digest(publication.release)
+
+
 @pytest.mark.asyncio
 async def test_publish_uses_exact_subject_endpoint_and_verifies_receipt() -> None:
     configuration = _configuration()
@@ -303,20 +308,17 @@ async def test_publish_executable_protected_release_uses_exact_v2_reporter_reque
     configuration = _configuration()
     publication = _executable_publication(configuration)
     seen: list[httpx.Request] = []
-    payload = {
-        "intent_id": str(publication.release.binding.intent_id),
-        "protected_release_sha256": publication.release.protected_release_sha256,
-        "executable": True,
-    }
 
     async def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request)
         return httpx.Response(
             200,
             json={
-                **payload,
-                "receipt_digest": _executable_receipt_digest(payload),
+                "intent_id": str(publication.release.binding.intent_id),
+                "protected_release_sha256": publication.release.protected_release_sha256,
+                "receipt_digest": canonical_executable_digest(publication.release),
                 "replayed": False,
+                "executable": True,
             },
         )
 
@@ -346,6 +348,45 @@ async def test_publish_executable_protected_release_uses_exact_v2_reporter_reque
     assert request.headers["Authorization"] == "Bearer reporter-secret"
     assert request.headers["Content-Type"] == "application/json"
     assert request.content == canonical_executable_bytes(publication.release)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replayed", (False, True))
+async def test_publish_executable_protected_release_accepts_manager_digest_for_full_release_payload(
+    replayed: bool,
+) -> None:
+    configuration = _configuration()
+    publication = _executable_publication(configuration)
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "intent_id": str(publication.release.binding.intent_id),
+                "protected_release_sha256": publication.release.protected_release_sha256,
+                "receipt_digest": canonical_executable_digest(publication.release),
+                "replayed": replayed,
+                "executable": True,
+            },
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = DemandReporterClient(
+        configuration,
+        manager_origin="https://capacity.internal",
+        bearer_token="reporter-secret",
+        http_client=http,
+    )
+    try:
+        receipt = await client.publish_executable_protected_release(
+            publication,
+            idempotency_key=uuid4(),
+        )
+    finally:
+        await http.aclose()
+
+    assert receipt.replayed is replayed
+    assert receipt.receipt_digest == canonical_executable_digest(publication.release)
 
 
 @pytest.mark.asyncio
@@ -537,19 +578,16 @@ async def test_publish_executable_protected_release_rejects_changed_receipt(
 async def test_publish_executable_protected_release_rejects_tampered_receipt_digest() -> None:
     configuration = _configuration()
     publication = _executable_publication(configuration)
-    payload = {
-        "intent_id": str(publication.release.binding.intent_id),
-        "protected_release_sha256": publication.release.protected_release_sha256,
-        "executable": True,
-    }
 
     async def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
             json={
-                **payload,
+                "intent_id": str(publication.release.binding.intent_id),
+                "protected_release_sha256": publication.release.protected_release_sha256,
                 "receipt_digest": "0" * 64,
                 "replayed": False,
+                "executable": True,
             },
         )
 
@@ -569,7 +607,7 @@ async def test_publish_executable_protected_release_rejects_tampered_receipt_dig
     finally:
         await http.aclose()
 
-    assert _executable_receipt_digest(payload) != "0" * 64
+    assert canonical_executable_digest(publication.release) != "0" * 64
 
 
 @pytest.mark.asyncio

@@ -368,3 +368,93 @@ Success: no issues found in 17 source files
 ### Fix-round concerns
 
 - The runtime independence test necessarily uses fake storage and publisher boundaries, but it runs the real `CapacityAgentRuntime`, real `ExecutableProtectedReleaseReporterRuntime`, and real `CapacityAgentServiceRuntime` together to exercise the actual retry/cancellation path rather than a mocked control-flow shell.
+
+## Fix round 2: executable protected-release receipt parity with manager digest
+
+### Summary
+
+Addressed the remaining server/client parity bug in executable protected-release receipt validation:
+
+- the unchanged manager still returns `_payload_digest(release.model_dump(mode="json", exclude_none=False))`,
+- that value is exactly `canonical_executable_digest(publication.release)`, i.e. `publication.publication_digest`,
+- the client had been validating a reduced digest over `{intent_id, protected_release_sha256, executable}` and therefore rejected genuine manager `200` responses,
+- validation now requires the receipt digest to equal the already-validated canonical release/publication digest,
+- tampered receipt digests are still rejected.
+
+### Files changed in fix round 2
+
+- Modified: `src/loom_capacity_agent/client.py`
+- Modified: `tests/unit/test_capacity_agent_client.py`
+- Modified: `.superpowers/sdd/task-15-protected-release-bridge-plan/task-2-report.md`
+
+### RED 6: genuine manager digest rejected
+
+Command:
+
+```bash
+uv run --no-sync pytest -q tests/unit/test_capacity_agent_client.py -k executable_protected_release
+```
+
+Relevant output:
+
+```text
+FAILED tests/unit/test_capacity_agent_client.py::test_publish_executable_protected_release_uses_exact_v2_reporter_request
+FAILED tests/unit/test_capacity_agent_client.py::test_publish_executable_protected_release_accepts_manager_digest_for_full_release_payload[False]
+FAILED tests/unit/test_capacity_agent_client.py::test_publish_executable_protected_release_accepts_manager_digest_for_full_release_payload[True]
+E   loom_capacity_agent.client.DemandPublishError: capacity manager executable protected release receipt digest changed
+```
+
+This confirmed the client rejected both fresh and replayed receipts carrying the real manager digest for the full release payload.
+
+### GREEN 6: client parity restored
+
+Command:
+
+```bash
+uv run --no-sync pytest -q tests/unit/test_capacity_agent_client.py -k executable_protected_release
+```
+
+Output:
+
+```text
+14 passed, 12 deselected in 0.14s
+```
+
+Notes:
+
+- the client now compares `receipt.receipt_digest` directly to `publication.publication_digest`,
+- the reduced receipt-only digest helper was removed as unused,
+- the tampered-digest rejection test still passes.
+
+### GREEN 7: full Task 2 suite after fix round 2
+
+Final verification command:
+
+```bash
+uv run --no-sync pytest -q tests/unit/test_capacity_agent_client.py tests/unit/test_capacity_agent_runtime.py tests/unit/test_capacity_agent_executable_release_reporter.py
+uv run --no-sync ruff format --check src/loom_capacity_agent tests/unit/test_capacity_agent_client.py tests/unit/test_capacity_agent_runtime.py tests/unit/test_capacity_agent_executable_release_reporter.py
+uv run --no-sync ruff check src/loom_capacity_agent tests/unit/test_capacity_agent_client.py tests/unit/test_capacity_agent_runtime.py tests/unit/test_capacity_agent_executable_release_reporter.py
+uv run --no-sync mypy src/loom_capacity_agent
+git diff --check
+```
+
+Final outputs:
+
+```text
+41 passed in 0.21s
+20 files already formatted
+All checks passed!
+Success: no issues found in 17 source files
+```
+
+`git diff --check` returned cleanly.
+
+### Fix-round self-review
+
+- Client/server parity now matches the live manager contract: the client accepts the manager receipt digest for the canonical full executable release payload.
+- Replay parity is covered explicitly; both `replayed=False` and `replayed=True` receipts are accepted when the digest matches the canonical release payload.
+- Tampered digest rejection remains intact because the client compares against the trusted, locally recomputed `publication.publication_digest`.
+
+### Fix-round concerns
+
+- The parity fix assumes the manager continues returning the digest of the full `ExecutableProtectedReleaseV2` payload, which is what `execution_store.acknowledge_protected_release()` returns today via `_payload_digest(payload)`. If the manager contract later changes, the client and these tests will need to change together.

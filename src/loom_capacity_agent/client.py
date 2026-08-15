@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import os
 import ssl
 import stat
@@ -91,17 +89,6 @@ class ExecutableProtectedReleasePublishReceiptV2(BaseModel):
     receipt_digest: Digest
     replayed: bool
     executable: Literal[True]
-
-
-def _receipt_digest(payload: dict[str, object]) -> str:
-    encoded = json.dumps(
-        payload,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-        default=str,
-    ).encode("ascii")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -529,13 +516,7 @@ class DemandReporterClient:
             raise DemandPublishError(
                 "capacity manager executable protected release receipt does not match the report"
             )
-        if receipt.receipt_digest != _receipt_digest(
-            {
-                "intent_id": receipt.intent_id,
-                "protected_release_sha256": receipt.protected_release_sha256,
-                "executable": receipt.executable,
-            }
-        ):
+        if receipt.receipt_digest != publication.publication_digest:
             raise DemandPublishError(
                 "capacity manager executable protected release receipt digest changed"
             )
