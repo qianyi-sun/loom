@@ -1214,7 +1214,7 @@ def create_app(
         session_factory, _store, _writer = runtime(request)
         async with session_factory() as session:
             row = await session.get(CapacityAllocationEpoch, allocation_epoch)
-        if row is None:
+        if row is None or row.executable:
             raise HTTPException(status_code=404, detail="shadow epoch not found")
         return {
             "allocation_epoch": row.allocation_epoch,
@@ -1235,12 +1235,15 @@ def create_app(
     ) -> Any:
         limit = _bounded_limit(limit)
         session_factory, _store, _writer = runtime(request)
-        query = select(CapacityAllocation).where(
-            CapacityAllocation.allocation_epoch == allocation_epoch
-        )
-        if cursor is not None:
-            query = query.where(CapacityAllocation.id > cursor)
         async with session_factory() as session:
+            epoch = await session.get(CapacityAllocationEpoch, allocation_epoch)
+            if epoch is None or epoch.executable:
+                raise HTTPException(status_code=404, detail="shadow epoch not found")
+            query = select(CapacityAllocation).where(
+                CapacityAllocation.allocation_epoch == allocation_epoch
+            )
+            if cursor is not None:
+                query = query.where(CapacityAllocation.id > cursor)
             rows = (
                 (await session.execute(query.order_by(CapacityAllocation.id).limit(limit + 1)))
                 .scalars()

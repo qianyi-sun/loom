@@ -2850,6 +2850,14 @@ class CapacityManagementStore:
                 )
             )
         ).all()
+        reservation_expiries = [
+            tranche.expires_at
+            for tranche, _shape in reservation_rows
+            if tranche.state == "proposed"
+        ]
+        reservation_valid_until = (
+            min(reservation_expiries) if reservation_expiries else None
+        )
         state_by_shape = {
             "proposed": "proposed",
             "accepted": "accepted",
@@ -2941,6 +2949,7 @@ class CapacityManagementStore:
             effective_account_policies=effective_accounts,
             subjects=subject_inputs,
             pools=pool_inputs,
+            reservation_valid_until=reservation_valid_until,
             observed_commitments=_deduplicate_observed_commitments(observed),
             fairness_cursors=fairness,
             existing_pending_slots=0,
@@ -3048,6 +3057,26 @@ class CapacityManagementStore:
             database_received_at=received,
         )
 
+    def allocation_input_valid_until(
+        self,
+        value: AllocationInputV1,
+    ) -> datetime | None:
+        """Return the earliest expiry of an input currently marked valid."""
+
+        expiries: list[datetime] = []
+        if value.reservation_valid_until is not None:
+            expiries.append(value.reservation_valid_until)
+        for freshness in (
+            *(subject.freshness for subject in value.subjects),
+            *(pool.freshness for pool in value.pools),
+        ):
+            if freshness.state != "valid":
+                continue
+            if freshness.database_received_at is None:
+                raise CapacityStoreError("valid allocation freshness lacks receipt time")
+            expiries.append(freshness.database_received_at + self._freshness)
+        return min(expiries, default=None)
+
     async def commit_shadow_epoch(
         self,
         session: AsyncSession,
@@ -3055,12 +3084,18 @@ class CapacityManagementStore:
         epoch: ShadowEpochV1,
     ) -> CommittedShadowEpoch:
         async with _write_transaction(session):
-            authority = await _lock_authority(session)
+            authority = await _lock_any_authority(session)
             if (
                 authority.authority_incarnation != writer.authority_incarnation
                 or authority.writer_epoch != writer.writer_epoch
             ):
                 raise StaleWriterError("writer is no longer current")
+            if authority.execution_state == "active":
+                raise StaleAllocationInputError(
+                    "execution authority activated before shadow commit"
+                )
+            if authority.executable_new_capacity_ceiling != 0:
+                raise AuthorityRecoveryError("capacity authority is not shadow-only")
             current_input = await self.load_allocation_input(session, writer)
             current_digest = canonical_digest(current_input)
             if current_digest != epoch.input_digest:
@@ -3136,8 +3171,9 @@ class CapacityManagementStore:
                         last_shadow_epoch=row.allocation_epoch,
                     )
                 )
-            authority.increase_freeze = False
-            authority.increase_freeze_reason = None
+            if authority.execution_state == "shadow":
+                authority.increase_freeze = False
+                authority.increase_freeze_reason = None
             authority.updated_at = now
             session.add(
                 _audit(
@@ -3153,7 +3189,7 @@ class CapacityManagementStore:
             )
             return CommittedShadowEpoch(row.allocation_epoch, epoch.input_digest)
 
-    async def record_shadow_failure(
+    async def record_reconcile_failure(
         self,
         session: AsyncSession,
         writer: WriterFence,
@@ -3168,7 +3204,7 @@ class CapacityManagementStore:
         expected_input_digest: str | None,
         persist_failed_epoch: bool = True,
     ) -> RecordedShadowFailure:
-        """Persist one fenced fail-closed diagnostic without allocation rows."""
+        """Inspect locked durable authority and persist one fail-closed diagnostic."""
 
         if not reason or len(reason.encode("utf-8")) > 1024:
             raise ValueError("shadow failure reason must be between 1 and 1024 bytes")
@@ -3178,31 +3214,99 @@ class CapacityManagementStore:
         ):
             raise ValueError("expected input digest must be lowercase SHA-256")
         async with _write_transaction(session):
-            authority = await _lock_authority(session)
+            authority = await _lock_any_authority(session)
             if (
                 authority.authority_incarnation != writer.authority_incarnation
                 or authority.writer_epoch != writer.writer_epoch
             ):
                 raise StaleWriterError("writer is no longer current")
-            current_input: AllocationInputV1 | None = None
-            if expected_input_digest is not None:
-                current_input = await self.load_allocation_input(session, writer)
-                if canonical_digest(current_input) != expected_input_digest:
-                    raise StaleAllocationInputError(
-                        "allocation input changed before failure record"
+
+            execution_epoch: int | None = None
+            execution_manifest_sha256: str | None = None
+            if authority.execution_state == "shadow":
+                if (
+                    authority.execution_epoch != 0
+                    or authority.execution_manifest_sha256 is not None
+                    or authority.executable_new_capacity_ceiling != 0
+                ):
+                    raise AuthorityRecoveryError("shadow execution authority is contradictory")
+                configuration_epoch: int | None = None
+            elif authority.execution_state == "active":
+                if (
+                    authority.execution_epoch <= 0
+                    or authority.execution_manifest_sha256 is None
+                    or authority.executable_new_capacity_ceiling <= 0
+                ):
+                    raise AuthorityRecoveryError("active execution authority is incomplete")
+                execution_row = (
+                    await session.execute(
+                        select(CapacityExecutionEpoch)
+                        .where(CapacityExecutionEpoch.execution_epoch == authority.execution_epoch)
+                        .with_for_update()
                     )
-            configuration_epoch = (
-                current_input.configuration.configuration_epoch
-                if current_input is not None
-                else (
+                ).scalar_one_or_none()
+                if execution_row is None:
+                    raise AuthorityRecoveryError("execution epoch row is missing")
+                execution = self._execution_context(authority, execution_row)
+                if (
+                    not isinstance(execution, ExecutionAuthorityV2)
+                    or execution.execution_state != "active"
+                    or execution.executable_new_capacity_ceiling <= 0
+                    or execution.executable_new_capacity_rate_per_minute <= 0
+                ):
+                    raise AuthorityRecoveryError("active execution authority is invalid")
+                configuration_epoch = execution.configuration_epoch
+                execution_epoch = execution.execution_epoch
+                execution_manifest_sha256 = execution.execution_manifest_sha256
+            else:
+                raise AuthorityRecoveryError(
+                    "reconciliation failure cannot be attributed to transitional authority"
+                )
+
+            current_input: AllocationInputV1 | None = None
+            observed_input_digest: str | None = None
+            input_drifted = False
+            input_revalidation_failed = False
+            if expected_input_digest is not None:
+                try:
+                    current_input = await self.load_allocation_input(session, writer)
+                except DBAPIError:
+                    raise
+                except Exception:
+                    input_revalidation_failed = True
+                if current_input is not None:
+                    observed_input_digest = canonical_digest(current_input)
+                    input_drifted = observed_input_digest != expected_input_digest
+                    if (
+                        configuration_epoch is not None
+                        and current_input.configuration.configuration_epoch
+                        != configuration_epoch
+                    ):
+                        input_drifted = True
+                    if configuration_epoch is None:
+                        configuration_epoch = current_input.configuration.configuration_epoch
+            elif configuration_epoch is None:
+                configuration_epoch = (
                     await session.execute(
                         select(func.max(CapacityConfigurationEpoch.configuration_epoch))
                     )
                 ).scalar_one()
-            )
+            if configuration_epoch is None:
+                configuration_epoch = (
+                    await session.execute(
+                        select(func.max(CapacityConfigurationEpoch.configuration_epoch))
+                    )
+                ).scalar_one()
+
             input_digest = expected_input_digest or ("0" * 64)
             allocation_epoch: int | None = None
-            if persist_failed_epoch and configuration_epoch is not None:
+            now = await _db_now(session)
+            if (
+                persist_failed_epoch
+                and configuration_epoch is not None
+                and not input_drifted
+                and not input_revalidation_failed
+            ):
                 row = CapacityAllocationEpoch(
                     writer_epoch=writer.writer_epoch,
                     configuration_epoch=configuration_epoch,
@@ -3212,29 +3316,52 @@ class CapacityManagementStore:
                     complete_payload={
                         "schema_version": 1,
                         "input_digest": input_digest,
-                        "reason": reason,
+                        "failure_reason": reason,
                         "executable": False,
                     },
                     executable=False,
-                    committed_at=await _db_now(session),
+                    execution_epoch=None,
+                    execution_manifest_sha256=None,
+                    committed_at=now,
                 )
                 session.add(row)
                 await session.flush()
                 allocation_epoch = row.allocation_epoch
-            now = await _db_now(session)
             authority.increase_freeze = True
             authority.increase_freeze_reason = event_kind
             authority.updated_at = now
+            object_binding: dict[str, Any] = {
+                "allocation_epoch": allocation_epoch,
+                "writer_epoch": writer.writer_epoch,
+            }
+            if configuration_epoch is not None:
+                object_binding["configuration_epoch"] = configuration_epoch
+            if execution_epoch is not None:
+                object_binding.update(
+                    {
+                        "execution_epoch": execution_epoch,
+                        "execution_manifest_sha256": execution_manifest_sha256,
+                    }
+                )
+            detail: dict[str, Any] = {
+                "input_digest": input_digest,
+                "reason": reason,
+                "executable": False,
+            }
+            if expected_input_digest is not None:
+                detail.update(
+                    {
+                        "observed_input_digest": observed_input_digest,
+                        "input_drifted": input_drifted or input_revalidation_failed,
+                    }
+                )
             session.add(
                 _audit(
                     actor_kind="manager",
                     actor_id=str(writer.authority_incarnation),
                     event_kind=event_kind,
-                    object_binding={
-                        "allocation_epoch": allocation_epoch,
-                        "writer_epoch": writer.writer_epoch,
-                    },
-                    detail={"input_digest": input_digest, "reason": reason},
+                    object_binding=object_binding,
+                    detail=detail,
                 )
             )
             return RecordedShadowFailure(allocation_epoch, input_digest)

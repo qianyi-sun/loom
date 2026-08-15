@@ -1174,10 +1174,19 @@ class AllocationInputV1(StrictV1Model):
     effective_account_policies: tuple[AccountPolicyV1, ...] = ()
     subjects: Annotated[tuple[SubjectAllocationInputV1, ...], Field(max_length=MAX_SUBJECTS)]
     pools: Annotated[tuple[PoolAllocationInputV1, ...], Field(max_length=MAX_POOLS)]
+    reservation_valid_until: datetime | None = None
     observed_commitments: tuple[ObservedCommitmentV1, ...] = ()
     fairness_cursors: tuple[FairnessCursorV1, ...] = ()
     existing_pending_slots: Quantity = 0
     existing_pending_jobs: Quantity = 0
+
+    @field_validator("reservation_valid_until")
+    @classmethod
+    def _reservation_validity(
+        cls,
+        value: datetime | None,
+    ) -> datetime | None:
+        return None if value is None else _utc(value)
 
     @field_validator("effective_account_policies")
     @classmethod

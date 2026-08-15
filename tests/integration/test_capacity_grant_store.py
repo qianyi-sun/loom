@@ -1883,7 +1883,7 @@ async def test_open_reservation_is_charged_and_retained_in_next_allocation(
         actor="executor-installer",
         idempotency_key=_REGISTRATION_KEY,
     )
-    await grants.propose_reservation(
+    proposed = await grants.propose_reservation(
         capacity_session,
         writer,
         proposal,
@@ -1899,6 +1899,7 @@ async def test_open_reservation_is_charged_and_retained_in_next_allocation(
         if item.subject_id == proposal.subject_id and item.pool_id == proposal.pool_id
     )
     assert len(reserves) == 1
+    assert allocation_input.reservation_valid_until == proposed.expires_at
     assert reserves[0].reservation_identity == str(proposal.shapes[0].intent_id)
     assert reserves[0].state == "proposed"
     assert allocation.desired_slots == proposal.shapes[0].concurrency_slots
