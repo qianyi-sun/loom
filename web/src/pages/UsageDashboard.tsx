@@ -57,6 +57,7 @@ export default function UsageDashboard(): JSX.Element {
 
   const query = useQuery({
     queryKey: ["usage", start, end, groupBy, teamId, auth.isAdmin],
+    enabled: auth.isAuthenticated,
     queryFn: () =>
       api.getUsage({
         start,
