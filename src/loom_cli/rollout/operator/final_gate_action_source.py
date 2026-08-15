@@ -116,8 +116,9 @@ class FinalGateActionSource:
             systemd_evidence,
             predecessor_evidence,
         )
-        if envelope.resume:
-            self._validate_resume_plan(envelope, plan)
+        protected_apply_plan = (
+            self._validate_resume_plan(envelope, plan) if envelope.resume else None
+        )
         plan_path = FinalGatePlanStore(
             self.state_root,
             request_id=envelope.request_id,
@@ -132,10 +133,28 @@ class FinalGateActionSource:
             executable=self.executable,
             executable_owner_uid=self.executable_owner_uid,
         )
+        convergence_runner = runner
+        if protected_apply_plan is not None:
+            protected_apply_store = FinalGatePlanStore(
+                self.state_root,
+                request_id=envelope.request_id,
+                attempt_number=protected_apply_plan.attempt_number,
+                service_uid=self.service_uid,
+            )
+            convergence_runner = InstalledFinalGateStepRunner(
+                service_uid=self.service_uid,
+                plan_path=protected_apply_store.path,
+                plan_digest=protected_apply_plan.plan_digest,
+                run=self.run,
+                executable=self.executable,
+                executable_owner_uid=self.executable_owner_uid,
+            )
 
         def action(check_id: str) -> FinalGateAction:
+            selected_runner = convergence_runner if check_id == "final.convergence" else runner
+
             def execute(operation: CheckOperation) -> FinalGateResult:
-                return runner(
+                return selected_runner(
                     check_id,
                     operation,
                     candidate_sha=envelope.resolved_sha,
@@ -193,9 +212,9 @@ class FinalGateActionSource:
         self,
         envelope: DriverEnvelope,
         plan: FinalGatePlan,
-    ) -> None:
+    ) -> FinalGatePlan | None:
         predecessor: FinalGatePlan | None = None
-        for attempt_number in range(envelope.attempt_number - 1, 0, -1):
+        for attempt_number in range(1, envelope.attempt_number):
             executions = FinalGateExecutionStore(
                 self.state_root,
                 request_id=envelope.request_id,
@@ -213,7 +232,7 @@ class FinalGateActionSource:
             ).read()
             break
         if predecessor is None:
-            return
+            return None
 
         def stable_payload(value: FinalGatePlan) -> dict[str, object]:
             payload = value.to_dict()
@@ -223,6 +242,7 @@ class FinalGateActionSource:
 
         if stable_payload(predecessor) != stable_payload(plan):
             raise ValueError("final gate resume plan binding drifted")
+        return predecessor
 
     def _publication(
         self,
