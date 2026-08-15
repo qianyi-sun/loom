@@ -1815,7 +1815,10 @@ class CapacityExecutionStore:
             for charged_row, charged_binding in charged_bindings
             if charged_binding.pool_id == binding.pool_id
         )
-        fixed_commitments = (*observation.commitments, *charged_commitments)
+        fixed_commitments = self._fixed_commitments_with_charged_intents(
+            observation.commitments,
+            charged_commitments,
+        )
         committed = checked_sum_vectors(tuple(item.resources for item in fixed_commitments))
         total = checked_sum_vectors(
             tuple(
@@ -1938,6 +1941,56 @@ class CapacityExecutionStore:
                 state,
             ),
             node_ids=binding.node_ids,
+        )
+
+    @staticmethod
+    def _fixed_commitments_with_charged_intents(
+        observed: tuple[ObservedCommitmentV1, ...],
+        charged: tuple[ObservedCommitmentV1, ...],
+    ) -> tuple[ObservedCommitmentV1, ...]:
+        authenticated = tuple(
+            item
+            for item in observed
+            if item.kind == "physical"
+            and item.ownership_state == "authenticated"
+            and item.reservation_identity is not None
+        )
+        deduplicated_charged = tuple(
+            item
+            for item in charged
+            if len(
+                tuple(
+                    candidate
+                    for candidate in authenticated
+                    if CapacityExecutionStore._authenticated_physical_matches_charged_intent(
+                        candidate,
+                        item,
+                    )
+                )
+            )
+            != 1
+        )
+        return (*observed, *deduplicated_charged)
+
+    @staticmethod
+    def _authenticated_physical_matches_charged_intent(
+        observed: ObservedCommitmentV1,
+        charged: ObservedCommitmentV1,
+    ) -> bool:
+        return (
+            observed.reservation_identity == charged.reservation_identity
+            and observed.physical_identity == charged.physical_identity
+            and observed.subject_id == charged.subject_id
+            and observed.subject_incarnation == charged.subject_incarnation
+            and observed.deployment_generation == charged.deployment_generation
+            and observed.pool_id == charged.pool_id
+            and observed.pool_generation == charged.pool_generation
+            and observed.profile_id == charged.profile_id
+            and observed.profile_generation == charged.profile_generation
+            and observed.profile_digest == charged.profile_digest
+            and observed.shape_id == charged.shape_id
+            and observed.resources == charged.resources
+            and observed.node_ids == charged.node_ids
         )
 
     async def _consume_rate_tokens(
