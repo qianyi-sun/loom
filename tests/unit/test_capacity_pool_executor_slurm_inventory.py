@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -194,6 +195,9 @@ def _policy() -> SlurmInventoryPolicy:
         controller_cluster="trt-gb10",
         slurm_version=(23, 11, 4),
         data_parser="data_parser/v0.0.40",
+        query_principal="loom-capacity-slurm-reader",
+        query_uid=os.geteuid(),
+        job_visibility_evidence_sha256="a" * 64,
         scontrol_sha256="c" * 64,
         squeue_sha256="d" * 64,
         slurm_conf_sha256="e" * 64,
@@ -234,6 +238,9 @@ def _controller_bound_policy() -> SlurmInventoryPolicy:
         controller_cluster="trt-gb10",
         slurm_version=(23, 11, 4),
         data_parser="data_parser/v0.0.40",
+        query_principal=policy.query_principal,
+        query_uid=policy.query_uid,
+        job_visibility_evidence_sha256=policy.job_visibility_evidence_sha256,
         scontrol_sha256="c" * 64,
         squeue_sha256="d" * 64,
         slurm_conf_sha256="e" * 64,
@@ -268,10 +275,55 @@ def test_policy_rejects_an_unsupported_slurm_release() -> None:
             controller_cluster=policy.controller_cluster,
             slurm_version=(24, 5, 0),
             data_parser=policy.data_parser,
+            query_principal=policy.query_principal,
+            query_uid=policy.query_uid,
+            job_visibility_evidence_sha256=policy.job_visibility_evidence_sha256,
             scontrol_sha256=policy.scontrol_sha256,
             squeue_sha256=policy.squeue_sha256,
             slurm_conf_sha256=policy.slurm_conf_sha256,
         )
+
+
+def test_policy_requires_protected_full_visibility_query_evidence() -> None:
+    policy = _policy()
+
+    with pytest.raises(TypeError, match="query_principal"):
+        SlurmInventoryPolicy(
+            pool_id=policy.pool_id,
+            pool_generation=policy.pool_generation,
+            reporter_incarnation=policy.reporter_incarnation,
+            nodes=policy.nodes,
+            relevant_partitions=policy.relevant_partitions,
+            slot_resources=policy.slot_resources,
+            controller_cluster=policy.controller_cluster,
+            slurm_version=policy.slurm_version,
+            data_parser=policy.data_parser,
+            scontrol_sha256=policy.scontrol_sha256,
+            squeue_sha256=policy.squeue_sha256,
+            slurm_conf_sha256=policy.slurm_conf_sha256,
+        )
+
+
+@pytest.mark.parametrize(
+    "changes",
+    (
+        {"query_principal": "root/operator"},
+        {"query_uid": 0},
+        {"query_uid": True},
+        {"job_visibility_evidence_sha256": "0" * 64},
+        {"job_visibility_evidence_sha256": "g" * 64},
+    ),
+)
+def test_policy_rejects_invalid_full_visibility_query_evidence(
+    changes: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError, match=r"query|visibility"):
+        replace(_policy(), **changes)
+
+
+def test_policy_rejects_a_noncanonical_partition_name() -> None:
+    with pytest.raises(ValueError, match="partitions"):
+        replace(_policy(), relevant_partitions=("gb10,shared",))
 
 
 def test_busy_canonical_node_is_charged_and_out_of_authority_node_is_ignored() -> None:
@@ -362,6 +414,9 @@ def test_duplicate_canonical_node_policy_is_rejected() -> None:
             controller_cluster=policy.controller_cluster,
             slurm_version=policy.slurm_version,
             data_parser=policy.data_parser,
+            query_principal=policy.query_principal,
+            query_uid=policy.query_uid,
+            job_visibility_evidence_sha256=policy.job_visibility_evidence_sha256,
             scontrol_sha256=policy.scontrol_sha256,
             squeue_sha256=policy.squeue_sha256,
             slurm_conf_sha256=policy.slurm_conf_sha256,
@@ -385,6 +440,9 @@ def test_policy_normalizes_numerically_listed_hosts_to_contract_order() -> None:
         controller_cluster=policy.controller_cluster,
         slurm_version=policy.slurm_version,
         data_parser=policy.data_parser,
+        query_principal=policy.query_principal,
+        query_uid=policy.query_uid,
+        job_visibility_evidence_sha256=policy.job_visibility_evidence_sha256,
         scontrol_sha256=policy.scontrol_sha256,
         squeue_sha256=policy.squeue_sha256,
         slurm_conf_sha256=policy.slurm_conf_sha256,
@@ -414,6 +472,9 @@ def test_policy_rejects_a_canonical_node_without_physical_slots() -> None:
             controller_cluster=policy.controller_cluster,
             slurm_version=policy.slurm_version,
             data_parser=policy.data_parser,
+            query_principal=policy.query_principal,
+            query_uid=policy.query_uid,
+            job_visibility_evidence_sha256=policy.job_visibility_evidence_sha256,
             scontrol_sha256=policy.scontrol_sha256,
             squeue_sha256=policy.squeue_sha256,
             slurm_conf_sha256=policy.slurm_conf_sha256,
@@ -573,6 +634,57 @@ def test_pending_job_in_any_partition_of_a_canonical_node_is_charged() -> None:
     ]
 
 
+def test_pending_job_in_multiple_partitions_is_charged_when_any_is_relevant() -> None:
+    node_document, job_document = _documents()
+    _clear_canonical_allocation(node_document)
+    jobs = job_document["jobs"]
+    assert isinstance(jobs, list)
+    job = jobs[0]
+    assert isinstance(job, dict)
+    job["job_state"] = ["PENDING"]
+    job["partition"] = "gb10,shared"
+    job["job_resources"] = {"allocated_nodes": None}
+    job_document["jobs"] = [job]
+
+    reports = build_slurm_capacity_reports(
+        node_document,
+        job_document,
+        policy=_policy(),
+        binding=_binding(),
+        source_observed_at=datetime(2026, 8, 15, 12, 0, tzinfo=UTC),
+    )
+
+    assert [item.physical_identity for item in reports.pool_observation.commitments] == [
+        "slurm-job-42"
+    ]
+
+
+@pytest.mark.parametrize(
+    "partition",
+    ("", "gb10,", ",gb10", "gb10,,shared", "gb10,gb10", "gb10, shared", "gb10,*"),
+)
+def test_node_less_job_with_malformed_partition_list_is_rejected(partition: str) -> None:
+    node_document, job_document = _documents()
+    _clear_canonical_allocation(node_document)
+    jobs = job_document["jobs"]
+    assert isinstance(jobs, list)
+    job = jobs[0]
+    assert isinstance(job, dict)
+    job["job_state"] = ["PENDING"]
+    job["partition"] = partition
+    job["job_resources"] = {"allocated_nodes": None}
+    job_document["jobs"] = [job]
+
+    with pytest.raises(ValueError, match="partition is invalid"):
+        build_slurm_capacity_reports(
+            node_document,
+            job_document,
+            policy=_policy(),
+            binding=_binding(),
+            source_observed_at=datetime(2026, 8, 15, 12, 0, tzinfo=UTC),
+        )
+
+
 def test_gpu_tres_is_included_in_the_physical_resource_charge() -> None:
     node_document, job_document = _documents()
     jobs = job_document["jobs"]
@@ -724,6 +836,7 @@ async def test_subprocess_runner_owns_fixed_commands_and_minimal_environment(
             "LC_ALL": "C.UTF-8",
             "PATH": "/usr/bin:/bin",
             "SLURM_CONF": "/etc/loom/capacity/slurm.conf",
+            "SQUEUE_ALL": "1",
         }
         and call[1]["cwd"] == "/"
         for call in calls
@@ -743,6 +856,22 @@ async def test_subprocess_runner_rejects_every_non_inventory_command(
 
     with pytest.raises(ValueError, match="read-only"):
         await runner.run("mutate")  # type: ignore[arg-type]
+
+
+def test_subprocess_runner_rejects_a_different_effective_query_uid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        slurm_inventory,
+        "_verify_trusted_file",
+        lambda _path, _digest: None,
+    )
+
+    with pytest.raises(RuntimeError, match="query identity"):
+        SubprocessReadOnlySlurmCommandRunner(
+            policy=replace(_policy(), query_uid=os.geteuid() + 1),
+            timeout_seconds=2,
+        )
 
 
 @pytest.mark.asyncio
@@ -997,6 +1126,37 @@ def test_controller_evidence_binds_the_trusted_runtime_digests() -> None:
         node_document,
         job_document,
         policy=changed_policy,
+        binding=_binding(),
+        source_observed_at=datetime(2026, 8, 15, 12, 0, tzinfo=UTC),
+    )
+
+    assert changed.controller_sha256 != first.controller_sha256
+
+
+@pytest.mark.parametrize(
+    "changes",
+    (
+        {"query_principal": "loom-capacity-slurm-reader-v2"},
+        {"query_uid": os.geteuid() + 1},
+        {"job_visibility_evidence_sha256": "b" * 64},
+    ),
+)
+def test_controller_evidence_binds_full_visibility_query_identity(
+    changes: dict[str, object],
+) -> None:
+    node_document, job_document = _documents()
+    first = build_slurm_capacity_reports(
+        node_document,
+        job_document,
+        policy=_policy(),
+        binding=_binding(),
+        source_observed_at=datetime(2026, 8, 15, 12, 0, tzinfo=UTC),
+    )
+
+    changed = build_slurm_capacity_reports(
+        node_document,
+        job_document,
+        policy=replace(_policy(), **changes),
         binding=_binding(),
         source_observed_at=datetime(2026, 8, 15, 12, 0, tzinfo=UTC),
     )

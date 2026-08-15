@@ -150,23 +150,30 @@ no apply, activation, or ceiling-changing command.
 The separate `loom_capacity_pool_executor` namespace in the Loom wheel can
 capture one controller-local Slurm 23.11 snapshot with only `scontrol show
 nodes --json` and `squeue --json`. It brackets the node read with two queue
-reads and accepts only allocation-identical queue documents whose finite
-positive `last_update`, exact cluster, Slurm patch release, and data-parser
-identity match the protected policy and node document. Every protected node
-must retain its exact CPU, memory, GPU, and partition envelope. The adapter
-maps OLDLAB's uppercase controller names back to canonical fleet IDs. The
-protected policy, rather than a compiled range, selects GB10 nodes; the current
-safe set is 1 through 9 and 11 through 15. Node 10 remains outside that set
-until it has the accepted partition envelope, while physical node 16 remains
-outside Loom authority.
+reads. The fixed queue argv runs with protected `SQUEUE_ALL=1`; the runner
+requires its effective UID to equal the dedicated non-root query UID. The
+protected policy binds that UID, its query-principal identity, and a nonzero
+evidence digest proving that the principal has complete job visibility under
+the controller's `PrivateData` policy. All of those query semantics enter the
+controller evidence digest. The adapter accepts only allocation-identical
+queue documents whose finite positive `last_update`, exact cluster, Slurm
+patch release, and data-parser identity match the protected policy and node
+document. Every protected node must retain its exact CPU, memory, GPU, and
+partition envelope. The adapter maps OLDLAB's uppercase controller names back
+to canonical fleet IDs. The protected policy, rather than a compiled range,
+selects GB10 nodes; the current safe set is 1 through 9 and 11 through 15.
+Node 10 remains outside that set until it has the accepted partition envelope,
+while physical node 16 remains outside Loom authority.
 
 One accepted snapshot produces both `PoolObservationV1` and
 `ExecutableExecutorInventoryV2`. Healthy busy nodes remain visible; current
 jobs, node-less nonterminal jobs, pending arrays, GPU/TRES use, and unavailable
-canonical nodes stay charged. Per-node allocation counters are reconciled
-against visible jobs, and any hidden residual or ambiguity becomes a
-quarantined node or full-pool charge. The subprocess runner owns fixed
-`/usr/bin` binaries, a digest-bound root-owned
+canonical nodes stay charged. A node-less job's canonical comma-separated
+partition set is charged whenever any eligible partition reaches the protected
+nodes; malformed, empty, or duplicate partition entries fail closed. Per-node
+allocation counters are reconciled against visible jobs, and any hidden
+residual or ambiguity becomes a quarantined node or full-pool charge. The
+subprocess runner owns fixed `/usr/bin` binaries, a digest-bound root-owned
 `/etc/loom/capacity/slurm.conf`, a minimal environment, bounded output and
 timeout, and cancellation-safe child reaping. Until signed ownership and
 terminal-release paths land, every foreign or ambiguous physical record is

@@ -28,6 +28,7 @@ from loom_capacity_manager.executable_contracts import (
 )
 
 _MAX_SLURM_JSON_BYTES = 8 * 1024 * 1024
+_SLURM_PARTITION_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 
 
 class SlurmSnapshotRaceError(ValueError):
@@ -47,6 +48,9 @@ class SlurmInventoryPolicy:
     controller_cluster: str
     slurm_version: tuple[int, int, int]
     data_parser: str
+    query_principal: str
+    query_uid: int
+    job_visibility_evidence_sha256: str
     scontrol_sha256: str
     squeue_sha256: str
     slurm_conf_sha256: str
@@ -66,6 +70,9 @@ class SlurmInventoryPolicy:
             raise ValueError("Slurm inventory pool generation must be positive")
         if not self.relevant_partitions or len(self.relevant_partitions) != len(
             set(self.relevant_partitions)
+        ) or any(
+            _SLURM_PARTITION_PATTERN.fullmatch(partition) is None
+            for partition in self.relevant_partitions
         ):
             raise ValueError("Slurm inventory partitions must be unique and canonical")
         object.__setattr__(self, "relevant_partitions", tuple(sorted(self.relevant_partitions)))
@@ -88,6 +95,15 @@ class SlurmInventoryPolicy:
             raise ValueError("Slurm inventory supports only reviewed Slurm 23.11 releases")
         if not re.fullmatch(r"data_parser/v[0-9]+\.[0-9]+\.[0-9]+", self.data_parser):
             raise ValueError("Slurm data parser identity is invalid")
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_.-]{0,127}", self.query_principal):
+            raise ValueError("Slurm protected query principal is invalid")
+        if type(self.query_uid) is not int or not 0 < self.query_uid < 2**32 - 1:
+            raise ValueError("Slurm protected query uid is invalid")
+        if (
+            not re.fullmatch(r"[0-9a-f]{64}", self.job_visibility_evidence_sha256)
+            or self.job_visibility_evidence_sha256 == "0" * 64
+        ):
+            raise ValueError("Slurm complete job visibility evidence is invalid")
         for digest in (self.scontrol_sha256, self.squeue_sha256, self.slurm_conf_sha256):
             if not re.fullmatch(r"[0-9a-f]{64}", digest):
                 raise ValueError("Slurm trusted file digest is invalid")
@@ -141,6 +157,7 @@ _SLURM_ENVIRONMENT = {
     "LC_ALL": "C.UTF-8",
     "PATH": "/usr/bin:/bin",
     "SLURM_CONF": _SLURM_CONF_PATH,
+    "SQUEUE_ALL": "1",
 }
 
 
@@ -202,6 +219,8 @@ class SubprocessReadOnlySlurmCommandRunner:
         self.timeout_seconds = float(timeout_seconds)
 
     def _verify_runtime(self) -> None:
+        if os.geteuid() != self._policy.query_uid:
+            raise RuntimeError("protected Slurm query identity does not match policy")
         for path, digest in self._trusted_files:
             _verify_trusted_file(path, digest)
 
@@ -541,6 +560,19 @@ def _pool_resources(nodes: tuple[NodeEnvelopeV1, ...]) -> ResourceVectorV1:
     )
 
 
+def _job_partitions(value: object) -> frozenset[str]:
+    if not isinstance(value, str):
+        raise ValueError("Slurm node-less job partition is invalid")
+    partitions = value.split(",")
+    if (
+        not partitions
+        or any(_SLURM_PARTITION_PATTERN.fullmatch(partition) is None for partition in partitions)
+        or len(partitions) != len(set(partitions))
+    ):
+        raise ValueError("Slurm node-less job partition is invalid")
+    return frozenset(partitions)
+
+
 def _job_resources(
     job: Mapping[str, object],
     *,
@@ -577,10 +609,8 @@ def _job_resources(
     if not relevant:
         if allocated_node_names:
             return None
-        partition = job.get("partition")
-        if not isinstance(partition, str):
-            raise ValueError("Slurm node-less job partition is invalid")
-        if state == "terminal" or partition not in relevant_partitions:
+        partitions = _job_partitions(job.get("partition"))
+        if state == "terminal" or partitions.isdisjoint(relevant_partitions):
             return None
         if _is_compact_array(job) or state == "unknown":
             return _ParsedJobResources(pool_resources, (), {})
@@ -1023,6 +1053,12 @@ def build_slurm_capacity_reports(
                     "cluster": policy.controller_cluster,
                     "slurm_version": policy.slurm_version,
                     "data_parser": policy.data_parser,
+                    "query_principal": policy.query_principal,
+                    "query_uid": policy.query_uid,
+                    "job_visibility_evidence_sha256": (
+                        policy.job_visibility_evidence_sha256
+                    ),
+                    "squeue_all": _SLURM_ENVIRONMENT["SQUEUE_ALL"],
                     "scontrol_sha256": policy.scontrol_sha256,
                     "squeue_sha256": policy.squeue_sha256,
                     "slurm_conf_sha256": policy.slurm_conf_sha256,

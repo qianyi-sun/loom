@@ -205,12 +205,20 @@ permission to launch, cancel, signal, or release physical capacity.
 The controller-local read-only observer is the separate
 `loom_capacity_pool_executor` namespace in the Loom wheel. It may use only
 `scontrol show nodes --json` and `squeue --json`; the latter brackets the node
-read. It requires an allocation-stable queue, exact protected Slurm 23.11
-controller/parser identity, exact per-node resources and partitions, and
-digest-bound fixed binaries plus a root-owned protected Slurm config. Visible
-jobs are reconciled with node allocation counters; hidden residuals, compact
-arrays, and other ambiguity stay charged or quarantine the full affected
+read. The exact queue argv must run with protected `SQUEUE_ALL=1` under the
+dedicated non-root query UID. Before rehearsal, retain reviewed evidence that
+the named query principal has complete job visibility under the controller's
+`PrivateData` policy, place that evidence digest in the protected inventory
+policy, and verify the running effective UID matches. It requires an
+allocation-stable queue, exact protected Slurm 23.11 controller/parser
+identity, exact per-node resources and partitions, and digest-bound fixed
+binaries plus a root-owned protected Slurm config. Node-less jobs use a
+validated comma-separated partition set and are charged when any listed
+partition can reach protected nodes. Visible jobs are reconciled with node
+allocation counters; hidden residuals, malformed partition lists, compact
+arrays, and other ambiguity fail closed or quarantine the full affected
 capacity. The paired shadow/executable inventory carries the manager's exact
-journal checkpoint. This observer does not change the rehearsal rule above:
-it is not a daemon, all foreign or ambiguous records stay quarantined, and its
-presence does not permit installing or activating a pool executor.
+journal checkpoint and binds the full-visibility identity/evidence. This
+observer does not change the rehearsal rule above: it is not a daemon, all
+foreign or ambiguous records stay quarantined, and its presence does not
+permit installing or activating a pool executor.
