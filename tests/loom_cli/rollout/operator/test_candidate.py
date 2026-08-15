@@ -221,9 +221,14 @@ def test_sealed_binding_uses_exact_detached_local_candidate_without_fetch(
     runtime_root.mkdir(parents=True)
     repo = runtime_root / "repo"
     build_repo.rename(repo)
-    (runtime_root / "venv").mkdir()
-    (runtime_root / "venv" / "bin").mkdir()
-    (runtime_root / "venv" / "bin" / "python").symlink_to("/usr/bin/python3")
+    venv = runtime_root / "venv"
+    venv.mkdir()
+    venv_bin = venv / "bin"
+    venv_bin.mkdir()
+    (venv_bin / "python").symlink_to("/usr/bin/python3")
+    for directory in (candidate_root, runtime_root, repo, repo / ".git", venv, venv_bin):
+        directory.chmod(0o755)
+    (repo / ".git" / "config").chmod(0o644)
     config_path = tmp_path / "staging-rollout.toml"
     config_path.write_text("schema_version = 2\n", encoding="utf-8")
     config_path.chmod(0o600)
