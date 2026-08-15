@@ -118,8 +118,12 @@ fails unless both exact identities are present before attempting HTTPS.
 Each controller gets a separate mTLS certificate, bearer principal with only
 `capacity:execute:pool`, owner-only bearer/TLS files, owner-only Ed25519 private
 key, and an owner-only `0700` state directory. The principal is bound to the
-exact pool ID, executor ID, and executor incarnation. The private signing key
-never reaches the manager or any environment namespace.
+exact pool ID, executor ID, and executor incarnation. In the schema-version-1
+principal registry, `executor_pool_generation` remains optional so legacy v1
+executors can keep using every `/v1/executors/...` route. Every `/v2/executors/...`
+route additionally requires the same principal to carry a positive
+`executor_pool_generation` exactly matching the prepared v2 pool binding. The
+private signing key never reaches the manager or any environment namespace.
 
 Construct `DryRunExecutorBinding`, `ExecutorConnection`, and
 `CapacityExecutorClient.from_files(...)`, then open `ExecutorJournal` and wrap

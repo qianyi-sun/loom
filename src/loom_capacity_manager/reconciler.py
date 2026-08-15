@@ -123,6 +123,10 @@ async def _commit_reconciled_epoch(
             raise StaleAllocationInputError(
                 "allocation input freshness expired before commit"
             )
+        if valid_until is None:
+            raise StaleAllocationInputError(
+                "allocation input freshness deadline is required for executable commit"
+            )
         allocation_epoch = (
             await session.execute(
                 text(
@@ -147,6 +151,7 @@ async def _commit_reconciled_epoch(
             executable=True,
             execution_epoch=executable_authority.execution_epoch,
             execution_manifest_sha256=executable_authority.execution_manifest_sha256,
+            input_valid_until=valid_until,
             sealed=False,
             allocation_count=len(shadow.allocations),
             committed_at=now,
@@ -236,13 +241,9 @@ async def _commit_reconciled_epoch(
         )
         final_now = (await session.execute(select(func.clock_timestamp()))).scalar_one()
         final_valid_until = store.allocation_input_valid_until(current_input)
-        if valid_until is None:
-            valid_until = final_valid_until
-        elif final_valid_until is not None:
-            valid_until = min(valid_until, final_valid_until)
         if (
-            valid_until is not None
-            and final_now + _EXECUTABLE_COMMIT_SAFETY_MARGIN >= valid_until
+            final_valid_until is None
+            or final_now + _EXECUTABLE_COMMIT_SAFETY_MARGIN >= final_valid_until
         ):
             raise StaleAllocationInputError(
                 "allocation input freshness expired before durable commit"

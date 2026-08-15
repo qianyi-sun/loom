@@ -440,6 +440,49 @@ def isolated_migration_postgres_url(postgres_url: str) -> Iterator[str]:
             admin_engine.dispose()
 
 
+@pytest.fixture
+def isolated_capacity_postgres_url(postgres_url: str) -> Iterator[str]:
+    """Provide one fresh capacity-schema database for real concurrency tests."""
+
+    source_url = make_url(postgres_url)
+    database_name = f"loom_capacity_case_{os.getpid()}_{uuid4().hex[:8]}"
+    admin_url = source_url.set(database="postgres")
+    admin_engine = create_engine(admin_url, isolation_level="AUTOCOMMIT")
+    quoted_database = admin_engine.dialect.identifier_preparer.quote(database_name)
+    repo_root = Path(__file__).resolve().parents[2]
+    try:
+        with admin_engine.connect() as connection:
+            connection.exec_driver_sql(f"CREATE DATABASE {quoted_database} TEMPLATE template0")
+        isolated_url = source_url.set(database=database_name).render_as_string(
+            hide_password=False
+        )
+        cfg = AlembicConfig(str(repo_root / "capacity_migrations" / "alembic.ini"))
+        cfg.set_main_option("script_location", str(repo_root / "capacity_migrations"))
+        previous = os.environ.get("LOOM_CAPACITY_DB_URL")
+        os.environ["LOOM_CAPACITY_DB_URL"] = isolated_url
+        try:
+            command.upgrade(cfg, "head")
+        finally:
+            if previous is None:
+                os.environ.pop("LOOM_CAPACITY_DB_URL", None)
+            else:
+                os.environ["LOOM_CAPACITY_DB_URL"] = previous
+        yield isolated_url
+    finally:
+        try:
+            with admin_engine.connect() as connection:
+                connection.execute(
+                    text(
+                        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                        "WHERE datname = :database_name AND pid <> pg_backend_pid()"
+                    ),
+                    {"database_name": database_name},
+                )
+                connection.exec_driver_sql(f"DROP DATABASE IF EXISTS {quoted_database}")
+        finally:
+            admin_engine.dispose()
+
+
 @pytest.fixture(scope="module")
 def shared_minio() -> Iterator[MinioContainer]:
     """Module-scoped MinIO so we don't pay container-start cost per

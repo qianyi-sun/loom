@@ -45,6 +45,11 @@ EXPECTED_TABLES = {
     "capacity_executor_observations",
     "capacity_execution_epochs",
     "capacity_execution_executors",
+    "capacity_executable_command_receipts",
+    "capacity_executable_executor_states",
+    "capacity_executable_intents",
+    "capacity_executable_launch_rate_buckets",
+    "capacity_executable_protected_release_receipts",
     "capacity_fairness_state",
     "capacity_launch_permits",
     "capacity_launch_rate_buckets",
@@ -61,6 +66,10 @@ EXPECTED_TABLES = {
     "capacity_tiers",
     "capacity_worker_profiles",
 }
+
+
+def _normalize_sql(sql: str) -> str:
+    return " ".join(sql.split())
 
 
 def _capacity_config(url: str) -> AlembicConfig:
@@ -80,6 +89,17 @@ def _seed_executable_allocation_history(
     complete_payload: dict[str, object] | None = None,
     seal: bool = True,
 ) -> int:
+    has_input_valid_until = (
+        connection.execute(
+            text(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_schema = 'public' "
+                "AND table_name = 'capacity_allocation_epochs' "
+                "AND column_name = 'input_valid_until'"
+            )
+        ).scalar_one_or_none()
+        is not None
+    )
     authority = connection.execute(
         text(
             "SELECT authority_incarnation FROM capacity_authority_state "
@@ -232,9 +252,12 @@ def _seed_executable_allocation_history(
             "INSERT INTO capacity_allocation_epochs "
             "(writer_epoch, configuration_epoch, input_digest, status, "
             "failure_reason, complete_payload, executable, execution_epoch, "
-            "execution_manifest_sha256, sealed, allocation_count, committed_at) VALUES "
+            + ("input_valid_until, " if has_input_valid_until else "")
+            + "execution_manifest_sha256, sealed, allocation_count, committed_at) VALUES "
             "(1, 1, repeat('a', 64), 'executable', NULL, "
-            "CAST(:complete_payload AS jsonb), true, 1, :execution_manifest, false, "
+            "CAST(:complete_payload AS jsonb), true, 1, "
+            + ("now(), " if has_input_valid_until else "")
+            + ":execution_manifest, false, "
             ":allocation_count, now()) RETURNING allocation_epoch"
         ),
         {
@@ -1035,6 +1058,128 @@ def test_capacity_0005_rejects_truncating_executable_allocation_history(
         engine.dispose()
 
 
+def test_capacity_0006_requires_input_deadlines_and_small_refill_remainders(
+    isolated_capacity_migration_url: str,
+) -> None:
+    cfg = _capacity_config(isolated_capacity_migration_url)
+    engine = create_engine(isolated_capacity_migration_url)
+    try:
+        command.upgrade(cfg, "capacity_0005")
+        with engine.connect() as connection:
+            inspector = inspect(connection)
+            expected_allocation_epoch_columns = {
+                column["name"]
+                for column in inspector.get_columns(
+                    "capacity_allocation_epochs",
+                    schema="public",
+                )
+            }
+            expected_allocation_epoch_mode_check = {
+                item["name"]: _normalize_sql(str(item["sqltext"]))
+                for item in inspector.get_check_constraints(
+                    "capacity_allocation_epochs",
+                    schema="public",
+                )
+            }["capacity_allocation_epoch_mode_check"]
+        with engine.begin() as connection:
+            allocation_epoch = _seed_executable_allocation_history(connection, include_child=True)
+        command.upgrade(cfg, "capacity_0006")
+
+        with engine.connect() as connection:
+            assert connection.execute(
+                text(
+                    "SELECT input_valid_until IS NOT NULL "
+                    "FROM capacity_allocation_epochs WHERE allocation_epoch = :allocation_epoch"
+                ),
+                {"allocation_epoch": allocation_epoch},
+            ).scalar_one()
+
+        with pytest.raises(IntegrityError):
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "INSERT INTO capacity_allocation_epochs "
+                        "(writer_epoch, configuration_epoch, input_digest, status, "
+                        "failure_reason, complete_payload, executable, execution_epoch, "
+                        "execution_manifest_sha256, input_valid_until, sealed, "
+                        "allocation_count, committed_at) VALUES "
+                        "(1, 1, repeat('a', 64), 'executable', NULL, "
+                        "'{\"allocations\":[]}'::jsonb, true, 1, repeat('6', 64), "
+                        "NULL, true, 0, now())"
+                    )
+                )
+
+        with pytest.raises(IntegrityError):
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "INSERT INTO capacity_allocation_epochs "
+                        "(writer_epoch, configuration_epoch, input_digest, status, "
+                        "failure_reason, complete_payload, executable, input_valid_until, "
+                        "committed_at) VALUES "
+                        "(1, 1, repeat('b', 64), 'shadow', NULL, '{}'::jsonb, false, now(), now())"
+                    )
+                )
+
+        with pytest.raises(IntegrityError):
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "INSERT INTO capacity_executable_launch_rate_buckets "
+                        "(id, execution_epoch, configuration_epoch, scope, scope_identity, "
+                        "rate_per_minute, capacity_microtokens, available_microtokens, "
+                        "refill_remainder, last_refill_at) VALUES "
+                        "(:id, 1, 1, 'global', 'fleet', 1, 1000000, 1000000, 60, now())"
+                    ),
+                    {"id": uuid4()},
+                )
+
+        command.downgrade(cfg, "capacity_0005")
+
+        with engine.connect() as connection:
+            inspector = inspect(connection)
+            allocation_epoch_columns = {
+                column["name"]
+                for column in inspector.get_columns(
+                    "capacity_allocation_epochs",
+                    schema="public",
+                )
+            }
+            assert allocation_epoch_columns == expected_allocation_epoch_columns
+            assert "input_valid_until" not in allocation_epoch_columns
+            checks = {
+                item["name"]: _normalize_sql(str(item["sqltext"]))
+                for item in inspector.get_check_constraints(
+                    "capacity_allocation_epochs",
+                    schema="public",
+                )
+            }
+            assert (
+                checks["capacity_allocation_epoch_mode_check"]
+                == expected_allocation_epoch_mode_check
+            )
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "capacity_0005"
+
+        command.upgrade(cfg, "capacity_0006")
+
+        with engine.connect() as connection:
+            assert connection.execute(
+                text(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_schema = 'public' "
+                    "AND table_name = 'capacity_allocation_epochs' "
+                    "AND column_name = 'input_valid_until'"
+                )
+            ).scalar_one() == 1
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "capacity_0006"
+    finally:
+        engine.dispose()
+
+
 def test_capacity_0005_downgrade_serializes_executable_history_preflight(
     isolated_capacity_migration_url: str,
 ) -> None:
@@ -1244,6 +1389,78 @@ def test_capacity_0005_allocation_guards_fix_their_search_path(
         engine.dispose()
 
 
+def test_capacity_0006_refuses_downgrade_with_executable_queue_history(
+    isolated_capacity_migration_url: str,
+) -> None:
+    cfg = _capacity_config(isolated_capacity_migration_url)
+    engine = create_engine(isolated_capacity_migration_url)
+    try:
+        command.upgrade(cfg, "capacity_0006")
+        with engine.begin() as connection:
+            _seed_executable_allocation_history(connection)
+            connection.execute(
+                text(
+                    "INSERT INTO public.capacity_executable_executor_states "
+                    "(id, execution_epoch, execution_manifest_sha256, executor_id, "
+                    "executor_incarnation, pool_id, pool_generation, state, "
+                    "lease_expires_at, last_heartbeat_at) "
+                    "SELECT :id, execution_epoch, execution_manifest_sha256, executor_id, "
+                    "executor_incarnation, pool_id, pool_generation, 'current', now(), now() "
+                    "FROM public.capacity_execution_executors WHERE pool_id = 'gb10'"
+                ),
+                {"id": uuid4()},
+            )
+
+        with pytest.raises(
+            RuntimeError,
+            match="cannot downgrade capacity_0006 with executable queue history",
+        ):
+            command.downgrade(cfg, "capacity_0005")
+
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == ("capacity_0006")
+            assert connection.execute(
+                text("SELECT count(*) FROM public.capacity_executable_executor_states")
+            ).scalar_one() == 1
+    finally:
+        engine.dispose()
+
+
+def test_capacity_0006_upgrade_and_downgrade_ignore_search_path(
+    isolated_capacity_migration_url: str,
+) -> None:
+    cfg = _capacity_config(isolated_capacity_migration_url)
+    command.upgrade(cfg, "capacity_0005")
+    engine = create_engine(isolated_capacity_migration_url)
+    migration = importlib.import_module(
+        "capacity_migrations.versions.capacity_0006_executable_work_queue"
+    )
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("CREATE SCHEMA capacity_queue_decoy"))
+            connection.execute(text("SET LOCAL search_path TO capacity_queue_decoy, pg_catalog"))
+            migration_context = MigrationContext.configure(connection)
+            with Operations.context(migration_context):
+                migration.upgrade()
+            assert {
+                "capacity_executable_command_receipts",
+                "capacity_executable_executor_states",
+                "capacity_executable_intents",
+                "capacity_executable_launch_rate_buckets",
+            } <= set(inspect(connection).get_table_names(schema="public"))
+            assert not inspect(connection).get_table_names(schema="capacity_queue_decoy")
+
+            with Operations.context(migration_context):
+                migration.downgrade()
+            assert "capacity_executable_executor_states" not in inspect(
+                connection
+            ).get_table_names(schema="public")
+    finally:
+        engine.dispose()
+
+
 def test_capacity_schema_has_independent_revision_table(
     capacity_postgres_url: str,
     postgres_url: str,
@@ -1254,7 +1471,7 @@ def test_capacity_schema_has_independent_revision_table(
         with capacity_engine.connect() as connection:
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == ("capacity_0005")
+            ).scalar_one() == ("capacity_0006")
         with environment_engine.connect() as connection:
             environment_revision = connection.execute(
                 text("SELECT version_num FROM alembic_version")
@@ -1281,7 +1498,7 @@ async def test_capacity_schema_error_uses_installed_capacity_migration_command(
 async def test_capacity_schema_startup_returns_numeric_head(
     capacity_engine: AsyncEngine,
 ) -> None:
-    assert await assert_capacity_schema_at_head(capacity_engine) == 5
+    assert await assert_capacity_schema_at_head(capacity_engine) == 6
 
 
 def test_package3_tables_are_database_constrained_to_dry_run(

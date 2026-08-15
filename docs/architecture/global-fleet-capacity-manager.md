@@ -1,12 +1,17 @@
 # Global Fleet Capacity Manager
 
-The global capacity-manager service computes deterministic, fleet-wide shadow
+The global capacity-manager service computes deterministic, fleet-wide
 allocations from versioned fleet configuration, subject configuration, demand
-reports, pool observations, and current commitments. It also records a fenced
-dry-run protocol for reservations, launch ordering, executor inventory, and
-release evidence. Both surfaces are evidence and audit infrastructure only:
-they cannot authorize a worker claim, launch capacity, mutate a Slurm
-controller, or release physical capacity.
+reports, pool observations, and current commitments. Shadow allocation and the
+v1 executor protocol remain non-executable evidence surfaces. A separate v2
+ledger can persist sealed executable allocation epochs and issue exact,
+short-lived launch permits after a fenced execution epoch is activated.
+
+The manager still has no worker-claim mutation or scheduler client. A v2 permit
+can be consumed only by the exact registered pool executor; the executor and
+protected admission paths that would turn it into physical capacity are
+separate activation blockers. The checked-in Package 5A deployment remains
+inert at an executable ceiling of zero.
 
 ## Authority boundary
 
@@ -24,14 +29,16 @@ metrics avoid dynamic environment or subject labels.
 
 The service accepts configuration proposals and activation records, reporter
 input, dynamic personal-subject projections, dry-run grant and executor
-records, shadow-reconciliation requests, and read-only status/audit queries.
-Its database enforces:
+records, fenced execution preparation/activation evidence, executable-v2 pool
+work, reconciliation requests, and read-only status/audit queries. Its database
+enforces:
 
-- `executable_new_capacity_ceiling = 0`;
-- all allocation, reservation, permit, executor, inventory, and release
-  records are non-executable;
-- reporter sequence and writer fences are monotonic; and
-- conflicting idempotency or report replay fails closed.
+- executable work has one exact prepared execution epoch, manifest, fleet
+  release, pool generation, and executor incarnation;
+- executable intents descend only from sealed executable allocation epochs;
+- executor and intent high-waters and states advance monotonically;
+- command and protected-release receipts are append-only; and
+- reporter sequence, writer fences, idempotency, and replay fail closed.
 
 ## Shadow allocation
 
@@ -103,6 +110,41 @@ See the
 [pool-executor dry-run runbook](../runbooks/global-fleet-pool-executor-dry-run.md)
 for controller binding, recovery, and rehearsal checks.
 
+## Fenced executable-v2 work queue
+
+Executable-v2 state is physically separate from the dry-run-v1 ledger. The
+manager serves a pool only while the authority, execution epoch, manifest,
+executor registration, executor incarnation, pool generation, and latest
+sealed allocation epoch all match. Proposal, acceptance, bootstrap, permit,
+consumption, close, and partial release commands share one authority-first lock
+order and append exact command receipts.
+
+Permit issue and consumption recheck global, tier, account, subject, pool,
+pending-job, pending-slot, rate, topology, selected-node, executor-lease, and
+inventory-freshness bounds. The final database-time fence includes the
+earliest deadline of every pool observation used for global accounting. A
+newer allocation epoch supersedes unused older work, and expired allocation
+inputs cannot create or consume a permit.
+
+Consumption moves an intent to `submitting-unknown`, which remains charged
+until signed inventory observes physical work or the executor publishes an
+exact post-consumption recovery command. Recovery requires a fresh complete
+inventory plus authenticated controller evidence that both the submit process
+and scheduler submission are absent; it moves the intent only into the normal
+protected close path. It never frees capacity from an empty observation alone.
+
+Protected release acknowledgements are authority-validated before replay and
+stored as append-only, strictly increasing receipts. An old exact replay stays
+valid after a successor is recorded, while physical release uses only the
+highest retained protected registration epoch and matching terminal evidence.
+Database triggers use `search_path=pg_catalog`, qualify queue roots through
+`public`, reject illegal direct-SQL state/high-water changes, prohibit executor
+unfencing, and make command and protected-release receipts immutable.
+
+This queue is executable authority, not scheduler actuation. No checked-in
+daemon calls Slurm from these routes, and the Package 5A renderer still exposes
+no apply, activation, or ceiling-changing command.
+
 ## Dynamic personal subject projection
 
 After stable-route activation, the lifecycle service registers the personal
@@ -144,18 +186,16 @@ configuration; incomplete retirement evidence fails before local deletion.
 ## Service surface
 
 The HTTP service exposes configuration proposal/activation, dynamic personal
-subject projection, report ingestion, dry-run executor registration,
-checkpoint, heartbeat, and inventory, reservation and launch-permit records,
-protected-release acknowledgements, partial-release evidence, shadow
-reconciliation, status, audit, health, and metrics routes. Mutual TLS
-authenticates the transport, hashed bearer principals bind the exact operator,
-reporter, manager, or pool-executor authority, and metric labels never contain
-subject IDs or dynamic environment names.
+subject projection, report ingestion, dry-run-v1 executor records,
+executable-v2 checkpoint/work/inventory/command routes, protected-release
+acknowledgements, reconciliation, status, audit, health, and metrics. Mutual
+TLS authenticates the transport, hashed bearer principals bind the exact
+operator, reporter, manager, or pool-executor authority, and metric labels
+never contain subject IDs or dynamic environment names.
 
-The grant, permit, executor, inventory, and release routes accept only dry-run
-contracts. The service has no task-claim admission, scheduler execution, Slurm
-mutation, or physical-release authority, and the database rejects a non-zero
-executable ceiling.
+The service has no task-claim admission, scheduler execution, Slurm mutation,
+or direct physical-release client. The packaged deployment continues to reject
+live readiness unless its executable ceiling is zero.
 
 Run the checked-in offline proof without a live database or controller:
 
@@ -186,9 +226,9 @@ allocations.
 
 Implementation lives under `src/loom_capacity_manager/`,
 `src/loom_capacity_executor/`, and `src/loom_capacity_agent/`. The service,
-executor, and protected-store integration suites prove that no stored or
-returned allocation, reservation, permit, or release record becomes
-executable.
+executor, and protected-store integration suites prove v1/v2 ledger isolation,
+exact executable bindings, fail-closed ambiguity, and protected release before
+capacity is uncharged.
 
 ## Package 5A render-only control-plane foundation
 
@@ -305,17 +345,20 @@ Those facts must be measured and reconciled into one reviewed immutable fleet
 generation. The manager must not choose an environment copy or merge node
 lists implicitly.
 
-Live activation remains blocked on Packages 2–5 in the approved design,
-including protected task/claim and execution-generation bindings, fenced
-pool-local actuation, legacy-writer containment and drain evidence tracked by
-issue #896, and the re-scoped activation evidence tracked by issue #906. Until
-all activation-boundary evidence is approved, the executable ceiling remains
-zero and existing legacy autoscaling behavior is unchanged.
+The sealed executable allocation and manager work queue are implemented, but
+live activation remains blocked on protected task/claim bindings, real fenced
+OLDLAB and GB10 executors, personal lifecycle convergence, mixed-workload
+containment tracked by issue #896, GB10 health/capacity convergence, and the
+change-window evidence tracked by issue #906. Until those activation-boundary
+gates pass, the executable ceiling remains zero and existing environment-local
+autoscalers remain the live writers.
 
 ## Verification
 
-The Package 1 gate runs the capacity contract, state, topology, allocator,
-store, API, mTLS, property, and offline-driver tests; Ruff; mypy; whitespace
-checks; and a source audit for grant, launch-permit, worker-claim, or Slurm
-mutation vocabulary. Integration tests additionally prove the authority
-ceiling and every stored allocation executable flag remain zero/false.
+The capacity gate runs contract, state, topology, allocator, store, API, mTLS,
+property, migration, and offline-driver tests; Ruff; strict Mypy; compilation;
+whitespace checks; and a scheduler/process/path source audit. Integration tests
+prove v1 isolation, exact current-allocation fencing, crash recovery,
+authority-first release replay, hostile-search-path safety, direct-SQL guards,
+and upgrade/downgrade/re-upgrade parity. Deployment tests separately prove the
+checked-in Package 5A remains at a zero executable ceiling.
