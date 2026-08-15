@@ -2715,6 +2715,30 @@ class ExecutableCapacityHarness:
             terminal_kind=row.terminal_kind,
         )
 
+    async def drain_accepted_cleanup_unused(
+        self,
+        pool_id: str,
+        binding: ExecutableIntentBindingV2,
+    ) -> ProtectedDrainEvidence:
+        cleanup = await self.pools[pool_id].tick()
+        if cleanup.status != "bootstrap-registered" or cleanup.operation_id != binding.intent_id:
+            raise RuntimeError(f"accepted intent did not register cleanup bootstrap: {cleanup}")
+        result = await self.pools[pool_id].tick()
+        if result.status != "draining" or result.operation_id != binding.intent_id:
+            raise RuntimeError(
+                f"cleanup-prepared intent did not drain through revocation: {result}"
+            )
+        owner = self._owners_by_subject[binding.subject_id]
+        publication = await self._pending_protected_release(owner)
+        row = await self._manager_intent_row(binding.intent_id)
+        return ProtectedDrainEvidence(
+            intent_id=binding.intent_id,
+            event_kind=publication.event_kind,
+            executor_status=result.status,
+            manager_state=row.state,
+            terminal_kind=row.terminal_kind,
+        )
+
     async def drain_unregistered_withdrawn(
         self,
         pool_id: str,

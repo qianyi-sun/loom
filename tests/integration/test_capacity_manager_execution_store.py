@@ -19,6 +19,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableBootstrapRegistrationV2,
     ExecutableExecutorHeartbeatV2,
     ExecutableExecutorInventoryV2,
+    ExecutableIntentBindingV2,
     ExecutableIntentCloseV2,
     ExecutableInventoryRecordV2,
     ExecutableOwnershipMetadataV2,
@@ -540,6 +541,34 @@ async def _launch_ready(
     assert permit is not None
     assert permit.binding.intent_id == intent.intent_id
     return permit
+
+
+async def _accepted_binding(
+    store: CapacityExecutionStore,
+    session: AsyncSession,
+):
+    active, _allocation_epoch = await _active_plan(session)
+    binding = executor_binding("gb10")
+    await _heartbeat(store, session, active, pool_id="gb10")
+    proposal = await store.next_pool_work(session, binding)
+    assert isinstance(proposal, ExecutableReservationProposalV2)
+    accepted = await store.accept_reservation(
+        session,
+        ExecutableReservationAcceptanceV2(
+            execution=proposal.execution,
+            tranche_id=proposal.tranche_id,
+            proposal_digest=store.contract_digest(proposal),
+            pool_id=binding.pool_id,
+            pool_generation=binding.pool_generation,
+            executor_id=binding.executor_id,
+            executor_incarnation=binding.executor_incarnation,
+            command_sequence=1,
+        ),
+    )
+    intent = await store.next_pool_work(session, binding)
+    assert isinstance(intent, ExecutableIntentBindingV2)
+    assert intent.intent_id == accepted.intent_ids[0]
+    return active, intent
 
 
 async def _consume_then_publish_empty_inventory(
@@ -1379,6 +1408,46 @@ async def test_register_bootstrap_locks_executor_context_before_intent(
         "executor-state",
         "intent",
     ]
+
+
+@pytest.mark.parametrize("mode", ("increase-freeze", "drain-only"))
+async def test_cleanup_bootstrap_registration_converges_for_accepted_intent_without_permit(
+    capacity_session: AsyncSession,
+    mode: str,
+) -> None:
+    store = CapacityExecutionStore()
+    active, intent = await _accepted_binding(store, capacity_session)
+    if mode == "increase-freeze":
+        await capacity_session.execute(
+            update(CapacityAuthorityState)
+            .where(CapacityAuthorityState.singleton_id == 1)
+            .values(increase_freeze=True, increase_freeze_reason="synthetic failure")
+        )
+    else:
+        await CapacityManagementStore().register_writer(
+            capacity_session,
+            active.authority_incarnation,
+            expected_epoch=active.writer_epoch,
+        )
+
+    result = await store.register_bootstrap(
+        capacity_session,
+        ExecutableBootstrapRegistrationV2(
+            binding=intent,
+            command_sequence=2,
+            bootstrap_registration_epoch=1,
+            bootstrap_evidence_sha256="8" * 64,
+        ),
+    )
+
+    assert result.intent_id == intent.intent_id
+    row = await _intent_row(capacity_session, intent.intent_id)
+    assert row.state == "launch-ready"
+    assert row.permit_id is None
+    assert row.permit_consumed_at is None
+    successor = await store.next_pool_work(capacity_session, executor_binding(intent.pool_id))
+    assert isinstance(successor, ExecutableIntentCloseV2)
+    assert successor.binding == intent
 
 
 async def test_old_permit_cannot_consume_after_newer_sealed_epoch(
@@ -2374,6 +2443,89 @@ async def test_external_physical_commitment_pending_states_count_against_global_
 
     with pytest.raises(ExecutionConflictError, match="global pending limit"):
         await store._assert_pending_limits(capacity_session, context, row)
+
+
+async def test_exact_authenticated_pending_physical_coalesces_with_charged_intent(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityExecutionStore()
+    permit, row = await _quarantined_consumed_permit(
+        store,
+        capacity_session,
+        policy=execution_policy(ceiling=2),
+    )
+    await capacity_session.execute(
+        update(CapacityAuthorityState)
+        .where(CapacityAuthorityState.singleton_id == 1)
+        .values(global_pending_slot_ceiling=8, global_pending_job_ceiling=2)
+    )
+    physical = _authenticated_physical_commitment(permit).model_copy(update={"state": "pending"})
+    observation = pool_observation(pool_id=permit.binding.pool_id).model_copy(
+        update={"commitments": (physical,)}
+    )
+    await capacity_session.execute(
+        update(CapacityPoolObservation)
+        .where(CapacityPoolObservation.pool_id == permit.binding.pool_id)
+        .values(payload=observation.model_dump(mode="json", exclude_none=False))
+    )
+    context = await store._locked_execution_context(
+        capacity_session,
+        permit.binding.execution,
+        executor_binding(permit.binding.pool_id),
+    )
+    successor = _successor_binding(permit.binding)
+    successor_row = _successor_proposed_row(store, row, successor)
+    await _test_only_add_intent_without_guard(capacity_session, successor_row)
+
+    await store._assert_pending_limits(capacity_session, context, successor_row)
+
+
+@pytest.mark.parametrize("drift", ("resources", "pool-generation", "nodes"))
+async def test_authenticated_pending_physical_drift_counts_separately_from_charged_intent(
+    capacity_session: AsyncSession,
+    drift: str,
+) -> None:
+    store = CapacityExecutionStore()
+    permit, row = await _quarantined_consumed_permit(
+        store,
+        capacity_session,
+        policy=execution_policy(ceiling=2),
+    )
+    await capacity_session.execute(
+        update(CapacityAuthorityState)
+        .where(CapacityAuthorityState.singleton_id == 1)
+        .values(global_pending_slot_ceiling=8, global_pending_job_ceiling=2)
+    )
+    physical = _authenticated_physical_commitment(permit).model_copy(update={"state": "pending"})
+    if drift == "resources":
+        physical = physical.model_copy(
+            update={"resources": _scaled_resources(permit.binding.resources, 2)}
+        )
+    elif drift == "pool-generation":
+        physical = physical.model_copy(
+            update={"pool_generation": permit.binding.pool_generation + 1}
+        )
+    else:
+        physical = physical.model_copy(update={"node_ids": ("gb10-drift",)})
+    observation = pool_observation(pool_id=permit.binding.pool_id).model_copy(
+        update={"commitments": (physical,)}
+    )
+    await capacity_session.execute(
+        update(CapacityPoolObservation)
+        .where(CapacityPoolObservation.pool_id == permit.binding.pool_id)
+        .values(payload=observation.model_dump(mode="json", exclude_none=False))
+    )
+    context = await store._locked_execution_context(
+        capacity_session,
+        permit.binding.execution,
+        executor_binding(permit.binding.pool_id),
+    )
+    successor = _successor_binding(permit.binding)
+    successor_row = _successor_proposed_row(store, row, successor)
+    await _test_only_add_intent_without_guard(capacity_session, successor_row)
+
+    with pytest.raises(ExecutionConflictError, match="global pending limit"):
+        await store._assert_pending_limits(capacity_session, context, successor_row)
 
 
 async def test_closing_intent_remains_charged_until_release(

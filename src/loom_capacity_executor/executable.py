@@ -614,47 +614,84 @@ class ExecutablePoolExecutor:
         ):
             raise JournalRegressionError("stored ownership request and proof are not coherent")
 
+    def _new_bootstrap_registration(
+        self,
+        binding: ExecutableIntentBindingV2,
+        *,
+        command_sequence: int,
+    ) -> ExecutableBootstrapRegistrationV2:
+        if self._bootstrap_handoff_store is not None:
+            lease = self._bootstrap_handoff_store.prepare(
+                binding,
+                bootstrap_registration_epoch=1,
+                expires_at=self._now() + timedelta(minutes=30),
+                trusted_launcher_release_sha256=(binding.execution.trusted_fleet_release_sha256),
+                protected_admission_route_sha256=self._handoff_route_sha256(binding),
+            )
+            bootstrap_evidence_sha256 = lease.bootstrap_sha256
+        elif self._bootstrap_digest is not None:
+            bootstrap_evidence_sha256 = self._bootstrap_digest(binding)
+        else:
+            raise JournalRegressionError("bootstrap handoff store is unavailable")
+        return ExecutableBootstrapRegistrationV2(
+            binding=binding,
+            command_sequence=command_sequence,
+            bootstrap_registration_epoch=1,
+            bootstrap_evidence_sha256=bootstrap_evidence_sha256,
+        )
+
+    def _prepared_bootstrap_registration(
+        self,
+        binding: ExecutableIntentBindingV2,
+        *,
+        command_sequence: int,
+        request_event: str,
+        confirm_event: str,
+        state_label: str,
+    ) -> ExecutableBootstrapRegistrationV2:
+        latest = self.journal.latest("bootstrap", str(binding.intent_id))
+        if latest is None:
+            return self._new_bootstrap_registration(binding, command_sequence=command_sequence)
+        if latest.event_kind not in {
+            request_event,
+            confirm_event,
+        }:
+            raise JournalRegressionError(f"{state_label} bootstrap journal state is invalid")
+        payload = latest.durable_payload()
+        if payload is None:
+            raise JournalRegressionError(f"{state_label} bootstrap request is absent from journal")
+        registration = ExecutableBootstrapRegistrationV2.model_validate_json(payload)
+        if registration.binding != binding or registration.command_sequence != command_sequence:
+            raise JournalRegressionError(f"{state_label} bootstrap request binding changed")
+        return registration
+
     def _bootstrap_registration(
         self,
         binding: ExecutableIntentBindingV2,
         *,
         command_sequence: int,
     ) -> ExecutableBootstrapRegistrationV2:
-        latest = self.journal.latest("bootstrap", str(binding.intent_id))
-        if latest is None:
-            if self._bootstrap_handoff_store is not None:
-                lease = self._bootstrap_handoff_store.prepare(
-                    binding,
-                    bootstrap_registration_epoch=1,
-                    expires_at=self._now() + timedelta(minutes=30),
-                    trusted_launcher_release_sha256=(
-                        binding.execution.trusted_fleet_release_sha256
-                    ),
-                    protected_admission_route_sha256=self._handoff_route_sha256(binding),
-                )
-                bootstrap_evidence_sha256 = lease.bootstrap_sha256
-            elif self._bootstrap_digest is not None:
-                bootstrap_evidence_sha256 = self._bootstrap_digest(binding)
-            else:
-                raise JournalRegressionError("bootstrap handoff store is unavailable")
-            return ExecutableBootstrapRegistrationV2(
-                binding=binding,
-                command_sequence=command_sequence,
-                bootstrap_registration_epoch=1,
-                bootstrap_evidence_sha256=bootstrap_evidence_sha256,
-            )
-        if latest.event_kind not in {
-            "protected-bootstrap-requested",
-            "protected-bootstrap-confirmed",
-        }:
-            raise JournalRegressionError("protected bootstrap journal state is invalid")
-        payload = latest.durable_payload()
-        if payload is None:
-            raise JournalRegressionError("protected bootstrap request is absent from journal")
-        registration = ExecutableBootstrapRegistrationV2.model_validate_json(payload)
-        if registration.binding != binding or registration.command_sequence != command_sequence:
-            raise JournalRegressionError("protected bootstrap request binding changed")
-        return registration
+        return self._prepared_bootstrap_registration(
+            binding,
+            command_sequence=command_sequence,
+            request_event="protected-bootstrap-requested",
+            confirm_event="protected-bootstrap-confirmed",
+            state_label="protected",
+        )
+
+    def _cleanup_bootstrap_registration(
+        self,
+        binding: ExecutableIntentBindingV2,
+        *,
+        command_sequence: int,
+    ) -> ExecutableBootstrapRegistrationV2:
+        return self._prepared_bootstrap_registration(
+            binding,
+            command_sequence=command_sequence,
+            request_event="cleanup-bootstrap-requested",
+            confirm_event="cleanup-bootstrap-confirmed",
+            state_label="cleanup",
+        )
 
     def _handoff_route_sha256(self, binding: ExecutableIntentBindingV2) -> str:
         route = getattr(self.admission, "bootstrap_handoff_route_sha256", None)
@@ -767,6 +804,7 @@ class ExecutablePoolExecutor:
         central_events = {
             "reservation-accept-requested",
             "bootstrap-register-requested",
+            "cleanup-bootstrap-register-requested",
             "permit-consume-requested",
             "intent-close-requested",
             "reservation-release-requested",
@@ -799,6 +837,19 @@ class ExecutablePoolExecutor:
             await self._central_command(
                 registration,
                 event="bootstrap-register",
+                operation=lambda: self.client.register_executable_bootstrap(registration),
+            )
+            return ExecutorTickResult(
+                "bootstrap-registered",
+                registration.binding.intent_id,
+                str(registration.bootstrap_registration_epoch),
+            )
+        if record.event_kind == "cleanup-bootstrap-register-requested":
+            registration = ExecutableBootstrapRegistrationV2.model_validate_json(payload)
+            self._validate_central_replay(record, registration, checkpoint)
+            await self._central_command(
+                registration,
+                event="cleanup-bootstrap-register",
                 operation=lambda: self.client.register_executable_bootstrap(registration),
             )
             return ExecutorTickResult(
@@ -839,6 +890,7 @@ class ExecutablePoolExecutor:
             in {
                 "reservation-accept-requested",
                 "bootstrap-register-requested",
+                "cleanup-bootstrap-register-requested",
                 "permit-consume-requested",
                 "intent-close-requested",
                 "reservation-release-requested",
@@ -848,6 +900,19 @@ class ExecutablePoolExecutor:
             return None
         if len(records) != 1:
             raise JournalRegressionError("multiple central commands remain unresolved")
+        if records[0].event_kind == "cleanup-bootstrap-register-requested":
+            return await self._replay_central_request(checkpoint)
+        if records[0].event_kind == "bootstrap-register-requested":
+            payload = records[0].durable_payload()
+            if payload is None:
+                raise JournalRegressionError("central request is absent from journal")
+            registration = ExecutableBootstrapRegistrationV2.model_validate_json(payload)
+            latest = self.journal.latest("bootstrap", str(registration.binding.intent_id))
+            if latest is None or latest.event_kind != "protected-bootstrap-confirmed":
+                raise JournalRegressionError(
+                    "drain-only executor cannot replay fresh bootstrap registration"
+                )
+            return await self._replay_central_request(checkpoint)
         if records[0].event_kind not in {
             "intent-close-requested",
             "reservation-release-requested",
@@ -1083,6 +1148,139 @@ class ExecutablePoolExecutor:
             return ExecutorTickResult("draining", revocation.binding.intent_id)
         cancel = SlurmCancelRequestV2.model_validate_json(payload)
         return await self._recover_pending_cancel(record, cancel, checkpoint)
+
+    def _cleanup_bootstrap_needs_registration(
+        self,
+        binding: ExecutableIntentBindingV2,
+    ) -> bool:
+        central = self.journal.latest("intent", str(binding.intent_id))
+        if central is not None and central.event_kind in {
+            "cleanup-bootstrap-register-confirmed",
+            "intent-close-requested",
+            "intent-close-confirmed",
+        }:
+            return False
+        bootstrap = self.journal.latest("bootstrap", str(binding.intent_id))
+        return bootstrap is None or bootstrap.event_kind in {
+            "cleanup-bootstrap-requested",
+            "cleanup-bootstrap-confirmed",
+        }
+
+    def _retained_ordinary_bootstrap_registration(
+        self,
+        binding: ExecutableIntentBindingV2,
+    ) -> tuple[ExecutableBootstrapRegistrationV2, JournalRecord] | None:
+        central = self.journal.latest("intent", str(binding.intent_id))
+        if central is not None and central.event_kind in {
+            "bootstrap-register-requested",
+            "bootstrap-register-confirmed",
+            "cleanup-bootstrap-register-requested",
+            "cleanup-bootstrap-register-confirmed",
+            "intent-close-requested",
+            "intent-close-confirmed",
+        }:
+            return None
+        bootstrap = self.journal.latest("bootstrap", str(binding.intent_id))
+        if bootstrap is None or bootstrap.event_kind not in {
+            "protected-bootstrap-requested",
+            "protected-bootstrap-confirmed",
+        }:
+            return None
+        payload = bootstrap.durable_payload()
+        if payload is None:
+            raise JournalRegressionError("protected bootstrap request is absent from journal")
+        registration = ExecutableBootstrapRegistrationV2.model_validate_json(payload)
+        self._assert_binding(registration.binding)
+        if registration.binding != binding:
+            raise JournalRegressionError("protected bootstrap request binding changed")
+        if (
+            canonical_executable_bytes(registration) != payload
+            or canonical_executable_digest(registration) != bootstrap.payload_digest
+        ):
+            raise JournalRegressionError("protected bootstrap request bytes changed")
+        return registration, bootstrap
+
+    async def _register_retained_ordinary_bootstrap(
+        self,
+        binding: ExecutableIntentBindingV2,
+    ) -> ExecutorTickResult:
+        retained = self._retained_ordinary_bootstrap_registration(binding)
+        if retained is None:
+            raise JournalRegressionError("ordinary bootstrap registration is absent")
+        registration, bootstrap = retained
+        payload = bootstrap.durable_payload()
+        if payload is None:
+            raise JournalRegressionError("protected bootstrap request is absent from journal")
+        if bootstrap.event_kind == "protected-bootstrap-requested":
+            await self.admission.prepare_worker(
+                registration,
+                bootstrap_sha256=registration.bootstrap_evidence_sha256,
+            )
+            self.journal.append(
+                "protected-bootstrap-confirmed",
+                bootstrap.payload_digest,
+                object_kind=bootstrap.object_kind,
+                object_id=bootstrap.object_id,
+                payload=payload,
+            )
+        await self._central_command(
+            registration,
+            event="bootstrap-register",
+            operation=lambda: self.client.register_executable_bootstrap(registration),
+        )
+        return ExecutorTickResult(
+            "bootstrap-registered",
+            registration.binding.intent_id,
+            str(registration.bootstrap_registration_epoch),
+        )
+
+    async def _register_cleanup_bootstrap(
+        self,
+        close: ExecutableIntentCloseV2,
+    ) -> ExecutorTickResult:
+        registration = self._cleanup_bootstrap_registration(
+            close.binding,
+            command_sequence=close.command_sequence,
+        )
+        payload = canonical_executable_bytes(registration)
+        digest = canonical_executable_digest(registration)
+        latest = self.journal.latest("bootstrap", str(close.binding.intent_id))
+        if latest is None:
+            self.journal.append(
+                "cleanup-bootstrap-requested",
+                digest,
+                object_kind="bootstrap",
+                object_id=str(close.binding.intent_id),
+                payload=payload,
+            )
+        elif latest.event_kind not in {
+            "cleanup-bootstrap-requested",
+            "cleanup-bootstrap-confirmed",
+        }:
+            raise JournalRegressionError("cleanup bootstrap journal state is invalid")
+        latest = self.journal.latest("bootstrap", str(close.binding.intent_id))
+        if latest is None or latest.event_kind == "cleanup-bootstrap-requested":
+            await self.admission.prepare_worker(
+                registration,
+                bootstrap_sha256=registration.bootstrap_evidence_sha256,
+            )
+            self.journal.append(
+                "cleanup-bootstrap-confirmed",
+                digest,
+                object_kind="bootstrap",
+                object_id=str(close.binding.intent_id),
+                payload=payload,
+            )
+        await self._central_command(
+            registration,
+            event="cleanup-bootstrap-register",
+            operation=lambda: self.client.register_executable_bootstrap(registration),
+        )
+        return ExecutorTickResult(
+            "bootstrap-registered",
+            registration.binding.intent_id,
+            str(registration.bootstrap_registration_epoch),
+        )
 
     async def _apply_one(
         self,
@@ -1527,14 +1725,11 @@ class ExecutablePoolExecutor:
     ) -> ExecutorTickResult:
         envelope = self._load_launch(close.binding.intent_id)
         physical = self._physical_binding(envelope)
-        bootstrap = self.journal.latest("bootstrap", str(close.binding.intent_id))
-        if envelope is None and physical is None and bootstrap is None:
-            await self._central_command(
-                close,
-                event="intent-close",
-                operation=lambda: self.client.close_executable_intent(close),
-            )
-            return ExecutorTickResult("draining", close.binding.intent_id)
+        if envelope is None and physical is None:
+            if self._retained_ordinary_bootstrap_registration(close.binding) is not None:
+                return await self._register_retained_ordinary_bootstrap(close.binding)
+            if self._cleanup_bootstrap_needs_registration(close.binding):
+                return await self._register_cleanup_bootstrap(close)
         observation = await self.admission.observe_intent(close.binding)
         jobs = await self.slurm.inventory()
         matches = self._bound_exact_matches(envelope, physical, jobs)

@@ -88,6 +88,7 @@ class FakeManager:
         self.releases: list[ExecutablePartialReleaseV2] = []
         self.central_requests: list[StrictV2Model] = []
         self.inventory_failure: Exception | None = None
+        self.register_failure_after_transition: Exception | None = None
         self.reject_work_fetch = False
 
     async def executable_checkpoint(self) -> SimpleNamespace:
@@ -136,15 +137,24 @@ class FakeManager:
         self, value: ExecutableBootstrapRegistrationV2
     ) -> SimpleNamespace:
         self.central_requests.append(value)
-        result = self._transition(
-            value.command_sequence,
-            {
-                "intent_id": value.binding.intent_id,
-                "bootstrap_registration_epoch": value.bootstrap_registration_epoch,
-                "executable": True,
-            },
-        )
+        payload = {
+            "intent_id": value.binding.intent_id,
+            "bootstrap_registration_epoch": value.bootstrap_registration_epoch,
+            "executable": True,
+        }
+        if value.command_sequence == self.command_sequence:
+            result = SimpleNamespace(
+                **payload,
+                receipt_digest=_receipt_digest(payload),
+                replayed=True,
+            )
+        else:
+            result = self._transition(value.command_sequence, payload)
         self.work = None
+        if self.register_failure_after_transition is not None:
+            failure = self.register_failure_after_transition
+            self.register_failure_after_transition = None
+            raise failure
         return result
 
     async def consume_executable_permit(
@@ -785,7 +795,9 @@ async def test_drain_only_tick_rejects_new_capacity_work_without_side_effects(
     journal.close()
 
 
-async def test_drain_only_tick_allows_close_work(tmp_path: Path) -> None:
+async def test_drain_only_tick_allows_cleanup_bootstrap_for_accepted_close(
+    tmp_path: Path,
+) -> None:
     launch = launch_context_fixture()
     close = ExecutableIntentCloseV2(binding=launch.binding, command_sequence=1)
     executor, journal, manager, admission, slurm, _launch = executor_fixture(
@@ -799,9 +811,212 @@ async def test_drain_only_tick_allows_close_work(tmp_path: Path) -> None:
     admission.observe_intent = _unexpected_observe  # type: ignore[method-assign]
     result = await executor.tick_drain_only()
 
-    assert result.status == "draining"
-    assert manager.central_requests == [close]
+    assert result.status == "bootstrap-registered"
+    assert len(admission.prepare_requests) == 1
+    registration = admission.prepare_requests[0]
+    assert registration.binding == close.binding
+    assert registration.command_sequence == close.command_sequence
+    assert manager.central_requests == [registration]
+    assert journal.latest("bootstrap", str(close.binding.intent_id)) is not None
+    central = journal.latest("intent", str(close.binding.intent_id))
+    assert central is not None
+    assert central.event_kind == "cleanup-bootstrap-register-confirmed"
     assert slurm.submit_count == 0
+    journal.close()
+
+
+async def test_accepted_close_bootstraps_cleanup_before_central_close_without_slurm(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    close = ExecutableIntentCloseV2(binding=launch.binding, command_sequence=1)
+    executor, journal, manager, admission, slurm, _launch = executor_fixture(
+        tmp_path,
+        work=close,
+    )
+
+    result = await executor.tick()
+
+    assert result.status == "bootstrap-registered"
+    assert len(admission.prepare_requests) == 1
+    registration = admission.prepare_requests[0]
+    assert registration.binding == close.binding
+    assert registration.command_sequence == close.command_sequence
+    assert manager.central_requests == [registration]
+    assert close not in manager.central_requests
+    bootstrap = journal.latest("bootstrap", str(close.binding.intent_id))
+    central = journal.latest("intent", str(close.binding.intent_id))
+    assert bootstrap is not None
+    assert bootstrap.event_kind == "cleanup-bootstrap-confirmed"
+    assert central is not None
+    assert central.event_kind == "cleanup-bootstrap-register-confirmed"
+    assert slurm.submit_count == 0
+    journal.close()
+
+
+async def test_cleanup_bootstrap_prepare_replays_exactly_after_crash(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    close = ExecutableIntentCloseV2(binding=launch.binding, command_sequence=1)
+    executor, journal, manager, admission, slurm, _launch = executor_fixture(
+        tmp_path,
+        work=close,
+    )
+    admission.crash_after_prepare = True
+
+    with pytest.raises(SimulatedCrash):
+        await executor.tick()
+
+    requested = journal.latest("bootstrap", str(close.binding.intent_id))
+    assert requested is not None
+    assert requested.event_kind == "cleanup-bootstrap-requested"
+    payload = requested.durable_payload()
+    assert payload is not None
+    admission.crash_after_prepare = False
+
+    result = await executor.tick()
+
+    assert result.status == "bootstrap-registered"
+    assert len(admission.prepare_requests) == 2
+    assert admission.prepare_requests[1] == admission.prepare_requests[0]
+    assert canonical_executable_bytes(admission.prepare_requests[1]) == payload
+    assert len(manager.central_requests) == 1
+    assert manager.central_requests[0] == admission.prepare_requests[0]
+    assert slurm.submit_count == 0
+    journal.close()
+
+
+async def test_close_replays_requested_ordinary_bootstrap_before_revocation(
+    tmp_path: Path,
+) -> None:
+    binding = launch_context_fixture().binding
+    executor, journal, manager, admission, slurm, _launch = executor_fixture(
+        tmp_path,
+        work=binding,
+    )
+    admission.crash_after_prepare = True
+
+    with pytest.raises(SimulatedCrash):
+        await executor.tick()
+
+    requested = journal.latest("bootstrap", str(binding.intent_id))
+    assert requested is not None
+    assert requested.event_kind == "protected-bootstrap-requested"
+    payload = requested.durable_payload()
+    assert payload is not None
+    retained = ExecutableBootstrapRegistrationV2.model_validate_json(payload)
+    close = ExecutableIntentCloseV2(
+        binding=binding,
+        command_sequence=retained.command_sequence,
+    )
+    manager.work = close
+    admission.crash_after_prepare = False
+
+    result = await executor.tick()
+
+    assert result.status == "bootstrap-registered"
+    assert len(admission.prepare_requests) == 2
+    assert admission.prepare_requests[1] == admission.prepare_requests[0]
+    assert canonical_executable_bytes(admission.prepare_requests[1]) == payload
+    assert manager.central_requests == [retained]
+    assert close not in manager.central_requests
+    assert admission.prepared_revocation_requests == []
+    assert slurm.submit_count == 0
+    bootstrap = journal.latest("bootstrap", str(binding.intent_id))
+    central = journal.latest("intent", str(binding.intent_id))
+    assert bootstrap is not None
+    assert bootstrap.event_kind == "protected-bootstrap-confirmed"
+    assert central is not None
+    assert central.event_kind == "bootstrap-register-confirmed"
+    assert central.payload_digest == requested.payload_digest
+    assert central.durable_payload() == payload
+    journal.close()
+
+
+async def test_drain_only_close_registers_confirmed_ordinary_bootstrap_before_revocation(
+    tmp_path: Path,
+) -> None:
+    binding = launch_context_fixture().binding
+    executor, journal, manager, admission, slurm, _launch = executor_fixture(
+        tmp_path,
+        work=None,
+    )
+    retained = ExecutableBootstrapRegistrationV2(
+        binding=binding,
+        command_sequence=1,
+        bootstrap_registration_epoch=1,
+        bootstrap_evidence_sha256="b" * 64,
+    )
+    payload = canonical_executable_bytes(retained)
+    digest = canonical_executable_digest(retained)
+    journal.append(
+        "protected-bootstrap-requested",
+        digest,
+        object_kind="bootstrap",
+        object_id=str(binding.intent_id),
+        payload=payload,
+    )
+    journal.append(
+        "protected-bootstrap-confirmed",
+        digest,
+        object_kind="bootstrap",
+        object_id=str(binding.intent_id),
+        payload=payload,
+    )
+    admission.observations[binding.intent_id] = ProtectedIntentObservationV2(
+        binding=binding,
+        bootstrap_registration_epoch=1,
+    )
+    close = ExecutableIntentCloseV2(binding=binding, command_sequence=1)
+    manager.work = close
+
+    result = await executor.tick_drain_only()
+
+    assert result.status == "bootstrap-registered"
+    assert admission.prepare_requests == []
+    assert manager.central_requests == [retained]
+    assert close not in manager.central_requests
+    assert admission.prepared_revocation_requests == []
+    assert slurm.submit_count == 0
+    central = journal.latest("intent", str(binding.intent_id))
+    assert central is not None
+    assert central.event_kind == "bootstrap-register-confirmed"
+    assert central.payload_digest == digest
+    assert central.durable_payload() == payload
+    journal.close()
+
+
+async def test_drain_only_replays_cleanup_registration_after_response_loss(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    close = ExecutableIntentCloseV2(binding=launch.binding, command_sequence=1)
+    executor, journal, manager, _admission, slurm, _launch = executor_fixture(
+        tmp_path,
+        work=close,
+    )
+    manager.register_failure_after_transition = ExecutorTransportError(
+        "lost cleanup registration response"
+    )
+
+    with pytest.raises(ExecutorTransportError):
+        await executor.tick()
+
+    pending = journal.pending_requests()
+    assert len(pending) == 1
+    assert pending[0].event_kind == "cleanup-bootstrap-register-requested"
+    manager.reject_work_fetch = True
+
+    result = await executor.tick_drain_only()
+
+    assert result.status == "bootstrap-registered"
+    assert len(manager.central_requests) == 2
+    assert manager.central_requests[1] == manager.central_requests[0]
+    assert slurm.submit_count == 0
+    confirmed = journal.latest("intent", str(close.binding.intent_id))
+    assert confirmed is not None
+    assert confirmed.event_kind == "cleanup-bootstrap-register-confirmed"
     journal.close()
 
 

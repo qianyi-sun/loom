@@ -194,6 +194,40 @@ async def test_prepared_unused_retirement_uses_protected_release_reporter_runtim
     )
 
 
+async def test_accepted_never_prepared_close_uses_cleanup_bootstrap_before_retirement(
+    executable_capacity_harness: ExecutableCapacityHarness,
+) -> None:
+    alice = await executable_capacity_harness.add_owner("alice", "a" * 64)
+    await alice.publish_x86_demand(1)
+    await executable_capacity_harness.activate_next_epoch()
+    await executable_capacity_harness.reconcile()
+
+    binding = await executable_capacity_harness.accept_next_binding("oldlab")
+    handoff_path = executable_capacity_harness.bootstrap_handoff_path("oldlab", binding)
+    assert not handoff_path.exists()
+    assert executable_capacity_harness.oldlab.sbatch_calls == ()
+
+    await executable_capacity_harness.begin_drain()
+    drained = await executable_capacity_harness.drain_accepted_cleanup_unused("oldlab", binding)
+    assert drained.event_kind == "prepared-revoked"
+    assert drained.executor_status == "draining"
+    assert drained.manager_state == "closing"
+    assert drained.terminal_kind == "unused"
+    assert not handoff_path.exists()
+    assert executable_capacity_harness.oldlab.sbatch_calls == ()
+    assert executable_capacity_harness.oldlab.cancelled_job_ids() == ()
+
+    published = await executable_capacity_harness.publish_next_protected_release_with_replay(alice)
+    assert published.event_kind == "prepared-revoked"
+    released = await executable_capacity_harness.release_retired_intent("oldlab", binding)
+
+    assert released.status == "released"
+    assert executable_capacity_harness.execution_state == "shadow"
+    assert executable_capacity_harness.total_loom_jobs() == 0
+    assert await executable_capacity_harness.manager_commitments() == ()
+    assert executable_capacity_harness.oldlab.inventory_records() == ()
+
+
 async def test_unregistered_withdrawn_retirement_cancels_only_exact_pending_job(
     executable_capacity_harness: ExecutableCapacityHarness,
 ) -> None:

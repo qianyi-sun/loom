@@ -994,6 +994,7 @@ class CapacityExecutionStore:
                 session,
                 registration.binding.execution,
                 self._executor_binding_from_contract(registration.binding),
+                require_active=False,
             )
             row = await self._locked_intent(session, registration.binding.intent_id)
             if registration.binding != ExecutableIntentBindingV2.model_validate_json(
@@ -2469,19 +2470,19 @@ class CapacityExecutionStore:
                     totals[scope][0] += slots
                     totals[scope][1] += 1
 
-        counted_reservation_identities: set[str] = set()
+        charged_commitments: list[tuple[ObservedCommitmentV1, str | None, str | None]] = []
         for pending_row in pending:
             pending_binding = ExecutableIntentBindingV2.model_validate_json(
                 json.dumps(pending_row.binding_payload)
             )
-            counted_reservation_identities.add(str(pending_binding.intent_id))
-            add(
-                subject_id=pending_binding.subject_id,
-                account_id=pending_binding.account_id,
-                tier_id=pending_binding.tier_id,
-                pool_id=pending_binding.pool_id,
-                slots=pending_binding.concurrency_slots,
+            charged_commitments.append(
+                (
+                    self._charged_intent_commitment(pending_row, pending_binding),
+                    pending_binding.account_id,
+                    pending_binding.tier_id,
+                )
             )
+        observed_pending: list[ObservedCommitmentV1] = []
         for observation in observations.values():
             for commitment in observation.commitments:
                 if commitment.state not in {
@@ -2491,12 +2492,7 @@ class CapacityExecutionStore:
                     "submitting-unknown",
                 }:
                     continue
-                if (
-                    commitment.kind == "physical"
-                    and commitment.ownership_state == "authenticated"
-                    and commitment.reservation_identity in counted_reservation_identities
-                ):
-                    continue
+                observed_pending.append(commitment)
                 account_id: str | None = None
                 tier_id: str | None = None
                 if commitment.subject_id is not None and commitment.subject_incarnation is not None:
@@ -2512,6 +2508,28 @@ class CapacityExecutionStore:
                     pool_id=commitment.pool_id,
                     slots=commitment.resources.slots,
                 )
+        authenticated = tuple(
+            item
+            for item in observed_pending
+            if item.kind == "physical"
+            and item.ownership_state == "authenticated"
+            and item.reservation_identity is not None
+        )
+        for commitment, account_id, tier_id in charged_commitments:
+            matches = tuple(
+                candidate
+                for candidate in authenticated
+                if self._authenticated_physical_matches_charged_intent(candidate, commitment)
+            )
+            if len(matches) == 1:
+                continue
+            add(
+                subject_id=commitment.subject_id,
+                account_id=account_id,
+                tier_id=tier_id,
+                pool_id=commitment.pool_id,
+                slots=commitment.resources.slots,
+            )
         add(
             subject_id=binding.subject_id,
             account_id=binding.account_id,
