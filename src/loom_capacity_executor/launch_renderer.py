@@ -353,7 +353,7 @@ def build_executable_ownership_metadata(
     return ExecutableOwnershipMetadataV2(
         binding=context.binding,
         controller_authority_sha256=context.controller_authority.controller_authority_sha256,
-        trusted_launcher_sha256=profile.launcher.sha256,
+        trusted_launcher_sha256=context.binding.execution.trusted_fleet_release_sha256,
         slurm_cluster=profile.slurm_cluster,
         submitter_identity=profile.submitter,
         association=profile.association,

@@ -148,6 +148,47 @@ _RETIREMENT_CHECK = (
     "AND inventory_payload -> 'execution' ->> 'execution_manifest_sha256' = execution_manifest_sha256) "
     "OR (NOT retirement_safe AND retirement_inventory_digest IS NULL)"
 )
+_ACCEPTED_RELEASE_TRANSITION_TEXT_0006 = (
+    "(OLD.state = 'accepted' AND NEW.state IN ('launch-ready','closing','quarantined')) OR"
+)
+_ACCEPTED_RELEASE_TRANSITION_PATTERN_0006 = (
+    r"\(OLD\.state = 'accepted' AND NEW\.state IN "
+    r"\('launch-ready','closing','quarantined'\)\) OR"
+)
+_ACCEPTED_RELEASE_TRANSITION_TEXT_0007 = (
+    "(OLD.state = 'accepted' AND NEW.state IN ('launch-ready','closing','released',"
+    "'quarantined')) OR"
+)
+_ACCEPTED_RELEASE_TRANSITION_PATTERN_0007 = (
+    r"\(OLD\.state = 'accepted' AND NEW\.state IN "
+    r"\('launch-ready','closing','released','quarantined'\)\) OR"
+)
+_ACCEPTED_RELEASE_BRANCH_TEXT_0006 = (
+    "IF OLD.state = 'accepted' AND NEW.state = 'launch-ready'\n             AND bootstrap_changed"
+)
+_ACCEPTED_RELEASE_BRANCH_PATTERN_0006 = (
+    r"IF OLD\.state = 'accepted' AND NEW\.state = 'launch-ready'\s+AND bootstrap_changed"
+)
+_ACCEPTED_RELEASE_BRANCH_TEXT_0007 = (
+    "IF OLD.state = 'accepted' AND NEW.state = 'released'\n"
+    "             AND release_changed AND NEW.released_at IS NOT NULL\n"
+    "             AND NOT accepted_changed AND NOT bootstrap_changed\n"
+    "             AND NOT permit_changed AND NOT consumption_changed\n"
+    "             AND NOT inventory_changed THEN\n"
+    "            RETURN NEW;\n"
+    "          END IF;\n"
+    "          IF OLD.state = 'accepted' AND NEW.state = 'launch-ready'\n"
+    "             AND bootstrap_changed"
+)
+_ACCEPTED_RELEASE_BRANCH_PATTERN_0007 = (
+    r"IF OLD\.state = 'accepted' AND NEW\.state = 'released'\s+"
+    r"AND release_changed AND NEW\.released_at IS NOT NULL\s+"
+    r"AND NOT accepted_changed AND NOT bootstrap_changed\s+"
+    r"AND NOT permit_changed AND NOT consumption_changed\s+"
+    r"AND NOT inventory_changed THEN\s+RETURN NEW;\s+END IF;\s+"
+    r"IF OLD\.state = 'accepted' AND NEW\.state = 'launch-ready'\s+"
+    r"AND bootstrap_changed"
+)
 _UPGRADE_EXECUTION_GUARD = r"""CREATE OR REPLACE FUNCTION capacity_execution_epoch_transition_guard()
         RETURNS trigger
         LANGUAGE plpgsql
@@ -1016,6 +1057,63 @@ def _replace_execution_epoch_checks(*, official: bool) -> None:
     )
 
 
+def _patch_intent_guard_sql(*, downgrade: bool) -> str:
+    current_transition_pattern = (
+        _ACCEPTED_RELEASE_TRANSITION_PATTERN_0007
+        if downgrade
+        else _ACCEPTED_RELEASE_TRANSITION_PATTERN_0006
+    )
+    replacement_transition = (
+        _ACCEPTED_RELEASE_TRANSITION_TEXT_0006
+        if downgrade
+        else _ACCEPTED_RELEASE_TRANSITION_TEXT_0007
+    )
+    current_branch_pattern = (
+        _ACCEPTED_RELEASE_BRANCH_PATTERN_0007
+        if downgrade
+        else _ACCEPTED_RELEASE_BRANCH_PATTERN_0006
+    )
+    replacement_branch = (
+        _ACCEPTED_RELEASE_BRANCH_TEXT_0006 if downgrade else _ACCEPTED_RELEASE_BRANCH_TEXT_0007
+    )
+    direction = "downgrade" if downgrade else "upgrade"
+    return f"""
+    DO $$
+    DECLARE
+      v_definition text;
+    BEGIN
+      SELECT pg_get_functiondef(p.oid)
+        INTO v_definition
+        FROM pg_proc AS p
+        JOIN pg_namespace AS n ON n.oid = p.pronamespace
+       WHERE n.nspname = 'public'
+         AND p.proname = 'capacity_executable_intent_guard';
+      IF v_definition IS NULL THEN
+        RAISE EXCEPTION 'capacity_executable_intent_guard() is missing'
+          USING ERRCODE = '55000';
+      END IF;
+      IF v_definition !~ $pattern${current_transition_pattern}$pattern$
+         OR v_definition !~ $pattern${current_branch_pattern}$pattern$ THEN
+        RAISE EXCEPTION 'capacity_0007 {direction} expected the official executable intent guard'
+          USING ERRCODE = '55000';
+      END IF;
+      v_definition := regexp_replace(
+        v_definition,
+        $pattern${current_transition_pattern}$pattern$,
+        $replacement${replacement_transition}$replacement$,
+        'g'
+      );
+      v_definition := regexp_replace(
+        v_definition,
+        $pattern${current_branch_pattern}$pattern$,
+        $replacement${replacement_branch}$replacement$
+      );
+      EXECUTE v_definition;
+    END
+    $$;
+    """
+
+
 def upgrade() -> None:
     op.add_column("capacity_execution_epochs", sa.Column("drain_actor", sa.Text(), nullable=True))
     op.add_column(
@@ -1071,6 +1169,7 @@ def upgrade() -> None:
         "capacity_executable_executor_states",
         _RETIREMENT_CHECK,
     )
+    op.execute(_patch_intent_guard_sql(downgrade=False))
     op.execute(_UPGRADE_EXECUTION_GUARD)
     op.execute(_UPGRADE_AUTHORITY_GUARD)
 
@@ -1106,6 +1205,7 @@ def downgrade() -> None:
     ).scalar_one():
         raise RuntimeError("cannot downgrade capacity_0007 with executor retirement evidence")
 
+    op.execute(_patch_intent_guard_sql(downgrade=True))
     op.execute(_DOWNGRADE_EXECUTION_GUARD)
     op.execute(_DOWNGRADE_AUTHORITY_GUARD)
     op.drop_constraint(

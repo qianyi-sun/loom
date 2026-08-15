@@ -435,7 +435,7 @@ def test_reintegrated_capacity_history_has_one_exact_head() -> None:
     assert bridge_completion.path.endswith("capacity_0007_executable_bridge_completion.py")
 
 
-def test_capacity_0007_adds_bridge_completion_without_replacing_upstream_guards(
+def test_capacity_0007_adds_bridge_completion_and_only_patches_accepted_release_guard(
     isolated_capacity_migration_url: str,
 ) -> None:
     cfg = _capacity_config(isolated_capacity_migration_url)
@@ -505,10 +505,29 @@ def test_capacity_0007_adds_bridge_completion_without_replacing_upstream_guards(
                 == base_constraints
             )
             assert _routine_grants(connection, UPSTREAM_ALLOCATION_ROUTINES) == base_grants
+            current_queue_routines = _routine_definitions(connection, UPSTREAM_QUEUE_GUARD_ROUTINES)
+            assert set(current_queue_routines) == set(base_queue_routines)
             assert (
-                _routine_definitions(connection, UPSTREAM_QUEUE_GUARD_ROUTINES)
-                == base_queue_routines
+                current_queue_routines["capacity_executable_intent_guard"]
+                != base_queue_routines["capacity_executable_intent_guard"]
             )
+            assert (
+                "(OLD.state = 'accepted' AND NEW.state IN "
+                "('launch-ready','closing','released','quarantined')) OR"
+                in current_queue_routines["capacity_executable_intent_guard"]
+            )
+            assert (
+                "IF OLD.state = 'accepted' AND NEW.state = 'released' "
+                "AND release_changed AND NEW.released_at IS NOT NULL "
+                "AND NOT accepted_changed AND NOT bootstrap_changed "
+                "AND NOT permit_changed AND NOT consumption_changed "
+                "AND NOT inventory_changed THEN RETURN NEW; END IF;"
+                in current_queue_routines["capacity_executable_intent_guard"]
+            )
+            for routine_name, definition in base_queue_routines.items():
+                if routine_name == "capacity_executable_intent_guard":
+                    continue
+                assert current_queue_routines[routine_name] == definition
             assert (
                 _trigger_definitions(connection, UPSTREAM_QUEUE_GUARD_TRIGGERS)
                 == base_queue_triggers

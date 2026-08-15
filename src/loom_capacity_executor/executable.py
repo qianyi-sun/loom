@@ -1094,6 +1094,7 @@ class ExecutablePoolExecutor:
                 execution=work.execution,
                 tranche_id=work.tranche_id,
                 proposal_digest=canonical_executable_digest(work),
+                pool_id=work.pool_id,
                 pool_generation=work.pool_generation,
                 executor_id=work.executor_id,
                 executor_incarnation=work.executor_incarnation,
@@ -1492,14 +1493,49 @@ class ExecutablePoolExecutor:
         )
         return True
 
+    def _confirmed_terminal_inventory_record(
+        self,
+        binding: ExecutableIntentBindingV2,
+    ) -> ExecutableInventoryRecordV2 | None:
+        retained = self.journal.latest("inventory", str(self.registration.executor_incarnation))
+        if retained is None or retained.event_kind != "inventory-publish-confirmed":
+            return None
+        payload = retained.durable_payload()
+        if payload is None:
+            raise JournalRegressionError("confirmed inventory is absent from journal")
+        inventory = ExecutableExecutorInventoryV2.model_validate_json(payload)
+        self._assert_inventory_binding(inventory)
+        matches = tuple(
+            record
+            for record in inventory.records
+            if record.ownership_proof is not None
+            and record.ownership_proof.metadata.binding == binding
+        )
+        if not matches:
+            return None
+        if len(matches) != 1:
+            raise JournalRegressionError("confirmed inventory duplicates executable ownership")
+        record = matches[0]
+        if record.state != "terminal" or record.terminal_evidence_sha256 is None:
+            return None
+        return record
+
     async def _close(
         self,
         close: ExecutableIntentCloseV2,
         checkpoint: ExecutableCheckpointReceiptV2,
     ) -> ExecutorTickResult:
-        observation = await self.admission.observe_intent(close.binding)
         envelope = self._load_launch(close.binding.intent_id)
         physical = self._physical_binding(envelope)
+        bootstrap = self.journal.latest("bootstrap", str(close.binding.intent_id))
+        if envelope is None and physical is None and bootstrap is None:
+            await self._central_command(
+                close,
+                event="intent-close",
+                operation=lambda: self.client.close_executable_intent(close),
+            )
+            return ExecutorTickResult("draining", close.binding.intent_id)
+        observation = await self.admission.observe_intent(close.binding)
         jobs = await self.slurm.inventory()
         matches = self._bound_exact_matches(envelope, physical, jobs)
         bound_conflicts = self._bound_live_conflicts(envelope, physical, jobs)
@@ -1555,11 +1591,6 @@ class ExecutablePoolExecutor:
                     object_id=job.job_id,
                     payload=cancel_payload,
                 )
-                await self._central_command(
-                    close,
-                    event="intent-close",
-                    operation=lambda: self.client.close_executable_intent(close),
-                )
                 return ExecutorTickResult("pending-cancelled", close.binding.intent_id)
             if matches:
                 return ExecutorTickResult("draining", close.binding.intent_id)
@@ -1611,11 +1642,6 @@ class ExecutablePoolExecutor:
                 object_id=job.job_id,
                 payload=cancel_payload,
             )
-            await self._central_command(
-                close,
-                event="intent-close",
-                operation=lambda: self.client.close_executable_intent(close),
-            )
             return ExecutorTickResult("pending-cancelled", close.binding.intent_id)
         if matches:
             return ExecutorTickResult(
@@ -1635,6 +1661,32 @@ class ExecutablePoolExecutor:
                 close.binding.intent_id,
                 "physical job differs from protected binding",
             )
+        if self._confirmed_terminal_inventory_record(close.binding) is not None:
+            await self._central_command(
+                close,
+                event="intent-close",
+                operation=lambda: self.client.close_executable_intent(close),
+            )
+            return ExecutorTickResult("draining", close.binding.intent_id)
+        if envelope is not None:
+            high_water = await self.slurm.accounting_high_water(
+                since=envelope.rendered.ownership_proof.metadata.submitted_at
+            )
+            terminal_matches = self._exact_terminal_matches(envelope, high_water.terminal_jobs)
+            terminal_conflicts = self._terminal_ownership_conflicts(
+                envelope,
+                high_water.terminal_jobs,
+            )
+            if terminal_conflicts or len(terminal_matches) > 1:
+                await self._publish_inventory(checkpoint, jobs=jobs, quarantine_all=True)
+                return ExecutorTickResult(
+                    "quarantined",
+                    close.binding.intent_id,
+                    "scheduler association is absent, duplicate, foreign, or resource-mismatched",
+                )
+            if len(terminal_matches) == 1:
+                return await self._publish_inventory(checkpoint, jobs=jobs)
+            return ExecutorTickResult("draining", close.binding.intent_id)
         if (
             observation.worker_id is None
             and observation.worker_incarnation is None

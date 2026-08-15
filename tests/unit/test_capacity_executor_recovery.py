@@ -751,10 +751,21 @@ async def test_repeated_close_after_withdraw_confirmed_recovers_physical_binding
     assert slurm.jobs == []
     assert len(slurm.cancel_requests) == 1
     assert slurm.cancel_requests[0].job_id == pending.job_id
-    assert manager.work is None
+    assert manager.work == close
     confirmed = reopened.latest("job", pending.job_id)
     assert confirmed is not None
     assert confirmed.event_kind == "pending-cancel-confirmed-cancelled"
+    slurm.terminal_jobs = (_terminal_from_job(pending),)
+
+    inventory = await recovered.tick()
+
+    assert inventory.status == "inventory-published"
+    assert manager.work == close
+
+    closed = await recovered.tick()
+
+    assert closed.status == "draining"
+    assert manager.work is None
     reopened.close()
 
 

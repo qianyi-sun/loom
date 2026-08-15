@@ -224,7 +224,7 @@ def test_render_returns_task6_request_and_signed_complete_ownership_evidence() -
         rendered.ownership_proof.metadata.controller_authority_sha256
         == canonical_launch_policy_digest(context.profile)
     )
-    assert rendered.ownership_proof.metadata.trusted_launcher_sha256 == "2" * 64
+    assert rendered.ownership_proof.metadata.trusted_launcher_sha256 == "3" * 64
     assert rendered.ownership_proof.metadata.slurm_cluster == "oldlab"
     assert rendered.ownership_proof.metadata.submitter_identity == "loom-oldlab"
     assert rendered.ownership_proof.metadata.association == "loom-executor"
@@ -360,16 +360,12 @@ def test_launcher_content_and_trusted_release_cannot_substitute_for_each_other()
     substituted_launcher = proof.model_copy(
         update={
             "metadata": proof.metadata.model_copy(
-                update={
-                    "trusted_launcher_sha256": (
-                        proof.metadata.binding.execution.trusted_fleet_release_sha256
-                    )
-                }
+                update={"trusted_launcher_sha256": context.profile.launcher.sha256}
             )
         }
     )
     substituted_execution = proof.metadata.binding.execution.model_copy(
-        update={"trusted_fleet_release_sha256": proof.metadata.trusted_launcher_sha256}
+        update={"trusted_fleet_release_sha256": context.profile.launcher.sha256}
     )
     substituted_release = proof.model_copy(
         update={
@@ -383,14 +379,12 @@ def test_launcher_content_and_trusted_release_cannot_substitute_for_each_other()
         }
     )
 
-    assert proof.metadata.trusted_launcher_sha256 == context.profile.launcher.sha256
+    assert proof.metadata.trusted_launcher_sha256 == context.profile.trusted_launcher_release_sha256
     assert (
         proof.metadata.binding.execution.trusted_fleet_release_sha256
         == context.profile.trusted_launcher_release_sha256
     )
-    assert proof.metadata.trusted_launcher_sha256 != (
-        proof.metadata.binding.execution.trusted_fleet_release_sha256
-    )
+    assert proof.metadata.trusted_launcher_sha256 != (context.profile.launcher.sha256)
     assert not verify_executable_ownership(
         substituted_launcher,
         keyring=keyring,

@@ -149,6 +149,7 @@ from loom_capacity_manager.models import (
     CapacityDevelopmentProjection,
     CapacityExecutableExecutorState,
     CapacityExecutableIntent,
+    CapacityExecutableProtectedReleaseReceipt,
 )
 from loom_capacity_manager.ownership import OwnershipKeyring, public_key_fingerprint
 from loom_capacity_manager.store import CapacityManagementStore, ExecutionConflictError
@@ -2622,6 +2623,43 @@ class ExecutableCapacityHarness:
             ).scalar_one()
         return row
 
+    async def _latest_protected_release_receipts(
+        self,
+        intent_ids: tuple[UUID, ...],
+    ) -> dict[UUID, CapacityExecutableProtectedReleaseReceipt]:
+        if self._session_factory is None or not intent_ids:
+            return {}
+        async with self._session_factory() as session:
+            rows = tuple(
+                (
+                    await session.execute(
+                        select(CapacityExecutableProtectedReleaseReceipt)
+                        .where(CapacityExecutableProtectedReleaseReceipt.intent_id.in_(intent_ids))
+                        .order_by(
+                            CapacityExecutableProtectedReleaseReceipt.intent_id,
+                            CapacityExecutableProtectedReleaseReceipt.protected_registration_epoch,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        latest: dict[UUID, CapacityExecutableProtectedReleaseReceipt] = {}
+        for row in rows:
+            latest[row.intent_id] = row
+        return latest
+
+    @staticmethod
+    def _release_payload_digest(
+        receipt: CapacityExecutableProtectedReleaseReceipt,
+    ) -> str:
+        release = ExecutableProtectedReleaseV2.model_validate_json(
+            json.dumps(receipt.release_payload)
+        )
+        if release.protected_release_sha256 != receipt.protected_release_sha256:
+            raise RuntimeError("manager protected release receipt digest diverged")
+        return canonical_executable_digest(release)
+
     async def _pending_protected_release(
         self,
         owner: OwnerHandle,
@@ -3010,6 +3048,9 @@ class ExecutableCapacityHarness:
         binding: ExecutableIntentBindingV2,
     ) -> ProtectedIntentSnapshot:
         row = await self._manager_intent_row(binding.intent_id)
+        receipt = (await self._latest_protected_release_receipts((binding.intent_id,))).get(
+            binding.intent_id
+        )
         owner = self._owners_by_subject[binding.subject_id]
         pool = self.pools[pool_id]
         return ProtectedIntentSnapshot(
@@ -3019,7 +3060,9 @@ class ExecutableCapacityHarness:
             pool_id=pool_id,
             manager_state=row.state,
             observed_state=row.observed_state,
-            protected_release_digest=row.protected_release_digest,
+            protected_release_digest=(
+                None if receipt is None else self._release_payload_digest(receipt)
+            ),
             terminal_kind=row.terminal_kind,
             worker_registered=self.worker_registered(binding.intent_id),
             live_job_states=tuple(
@@ -3081,12 +3124,16 @@ class ExecutableCapacityHarness:
         execution_epoch = max(row.execution_epoch for row in executor_rows)
         intents = [row for row in intent_rows if row.execution_epoch == execution_epoch]
         executors = [row for row in executor_rows if row.execution_epoch == execution_epoch]
+        release_receipts = await self._latest_protected_release_receipts(
+            tuple(sorted((row.intent_id for row in intents), key=str))
+        )
 
         bindings = []
         manager_evidence = []
         for row in intents:
             binding = ExecutableIntentBindingV2.model_validate_json(json.dumps(row.binding_payload))
             owner = self._owners_by_subject[binding.subject_id]
+            receipt = release_receipts.get(row.intent_id)
             bindings.append(
                 {
                     "rank": row.launch_rank,
@@ -3105,8 +3152,12 @@ class ExecutableCapacityHarness:
                     "state": row.state,
                     "observed_state": row.observed_state,
                     "bootstrap_registered": row.bootstrap_registration_epoch is not None,
-                    "protected_registered": row.protected_registration_epoch is not None,
-                    "protected_released": row.protected_release_sha256 is not None,
+                    "protected_release_digest": (
+                        None if receipt is None else self._release_payload_digest(receipt)
+                    ),
+                    "protected_release_epoch": (
+                        None if receipt is None else receipt.protected_registration_epoch
+                    ),
                     "terminal_kind": row.terminal_kind,
                     "terminal_identity": row.terminal_identity,
                     "terminal_evidence": row.terminal_evidence_sha256,
@@ -3186,14 +3237,10 @@ class ExecutableCapacityHarness:
         }
         release_digests = []
         for row in intents:
-            if row.protected_release_payload is None:
+            receipt = release_receipts.get(row.intent_id)
+            if receipt is None:
                 continue
-            release = ExecutableProtectedReleaseV2.model_validate_json(
-                json.dumps(row.protected_release_payload)
-            )
-            release_digest = canonical_executable_digest(release)
-            if row.protected_release_digest != release_digest:
-                raise RuntimeError("manager protected release digest diverged")
+            release_digest = self._release_payload_digest(receipt)
             binding = ExecutableIntentBindingV2.model_validate_json(json.dumps(row.binding_payload))
             release_digests.append(
                 {
@@ -3380,6 +3427,14 @@ class ExecutableCapacityHarness:
         for intent_id, pool_id, _rank in rows:
             pool = self.pools[pool_id]
             first = await pool.tick()
+            if first.status == "inventory-published" and intent_id not in self._workers:
+                binding = await self._binding(intent_id)
+                owner = self._owners_by_subject[binding.subject_id]
+                await self.publish_next_protected_release_with_replay(owner)
+                released = await pool.tick()
+                if released.status != "released":
+                    raise RuntimeError(f"prepared-unused intent did not release: {released}")
+                continue
             if first.status not in {"draining", "pending-cancelled"}:
                 raise RuntimeError(f"intent did not enter protected drain: {first}")
             if not completed_claims:
@@ -3388,16 +3443,20 @@ class ExecutableCapacityHarness:
             worker = self._workers[intent_id]
             if any(job["job_id"] == worker.job_id for job in pool.fake.live_jobs()):
                 pool.fake.terminalize_job(worker.job_id)
+            terminal_inventory: ExecutorTickResult | None = None
             if first.status == "draining":
                 closed = await pool.tick()
-                if closed.status != "draining":
+                if closed.status == "inventory-published":
+                    terminal_inventory = closed
+                elif closed.status != "draining":
                     raise RuntimeError(f"intent did not close centrally: {closed}")
-            await pool.heartbeat()
-            terminal_inventory = await pool.tick()
-            if terminal_inventory.status != "inventory-published":
-                raise RuntimeError(
-                    f"intent terminal inventory was not published: {terminal_inventory}"
-                )
+            if terminal_inventory is None:
+                await pool.heartbeat()
+                terminal_inventory = await pool.tick()
+                if terminal_inventory.status != "inventory-published":
+                    raise RuntimeError(
+                        f"intent terminal inventory was not published: {terminal_inventory}"
+                    )
             terminal_closed = await pool.tick()
             if terminal_closed.status != "draining":
                 raise RuntimeError(f"terminal intent did not close centrally: {terminal_closed}")
@@ -3413,29 +3472,20 @@ class ExecutableCapacityHarness:
                 protected_registration_epoch=observation.protected_registration_epoch,
                 release_epoch=observation.protected_registration_epoch + 1,
             )
-            protected = await self._admission.acknowledge_release(
+            await self._admission.acknowledge_release(
                 worker.binding,
                 release_request,
                 current_worker_credential=worker.credential,
             )
-            manager_release = ExecutableProtectedReleaseV2(
-                binding=worker.binding,
-                reporter_incarnation=protected.reporter_incarnation,
-                bootstrap_registration_epoch=protected.bootstrap_registration_epoch,
-                protected_registration_epoch=protected.protected_registration_epoch,
-                bootstrap_revoked=True,
-                protected_release_sha256=protected.protected_release_sha256,
-            )
             owner = self._owners_by_subject[worker.binding.subject_id]
-            response = await self._request(
-                "PUT",
-                f"/v2/reports/protected-releases/{owner.subject_id}/"
-                f"{worker.binding.shape_instance_id}",
-                token=owner.reporter_token,
-                value=manager_release,
-                idempotency_key=_uuid(f"manager-release:{intent_id}"),
-            )
-            response.raise_for_status()
+            publication = await self.publish_next_protected_release_with_replay(owner)
+            if (
+                publication.intent_id != worker.binding.intent_id
+                or publication.event_kind != "released"
+            ):
+                raise RuntimeError(
+                    "protected release reporter published a stale or mismatched release"
+                )
             released = await pool.tick()
             if released.status != "released":
                 raise RuntimeError(f"intent did not release: {released}")

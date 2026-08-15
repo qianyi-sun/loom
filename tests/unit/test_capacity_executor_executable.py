@@ -788,11 +788,15 @@ async def test_drain_only_tick_rejects_new_capacity_work_without_side_effects(
 async def test_drain_only_tick_allows_close_work(tmp_path: Path) -> None:
     launch = launch_context_fixture()
     close = ExecutableIntentCloseV2(binding=launch.binding, command_sequence=1)
-    executor, journal, manager, _admission, slurm, _launch = executor_fixture(
+    executor, journal, manager, admission, slurm, _launch = executor_fixture(
         tmp_path,
         work=close,
     )
 
+    async def _unexpected_observe(_binding: ExecutableIntentBindingV2) -> object:
+        raise AssertionError("accepted close must not require protected observation")
+
+    admission.observe_intent = _unexpected_observe  # type: ignore[method-assign]
     result = await executor.tick_drain_only()
 
     assert result.status == "draining"
@@ -811,6 +815,7 @@ def _durable_central_request(
                 execution=binding.execution,
                 tranche_id=binding.tranche_id,
                 proposal_digest="d" * 64,
+                pool_id=binding.pool_id,
                 pool_generation=binding.pool_generation,
                 executor_id=binding.executor_id,
                 executor_incarnation=binding.executor_incarnation,
@@ -1335,6 +1340,67 @@ async def test_ordinary_reclamation_never_signals_active_worker(tmp_path: Path) 
     journal.close()
 
 
+async def test_close_publishes_terminal_inventory_before_central_close_after_drain(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    permit = permit_fixture(launch.binding)
+    executor, journal, manager, admission, slurm, _launch = executor_fixture(
+        tmp_path,
+        work=permit,
+    )
+    await executor.tick()
+    prior_requests = tuple(manager.central_requests)
+    close = ExecutableIntentCloseV2(binding=launch.binding, command_sequence=2)
+    manager.work = close
+    admission.observations[launch.binding.intent_id] = ProtectedIntentObservationV2(
+        binding=launch.binding,
+        bootstrap_registration_epoch=1,
+        worker_id=UUID(int=321),
+        worker_incarnation=UUID(int=322),
+        protected_registration_epoch=2,
+        claim_high_water=0,
+    )
+    active = slurm.jobs[0].model_copy(
+        update={"state": "RUNNING", "nodes": launch.binding.node_ids, "pending_reason": None}
+    )
+    slurm.jobs[0] = active
+
+    first = await executor.tick()
+
+    assert first.status == "draining"
+    assert tuple(manager.central_requests) == prior_requests
+    slurm.jobs.clear()
+    terminal = _terminal_from_job(active)
+    slurm.terminal_jobs = (terminal,)
+
+    second = await executor.tick()
+
+    assert second.status == "inventory-published"
+    assert tuple(manager.central_requests) == prior_requests
+    inventory = manager.inventories[-1]
+    record = next(
+        record
+        for record in inventory.records
+        if record.ownership_proof is not None
+        and record.ownership_proof.metadata.binding.intent_id == launch.binding.intent_id
+    )
+    assert record.state == "terminal"
+    assert (
+        record.terminal_evidence_sha256
+        == executable_module.ExecutablePoolExecutor._slurm_evidence_digest(terminal)
+    )
+
+    third = await executor.tick()
+
+    assert third.status == "draining"
+    assert manager.work is None
+    assert tuple(manager.central_requests) == (*prior_requests, close)
+    retained = journal.latest("intent", str(launch.binding.intent_id))
+    assert retained is not None and retained.event_kind == "intent-close-confirmed"
+    journal.close()
+
+
 # Production break caught: an exact pending physical job with no registered
 # worker stayed quarantined instead of first revoking bootstrap, fencing late
 # registration, and then conditionally cancelling the owned pending job.
@@ -1356,9 +1422,9 @@ async def test_close_withdraws_bound_unregistered_pending_job_before_cancel(
 
     assert result.status == "pending-cancelled"
     assert result.operation_id == launch.binding.intent_id
-    assert manager.command_sequence == 2
-    assert manager.work is None
-    assert tuple(manager.central_requests) == (*prior_requests, close)
+    assert manager.command_sequence == 1
+    assert manager.work == close
+    assert tuple(manager.central_requests) == prior_requests
     assert slurm.jobs == []
     assert len(admission.withdraw_requests) == 1
     withdrawal = admission.withdraw_requests[0]
@@ -1370,6 +1436,21 @@ async def test_close_withdraws_bound_unregistered_pending_job_before_cancel(
     assert withdrawal.expected_claim_high_water == 0
     assert withdrawal.bootstrap_registration_epoch == 1
     assert withdrawal.protected_registration_epoch == 2
+    retained = journal.latest("intent", str(launch.binding.intent_id))
+    assert retained is not None and retained.event_kind == "protected-withdraw-confirmed"
+    slurm.terminal_jobs = (_terminal_from_job(pending),)
+
+    inventory = await executor.tick()
+
+    assert inventory.status == "inventory-published"
+    assert manager.work == close
+
+    closed = await executor.tick()
+
+    assert closed.status == "draining"
+    assert manager.command_sequence == 2
+    assert manager.work is None
+    assert tuple(manager.central_requests) == (*prior_requests, close)
     retained = journal.latest("intent", str(launch.binding.intent_id))
     assert retained is not None and retained.event_kind == "intent-close-confirmed"
     journal.close()
