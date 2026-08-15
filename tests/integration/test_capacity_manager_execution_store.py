@@ -29,6 +29,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableIntentBindingV2,
     ExecutableIntentCloseV2,
     ExecutableInventoryRecordV2,
+    ExecutableLaunchPermitV2,
     ExecutableOwnershipMetadataV2,
     ExecutablePartialReleaseV2,
     ExecutablePermitConsumptionV2,
@@ -1340,6 +1341,154 @@ async def test_increase_freeze_turns_accepted_work_into_close(
     work = await store.next_pool_work(capacity_session, binding)
 
     assert isinstance(work, ExecutableIntentCloseV2)
+
+
+# Production break caught: an accepted intent that has not reached physical
+# launch must remain publicly closeable during freeze so the executor can revoke
+# its prepared bootstrap before central close.
+async def test_freeze_publicly_closes_accepted_intent_as_unused(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityExecutionStore()
+    active, _allocation_epoch = await _active_plan(capacity_session)
+    binding = executor_binding("gb10")
+    await _heartbeat(store, capacity_session, active, pool_id="gb10")
+    proposal = await store.next_pool_work(capacity_session, binding)
+    assert isinstance(proposal, ExecutableReservationProposalV2)
+    await store.accept_reservation(
+        capacity_session,
+        ExecutableReservationAcceptanceV2(
+            execution=proposal.execution,
+            tranche_id=proposal.tranche_id,
+            proposal_digest=store.contract_digest(proposal),
+            pool_generation=binding.pool_generation,
+            executor_id=binding.executor_id,
+            executor_incarnation=binding.executor_incarnation,
+            command_sequence=1,
+        ),
+    )
+    await capacity_session.execute(
+        update(CapacityAuthorityState)
+        .where(CapacityAuthorityState.singleton_id == 1)
+        .values(increase_freeze=True, increase_freeze_reason="fix-round-accepted")
+    )
+
+    close = await store.next_pool_work(capacity_session, binding)
+
+    assert isinstance(close, ExecutableIntentCloseV2)
+    result = await store.begin_intent_close(capacity_session, close)
+    assert result.intent_id == close.binding.intent_id
+
+
+# Production break caught: after protected bootstrap registration but before a
+# launch permit is consumed, the public queue must still close the unused intent
+# without requiring any scheduler envelope.
+async def test_freeze_publicly_closes_launch_ready_intent_as_unused(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityExecutionStore()
+    active, _allocation_epoch = await _active_plan(capacity_session)
+    binding = executor_binding("gb10")
+    await _heartbeat(store, capacity_session, active, pool_id="gb10")
+    proposal = await store.next_pool_work(capacity_session, binding)
+    assert isinstance(proposal, ExecutableReservationProposalV2)
+    accepted = await store.accept_reservation(
+        capacity_session,
+        ExecutableReservationAcceptanceV2(
+            execution=proposal.execution,
+            tranche_id=proposal.tranche_id,
+            proposal_digest=store.contract_digest(proposal),
+            pool_generation=binding.pool_generation,
+            executor_id=binding.executor_id,
+            executor_incarnation=binding.executor_incarnation,
+            command_sequence=1,
+        ),
+    )
+    intent = await store.next_pool_work(capacity_session, binding)
+    assert isinstance(intent, ExecutableIntentBindingV2)
+    assert intent.intent_id == accepted.intent_ids[0]
+    await store.register_bootstrap(
+        capacity_session,
+        ExecutableBootstrapRegistrationV2(
+            binding=intent,
+            command_sequence=2,
+            bootstrap_registration_epoch=1,
+            bootstrap_evidence_sha256="8" * 64,
+        ),
+    )
+    await capacity_session.execute(
+        update(CapacityAuthorityState)
+        .where(CapacityAuthorityState.singleton_id == 1)
+        .values(increase_freeze=True, increase_freeze_reason="fix-round-launch-ready")
+    )
+
+    close = await store.next_pool_work(capacity_session, binding)
+
+    assert isinstance(close, ExecutableIntentCloseV2)
+    result = await store.begin_intent_close(capacity_session, close)
+    assert result.intent_id == intent.intent_id
+
+
+# Production break caught: a current launch permit that has not been consumed
+# must not be confused with an ambiguous submitted launch; it has no envelope
+# and remains safely closeable as an unused intent.
+async def test_freeze_publicly_closes_unconsumed_permit_as_unused(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityExecutionStore()
+    permit = await _launch_ready(store, capacity_session)
+    assert isinstance(permit, ExecutableLaunchPermitV2)
+    await capacity_session.execute(
+        update(CapacityAuthorityState)
+        .where(CapacityAuthorityState.singleton_id == 1)
+        .values(increase_freeze=True, increase_freeze_reason="fix-round-permitted")
+    )
+
+    close = await store.next_pool_work(capacity_session, executor_binding("gb10"))
+
+    assert isinstance(close, ExecutableIntentCloseV2)
+    assert close.binding == permit.binding
+    result = await store.begin_intent_close(capacity_session, close)
+    assert result.intent_id == permit.binding.intent_id
+
+
+# Production break caught: once permit consumption is durably accepted, manager
+# state is submitting-unknown; freeze must not publicly emit a close that would
+# let the executor revoke an ambiguous possibly-submitted launch.
+async def test_consumed_permit_enters_submitting_unknown_and_cannot_emit_unused_close(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityExecutionStore()
+    permit = await _launch_ready(store, capacity_session)
+    await store.consume_launch_permit(
+        capacity_session,
+        ExecutablePermitConsumptionV2(
+            permit_id=permit.permit_id,
+            permit_digest=store.contract_digest(permit),
+            binding=permit.binding,
+            command_sequence=3,
+        ),
+    )
+    row = (
+        await capacity_session.execute(
+            select(CapacityExecutableIntent).where(
+                CapacityExecutableIntent.intent_id == permit.binding.intent_id
+            )
+        )
+    ).scalar_one()
+    assert row.state == "submitting-unknown"
+    await capacity_session.execute(
+        update(CapacityAuthorityState)
+        .where(CapacityAuthorityState.singleton_id == 1)
+        .values(increase_freeze=True, increase_freeze_reason="fix-round-consumed")
+    )
+
+    work = await store.next_pool_work(capacity_session, executor_binding("gb10"))
+
+    assert work is None
+    close = ExecutableIntentCloseV2(binding=permit.binding, command_sequence=4)
+    with pytest.raises(ExecutionConflictError, match="intent cannot begin close"):
+        await store.begin_intent_close(capacity_session, close)
 
 
 async def test_drain_only_writer_transition_allows_retained_intent_close(

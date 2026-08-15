@@ -18,6 +18,7 @@ from loom_capacity_agent.admission import (
     PhysicalJobBindingV2,
     PreparedExecutableAdmissionV2,
 )
+from loom_capacity_executor.bootstrap_handoff import BootstrapHandoffStore
 from loom_capacity_executor.client import ExecutorRejectedError, ExecutorTransportError
 from loom_capacity_executor.executable import (
     ExecutablePoolExecutor,
@@ -344,6 +345,7 @@ class FakeSlurm:
     def __init__(self) -> None:
         self.jobs: list[SlurmJobObservationV2] = []
         self.submit_count = 0
+        self.crash_before_submit_commit = False
         self.crash_after_submit = False
         self.admission: FakeAdmission | None = None
         self.terminal_jobs: tuple[SlurmTerminalEvidenceV2, ...] = ()
@@ -352,6 +354,8 @@ class FakeSlurm:
         self.cancel_commits_before_failure = False
 
     async def submit(self, request: Any) -> SlurmSubmissionV2:
+        if self.crash_before_submit_commit:
+            raise SimulatedCrash("process stopped before sbatch outcome was known")
         self.submit_count += 1
         self.jobs.append(
             SlurmJobObservationV2(
@@ -1216,6 +1220,50 @@ async def test_close_revokes_prepared_bootstrap_without_a_physical_job(
     assert central.event_kind == "intent-close-confirmed"
     assert requested.sequence < central.sequence
     assert slurm.submit_count == 0
+    journal.close()
+
+
+# Production break caught: a public close for a launch-ready/permitted but
+# unconsumed intent has no scheduler envelope and no handoff ownership sidecar;
+# that is the safe boundary where prepared revocation may remove the clear
+# handoff before central close.
+async def test_close_revokes_unconsumed_handoff_before_central_close(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    handoff_directory = tmp_path / "handoff"
+    handoff_directory.mkdir(mode=0o700)
+    handoff_store = BootstrapHandoffStore(handoff_directory)
+    executor, journal, manager, admission, slurm, _launch = executor_fixture(
+        tmp_path,
+        work=launch.binding,
+    )
+    executor._bootstrap_handoff_store = handoff_store
+    executor._bootstrap_digest = None
+    await executor.tick()
+    reference = handoff_store.reference_for(launch.binding)
+    handoff_path = handoff_directory / reference
+    assert handoff_path.exists()
+    assert not handoff_path.with_suffix(".ownership").exists()
+    assert journal.latest("job", str(launch.binding.intent_id)) is None
+    close = ExecutableIntentCloseV2(binding=launch.binding, command_sequence=2)
+    manager.work = close
+
+    result = await executor.tick()
+
+    assert result.status == "draining"
+    assert not handoff_path.exists()
+    assert not handoff_path.with_suffix(".ownership").exists()
+    assert slurm.submit_count == 0
+    assert len(admission.prepared_revocation_requests) == 1
+    assert manager.central_requests[-1] == close
+    deleted = journal.latest("prepared-revocation", str(launch.binding.intent_id))
+    assert deleted is not None
+    assert deleted.event_kind == "prepared-handoff-deleted"
+    central = journal.latest("intent", str(launch.binding.intent_id))
+    assert central is not None
+    assert central.event_kind == "intent-close-confirmed"
+    assert deleted.sequence < central.sequence
     journal.close()
 
 

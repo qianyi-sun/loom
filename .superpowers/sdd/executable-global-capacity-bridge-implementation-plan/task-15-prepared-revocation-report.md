@@ -161,3 +161,68 @@ Final focused tests:
 
 - Trusted V2 reporter publication through the manager protected-release endpoint and final execution-epoch retirement are intentionally not implemented in Phase A per the task instructions.
 - The worktree still contains unrelated unstaged retained-runtime/capacity_0004/model/ops repair files from earlier work; they were not included in the Phase A commit.
+
+## Fix round 1
+
+### Status
+
+DONE_WITH_CONCERNS
+
+### Reviewer finding evaluated
+
+Reviewer concern: executor `_close()` could central-close after permit consumption / launch-ready with a launch envelope but no physical job, because prepared revocation was limited to `envelope is None`.
+
+Controller verification held under test: public manager state moves from `permitted` to `submitting-unknown` as soon as permit consumption succeeds, and `next_pool_work()` does not emit unused close for `submitting-unknown`. The executor records the launch envelope only after central permit consumption succeeds, so a public manager-issued unused close with an envelope remains unreachable.
+
+No production semantics were changed in fix round 1. The fix is focused regression coverage that makes the public-boundary invariant explicit.
+
+### Files changed in fix round 1
+
+- `tests/integration/test_capacity_manager_execution_store.py`
+- `tests/unit/test_capacity_executor_executable.py`
+- `tests/unit/test_capacity_executor_recovery.py`
+- `.superpowers/sdd/executable-global-capacity-bridge-implementation-plan/task-15-prepared-revocation-report.md`
+
+### Test/evidence added
+
+- Public manager matrix:
+  - accepted intent under freeze emits unused close and `begin_intent_close()` accepts it;
+  - launch-ready intent under freeze emits unused close and `begin_intent_close()` accepts it;
+  - permitted-but-unconsumed intent under freeze emits unused close and `begin_intent_close()` accepts it;
+  - consumed permit records `submitting-unknown`, emits no unused close under freeze, and direct close is rejected.
+- Executor boundary:
+  - unconsumed handoff close has no launch envelope and no `.ownership` sidecar, revokes prepared bootstrap, deletes handoff, and central-closes only after deletion;
+  - `slurm-submit-unknown` envelope with no observed physical job quarantines during recovery, does not revoke prepared bootstrap, does not central-close, and preserves handoff plus `.ownership` evidence.
+
+### Commands and outcomes
+
+- `uv run --no-sync pytest -q tests/integration/test_capacity_manager_execution_store.py::test_freeze_publicly_closes_accepted_intent_as_unused tests/integration/test_capacity_manager_execution_store.py::test_freeze_publicly_closes_launch_ready_intent_as_unused tests/integration/test_capacity_manager_execution_store.py::test_freeze_publicly_closes_unconsumed_permit_as_unused tests/integration/test_capacity_manager_execution_store.py::test_consumed_permit_enters_submitting_unknown_and_cannot_emit_unused_close`
+  - `4 passed in 4.20s`
+- `uv run --no-sync pytest -q tests/unit/test_capacity_executor_recovery.py::test_submit_requested_without_observed_job_quarantines_without_prepared_revocation`
+  - `1 passed in 0.40s`
+- `uv run --no-sync pytest -q tests/unit/test_capacity_executor_executable.py::test_close_revokes_unconsumed_handoff_before_central_close`
+  - First run failed due missing test import, not production behavior.
+  - After import fix: `1 passed in 0.15s`
+- `uv run --no-sync pytest -q tests/integration/test_capacity_manager_execution_store.py`
+  - `70 passed in 14.20s`
+- `uv run --no-sync pytest -q tests/unit/test_capacity_executor_executable.py tests/unit/test_capacity_executor_recovery.py`
+  - `59 passed in 0.74s`
+- `uv run --no-sync ruff format tests/integration/test_capacity_manager_execution_store.py tests/unit/test_capacity_executor_executable.py tests/unit/test_capacity_executor_recovery.py`
+  - `3 files left unchanged`
+- `uv run --no-sync ruff check --fix tests/unit/test_capacity_executor_executable.py`
+  - `Found 1 error (1 fixed, 0 remaining).`
+- `uv run --no-sync ruff check tests/integration/test_capacity_manager_execution_store.py tests/unit/test_capacity_executor_executable.py tests/unit/test_capacity_executor_recovery.py`
+  - `All checks passed!`
+- `git diff --check`
+  - Passed with no output.
+
+### Self-review
+
+- The new manager tests use `next_pool_work()`, `consume_launch_permit()`, and `begin_intent_close()` public store methods.
+- The executor ambiguous-envelope test uses public `tick()`/`recover()` and a test-only Slurm failure mode to model a durable `slurm-submit-unknown` envelope with no scheduler observation.
+- No protected prepared revocation is attempted once the permit was consumed.
+- Handoff `.ownership` evidence survives the ambiguous consumed state and remains fail-closed.
+
+### Remaining concerns
+
+- Same Phase A boundary as above: trusted V2 reporter publication and final manager retirement remain intentionally out of scope for this fix round.

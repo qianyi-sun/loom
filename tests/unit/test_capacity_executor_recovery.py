@@ -397,6 +397,62 @@ async def test_repeated_close_after_prepared_handoff_deleted_replays_central_clo
     reopened.close()
 
 
+# Production break caught: once permit consumption has committed and a launch
+# envelope exists, missing scheduler observation is ambiguous. Recovery must
+# quarantine instead of revoking the prepared bootstrap or central-closing, and
+# ownership sidecar evidence must remain fail-closed on disk.
+async def test_submit_requested_without_observed_job_quarantines_without_prepared_revocation(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    handoff_directory = tmp_path / "handoff"
+    handoff_directory.mkdir(mode=0o700)
+    handoff_store = BootstrapHandoffStore(handoff_directory)
+    executor, journal, manager, admission, slurm, launch = executor_fixture(
+        tmp_path,
+        work=launch.binding,
+    )
+    executor._bootstrap_handoff_store = handoff_store
+    executor._bootstrap_digest = None
+    await executor.tick()
+    reference = handoff_store.reference_for(launch.binding)
+    manager.work = permit_fixture(launch.binding)
+    slurm.crash_before_submit_commit = True
+
+    with pytest.raises(SimulatedCrash):
+        await executor.tick()
+
+    latest = journal.latest("job", str(launch.binding.intent_id))
+    assert latest is not None and latest.event_kind == "slurm-submit-unknown"
+    assert slurm.submit_count == 0
+    assert slurm.jobs == []
+    assert (handoff_directory / reference).exists()
+    assert (handoff_directory / reference).with_suffix(".ownership").exists()
+    journal.close()
+
+    slurm.crash_before_submit_commit = False
+    recovered, reopened = _restart(
+        journal.path,
+        manager,
+        admission,
+        slurm,
+        launch,
+        bootstrap_handoff_store=handoff_store,
+    )
+    result = await recovered.recover()
+
+    assert result.status == "quarantined"
+    assert admission.prepared_revocation_requests == []
+    assert manager.work is None
+    assert [type(item).__name__ for item in manager.central_requests] == [
+        "ExecutableBootstrapRegistrationV2",
+        "ExecutablePermitConsumptionV2",
+    ]
+    assert (handoff_directory / reference).exists()
+    assert (handoff_directory / reference).with_suffix(".ownership").exists()
+    reopened.close()
+
+
 # Production break caught: treating an interrupted sbatch as safely absent would
 # submit the same stable operation twice after process restart.
 async def test_crash_after_submit_never_resubmits(tmp_path: Path) -> None:
