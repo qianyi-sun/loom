@@ -116,6 +116,7 @@ def test_capacity_guard_migrations_have_no_candidate_database_fallback() -> None
     assert "LOOM_CAPACITY_GUARD_DB_URL" in source
     assert "LOOM_CAPACITY_GUARD_OWNER_ROLE" in source
     assert "LOOM_CAPACITY_GUARD_AGENT_ROLE" in source
+    assert "LOOM_CAPACITY_GUARD_EXECUTOR_ROLE" in source
     assert "LOOM_DB_URL" not in source
     assert "LOOM_CP_DB_URL" not in source
     assert "LOOM_CAPACITY_DB_URL" not in source
@@ -127,7 +128,9 @@ def test_capacity_guard_is_in_default_static_validation() -> None:
     assert "src/loom_capacity_agent" in project["tool"]["mypy"]["files"]
 
     workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
-    ruff_command = "ruff check src tests packages migrations capacity_guard_migrations"
+    ruff_command = (
+        "ruff check src tests packages migrations capacity_guard_migrations capacity_migrations"
+    )
     assert ruff_command in workflow
 
 
@@ -244,5 +247,22 @@ def test_complete_mutation_inventory_migration_only_tightens_inert_policy() -> N
     assert "update public." not in lowered
     assert "delete from public." not in lowered
     assert "insert into loom_capacity_guard.protected_claim_leases" not in lowered
+    assert "sbatch" not in lowered
+    assert "scancel" not in lowered
+
+
+def test_executable_intent_observation_migration_is_read_only_and_role_bounded() -> None:
+    source = Path(
+        "capacity_guard_migrations/versions/guard_0013_executable_intent_observation.py"
+    ).read_text(encoding="utf-8")
+    lowered = source.lower()
+    assert "observe_executable_intent" in lowered
+    assert "security definer" in lowered
+    assert "session_user::text <> v_executor_role" in lowered
+    assert "to public" not in lowered
+    assert "insert into" not in lowered
+    assert "update " not in lowered
+    assert "delete from" not in lowered
+    assert "truncate " not in lowered
     assert "sbatch" not in lowered
     assert "scancel" not in lowered

@@ -158,7 +158,6 @@ async def _commit_reconciled_epoch(
         )
         session.add(row)
         await session.flush()
-
         for allocation in shadow.allocations:
             session.add(
                 CapacityAllocation(
@@ -234,10 +233,7 @@ async def _commit_reconciled_epoch(
         )
         await session.flush()
         await session.execute(
-            text(
-                "SET CONSTRAINTS "
-                "public.capacity_executable_allocation_seal_guard IMMEDIATE"
-            )
+            text("SET CONSTRAINTS public.capacity_executable_allocation_seal_guard IMMEDIATE")
         )
         final_now = (await session.execute(select(func.clock_timestamp()))).scalar_one()
         final_valid_until = store.allocation_input_valid_until(current_input)

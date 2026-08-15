@@ -20,6 +20,21 @@ from loom_cli.environment_state import (
 )
 
 
+def _assert_manager_trust_arguments(supervisor: dict[str, Any], *, pool_name: str) -> None:
+    args = supervisor["args"]
+    expected = {
+        "--global-execution-witness-json": (
+            f"/etc/loom/credentials/global-execution/{pool_name}-witness.json"
+        ),
+        "--manager-public-key": "/etc/loom/credentials/global-execution/manager-ed25519.pub",
+        "--expected-manager-public-key-sha256-file": (
+            "/etc/loom/credentials/global-execution/manager-ed25519.pub.sha256"
+        ),
+    }
+    for option, value in expected.items():
+        assert args[args.index(option) + 1] == value
+
+
 def test_normalize_autoscaler_policy_passes_through_qos_and_slurm_scheduler_fields() -> None:
     normalized = _normalize_autoscaler_policy(
         {
@@ -2343,6 +2358,7 @@ def test_committed_development_profile_ships_fail_closed_supervisors() -> None:
     assert oldlab["enabled"] is False
     assert oldlab["active"] is False
     assert "15447" in oldlab["args"]
+    _assert_manager_trust_arguments(oldlab, pool_name="oldlab")
 
     gb10 = supervisors["gb10-development"]
     assert gb10["pool_name"] == "gb10"
@@ -2351,6 +2367,7 @@ def test_committed_development_profile_ships_fail_closed_supervisors() -> None:
     assert gb10["enabled"] is False
     assert gb10["active"] is False
     assert "15450" in gb10["args"]
+    _assert_manager_trust_arguments(gb10, pool_name="gb10")
 
     # Both dev supervisors are fail-closed: neither is enabled nor active.
     assert not any(
@@ -2381,6 +2398,7 @@ def test_committed_staging_profile_activates_both_slurm_supervisors() -> None:
     assert gb10["active"] is True
     assert "15451" in gb10["args"]
     assert "loom-external-slurm-autoscaler-db" in gb10["args"]
+    _assert_manager_trust_arguments(gb10, pool_name="gb10")
 
     oldlab = by_name["oldlab-staging"]
     assert oldlab["pool_name"] == "oldlab"
@@ -2391,6 +2409,23 @@ def test_committed_staging_profile_activates_both_slurm_supervisors() -> None:
     assert "15448" in oldlab["args"]
     assert "service/loom-postgres-rw" in oldlab["args"]
     assert oldlab["working_directory"].startswith("/opt/loom-staging-runner/candidates/")
+    _assert_manager_trust_arguments(oldlab, pool_name="oldlab")
+
+
+def test_committed_production_supervisor_has_independently_pinned_manager_trust() -> None:
+    profile = load_environment_state_profile(
+        Path("deploy/environment-state/production.toml"),
+        variables={
+            "IMAGE_TAG": "production-test",
+            "ENV_CONFIG_VERSION": "production-test",
+            "GIT_SHA": "a" * 40,
+        },
+        expected_environment="production",
+    )
+    assert len(profile.external_slurm_autoscaler_supervisors) == 1
+    _assert_manager_trust_arguments(
+        profile.external_slurm_autoscaler_supervisors[0], pool_name="gb10"
+    )
 
 
 def test_staging_profile_loader_rejects_candidate_self_attested_activation(

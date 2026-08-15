@@ -43,6 +43,8 @@ def _record(row: DevInstance) -> DevInstanceRecord:
         subject_id=row.subject_id,
         subject_incarnation=row.subject_incarnation,
         candidate_id=row.candidate_id,
+        capacity_namespace=row.capacity_namespace,
+        capacity_database=row.capacity_database,
     )
 
 

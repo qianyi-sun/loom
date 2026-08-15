@@ -78,6 +78,7 @@ def _pool_executor(token: str = "executor-secret") -> dict[str, object]:
         "pool_reporter_incarnation": None,
         "executor_id": "oldlab-executor",
         "executor_incarnation": str(EXECUTOR_INCARNATION),
+        "executor_pool_generation": 1,
     }
 
 
@@ -96,7 +97,7 @@ def test_registry_verifies_hash_without_storing_raw_token(tmp_path: Path) -> Non
     assert "operator-secret" not in path.read_text(encoding="utf-8")
 
 
-def test_registry_accepts_v1_pool_executor_binding_without_generation_but_requires_it_for_v2(
+def test_registry_requires_exact_pool_executor_generation(
     tmp_path: Path,
 ) -> None:
     verifier = CapacityPrincipalVerifier.from_file(
@@ -108,17 +109,18 @@ def test_registry_accepts_v1_pool_executor_binding_without_generation_but_requir
     assert executor.pool_id == "oldlab"
     assert executor.executor_id == "oldlab-executor"
     assert executor.executor_incarnation == EXECUTOR_INCARNATION
-    assert executor.executor_pool_generation is None
+    assert executor.executor_pool_generation == 1
     assert executor.matches_executor(
         pool_id="oldlab",
         executor_id="oldlab-executor",
         executor_incarnation=EXECUTOR_INCARNATION,
+        pool_generation=1,
     )
     assert not executor.matches_executor(
         pool_id="oldlab",
         executor_id="oldlab-executor",
         executor_incarnation=EXECUTOR_INCARNATION,
-        pool_generation=1,
+        pool_generation=2,
     )
     incomplete = _pool_executor()
     incomplete["executor_incarnation"] = None
@@ -145,6 +147,15 @@ def test_registry_accepts_v1_pool_executor_binding_without_generation_but_requir
         executor_incarnation=EXECUTOR_INCARNATION,
         pool_generation=2,
     )
+    missing_generation = _pool_executor()
+    missing_generation.pop("executor_pool_generation")
+    with pytest.raises(PrincipalRegistryError, match="executor binding"):
+        CapacityPrincipalVerifier.from_file(
+            _write_registry(
+                tmp_path / "missing-generation.json",
+                [_operator(), missing_generation],
+            )
+        )
     overprivileged = _pool_executor()
     overprivileged["scopes"] = [
         "capacity:execute:pool",

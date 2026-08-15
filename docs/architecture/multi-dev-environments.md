@@ -270,3 +270,21 @@ publication; it does not mean worker slots are live.
 The separate global development-fleet supervisor consumes 40-character Git
 candidate identities and existing per-instance external Slurm policies, so it
 cannot consume these 64-character personal-candidate bindings directly.
+
+## Capacity status projection
+
+The personal-environment API keeps `application_status`, `capacity_status`,
+`capacity_prepared`, and `worker_available` separate. Application readiness
+remains a lifecycle property and pod readiness never implies worker capacity.
+The manager checkpoint carries configuration epoch, execution state, execution
+epoch, and executable ceiling; personal reconciliation uses its configuration
+epoch only for projection fencing. In the checked-in inert deployment, capacity
+is `shadow` or `prepared` and worker availability is false. If a later
+authorized active manager records exact physical capacity, a matching protected
+guard-database worker registration still has to prove the same subject,
+incarnation, deployment generation, and intent before availability can be
+reported.
+That conjunction is read under a dedicated `NOINHERIT` observer database login
+with no memberships or mutation-function grants. Missing, stale, malformed, or
+unreachable manager, credential, or protected observation evidence fails
+closed to `waiting`; it does not change application readiness into a 5xx.

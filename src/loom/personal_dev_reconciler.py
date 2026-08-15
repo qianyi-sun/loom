@@ -306,7 +306,7 @@ class PersonalDevEnvironmentReconciler:
                 "capacity_projection_requested",
             }:
                 expected_epoch = await self._with_heartbeats(
-                    self.capacity_projector.current_configuration_epoch(),
+                    self.capacity_projector.current_manager_checkpoint(),
                     lease=lease,
                     started=started,
                     initial_now=now,
@@ -314,13 +314,13 @@ class PersonalDevEnvironmentReconciler:
                 request = personal_dev_capacity_projection(
                     claim,
                     installation,
-                    expected_configuration_epoch=expected_epoch,
+                    expected_configuration_epoch=expected_epoch.configuration_epoch,
                 )
                 callback_now = now + timedelta(seconds=loop.time() - started)
                 await self.authority.prepare_capacity_projection(
                     **lease,
                     now=callback_now,
-                    expected_configuration_epoch=expected_epoch,
+                    expected_configuration_epoch=expected_epoch.configuration_epoch,
                     projection_request_sha256=canonical_digest(request),
                     reporter_incarnation=installation.reporter_incarnation,
                     reporter_token_sha256=installation.reporter_token_sha256,
@@ -352,23 +352,23 @@ class PersonalDevEnvironmentReconciler:
                 )
             except PersonalDevCapacityProjectionConflictError as exc:
                 refreshed_epoch = await self._with_heartbeats(
-                    self.capacity_projector.current_configuration_epoch(),
+                    self.capacity_projector.current_manager_checkpoint(),
                     lease=lease,
                     started=started,
                     initial_now=now,
                 )
-                if refreshed_epoch <= request.expected_configuration_epoch:
+                if refreshed_epoch.configuration_epoch <= request.expected_configuration_epoch:
                     raise RuntimeError(
                         "capacity manager rejected the request at its current epoch"
                     ) from exc
                 refreshed = request.model_copy(
-                    update={"expected_configuration_epoch": refreshed_epoch}
+                    update={"expected_configuration_epoch": refreshed_epoch.configuration_epoch}
                 )
                 callback_now = now + timedelta(seconds=loop.time() - started)
                 await self.authority.refresh_capacity_projection_epoch(
                     **lease,
                     now=callback_now,
-                    expected_configuration_epoch=refreshed_epoch,
+                    expected_configuration_epoch=refreshed_epoch.configuration_epoch,
                     projection_request_sha256=canonical_digest(refreshed),
                 )
                 return True
@@ -474,14 +474,14 @@ class PersonalDevEnvironmentReconciler:
         checkpoint = operation.checkpoint
         if checkpoint == "capacity_retirement_requested":
             expected_epoch = await self._with_heartbeats(
-                self.capacity_projector.current_configuration_epoch(),
+                self.capacity_projector.current_manager_checkpoint(),
                 lease=lease,
                 started=started,
                 initial_now=initial_now,
             )
             request = personal_dev_capacity_retirement_projection(
                 claim,
-                expected_configuration_epoch=expected_epoch,
+                expected_configuration_epoch=expected_epoch.configuration_epoch,
             )
             if (
                 operation.capacity_reporter_incarnation is None
@@ -496,14 +496,12 @@ class PersonalDevEnvironmentReconciler:
             await self.authority.prepare_capacity_projection(
                 **lease,
                 now=callback_now,
-                expected_configuration_epoch=expected_epoch,
+                expected_configuration_epoch=expected_epoch.configuration_epoch,
                 projection_request_sha256=canonical_digest(request),
                 reporter_incarnation=operation.capacity_reporter_incarnation,
                 reporter_token_sha256=operation.capacity_reporter_token_sha256,
                 protected_admission_sha256=operation.protected_admission_sha256,
-                capacity_agent_installation_sha256=(
-                    operation.capacity_agent_installation_sha256
-                ),
+                capacity_agent_installation_sha256=(operation.capacity_agent_installation_sha256),
                 supported_pool_ids=operation.capacity_supported_pool_ids,
                 supported_architectures=operation.capacity_supported_architectures,
             )
@@ -528,23 +526,23 @@ class PersonalDevEnvironmentReconciler:
                 )
             except PersonalDevCapacityProjectionConflictError as exc:
                 refreshed_epoch = await self._with_heartbeats(
-                    self.capacity_projector.current_configuration_epoch(),
+                    self.capacity_projector.current_manager_checkpoint(),
                     lease=lease,
                     started=started,
                     initial_now=initial_now,
                 )
-                if refreshed_epoch <= request.expected_configuration_epoch:
+                if refreshed_epoch.configuration_epoch <= request.expected_configuration_epoch:
                     raise RuntimeError(
                         "capacity manager rejected retirement at its current epoch"
                     ) from exc
                 refreshed = request.model_copy(
-                    update={"expected_configuration_epoch": refreshed_epoch}
+                    update={"expected_configuration_epoch": refreshed_epoch.configuration_epoch}
                 )
                 callback_now = initial_now + timedelta(seconds=loop.time() - started)
                 await self.authority.refresh_capacity_projection_epoch(
                     **lease,
                     now=callback_now,
-                    expected_configuration_epoch=refreshed_epoch,
+                    expected_configuration_epoch=refreshed_epoch.configuration_epoch,
                     projection_request_sha256=canonical_digest(refreshed),
                 )
                 return

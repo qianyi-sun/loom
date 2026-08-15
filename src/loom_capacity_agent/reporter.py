@@ -49,10 +49,7 @@ def _compatible(
     return (
         (requirements.required_pool is None or requirements.required_pool == pool.pool_id)
         and requirements.os == pool.operating_system
-        and (
-            requirements.cpu_arch == "any"
-            or requirements.cpu_arch == pool.cpu_architecture
-        )
+        and (requirements.cpu_arch == "any" or requirements.cpu_arch == pool.cpu_architecture)
         and requirements.gpu_vendor == pool.gpu_vendor
         and set(requirements.network_policies) <= set(pool.network_policies)
     )
@@ -168,7 +165,9 @@ def build_demand_snapshot(
             fixed_claims=(),
         )
     except ValidationError as exc:
-        raise DemandReportBlockedError("protected demand snapshot is outside manager bounds") from exc
+        raise DemandReportBlockedError(
+            "protected demand snapshot is outside manager bounds"
+        ) from exc
 
 
 def build_lifecycle_demand_snapshot(
@@ -271,7 +270,9 @@ def build_lifecycle_demand_snapshot(
             fixed_claims=(),
         )
     except ValidationError as exc:
-        raise DemandReportBlockedError("protected demand snapshot is outside manager bounds") from exc
+        raise DemandReportBlockedError(
+            "protected demand snapshot is outside manager bounds"
+        ) from exc
 
 
 __all__ = [

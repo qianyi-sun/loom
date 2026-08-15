@@ -7,11 +7,17 @@ from uuid import UUID
 import httpx
 import pytest
 
+import loom_capacity_executor.client as client_module
 from loom_capacity_executor.client import (
     CapacityExecutorClient,
+    ExecutableCapacityExecutorClient,
     ExecutorTransportError,
 )
 from loom_capacity_executor.dry_run import DryRunExecutorBinding
+from loom_capacity_manager.executable_contracts import (
+    ExecutableExecutorRegistrationV2,
+    ExecutionContextV2,
+)
 from loom_capacity_manager.grant_contracts import (
     DryRunExecutorHeartbeatV1,
     DryRunReservationAcceptanceV1,
@@ -27,6 +33,25 @@ def _binding() -> DryRunExecutorBinding:
         pool_id="oldlab",
         pool_generation=2,
     )
+
+
+class _GuardedOversizeStream(httpx.AsyncByteStream):
+    def __init__(self) -> None:
+        self.read_past_limit = False
+
+    async def __aiter__(self):  # type: ignore[no-untyped-def]
+        yield b" " * client_module._MAX_RECEIPT_BYTES
+        yield b"x"
+        self.read_past_limit = True
+        raise AssertionError("client read past the configured response byte bound")
+
+
+class _StreamingOversizeTransport(httpx.AsyncBaseTransport):
+    def __init__(self) -> None:
+        self.stream = _GuardedOversizeStream()
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, request=request, stream=self.stream)
 
 
 async def test_executor_client_fetches_exact_checkpoint_and_accepts_over_https() -> None:
@@ -167,3 +192,116 @@ async def test_executor_client_rejects_unsafe_origins_and_tokens() -> None:
             bearer_token="x" * 4097,
             http_client=http,
         )
+
+
+async def test_executor_client_aborts_streaming_receipt_once_byte_bound_is_crossed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parsed = False
+
+    def unexpected_parse(cls: object, payload: bytes) -> object:
+        nonlocal parsed
+        parsed = True
+        raise AssertionError(f"oversized receipt was parsed: {len(payload)}")
+
+    monkeypatch.setattr(
+        client_module.ExecutorCheckpointReceiptV1,
+        "model_validate_json",
+        classmethod(unexpected_parse),
+    )
+    transport = _StreamingOversizeTransport()
+    http = httpx.AsyncClient(transport=transport)
+    client = CapacityExecutorClient(
+        _binding(),
+        manager_origin="https://capacity.example.test",
+        bearer_token="executor-secret",
+        http_client=http,
+    )
+
+    with pytest.raises(ExecutorTransportError, match="receipt exceeds"):
+        await client.checkpoint()
+
+    assert parsed is False
+    assert transport.stream.read_past_limit is False
+    await http.aclose()
+
+
+async def test_executable_work_fetch_aborts_streaming_body_once_byte_bound_is_crossed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parsed = False
+
+    def unexpected_parse(payload: bytes) -> object:
+        nonlocal parsed
+        parsed = True
+        raise AssertionError(f"oversized work was parsed: {len(payload)}")
+
+    monkeypatch.setattr(client_module._EXECUTABLE_WORK, "validate_json", unexpected_parse)
+    transport = _StreamingOversizeTransport()
+    http = httpx.AsyncClient(transport=transport)
+    registration = ExecutableExecutorRegistrationV2.model_construct(
+        pool_id="oldlab",
+        executable=True,
+    )
+    client = ExecutableCapacityExecutorClient(
+        registration,
+        manager_origin="https://capacity.example.test",
+        bearer_token="executor-secret",
+        http_client=http,
+    )
+
+    with pytest.raises(ExecutorTransportError, match="work exceeds"):
+        await client.next_executable_work(0)
+
+    assert parsed is False
+    assert transport.stream.read_past_limit is False
+    await http.aclose()
+
+
+# Production break caught: the executable daemon had no authenticated route to
+# read the manager's current execution context before constructing a mutating
+# scheduler/protected-database runtime.
+async def test_executable_client_fetches_exact_current_execution_context() -> None:
+    expected = ExecutionContextV2(
+        authority_incarnation=UUID(int=50),
+        writer_epoch=7,
+        configuration_epoch=9,
+        execution_epoch=11,
+        execution_manifest_sha256="c" * 64,
+        execution_state="drain-only",
+        executable_new_capacity_ceiling=0,
+        executable_new_capacity_rate_per_minute=0,
+        trusted_fleet_release_sha256="d" * 64,
+    )
+    registration = ExecutableExecutorRegistrationV2.model_construct(
+        execution=expected,
+        executor_id="oldlab-executor",
+        executor_incarnation=UUID(int=51),
+        pool_id="oldlab",
+        pool_generation=2,
+        signing_key_id="oldlab-key",
+        signing_key_sha256="a" * 64,
+        local_authority_sha256="b" * 64,
+        controller_authority_sha256="e" * 64,
+        executable=True,
+    )
+    seen: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=expected.model_dump(mode="json"))
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = ExecutableCapacityExecutorClient(
+        registration,
+        manager_origin="https://capacity.example.test",
+        bearer_token="executor-secret",
+        http_client=http,
+    )
+
+    current = await client.current_execution_context()
+
+    assert current == expected
+    assert [request.url.path for request in seen] == ["/v2/executors/oldlab/context"]
+    assert seen[0].headers["authorization"] == "Bearer executor-secret"
+    await http.aclose()

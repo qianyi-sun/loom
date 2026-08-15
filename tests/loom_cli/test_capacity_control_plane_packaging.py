@@ -28,6 +28,12 @@ _MIGRATION_RESOURCES = {
     "capacity_migrations/versions/capacity_0003_fenced_grant_protocol.py",
     "capacity_migrations/versions/capacity_0004_executable_bridge.py",
     "capacity_migrations/versions/capacity_0005_executable_allocation.py",
+    "capacity_migrations/versions/capacity_0006_executable_work_queue.py",
+    "capacity_migrations/versions/capacity_0007_executable_bridge_completion.py",
+    "capacity_migrations/versions/capacity_0008_inventory_confirmation.py",
+    "capacity_migrations/versions/capacity_0009_prepared_retirement_evidence.py",
+    "capacity_migrations/versions/capacity_0010_retirement_heartbeat_freshness.py",
+    "capacity_migrations/versions/capacity_0011_executable_intent_observed_state_check.py",
 }
 _PROFILE = _REPO_ROOT / "deploy/dev-fleet/capacity-control-plane.toml"
 _MANAGER_IMAGE = "ghcr.io/qianyi-sun/loom-capacity-manager@sha256:" + "a" * 64
@@ -37,6 +43,25 @@ _AUTHORITY = UUID("00000000-0000-4000-8000-000000000901")
 @pytest.fixture(scope="module")
 def built_loom_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
     output_directory = tmp_path_factory.mktemp("capacity-wheel")
+    source_directory = tmp_path_factory.mktemp("capacity-source") / "loom"
+    shutil.copytree(
+        _REPO_ROOT,
+        source_directory,
+        ignore=shutil.ignore_patterns(
+            ".git",
+            ".hypothesis",
+            ".mypy_cache",
+            ".pytest_cache",
+            ".ruff_cache",
+            ".superpowers",
+            ".venv",
+            ".env",
+            "*.egg-info",
+            "__pycache__",
+            "build",
+            "dist",
+        ),
+    )
     completed = subprocess.run(
         [
             "uv",
@@ -44,9 +69,9 @@ def built_loom_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
             "--wheel",
             "--out-dir",
             str(output_directory),
-            str(_REPO_ROOT),
+            str(source_directory),
         ],
-        cwd=_REPO_ROOT,
+        cwd=source_directory,
         check=False,
         capture_output=True,
         text=True,
@@ -189,4 +214,4 @@ def test_installed_wheel_renders_capacity_manifests_outside_checkout(
         "StatefulSet",
         "Job",
     ]
-    assert documents[3]["metadata"]["name"].startswith("loom-capacity-migrate-capacity-0006-")
+    assert documents[3]["metadata"]["name"].startswith("loom-capacity-migrate-capacity-0011-")

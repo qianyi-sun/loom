@@ -18,7 +18,7 @@ def test_repository_checks_ruff_scope_matches_repo_wide_local_lint() -> None:
 
     assert ruff_step["run"] == (
         "uv run --no-sync ruff check src tests packages migrations "
-        "capacity_guard_migrations"
+        "capacity_guard_migrations capacity_migrations"
     )
 
 
@@ -59,9 +59,7 @@ def test_contributor_quickstart_documents_full_fast_coverage_gate() -> None:
         step for step in package_steps if step.get("name") == "Pytest — manifest-owned package lane"
     )
     coverage_gate_step = next(
-        step
-        for step in fast_steps
-        if step.get("name") == "Coverage gate + summary (fast tier)"
+        step for step in fast_steps if step.get("name") == "Coverage gate + summary (fast tier)"
     )
 
     text = (REPO_ROOT / "docs/contributing/contributor-quickstart.md").read_text(encoding="utf-8")

@@ -3,7 +3,6 @@ from pathlib import Path
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -17,8 +16,7 @@ def test_upstream_1412_union_has_one_exact_capacity_history() -> None:
     script = ScriptDirectory.from_config(_capacity_config_without_database())
     assert tuple(script.get_heads()) == ("capacity_0011",)
     assert tuple(
-        revision.revision
-        for revision in script.walk_revisions("capacity_0011", "capacity_0003")
+        revision.revision for revision in script.walk_revisions("capacity_0004", "capacity_0011")
     ) == (
         "capacity_0011",
         "capacity_0010",

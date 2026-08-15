@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -9,21 +10,193 @@ from uuid import UUID
 
 import pytest
 import yaml  # type: ignore[import-untyped]
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import ValidationError
 
 import loom_cli.capacity_control_plane as capacity_control_plane
+from loom_capacity_executor.config import PoolExecutorConfig
+from loom_capacity_manager.ownership import public_key_fingerprint
 from loom_cli.capacity_control_plane import (
     CapacityControlPlaneProfile,
+    CapacityPoolExecutorProfile,
+    capacity_pool_executor_manifest_sha256,
     load_capacity_control_plane_profile,
+    load_capacity_pool_executor_profile,
     render_capacity_control_plane_manifests,
+    render_capacity_pool_executor_configs,
+    render_capacity_pool_executor_service_environment,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PROFILE = _REPO_ROOT / "deploy/dev-fleet/capacity-control-plane.toml"
-_MANAGER_IMAGE = (
-    "ghcr.io/qianyi-sun/loom-capacity-manager@sha256:" + "a" * 64
-)
+_EXECUTOR_PROFILE = _REPO_ROOT / "deploy/dev-fleet/capacity-pool-executor.toml.example"
+_EXECUTOR_SERVICE = _REPO_ROOT / "deploy/dev-fleet/loom-capacity-pool-executor.service"
+_MANAGER_IMAGE = "ghcr.io/qianyi-sun/loom-capacity-manager@sha256:" + "a" * 64
 _AUTHORITY = UUID("00000000-0000-4000-8000-000000000901")
+
+
+def test_checked_in_executor_profile_is_inert_and_pool_complete() -> None:
+    profile = load_capacity_pool_executor_profile(_EXECUTOR_PROFILE)
+
+    assert profile.namespace == "loom-dev"
+    assert profile.executable_new_capacity_ceiling == 0
+    assert {pool.pool_id for pool in profile.pools} == {"oldlab", "gb10"}
+    assert len({pool.executor_id for pool in profile.pools}) == 2
+    assert len({pool.state_directory for pool in profile.pools}) == 2
+    assert len({pool.bearer_token_file for pool in profile.pools}) == 2
+    rendered = render_capacity_pool_executor_configs(profile)
+    assert tuple(rendered) == ("gb10", "oldlab")
+    assert all(value.endswith("\n") for value in rendered.values())
+    assert all('"execution_epoch":' in value for value in rendered.values())
+    assert all("executable_new_capacity_ceiling" not in value for value in rendered.values())
+    for pool in profile.pools:
+        payload = json.loads(rendered[pool.pool_id])
+        assert set(payload) == {
+            "association",
+            "approved_profiles_sha256",
+            "authority_incarnation",
+            "bearer_token_file",
+            "configuration_epoch",
+            "controller_authority_sha256",
+            "controller_host",
+            "execution_epoch",
+            "execution_manifest_sha256",
+            "executor_image",
+            "executor_id",
+            "executor_incarnation",
+            "journal_file",
+            "local_authority_sha256",
+            "local_uid",
+            "manager_origin",
+            "ownership_key_file",
+            "partition",
+            "pool_generation",
+            "pool_id",
+            "profile_digest",
+            "profile_generation",
+            "profile_id",
+            "qos",
+            "signing_key_id",
+            "signing_key_sha256",
+            "slurm_cluster",
+            "slurm_executables",
+            "state_directory",
+            "service_user",
+            "submitter",
+            "tls_ca_file",
+            "tls_certificate_file",
+            "tls_private_key_file",
+            "trusted_fleet_release_sha256",
+            "writer_epoch",
+        }
+        assert payload["approved_profiles_sha256"] == "0" * 64
+        environment = render_capacity_pool_executor_service_environment(profile, pool.pool_id)
+        assert environment == (
+            f"LOOM_CAPACITY_EXECUTOR_CONFIG={pool.config_file}\n"
+            "LOOM_CAPACITY_EXECUTOR_EXECUTABLE_CEILING=0\n"
+            f"LOOM_CAPACITY_EXECUTOR_EXPECTED_MANIFEST_SHA256="
+            f"{capacity_pool_executor_manifest_sha256(profile, pool.pool_id)}\n"
+            f"LOOM_CAPACITY_EXECUTOR_POOL={pool.pool_id}\n"
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("executor_image", "ghcr.io/qianyi-sun/loom-capacity-executor@sha256:" + "2" * 64),
+        ("service_user", "loom_capacity_executor_next"),
+    ],
+)
+def test_executor_package_inputs_change_consumed_config_and_manifest(
+    field: str, value: str
+) -> None:
+    profile = load_capacity_pool_executor_profile(_EXECUTOR_PROFILE)
+    changed = profile.model_copy(update={field: value})
+    pool_id = profile.pools[0].pool_id
+    assert (
+        render_capacity_pool_executor_configs(profile)[pool_id]
+        != render_capacity_pool_executor_configs(changed)[pool_id]
+    )
+    assert capacity_pool_executor_manifest_sha256(
+        profile, pool_id
+    ) != capacity_pool_executor_manifest_sha256(changed, pool_id)
+
+
+def test_checked_in_executor_systemd_unit_is_validation_only() -> None:
+    unit = _EXECUTOR_SERVICE.read_text(encoding="utf-8")
+    directives = "\n".join(line for line in unit.splitlines() if not line.startswith("#"))
+
+    assert "[Install]" not in {line.strip() for line in directives.splitlines()}
+    assert "--validate-only" in directives
+    assert "LOOM_CAPACITY_EXECUTOR_EXECUTABLE_CEILING} = 0" in directives
+    for forbidden in ("systemctl", " enable", " start", " apply", " activate"):
+        assert forbidden not in directives
+
+
+def test_rendered_executor_config_is_accepted_by_the_production_loader(
+    tmp_path: Path,
+) -> None:
+    payload = load_capacity_pool_executor_profile(_EXECUTOR_PROFILE).model_dump(mode="json")
+    private_key = Ed25519PrivateKey.from_private_bytes(b"k" * 32)
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    config_file = tmp_path / "executor.json"
+    secret_paths = {
+        "bearer_token_file": tmp_path / "bearer",
+        "tls_ca_file": tmp_path / "ca.pem",
+        "tls_certificate_file": tmp_path / "certificate.pem",
+        "tls_private_key_file": tmp_path / "private-key.pem",
+        "ownership_key_file": tmp_path / "ownership-key",
+    }
+    for name, path in secret_paths.items():
+        path.write_bytes(private_key.private_bytes_raw() if name == "ownership_key_file" else b"x")
+        path.chmod(0o600)
+    pool = payload["pools"][0]
+    pool.update(
+        config_file=str(config_file),
+        state_directory=str(state),
+        journal_file=str(state / "executor.journal"),
+        local_uid=os.geteuid(),
+        signing_key_sha256=public_key_fingerprint(private_key.public_key()),
+        **{name: str(path) for name, path in secret_paths.items()},
+    )
+    candidate = CapacityPoolExecutorProfile.model_validate(payload)
+    config_file.write_text(
+        render_capacity_pool_executor_configs(candidate)[pool["pool_id"]],
+        encoding="utf-8",
+    )
+    config_file.chmod(0o600)
+
+    loaded = PoolExecutorConfig.from_files(
+        config_file,
+        expected_manifest_sha256=capacity_pool_executor_manifest_sha256(candidate, pool["pool_id"]),
+    )
+
+    assert loaded.pool_id == pool["pool_id"]
+    assert loaded.execution.execution_state == "prepared"
+    assert loaded.execution.executable_new_capacity_ceiling == 0
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda value: value.update(executable_new_capacity_ceiling=1), "ceiling"),
+        (lambda value: value.update(namespace="loom-dev-shared"), "namespace"),
+        (lambda value: value.update(executor_image="ghcr.io/example/executor:latest"), "immutable"),
+        (
+            lambda value: value["pools"][1].update(
+                bearer_token_file=value["pools"][0]["bearer_token_file"]
+            ),
+            "credential",
+        ),
+        (lambda value: value["pools"][0].update(pool_id="oldlab"), "pool"),
+    ],
+)
+def test_executor_profile_rejects_live_or_cross_pool_inputs(mutation, message: str) -> None:
+    payload = load_capacity_pool_executor_profile(_EXECUTOR_PROFILE).model_dump(mode="json")
+    mutation(payload)
+    with pytest.raises(ValidationError, match=message):
+        CapacityPoolExecutorProfile.model_validate(payload)
 
 
 def test_checked_in_capacity_control_plane_profile_is_strict_and_immutable() -> None:
@@ -33,8 +206,7 @@ def test_checked_in_capacity_control_plane_profile_is_strict_and_immutable() -> 
     assert profile.namespace == "loom-dev"
     assert profile.secret_name == "loom-capacity-manager"
     assert profile.postgres_image == (
-        "postgres:17.4@sha256:"
-        "304ab813518754228f9f792f79d6da36359b82d8ecf418096c636725f8c930ad"
+        "postgres:17.4@sha256:304ab813518754228f9f792f79d6da36359b82d8ecf418096c636725f8c930ad"
     )
     assert profile.postgres_storage == "20Gi"
     assert profile.postgres_resources.model_dump() == {
@@ -103,14 +275,11 @@ def _documents() -> list[dict[str, Any]]:
 def test_renderer_emits_one_inert_control_plane_in_dependency_order() -> None:
     documents = _documents()
 
-    assert [
-        (document["kind"], document["metadata"]["name"])
-        for document in documents
-    ] == [
+    assert [(document["kind"], document["metadata"]["name"]) for document in documents] == [
         ("Namespace", "loom-dev"),
         ("Service", "loom-capacity-postgres"),
         ("StatefulSet", "loom-capacity-postgres"),
-        ("Job", "loom-capacity-migrate-capacity-0006-aaaaaaaaaa-5dac8b2dfb"),
+        ("Job", "loom-capacity-migrate-capacity-0011-aaaaaaaaaa-38cbaa533c"),
         ("Service", "loom-capacity-manager"),
         ("Deployment", "loom-capacity-manager"),
         ("NetworkPolicy", "capacity-default-deny"),
@@ -148,9 +317,7 @@ def test_migration_job_name_changes_with_immutable_template_inputs() -> None:
             if document and document["kind"] == "Job"
         )
 
-    changed_resources = profile.migration_resources.model_copy(
-        update={"cpu_limit": "2"}
-    )
+    changed_resources = profile.migration_resources.model_copy(update={"cpu_limit": "2"})
     names = {
         job_name(profile, _AUTHORITY),
         job_name(profile, UUID("00000000-0000-4000-8000-000000000902")),
@@ -171,7 +338,7 @@ def test_migration_job_name_binds_the_complete_immutable_spec() -> None:
     job = next(document for document in _documents() if document["kind"] == "Job")
     expected_suffix = hashlib.sha256(
         json.dumps(
-            {"migration_head": "capacity_0006", "spec": job["spec"]},
+            {"migration_head": "capacity_0011", "spec": job["spec"]},
             sort_keys=True,
             separators=(",", ":"),
         ).encode()
@@ -219,12 +386,8 @@ def test_renderer_pins_images_credentials_security_and_zero_only_commands() -> N
     assert postgres["spec"]["template"]["spec"]["containers"][0]["image"] == (
         load_capacity_control_plane_profile(_PROFILE).postgres_image
     )
-    assert migration["spec"]["template"]["spec"]["containers"][0]["image"] == (
-        _MANAGER_IMAGE
-    )
-    assert manager["spec"]["template"]["spec"]["containers"][0]["image"] == (
-        _MANAGER_IMAGE
-    )
+    assert migration["spec"]["template"]["spec"]["containers"][0]["image"] == (_MANAGER_IMAGE)
+    assert manager["spec"]["template"]["spec"]["containers"][0]["image"] == (_MANAGER_IMAGE)
     assert migration["spec"]["template"]["spec"]["containers"][0]["args"] == [
         "--db-url-file",
         "/var/run/loom-capacity-manager/runtime/credentials/database-url",
@@ -321,8 +484,7 @@ def test_renderer_exposes_only_cluster_internal_mtls_and_least_access_networks()
     manager_service = next(
         document
         for document in documents
-        if document["kind"] == "Service"
-        and document["metadata"]["name"] == "loom-capacity-manager"
+        if document["kind"] == "Service" and document["metadata"]["name"] == "loom-capacity-manager"
     )
     assert manager_service["spec"]["type"] == "ClusterIP"
     assert set(manager_service["spec"]) == {"type", "selector", "ports"}
@@ -358,9 +520,7 @@ def test_renderer_exposes_only_cluster_internal_mtls_and_least_access_networks()
     assert manager_ingress["from"] == [
         {
             "namespaceSelector": {},
-            "podSelector": {
-                "matchLabels": {"app.kubernetes.io/name": "loom-capacity-agent"}
-            },
+            "podSelector": {"matchLabels": {"app.kubernetes.io/name": "loom-capacity-agent"}},
         },
         {"podSelector": {"matchLabels": {"app": "loom-service"}}},
     ]
