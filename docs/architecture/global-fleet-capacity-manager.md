@@ -255,11 +255,29 @@ attempt identities, prepared bindings, lifecycle observations, protected
 release fences, legacy-writer inventory, and audit records under append-only
 and serializable constraints.
 
-This guard remains disabled at allocation epoch zero. Its admission checks
-deny execution, its stored bindings are non-executable, and normal submission
-and claim routes do not use it to authorize work. It is useful only for
-validating the protected data model and comparing current demand with shadow
-allocations.
+The base guard remains disabled at allocation epoch zero. Its ordinary
+prepared bindings are non-executable, and normal submission and claim routes
+do not use it to authorize work.
+
+A separate least-privileged executor role can call serializable protected
+procedures that prepare an executable intent, bind its exact Slurm job,
+register or drain its worker incarnation, admit an exact protected attempt,
+project an admitted claim's terminal evidence, and acknowledge terminal worker
+release. Preparation requires the exact append-only protected bootstrap
+registration produced by the trusted demand agent, including its subject,
+intent, full execution binding, command sequence, epochs, bootstrap hash, and
+receipt digest. These transitions are append-only, bind the subject, candidate
+publication, execution fence, worker, requirements digest, and monotonic
+high-water marks, and serialize claim admission against terminal lifecycle
+projection. A candidate or deployment reconfiguration immediately denies new
+claims to workers registered under the prior binding while preserving their
+credential-authenticated drain and release cleanup path. The candidate role,
+the trusted demand-agent role, and `PUBLIC` have no access to this surface.
+Personal-development provisioning creates the executor role sealed as
+`NOLOGIN`; no checked-in candidate route, worker route, or deployed daemon
+invokes the procedures. Consequently this protected surface cannot consume
+manager work or change physical capacity while the global executable ceiling
+and deployment entry points remain zero.
 
 Implementation lives under `src/loom_capacity_manager/`,
 `src/loom_capacity_executor/`, `src/loom_capacity_pool_executor/`, and

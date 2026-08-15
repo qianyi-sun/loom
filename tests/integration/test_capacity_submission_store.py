@@ -564,6 +564,10 @@ async def test_atomic_submission_blocks_guard_downgrade_without_data_loss(
     monkeypatch.setenv(
         "LOOM_CAPACITY_GUARD_AGENT_ROLE", _value(capacity_guard_database, "agent_role")
     )
+    monkeypatch.setenv(
+        "LOOM_CAPACITY_GUARD_EXECUTOR_ROLE",
+        _value(capacity_guard_database, "executor_role"),
+    )
     with pytest.raises(DBAPIError, match="atomic trial submissions exist"):
         command.downgrade(config, "guard_0010")
 
@@ -591,7 +595,7 @@ async def test_atomic_submission_blocks_guard_downgrade_without_data_loss(
     finally:
         admin.dispose()
     assert dict(row) == {
-        "version_num": "guard_0012",
+        "version_num": "guard_0013",
         "state": "protected-pending",
         "lifecycle_authority_id": receipt.lifecycle_authority_id,
         "protected_attempt_id": submission.protected_attempt_id,
@@ -633,6 +637,10 @@ async def test_concurrent_guard_downgrade_observes_committing_atomic_submission(
     )
     monkeypatch.setenv(
         "LOOM_CAPACITY_GUARD_AGENT_ROLE", _value(capacity_guard_database, "agent_role")
+    )
+    monkeypatch.setenv(
+        "LOOM_CAPACITY_GUARD_EXECUTOR_ROLE",
+        _value(capacity_guard_database, "executor_role"),
     )
 
     agent_engine = create_async_engine(
@@ -717,7 +725,7 @@ async def test_concurrent_guard_downgrade_observes_committing_atomic_submission(
         await agent_engine.dispose()
 
     assert dict(row) == {
-        "version_num": "guard_0012",
+        "version_num": "guard_0013",
         "state": "protected-pending",
         "lifecycle_authority_id": receipt.lifecycle_authority_id,
         "protected_attempt_id": submission.protected_attempt_id,
