@@ -472,8 +472,17 @@ class CapacityExecutionStore:
                 or intent.state != "released"
             ):
                 return False
-        return observed_intent_ids == set(intents_by_id) and all(
-            intent.state == "released" for intent in pool_intents
+        unobserved_intent_ids = set(intents_by_id) - observed_intent_ids
+        return all(intent.state == "released" for intent in pool_intents) and all(
+            (
+                intent.terminal_kind == "unused"
+                and intent.terminal_identity == intent.shape_instance_id
+                and intent.inventory_sequence is not None
+                and intent.inventory_sequence <= inventory.inventory_sequence
+                and intent.terminal_evidence_sha256 is not None
+            )
+            for intent_id in unobserved_intent_ids
+            for intent in (intents_by_id[intent_id],)
         )
 
     async def heartbeat_executor(

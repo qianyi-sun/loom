@@ -256,6 +256,56 @@ def _protected_terminal_fence(
     return None
 
 
+def _retained_drain_execution_matches(retained: object, current: object) -> bool:
+    if not all(
+        hasattr(value, field)
+        for value in (retained, current)
+        for field in (
+            "execution_state",
+            "executable_new_capacity_ceiling",
+            "executable_new_capacity_rate_per_minute",
+            "writer_epoch",
+            "model_dump",
+        )
+    ):
+        return False
+    retained_value = cast(Any, retained)
+    current_value = cast(Any, current)
+    if (
+        retained_value.execution_state not in {"prepared", "active"}
+        or current_value.execution_state != "drain-only"
+        or current_value.executable_new_capacity_ceiling != 0
+        or current_value.executable_new_capacity_rate_per_minute != 0
+        or current_value.writer_epoch < retained_value.writer_epoch
+    ):
+        return False
+    mutable_fields = {
+        "writer_epoch",
+        "execution_state",
+        "executable_new_capacity_ceiling",
+        "executable_new_capacity_rate_per_minute",
+        "allocation_epoch",
+        "executable",
+    }
+    retained_payload = retained_value.model_dump(mode="json", exclude=mutable_fields)
+    current_payload = current_value.model_dump(
+        mode="json",
+        exclude=mutable_fields,
+    )
+    return bool(retained_payload == current_payload)
+
+
+def _inventory_execution_matches(retained: object, current: object) -> bool:
+    if not all(hasattr(value, "model_dump") for value in (retained, current)):
+        return False
+    retained_payload = cast(Any, retained).model_dump(mode="json", exclude={"executable"})
+    current_payload = cast(Any, current).model_dump(
+        mode="json",
+        exclude={"executable"},
+    )
+    return bool(retained_payload == current_payload)
+
+
 class ExecutablePoolExecutor:
     """Apply at most one exact manager-authored executable-v2 operation per tick."""
 
@@ -1726,6 +1776,7 @@ class ExecutablePoolExecutor:
     ) -> ExecutableExecutorInventoryV2 | None:
         sequence_records = 0
         matches: list[ExecutableExecutorInventoryV2] = []
+        match_payloads: set[bytes] = set()
         for record in self.journal.records(
             "inventory",
             str(self.registration.executor_incarnation),
@@ -1748,7 +1799,8 @@ class ExecutablePoolExecutor:
                 and canonical_executable_digest(inventory) == item.terminal_evidence_sha256
             ):
                 matches.append(inventory)
-        if sequence_records == 1 and len(matches) == 1:
+                match_payloads.add(canonical_executable_bytes(inventory))
+        if sequence_records >= 1 and len(matches) == sequence_records and len(match_payloads) == 1:
             return matches[0]
         return None
 
@@ -2118,9 +2170,15 @@ class ExecutablePoolExecutor:
         return await self._send_inventory(inventory)
 
     def _assert_inventory_binding(self, inventory: ExecutableExecutorInventoryV2) -> None:
+        if not _inventory_execution_matches(
+            inventory.execution, self.registration.execution
+        ) and not _retained_drain_execution_matches(
+            inventory.execution,
+            self.registration.execution,
+        ):
+            raise JournalRegressionError("inventory request execution changed")
         if (
-            inventory.execution != self.registration.execution
-            or inventory.executor_id != self.registration.executor_id
+            inventory.executor_id != self.registration.executor_id
             or inventory.executor_incarnation != self.registration.executor_incarnation
             or inventory.pool_id != self.registration.pool_id
             or inventory.pool_generation != self.registration.pool_generation

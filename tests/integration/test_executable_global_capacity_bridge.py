@@ -140,6 +140,141 @@ async def test_neutral_fairness_is_stable_and_complete_work_scales_to_zero(
     )
 
 
+async def test_prepared_unused_retirement_uses_protected_release_reporter_runtime(
+    executable_capacity_harness: ExecutableCapacityHarness,
+) -> None:
+    alice = await executable_capacity_harness.add_owner("alice", "a" * 64)
+    await alice.publish_x86_demand(1)
+    await executable_capacity_harness.activate_next_epoch()
+    await executable_capacity_harness.reconcile()
+
+    binding = await executable_capacity_harness.prepare_unused_intent("oldlab")
+    handoff_path = executable_capacity_harness.bootstrap_handoff_path("oldlab", binding)
+    assert handoff_path.exists()
+    assert executable_capacity_harness.oldlab.sbatch_calls == ()
+
+    await executable_capacity_harness.begin_drain()
+    drained = await executable_capacity_harness.drain_prepared_unused("oldlab", binding)
+    assert drained.event_kind == "prepared-revoked"
+    assert drained.executor_status == "draining"
+    assert drained.manager_state == "closing"
+    assert drained.terminal_kind == "unused"
+    assert not handoff_path.exists()
+    assert executable_capacity_harness.oldlab.sbatch_calls == ()
+    assert executable_capacity_harness.oldlab.cancelled_job_ids() == ()
+
+    outage = await executable_capacity_harness.publish_next_protected_release_with_replay(
+        alice,
+        manager_outage_before_first_publish=True,
+        lose_response_after_manager_ack=True,
+    )
+    assert outage.event_kind == "prepared-revoked"
+    assert outage.publish_attempts == 3
+    assert outage.idempotency_keys[1] == outage.idempotency_keys[2]
+    assert outage.manager_replayed_flags == (False, True)
+    assert outage.guard_publication_count == 1
+
+    released = await executable_capacity_harness.release_retired_intent("oldlab", binding)
+    final = await executable_capacity_harness.canonical_digests()
+    assert released.status == "released"
+    assert executable_capacity_harness.execution_state == "shadow"
+    assert executable_capacity_harness.total_loom_jobs() == 0
+    assert await executable_capacity_harness.manager_commitments() == ()
+    assert executable_capacity_harness.oldlab.inventory_records() == ()
+    print(
+        "CANONICAL_DIGEST prepared_unused "
+        f"allocation={final.allocation} inventory={final.inventory} "
+        f"evidence={final.evidence}"
+    )
+
+
+async def test_unregistered_withdrawn_retirement_cancels_only_exact_pending_job(
+    executable_capacity_harness: ExecutableCapacityHarness,
+) -> None:
+    alice = await executable_capacity_harness.add_owner("alice", "a" * 64)
+    await alice.publish_x86_demand(1)
+    await executable_capacity_harness.activate_next_epoch()
+    await executable_capacity_harness.reconcile()
+    foreign_job = executable_capacity_harness.oldlab.add_foreign_job("9003")
+    foreign_before = executable_capacity_harness.oldlab.job_snapshot(foreign_job)
+
+    binding, job_id = await executable_capacity_harness.submit_unregistered_intent("oldlab")
+    assert not executable_capacity_harness.worker_registered(binding.intent_id)
+    assert executable_capacity_harness.trusted_launcher_process_count() == 0
+
+    await executable_capacity_harness.begin_drain()
+    await executable_capacity_harness.restart_executor("oldlab")
+    drained = await executable_capacity_harness.drain_unregistered_withdrawn(
+        "oldlab",
+        binding,
+        job_id,
+    )
+    assert drained.event_kind == "withdrawn"
+    assert drained.executor_status == "pending-cancelled"
+    assert drained.manager_state == "closing"
+    assert drained.terminal_kind == "slurm-job"
+    assert executable_capacity_harness.oldlab.cancelled_job_ids() == (job_id,)
+    assert executable_capacity_harness.oldlab.job_snapshot(foreign_job) == foreign_before
+    assert foreign_job not in executable_capacity_harness.oldlab.cancelled_job_ids()
+    assert not executable_capacity_harness.worker_registered(binding.intent_id)
+
+    published = await executable_capacity_harness.publish_next_protected_release_with_replay(alice)
+    assert published.event_kind == "withdrawn"
+    assert published.guard_publication_count == 1
+
+    released = await executable_capacity_harness.release_retired_intent("oldlab", binding)
+    final = await executable_capacity_harness.canonical_digests()
+    assert released.status == "released"
+    assert executable_capacity_harness.execution_state == "shadow"
+    assert executable_capacity_harness.oldlab.job_snapshot(foreign_job) == foreign_before
+    assert await executable_capacity_harness.manager_commitments() == ()
+    print(
+        "CANONICAL_DIGEST unregistered_withdrawn "
+        f"allocation={final.allocation} inventory={final.inventory} "
+        f"evidence={final.evidence}"
+    )
+
+
+async def test_protected_release_reporter_delay_keeps_pools_isolated(
+    executable_capacity_harness: ExecutableCapacityHarness,
+) -> None:
+    alice = await executable_capacity_harness.add_owner("alice", "a" * 64)
+    bob = await executable_capacity_harness.add_owner("bob", "b" * 64)
+    await alice.publish_x86_demand(1)
+    await bob.publish_arm_demand(1)
+    await executable_capacity_harness.activate_next_epoch()
+    await executable_capacity_harness.reconcile()
+
+    bob_binding, bob_job_id = await executable_capacity_harness.submit_unregistered_intent("gb10")
+    alice_binding = await executable_capacity_harness.prepare_unused_intent("oldlab")
+    await executable_capacity_harness.begin_drain()
+    alice_drained = await executable_capacity_harness.drain_prepared_unused("oldlab", alice_binding)
+    bob_drained = await executable_capacity_harness.drain_unregistered_withdrawn(
+        "gb10",
+        bob_binding,
+        bob_job_id,
+    )
+    assert alice_drained.event_kind == "prepared-revoked"
+    assert bob_drained.event_kind == "withdrawn"
+
+    alice_publication = (
+        await executable_capacity_harness.publish_next_protected_release_with_replay(alice)
+    )
+    assert alice_publication.guard_publication_count == 1
+    assert await executable_capacity_harness.retirement_is_blocked()
+    assert executable_capacity_harness.execution_state == "drain-only"
+
+    bob_publication = await executable_capacity_harness.publish_next_protected_release_with_replay(
+        bob
+    )
+    assert bob_publication.event_kind == "withdrawn"
+    assert bob_publication.guard_publication_count == 1
+    await executable_capacity_harness.release_retired_intent("oldlab", alice_binding)
+    await executable_capacity_harness.release_retired_intent("gb10", bob_binding)
+    assert executable_capacity_harness.execution_state == "shadow"
+    assert executable_capacity_harness.cross_owner_bindings() == []
+
+
 async def test_failure_matrix_keeps_uncertainty_pool_and_owner_scoped(
     executable_capacity_harness: ExecutableCapacityHarness,
 ) -> None:

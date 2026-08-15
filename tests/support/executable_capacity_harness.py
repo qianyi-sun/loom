@@ -26,18 +26,28 @@ from tests.support.fake_slurm import FakeSlurm
 
 from loom.db.schema import Task, Team, TeamQuota, Trial
 from loom_capacity_agent.admission import (
+    ExecutablePreparedBootstrapRevocationV2,
     ExecutableReleaseRequestV2,
     ExecutableWorkerRegistrationV2,
     PhysicalJobBindingV2,
+    PublishableExecutableProtectedReleaseV2,
 )
 from loom_capacity_agent.claim_guard import (
     ExecutableClaimProposalV2,
     InertAttemptTransitionV1,
 )
-from loom_capacity_agent.contracts import AgentRegistrationV1
+from loom_capacity_agent.client import DemandReporterClient
+from loom_capacity_agent.contracts import (
+    AgentPoolCapabilityV1,
+    AgentRegistrationV1,
+    ReporterConfigurationV1,
+)
 from loom_capacity_agent.executable_admission import ExecutableAdmissionStore
+from loom_capacity_agent.executable_release_reporter import (
+    ExecutableProtectedReleaseReporterRuntime,
+)
 from loom_capacity_agent.lifecycle_store import CapacityAttemptLifecycleStore
-from loom_capacity_agent.store import CapacityAgentStore
+from loom_capacity_agent.store import CapacityAgentStore, read_next_executable_protected_release
 from loom_capacity_executor.bootstrap_handoff import (
     BootstrapHandoffStore,
 )
@@ -140,7 +150,7 @@ from loom_capacity_manager.models import (
     CapacityExecutableIntent,
 )
 from loom_capacity_manager.ownership import OwnershipKeyring, public_key_fingerprint
-from loom_capacity_manager.store import CapacityManagementStore
+from loom_capacity_manager.store import CapacityManagementStore, ExecutionConflictError
 
 _AUTHORITY_ID = UUID("0f8ad3cd-6cb9-5cb5-8270-356dfe5f98ad")
 _NAMESPACE = UUID("1a2d45de-825b-5b74-a0a7-16afbc193f8d")
@@ -258,6 +268,55 @@ class _Claim:
     terminal: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class ProtectedDrainEvidence:
+    intent_id: UUID
+    event_kind: Literal["released", "withdrawn", "prepared-revoked"]
+    executor_status: str
+    manager_state: str
+    terminal_kind: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ProtectedReleaseReplayEvidence:
+    intent_id: UUID
+    event_kind: Literal["released", "withdrawn", "prepared-revoked"]
+    publish_attempts: int
+    idempotency_keys: tuple[UUID, ...]
+    manager_replayed_flags: tuple[bool, ...]
+    guard_publication_count: int
+
+
+class _RecordingExecutableReleasePublisher:
+    def __init__(
+        self,
+        inner: DemandReporterClient,
+        *,
+        lose_response_after_manager_ack: bool,
+    ) -> None:
+        self._inner = inner
+        self._lose_response_after_manager_ack = lose_response_after_manager_ack
+        self.calls: list[tuple[PublishableExecutableProtectedReleaseV2, UUID]] = []
+        self.replayed: list[bool] = []
+
+    async def publish_executable_protected_release(
+        self,
+        publication: PublishableExecutableProtectedReleaseV2,
+        *,
+        idempotency_key: UUID,
+    ) -> Any:
+        self.calls.append((publication, idempotency_key))
+        receipt = await self._inner.publish_executable_protected_release(
+            publication,
+            idempotency_key=idempotency_key,
+        )
+        self.replayed.append(receipt.replayed)
+        if self._lose_response_after_manager_ack:
+            self._lose_response_after_manager_ack = False
+            raise RuntimeError("simulated response loss after manager acknowledgement")
+        return receipt
+
+
 class _SwitchableASGITransport(httpx.AsyncBaseTransport):
     """Keep long-lived clients while swapping the in-process manager epoch."""
 
@@ -346,6 +405,17 @@ class _ProtectedAdmissionRouter:
     async def begin_drain(self, request: Any) -> Any:
         async with self._store(request.binding) as store:
             return await store.begin_drain(request)
+
+    async def withdraw_unregistered_worker(self, request: Any) -> Any:
+        async with self._store(request.binding) as store:
+            return await store.withdraw_unregistered_worker(request)
+
+    async def revoke_prepared_bootstrap(
+        self,
+        request: ExecutablePreparedBootstrapRevocationV2,
+    ) -> Any:
+        async with self._store(request.binding) as store:
+            return await store.revoke_prepared_bootstrap(request)
 
     async def register_worker(
         self,
@@ -448,6 +518,13 @@ class _HarnessAdmissionClient:
     async def withdraw_unregistered_worker(self, request: Any) -> Any:
         async with self._store() as store:
             return await store.withdraw_unregistered_worker(request)
+
+    async def revoke_prepared_bootstrap(
+        self,
+        request: ExecutablePreparedBootstrapRevocationV2,
+    ) -> Any:
+        async with self._store() as store:
+            return await store.revoke_prepared_bootstrap(request)
 
     async def register_worker(
         self,
@@ -2441,6 +2518,274 @@ class ExecutableCapacityHarness:
                 entry.worker_credential == worker.credential
             ),
         }
+
+    async def prepare_unused_intent(self, pool_id: str) -> ExecutableIntentBindingV2:
+        pool = self.pools[pool_id]
+        binding: ExecutableIntentBindingV2 | None = None
+        for _ in range(4):
+            accepted = await pool.tick()
+            if accepted.status == "accepted" and pool.client is not None:
+                checkpoint = await pool.client.executable_checkpoint()
+                work = await pool.client.next_executable_work(checkpoint.command_sequence)
+                if not isinstance(work, ExecutableIntentBindingV2):
+                    raise RuntimeError("accepted reservation did not expose an intent binding")
+                binding = work
+                break
+            if accepted.status not in {"inventory-published", "idle"}:
+                raise RuntimeError(f"next reservation was not accepted: {accepted}")
+        if binding is None:
+            raise RuntimeError("pool did not expose an accepted reservation")
+        prepared = await self.pools[pool_id].tick()
+        if prepared.status != "bootstrap-registered" or prepared.operation_id != binding.intent_id:
+            raise RuntimeError(f"intent was not protected-prepared: {prepared}")
+        return binding
+
+    async def submit_unregistered_intent(
+        self,
+        pool_id: str,
+    ) -> tuple[ExecutableIntentBindingV2, str]:
+        binding = await self.prepare_unused_intent(pool_id)
+        submitted = await self.pools[pool_id].tick()
+        if submitted.status != "submitted" or submitted.operation_id != binding.intent_id:
+            raise RuntimeError(f"intent was not submitted without worker registration: {submitted}")
+        await self.pools[pool_id].heartbeat()
+        inventory = await self.pools[pool_id].tick()
+        if inventory.status != "inventory-published":
+            raise RuntimeError(f"submitted intent inventory was not published: {inventory}")
+        return binding, submitted.detail
+
+    def bootstrap_handoff_path(
+        self,
+        pool_id: str,
+        binding: ExecutableIntentBindingV2,
+    ) -> Path:
+        pool = self.pools[pool_id]
+        return pool.handoff_directory / pool.handoff_store.reference_for(binding)
+
+    def worker_registered(self, intent_id: UUID) -> bool:
+        return intent_id in self._worker_registrations
+
+    def trusted_launcher_process_count(self) -> int:
+        return len(self._trusted_process_entries)
+
+    async def _manager_intent_row(self, intent_id: UUID) -> CapacityExecutableIntent:
+        if self._session_factory is None:
+            raise RuntimeError("manager session factory is unavailable")
+        async with self._session_factory() as session:
+            row = (
+                await session.execute(
+                    select(CapacityExecutableIntent).where(
+                        CapacityExecutableIntent.intent_id == intent_id
+                    )
+                )
+            ).scalar_one()
+        return row
+
+    async def _pending_protected_release(
+        self,
+        owner: OwnerHandle,
+    ) -> PublishableExecutableProtectedReleaseV2:
+        engine = create_async_engine(
+            make_url(_database_value(owner.database, "agent_url")),
+            isolation_level="SERIALIZABLE",
+        )
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session, session.begin():
+                publication = await read_next_executable_protected_release(
+                    session,
+                    registration=owner.registration,
+                )
+        finally:
+            await engine.dispose()
+        if publication is None:
+            raise RuntimeError("protected release outbox is empty")
+        return publication
+
+    async def _guard_publication_count(self, owner: OwnerHandle) -> int:
+        async with self._owner_stores(owner) as (_agent, _guard, session):
+            return int(
+                (
+                    await session.execute(
+                        text(
+                            "SELECT count(*) FROM "
+                            "loom_capacity_guard.executable_release_publication_events "
+                            "WHERE agent_incarnation = :agent_incarnation"
+                        ),
+                        {"agent_incarnation": owner.registration.agent_incarnation},
+                    )
+                ).scalar_one()
+            )
+
+    async def drain_prepared_unused(
+        self,
+        pool_id: str,
+        binding: ExecutableIntentBindingV2,
+    ) -> ProtectedDrainEvidence:
+        result = await self.pools[pool_id].tick()
+        if result.status != "draining" or result.operation_id != binding.intent_id:
+            raise RuntimeError(f"prepared intent did not drain through revocation: {result}")
+        owner = self._owners_by_subject[binding.subject_id]
+        publication = await self._pending_protected_release(owner)
+        row = await self._manager_intent_row(binding.intent_id)
+        return ProtectedDrainEvidence(
+            intent_id=binding.intent_id,
+            event_kind=publication.event_kind,
+            executor_status=result.status,
+            manager_state=row.state,
+            terminal_kind=row.terminal_kind,
+        )
+
+    async def drain_unregistered_withdrawn(
+        self,
+        pool_id: str,
+        binding: ExecutableIntentBindingV2,
+        job_id: str,
+    ) -> ProtectedDrainEvidence:
+        result = await self.pools[pool_id].tick()
+        if result.status != "pending-cancelled" or result.operation_id != binding.intent_id:
+            raise RuntimeError(f"unregistered intent did not cancel pending job: {result}")
+        self.pools[pool_id].fake.terminalize_job(job_id)
+        await self.pools[pool_id].heartbeat()
+        terminal_inventory = await self.pools[pool_id].tick()
+        if terminal_inventory.status != "inventory-published":
+            raise RuntimeError(
+                f"terminal accounting inventory was not published: {terminal_inventory}"
+            )
+        terminal_close = await self.pools[pool_id].tick()
+        if terminal_close.status != "draining" or terminal_close.operation_id != binding.intent_id:
+            raise RuntimeError(f"terminal intent did not close centrally: {terminal_close}")
+        owner = self._owners_by_subject[binding.subject_id]
+        publication = await self._pending_protected_release(owner)
+        row = await self._manager_intent_row(binding.intent_id)
+        return ProtectedDrainEvidence(
+            intent_id=binding.intent_id,
+            event_kind=publication.event_kind,
+            executor_status=result.status,
+            manager_state=row.state,
+            terminal_kind=row.terminal_kind,
+        )
+
+    def _reporter_configuration(self, owner: OwnerHandle) -> ReporterConfigurationV1:
+        capabilities = {
+            "oldlab": ("oldlab-x86-none", "x86_64"),
+            "gb10": ("gb10-arm-none", "arm64"),
+        }
+        return ReporterConfigurationV1(
+            **owner.registration.model_dump(mode="python"),
+            pool_capabilities=tuple(
+                AgentPoolCapabilityV1(
+                    capability_id=capabilities[pool_id][0],
+                    pool_id=cast(Any, pool_id),
+                    operating_system="linux",
+                    cpu_architecture=cast(Any, capabilities[pool_id][1]),
+                    gpu_vendor="none",
+                    network_policies=("public",),
+                )
+                for pool_id in _POOL_ORDER
+            ),
+        )
+
+    async def _run_release_reporter_once(
+        self,
+        owner: OwnerHandle,
+        publisher: _RecordingExecutableReleasePublisher,
+    ) -> None:
+        engine = create_async_engine(
+            make_url(_database_value(owner.database, "agent_url")),
+            isolation_level="SERIALIZABLE",
+        )
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            runtime = ExecutableProtectedReleaseReporterRuntime(
+                configuration=self._reporter_configuration(owner),
+                session_factory=factory,
+                publisher=publisher,
+            )
+            await runtime.initialize()
+            await runtime.run_once()
+        finally:
+            await engine.dispose()
+
+    async def publish_next_protected_release_with_replay(
+        self,
+        owner: OwnerHandle,
+        *,
+        manager_outage_before_first_publish: bool = False,
+        lose_response_after_manager_ack: bool = False,
+    ) -> ProtectedReleaseReplayEvidence:
+        inner = DemandReporterClient(
+            self._reporter_configuration(owner),
+            manager_origin="https://capacity.test",
+            bearer_token=owner.reporter_token,
+            http_client=self.http,
+        )
+        publisher = _RecordingExecutableReleasePublisher(
+            inner,
+            lose_response_after_manager_ack=lose_response_after_manager_ack,
+        )
+        if manager_outage_before_first_publish:
+            self._transport.online = False
+            try:
+                await self._run_release_reporter_once(owner, publisher)
+            except RuntimeError:
+                pass
+            finally:
+                self._transport.online = True
+        if lose_response_after_manager_ack:
+            try:
+                await self._run_release_reporter_once(owner, publisher)
+            except RuntimeError as exc:
+                if "response loss" not in str(exc):
+                    raise
+        await self._run_release_reporter_once(owner, publisher)
+        if not publisher.calls:
+            raise RuntimeError("protected release reporter did not publish")
+        first_publication = publisher.calls[0][0]
+        return ProtectedReleaseReplayEvidence(
+            intent_id=first_publication.release.binding.intent_id,
+            event_kind=first_publication.event_kind,
+            publish_attempts=len(publisher.calls),
+            idempotency_keys=tuple(item[1] for item in publisher.calls),
+            manager_replayed_flags=tuple(publisher.replayed),
+            guard_publication_count=await self._guard_publication_count(owner),
+        )
+
+    async def release_retired_intent(
+        self,
+        pool_id: str,
+        binding: ExecutableIntentBindingV2,
+    ) -> ExecutorTickResult:
+        pool = self.pools[pool_id]
+        result = await pool.tick()
+        if result.status != "released":
+            raise RuntimeError(f"intent did not release centrally: {result}")
+        if await self.manager_commitments() == ():
+            for pool in self.pools.values():
+                await pool.heartbeat()
+                final_inventory = await pool.tick()
+                if final_inventory.status != "inventory-published":
+                    raise RuntimeError(
+                        f"pool {pool.pool_id} final inventory was not published: {final_inventory}"
+                    )
+                await pool.heartbeat()
+                if pool.journal is None or pool.registration is None:
+                    raise RuntimeError("pool executor runtime is unavailable")
+                latest = pool.journal.latest(
+                    "inventory",
+                    str(pool.registration.executor_incarnation),
+                )
+                if latest is not None and (payload := latest.durable_payload()) is not None:
+                    pool.last_inventory = ExecutableExecutorInventoryV2.model_validate_json(payload)
+            await self._retire_exact()
+        return result
+
+    async def retirement_is_blocked(self) -> bool:
+        try:
+            await self.retire()
+        except ExecutionConflictError:
+            return True
+        return False
 
     async def drive_pool(self, pool_id: str) -> ExecutorTickResult:
         pool = self.pools[pool_id]
