@@ -3010,7 +3010,7 @@ async def test_quarantined_intent_counts_against_multi_node_topology(
         )
 
 
-async def test_increase_freeze_releases_accepted_work_without_protected_close(
+async def test_increase_freeze_begins_central_close_for_accepted_work(
     capacity_session: AsyncSession,
 ) -> None:
     store = CapacityExecutionStore()
@@ -3040,7 +3040,9 @@ async def test_increase_freeze_releases_accepted_work_without_protected_close(
 
     work = await store.next_pool_work(capacity_session, binding)
 
-    assert work is None
+    assert isinstance(work, ExecutableIntentCloseV2)
+    result = await store.begin_intent_close(capacity_session, work)
+    assert result.intent_id == work.binding.intent_id
     row = (
         await capacity_session.execute(
             select(CapacityExecutableIntent).where(
@@ -3049,8 +3051,7 @@ async def test_increase_freeze_releases_accepted_work_without_protected_close(
             )
         )
     ).scalar_one()
-    assert row.state == "released"
-    assert row.released_at is not None
+    assert row.state == "closing"
 
 
 async def test_global_authority_rate_ceiling_limits_second_consumption(

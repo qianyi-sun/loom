@@ -829,10 +829,6 @@ class CapacityExecutionStore:
                     )
                 if current.state == "accepted":
                     if not increase_allowed:
-                        if authority.execution_state == "active":
-                            current.state = "released"
-                            current.released_at = now
-                            continue
                         binding = ExecutableIntentBindingV2.model_validate_json(
                             json.dumps(current.binding_payload)
                         )
