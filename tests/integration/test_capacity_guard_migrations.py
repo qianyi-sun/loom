@@ -50,6 +50,11 @@ EXPECTED_GUARD_TABLES = {
     "legacy_compatibility_preparations",
     "legacy_writer_cursors",
     "legacy_compatibility_freezes",
+    "executable_admission_authority",
+    "executable_admission_events",
+    "executable_claim_state",
+    "executable_claim_leases",
+    "executable_claim_terminal_events",
 }
 
 
@@ -65,7 +70,7 @@ async def test_guard_schema_startup_returns_numeric_head(
 ) -> None:
     engine = create_async_engine(_value(capacity_guard_database, "migrator_url"))
     try:
-        assert await assert_capacity_guard_schema_at_head(engine) == 12
+        assert await assert_capacity_guard_schema_at_head(engine) == 13
     finally:
         await engine.dispose()
 
@@ -192,7 +197,7 @@ def test_guard_schema_has_exact_owner_and_preserves_public_application_tables(
             revision = connection.execute(
                 text("SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version")
             ).scalar_one()
-            assert revision == "guard_0012"
+            assert revision == "guard_0013"
             public_before = capacity_guard_database["public_tables_before"]
             assert isinstance(public_before, frozenset)
             assert frozenset(inspect(connection).get_table_names(schema="public")) == public_before
@@ -604,6 +609,7 @@ def _guard_config(database: dict[str, object]) -> AlembicConfig:
     os.environ["LOOM_CAPACITY_GUARD_DB_URL"] = _value(database, "migrator_url")
     os.environ["LOOM_CAPACITY_GUARD_OWNER_ROLE"] = _value(database, "owner_role")
     os.environ["LOOM_CAPACITY_GUARD_AGENT_ROLE"] = _value(database, "agent_role")
+    os.environ["LOOM_CAPACITY_GUARD_EXECUTOR_ROLE"] = _value(database, "executor_role")
     return cfg
 
 
@@ -726,6 +732,7 @@ def test_guard_alembic_environment_has_no_database_fallback() -> None:
     assert "LOOM_CAPACITY_GUARD_DB_URL" in source
     assert "LOOM_CAPACITY_GUARD_OWNER_ROLE" in source
     assert "LOOM_CAPACITY_GUARD_AGENT_ROLE" in source
+    assert "LOOM_CAPACITY_GUARD_EXECUTOR_ROLE" in source
     assert "LOOM_DB_URL" not in source
     assert "LOOM_CP_DB_URL" not in source
     assert "LOOM_CAPACITY_DB_URL" not in source
@@ -753,6 +760,7 @@ def test_guard_migration_requires_explicit_canonical_settings(
     monkeypatch.delenv("LOOM_CAPACITY_GUARD_DB_URL", raising=False)
     monkeypatch.delenv("LOOM_CAPACITY_GUARD_OWNER_ROLE", raising=False)
     monkeypatch.delenv("LOOM_CAPACITY_GUARD_AGENT_ROLE", raising=False)
+    monkeypatch.delenv("LOOM_CAPACITY_GUARD_EXECUTOR_ROLE", raising=False)
     with pytest.raises(RuntimeError, match="LOOM_CAPACITY_GUARD_DB_URL"):
         command.current(cfg)
 
@@ -802,6 +810,10 @@ def test_guard_migration_login_must_be_owner_member(
         monkeypatch.setenv(
             "LOOM_CAPACITY_GUARD_AGENT_ROLE", _value(capacity_guard_database, "agent_role")
         )
+        monkeypatch.setenv(
+            "LOOM_CAPACITY_GUARD_EXECUTOR_ROLE",
+            _value(capacity_guard_database, "executor_role"),
+        )
         with pytest.raises(ProgrammingError) as caught:
             command.current(cfg)
         assert isinstance(caught.value.orig, InsufficientPrivilege)
@@ -824,6 +836,10 @@ def test_guard_migration_rejects_superuser_login(
     )
     monkeypatch.setenv(
         "LOOM_CAPACITY_GUARD_AGENT_ROLE", _value(capacity_guard_database, "agent_role")
+    )
+    monkeypatch.setenv(
+        "LOOM_CAPACITY_GUARD_EXECUTOR_ROLE",
+        _value(capacity_guard_database, "executor_role"),
     )
     with pytest.raises(RuntimeError, match="least-privileged"):
         command.current(cfg)

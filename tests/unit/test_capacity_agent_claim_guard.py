@@ -11,6 +11,8 @@ from loom_capacity_agent.claim_guard import (
     ClaimGuardDecisionV1,
     ClaimProposalV1,
     DisabledClaimGuard,
+    ExecutableClaimGate,
+    ExecutableClaimProposalV2,
     InertAttemptTransitionV1,
 )
 from loom_capacity_agent.contracts import AgentRegistrationV1
@@ -167,3 +169,24 @@ async def test_disabled_claim_guard_rejects_a_mismatched_registration() -> None:
 def test_claim_contracts_contain_no_secret_or_token_field() -> None:
     fields = set(ClaimProposalV1.model_fields) | set(ClaimGuardDecisionV1.model_fields)
     assert not {field for field in fields if "secret" in field or "token" in field}
+
+
+@pytest.mark.asyncio
+async def test_executable_claim_gate_delegates_the_complete_protected_transaction() -> None:
+    checked: list[ExecutableClaimProposalV2] = []
+
+    async def admit_claim(proposal: ExecutableClaimProposalV2) -> None:
+        checked.append(proposal)
+
+    proposal = ExecutableClaimProposalV2(
+        operation_id=uuid4(),
+        protected_attempt_id=uuid4(),
+        execution_generation=7,
+        requirements_digest="b" * 64,
+        worker_id=uuid4(),
+        worker_incarnation=uuid4(),
+        expected_claim_high_water=3,
+    )
+    decision = await ExecutableClaimGate(admit_claim=admit_claim).evaluate(proposal)
+    assert decision is None
+    assert checked == [proposal]

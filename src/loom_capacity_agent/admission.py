@@ -26,7 +26,7 @@ from loom_capacity_manager.contracts import (
     WorkerShapeV1,
     canonical_digest,
 )
-from loom_capacity_manager.executable_contracts import StrictV2Model
+from loom_capacity_manager.executable_contracts import ExecutableIntentBindingV2, StrictV2Model
 
 PhysicalPool = Literal["oldlab", "gb10"]
 
@@ -349,12 +349,174 @@ class PreparedProtectedReleaseV1(AgentRegistrationV1):
         return self
 
 
+class PhysicalJobBindingV2(StrictV2Model):
+    """Bind one prepared executable intent to its exact scheduler identity."""
+
+    operation_id: UUID
+    binding: ExecutableIntentBindingV2
+    bootstrap_registration_epoch: PositiveGeneration
+    slurm_job_id: Identifier
+    ownership_evidence_sha256: Digest
+    executable: Literal[True] = True
+
+
+class ExecutableWorkerRegistrationV2(StrictV2Model):
+    """Exchange or requeue one worker identity after physical binding."""
+
+    operation_id: UUID
+    binding: ExecutableIntentBindingV2
+    bootstrap_registration_epoch: PositiveGeneration
+    protected_registration_epoch: PositiveGeneration
+    slurm_job_id: Identifier
+    worker_id: UUID
+    worker_incarnation: UUID
+    worker_credential_sha256: Digest
+    predecessor_worker_incarnation: UUID | None = None
+    executable: Literal[True] = True
+
+    @model_validator(mode="after")
+    def _registration_epoch(self) -> ExecutableWorkerRegistrationV2:
+        if self.protected_registration_epoch <= self.bootstrap_registration_epoch:
+            raise ValueError("worker registration epoch must advance past bootstrap")
+        identities = {
+            self.operation_id,
+            self.binding.intent_id,
+            self.binding.tranche_id,
+            self.worker_id,
+            self.worker_incarnation,
+        }
+        if self.predecessor_worker_incarnation is not None:
+            identities.add(self.predecessor_worker_incarnation)
+        if len(identities) != 5 + (self.predecessor_worker_incarnation is not None):
+            raise ValueError("worker registration identities must be distinct")
+        return self
+
+
+class ExecutableDrainRequestV2(StrictV2Model):
+    """Monotonically stop claims for one exact live worker incarnation."""
+
+    operation_id: UUID
+    binding: ExecutableIntentBindingV2
+    worker_id: UUID
+    worker_incarnation: UUID
+    expected_claim_high_water: NonNegativeSequence
+    drain_epoch: PositiveGeneration
+    executable: Literal[True] = True
+
+
+class ExecutableReleaseRequestV2(StrictV2Model):
+    """Fence delayed registration after protected claims and credentials close."""
+
+    operation_id: UUID
+    binding: ExecutableIntentBindingV2
+    reporter_incarnation: UUID
+    bootstrap_registration_epoch: PositiveGeneration
+    expected_claim_high_water: NonNegativeSequence
+    protected_registration_epoch: PositiveGeneration
+    release_epoch: PositiveGeneration
+    executable: Literal[True] = True
+
+
+class PreparedExecutableAdmissionV2(StrictV2Model):
+    """Exact protected receipt for one sealed executable bootstrap digest."""
+
+    subject_id: UUID
+    subject_incarnation: UUID
+    intent_id: UUID
+    bootstrap_registration_epoch: PositiveGeneration
+    bootstrap_sha256: Digest
+    request_digest: Digest
+    admission_digest: Digest
+    protected_high_water: PositiveGeneration
+    admission_state: Literal["prepared"] = "prepared"
+    executable: Literal[True] = True
+
+
+class BoundExecutableWorkerV2(StrictV2Model):
+    """Exact protected receipt for a physical scheduler binding."""
+
+    subject_id: UUID
+    subject_incarnation: UUID
+    intent_id: UUID
+    bootstrap_registration_epoch: PositiveGeneration
+    slurm_job_id: Identifier
+    ownership_evidence_sha256: Digest
+    request_digest: Digest
+    binding_digest: Digest
+    protected_high_water: PositiveGeneration
+    binding_state: Literal["bound"] = "bound"
+    executable: Literal[True] = True
+
+
+class RegisteredExecutableWorkerV2(StrictV2Model):
+    """Exact receipt for one live worker and any revoked predecessor."""
+
+    subject_id: UUID
+    subject_incarnation: UUID
+    intent_id: UUID
+    worker_id: UUID
+    worker_incarnation: UUID
+    predecessor_worker_incarnation: UUID | None = None
+    protected_registration_epoch: PositiveGeneration
+    request_digest: Digest
+    registration_digest: Digest
+    protected_high_water: PositiveGeneration
+    registration_state: Literal["registered"] = "registered"
+    executable: Literal[True] = True
+
+
+class DrainedExecutableWorkerV2(StrictV2Model):
+    """Exact receipt proving new claims are fenced without closing live claims."""
+
+    subject_id: UUID
+    subject_incarnation: UUID
+    intent_id: UUID
+    worker_id: UUID
+    worker_incarnation: UUID
+    claim_high_water: NonNegativeSequence
+    live_claim_count: NonNegativeSequence
+    drain_epoch: PositiveGeneration
+    request_digest: Digest
+    drain_digest: Digest
+    protected_high_water: PositiveGeneration
+    worker_state: Literal["draining"] = "draining"
+    executable: Literal[True] = True
+
+
+class ExecutableReleaseReceiptV2(StrictV2Model):
+    """Append-only protected release proof consumed by the manager."""
+
+    binding: ExecutableIntentBindingV2
+    reporter_incarnation: UUID
+    bootstrap_registration_epoch: PositiveGeneration
+    protected_registration_epoch: PositiveGeneration
+    claim_high_water: NonNegativeSequence
+    live_claim_count: Literal[0] = 0
+    release_epoch: PositiveGeneration
+    bootstrap_revoked: Literal[True] = True
+    worker_credentials_revoked: Literal[True] = True
+    request_digest: Digest
+    protected_release_sha256: Digest
+    protected_high_water: PositiveGeneration
+    release_state: Literal["acknowledged"] = "acknowledged"
+    executable: Literal[True] = True
+
+
 __all__ = [
+    "BoundExecutableWorkerV2",
+    "DrainedExecutableWorkerV2",
+    "ExecutableDrainRequestV2",
+    "ExecutableReleaseReceiptV2",
+    "ExecutableReleaseRequestV2",
+    "ExecutableWorkerRegistrationV2",
+    "PhysicalJobBindingV2",
     "PreparedAdmissionPlanV1",
     "PreparedBootstrapBindingV1",
+    "PreparedExecutableAdmissionV2",
     "PreparedPlacementAllowanceV1",
     "PreparedProtectedReleaseV1",
     "PreparedWorkerBindingV1",
     "PreparedWorkerShapeV1",
     "ProtectedExecutableBootstrapRegistrationV2",
+    "RegisteredExecutableWorkerV2",
 ]
