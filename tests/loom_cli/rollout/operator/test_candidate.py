@@ -99,8 +99,15 @@ def trusted_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     git_config.write_text("[core]\n\trepositoryformatversion = 0\n", encoding="utf-8")
     config_path = candidate_root / "staging-rollout.toml"
     config_path.write_text("schema_version = 1\n", encoding="utf-8")
-    repo.chmod(0o755)
-    (repo / ".git").chmod(0o755)
+    for directory in (
+        candidate_root,
+        runtime_root,
+        repo,
+        repo / ".git",
+        runtime_root / "venv",
+        runtime_root / "venv" / "bin",
+    ):
+        directory.chmod(0o755)
     git_config.chmod(0o644)
     config_path.chmod(0o600)
     monkeypatch.setattr(
