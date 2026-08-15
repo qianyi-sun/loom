@@ -401,3 +401,109 @@ Evidence:
 - The success test proves the exec target is `/proc/self/fd/<fd>` and still
   reads the originally verified candidate after the configured pathname is
   replaced.
+
+## Fix Round 3 — sealed candidate snapshot remediation
+
+Base: `edb60fabb` (`fix: close executable bridge round 2 review gaps`).
+
+Scoped fix round 2 re-review status:
+
+1. Addressed: executor work selection now consumes the shared public runtime
+   profile resolver, and no lifecycle mutation route was added.
+2. Important open: the trusted wrapper still returned an authenticated
+   descriptor to a current-UID-owned source inode, so a `0555` candidate could
+   be `chmod`ed and rewritten in-place after hashing and before exec.
+3. Important open: the candidate descriptor was opened close-on-exec while the
+   wrapper executed `/proc/self/fd/<fd>`, so real shebang candidates failed when
+   the interpreter tried to reopen the now-closed descriptor.
+
+### Root cause
+
+- Round 2 authenticated the candidate path, owner, mode, image, and opened
+  source descriptor before consuming the bootstrap handoff, but it kept the
+  source inode as the object passed to exec. For same-UID ownership, `0555`
+  does not make the inode immutable because the owner can `chmod` and rewrite
+  the same inode after the hash is computed.
+- The previous success coverage used injected `execvpe` and read
+  `/proc/self/fd/<fd>` before a real exec. That masked the Linux shebang path:
+  `execve("/proc/self/fd/<fd>", argv, env)` closes close-on-exec descriptors
+  before `/bin/sh` reopens the script path.
+
+### RED evidence
+
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_bootstrap_handoff.py::test_trusted_launcher_verified_candidate_descriptor_is_immutable_after_same_inode_rewrite tests/unit/test_capacity_executor_bootstrap_handoff.py::test_trusted_launcher_real_exec_supports_shebang_candidate_descriptor -q`
+  - RED: `2 failed in 0.38s`.
+  - Same-inode mutation failure: the descriptor read
+    `#!/bin/sh\nprintf 'mutated\n'\n` instead of the preverified
+    `#!/bin/sh\nprintf 'original\n'\n`.
+  - Real shebang failure: child exited `2` and stderr contained
+    `/bin/sh: 0: cannot open /proc/self/fd/15: No such file`.
+
+### Remediation
+
+- `_open_verified_candidate()` still verifies the configured canonical path,
+  nonsymlink regular-file identity, owner, exact mode, current-UID writable
+  mode, and SHA-256 before the bootstrap handoff is consumed.
+- After source verification, it now streams the verified bytes into an
+  anonymous Linux `memfd` snapshot, closes the source descriptor, seals the
+  snapshot with write/grow/shrink/further-seal prevention, then marks only the
+  sealed descriptor inheritable for the exec handoff.
+- The trusted process still calls `exec_bootstrap_handoff_candidate()` only
+  after the image digest and sealed candidate snapshot are authenticated, and
+  still passes the original candidate argv with no shell.
+- Added focused regressions for same-inode post-verification mutation and a
+  real child-process shebang exec using production `os.execvpe`.
+- Added libc-backed `memfd_create` and Linux fcntl seal constants because this
+  Python runtime does not expose `os.memfd_create` or the seal constants even
+  though the Linux kernel/libc support them.
+
+### GREEN evidence and verification
+
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_bootstrap_handoff.py::test_trusted_launcher_verified_candidate_descriptor_is_immutable_after_same_inode_rewrite tests/unit/test_capacity_executor_bootstrap_handoff.py::test_trusted_launcher_real_exec_supports_shebang_candidate_descriptor -q`
+  - `2 passed in 0.17s`
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_bootstrap_handoff.py -q`
+  - `24 passed in 0.34s`
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_slurm_backend.py tests/unit/test_capacity_executor_executable.py tests/unit/test_capacity_executor_recovery.py tests/unit/test_capacity_executor_client.py tests/unit/test_capacity_executor_admission_client.py tests/unit/test_capacity_executor_config.py tests/unit/test_capacity_executor_runtime.py tests/unit/test_capacity_executor_bootstrap_handoff.py tests/unit/test_capacity_executor_heartbeat.py tests/unit/test_capacity_executor_launch_renderer.py -q`
+  - `214 passed in 9.59s`
+- `uv run --no-sync pytest tests/integration/test_executable_global_capacity_bridge.py -q`
+  - pass 1: `5 passed in 28.84s`
+  - pass 2: `5 passed in 39.82s`
+- `uv run --no-sync pytest tests/integration/test_capacity_manager_api.py tests/integration/test_capacity_manager_execution_store.py tests/integration/test_capacity_manager_execution_epoch.py -q`
+  - `112 passed, 1 warning in 19.04s`
+- `uv run --no-sync pytest tests/ops/test_global_fleet_pool_executor_once.py tests/ops/test_global_fleet_capacity_shadow_once.py tests/ops/test_capacity_mutation_inventory.py tests/ops/test_capacity_guard_package_boundary.py -q`
+  - `39 passed in 0.87s`
+- `uv run --no-sync pytest tests/loom_cli/test_capacity_control_plane.py -q`
+  - `36 passed in 0.67s`
+- `uv run --no-sync ruff format --check <2 pending Python files> && uv run --no-sync ruff check <2 pending Python files>`
+  - `2 files already formatted`
+  - `All checks passed!`
+- `uv run --no-sync mypy`
+  - `Success: no issues found in 810 source files`
+- `git diff --check && find docs -maxdepth 1 -type d -name superpowers -print`
+  - exit 0; no output.
+
+The existing manager integration warning remains the known
+`StarletteDeprecationWarning` from `fastapi.testclient` importing Starlette's
+`TestClient`.
+
+### Files changed
+
+- `src/loom_capacity_executor/trusted_launcher.py`
+- `tests/unit/test_capacity_executor_bootstrap_handoff.py`
+- this report and `progress.md`
+
+### Self-review
+
+- DryRun V1 contracts were not changed.
+- Checked-in/rendered executable ceiling remains zero.
+- No live Kubernetes, Slurm, systemd, activation, `origin/dev`, or lifecycle
+  mutation route work was performed.
+- The source candidate descriptor is closed before physical binding resolution,
+  admission construction, handoff consumption, claim, credential exposure, and
+  exec.
+- Rejection/error paths close both source and snapshot descriptors; if injected
+  `execvpe` returns or raises, `run_trusted_launcher_process()` closes the
+  sealed descriptor in its `finally` block.
+- A successful candidate receives at most the sealed nonsecret snapshot
+  descriptor needed for `/proc/self/fd/<fd>` exec and shebang interpreter
+  reopen.

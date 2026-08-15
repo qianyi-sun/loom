@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import ctypes
 import errno
+import fcntl
 import hashlib
 import os
 import posixpath
@@ -38,6 +40,15 @@ _IMAGE_DIGEST_PATTERN = (
 
 _Execvpe = Callable[[str, tuple[str, ...], Mapping[str, str]], Any]
 _AdmissionFactory = Callable[..., object]
+_CANDIDATE_READ_CHUNK_BYTES = 1024 * 1024
+_MFD_CLOEXEC = getattr(os, "MFD_CLOEXEC", 0x0001)
+_MFD_ALLOW_SEALING = getattr(os, "MFD_ALLOW_SEALING", 0x0002)
+_F_ADD_SEALS = getattr(fcntl, "F_ADD_SEALS", 1033)
+_F_GET_SEALS = getattr(fcntl, "F_GET_SEALS", 1034)
+_F_SEAL_SEAL = getattr(fcntl, "F_SEAL_SEAL", 0x0001)
+_F_SEAL_SHRINK = getattr(fcntl, "F_SEAL_SHRINK", 0x0002)
+_F_SEAL_GROW = getattr(fcntl, "F_SEAL_GROW", 0x0004)
+_F_SEAL_WRITE = getattr(fcntl, "F_SEAL_WRITE", 0x0008)
 
 
 class TrustedCandidateExecutableV2(StrictV2Model):
@@ -237,6 +248,53 @@ def _read_verified_file(
     return payload
 
 
+def _write_all(descriptor: int, payload: bytes) -> None:
+    view = memoryview(payload)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise BootstrapHandoffError("trusted launcher candidate snapshot write failed")
+        view = view[written:]
+
+
+def _create_candidate_snapshot_descriptor() -> int:
+    flags = _MFD_CLOEXEC | _MFD_ALLOW_SEALING
+    try:
+        memfd_create = getattr(os, "memfd_create", None)
+        if memfd_create is not None:
+            return int(memfd_create("loom-trusted-candidate", flags))
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc_memfd_create = libc.memfd_create
+        libc_memfd_create.argtypes = [ctypes.c_char_p, ctypes.c_uint]
+        libc_memfd_create.restype = ctypes.c_int
+        descriptor = int(libc_memfd_create(b"loom-trusted-candidate", flags))
+        if descriptor < 0:
+            error_number = ctypes.get_errno()
+            raise OSError(error_number, os.strerror(error_number))
+        return descriptor
+    except AttributeError as exc:
+        raise BootstrapHandoffError(
+            "trusted launcher candidate immutable snapshot is unavailable"
+        ) from exc
+    except OSError as exc:
+        raise BootstrapHandoffError(
+            "trusted launcher candidate immutable snapshot is unavailable"
+        ) from exc
+
+
+def _seal_candidate_snapshot(descriptor: int) -> None:
+    seals = _F_SEAL_WRITE | _F_SEAL_GROW | _F_SEAL_SHRINK | _F_SEAL_SEAL
+    try:
+        fcntl.fcntl(descriptor, _F_ADD_SEALS, seals)
+        actual_seals = int(fcntl.fcntl(descriptor, _F_GET_SEALS))
+    except OSError as exc:
+        raise BootstrapHandoffError(
+            "trusted launcher candidate immutable snapshot sealing failed"
+        ) from exc
+    if actual_seals & seals != seals:
+        raise BootstrapHandoffError("trusted launcher candidate immutable snapshot sealing failed")
+
+
 def _open_verified_candidate(identity: TrustedCandidateExecutableV2) -> int:
     path = Path(identity.path)
     try:
@@ -264,6 +322,7 @@ def _open_verified_candidate(identity: TrustedCandidateExecutableV2) -> int:
                 "trusted launcher candidate executable must be a nonsymlink"
             ) from exc
         raise BootstrapHandoffError("trusted launcher candidate executable is unavailable") from exc
+    snapshot_descriptor: int | None = None
     try:
         opened = os.fstat(descriptor)
         if (
@@ -280,19 +339,26 @@ def _open_verified_candidate(identity: TrustedCandidateExecutableV2) -> int:
             raise BootstrapHandoffError(
                 "trusted launcher candidate executable mode is writable by current uid"
             )
+        snapshot_descriptor = _create_candidate_snapshot_descriptor()
         digest = hashlib.sha256()
         while True:
-            chunk = os.read(descriptor, 1024 * 1024)
+            chunk = os.read(descriptor, _CANDIDATE_READ_CHUNK_BYTES)
             if not chunk:
                 break
             digest.update(chunk)
+            _write_all(snapshot_descriptor, chunk)
         if digest.hexdigest() != identity.sha256:
             raise BootstrapHandoffError("trusted launcher candidate executable digest changed")
-        os.lseek(descriptor, 0, os.SEEK_SET)
+        os.lseek(snapshot_descriptor, 0, os.SEEK_SET)
+        _seal_candidate_snapshot(snapshot_descriptor)
+        os.set_inheritable(snapshot_descriptor, True)
     except Exception:
+        if snapshot_descriptor is not None:
+            os.close(snapshot_descriptor)
         os.close(descriptor)
         raise
-    return descriptor
+    os.close(descriptor)
+    return snapshot_descriptor
 
 
 def _load_trusted_config(identity: SlurmFileIdentityV2) -> TrustedLauncherConfigV2:

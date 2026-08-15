@@ -5,6 +5,7 @@ import base64
 import hashlib
 import json
 import os
+import shlex
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -723,15 +724,12 @@ def _trusted_candidate_config_payload(
     }
 
 
-async def _run_trusted_process_with_candidate_config(
+def _trusted_launcher_process_argv_for_candidate_config(
     tmp_path: Path,
     *,
     config_payload: dict[str, object],
     process_image_digest: str = _CANDIDATE_IMAGE,
-    on_exec: Callable[[str, tuple[str, ...], dict[str, str]], None] | None = None,
-    admission: _Admission | None = None,
-    exec_calls: list[tuple[str, tuple[str, ...], dict[str, str]]] | None = None,
-) -> tuple[_Admission, list[tuple[str, tuple[str, ...], dict[str, str]]]]:
+) -> tuple[str, ...]:
     from dataclasses import replace
 
     from loom_capacity_executor.launch_renderer import (
@@ -742,10 +740,8 @@ async def _run_trusted_process_with_candidate_config(
         SlurmExecutableIdentityV2,
         SlurmFileIdentityV2,
     )
-    from loom_capacity_executor.trusted_launcher import run_trusted_launcher_process
 
     directory = Path(config_payload["handoff_directory"])
-    admission_directory = Path(config_payload["admission_directory"])
     launcher_path = tmp_path / "trusted-launcher"
     launcher_path.write_text("#!/bin/sh\nexit 70\n", encoding="utf-8")
     launcher_path.chmod(0o755)
@@ -810,6 +806,26 @@ async def _run_trusted_process_with_candidate_config(
             "image_digest": process_image_digest,
         }
     )
+    return launch_request.trusted_launcher_argv()
+
+
+async def _run_trusted_process_with_candidate_config(
+    tmp_path: Path,
+    *,
+    config_payload: dict[str, object],
+    process_image_digest: str = _CANDIDATE_IMAGE,
+    on_exec: Callable[[str, tuple[str, ...], dict[str, str]], None] | None = None,
+    admission: _Admission | None = None,
+    exec_calls: list[tuple[str, tuple[str, ...], dict[str, str]]] | None = None,
+) -> tuple[_Admission, list[tuple[str, tuple[str, ...], dict[str, str]]]]:
+    from loom_capacity_executor.trusted_launcher import run_trusted_launcher_process
+
+    launch_argv = _trusted_launcher_process_argv_for_candidate_config(
+        tmp_path,
+        config_payload=config_payload,
+        process_image_digest=process_image_digest,
+    )
+    admission_directory = Path(config_payload["admission_directory"])
     admission = admission or _Admission()
     exec_calls = exec_calls if exec_calls is not None else []
 
@@ -825,7 +841,7 @@ async def _run_trusted_process_with_candidate_config(
         raise _ExecBoundaryError
 
     await run_trusted_launcher_process(
-        launch_request.trusted_launcher_argv(),
+        launch_argv,
         environment={"SLURM_JOB_ID": "101"},
         now=lambda: _NOW,
         admission_factory=admission_factory,
@@ -1043,6 +1059,111 @@ async def test_trusted_launcher_executes_already_open_verified_candidate(
     assert (
         admission.requests[0].worker_credential_sha256
         == hashlib.sha256(observed[0][2].encode("ascii")).hexdigest()
+    )
+
+
+# Production break caught: a current-UID-owned 0555 candidate can be chmodded
+# and rewritten in-place after authentication; the descriptor handed to exec
+# must still expose only the exact preverified bytes.
+def test_trusted_launcher_verified_candidate_descriptor_is_immutable_after_same_inode_rewrite(
+    tmp_path: Path,
+) -> None:
+    from loom_capacity_executor.trusted_launcher import (
+        TrustedCandidateExecutableV2,
+        _open_verified_candidate,
+    )
+
+    candidate = tmp_path / "candidate-worker"
+    original_payload = _write_candidate(candidate, b"#!/bin/sh\nprintf 'original\\n'\n")
+    identity = TrustedCandidateExecutableV2(
+        path=str(candidate),
+        sha256=hashlib.sha256(original_payload).hexdigest(),
+        owner_uid=candidate.stat().st_uid,
+        mode=candidate.stat().st_mode & 0o777,
+    )
+
+    descriptor = _open_verified_candidate(identity)
+    try:
+        candidate.chmod(0o755)
+        candidate.write_bytes(b"#!/bin/sh\nprintf 'mutated\\n'\n")
+        candidate.chmod(0o555)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        observed_payload = os.read(descriptor, 4096)
+    finally:
+        os.close(descriptor)
+
+    assert observed_payload == original_payload
+
+
+# Production break caught: the real exec boundary for shebang candidates must
+# keep the authenticated descriptor available after exec so the interpreter can
+# reopen /proc/self/fd/<fd>; fake execvpe tests cannot observe this.
+def test_trusted_launcher_real_exec_supports_shebang_candidate_descriptor(
+    tmp_path: Path,
+) -> None:
+    from loom_capacity_executor.trusted_launcher import run_trusted_launcher_process
+
+    directory = tmp_path / "handoff"
+    directory.mkdir(mode=0o700)
+    admission_directory = tmp_path / "admission"
+    admission_directory.mkdir(mode=0o700)
+    output = tmp_path / "candidate-output.txt"
+    child_error = tmp_path / "child-error.txt"
+    candidate = tmp_path / "candidate-worker"
+    script = (
+        "#!/bin/sh\n"
+        'if [ -n "$LOOM_EXECUTOR_WORKER_CREDENTIAL" ]; then\n'
+        "  credential_state=present\n"
+        "else\n"
+        "  credential_state=missing\n"
+        "fi\n"
+        f"printf 'payload=original\\narg1=%s\\ncredential=%s\\n' "
+        f'"$1" "$credential_state" > {shlex.quote(str(output))}\n'
+    ).encode()
+    _write_candidate(candidate, script)
+    config = _trusted_candidate_config_payload(
+        handoff_directory=directory,
+        admission_directory=admission_directory,
+        candidate_path=candidate,
+    )
+    launch_argv = _trusted_launcher_process_argv_for_candidate_config(
+        tmp_path,
+        config_payload=config,
+    )
+
+    def admission_factory(directory_arg: Path, *, expected_directory_sha256: str) -> _Admission:
+        assert directory_arg == admission_directory
+        assert expected_directory_sha256 == _Admission.route_sha256
+        return _Admission()
+
+    pid = os.fork()
+    if pid == 0:
+        try:
+            asyncio.run(
+                run_trusted_launcher_process(
+                    launch_argv,
+                    environment={"SLURM_JOB_ID": "101"},
+                    now=lambda: _NOW,
+                    admission_factory=admission_factory,
+                    execvpe=os.execvpe,
+                )
+            )
+        except BaseException as exc:
+            child_error.write_text(f"{type(exc).__name__}: {exc}", encoding="utf-8")
+            os._exit(125)
+        os._exit(126)
+
+    _waited_pid, status = os.waitpid(pid, 0)
+    assert os.WIFEXITED(status), status
+    exit_code = os.WEXITSTATUS(status)
+    error_message = (
+        child_error.read_text(encoding="utf-8")
+        if child_error.exists()
+        else "candidate process did not write a Python exception"
+    )
+    assert exit_code == 0, error_message
+    assert output.read_text(encoding="utf-8") == (
+        "payload=original\narg1=--once\ncredential=present\n"
     )
 
 
