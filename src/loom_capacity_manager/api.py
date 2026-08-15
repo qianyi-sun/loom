@@ -1288,7 +1288,11 @@ def create_app(
             async with session_factory() as session:
                 result = await executions.recover_unsubmitted_permit(session, value)
             payload = jsonable_encoder(result)
-            payload.setdefault("state", "quarantined")
+            observed_state = payload.get("state")
+            if observed_state is None:
+                payload["state"] = "quarantined"
+            elif observed_state != "quarantined":
+                raise HTTPException(status_code=409, detail="capacity state conflict")
             return payload
         except CapacityStoreError as exc:
             raise _store_error(exc) from exc

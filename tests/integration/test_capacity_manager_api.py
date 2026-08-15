@@ -1287,6 +1287,46 @@ def test_submission_recovery_response_is_explicitly_quarantined(
     assert store.last_recovery.binding.pool_generation == 1
 
 
+def test_submission_recovery_rejects_store_returned_unused_state(
+    api_context: tuple[TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator],
+) -> None:
+    class ForbiddenRecoveryStateStore(RecordingExecutionStore):
+        async def recover_unsubmitted_permit(
+            self,
+            _session,  # type: ignore[no-untyped-def]
+            recovery: ExecutableSubmissionRecoveryV2,
+        ) -> dict[str, object]:
+            self.recovery_calls += 1
+            self.last_recovery = recovery
+            return {
+                "intent_id": str(recovery.binding.intent_id),
+                "receipt_digest": "9" * 64,
+                "replayed": False,
+                "state": "unused",
+                "executable": True,
+            }
+
+    _client, _app, settings, _allocator = api_context
+    store = ForbiddenRecoveryStateStore()
+    app = create_app(
+        settings,
+        verifier=CapacityPrincipalVerifier.from_file(settings.principals_file),
+        execution_store=store,
+    )
+    permit_id = UUID(int=43)
+    with TestClient(app) as client:
+        response = client.post(
+            f"/v2/executors/oldlab/permits/{permit_id}/recover",
+            headers={"Authorization": f"Bearer {OLDLAB_EXECUTOR_TOKEN}"},
+            json=_v2_submission_recovery_payload(permit_id=permit_id),
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "capacity state conflict"}
+    assert store.recovery_calls == 1
+    assert store.last_recovery is not None
+
+
 def test_v2_submission_recovery_rejects_path_or_executor_drift(
     api_context: tuple[TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator],
 ) -> None:
