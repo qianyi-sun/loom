@@ -222,9 +222,7 @@ def test_install_applies_exact_authority_and_publishes_no_secret_evidence(
     assert len(result["changed"]) == 5
     assert installer.check()["ok"] is True
     source_command = next(
-        command
-        for command, _stdin in runner.calls
-        if "config" in command and "view" in command
+        command for command, _stdin in runner.calls if "config" in command and "view" in command
     )
     assert source_command == (
         "kubectl",
@@ -238,15 +236,12 @@ def test_install_applies_exact_authority_and_publishes_no_secret_evidence(
     assert sum("apply" in command for command, _ in runner.calls) == 2
     assert sum("token" in command for command, _ in runner.calls) == 2
     database_calls = [
-        (command, stdin)
-        for command, stdin in runner.calls
-        if "service/loom-postgres-rw" in command
+        (command, stdin) for command, stdin in runner.calls if "service/loom-postgres-rw" in command
     ]
     assert len(database_calls) == 2
     assert all(stdin is not None for _command, stdin in database_calls)
     assert all(
-        command[command.index("-U") : command.index("-U") + 4]
-        == ("-U", "postgres", "-d", "loom")
+        command[command.index("-U") : command.index("-U") + 4] == ("-U", "postgres", "-d", "loom")
         for command, _stdin in database_calls
     )
     assert all("--stdin" in command for command, _stdin in database_calls)
@@ -302,9 +297,7 @@ def test_install_creates_exact_root_probe_authority_without_exposing_token(
     sql = next(
         stdin
         for command, stdin in runner.calls
-        if "service/loom-postgres-rw" in command
-        and stdin is not None
-        and "readonly_probe" in stdin
+        if "service/loom-postgres-rw" in command and stdin is not None and "readonly_probe" in stdin
     )
     assert result["ok"] is True
     assert raw.startswith(b"loom_readonly_probe_")

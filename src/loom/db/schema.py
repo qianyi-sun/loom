@@ -3300,7 +3300,9 @@ class PipelineRun(Base):
     control_binding_snapshots_digest: Mapped[str] = mapped_column(
         Text,
         nullable=False,
-        server_default=text("'sha256:37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570'"),
+        server_default=text(
+            "'sha256:37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570'"
+        ),
     )
     budget_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     request_digest: Mapped[str] = mapped_column(Text, nullable=False)
@@ -3453,20 +3455,28 @@ class JudgeExecutionProfile(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False)
     environment: Mapped[str] = mapped_column(Text, nullable=False)
     provider_connection_id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("provider_connections.id", ondelete="RESTRICT"), nullable=False
+        PgUUID(as_uuid=True),
+        ForeignKey("provider_connections.id", ondelete="RESTRICT"),
+        nullable=False,
     )
     agent_adapter: Mapped[str] = mapped_column(Text, nullable=False)
     recipe_digest: Mapped[str] = mapped_column(Text, nullable=False)
     snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     snapshot_bytes: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     snapshot_sha256: Mapped[str] = mapped_column(Text, nullable=False)
-    allowed_team_ids: Mapped[list[UUID]] = mapped_column(ARRAY(PgUUID(as_uuid=True)), nullable=False)
+    allowed_team_ids: Mapped[list[UUID]] = mapped_column(
+        ARRAY(PgUUID(as_uuid=True)), nullable=False
+    )
     is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
-    created_by: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    created_by: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
     )
-    updated_by: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    updated_by: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
     )
@@ -3516,19 +3526,27 @@ class RecipeProviderBinding(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False)
     environment: Mapped[str] = mapped_column(Text, nullable=False)
     provider_connection_id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("provider_connections.id", ondelete="RESTRICT"), nullable=False
+        PgUUID(as_uuid=True),
+        ForeignKey("provider_connections.id", ondelete="RESTRICT"),
+        nullable=False,
     )
     recipe_digest: Mapped[str] = mapped_column(Text, nullable=False)
     snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     snapshot_bytes: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     snapshot_sha256: Mapped[str] = mapped_column(Text, nullable=False)
-    allowed_team_ids: Mapped[list[UUID]] = mapped_column(ARRAY(PgUUID(as_uuid=True)), nullable=False)
+    allowed_team_ids: Mapped[list[UUID]] = mapped_column(
+        ARRAY(PgUUID(as_uuid=True)), nullable=False
+    )
     is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
-    created_by: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    created_by: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
     )
-    updated_by: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    updated_by: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
     )
@@ -3572,7 +3590,9 @@ class PipelineRunControlBinding(Base):
     snapshot_bytes: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     snapshot_sha256: Mapped[str] = mapped_column(Text, nullable=False)
     provider_connection_id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("provider_connections.id", ondelete="RESTRICT"), nullable=False
+        PgUUID(as_uuid=True),
+        ForeignKey("provider_connections.id", ondelete="RESTRICT"),
+        nullable=False,
     )
     provider_request_limit: Mapped[int] = mapped_column(Integer, nullable=False)
     provider_cost_limit_microusd: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -5424,7 +5444,9 @@ class PipelineExecutionCheckpoint(Base):
         UniqueConstraint(
             "execution_attempt_id", "checkpoint_sequence", name="pipeline_checkpoints_sequence_uidx"
         ),
-        CheckConstraint("attempt_number BETWEEN 1 AND 3", name="pipeline_checkpoints_attempt_check"),
+        CheckConstraint(
+            "attempt_number BETWEEN 1 AND 3", name="pipeline_checkpoints_attempt_check"
+        ),
         CheckConstraint(
             "source_attempt_state IN ('claimed','running')",
             name="pipeline_checkpoints_source_state_check",
@@ -5471,7 +5493,9 @@ class PipelineExecutionCheckpoint(Base):
         PgUUID(as_uuid=True), ForeignKey("pipeline_runs.id", ondelete="CASCADE"), nullable=False
     )
     pipeline_stage_run_id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("pipeline_stage_runs.id", ondelete="CASCADE"), nullable=False
+        PgUUID(as_uuid=True),
+        ForeignKey("pipeline_stage_runs.id", ondelete="CASCADE"),
+        nullable=False,
     )
     attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
     recipe_digest: Mapped[str] = mapped_column(Text, nullable=False)
