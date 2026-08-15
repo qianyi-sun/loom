@@ -509,9 +509,7 @@ def isolated_capacity_postgres_url(postgres_url: str) -> Iterator[str]:
     try:
         with admin_engine.connect() as connection:
             connection.exec_driver_sql(f"CREATE DATABASE {quoted_database} TEMPLATE template0")
-        isolated_url = source_url.set(database=database_name).render_as_string(
-            hide_password=False
-        )
+        isolated_url = source_url.set(database=database_name).render_as_string(hide_password=False)
         cfg = AlembicConfig(str(repo_root / "capacity_migrations" / "alembic.ini"))
         cfg.set_main_option("script_location", str(repo_root / "capacity_migrations"))
         previous = os.environ.get("LOOM_CAPACITY_DB_URL")

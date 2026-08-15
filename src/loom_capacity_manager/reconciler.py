@@ -116,13 +116,8 @@ async def _commit_reconciled_epoch(
 
         now = (await session.execute(select(func.clock_timestamp()))).scalar_one()
         valid_until = store.allocation_input_valid_until(current_input)
-        if (
-            valid_until is not None
-            and now + _EXECUTABLE_COMMIT_SAFETY_MARGIN >= valid_until
-        ):
-            raise StaleAllocationInputError(
-                "allocation input freshness expired before commit"
-            )
+        if valid_until is not None and now + _EXECUTABLE_COMMIT_SAFETY_MARGIN >= valid_until:
+            raise StaleAllocationInputError("allocation input freshness expired before commit")
         if valid_until is None:
             raise StaleAllocationInputError(
                 "allocation input freshness deadline is required for executable commit"

@@ -170,6 +170,19 @@ def test_registry_requires_exact_pool_executor_generation(
         )
 
 
+def test_registry_rejects_non_positive_executor_pool_generation(tmp_path: Path) -> None:
+    invalid_generation = _pool_executor()
+    invalid_generation["executor_pool_generation"] = 0
+
+    with pytest.raises(PrincipalRegistryError):
+        CapacityPrincipalVerifier.from_file(
+            _write_registry(
+                tmp_path / "non-positive-generation.json",
+                [_operator(), invalid_generation],
+            )
+        )
+
+
 @pytest.mark.parametrize(
     "header",
     (None, "", "Basic abc", "Bearer", "Bearer wrong", "Bearer secret extra"),

@@ -547,6 +547,10 @@ def test_reintegrated_capacity_round_trip_restores_exact_upstream_capacity_0005_
             assert (
                 "input_valid_until" in surface_0006.database_columns["capacity_allocation_epochs"]
             )
+            assert (
+                surface_0006.database_columns["capacity_allocation_epochs"]["input_valid_until"]
+                == surface_0006.orm_columns["capacity_allocation_epochs"]["input_valid_until"]
+            )
             assert "capacity_execution_epoch_transition_guard()" in surface_0006.routines
             assert "capacity_prepared_retirement_evidence_guard()" not in surface_0006.routines
             assert "capacity_executable_executor_states" in surface_0006.database_columns
@@ -565,7 +569,15 @@ def test_reintegrated_capacity_round_trip_restores_exact_upstream_capacity_0005_
             assert surface_0007.database_columns == surface_0007.orm_columns
             assert "capacity_executable_protected_release_receipts" in surface_0007.database_columns
             assert (
+                surface_0007.database_columns["capacity_executable_protected_release_receipts"]
+                == surface_0007.orm_columns["capacity_executable_protected_release_receipts"]
+            )
+            assert (
                 "protected_release_digest"
+                not in surface_0007.database_columns["capacity_executable_intents"]
+            )
+            assert (
+                "protected_release_sha256"
                 not in surface_0007.database_columns["capacity_executable_intents"]
             )
             assert (

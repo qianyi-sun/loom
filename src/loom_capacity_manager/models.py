@@ -2076,6 +2076,7 @@ class CapacityExecutableIntent(Base):
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
     )
 
+
 class CapacityExecutableProtectedReleaseReceipt(Base):
     """Append-only protected release evidence for one executable intent."""
 
@@ -2218,6 +2219,7 @@ class CapacityExecutableLaunchRateBucket(Base):
         BigInteger, nullable=False, server_default=text("0")
     )
     last_refill_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+
 
 class CapacityAuditEvent(Base):
     __tablename__ = "capacity_audit_events"

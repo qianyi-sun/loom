@@ -779,6 +779,84 @@ def test_journal_permit_and_release_boundaries_fail_closed() -> None:
         )
 
 
+def test_executable_reservation_acceptance_requires_pool_id_in_canonical_payload() -> None:
+    """Removing the acceptance pool binding must fail this executable contract."""
+
+    contracts = _contracts()
+    binding = _intent_binding()
+    acceptance = contracts.ExecutableReservationAcceptanceV2(
+        execution=binding.execution,
+        tranche_id=binding.tranche_id,
+        proposal_digest="4" * 64,
+        pool_id=binding.pool_id,
+        pool_generation=binding.pool_generation,
+        executor_id=binding.executor_id,
+        executor_incarnation=binding.executor_incarnation,
+        command_sequence=1,
+    )
+
+    assert acceptance.model_dump(mode="json") == {
+        "schema_version": 2,
+        "execution": binding.execution.model_dump(mode="json"),
+        "tranche_id": str(binding.tranche_id),
+        "proposal_digest": "4" * 64,
+        "pool_id": binding.pool_id,
+        "pool_generation": binding.pool_generation,
+        "executor_id": binding.executor_id,
+        "executor_incarnation": str(binding.executor_incarnation),
+        "command_sequence": 1,
+        "executable": True,
+    }
+    payload = acceptance.model_dump(mode="json")
+    del payload["pool_id"]
+    with pytest.raises(ValidationError, match="pool_id"):
+        contracts.ExecutableReservationAcceptanceV2.model_validate(payload)
+
+
+def test_submission_recovery_requires_exact_absence_evidence() -> None:
+    """Weakening recovery absence proof must fail this executable contract."""
+
+    contracts = _contracts()
+    binding = _intent_binding()
+    completed_at = datetime(2026, 8, 12, 12, 0, tzinfo=UTC)
+    recovery = contracts.ExecutableSubmissionRecoveryV2(
+        binding=binding,
+        permit_id=UUID(int=30),
+        permit_digest="6" * 64,
+        command_sequence=4,
+        inventory_sequence=2,
+        inventory_digest="7" * 64,
+        controller_query_completed_at=completed_at,
+        submit_process_absent=True,
+        scheduler_submission_absent=True,
+        controller_evidence_sha256="8" * 64,
+    )
+
+    assert recovery.permit_id == UUID(int=30)
+    assert recovery.permit_digest == "6" * 64
+    assert recovery.inventory_sequence == 2
+    assert recovery.inventory_digest == "7" * 64
+    assert recovery.controller_query_completed_at == completed_at
+    assert recovery.submit_process_absent is True
+    assert recovery.scheduler_submission_absent is True
+    assert recovery.controller_evidence_sha256 == "8" * 64
+    assert recovery.executable is True
+
+    missing_submit_process = recovery.model_dump(mode="json")
+    del missing_submit_process["submit_process_absent"]
+    with pytest.raises(ValidationError, match="submit_process_absent"):
+        contracts.ExecutableSubmissionRecoveryV2.model_validate(missing_submit_process)
+
+    with pytest.raises(ValidationError, match="scheduler_submission_absent"):
+        contracts.ExecutableSubmissionRecoveryV2.model_validate(
+            recovery.model_dump(mode="python") | {"scheduler_submission_absent": False}
+        )
+    with pytest.raises(ValidationError, match="executable"):
+        contracts.ExecutableSubmissionRecoveryV2.model_validate(
+            recovery.model_dump(mode="python") | {"executable": False}
+        )
+
+
 def test_executable_inventory_uses_tagged_candidate_ownership_proof() -> None:
     """Reusing dry-run ownership metadata must fail this executable boundary."""
 

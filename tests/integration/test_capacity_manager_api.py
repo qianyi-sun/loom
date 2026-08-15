@@ -33,10 +33,17 @@ from loom_capacity_manager.api import (
     _writer_matches_authority,
     create_app,
 )
-from loom_capacity_manager.auth import CapacityPrincipalVerifier
+from loom_capacity_manager.auth import CapacityPrincipal, CapacityPrincipalVerifier
 from loom_capacity_manager.config import CapacityManagerSettings, build_uvicorn_kwargs
-from loom_capacity_manager.contracts import MAX_CONTRACT_BYTES, canonical_digest
-from loom_capacity_manager.executable_contracts import ExecutionActivationV2
+from loom_capacity_manager.contracts import MAX_CONTRACT_BYTES, ResourceVectorV1, canonical_digest
+from loom_capacity_manager.executable_contracts import (
+    CandidateBindingV2,
+    ExecutableIntentBindingV2,
+    ExecutableReservationAcceptanceV2,
+    ExecutableSubmissionRecoveryV2,
+    ExecutionActivationV2,
+    ExecutionFenceV2,
+)
 from loom_capacity_manager.models import (
     Base,
     CapacityAllocation,
@@ -87,6 +94,10 @@ OLDLAB_EXECUTOR_TOKEN = "oldlab-executor-secret"
 OLDLAB_V2_EXECUTOR_TOKEN = "oldlab-v2-executor-secret"
 OLDLAB_EXECUTOR_INCARNATION = UUID("00000000-0000-4000-8000-000000000601")
 OLDLAB_OWNERSHIP_PRIVATE_KEY = Ed25519PrivateKey.from_private_bytes(b"\x03" * 32)
+V2_TRANCHE_ID = UUID(int=41)
+V2_INTENT_ID = UUID(int=42)
+V2_PERMIT_ID = UUID(int=43)
+V2_ACCEPTED_INTENT_ID = UUID(int=44)
 
 
 def _hash(token: str) -> str:
@@ -126,6 +137,143 @@ def _principal(
         ),
         "executor_pool_generation": executor_pool_generation,
     }
+
+
+def _execution_fence() -> ExecutionFenceV2:
+    return ExecutionFenceV2(
+        authority_incarnation=AUTHORITY_ID,
+        writer_epoch=1,
+        configuration_epoch=1,
+        execution_epoch=2,
+        execution_manifest_sha256="c" * 64,
+        execution_state="active",
+        executable_new_capacity_ceiling=1,
+        executable_new_capacity_rate_per_minute=1,
+        trusted_fleet_release_sha256="d" * 64,
+        allocation_epoch=3,
+    )
+
+
+def _intent_binding_v2(
+    *,
+    pool_id: str = "oldlab",
+    pool_generation: int = 1,
+    executor_id: str = "oldlab-executor",
+    executor_incarnation: UUID = OLDLAB_EXECUTOR_INCARNATION,
+) -> ExecutableIntentBindingV2:
+    return ExecutableIntentBindingV2(
+        execution=_execution_fence(),
+        tranche_id=V2_TRANCHE_ID,
+        intent_id=V2_INTENT_ID,
+        shape_instance_id="shape-1",
+        subject_id=SUBJECT_ID,
+        subject_incarnation=SUBJECT_INCARNATION,
+        account_id="owner-1",
+        tier_id="development",
+        candidate=CandidateBindingV2(
+            algorithm="source-sha256",
+            identity="1" * 64,
+            publication_sha256="2" * 64,
+        ),
+        candidate_generation=1,
+        deployment_generation=1,
+        pool_id=pool_id,
+        pool_generation=pool_generation,
+        executor_id=executor_id,
+        executor_incarnation=executor_incarnation,
+        shape_id="shape-a",
+        profile_id="profile-a",
+        profile_generation=1,
+        profile_digest="3" * 64,
+        concurrency_slots=1,
+        resources=ResourceVectorV1(
+            slots=1,
+            cpu_millicores=1000,
+            memory_bytes=1_073_741_824,
+        ),
+        node_ids=("node-1",),
+    )
+
+
+def _v2_acceptance_payload(
+    *,
+    pool_id: str = "oldlab",
+    pool_generation: int = 1,
+    executor_id: str = "oldlab-executor",
+    executor_incarnation: UUID = OLDLAB_EXECUTOR_INCARNATION,
+    tranche_id: UUID = V2_TRANCHE_ID,
+) -> dict[str, object]:
+    return ExecutableReservationAcceptanceV2(
+        execution=_execution_fence(),
+        tranche_id=tranche_id,
+        proposal_digest="4" * 64,
+        pool_id=pool_id,
+        pool_generation=pool_generation,
+        executor_id=executor_id,
+        executor_incarnation=executor_incarnation,
+        command_sequence=5,
+    ).model_dump(mode="json")
+
+
+def _v2_submission_recovery_payload(
+    *,
+    binding: ExecutableIntentBindingV2 | None = None,
+    permit_id: UUID = V2_PERMIT_ID,
+) -> dict[str, object]:
+    resolved_binding = _intent_binding_v2() if binding is None else binding
+    return ExecutableSubmissionRecoveryV2(
+        binding=resolved_binding,
+        permit_id=permit_id,
+        permit_digest="5" * 64,
+        command_sequence=6,
+        inventory_sequence=2,
+        inventory_digest="6" * 64,
+        controller_query_completed_at=datetime(2026, 8, 12, 12, 0, tzinfo=UTC),
+        submit_process_absent=True,
+        scheduler_submission_absent=True,
+        controller_evidence_sha256="7" * 64,
+    ).model_dump(mode="json")
+
+
+class RecordingExecutionStore:
+    def __init__(self) -> None:
+        self.accept_calls = 0
+        self.recovery_calls = 0
+        self.last_acceptance: ExecutableReservationAcceptanceV2 | None = None
+        self.last_recovery: ExecutableSubmissionRecoveryV2 | None = None
+
+    async def accept_reservation(self, _session, acceptance: ExecutableReservationAcceptanceV2):  # type: ignore[no-untyped-def]
+        self.accept_calls += 1
+        self.last_acceptance = acceptance
+        return {
+            "tranche_id": str(acceptance.tranche_id),
+            "intent_ids": [str(V2_ACCEPTED_INTENT_ID)],
+            "receipt_digest": "8" * 64,
+            "replayed": False,
+            "executable": True,
+        }
+
+    async def recover_unsubmitted_permit(
+        self,
+        _session,  # type: ignore[no-untyped-def]
+        recovery: ExecutableSubmissionRecoveryV2,
+    ) -> dict[str, object]:
+        self.recovery_calls += 1
+        self.last_recovery = recovery
+        return {
+            "intent_id": str(recovery.binding.intent_id),
+            "receipt_digest": "9" * 64,
+            "replayed": False,
+            "executable": True,
+        }
+
+
+class StaticPrincipalVerifier:
+    def __init__(self, principal: CapacityPrincipal) -> None:
+        self._principal = principal
+
+    def verify_bearer(self, _header: str | None) -> CapacityPrincipal:
+        return self._principal
 
 
 def _owner_file(path: Path, value: str) -> Path:
@@ -1017,6 +1165,161 @@ def test_v2_executor_work_route_is_exactly_pool_bound(
     assert crossed_pool.status_code == 403
     assert own_context.status_code == 409
     assert crossed_context.status_code == 403
+
+
+def test_v2_work_rejects_legacy_executor_without_positive_pool_generation(
+    api_context: tuple[TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator],
+) -> None:
+    _client, _app, settings, _allocator = api_context
+    verifier = StaticPrincipalVerifier(
+        CapacityPrincipal(
+            principal_id="legacy-oldlab-executor",
+            scopes=frozenset({"capacity:execute:pool"}),
+            subject_id=None,
+            subject_incarnation=None,
+            demand_reporter_incarnation=None,
+            pool_id="oldlab",
+            pool_reporter_incarnation=None,
+            executor_id="oldlab-executor",
+            executor_incarnation=OLDLAB_EXECUTOR_INCARNATION,
+            executor_pool_generation=None,
+        )
+    )
+    app = create_app(settings, verifier=verifier)
+    with TestClient(app) as client:
+        response = client.get(
+            "/v2/executors/oldlab/work",
+            headers={"Authorization": "Bearer legacy-oldlab-executor"},
+        )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "forbidden"}
+
+
+def test_v2_acceptance_rejects_cross_pool_rbac_and_pool_binding_mismatch(
+    api_context: tuple[TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator],
+) -> None:
+    _client, _app, settings, _allocator = api_context
+    store = RecordingExecutionStore()
+    app = create_app(
+        settings,
+        verifier=CapacityPrincipalVerifier.from_file(settings.principals_file),
+        execution_store=store,
+    )
+    tranche_id = UUID(int=41)
+    path = f"/v2/executors/oldlab/reservations/{tranche_id}/accept"
+    headers = {"Authorization": f"Bearer {OLDLAB_EXECUTOR_TOKEN}"}
+    with TestClient(app) as client:
+        accepted = client.post(
+            path,
+            headers=headers,
+            json=_v2_acceptance_payload(tranche_id=tranche_id),
+        )
+        crossed_pool = client.post(
+            f"/v2/executors/gb10/reservations/{tranche_id}/accept",
+            headers=headers,
+            json=_v2_acceptance_payload(tranche_id=tranche_id),
+        )
+        mismatched_pool = client.post(
+            path,
+            headers=headers,
+            json=_v2_acceptance_payload(pool_id="gb10", tranche_id=tranche_id),
+        )
+        mismatched_executor = client.post(
+            path,
+            headers=headers,
+            json=_v2_acceptance_payload(
+                executor_id="other-executor",
+                tranche_id=tranche_id,
+            ),
+        )
+        mismatched_generation = client.post(
+            path,
+            headers=headers,
+            json=_v2_acceptance_payload(pool_generation=2, tranche_id=tranche_id),
+        )
+
+    assert accepted.status_code == 200
+    assert accepted.json() == {
+        "tranche_id": str(tranche_id),
+        "intent_ids": [str(UUID(int=44))],
+        "receipt_digest": "8" * 64,
+        "replayed": False,
+        "executable": True,
+    }
+    assert store.accept_calls == 1
+    assert store.last_acceptance is not None
+    assert store.last_acceptance.pool_id == "oldlab"
+    assert crossed_pool.status_code == 403
+    assert mismatched_pool.status_code == 403
+    assert mismatched_executor.status_code == 403
+    assert mismatched_generation.status_code == 403
+
+
+def test_submission_recovery_response_is_explicitly_quarantined(
+    api_context: tuple[TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator],
+) -> None:
+    _client, _app, settings, _allocator = api_context
+    store = RecordingExecutionStore()
+    app = create_app(
+        settings,
+        verifier=CapacityPrincipalVerifier.from_file(settings.principals_file),
+        execution_store=store,
+    )
+    permit_id = UUID(int=43)
+    with TestClient(app) as client:
+        response = client.post(
+            f"/v2/executors/oldlab/permits/{permit_id}/recover",
+            headers={"Authorization": f"Bearer {OLDLAB_EXECUTOR_TOKEN}"},
+            json=_v2_submission_recovery_payload(permit_id=permit_id),
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "intent_id": str(UUID(int=42)),
+        "receipt_digest": "9" * 64,
+        "replayed": False,
+        "state": "quarantined",
+        "executable": True,
+    }
+    assert store.recovery_calls == 1
+    assert store.last_recovery is not None
+    assert store.last_recovery.binding.pool_generation == 1
+
+
+def test_v2_submission_recovery_rejects_path_or_executor_drift(
+    api_context: tuple[TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator],
+) -> None:
+    _client, _app, settings, _allocator = api_context
+    store = RecordingExecutionStore()
+    app = create_app(
+        settings,
+        verifier=CapacityPrincipalVerifier.from_file(settings.principals_file),
+        execution_store=store,
+    )
+    permit_id = UUID(int=43)
+    payload = _v2_submission_recovery_payload(permit_id=permit_id)
+    with TestClient(app) as client:
+        wrong_path = client.post(
+            f"/v2/executors/oldlab/permits/{UUID(int=99)}/recover",
+            headers={"Authorization": f"Bearer {OLDLAB_EXECUTOR_TOKEN}"},
+            json=payload,
+        )
+        wrong_executor = client.post(
+            f"/v2/executors/oldlab/permits/{permit_id}/recover",
+            headers={"Authorization": f"Bearer {OLDLAB_EXECUTOR_TOKEN}"},
+            json=payload | {"binding": payload["binding"] | {"executor_id": "other-executor"}},
+        )
+        wrong_generation = client.post(
+            f"/v2/executors/oldlab/permits/{permit_id}/recover",
+            headers={"Authorization": f"Bearer {OLDLAB_EXECUTOR_TOKEN}"},
+            json=payload | {"binding": payload["binding"] | {"pool_generation": 2}},
+        )
+
+    assert wrong_path.status_code == 403
+    assert wrong_executor.status_code == 403
+    assert wrong_generation.status_code == 403
+    assert store.recovery_calls == 0
 
 
 def test_lifecycle_can_project_and_authenticate_a_personal_demand_reporter(

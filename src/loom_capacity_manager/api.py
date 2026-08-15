@@ -1138,10 +1138,13 @@ def create_app(
         actor: CapacityPrincipal = Depends(require("capacity:execute:pool")),
     ) -> Any:
         binding = executor_binding(actor, pool_id=pool_id)
-        session_factory, executions = execution_runtime(request)
+        session_factory, store, _writer = runtime(request)
+        del binding
         try:
             async with session_factory() as session:
-                result = await executions.executor_current_context(session, binding)
+                result = await store.execution_authority(session)
+            if result is None:
+                raise HTTPException(status_code=409, detail="execution context not available")
             return jsonable_encoder(result)
         except CapacityStoreError as exc:
             raise _store_error(exc) from exc
@@ -1284,7 +1287,9 @@ def create_app(
         try:
             async with session_factory() as session:
                 result = await executions.recover_unsubmitted_permit(session, value)
-            return jsonable_encoder(result)
+            payload = jsonable_encoder(result)
+            payload.setdefault("state", "quarantined")
+            return payload
         except CapacityStoreError as exc:
             raise _store_error(exc) from exc
 

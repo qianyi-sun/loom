@@ -727,9 +727,7 @@ class ExecutableSubmissionRecoveryV2(StrictV2Model):
     controller_evidence_sha256: Digest
     executable: Literal[True] = True
 
-    _controller_query_completed_at_utc = field_validator("controller_query_completed_at")(
-        _utc_time
-    )
+    _controller_query_completed_at_utc = field_validator("controller_query_completed_at")(_utc_time)
 
 
 class ExecutableIntentCloseV2(StrictV2Model):
