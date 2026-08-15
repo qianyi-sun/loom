@@ -26,6 +26,7 @@ from loom_capacity_manager.contracts import (
     WorkerShapeV1,
     canonical_digest,
 )
+from loom_capacity_manager.executable_contracts import StrictV2Model
 
 PhysicalPool = Literal["oldlab", "gb10"]
 
@@ -249,6 +250,22 @@ class PreparedBootstrapBindingV1(AgentRegistrationV1):
         return self
 
 
+class ProtectedExecutableBootstrapRegistrationV2(StrictV2Model):
+    """Protected local receipt for one executor-proposed bootstrap hash."""
+
+    subject_id: UUID
+    subject_incarnation: UUID
+    intent_id: UUID
+    proposal_epoch: PositiveGeneration
+    proposal_digest: Digest
+    bootstrap_registration_epoch: PositiveGeneration
+    bootstrap_sha256: Digest
+    protected_admission_sha256: Digest
+    protected_high_water: PositiveGeneration
+    registration_state: Literal["registered"] = "registered"
+    executable: Literal[False] = False
+
+
 class PreparedWorkerBindingV1(AgentRegistrationV1):
     """Ownership evidence and credential hash for a nonclaimable worker."""
 
@@ -339,4 +356,5 @@ __all__ = [
     "PreparedProtectedReleaseV1",
     "PreparedWorkerBindingV1",
     "PreparedWorkerShapeV1",
+    "ProtectedExecutableBootstrapRegistrationV2",
 ]

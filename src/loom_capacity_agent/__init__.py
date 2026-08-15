@@ -33,6 +33,11 @@ from loom_capacity_agent.contracts import (
     GuardLifecycleDemandObservationV2,
     ReporterConfigurationV1,
 )
+from loom_capacity_agent.executable_bootstrap import (
+    ProtectedExecutableBootstrapCoordinator,
+    ProtectedExecutableBootstrapError,
+    ProtectedExecutableBootstrapWork,
+)
 from loom_capacity_agent.legacy_fence import (
     LEGACY_MUTATION_INVENTORY_DIGEST,
     LEGACY_MUTATION_PATH_IDS,
@@ -109,6 +114,9 @@ __all__ = [
     "PreparedProtectedReleaseV1",
     "PreparedWorkerBindingV1",
     "PreparedWorkerShapeV1",
+    "ProtectedExecutableBootstrapCoordinator",
+    "ProtectedExecutableBootstrapError",
+    "ProtectedExecutableBootstrapWork",
     "ProtectedReleasePublishReceiptV1",
     "ReporterConfigurationV1",
     "build_demand_snapshot",

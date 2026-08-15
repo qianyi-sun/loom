@@ -45,6 +45,8 @@ EXPECTED_TABLES = {
     "capacity_executor_observations",
     "capacity_execution_epochs",
     "capacity_execution_executors",
+    "capacity_executable_bootstrap_acknowledgements",
+    "capacity_executable_bootstrap_proposals",
     "capacity_executable_command_receipts",
     "capacity_executable_executor_states",
     "capacity_executable_intents",
@@ -1461,6 +1463,117 @@ def test_capacity_0006_upgrade_and_downgrade_ignore_search_path(
         engine.dispose()
 
 
+def test_capacity_0007_refuses_downgrade_with_protected_bootstrap_evidence(
+    isolated_capacity_migration_url: str,
+) -> None:
+    cfg = _capacity_config(isolated_capacity_migration_url)
+    engine = create_engine(isolated_capacity_migration_url)
+    try:
+        command.upgrade(cfg, "capacity_0007")
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "ALTER TABLE public.capacity_executable_bootstrap_proposals "
+                    "DISABLE TRIGGER ALL"
+                )
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO public.capacity_executable_bootstrap_proposals "
+                    "(id, intent_id, execution_epoch, execution_manifest_sha256, "
+                    "proposal_epoch, command_sequence, bootstrap_sha256, expires_at, "
+                    "proposal_digest, proposal_payload) VALUES "
+                    "(:id, :intent_id, 1, repeat('1', 64), 1, 1, repeat('2', 64), "
+                    "now() + interval '1 minute', repeat('3', 64), '{}'::jsonb)"
+                ),
+                {"id": uuid4(), "intent_id": uuid4()},
+            )
+            connection.execute(
+                text(
+                    "ALTER TABLE public.capacity_executable_bootstrap_proposals "
+                    "ENABLE TRIGGER ALL"
+                )
+            )
+
+        with pytest.raises(
+            RuntimeError,
+            match="cannot downgrade capacity_0007 while protected bootstrap evidence exists",
+        ):
+            command.downgrade(cfg, "capacity_0006")
+
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "capacity_0007"
+            assert connection.execute(
+                text(
+                    "SELECT count(*) FROM "
+                    "public.capacity_executable_bootstrap_proposals"
+                )
+            ).scalar_one() == 1
+    finally:
+        engine.dispose()
+
+
+def test_capacity_0007_upgrade_and_downgrade_ignore_search_path(
+    isolated_capacity_migration_url: str,
+) -> None:
+    cfg = _capacity_config(isolated_capacity_migration_url)
+    command.upgrade(cfg, "capacity_0006")
+    engine = create_engine(isolated_capacity_migration_url)
+    migration = importlib.import_module(
+        "capacity_migrations.versions.capacity_0007_protected_bootstrap_handshake"
+    )
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("CREATE SCHEMA capacity_bootstrap_decoy"))
+            connection.execute(
+                text("SET LOCAL search_path TO capacity_bootstrap_decoy, pg_catalog")
+            )
+            migration_context = MigrationContext.configure(connection)
+            with Operations.context(migration_context):
+                migration.upgrade()
+            assert {
+                "capacity_executable_bootstrap_acknowledgements",
+                "capacity_executable_bootstrap_proposals",
+            } <= set(inspect(connection).get_table_names(schema="public"))
+            assert not inspect(connection).get_table_names(
+                schema="capacity_bootstrap_decoy"
+            )
+            functions = dict(
+                connection.execute(
+                    text(
+                        "SELECT proname, array_to_string(proconfig, ',') "
+                        "FROM pg_proc JOIN pg_namespace "
+                        "ON pg_namespace.oid = pronamespace "
+                        "WHERE nspname = 'public' AND proname IN "
+                        "('capacity_executable_bootstrap_proposal_insert_guard', "
+                        "'capacity_executable_bootstrap_ack_insert_guard', "
+                        "'capacity_executable_intent_protected_bootstrap_guard')"
+                    )
+                ).all()
+            )
+            assert functions == {
+                "capacity_executable_bootstrap_ack_insert_guard": (
+                    "search_path=pg_catalog"
+                ),
+                "capacity_executable_bootstrap_proposal_insert_guard": (
+                    "search_path=pg_catalog"
+                ),
+                "capacity_executable_intent_protected_bootstrap_guard": (
+                    "search_path=pg_catalog"
+                ),
+            }
+
+            with Operations.context(migration_context):
+                migration.downgrade()
+            assert "capacity_executable_bootstrap_proposals" not in inspect(
+                connection
+            ).get_table_names(schema="public")
+    finally:
+        engine.dispose()
+
+
 def test_capacity_schema_has_independent_revision_table(
     capacity_postgres_url: str,
     postgres_url: str,
@@ -1471,7 +1584,7 @@ def test_capacity_schema_has_independent_revision_table(
         with capacity_engine.connect() as connection:
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == ("capacity_0006")
+            ).scalar_one() == ("capacity_0007")
         with environment_engine.connect() as connection:
             environment_revision = connection.execute(
                 text("SELECT version_num FROM alembic_version")
@@ -1498,7 +1611,7 @@ async def test_capacity_schema_error_uses_installed_capacity_migration_command(
 async def test_capacity_schema_startup_returns_numeric_head(
     capacity_engine: AsyncEngine,
 ) -> None:
-    assert await assert_capacity_schema_at_head(capacity_engine) == 6
+    assert await assert_capacity_schema_at_head(capacity_engine) == 7
 
 
 def test_package3_tables_are_database_constrained_to_dry_run(

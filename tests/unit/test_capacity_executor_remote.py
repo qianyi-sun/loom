@@ -10,15 +10,26 @@ import pytest
 
 from loom_capacity_executor.client import (
     CapacityExecutorClient,
+    ExecutableCapacityExecutorClient,
     ExecutorRejectedError,
     ExecutorTransportError,
 )
 from loom_capacity_executor.dry_run import DryRunExecutorBinding
 from loom_capacity_executor.journal import ExecutorJournal, JournalRegressionError
 from loom_capacity_executor.remote import RemoteDryRunPoolExecutor
+from loom_capacity_executor.remote_executable import RemoteExecutablePoolExecutor
+from loom_capacity_manager.executable_contracts import (
+    ExecutableBootstrapProposalV2,
+    canonical_executable_digest,
+)
 from loom_capacity_manager.grant_contracts import (
     DryRunReservationAcceptanceV1,
     canonical_grant_digest,
+)
+from tests.unit.test_capacity_executor_client import (
+    _executable_intent,
+    _executable_registration,
+    _receipt_digest,
 )
 
 
@@ -214,3 +225,74 @@ async def test_remote_executor_rejects_empty_journal_above_command_highwater(
             await executor.accept_reservation(acceptance)
     await http.aclose()
     assert post_calls == 0
+
+
+async def test_remote_executable_executor_journals_only_bootstrap_proposal(
+    tmp_path: Path,
+) -> None:
+    registration = _executable_registration()
+    proposal = ExecutableBootstrapProposalV2(
+        binding=_executable_intent(),
+        command_sequence=1,
+        proposal_epoch=1,
+        bootstrap_sha256="9" * 64,
+        expires_at=datetime.now(UTC) + timedelta(minutes=1),
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "execution_epoch": registration.execution.execution_epoch,
+                    "execution_manifest_sha256": (
+                        registration.execution.execution_manifest_sha256
+                    ),
+                    "executor_id": registration.executor_id,
+                    "executor_incarnation": str(registration.executor_incarnation),
+                    "pool_id": registration.pool_id,
+                    "pool_generation": registration.pool_generation,
+                    "command_sequence": 0,
+                    "journal_sequence": 0,
+                    "journal_digest": "0" * 64,
+                    "inventory_sequence": 0,
+                    "lease_expires_at": (
+                        datetime.now(UTC) + timedelta(minutes=1)
+                    ).isoformat(),
+                    "executable": True,
+                },
+            )
+        payload = {
+            "intent_id": str(proposal.binding.intent_id),
+            "proposal_epoch": proposal.proposal_epoch,
+            "proposal_digest": canonical_executable_digest(proposal),
+            "executable": True,
+        }
+        return httpx.Response(
+            200,
+            json={
+                "intent_id": payload["intent_id"],
+                "proposal_epoch": payload["proposal_epoch"],
+                "receipt_digest": _receipt_digest(payload),
+                "replayed": False,
+                "executable": True,
+            },
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = ExecutableCapacityExecutorClient(
+        registration,
+        manager_origin="https://capacity.example.test",
+        bearer_token="executor-secret",
+        http_client=http,
+    )
+    with ExecutorJournal(tmp_path / "executable.journal") as journal:
+        executor = RemoteExecutablePoolExecutor(registration, journal, client)
+        receipt = await executor.propose_bootstrap(proposal)
+        latest = journal.latest("intent", str(proposal.binding.intent_id))
+        assert receipt.proposal_epoch == 1
+        assert latest is not None
+        assert latest.event_kind == "bootstrap-propose-confirmed"
+        assert latest.payload_digest == canonical_executable_digest(proposal)
+        assert not hasattr(executor, "register_bootstrap")
+    await http.aclose()

@@ -731,6 +731,37 @@ def test_executable_operation_family_is_v2_true_and_exactly_bound() -> None:
         assert value.executable is True
 
 
+def test_executable_bootstrap_separates_executor_proposal_from_subject_acknowledgement() -> None:
+    """An executor must not be able to attest to protected admission itself."""
+
+    contracts = _contracts()
+    proposal_type = contracts.ExecutableBootstrapProposalV2
+    acknowledgement_type = contracts.ExecutableBootstrapAcknowledgementV2
+    binding = _intent_binding()
+    proposal = proposal_type(
+        binding=binding,
+        command_sequence=2,
+        proposal_epoch=1,
+        bootstrap_sha256="5" * 64,
+        expires_at=datetime.now(UTC) + timedelta(minutes=1),
+    )
+    acknowledgement = acknowledgement_type(
+        binding=binding,
+        proposal_epoch=proposal.proposal_epoch,
+        proposal_digest=contracts.canonical_executable_digest(proposal),
+        reporter_incarnation=UUID(int=40),
+        bootstrap_registration_epoch=1,
+        bootstrap_evidence_sha256="6" * 64,
+        protected_admission_sha256="7" * 64,
+    )
+
+    assert proposal.command_sequence == 2
+    assert not hasattr(acknowledgement, "command_sequence")
+    assert acknowledgement.reporter_incarnation == UUID(int=40)
+    assert acknowledgement.protected_admission_sha256 == "7" * 64
+    assert proposal.executable is acknowledgement.executable is True
+
+
 def test_journal_permit_and_release_boundaries_fail_closed() -> None:
     """Weakening ordering, UTC, or release epochs must fail this test."""
 

@@ -1971,6 +1971,134 @@ class CapacityExecutableIntent(Base):
     )
 
 
+class CapacityExecutableBootstrapProposal(Base):
+    """Append-only executor proposal containing only a bootstrap-secret hash."""
+
+    __tablename__ = "capacity_executable_bootstrap_proposals"
+    __table_args__ = (
+        CheckConstraint(
+            "execution_epoch > 0 AND proposal_epoch > 0 AND command_sequence > 0",
+            name="capacity_executable_bootstrap_proposal_quantity_check",
+        ),
+        CheckConstraint(
+            "execution_manifest_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND bootstrap_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND proposal_digest ~ '^[0-9a-f]{64}$'",
+            name="capacity_executable_bootstrap_proposal_digest_check",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(proposal_payload) = 'object' "
+            "AND octet_length(proposal_payload::text) <= 8388608",
+            name="capacity_executable_bootstrap_proposal_payload_check",
+        ),
+        CheckConstraint(
+            "expires_at > created_at AND expires_at <= created_at + interval '10 minutes'",
+            name="capacity_executable_bootstrap_proposal_expiry_check",
+        ),
+        ForeignKeyConstraint(
+            ("intent_id",),
+            ("capacity_executable_intents.intent_id",),
+            name="capacity_executable_bootstrap_proposal_intent_fkey",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "intent_id",
+            "proposal_epoch",
+            name="capacity_executable_bootstrap_proposal_epoch_key",
+        ),
+        UniqueConstraint(
+            "intent_id",
+            "execution_epoch",
+            "execution_manifest_sha256",
+            "proposal_epoch",
+            "proposal_digest",
+            name="capacity_executable_bootstrap_proposal_exact_key",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    intent_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    execution_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    execution_manifest_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    proposal_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    command_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    bootstrap_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    proposal_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    proposal_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class CapacityExecutableBootstrapAcknowledgement(Base):
+    """Append-only subject-agent proof for one current bootstrap proposal."""
+
+    __tablename__ = "capacity_executable_bootstrap_acknowledgements"
+    __table_args__ = (
+        CheckConstraint(
+            "execution_epoch > 0 AND proposal_epoch > 0 "
+            "AND bootstrap_registration_epoch > 0",
+            name="capacity_executable_bootstrap_ack_quantity_check",
+        ),
+        CheckConstraint(
+            "execution_manifest_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND proposal_digest ~ '^[0-9a-f]{64}$' "
+            "AND bootstrap_evidence_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND protected_admission_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND acknowledgement_digest ~ '^[0-9a-f]{64}$'",
+            name="capacity_executable_bootstrap_ack_digest_check",
+        ),
+        CheckConstraint(
+            "actor_id <> '' AND octet_length(actor_id) <= 256 "
+            "AND jsonb_typeof(acknowledgement_payload) = 'object' "
+            "AND octet_length(acknowledgement_payload::text) <= 8388608",
+            name="capacity_executable_bootstrap_ack_payload_check",
+        ),
+        ForeignKeyConstraint(
+            (
+                "intent_id",
+                "execution_epoch",
+                "execution_manifest_sha256",
+                "proposal_epoch",
+                "proposal_digest",
+            ),
+            (
+                "capacity_executable_bootstrap_proposals.intent_id",
+                "capacity_executable_bootstrap_proposals.execution_epoch",
+                "capacity_executable_bootstrap_proposals.execution_manifest_sha256",
+                "capacity_executable_bootstrap_proposals.proposal_epoch",
+                "capacity_executable_bootstrap_proposals.proposal_digest",
+            ),
+            name="capacity_executable_bootstrap_ack_proposal_fkey",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "idempotency_key",
+            name="capacity_executable_bootstrap_ack_idempotency_key",
+        ),
+        UniqueConstraint("intent_id", name="capacity_executable_bootstrap_ack_intent_key"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    idempotency_key: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    intent_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    execution_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    execution_manifest_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    proposal_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    proposal_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    reporter_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    bootstrap_registration_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    bootstrap_evidence_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    protected_admission_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    acknowledgement_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    actor_id: Mapped[str] = mapped_column(Text, nullable=False)
+    acknowledgement_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class CapacityExecutableProtectedReleaseReceipt(Base):
     """Append-only protected release evidence for one executable intent."""
 

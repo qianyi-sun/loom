@@ -29,6 +29,8 @@ from loom_capacity_manager.contracts import (
 )
 from loom_capacity_manager.executable_contracts import (
     CandidateBindingV2,
+    ExecutableBootstrapAcknowledgementV2,
+    ExecutableBootstrapProposalV2,
     ExecutableBootstrapRegistrationV2,
     ExecutableExecutorHeartbeatV2,
     ExecutableExecutorInventoryV2,
@@ -44,6 +46,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableSubmissionRecoveryV2,
     ExecutionContextV2,
     ExecutionFenceV2,
+    ExecutionPreparationV2,
     PreparedExecutorBindingV2,
     StrictV2Model,
     canonical_executable_digest,
@@ -56,6 +59,8 @@ from loom_capacity_manager.models import (
     CapacityAuthorityState,
     CapacityCandidate,
     CapacityDemandReporter,
+    CapacityExecutableBootstrapAcknowledgement,
+    CapacityExecutableBootstrapProposal,
     CapacityExecutableCommandReceipt,
     CapacityExecutableExecutorState,
     CapacityExecutableIntent,
@@ -133,6 +138,15 @@ class AcceptedExecutableReservation:
 class RegisteredExecutableBootstrap:
     intent_id: UUID
     bootstrap_registration_epoch: int
+    receipt_digest: str
+    replayed: bool
+    executable: Literal[True] = True
+
+
+@dataclass(frozen=True, slots=True)
+class ProposedExecutableBootstrap:
+    intent_id: UUID
+    proposal_epoch: int
     receipt_digest: str
     replayed: bool
     executable: Literal[True] = True
@@ -637,9 +651,14 @@ class CapacityExecutionStore:
                             binding=binding,
                             command_sequence=context.executor.command_high_water + 1,
                         )
-                    return ExecutableIntentBindingV2.model_validate_json(
-                        json.dumps(current.binding_payload)
+                    bootstrap = await self._latest_bootstrap_proposal(
+                        session, current.intent_id, lock=True
                     )
+                    if bootstrap is None or bootstrap.expires_at <= now:
+                        return ExecutableIntentBindingV2.model_validate_json(
+                            json.dumps(current.binding_payload)
+                        )
+                    return None
                 if current.state in {"launch-ready", "permitted"}:
                     if not increase_allowed:
                         binding = ExecutableIntentBindingV2.model_validate_json(
@@ -784,57 +803,293 @@ class CapacityExecutionStore:
                 replay is not None,
             )
 
-    async def register_bootstrap(
+    async def propose_bootstrap(
         self,
         session: AsyncSession,
-        registration: ExecutableBootstrapRegistrationV2,
-    ) -> RegisteredExecutableBootstrap:
-        digest = canonical_executable_digest(registration)
+        proposal: ExecutableBootstrapProposalV2,
+    ) -> ProposedExecutableBootstrap:
+        """Persist an executor bootstrap hash without granting launch readiness."""
+
+        digest = canonical_executable_digest(proposal)
         async with _write_transaction(session):
             await self._locked_execution_context(
                 session,
-                registration.binding.execution,
-                self._executor_binding_from_contract(registration.binding),
+                proposal.binding.execution,
+                self._executor_binding_from_contract(proposal.binding),
             )
-            row = await self._locked_intent(session, registration.binding.intent_id)
-            if registration.binding != ExecutableIntentBindingV2.model_validate_json(
+            row = await self._locked_intent(session, proposal.binding.intent_id)
+            if proposal.binding != ExecutableIntentBindingV2.model_validate_json(
                 json.dumps(row.binding_payload)
             ):
-                raise ExecutionConflictError("bootstrap intent binding changed")
+                raise ExecutionConflictError("bootstrap proposal intent binding changed")
             payload = {
                 "intent_id": str(row.intent_id),
-                "bootstrap_registration_epoch": registration.bootstrap_registration_epoch,
+                "proposal_epoch": proposal.proposal_epoch,
+                "proposal_digest": digest,
                 "executable": True,
             }
             replay = await self._command_replay(
                 session,
                 row,
-                sequence=registration.command_sequence,
-                operation_kind="bootstrap",
+                sequence=proposal.command_sequence,
+                operation_kind="bootstrap-propose",
                 request_digest=digest,
                 result_payload=payload,
             )
             if replay is None:
                 if row.state != "accepted":
-                    raise ExecutionConflictError("bootstrap intent is not accepted")
-                row.state = "launch-ready"
-                row.bootstrap_registration_epoch = registration.bootstrap_registration_epoch
-                row.bootstrap_evidence_sha256 = registration.bootstrap_evidence_sha256
-                row.launch_ready_at = await _database_now(session)
+                    raise ExecutionConflictError("bootstrap proposal intent is not accepted")
+                now = await _database_now(session)
+                latest = await self._latest_bootstrap_proposal(
+                    session, row.intent_id, lock=True
+                )
+                expected_epoch = 1 if latest is None else latest.proposal_epoch + 1
+                if proposal.proposal_epoch != expected_epoch:
+                    raise ExecutionConflictError("bootstrap proposal epoch changed")
+                if latest is not None and latest.expires_at > now:
+                    raise ExecutionConflictError("bootstrap proposal is still current")
+                if proposal.expires_at <= now or proposal.expires_at > now + timedelta(minutes=10):
+                    raise ExecutionConflictError("bootstrap proposal expiry is invalid")
+                session.add(
+                    CapacityExecutableBootstrapProposal(
+                        intent_id=row.intent_id,
+                        execution_epoch=row.execution_epoch,
+                        execution_manifest_sha256=row.execution_manifest_sha256,
+                        proposal_epoch=proposal.proposal_epoch,
+                        command_sequence=proposal.command_sequence,
+                        bootstrap_sha256=proposal.bootstrap_sha256,
+                        expires_at=proposal.expires_at,
+                        proposal_digest=digest,
+                        proposal_payload=proposal.model_dump(mode="json", exclude_none=False),
+                    )
+                )
+                await session.flush()
                 await self._record_command(
                     session,
                     row,
-                    sequence=registration.command_sequence,
-                    operation_kind="bootstrap",
+                    sequence=proposal.command_sequence,
+                    operation_kind="bootstrap-propose",
                     request_digest=digest,
                     result_payload=payload,
                 )
-            return RegisteredExecutableBootstrap(
+            return ProposedExecutableBootstrap(
                 row.intent_id,
-                registration.bootstrap_registration_epoch,
+                proposal.proposal_epoch,
                 _payload_digest(payload),
                 replay is not None,
             )
+
+    async def next_subject_bootstrap(
+        self,
+        session: AsyncSession,
+        *,
+        subject_id: UUID,
+        subject_incarnation: UUID,
+        reporter_incarnation: UUID,
+    ) -> ExecutableBootstrapProposalV2 | None:
+        """Return one current bootstrap hash only to its protected subject reporter."""
+
+        async with _write_transaction(session):
+            authority = await self._lock_authority(session)
+            if authority.execution_state not in {"active", "drain-only"}:
+                return None
+            epoch = await self._lock_current_epoch(session, authority)
+            reporter = (
+                await session.execute(
+                    select(CapacityDemandReporter)
+                    .where(
+                        CapacityDemandReporter.subject_id == subject_id,
+                        CapacityDemandReporter.subject_incarnation == subject_incarnation,
+                        CapacityDemandReporter.reporter_incarnation == reporter_incarnation,
+                        CapacityDemandReporter.state == "current",
+                    )
+                    .with_for_update(read=True)
+                )
+            ).scalar_one_or_none()
+            if reporter is None:
+                raise ExecutionConflictError("bootstrap subject reporter changed")
+            now = await _database_now(session)
+            proposals = (
+                (
+                    await session.execute(
+                        select(CapacityExecutableBootstrapProposal)
+                        .join(
+                            CapacityExecutableIntent,
+                            CapacityExecutableIntent.intent_id
+                            == CapacityExecutableBootstrapProposal.intent_id,
+                        )
+                        .where(
+                            CapacityExecutableIntent.execution_epoch == epoch.execution_epoch,
+                            CapacityExecutableIntent.execution_manifest_sha256
+                            == epoch.execution_manifest_sha256,
+                            CapacityExecutableIntent.subject_id == subject_id,
+                            CapacityExecutableIntent.subject_incarnation == subject_incarnation,
+                            CapacityExecutableIntent.state == "accepted",
+                            CapacityExecutableBootstrapProposal.expires_at > now,
+                        )
+                        .order_by(
+                            CapacityExecutableIntent.launch_rank,
+                            CapacityExecutableBootstrapProposal.proposal_epoch.desc(),
+                        )
+                        .with_for_update(read=True)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for proposal in proposals:
+                latest = await self._latest_bootstrap_proposal(
+                    session, proposal.intent_id, lock=False
+                )
+                if latest is not None and latest.id == proposal.id:
+                    return ExecutableBootstrapProposalV2.model_validate_json(
+                        json.dumps(proposal.proposal_payload)
+                    )
+            return None
+
+    async def acknowledge_bootstrap(
+        self,
+        session: AsyncSession,
+        acknowledgement: ExecutableBootstrapAcknowledgementV2,
+        *,
+        actor: str,
+        idempotency_key: UUID,
+    ) -> RegisteredExecutableBootstrap:
+        """Make one intent launch-ready only after exact protected subject evidence."""
+
+        if not actor or len(actor.encode("utf-8")) > 256:
+            raise ValueError("bootstrap acknowledgement actor is invalid")
+        digest = canonical_executable_digest(acknowledgement)
+        async with _write_transaction(session):
+            context = await self._locked_execution_context(
+                session,
+                acknowledgement.binding.execution,
+                self._executor_binding_from_contract(acknowledgement.binding),
+            )
+            row = await self._locked_intent(session, acknowledgement.binding.intent_id)
+            if acknowledgement.binding != ExecutableIntentBindingV2.model_validate_json(
+                json.dumps(row.binding_payload)
+            ):
+                raise ExecutionConflictError("bootstrap acknowledgement binding changed")
+            stored_payload = acknowledgement.model_dump(mode="json", exclude_none=False)
+            replay = (
+                await session.execute(
+                    select(CapacityExecutableBootstrapAcknowledgement)
+                    .where(
+                        CapacityExecutableBootstrapAcknowledgement.idempotency_key
+                        == idempotency_key
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if replay is not None:
+                if (
+                    replay.intent_id != row.intent_id
+                    or replay.acknowledgement_digest != digest
+                    or replay.actor_id != actor
+                    or replay.acknowledgement_payload != stored_payload
+                ):
+                    raise ExecutionConflictError(
+                        "bootstrap acknowledgement idempotency key was reused"
+                    )
+                return RegisteredExecutableBootstrap(
+                    row.intent_id,
+                    replay.bootstrap_registration_epoch,
+                    replay.acknowledgement_digest,
+                    True,
+                )
+            if row.state != "accepted":
+                raise ExecutionConflictError("bootstrap acknowledgement intent is not accepted")
+            reporter = (
+                await session.execute(
+                    select(CapacityDemandReporter)
+                    .where(
+                        CapacityDemandReporter.subject_id == row.subject_id,
+                        CapacityDemandReporter.subject_incarnation == row.subject_incarnation,
+                        CapacityDemandReporter.reporter_incarnation
+                        == acknowledgement.reporter_incarnation,
+                        CapacityDemandReporter.state == "current",
+                    )
+                    .with_for_update(read=True)
+                )
+            ).scalar_one_or_none()
+            if reporter is None:
+                raise ExecutionConflictError("bootstrap acknowledgement reporter changed")
+            try:
+                preparation = ExecutionPreparationV2.model_validate_json(
+                    json.dumps(context.epoch.manifest_payload)
+                )
+            except ValueError as exc:
+                raise ExecutionConflictError("execution preparation manifest is invalid") from exc
+            subject_acknowledgement = next(
+                (
+                    item
+                    for item in preparation.subject_acknowledgements
+                    if item.subject_id == row.subject_id
+                ),
+                None,
+            )
+            if (
+                subject_acknowledgement is None
+                or subject_acknowledgement.subject_incarnation != row.subject_incarnation
+                or subject_acknowledgement.reporter_incarnation
+                != acknowledgement.reporter_incarnation
+                or subject_acknowledgement.protected_admission_sha256
+                != acknowledgement.protected_admission_sha256
+            ):
+                raise ExecutionConflictError("bootstrap protected admission changed")
+            proposal = await self._latest_bootstrap_proposal(session, row.intent_id, lock=True)
+            now = await _database_now(session)
+            if (
+                proposal is None
+                or proposal.proposal_epoch != acknowledgement.proposal_epoch
+                or proposal.proposal_digest != acknowledgement.proposal_digest
+                or proposal.expires_at <= now
+            ):
+                raise ExecutionConflictError("bootstrap proposal changed or expired")
+            session.add(
+                CapacityExecutableBootstrapAcknowledgement(
+                    idempotency_key=idempotency_key,
+                    intent_id=row.intent_id,
+                    execution_epoch=row.execution_epoch,
+                    execution_manifest_sha256=row.execution_manifest_sha256,
+                    proposal_epoch=acknowledgement.proposal_epoch,
+                    proposal_digest=acknowledgement.proposal_digest,
+                    reporter_incarnation=acknowledgement.reporter_incarnation,
+                    bootstrap_registration_epoch=(
+                        acknowledgement.bootstrap_registration_epoch
+                    ),
+                    bootstrap_evidence_sha256=(
+                        acknowledgement.bootstrap_evidence_sha256
+                    ),
+                    protected_admission_sha256=(
+                        acknowledgement.protected_admission_sha256
+                    ),
+                    acknowledgement_digest=digest,
+                    actor_id=actor,
+                    acknowledgement_payload=stored_payload,
+                )
+            )
+            await session.flush()
+            row.state = "launch-ready"
+            row.bootstrap_registration_epoch = acknowledgement.bootstrap_registration_epoch
+            row.bootstrap_evidence_sha256 = acknowledgement.bootstrap_evidence_sha256
+            row.launch_ready_at = now
+            await session.flush()
+            return RegisteredExecutableBootstrap(
+                row.intent_id,
+                acknowledgement.bootstrap_registration_epoch,
+                digest,
+                False,
+            )
+
+    async def register_bootstrap(
+        self,
+        session: AsyncSession,
+        registration: ExecutableBootstrapRegistrationV2,
+    ) -> RegisteredExecutableBootstrap:
+        del session, registration
+        raise ExecutionConflictError("protected bootstrap acknowledgement is required")
 
     async def consume_launch_permit(
         self,
@@ -2411,6 +2666,23 @@ class CapacityExecutionStore:
         for row in rows:
             latest[row.intent_id] = row
         return latest
+
+    @staticmethod
+    async def _latest_bootstrap_proposal(
+        session: AsyncSession,
+        intent_id: UUID,
+        *,
+        lock: bool,
+    ) -> CapacityExecutableBootstrapProposal | None:
+        statement = (
+            select(CapacityExecutableBootstrapProposal)
+            .where(CapacityExecutableBootstrapProposal.intent_id == intent_id)
+            .order_by(CapacityExecutableBootstrapProposal.proposal_epoch.desc())
+            .limit(1)
+        )
+        if lock:
+            statement = statement.with_for_update()
+        return (await session.execute(statement)).scalar_one_or_none()
 
     @classmethod
     async def _latest_protected_release_receipt(

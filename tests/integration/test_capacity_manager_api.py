@@ -9,7 +9,7 @@ import json
 import ssl
 from collections.abc import AsyncIterator, Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Event, Thread
 from uuid import UUID, uuid4
@@ -32,8 +32,23 @@ from loom_capacity_manager.api import (
 )
 from loom_capacity_manager.auth import CapacityPrincipalVerifier
 from loom_capacity_manager.config import CapacityManagerSettings, build_uvicorn_kwargs
-from loom_capacity_manager.contracts import MAX_CONTRACT_BYTES, canonical_digest
-from loom_capacity_manager.executable_contracts import ExecutionActivationV2
+from loom_capacity_manager.contracts import (
+    MAX_CONTRACT_BYTES,
+    ResourceVectorV1,
+    canonical_digest,
+)
+from loom_capacity_manager.executable_contracts import (
+    CandidateBindingV2,
+    ExecutableBootstrapAcknowledgementV2,
+    ExecutableBootstrapProposalV2,
+    ExecutableIntentBindingV2,
+    ExecutionActivationV2,
+    ExecutionFenceV2,
+)
+from loom_capacity_manager.execution_store import (
+    ProposedExecutableBootstrap,
+    RegisteredExecutableBootstrap,
+)
 from loom_capacity_manager.models import (
     Base,
     CapacityAllocation,
@@ -76,6 +91,52 @@ OLDLAB_EXECUTOR_TOKEN = "oldlab-executor-secret"
 OLDLAB_V2_EXECUTOR_TOKEN = "oldlab-v2-executor-secret"
 OLDLAB_EXECUTOR_INCARNATION = UUID("00000000-0000-4000-8000-000000000601")
 OLDLAB_OWNERSHIP_PRIVATE_KEY = Ed25519PrivateKey.from_private_bytes(b"\x03" * 32)
+
+
+def _v2_intent_binding() -> ExecutableIntentBindingV2:
+    return ExecutableIntentBindingV2(
+        execution=ExecutionFenceV2(
+            authority_incarnation=AUTHORITY_ID,
+            writer_epoch=1,
+            configuration_epoch=1,
+            execution_epoch=1,
+            execution_manifest_sha256="1" * 64,
+            execution_state="active",
+            executable_new_capacity_ceiling=1,
+            executable_new_capacity_rate_per_minute=1,
+            trusted_fleet_release_sha256="2" * 64,
+            allocation_epoch=1,
+        ),
+        tranche_id=UUID(int=801),
+        intent_id=UUID(int=802),
+        shape_instance_id="shape-oldlab-1",
+        subject_id=SUBJECT_ID,
+        subject_incarnation=SUBJECT_INCARNATION,
+        account_id="owner-1",
+        tier_id="development",
+        candidate=CandidateBindingV2(
+            algorithm="source-sha256",
+            identity="3" * 64,
+            publication_sha256="4" * 64,
+        ),
+        candidate_generation=1,
+        deployment_generation=1,
+        pool_id="oldlab",
+        pool_generation=1,
+        executor_id="oldlab-executor",
+        executor_incarnation=OLDLAB_EXECUTOR_INCARNATION,
+        shape_id="one-slot",
+        profile_id="oldlab-profile",
+        profile_generation=1,
+        profile_digest="5" * 64,
+        concurrency_slots=1,
+        resources=ResourceVectorV1(
+            slots=1,
+            cpu_millicores=1_000,
+            memory_bytes=1_073_741_824,
+        ),
+        node_ids=("oldlab1",),
+    )
 
 
 def _hash(token: str) -> str:
@@ -772,7 +833,15 @@ def test_shadow_api_exposes_exactly_the_approved_routes(
             "/v2/executors/{pool_id}/reservations/{tranche_id}/accept",
             ("POST",),
         ),
-        ("/v2/executors/{pool_id}/intents/{intent_id}/bootstrap", ("POST",)),
+        (
+            "/v2/executors/{pool_id}/intents/{intent_id}/bootstrap-proposals",
+            ("POST",),
+        ),
+        ("/v2/subjects/{subject_id}/bootstrap-work", ("GET",)),
+        (
+            "/v2/subjects/{subject_id}/intents/{intent_id}/bootstrap-acknowledgements",
+            ("PUT",),
+        ),
         ("/v2/executors/{pool_id}/permits/{permit_id}/consume", ("POST",)),
         ("/v2/executors/{pool_id}/permits/{permit_id}/recover", ("POST",)),
         ("/v2/executors/{pool_id}/intents/{intent_id}/close", ("POST",)),
@@ -852,6 +921,150 @@ def test_v2_executor_routes_require_exact_positive_generation(
         },
     )
     assert wrong_generation.status_code == 403, wrong_generation.text
+
+
+def test_v2_bootstrap_routes_separate_executor_proposal_from_subject_acknowledgement(
+    api_context_v2_executor_generation: tuple[
+        TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, app, _settings, _allocator = api_context_v2_executor_generation
+    binding = _v2_intent_binding()
+    proposal = ExecutableBootstrapProposalV2(
+        binding=binding,
+        command_sequence=2,
+        proposal_epoch=1,
+        bootstrap_sha256="6" * 64,
+        expires_at=datetime.now(UTC) + timedelta(minutes=1),
+    )
+    acknowledgement = ExecutableBootstrapAcknowledgementV2(
+        binding=binding,
+        proposal_epoch=proposal.proposal_epoch,
+        proposal_digest="7" * 64,
+        reporter_incarnation=subject_configuration().demand_reporter_incarnation,
+        bootstrap_registration_epoch=1,
+        bootstrap_evidence_sha256="8" * 64,
+        protected_admission_sha256="3" * 64,
+    )
+    calls: list[tuple[str, object]] = []
+
+    async def propose(_session, value):  # type: ignore[no-untyped-def]
+        calls.append(("proposal", value))
+        return ProposedExecutableBootstrap(
+            intent_id=value.binding.intent_id,
+            proposal_epoch=value.proposal_epoch,
+            receipt_digest="9" * 64,
+            replayed=False,
+        )
+
+    async def next_subject(
+        _session,  # type: ignore[no-untyped-def]
+        *,
+        subject_id,
+        subject_incarnation,
+        reporter_incarnation,
+    ):
+        calls.append(
+            (
+                "subject-work",
+                (subject_id, subject_incarnation, reporter_incarnation),
+            )
+        )
+        return proposal
+
+    async def acknowledge(
+        _session,  # type: ignore[no-untyped-def]
+        value,
+        *,
+        actor,
+        idempotency_key,
+    ):
+        calls.append(("acknowledgement", (value, actor, idempotency_key)))
+        return RegisteredExecutableBootstrap(
+            intent_id=value.binding.intent_id,
+            bootstrap_registration_epoch=value.bootstrap_registration_epoch,
+            receipt_digest="a" * 64,
+            replayed=False,
+        )
+
+    monkeypatch.setattr(app.state.execution_store, "propose_bootstrap", propose)
+    monkeypatch.setattr(app.state.execution_store, "next_subject_bootstrap", next_subject)
+    monkeypatch.setattr(app.state.execution_store, "acknowledge_bootstrap", acknowledge)
+    executor_headers = {"Authorization": f"Bearer {OLDLAB_V2_EXECUTOR_TOKEN}"}
+    reporter_headers = {"Authorization": f"Bearer {DEMAND_TOKEN}"}
+
+    proposed = client.post(
+        f"/v2/executors/oldlab/intents/{binding.intent_id}/bootstrap-proposals",
+        headers=executor_headers,
+        json=proposal.model_dump(mode="json"),
+    )
+    assert proposed.status_code == 200, proposed.text
+    assert proposed.json()["proposal_epoch"] == 1
+    assert (
+        client.post(
+            f"/v2/executors/gb10/intents/{binding.intent_id}/bootstrap-proposals",
+            headers=executor_headers,
+            json=proposal.model_dump(mode="json"),
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post(
+            f"/v2/executors/oldlab/intents/{binding.intent_id}/bootstrap",
+            headers=executor_headers,
+            json=proposal.model_dump(mode="json"),
+        ).status_code
+        == 404
+    )
+
+    work = client.get(
+        f"/v2/subjects/{SUBJECT_ID}/bootstrap-work",
+        headers=reporter_headers,
+    )
+    assert work.status_code == 200, work.text
+    assert ExecutableBootstrapProposalV2.model_validate_json(work.content) == proposal
+    assert (
+        client.get(
+            f"/v2/subjects/{UUID(int=999)}/bootstrap-work",
+            headers=reporter_headers,
+        ).status_code
+        == 403
+    )
+    assert (
+        client.get(
+            f"/v2/subjects/{SUBJECT_ID}/bootstrap-work",
+            headers=executor_headers,
+        ).status_code
+        == 403
+    )
+
+    idempotency_key = uuid4()
+    acknowledged = client.put(
+        f"/v2/subjects/{SUBJECT_ID}/intents/{binding.intent_id}/"
+        "bootstrap-acknowledgements",
+        headers=reporter_headers | {"Idempotency-Key": str(idempotency_key)},
+        json=acknowledgement.model_dump(mode="json"),
+    )
+    assert acknowledged.status_code == 200, acknowledged.text
+    assert acknowledged.json()["bootstrap_registration_epoch"] == 1
+    assert (
+        client.put(
+            f"/v2/subjects/{UUID(int=999)}/intents/{binding.intent_id}/"
+            "bootstrap-acknowledgements",
+            headers=reporter_headers | {"Idempotency-Key": str(uuid4())},
+            json=acknowledgement.model_dump(mode="json"),
+        ).status_code
+        == 403
+    )
+    assert [kind for kind, _value in calls] == [
+        "proposal",
+        "subject-work",
+        "acknowledgement",
+    ]
+    _value, actor, received_key = calls[-1][1]  # type: ignore[misc]
+    assert actor == "dev-reporter"
+    assert received_key == idempotency_key
 
 
 def test_lifecycle_can_project_and_authenticate_a_personal_demand_reporter(

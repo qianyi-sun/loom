@@ -1240,6 +1240,11 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
             credentials=credentials,
             configuration=configuration,
         )
+        configuration = configuration.model_copy(
+            update={
+                "protected_admission_sha256": database.protected_admission_sha256
+            }
+        )
         if (
             _agent_password_from_secret(
                 {"database-url": database.agent_database_url.encode("utf-8")}

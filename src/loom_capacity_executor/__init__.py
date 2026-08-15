@@ -2,6 +2,7 @@
 
 from loom_capacity_executor.client import (
     CapacityExecutorClient,
+    ExecutableCapacityExecutorClient,
     ExecutorConnection,
     ExecutorRejectedError,
     ExecutorTLSFiles,
@@ -18,11 +19,13 @@ from loom_capacity_executor.journal import (
 )
 from loom_capacity_executor.keys import ExecutorKeyError, load_ownership_private_key
 from loom_capacity_executor.remote import RemoteDryRunPoolExecutor
+from loom_capacity_executor.remote_executable import RemoteExecutablePoolExecutor
 
 __all__ = [
     "CapacityExecutorClient",
     "DryRunExecutorBinding",
     "DryRunPoolExecutor",
+    "ExecutableCapacityExecutorClient",
     "ExecutorConnection",
     "ExecutorJournal",
     "ExecutorKeyError",
@@ -35,5 +38,6 @@ __all__ = [
     "JournalRecord",
     "JournalRegressionError",
     "RemoteDryRunPoolExecutor",
+    "RemoteExecutablePoolExecutor",
     "load_ownership_private_key",
 ]

@@ -28,6 +28,12 @@ from loom_capacity_manager.contracts import (
     canonical_bytes,
     canonical_digest,
 )
+from loom_capacity_manager.executable_contracts import (
+    ExecutableBootstrapAcknowledgementV2,
+    ExecutableBootstrapProposalV2,
+    canonical_executable_bytes,
+    canonical_executable_digest,
+)
 from loom_capacity_manager.grant_contracts import (
     DryRunProtectedReleaseAcknowledgementV1,
     canonical_grant_digest,
@@ -69,6 +75,18 @@ class ProtectedReleasePublishReceiptV1(BaseModel):
     acknowledgement_digest: Digest
     replayed: bool
     executable: Literal[False]
+
+
+class ExecutableBootstrapAcknowledgementReceiptV2(BaseModel):
+    """Exact manager receipt for one protected executable bootstrap."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    intent_id: UUID
+    bootstrap_registration_epoch: PositiveQuantity
+    receipt_digest: Digest
+    replayed: bool
+    executable: Literal[True]
 
 
 @dataclass(frozen=True, slots=True)
@@ -323,6 +341,118 @@ class DemandReporterClient:
             raise DemandPublishError("capacity manager demand receipt does not match the report")
         return receipt
 
+    async def next_executable_bootstrap(
+        self,
+    ) -> ExecutableBootstrapProposalV2 | None:
+        """Fetch one bootstrap hash bound to this exact protected subject."""
+
+        endpoint = (
+            f"{self._manager_origin}/v2/subjects/"
+            f"{self._configuration.subject_id}/bootstrap-work"
+        )
+        try:
+            response = await self._http.get(
+                endpoint,
+                headers={"Authorization": f"Bearer {self._bearer_token}"},
+            )
+        except httpx.HTTPError:
+            raise DemandPublishError(
+                "capacity manager bootstrap work transport failed"
+            ) from None
+        if response.status_code != 200:
+            raise DemandPublishError(
+                "capacity manager rejected bootstrap work with status "
+                f"{response.status_code}"
+            )
+        if len(response.content) > _MAX_RECEIPT_BYTES:
+            raise DemandPublishError("capacity manager bootstrap work exceeds its byte bound")
+        if response.content == b"null":
+            return None
+        try:
+            proposal = ExecutableBootstrapProposalV2.model_validate_json(response.content)
+        except (ValidationError, ValueError) as exc:
+            raise DemandPublishError(
+                "capacity manager returned invalid bootstrap work"
+            ) from exc
+        binding = proposal.binding
+        if (
+            binding.subject_id != self._configuration.subject_id
+            or binding.subject_incarnation != self._configuration.subject_incarnation
+            or binding.deployment_generation != self._configuration.deployment_generation
+        ):
+            raise DemandPublishError("capacity manager bootstrap work binding changed")
+        return proposal
+
+    async def publish_executable_bootstrap_acknowledgement(
+        self,
+        acknowledgement: ExecutableBootstrapAcknowledgementV2,
+        *,
+        idempotency_key: UUID,
+    ) -> ExecutableBootstrapAcknowledgementReceiptV2:
+        """Publish only evidence already committed by the protected local store."""
+
+        if not isinstance(acknowledgement, ExecutableBootstrapAcknowledgementV2):
+            raise DemandPublishError("bootstrap acknowledgement is not schema-v2")
+        if not isinstance(idempotency_key, UUID):
+            raise DemandPublishError("bootstrap acknowledgement idempotency key must be a UUID")
+        binding = acknowledgement.binding
+        if (
+            binding.subject_id != self._configuration.subject_id
+            or binding.subject_incarnation != self._configuration.subject_incarnation
+            or binding.deployment_generation != self._configuration.deployment_generation
+            or acknowledgement.reporter_incarnation
+            != self._configuration.reporter_incarnation
+            or self._configuration.protected_admission_sha256 is None
+            or acknowledgement.protected_admission_sha256
+            != self._configuration.protected_admission_sha256
+        ):
+            raise DemandPublishError("bootstrap acknowledgement binding changed")
+        endpoint = (
+            f"{self._manager_origin}/v2/subjects/{binding.subject_id}/intents/"
+            f"{binding.intent_id}/bootstrap-acknowledgements"
+        )
+        try:
+            response = await self._http.put(
+                endpoint,
+                content=canonical_executable_bytes(acknowledgement),
+                headers={
+                    "Authorization": f"Bearer {self._bearer_token}",
+                    "Content-Type": "application/json",
+                    "Idempotency-Key": str(idempotency_key),
+                },
+            )
+        except httpx.HTTPError:
+            raise DemandPublishError(
+                "capacity manager bootstrap acknowledgement transport failed"
+            ) from None
+        if response.status_code != 200:
+            raise DemandPublishError(
+                "capacity manager rejected bootstrap acknowledgement with status "
+                f"{response.status_code}"
+            )
+        if len(response.content) > _MAX_RECEIPT_BYTES:
+            raise DemandPublishError(
+                "capacity manager bootstrap acknowledgement receipt exceeds its byte bound"
+            )
+        try:
+            receipt = ExecutableBootstrapAcknowledgementReceiptV2.model_validate_json(
+                response.content
+            )
+        except (ValidationError, ValueError) as exc:
+            raise DemandPublishError(
+                "capacity manager returned an invalid bootstrap acknowledgement receipt"
+            ) from exc
+        if (
+            receipt.intent_id != binding.intent_id
+            or receipt.bootstrap_registration_epoch
+            != acknowledgement.bootstrap_registration_epoch
+            or receipt.receipt_digest != canonical_executable_digest(acknowledgement)
+        ):
+            raise DemandPublishError(
+                "capacity manager bootstrap acknowledgement receipt changed"
+            )
+        return receipt
+
     async def publish_protected_release(
         self,
         release: PreparedProtectedReleaseV1,
@@ -423,6 +553,7 @@ __all__ = [
     "DemandReporterClient",
     "DemandReporterConnection",
     "DemandReporterTLSFiles",
+    "ExecutableBootstrapAcknowledgementReceiptV2",
     "ProtectedReleasePublishReceiptV1",
     "build_reporter_tls_context",
     "canonical_manager_origin",
