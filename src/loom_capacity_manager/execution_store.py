@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom_capacity_manager.contracts import (
     MICROTOKENS_PER_LAUNCH,
+    ObservedCommitmentV1,
     PackingRequestV1,
     PackingShapeRequestV1,
     PoolObservationV1,
@@ -1746,7 +1747,6 @@ class CapacityExecutionStore:
             raise ExecutionConflictError("latest sealed executable allocation changed")
         if latest_epoch.input_valid_until is None or latest_epoch.input_valid_until <= now:
             raise ExecutionConflictError("allocation input expired")
-        committed = checked_sum_vectors(tuple(item.resources for item in observation.commitments))
         allocation = (
             await session.execute(
                 select(CapacityAllocation).where(
@@ -1785,12 +1785,16 @@ class CapacityExecutionStore:
             .scalars()
             .all()
         )
-        charged_slots = sum(
-            ExecutableIntentBindingV2.model_validate_json(
-                json.dumps(charged.binding_payload)
-            ).concurrency_slots
+        charged_bindings = tuple(
+            (
+                charged,
+                ExecutableIntentBindingV2.model_validate_json(json.dumps(charged.binding_payload)),
+            )
             for charged in charged_rows
             if current is None or charged.id != current.id
+        )
+        charged_slots = sum(
+            charged_binding.concurrency_slots for _row, charged_binding in charged_bindings
         )
         if charged_slots + binding.concurrency_slots > context.epoch.effective_ceiling:
             raise ExecutionConflictError("executable capacity ceiling exhausted")
@@ -1806,6 +1810,13 @@ class CapacityExecutionStore:
         ).scalar_one_or_none()
         if pool is None:
             raise ExecutionConflictError("pool profile is not eligible")
+        charged_commitments = tuple(
+            self._charged_intent_commitment(charged_row, charged_binding)
+            for charged_row, charged_binding in charged_bindings
+            if charged_binding.pool_id == binding.pool_id
+        )
+        fixed_commitments = (*observation.commitments, *charged_commitments)
+        committed = checked_sum_vectors(tuple(item.resources for item in fixed_commitments))
         total = checked_sum_vectors(
             tuple(
                 ResourceVectorV1.model_validate(node["allocatable"])
@@ -1839,7 +1850,7 @@ class CapacityExecutionStore:
             raise ExecutionConflictError("selected node headroom changed")
         overlapping = tuple(
             item
-            for item in observation.commitments
+            for item in fixed_commitments
             if not item.node_ids or selected.intersection(item.node_ids)
         )
         try:
@@ -1886,6 +1897,47 @@ class CapacityExecutionStore:
             executor_inventory_fresh_until=executor_inventory_fresh_until,
             pool_inventory_fresh_until=pool_inventory_fresh_until,
             allocation_input_valid_until=latest_epoch.input_valid_until,
+        )
+
+    @staticmethod
+    def _charged_intent_commitment(
+        row: CapacityExecutableIntent,
+        binding: ExecutableIntentBindingV2,
+    ) -> ObservedCommitmentV1:
+        state = (
+            "quarantined"
+            if row.state == "quarantined"
+            else "submitting-unknown"
+            if row.state == "submitting-unknown"
+            else "observed"
+            if row.state in {"observed", "terminal", "closing"}
+            else "accepted"
+        )
+        return ObservedCommitmentV1(
+            kind="reserve",
+            commitment_id=str(binding.intent_id),
+            physical_identity=binding.shape_instance_id,
+            reservation_identity=str(binding.intent_id),
+            subject_id=binding.subject_id,
+            subject_incarnation=binding.subject_incarnation,
+            deployment_generation=binding.deployment_generation,
+            pool_id=binding.pool_id,
+            pool_generation=binding.pool_generation,
+            profile_id=binding.profile_id,
+            profile_generation=binding.profile_generation,
+            profile_digest=binding.profile_digest,
+            shape_id=binding.shape_id,
+            resources=binding.resources,
+            state=cast(
+                Literal[
+                    "accepted",
+                    "submitting-unknown",
+                    "observed",
+                    "quarantined",
+                ],
+                state,
+            ),
+            node_ids=binding.node_ids,
         )
 
     async def _consume_rate_tokens(

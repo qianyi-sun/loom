@@ -37,6 +37,7 @@ from loom_capacity_manager.executable_contracts import (
 )
 from loom_capacity_manager.execution_store import CapacityExecutionStore
 from loom_capacity_manager.models import (
+    CapacityAccountPolicy,
     CapacityAllocation,
     CapacityAllocationEpoch,
     CapacityAuthorityState,
@@ -45,6 +46,7 @@ from loom_capacity_manager.models import (
     CapacityPool,
     CapacityPoolObservation,
     CapacitySubject,
+    CapacityTier,
     CapacityWorkerProfile,
 )
 from loom_capacity_manager.ownership import OwnershipKeyring
@@ -107,7 +109,7 @@ async def _active_plan_with_policy(  # type: ignore[no-untyped-def]
             expected_writer_epoch=prepared.writer_epoch,
             execution_epoch=prepared.execution_epoch,
             execution_manifest_sha256=prepared.execution_manifest_sha256,
-            executable_new_capacity_ceiling=1,
+            executable_new_capacity_ceiling=policy.executable_new_capacity_ceiling,
             executable_new_capacity_rate_per_minute=policy.executable_new_capacity_rate_per_minute,
         ),
         actor="activation-operator",
@@ -587,6 +589,76 @@ def _submission_recovery(
         scheduler_submission_absent=True,
         controller_evidence_sha256="a" * 64,
     )
+
+
+def _successor_binding(binding):  # type: ignore[no-untyped-def]
+    return binding.model_copy(
+        update={
+            "tranche_id": uuid4(),
+            "intent_id": uuid4(),
+            "shape_instance_id": f"{binding.shape_instance_id}-successor",
+        }
+    )
+
+
+def _successor_proposed_row(
+    store: CapacityExecutionStore,
+    row: CapacityExecutableIntent,
+    binding,
+) -> CapacityExecutableIntent:
+    return CapacityExecutableIntent(
+        intent_id=binding.intent_id,
+        tranche_id=binding.tranche_id,
+        shape_instance_id=binding.shape_instance_id,
+        execution_epoch=row.execution_epoch,
+        execution_manifest_sha256=row.execution_manifest_sha256,
+        configuration_epoch=row.configuration_epoch,
+        allocation_epoch=row.allocation_epoch,
+        executor_id=row.executor_id,
+        executor_incarnation=row.executor_incarnation,
+        pool_id=row.pool_id,
+        pool_generation=row.pool_generation,
+        subject_id=row.subject_id,
+        subject_incarnation=row.subject_incarnation,
+        launch_rank=row.launch_rank + 1,
+        proposal_digest=row.proposal_digest,
+        proposal_payload=json.loads(json.dumps(row.proposal_payload)),
+        binding_digest=store.contract_digest(binding),
+        binding_payload=binding.model_dump(mode="json", exclude_none=False),
+        state="proposed",
+    )
+
+
+async def _quarantined_consumed_permit(
+    store: CapacityExecutionStore,
+    session: AsyncSession,
+    *,
+    policy=None,
+):  # type: ignore[no-untyped-def]
+    resolved_policy = execution_policy(ceiling=2) if policy is None else policy
+    permit = await _launch_ready(store, session, policy=resolved_policy)
+    await store.consume_launch_permit(
+        session,
+        ExecutablePermitConsumptionV2(
+            permit_id=permit.permit_id,
+            permit_digest=store.contract_digest(permit),
+            binding=permit.binding,
+            command_sequence=3,
+        ),
+    )
+    inventory = ExecutableExecutorInventoryV2(
+        execution=_inventory_execution(permit.binding),
+        executor_id=permit.binding.executor_id,
+        executor_incarnation=permit.binding.executor_incarnation,
+        pool_id=permit.binding.pool_id,
+        pool_generation=permit.binding.pool_generation,
+        inventory_sequence=2,
+        journal_sequence=0,
+        journal_digest="0" * 64,
+    )
+    await store.ingest_executor_inventory(session, inventory)
+    await store.recover_unsubmitted_permit(session, _submission_recovery(store, permit, inventory))
+    return permit, await _intent_row(session, permit.binding.intent_id)
 
 
 async def _intent_row(
@@ -2290,6 +2362,216 @@ async def test_closing_intent_remains_charged_until_release(
         )
 
 
+@pytest.mark.parametrize(
+    ("scope", "expected"),
+    (
+        ("pool", "pool pending limit"),
+        ("subject", "subject pending limit"),
+        ("account", "account pending limit"),
+        ("tier", "tier pending limit"),
+    ),
+)
+async def test_quarantined_intent_counts_against_scoped_pending_limits(
+    capacity_session: AsyncSession,
+    scope: str,
+    expected: str,
+) -> None:
+    store = CapacityExecutionStore()
+    permit, row = await _quarantined_consumed_permit(store, capacity_session)
+    await capacity_session.execute(
+        update(CapacityAuthorityState)
+        .where(CapacityAuthorityState.singleton_id == 1)
+        .values(global_pending_slot_ceiling=8, global_pending_job_ceiling=8)
+    )
+    if scope == "pool":
+        await capacity_session.execute(
+            update(CapacityPool)
+            .where(
+                CapacityPool.configuration_epoch == permit.binding.execution.configuration_epoch,
+                CapacityPool.pool_id == permit.binding.pool_id,
+            )
+            .values(max_pending_slots=1, max_pending_jobs=1)
+        )
+    elif scope == "subject":
+        await capacity_session.execute(
+            update(CapacitySubject)
+            .where(
+                CapacitySubject.configuration_epoch == permit.binding.execution.configuration_epoch,
+                CapacitySubject.subject_id == permit.binding.subject_id,
+                CapacitySubject.subject_incarnation == permit.binding.subject_incarnation,
+            )
+            .values(max_pending_slots=1, max_pending_jobs=1)
+        )
+    elif scope == "account":
+        await capacity_session.execute(
+            update(CapacityAccountPolicy)
+            .where(
+                CapacityAccountPolicy.configuration_epoch
+                == permit.binding.execution.configuration_epoch,
+                CapacityAccountPolicy.account_id == permit.binding.account_id,
+            )
+            .values(max_pending_slots=1, max_pending_jobs=1)
+        )
+    else:
+        await capacity_session.execute(
+            update(CapacityTier)
+            .where(
+                CapacityTier.configuration_epoch == permit.binding.execution.configuration_epoch,
+                CapacityTier.tier_id == permit.binding.tier_id,
+            )
+            .values(max_pending_slots=1, max_pending_jobs=1)
+        )
+    context = await store._locked_execution_context(
+        capacity_session,
+        permit.binding.execution,
+        executor_binding(permit.binding.pool_id),
+    )
+    successor = _successor_binding(permit.binding)
+    successor_row = _successor_proposed_row(store, row, successor)
+    await _test_only_add_intent_without_guard(capacity_session, successor_row)
+
+    with pytest.raises(ExecutionConflictError, match=expected):
+        await store._assert_pending_limits(capacity_session, context, successor_row)
+
+
+async def test_quarantined_intent_counts_against_pool_resource_headroom(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityExecutionStore()
+    permit, _row = await _quarantined_consumed_permit(store, capacity_session)
+    pool = (
+        await capacity_session.execute(
+            select(CapacityPool).where(
+                CapacityPool.configuration_epoch == permit.binding.execution.configuration_epoch,
+                CapacityPool.pool_id == permit.binding.pool_id,
+            )
+        )
+    ).scalar_one()
+    topology = json.loads(json.dumps(pool.topology))
+    topology["resource_domains"][0]["nodes"][0]["allocatable"] = (
+        permit.binding.resources.model_dump(mode="json", exclude_none=False)
+    )
+    pool.topology = topology
+    context = await store._locked_execution_context(
+        capacity_session,
+        permit.binding.execution,
+        executor_binding(permit.binding.pool_id),
+    )
+
+    with pytest.raises(ExecutionConflictError, match="pool headroom"):
+        await store._assert_increase_eligible(
+            capacity_session,
+            context,
+            proposed=_successor_binding(permit.binding),
+        )
+
+
+async def test_quarantined_intent_combines_with_external_resource_commitments(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityExecutionStore()
+    permit, _row = await _quarantined_consumed_permit(store, capacity_session)
+    pool = (
+        await capacity_session.execute(
+            select(CapacityPool).where(
+                CapacityPool.configuration_epoch == permit.binding.execution.configuration_epoch,
+                CapacityPool.pool_id == permit.binding.pool_id,
+            )
+        )
+    ).scalar_one()
+    topology = json.loads(json.dumps(pool.topology))
+    template = topology["resource_domains"][0]["nodes"][0]
+    topology["resource_domains"][0]["nodes"] = [
+        {
+            **template,
+            "node_id": permit.binding.node_ids[0],
+            "allocatable": permit.binding.resources.model_dump(mode="json", exclude_none=False),
+        },
+        {
+            **template,
+            "node_id": "gb10-node-b",
+            "allocatable": permit.binding.resources.model_dump(mode="json", exclude_none=False),
+        },
+    ]
+    pool.topology = topology
+    external = pool_observation(pool_id=permit.binding.pool_id).model_copy(
+        update={
+            "commitments": (
+                pool_observation(
+                    pool_id=permit.binding.pool_id,
+                    commitment_ids=("external-resource",),
+                )
+                .commitments[0]
+                .model_copy(
+                    update={
+                        "resources": permit.binding.resources,
+                        "node_ids": ("gb10-node-b",),
+                    }
+                ),
+            )
+        }
+    )
+    await capacity_session.execute(
+        update(CapacityPoolObservation)
+        .where(CapacityPoolObservation.pool_id == permit.binding.pool_id)
+        .values(payload=external.model_dump(mode="json", exclude_none=False))
+    )
+    context = await store._locked_execution_context(
+        capacity_session,
+        permit.binding.execution,
+        executor_binding(permit.binding.pool_id),
+    )
+
+    with pytest.raises(ExecutionConflictError, match="pool headroom"):
+        await store._assert_increase_eligible(
+            capacity_session,
+            context,
+            proposed=_successor_binding(permit.binding),
+        )
+
+
+async def test_quarantined_intent_counts_against_selected_node_headroom(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityExecutionStore()
+    permit, _row = await _quarantined_consumed_permit(store, capacity_session)
+    pool = (
+        await capacity_session.execute(
+            select(CapacityPool).where(
+                CapacityPool.configuration_epoch == permit.binding.execution.configuration_epoch,
+                CapacityPool.pool_id == permit.binding.pool_id,
+            )
+        )
+    ).scalar_one()
+    topology = json.loads(json.dumps(pool.topology))
+    template = topology["resource_domains"][0]["nodes"][0]
+    topology["resource_domains"][0]["nodes"] = [
+        {
+            **template,
+            "node_id": permit.binding.node_ids[0],
+            "allocatable": permit.binding.resources.model_dump(mode="json", exclude_none=False),
+        },
+        {
+            **template,
+            "node_id": "gb10-spare",
+            "allocatable": permit.binding.resources.model_dump(mode="json", exclude_none=False),
+        },
+    ]
+    pool.topology = topology
+    context = await store._locked_execution_context(
+        capacity_session,
+        permit.binding.execution,
+        executor_binding(permit.binding.pool_id),
+    )
+
+    with pytest.raises(ExecutionConflictError, match="node headroom"):
+        await store._assert_increase_eligible(
+            capacity_session,
+            context,
+            proposed=_successor_binding(permit.binding),
+        )
+
+
 async def test_permit_consumption_rechecks_selected_node_headroom(
     capacity_session: AsyncSession,
 ) -> None:
@@ -2350,8 +2632,9 @@ async def _heterogeneous_multi_node_permit(
     *,
     reverse_shape_parts: bool,
     commitment_headroom: bool = False,
+    policy=None,
 ):  # type: ignore[no-untyped-def]
-    permit = await _launch_ready(store, session)
+    permit = await _launch_ready(store, session, policy=policy)
     small = resource_vector(slots=0, cpu_millicores=2, memory_bytes=2)
     large = resource_vector(slots=1, cpu_millicores=8, memory_bytes=8)
     worker_shape = shape(
@@ -2501,6 +2784,72 @@ async def test_overlapping_multi_node_commitment_fails_closed(
                 binding=permit.binding,
                 command_sequence=3,
             ),
+        )
+
+
+async def test_quarantined_intent_counts_against_multi_node_topology(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityExecutionStore()
+    permit = await _heterogeneous_multi_node_permit(
+        store,
+        capacity_session,
+        reverse_shape_parts=False,
+        policy=execution_policy(ceiling=2),
+    )
+    await store.consume_launch_permit(
+        capacity_session,
+        ExecutablePermitConsumptionV2(
+            permit_id=permit.permit_id,
+            permit_digest=store.contract_digest(permit),
+            binding=permit.binding,
+            command_sequence=3,
+        ),
+    )
+    inventory = ExecutableExecutorInventoryV2(
+        execution=_inventory_execution(permit.binding),
+        executor_id=permit.binding.executor_id,
+        executor_incarnation=permit.binding.executor_incarnation,
+        pool_id=permit.binding.pool_id,
+        pool_generation=permit.binding.pool_generation,
+        inventory_sequence=2,
+        journal_sequence=0,
+        journal_digest="0" * 64,
+    )
+    await store.ingest_executor_inventory(capacity_session, inventory)
+    await store.recover_unsubmitted_permit(
+        capacity_session,
+        _submission_recovery(store, permit, inventory),
+    )
+    pool = (
+        await capacity_session.execute(
+            select(CapacityPool).where(
+                CapacityPool.configuration_epoch == permit.binding.execution.configuration_epoch,
+                CapacityPool.pool_id == permit.binding.pool_id,
+            )
+        )
+    ).scalar_one()
+    topology = json.loads(json.dumps(pool.topology))
+    template = topology["resource_domains"][0]["nodes"][0]
+    topology["resource_domains"][0]["nodes"].append(
+        {
+            **template,
+            "node_id": "gb10-spare",
+            "allocatable": permit.binding.resources.model_dump(mode="json", exclude_none=False),
+        }
+    )
+    pool.topology = topology
+    context = await store._locked_execution_context(
+        capacity_session,
+        permit.binding.execution,
+        executor_binding(permit.binding.pool_id),
+    )
+
+    with pytest.raises(ExecutionConflictError, match="node headroom"):
+        await store._assert_increase_eligible(
+            capacity_session,
+            context,
+            proposed=_successor_binding(permit.binding),
         )
 
 
