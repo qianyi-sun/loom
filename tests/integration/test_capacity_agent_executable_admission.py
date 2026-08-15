@@ -23,6 +23,8 @@ from loom_capacity_agent.admission import (
     ExecutableWorkerRegistrationV2,
     ExecutableWorkerWithdrawalRequestV2,
     PhysicalJobBindingV2,
+    ProtectedReleasePublicationCheckpointV2,
+    PublishableExecutableProtectedReleaseV2,
 )
 from loom_capacity_agent.claim_guard import (
     ExecutableClaimProposalV2,
@@ -32,12 +34,17 @@ from loom_capacity_agent.claim_guard import (
 from loom_capacity_agent.contracts import AgentRegistrationV1
 from loom_capacity_agent.executable_admission import ExecutableAdmissionStore
 from loom_capacity_agent.lifecycle_store import CapacityAttemptLifecycleStore
+from loom_capacity_agent.store import (
+    acknowledge_executable_protected_release_publication,
+    read_next_executable_protected_release,
+)
 from loom_capacity_manager.contracts import ResourceVectorV1
 from loom_capacity_manager.executable_contracts import (
     CandidateBindingV2,
     ExecutableBootstrapRegistrationV2,
     ExecutableIntentBindingV2,
     ExecutionFenceV2,
+    canonical_executable_digest,
 )
 from tests.integration.test_capacity_agent_store import (
     _fence,
@@ -73,7 +80,24 @@ async def _serializable_executor_session(
 async def _agent_session(
     database: dict[str, object],
 ) -> AsyncIterator[AsyncSession]:
-    engine = create_async_engine(make_url(_value(database, "agent_url")))
+    engine = create_async_engine(
+        make_url(_value(database, "agent_url")), isolation_level="READ COMMITTED"
+    )
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with factory() as session, session.begin():
+            yield session
+    finally:
+        await engine.dispose()
+
+
+@asynccontextmanager
+async def _serializable_agent_session(
+    database: dict[str, object],
+) -> AsyncIterator[AsyncSession]:
+    engine = create_async_engine(
+        make_url(_value(database, "agent_url")), isolation_level="SERIALIZABLE"
+    )
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         async with factory() as session, session.begin():
@@ -367,6 +391,277 @@ def _withdrawal(request: ExecutableBootstrapRegistrationV2) -> ExecutableWorkerW
         ownership_evidence_sha256=physical.ownership_evidence_sha256,
         expected_claim_high_water=0,
     )
+
+
+def _prepared_revocation(
+    request: ExecutableBootstrapRegistrationV2,
+) -> ExecutablePreparedBootstrapRevocationV2:
+    return ExecutablePreparedBootstrapRevocationV2(
+        operation_id=UUID(int=122),
+        binding=request.binding,
+        bootstrap_registration_epoch=request.bootstrap_registration_epoch,
+        protected_registration_epoch=request.bootstrap_registration_epoch + 1,
+        expected_claim_high_water=0,
+    )
+
+
+async def _prepare_release_event(
+    database: dict[str, object],
+    *,
+    event_kind: str,
+) -> tuple[
+    AgentRegistrationV1,
+    PublishableExecutableProtectedReleaseV2,
+    ProtectedReleasePublicationCheckpointV2 | None,
+]:
+    _fence, registration = await _initialize_and_register(database)
+    request = _bootstrap(registration.subject_id, registration.subject_incarnation)
+    capability = "single-use-bootstrap-capability"
+    digest = hashlib.sha256(capability.encode("ascii")).hexdigest()
+
+    async with _serializable_executor_session(database) as session:
+        store = ExecutableAdmissionStore(session, registration=registration)
+        await store.prepare_worker(request, bootstrap_sha256=digest)
+        if event_kind == "prepared-revoked":
+            revocation = await store.revoke_prepared_bootstrap(_prepared_revocation(request))
+            expected_digest = revocation.protected_release_sha256
+            expected_epoch = revocation.protected_registration_epoch
+        else:
+            await store.bind_slurm_job(_physical(request))
+            if event_kind == "withdrawn":
+                withdrawal = await store.withdraw_unregistered_worker(_withdrawal(request))
+                expected_digest = withdrawal.withdrawal_digest
+                expected_epoch = withdrawal.protected_registration_epoch
+            else:
+                worker = _worker(request)
+                await store.register_worker(worker, bootstrap_capability=capability)
+                await store.begin_drain(
+                    ExecutableDrainRequestV2(
+                        operation_id=UUID(int=113),
+                        binding=request.binding,
+                        worker_id=worker.worker_id,
+                        worker_incarnation=worker.worker_incarnation,
+                        expected_claim_high_water=0,
+                        drain_epoch=1,
+                    )
+                )
+                release = await store.acknowledge_release(
+                    ExecutableReleaseRequestV2(
+                        operation_id=UUID(int=114),
+                        binding=request.binding,
+                        reporter_incarnation=registration.reporter_incarnation,
+                        bootstrap_registration_epoch=request.bootstrap_registration_epoch,
+                        expected_claim_high_water=0,
+                        protected_registration_epoch=worker.protected_registration_epoch,
+                        release_epoch=1,
+                    ),
+                    current_worker_credential="worker-credential-one",
+                )
+                expected_digest = release.protected_release_sha256
+                expected_epoch = release.protected_registration_epoch
+
+    async with _serializable_agent_session(database) as session:
+        publication = await read_next_executable_protected_release(
+            session,
+            registration=registration,
+        )
+        assert publication is not None
+        assert publication.event_kind == event_kind
+        assert publication.release.binding == request.binding
+        assert publication.release.reporter_incarnation == registration.reporter_incarnation
+        assert publication.release.bootstrap_registration_epoch == (
+            request.bootstrap_registration_epoch
+        )
+        assert publication.release.protected_registration_epoch == expected_epoch
+        assert publication.release.bootstrap_revoked is True
+        assert publication.release.protected_release_sha256 == expected_digest
+        assert publication.publication_digest == canonical_executable_digest(publication.release)
+        return registration, publication, None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_kind", ("released", "withdrawn", "prepared-revoked"))
+async def test_agent_release_outbox_normalizes_exact_protected_events(
+    capacity_guard_database: dict[str, object],
+    event_kind: str,
+) -> None:
+    registration, publication, _ = await _prepare_release_event(
+        capacity_guard_database,
+        event_kind=event_kind,
+    )
+
+    async with _serializable_agent_session(capacity_guard_database) as session:
+        reread = await read_next_executable_protected_release(session, registration=registration)
+        assert reread == publication
+        checkpoint = await acknowledge_executable_protected_release_publication(
+            session,
+            registration=registration,
+            publication=publication,
+            manager_acknowledgement_digest="9" * 64,
+        )
+        assert checkpoint.event_id == publication.event_id
+        assert checkpoint.event_kind == event_kind
+        assert checkpoint.publication_digest == publication.publication_digest
+        assert checkpoint.manager_acknowledgement_digest == "9" * 64
+        assert (
+            await acknowledge_executable_protected_release_publication(
+                session,
+                registration=registration,
+                publication=publication,
+                manager_acknowledgement_digest="9" * 64,
+            )
+            == checkpoint
+        )
+        assert (
+            await read_next_executable_protected_release(session, registration=registration) is None
+        )
+
+
+@pytest.mark.asyncio
+async def test_agent_release_outbox_rejects_wrong_authority_and_changed_replay(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    registration, publication, _ = await _prepare_release_event(
+        capacity_guard_database,
+        event_kind="withdrawn",
+    )
+    other_registration = registration.model_copy(update={"agent_incarnation": uuid4()})
+
+    async with _serializable_agent_session(capacity_guard_database) as session:
+        with pytest.raises(DBAPIError, match="not registered"):
+            await read_next_executable_protected_release(
+                session,
+                registration=other_registration,
+            )
+
+    async with _serializable_agent_session(capacity_guard_database) as session:
+        changed_release = publication.release.model_copy(
+            update={"protected_release_sha256": "8" * 64}
+        )
+        changed = PublishableExecutableProtectedReleaseV2(
+            event_id=publication.event_id,
+            event_kind=publication.event_kind,
+            release=changed_release,
+            publication_digest=canonical_executable_digest(changed_release),
+        )
+        with pytest.raises(DBAPIError, match="publication"):
+            await acknowledge_executable_protected_release_publication(
+                session,
+                registration=registration,
+                publication=changed,
+                manager_acknowledgement_digest="9" * 64,
+            )
+
+    async with _serializable_agent_session(capacity_guard_database) as session:
+        skipped = publication.model_copy(update={"event_id": publication.event_id + 1})
+        with pytest.raises(DBAPIError, match="next event"):
+            await acknowledge_executable_protected_release_publication(
+                session,
+                registration=registration,
+                publication=skipped,
+                manager_acknowledgement_digest="9" * 64,
+            )
+
+    async with _serializable_agent_session(capacity_guard_database) as session:
+        checkpoint = await acknowledge_executable_protected_release_publication(
+            session,
+            registration=registration,
+            publication=publication,
+            manager_acknowledgement_digest="9" * 64,
+        )
+        with pytest.raises(DBAPIError, match="conflicting"):
+            await acknowledge_executable_protected_release_publication(
+                session,
+                registration=registration,
+                publication=publication,
+                manager_acknowledgement_digest="8" * 64,
+            )
+        assert checkpoint.event_id == publication.event_id
+
+
+@pytest.mark.asyncio
+async def test_release_outbox_privileges_are_bounded_to_agent_functions(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    registration, publication, _ = await _prepare_release_event(
+        capacity_guard_database,
+        event_kind="prepared-revoked",
+    )
+    admin = create_engine(_value(capacity_guard_database, "admin_url"))
+    try:
+        with admin.connect() as connection:
+            rows = (
+                connection.execute(
+                    text(
+                        "SELECT routine_name FROM information_schema.role_routine_grants "
+                        "WHERE grantee = :agent AND routine_schema = 'loom_capacity_guard' "
+                        "AND routine_name LIKE '%executable_protected_release%' "
+                        "ORDER BY routine_name"
+                    ),
+                    {"agent": _value(capacity_guard_database, "agent_role")},
+                )
+                .scalars()
+                .all()
+            )
+            assert rows == [
+                "acknowledge_executable_protected_release_publication",
+                "read_next_executable_protected_release",
+            ]
+            for role in ("executor_role", "observer_role"):
+                assert (
+                    connection.execute(
+                        text(
+                            "SELECT has_function_privilege(:role, "
+                            "'loom_capacity_guard.read_next_executable_protected_release(uuid)', "
+                            "'EXECUTE')"
+                        ),
+                        {"role": _value(capacity_guard_database, role)},
+                    ).scalar_one()
+                    is False
+                )
+    finally:
+        admin.dispose()
+
+    for statement in (
+        "SELECT * FROM loom_capacity_guard.executable_release_publication_state",
+        "UPDATE loom_capacity_guard.executable_release_publication_state "
+        "SET last_event_id = last_event_id",
+        "SELECT * FROM loom_capacity_guard.executable_release_publication_events",
+        "INSERT INTO loom_capacity_guard.executable_release_publication_events "
+        "(agent_incarnation, admission_event_id, publication_payload, publication_digest, "
+        "manager_acknowledgement_digest) "
+        "VALUES (:agent_incarnation, :event_id, '{}'::jsonb, :digest, :digest)",
+    ):
+        async with _serializable_agent_session(capacity_guard_database) as session:
+            with pytest.raises(DBAPIError) as denied:
+                await session.execute(
+                    text(statement),
+                    {
+                        "agent_incarnation": registration.agent_incarnation,
+                        "event_id": publication.event_id,
+                        "digest": "0" * 64,
+                    },
+                )
+            assert isinstance(denied.value.orig, InsufficientPrivilege)
+
+    for url_key in ("executor_url", "observer_url"):
+        engine = create_async_engine(
+            make_url(_value(capacity_guard_database, url_key)), isolation_level="SERIALIZABLE"
+        )
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session, session.begin():
+                with pytest.raises(DBAPIError) as denied:
+                    await session.execute(
+                        text(
+                            "SELECT loom_capacity_guard."
+                            "read_next_executable_protected_release(:agent_incarnation)"
+                        ),
+                        {"agent_incarnation": registration.agent_incarnation},
+                    )
+                assert isinstance(denied.value.orig, InsufficientPrivilege)
+        finally:
+            await engine.dispose()
 
 
 @pytest.mark.asyncio

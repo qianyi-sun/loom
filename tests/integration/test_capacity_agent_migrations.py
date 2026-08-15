@@ -266,7 +266,15 @@ def test_agent_can_execute_only_the_bounded_agent_functions(
                         "has_function_privilege(:agent, "
                         "'loom_capacity_guard.submit_inert_trial_projection"
                         "(uuid,jsonb,bytea,text,jsonb,bytea,text,bytea,text)', 'EXECUTE') "
-                        "AS atomic_submission_execute"
+                        "AS atomic_submission_execute, "
+                        "has_function_privilege(:agent, "
+                        "'loom_capacity_guard.read_next_executable_protected_release"
+                        "(uuid)', 'EXECUTE') AS release_outbox_read_execute, "
+                        "has_function_privilege(:agent, "
+                        "'loom_capacity_guard."
+                        "acknowledge_executable_protected_release_publication"
+                        "(uuid,bigint,jsonb,text,text)', 'EXECUTE') "
+                        "AS release_outbox_ack_execute"
                     ),
                     {"agent": agent_role},
                 )
@@ -300,6 +308,8 @@ def test_agent_can_execute_only_the_bounded_agent_functions(
             "cross_mode_guard_execute": False,
             "submission_execute": True,
             "atomic_submission_execute": True,
+            "release_outbox_read_execute": True,
+            "release_outbox_ack_execute": True,
         }
     finally:
         admin.dispose()
@@ -357,7 +367,9 @@ def test_agent_functions_have_fixed_search_paths_and_exact_definer_status(
                         "'freeze_inert_legacy_compatibility', "
                         "'reject_global_preparation_with_legacy', "
                         "'register_inert_trial_submission', "
-                        "'submit_inert_trial_projection')"
+                        "'submit_inert_trial_projection', "
+                        "'read_next_executable_protected_release', "
+                        "'acknowledge_executable_protected_release_publication')"
                     )
                 )
                 .mappings()
@@ -387,6 +399,8 @@ def test_agent_functions_have_fixed_search_paths_and_exact_definer_status(
             "reject_global_preparation_with_legacy",
             "register_inert_trial_submission",
             "submit_inert_trial_projection",
+            "read_next_executable_protected_release",
+            "acknowledge_executable_protected_release_publication",
         }
         for name, row in functions.items():
             assert row["proconfig"] == ["search_path=pg_catalog"]

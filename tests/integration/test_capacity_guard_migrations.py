@@ -66,6 +66,8 @@ EXPECTED_GUARD_TABLES = {
     "executable_claim_state",
     "executable_claim_leases",
     "executable_claim_terminal_events",
+    "executable_release_publication_state",
+    "executable_release_publication_events",
 }
 
 
@@ -92,7 +94,7 @@ async def test_guard_schema_startup_returns_numeric_head(
 ) -> None:
     engine = create_async_engine(_value(capacity_guard_database, "migrator_url"))
     try:
-        assert await assert_capacity_guard_schema_at_head(engine) == 17
+        assert await assert_capacity_guard_schema_at_head(engine) == 18
     finally:
         await engine.dispose()
 
@@ -390,7 +392,7 @@ def test_guard_schema_has_exact_owner_and_preserves_public_application_tables(
             revision = connection.execute(
                 text("SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version")
             ).scalar_one()
-            assert revision == "guard_0017"
+            assert revision == "guard_0018"
             public_before = capacity_guard_database["public_tables_before"]
             assert isinstance(public_before, frozenset)
             assert frozenset(inspect(connection).get_table_names(schema="public")) == public_before
@@ -892,7 +894,7 @@ def test_guard_0014_downgrade_restores_executor_only_observation(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0017"
+                == "guard_0018"
             )
         with observer.connect() as connection, pytest.raises(DBAPIError) as caught:
             connection.execute(statement)
@@ -1050,7 +1052,7 @@ def test_guard_0017_downgrades_to_0016_and_reupgrades_observation_faithfully(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0017"
+                == "guard_0018"
             )
             row = (
                 connection.execute(
@@ -1150,6 +1152,140 @@ def test_guard_0017_refuses_downgrade_with_prepared_revocation_evidence(
 
     with pytest.raises(DBAPIError, match="cannot downgrade guard_0017"):
         command.downgrade(cfg, "guard_0016")
+
+
+# Production break caught: guard_0018 downgrade must never erase manager
+# publication evidence, and an evidence-free downgrade must restore the exact
+# guard_0017 routine/grant surface for later re-upgrade.
+def test_guard_0018_downgrades_to_0017_and_reupgrades_outbox_faithfully(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    cfg = _guard_config(capacity_guard_database)
+    engine = create_engine(_value(capacity_guard_database, "admin_url"))
+    agent_role = _value(capacity_guard_database, "agent_role")
+    executor_role = _value(capacity_guard_database, "executor_role")
+    observer_role = _value(capacity_guard_database, "observer_role")
+    read_signature = "loom_capacity_guard.read_next_executable_protected_release(uuid)"
+    ack_signature = (
+        "loom_capacity_guard.acknowledge_executable_protected_release_publication"
+        "(uuid,bigint,jsonb,text,text)"
+    )
+    revoke_signature = (
+        "loom_capacity_guard.revoke_prepared_executable_bootstrap(uuid,uuid,jsonb,bytea,text)"
+    )
+    try:
+        command.downgrade(cfg, "guard_0017")
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
+                    )
+                ).scalar_one()
+                == "guard_0017"
+            )
+            assert (
+                connection.execute(
+                    text("SELECT to_regprocedure(:function)"),
+                    {"function": read_signature},
+                ).scalar_one()
+                is None
+            )
+            assert (
+                connection.execute(
+                    text("SELECT to_regprocedure(:function)"),
+                    {"function": ack_signature},
+                ).scalar_one()
+                is None
+            )
+            tables = set(inspect(connection).get_table_names(schema="loom_capacity_guard"))
+            assert "executable_release_publication_state" not in tables
+            assert "executable_release_publication_events" not in tables
+            assert (
+                connection.execute(
+                    text("SELECT has_function_privilege(:role, :function, 'EXECUTE')"),
+                    {"role": executor_role, "function": revoke_signature},
+                ).scalar_one()
+                is True
+            )
+            assert (
+                connection.execute(
+                    text("SELECT has_function_privilege(:role, :function, 'EXECUTE')"),
+                    {"role": observer_role, "function": revoke_signature},
+                ).scalar_one()
+                is False
+            )
+
+        command.upgrade(cfg, "head")
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
+                    )
+                ).scalar_one()
+                == "guard_0018"
+            )
+            for signature in (read_signature, ack_signature):
+                assert (
+                    connection.execute(
+                        text("SELECT has_function_privilege(:role, :function, 'EXECUTE')"),
+                        {"role": agent_role, "function": signature},
+                    ).scalar_one()
+                    is True
+                )
+            for signature in (read_signature, ack_signature):
+                for role in (executor_role, observer_role):
+                    assert (
+                        connection.execute(
+                            text("SELECT has_function_privilege(:role, :function, 'EXECUTE')"),
+                            {"role": role, "function": signature},
+                        ).scalar_one()
+                        is False
+                    )
+    finally:
+        engine.dispose()
+
+
+def test_guard_0018_refuses_downgrade_with_publication_evidence(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    cfg = _guard_config(capacity_guard_database)
+    with _owner_connection(capacity_guard_database) as connection:
+        _subject_id, _subject_incarnation, intent_id, _worker_id, _worker_incarnation = (
+            _seed_executable_observation_rows(connection)
+        )
+        event = (
+            connection.execute(
+                text(
+                    "SELECT event_id, agent_incarnation "
+                    "FROM loom_capacity_guard.executable_admission_events "
+                    "WHERE intent_id = :intent_id "
+                    "ORDER BY event_id LIMIT 1"
+                ),
+                {"intent_id": intent_id},
+            )
+            .mappings()
+            .one()
+        )
+        connection.execute(
+            text(
+                "INSERT INTO loom_capacity_guard.executable_release_publication_events "
+                "(agent_incarnation, admission_event_id, publication_payload, "
+                "publication_digest, manager_acknowledgement_digest) "
+                "VALUES (:agent_incarnation, :event_id, '{}'::jsonb, :publication_digest, "
+                ":manager_acknowledgement_digest)"
+            ),
+            {
+                "agent_incarnation": event["agent_incarnation"],
+                "event_id": event["event_id"],
+                "publication_digest": "a" * 64,
+                "manager_acknowledgement_digest": "b" * 64,
+            },
+        )
+
+    with pytest.raises(DBAPIError, match="cannot downgrade guard_0018"):
+        command.downgrade(cfg, "guard_0017")
 
 
 @pytest.mark.asyncio

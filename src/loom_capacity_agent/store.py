@@ -11,6 +11,10 @@ from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from loom_capacity_agent.admission import (
+    ProtectedReleasePublicationCheckpointV2,
+    PublishableExecutableProtectedReleaseV2,
+)
 from loom_capacity_agent.contracts import (
     AgentRegistrationV1,
     GuardDemandObservationV1,
@@ -18,9 +22,15 @@ from loom_capacity_agent.contracts import (
 )
 from loom_capacity_guard.contracts import canonical_bytes, canonical_digest
 from loom_capacity_guard.store import CapacityGuardStore
+from loom_capacity_manager.executable_contracts import (
+    ExecutableProtectedReleaseV2,
+    canonical_executable_bytes,
+    canonical_executable_digest,
+)
 
 _SCHEMA = "loom_capacity_guard"
 _ROLE_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
+_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _REGISTRATION_BINDINGS = (
     "environment_id",
     "subject_id",
@@ -486,11 +496,115 @@ async def capture_lifecycle_demand_observation(
     return observation
 
 
+async def read_next_executable_protected_release(
+    session: AsyncSession,
+    *,
+    registration: AgentRegistrationV1,
+) -> PublishableExecutableProtectedReleaseV2 | None:
+    """Read the current agent's next protected release publication, without advancing it."""
+
+    returned = (
+        await session.execute(
+            text(f"SELECT {_SCHEMA}.read_next_executable_protected_release(:agent_incarnation)"),
+            {"agent_incarnation": registration.agent_incarnation},
+        )
+    ).scalar_one()
+    if returned is None:
+        return None
+    if not isinstance(returned, Mapping):
+        raise CapacityAgentStoreError("protected release outbox returned a non-object")
+    release_payload = returned.get("release")
+    if not isinstance(release_payload, Mapping):
+        raise CapacityAgentStoreError("protected release outbox returned a non-release")
+    try:
+        release = ExecutableProtectedReleaseV2.model_validate_json(
+            _json_payload(release_payload).encode("ascii")
+        )
+        publication = PublishableExecutableProtectedReleaseV2.model_validate(
+            {
+                "event_id": returned.get("event_id"),
+                "event_kind": returned.get("event_kind"),
+                "release": release,
+                "publication_digest": canonical_executable_digest(release),
+            }
+        )
+    except (ValidationError, ValueError) as exc:
+        raise CapacityAgentStoreError("protected release outbox payload is invalid") from exc
+    if (
+        release.reporter_incarnation != registration.reporter_incarnation
+        or release.binding.subject_id != registration.subject_id
+        or release.binding.subject_incarnation != registration.subject_incarnation
+        or release.binding.deployment_generation != registration.deployment_generation
+        or release.binding.candidate.algorithm != registration.candidate_identity_algorithm
+        or release.binding.candidate.identity != registration.candidate_identity
+        or release.binding.candidate.publication_sha256 != registration.candidate_publication_sha256
+    ):
+        raise CapacityAgentStoreError("protected release outbox binding is invalid")
+    canonical_executable_bytes(release)
+    return publication
+
+
+async def acknowledge_executable_protected_release_publication(
+    session: AsyncSession,
+    *,
+    registration: AgentRegistrationV1,
+    publication: PublishableExecutableProtectedReleaseV2,
+    manager_acknowledgement_digest: str,
+) -> ProtectedReleasePublicationCheckpointV2:
+    """Advance the protected release cursor only for the exact next manager publication."""
+
+    if not isinstance(publication, PublishableExecutableProtectedReleaseV2):
+        raise TypeError("protected release publication is invalid")
+    if _DIGEST_RE.fullmatch(manager_acknowledgement_digest) is None:
+        raise CapacityAgentStoreError("manager acknowledgement digest is invalid")
+    if canonical_executable_digest(publication.release) != publication.publication_digest:
+        raise CapacityAgentStoreError("protected release publication digest changed")
+    release_payload = canonical_executable_bytes(publication.release).decode("ascii")
+    async with session.begin_nested():
+        returned = (
+            await session.execute(
+                text(
+                    f"SELECT {_SCHEMA}."
+                    "acknowledge_executable_protected_release_publication("
+                    ":agent_incarnation, :event_id, CAST(:publication_payload AS jsonb), "
+                    ":publication_digest, :manager_acknowledgement_digest)"
+                ),
+                {
+                    "agent_incarnation": registration.agent_incarnation,
+                    "event_id": publication.event_id,
+                    "publication_payload": release_payload,
+                    "publication_digest": publication.publication_digest,
+                    "manager_acknowledgement_digest": manager_acknowledgement_digest,
+                },
+            )
+        ).scalar_one()
+        if not isinstance(returned, Mapping):
+            raise CapacityAgentStoreError("protected release acknowledgement returned a non-object")
+        try:
+            checkpoint = ProtectedReleasePublicationCheckpointV2.model_validate_json(
+                _json_payload(returned).encode("ascii")
+            )
+        except (ValidationError, ValueError) as exc:
+            raise CapacityAgentStoreError(
+                "protected release acknowledgement receipt is invalid"
+            ) from exc
+        if (
+            checkpoint.event_id != publication.event_id
+            or checkpoint.event_kind != publication.event_kind
+            or checkpoint.publication_digest != publication.publication_digest
+            or checkpoint.manager_acknowledgement_digest != manager_acknowledgement_digest
+        ):
+            raise CapacityAgentStoreError("protected release acknowledgement receipt changed")
+    return checkpoint
+
+
 __all__ = [
     "CapacityAgentStore",
     "CapacityAgentStoreError",
+    "acknowledge_executable_protected_release_publication",
     "capture_demand_observation",
     "capture_lifecycle_demand_observation",
     "read_agent_lifecycle_demand_observation",
     "read_agent_reporter_high_water",
+    "read_next_executable_protected_release",
 ]

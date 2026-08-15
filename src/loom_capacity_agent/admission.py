@@ -28,7 +28,9 @@ from loom_capacity_manager.contracts import (
 )
 from loom_capacity_manager.executable_contracts import (
     ExecutableIntentBindingV2,
+    ExecutableProtectedReleaseV2,
     StrictV2Model,
+    canonical_executable_digest,
 )
 
 PhysicalPool = Literal["oldlab", "gb10"]
@@ -549,6 +551,30 @@ class RevokedExecutableBootstrapV2(StrictV2Model):
         return self
 
 
+class PublishableExecutableProtectedReleaseV2(StrictV2Model):
+    """One guard outbox event normalized to the manager protected-release contract."""
+
+    event_id: PositiveGeneration
+    event_kind: Literal["released", "withdrawn", "prepared-revoked"]
+    release: ExecutableProtectedReleaseV2
+    publication_digest: Digest
+
+    @model_validator(mode="after")
+    def _publication_digest(self) -> PublishableExecutableProtectedReleaseV2:
+        if canonical_executable_digest(self.release) != self.publication_digest:
+            raise ValueError("publication digest does not match manager release contract")
+        return self
+
+
+class ProtectedReleasePublicationCheckpointV2(StrictV2Model):
+    """Append-only receipt that the manager acknowledged one outbox publication."""
+
+    event_id: PositiveGeneration
+    event_kind: Literal["released", "withdrawn", "prepared-revoked"]
+    publication_digest: Digest
+    manager_acknowledgement_digest: Digest
+
+
 class ExecutableReleaseReceiptV2(StrictV2Model):
     """Append-only protected release proof consumed by the manager."""
 
@@ -633,6 +659,8 @@ __all__ = [
     "PreparedWorkerBindingV1",
     "PreparedWorkerShapeV1",
     "ProtectedIntentObservationV2",
+    "ProtectedReleasePublicationCheckpointV2",
+    "PublishableExecutableProtectedReleaseV2",
     "RegisteredExecutableWorkerV2",
     "RevokedExecutableBootstrapV2",
     "WithdrawnExecutableWorkerV2",
