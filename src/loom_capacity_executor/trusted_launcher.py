@@ -8,6 +8,7 @@ import ctypes
 import errno
 import fcntl
 import hashlib
+import hmac
 import os
 import posixpath
 import stat
@@ -295,6 +296,23 @@ def _seal_candidate_snapshot(descriptor: int) -> None:
         raise BootstrapHandoffError("trusted launcher candidate immutable snapshot sealing failed")
 
 
+def _candidate_snapshot_sha256(descriptor: int) -> str:
+    try:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(descriptor, _CANDIDATE_READ_CHUNK_BYTES)
+            if not chunk:
+                break
+            digest.update(chunk)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+    except OSError as exc:
+        raise BootstrapHandoffError(
+            "trusted launcher candidate immutable snapshot digest failed"
+        ) from exc
+    return digest.hexdigest()
+
+
 def _open_verified_candidate(identity: TrustedCandidateExecutableV2) -> int:
     path = Path(identity.path)
     try:
@@ -349,8 +367,10 @@ def _open_verified_candidate(identity: TrustedCandidateExecutableV2) -> int:
             _write_all(snapshot_descriptor, chunk)
         if digest.hexdigest() != identity.sha256:
             raise BootstrapHandoffError("trusted launcher candidate executable digest changed")
-        os.lseek(snapshot_descriptor, 0, os.SEEK_SET)
         _seal_candidate_snapshot(snapshot_descriptor)
+        sealed_digest = _candidate_snapshot_sha256(snapshot_descriptor)
+        if not hmac.compare_digest(sealed_digest, identity.sha256):
+            raise BootstrapHandoffError("trusted launcher candidate executable digest changed")
         os.set_inheritable(snapshot_descriptor, True)
     except Exception:
         if snapshot_descriptor is not None:

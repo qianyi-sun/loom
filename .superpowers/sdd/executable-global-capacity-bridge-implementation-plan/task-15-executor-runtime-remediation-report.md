@@ -507,3 +507,109 @@ The existing manager integration warning remains the known
 - A successful candidate receives at most the sealed nonsecret snapshot
   descriptor needed for `/proc/self/fd/<fd>` exec and shebang interpreter
   reopen.
+
+## Fix Round 4 — post-seal snapshot authentication
+
+Base: `f544b847f` (`fix: seal trusted launcher candidate snapshot`).
+
+Scoped fix round 3 re-review status:
+
+1. Addressed: the trusted wrapper no longer executes a mutable source inode.
+2. Addressed: the sealed nonsecret descriptor is inheritable, so real shebang
+   candidates can be executed through `/proc/self/fd/<fd>`.
+3. Important open: the candidate bytes copied into the memfd were hashed before
+   the memfd was sealed, and the immutable sealed snapshot was never
+   independently rehashed. A same-UID process could reopen the unsealed
+   descriptor through `/proc/<pid>/fd/<fd>` and change the bytes after the
+   initial copy/hash but before seals were added.
+
+### Root cause
+
+Round 3 correctly moved execution to a sealed anonymous memfd snapshot, but
+treated the source-copy digest as proof of the eventual sealed object. That
+left a narrow writable window between the final source read and
+`F_ADD_SEALS`. If the memfd bytes changed in that window, the wrapper would
+seal attacker-controlled bytes and proceed to physical binding, admission,
+handoff claim, credential exposure, and exec without authenticating the object
+actually handed to the candidate process.
+
+### RED evidence
+
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_bootstrap_handoff.py::test_trusted_launcher_rejects_memfd_mutation_between_copy_hash_and_seal -q`
+  - RED: `1 failed in 0.18s`
+  - Failure reached `_ExecBoundaryError` from `fake_execvpe` with
+    `LOOM_EXECUTOR_WORKER_CREDENTIAL` in the environment, proving the mutated
+    memfd reached the candidate exec boundary after protected registration and
+    credential exposure.
+
+### Remediation
+
+- Added `_candidate_snapshot_sha256()` to seek and read the sealed snapshot
+  descriptor after `F_ADD_SEALS` completes.
+- `_open_verified_candidate()` now independently hashes the immutable sealed
+  snapshot and uses `hmac.compare_digest()` against the config-pinned
+  candidate SHA-256 before marking the descriptor inheritable.
+- Any post-seal digest mismatch, seek/read failure, or sealing failure raises
+  the bounded `BootstrapHandoffError` while the existing error path closes the
+  source and snapshot descriptors.
+- No physical binding resolution, routed admission construction, bootstrap
+  claim, credential exposure, or exec happens until after the post-seal
+  immutable-snapshot digest matches.
+
+### GREEN evidence and verification
+
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_bootstrap_handoff.py::test_trusted_launcher_rejects_memfd_mutation_between_copy_hash_and_seal -q`
+  - `1 passed in 0.13s`
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_bootstrap_handoff.py::test_trusted_launcher_rejects_memfd_mutation_between_copy_hash_and_seal tests/unit/test_capacity_executor_bootstrap_handoff.py::test_trusted_launcher_verified_candidate_descriptor_is_immutable_after_same_inode_rewrite tests/unit/test_capacity_executor_bootstrap_handoff.py::test_trusted_launcher_real_exec_supports_shebang_candidate_descriptor tests/unit/test_capacity_executor_bootstrap_handoff.py::test_trusted_launcher_executes_already_open_verified_candidate -q`
+  - `4 passed in 0.18s`
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_bootstrap_handoff.py -q`
+  - `25 passed in 0.33s`
+- After Ruff formatting the touched test file, rerun:
+  `uv run --no-sync pytest tests/unit/test_capacity_executor_bootstrap_handoff.py -q`
+  - `25 passed in 1.24s`
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_slurm_backend.py tests/unit/test_capacity_executor_executable.py tests/unit/test_capacity_executor_recovery.py tests/unit/test_capacity_executor_client.py tests/unit/test_capacity_executor_admission_client.py tests/unit/test_capacity_executor_config.py tests/unit/test_capacity_executor_runtime.py tests/unit/test_capacity_executor_bootstrap_handoff.py tests/unit/test_capacity_executor_heartbeat.py tests/unit/test_capacity_executor_launch_renderer.py -q`
+  - `215 passed in 8.72s`
+- `uv run --no-sync pytest tests/integration/test_executable_global_capacity_bridge.py -q`
+  - pass 1: `5 passed in 22.50s`
+  - pass 2: `5 passed in 23.61s`
+- `uv run --no-sync pytest tests/integration/test_capacity_manager_api.py tests/integration/test_capacity_manager_execution_store.py tests/integration/test_capacity_manager_execution_epoch.py -q`
+  - `112 passed, 1 warning in 19.37s`
+- `uv run --no-sync pytest tests/ops/test_global_fleet_pool_executor_once.py tests/ops/test_global_fleet_capacity_shadow_once.py tests/ops/test_capacity_mutation_inventory.py tests/ops/test_capacity_guard_package_boundary.py -q`
+  - `39 passed in 1.03s`
+- `uv run --no-sync pytest tests/loom_cli/test_capacity_control_plane.py -q`
+  - `36 passed in 0.71s`
+- `uv run --no-sync ruff format --check src/loom_capacity_executor/trusted_launcher.py tests/unit/test_capacity_executor_bootstrap_handoff.py && uv run --no-sync ruff check src/loom_capacity_executor/trusted_launcher.py tests/unit/test_capacity_executor_bootstrap_handoff.py`
+  - `2 files already formatted`
+  - `All checks passed!`
+- `uv run --no-sync mypy`
+  - `Success: no issues found in 810 source files`
+- `git diff --check && find docs -maxdepth 1 -type d -name superpowers -print`
+  - exit 0; no output.
+
+The existing manager integration warning remains the known
+`StarletteDeprecationWarning` from `fastapi.testclient` importing Starlette's
+`TestClient`.
+
+### Files changed
+
+- `src/loom_capacity_executor/trusted_launcher.py`
+- `tests/unit/test_capacity_executor_bootstrap_handoff.py`
+- this report and `progress.md`
+
+### Self-review
+
+- DryRun V1 contracts were not changed.
+- Checked-in/rendered executable ceiling remains zero.
+- No live Kubernetes, Slurm, systemd, activation, `origin/dev`, or lifecycle
+  mutation route work was performed.
+- The new regression names the production mutation it catches: removing the
+  post-seal digest compare lets changed memfd bytes reach credential exposure
+  and candidate exec.
+- The regression exercises production wrapper behavior and monkeypatches only
+  the real seal boundary to deterministically simulate the same-UID `/proc`
+  reopen race.
+- On mismatch, the test proves no admission request, bootstrap capability use,
+  worker credential exposure, launch claim, or exec call occurs, and that the
+  touched memfd descriptor is closed.
+- Normal sealed snapshot execution and the real shebang process path remain
+  covered and passing.

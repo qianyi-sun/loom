@@ -1095,6 +1095,63 @@ def test_trusted_launcher_verified_candidate_descriptor_is_immutable_after_same_
     assert observed_payload == original_payload
 
 
+# Production break caught: if a same-UID process rewrites the unsealed memfd
+# snapshot after the initial source copy/hash but before seals are added, the
+# wrapper must independently verify the immutable sealed bytes before protected
+# registration, credential exposure, or candidate exec.
+async def test_trusted_launcher_rejects_memfd_mutation_between_copy_hash_and_seal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import loom_capacity_executor.trusted_launcher as trusted_launcher
+
+    directory = tmp_path / "handoff"
+    directory.mkdir(mode=0o700)
+    admission_directory = tmp_path / "admission"
+    admission_directory.mkdir(mode=0o700)
+    candidate = tmp_path / "candidate-worker"
+    original_payload = _write_candidate(candidate, b"#!/bin/sh\nprintf 'original\\n'\n")
+    mutated_payload = b"#!/bin/sh\nprintf 'mutated!\\n'\n"
+    config = _trusted_candidate_config_payload(
+        handoff_directory=directory,
+        admission_directory=admission_directory,
+        candidate_path=candidate,
+    )
+    admission = _Admission()
+    exec_calls: list[tuple[str, tuple[str, ...], dict[str, str]]] = []
+    touched_descriptors: list[int] = []
+    real_seal = trusted_launcher._seal_candidate_snapshot
+
+    def mutate_then_seal(descriptor: int) -> None:
+        touched_descriptors.append(descriptor)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        os.write(descriptor, mutated_payload)
+        os.ftruncate(descriptor, len(mutated_payload))
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        real_seal(descriptor)
+
+    monkeypatch.setattr(trusted_launcher, "_seal_candidate_snapshot", mutate_then_seal)
+
+    with pytest.raises(BootstrapHandoffError, match="candidate executable digest"):
+        await _run_trusted_process_with_candidate_config(
+            tmp_path,
+            config_payload=config,
+            admission=admission,
+            exec_calls=exec_calls,
+        )
+
+    assert hashlib.sha256(original_payload).hexdigest() == config["candidate_executable"]["sha256"]
+    assert touched_descriptors
+    with pytest.raises(OSError):
+        os.fstat(touched_descriptors[0])
+    assert admission.requests == []
+    assert admission.capabilities == []
+    assert exec_calls == []
+    assert not tuple(directory.glob("*.used"))
+    assert not tuple(directory.glob("*.credential"))
+    assert not tuple(directory.glob("*.launched"))
+
+
 # Production break caught: the real exec boundary for shebang candidates must
 # keep the authenticated descriptor available after exec so the interpreter can
 # reopen /proc/self/fd/<fd>; fake execvpe tests cannot observe this.
