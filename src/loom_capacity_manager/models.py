@@ -951,8 +951,37 @@ class CapacityAllocationEpoch(Base):
             "input_digest ~ '^[0-9a-f]{64}$'",
             name="capacity_allocation_input_digest_check",
         ),
-        CheckConstraint("status IN ('shadow','failed')", name="capacity_allocation_status_check"),
-        CheckConstraint("executable = false", name="capacity_allocation_epoch_shadow_only_check"),
+        CheckConstraint(
+            "status IN ('shadow','failed','executable')",
+            name="capacity_allocation_status_check",
+        ),
+        CheckConstraint(
+            "(status IN ('shadow','failed') AND executable = false "
+            "AND execution_epoch IS NULL AND execution_manifest_sha256 IS NULL "
+            "AND sealed = true AND allocation_count IS NULL) OR "
+            "(status = 'executable' AND executable = true "
+            "AND execution_epoch IS NOT NULL AND execution_manifest_sha256 IS NOT NULL "
+            "AND allocation_count IS NOT NULL AND allocation_count >= 0 "
+            "AND COALESCE(jsonb_typeof(complete_payload -> 'allocations') = 'array', false) "
+            "AND COALESCE(jsonb_array_length(complete_payload -> 'allocations') "
+            "= allocation_count, false))",
+            name="capacity_allocation_epoch_mode_check",
+        ),
+        ForeignKeyConstraint(
+            ("execution_epoch", "execution_manifest_sha256"),
+            (
+                "capacity_execution_epochs.execution_epoch",
+                "capacity_execution_epochs.execution_manifest_sha256",
+            ),
+            name="capacity_allocation_epoch_execution_fkey",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "allocation_epoch",
+            "execution_epoch",
+            "execution_manifest_sha256",
+            name="capacity_allocation_epoch_execution_binding_key",
+        ),
     )
 
     allocation_epoch: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -970,6 +999,10 @@ class CapacityAllocationEpoch(Base):
     failure_reason: Mapped[str | None] = mapped_column(Text)
     complete_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     executable: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    execution_epoch: Mapped[int | None] = mapped_column(BigInteger)
+    execution_manifest_sha256: Mapped[str | None] = mapped_column(Text)
+    sealed: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    allocation_count: Mapped[int | None] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
     )
@@ -980,8 +1013,21 @@ class CapacityAllocation(Base):
     __tablename__ = "capacity_allocations"
     __table_args__ = (
         CheckConstraint(
-            "mode = 'shadow' AND executable = false",
-            name="capacity_allocations_shadow_only_check",
+            "(mode = 'shadow' AND executable = false "
+            "AND execution_epoch IS NULL AND execution_manifest_sha256 IS NULL) OR "
+            "(mode = 'executable' AND executable = true "
+            "AND execution_epoch IS NOT NULL AND execution_manifest_sha256 IS NOT NULL)",
+            name="capacity_allocations_mode_check",
+        ),
+        ForeignKeyConstraint(
+            ("allocation_epoch", "execution_epoch", "execution_manifest_sha256"),
+            (
+                "capacity_allocation_epochs.allocation_epoch",
+                "capacity_allocation_epochs.execution_epoch",
+                "capacity_allocation_epochs.execution_manifest_sha256",
+            ),
+            name="capacity_allocation_execution_binding_fkey",
+            ondelete="RESTRICT",
         ),
         UniqueConstraint(
             "allocation_epoch",
@@ -1009,6 +1055,8 @@ class CapacityAllocation(Base):
     witness: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     mode: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'shadow'"))
     executable: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    execution_epoch: Mapped[int | None] = mapped_column(BigInteger)
+    execution_manifest_sha256: Mapped[str | None] = mapped_column(Text)
 
 
 class CapacityExecutor(Base):
