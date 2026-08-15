@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import os
+import re
 import ssl
 import stat
 from pathlib import Path
 from uuid import UUID
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -26,11 +27,24 @@ class CapacityManagerSettings(BaseSettings):
     tls_key_file: Path
     tls_client_ca_file: Path
     ownership_public_keys_file: Path | None = None
+    execution_policy_file: Path | None = None
+    execution_policy_sha256: str | None = None
     host: str = "127.0.0.1"
     port: int = Field(default=8443, ge=1, le=65535)
     freshness_seconds: int = Field(default=120, ge=1, le=3600)
     allocation_timeout_seconds: float = Field(default=1.0, gt=0, le=60)
     reconciliation_max_attempts: int = Field(default=3, ge=1, le=10)
+
+    @model_validator(mode="after")
+    def _paired_execution_policy(self) -> CapacityManagerSettings:
+        if (self.execution_policy_file is None) != (self.execution_policy_sha256 is None):
+            raise ValueError("execution policy path and digest must be configured together")
+        if self.execution_policy_sha256 is not None and (
+            re.fullmatch(r"[0-9a-f]{64}", self.execution_policy_sha256) is None
+            or self.execution_policy_sha256 == "0" * 64
+        ):
+            raise ValueError("execution policy digest must be a nonzero SHA-256")
+        return self
 
 
 def read_owner_only_secret(path: Path, *, max_bytes: int = 16 * 1024) -> str:

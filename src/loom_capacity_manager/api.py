@@ -62,6 +62,7 @@ from loom_capacity_manager.executable_contracts import (
     PreparedExecutorBindingV2,
     canonical_executable_digest,
 )
+from loom_capacity_manager.execution_policy import load_execution_preparation_policy
 from loom_capacity_manager.execution_store import CapacityExecutionStore
 from loom_capacity_manager.grant_contracts import (
     DryRunBootstrapRegistrationV1,
@@ -388,11 +389,21 @@ def create_app(
 
     resolved_verifier = verifier or CapacityPrincipalVerifier.from_file(settings.principals_file)
     metrics = CapacityMetrics()
-    resolved_management_store = (
-        CapacityManagementStore(freshness_seconds=settings.freshness_seconds)
-        if management_store is None
-        else management_store
-    )
+    if management_store is None:
+        execution_policy = (
+            None
+            if settings.execution_policy_file is None
+            else load_execution_preparation_policy(
+                settings.execution_policy_file,
+                cast(str, settings.execution_policy_sha256),
+            )
+        )
+        resolved_management_store = CapacityManagementStore(
+            freshness_seconds=settings.freshness_seconds,
+            execution_policy=execution_policy,
+        )
+    else:
+        resolved_management_store = management_store
     ownership_keyring = OwnershipKeyring()
     if settings.ownership_public_keys_file is not None:
         ownership_keyring = OwnershipKeyring.from_json(
