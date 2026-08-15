@@ -709,11 +709,13 @@ async def test_personal_capacity_status_reader_accepts_jsonb_uuid_dict_observati
                         "(agent_incarnation, singleton_id, schema_version, environment_id, "
                         "subject_id, subject_incarnation, authority_incarnation, "
                         "reporter_incarnation, authority_mode, allocation_epoch, "
-                        "candidate_digest, deployment_generation, configuration_generation, "
-                        "registration_state) "
+                        "candidate_digest, candidate_identity_algorithm, "
+                        "candidate_identity, candidate_publication_sha256, "
+                        "deployment_generation, configuration_generation, registration_state) "
                         "VALUES (:agent_incarnation, 1, 1, 'dev-status', :subject_id, "
                         ":subject_incarnation, :authority_incarnation, :reporter_incarnation, "
-                        "'disabled', 0, :digest, 7, 5, 'registered')"
+                        "'disabled', 0, :digest, 'source-sha256', :digest, :digest, "
+                        "7, 5, 'registered')"
                     ),
                     {
                         "agent_incarnation": agent_incarnation,
