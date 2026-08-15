@@ -23,6 +23,7 @@ class TrivyException(NamedTuple):
     expires_at: date
     statement: str
 
+
 TRIVY_SCANNER_NAME = "Trivy"
 TRIVY_VERSION = "v0.70.0"
 _PERL_PURLS = (
@@ -53,7 +54,7 @@ TRIVY_CONFIG_BYTES = (
     b"    - vuln\n"
     b"severity:\n"
     b"  - CRITICAL\n"
-    b"timeout: 10m0s\n"
+    b"timeout: 20m0s\n"
     b"vulnerability:\n"
     b"  ignore-unfixed: false\n"
 )
@@ -132,7 +133,7 @@ def _render_ignore_bytes(exceptions: tuple[TrivyException, ...]) -> bytes:
 
 
 TRIVY_IGNORE_BYTES = _render_ignore_bytes(TRIVY_EXCEPTIONS)
-TRIVY_CONFIG_SHA256 = "35492da1d08b142bd1489ac54ecdedab62634b7b3095a37cebbe10b61df1adac"
+TRIVY_CONFIG_SHA256 = "bd8896276b5d8d00d8bb3c3d7a51d359b4931ea2811c21cb8ed692766a7eb8cf"
 TRIVY_IGNORE_SHA256 = "b09bd1a38036f5e4274586af64616a306590ec33b1e2ac8a73d67ab88d2e4d5a"
 
 

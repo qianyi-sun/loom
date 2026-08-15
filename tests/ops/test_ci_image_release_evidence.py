@@ -63,16 +63,16 @@ _TRIVY_EXCEPTIONS = [
         "statement": _POSTGRES_STATEMENT,
     },
     *[
-    {
-        "id": vulnerability_id,
-        "purls": _PERL_PURLS,
-        "expires_at": "2026-09-12",
-        "statement": _PERL_STATEMENT,
-    }
-    for vulnerability_id in (
-        "CVE-2026-13221",
-        "CVE-2026-42496",
-    )
+        {
+            "id": vulnerability_id,
+            "purls": _PERL_PURLS,
+            "expires_at": "2026-09-12",
+            "statement": _PERL_STATEMENT,
+        }
+        for vulnerability_id in (
+            "CVE-2026-13221",
+            "CVE-2026-42496",
+        )
     ],
     {
         "id": "CVE-2026-43185",
@@ -203,11 +203,11 @@ def test_architecture_predicate_binds_source_build_scan_and_invocation() -> None
             "release": _TRIVY_RELEASE,
             "archives": {"linux/amd64": _TRIVY_AMD64},
         },
-        "config_sha256": ("35492da1d08b142bd1489ac54ecdedab62634b7b3095a37cebbe10b61df1adac"),
+        "config_sha256": ("bd8896276b5d8d00d8bb3c3d7a51d359b4931ea2811c21cb8ed692766a7eb8cf"),
         "ignore_sha256": ("b09bd1a38036f5e4274586af64616a306590ec33b1e2ac8a73d67ab88d2e4d5a"),
         "scan_type": "image",
         "vuln_type": ["os", "library"],
-        "timeout": "10m0s",
+        "timeout": "20m0s",
         "severity": ["CRITICAL"],
         "exit_code": 1,
         "ignore_unfixed": False,
@@ -470,11 +470,11 @@ def test_manifest_attestation_binds_both_verified_architecture_subjects() -> Non
                 "linux/arm64": _TRIVY_ARM64,
             },
         },
-        "config_sha256": ("35492da1d08b142bd1489ac54ecdedab62634b7b3095a37cebbe10b61df1adac"),
+        "config_sha256": ("bd8896276b5d8d00d8bb3c3d7a51d359b4931ea2811c21cb8ed692766a7eb8cf"),
         "ignore_sha256": ("b09bd1a38036f5e4274586af64616a306590ec33b1e2ac8a73d67ab88d2e4d5a"),
         "scan_type": "image",
         "vuln_type": ["os", "library"],
-        "timeout": "10m0s",
+        "timeout": "20m0s",
         "severity": ["CRITICAL"],
         "exit_code": 1,
         "ignore_unfixed": False,
