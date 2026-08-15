@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -9,6 +10,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import delete, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from loom_capacity_manager.contracts import StaticCandidateProvenanceV1
 from loom_capacity_manager.executable_contracts import (
     CandidateBindingV2,
     ExecutableExecutorRegistrationV2,
@@ -25,7 +27,6 @@ from loom_capacity_manager.grant_store import CapacityGrantStore
 from loom_capacity_manager.models import (
     Base,
     CapacityAuthorityState,
-    CapacityCandidate,
 )
 from loom_capacity_manager.ownership import OwnershipKeyring, public_key_fingerprint
 from loom_capacity_manager.store import CapacityManagementStore, WriterFence
@@ -88,7 +89,11 @@ def execution_acknowledgement(
     )
 
 
-def executor_binding(pool_id: str) -> PreparedExecutorBindingV2:
+def executor_binding(
+    pool_id: str,
+    *,
+    controller_authority_sha256: str | None = None,
+) -> PreparedExecutorBindingV2:
     private_key = EXECUTOR_KEYS[pool_id]
     return PreparedExecutorBindingV2(
         pool_id=pool_id,
@@ -97,24 +102,45 @@ def executor_binding(pool_id: str) -> PreparedExecutorBindingV2:
         executor_incarnation=EXECUTOR_INCARNATIONS[pool_id],
         signing_key_sha256=public_key_fingerprint(private_key.public_key()),
         local_authority_sha256=("a" if pool_id == "gb10" else "b") * 64,
-        controller_authority_sha256=CONTROLLER_DIGESTS[pool_id],
+        controller_authority_sha256=(
+            CONTROLLER_DIGESTS[pool_id]
+            if controller_authority_sha256 is None
+            else controller_authority_sha256
+        ),
     )
 
 
 def execution_policy(
     candidate: CandidateBindingV2 | None = None,
+    *,
+    ceiling: int = 1,
+    controller_digests: Mapping[str, str] | None = None,
 ) -> ExecutionPreparationPolicyV2:
+    resolved_controller_digests = {
+        pool_id: (
+            CONTROLLER_DIGESTS[pool_id]
+            if controller_digests is None
+            else controller_digests.get(pool_id, CONTROLLER_DIGESTS[pool_id])
+        )
+        for pool_id in ("gb10", "oldlab")
+    }
     return ExecutionPreparationPolicyV2(
         trusted_fleet_release_sha256=TRUSTED_RELEASE,
-        executable_new_capacity_ceiling=1,
+        executable_new_capacity_ceiling=ceiling,
         executable_new_capacity_rate_per_minute=1,
-        executors=tuple(executor_binding(pool_id) for pool_id in ("gb10", "oldlab")),
+        executors=tuple(
+            executor_binding(
+                pool_id,
+                controller_authority_sha256=resolved_controller_digests[pool_id],
+            )
+            for pool_id in ("gb10", "oldlab")
+        ),
         subject_acknowledgements=(execution_acknowledgement(candidate),),
         rollback_evidence_sha256="6" * 64,
         controller_authorities=tuple(
             PoolControllerAuthorityV2(
                 pool_id=pool_id,
-                controller_authority_sha256=CONTROLLER_DIGESTS[pool_id],
+                controller_authority_sha256=resolved_controller_digests[pool_id],
             )
             for pool_id in ("gb10", "oldlab")
         ),
@@ -137,13 +163,21 @@ async def setup_execution(
     *,
     execution_policy: ExecutionPreparationPolicyV2 | None = None,
     candidate: CandidateBindingV2 | None = None,
+    ceiling: int = 1,
 ) -> PreparedExecutionFixture:
-    await session.execute(
-        text("ALTER TABLE capacity_execution_executors DISABLE TRIGGER USER")
-    )
-    await session.execute(
-        text("ALTER TABLE capacity_execution_epochs DISABLE TRIGGER USER")
-    )
+    controller_digests = dict(CONTROLLER_DIGESTS)
+    if execution_policy is not None:
+        controller_digests.update(
+            {
+                authority.pool_id: authority.controller_authority_sha256
+                for authority in execution_policy.controller_authorities
+            }
+        )
+    for table in reversed(Base.metadata.sorted_tables):
+        if table.name != CapacityAuthorityState.__tablename__:
+            await session.execute(text(f"ALTER TABLE {table.name} DISABLE TRIGGER USER"))
+            await session.execute(delete(table))
+            await session.execute(text(f"ALTER TABLE {table.name} ENABLE TRIGGER USER"))
     await session.execute(
         text(
             "ALTER TABLE capacity_authority_state DISABLE TRIGGER "
@@ -168,20 +202,11 @@ async def setup_execution(
             global_submission_rate_ceiling=0,
         )
     )
-    for table in reversed(Base.metadata.sorted_tables):
-        if table.name != CapacityAuthorityState.__tablename__:
-            await session.execute(delete(table))
     await session.execute(
         text(
             "ALTER TABLE capacity_authority_state ENABLE TRIGGER "
             "capacity_authority_execution_transition_guard"
         )
-    )
-    await session.execute(
-        text("ALTER TABLE capacity_execution_epochs ENABLE TRIGGER USER")
-    )
-    await session.execute(
-        text("ALTER TABLE capacity_execution_executors ENABLE TRIGGER USER")
     )
 
     store = CapacityManagementStore(execution_policy=execution_policy)
@@ -199,35 +224,25 @@ async def setup_execution(
         actor="environment-state",
         idempotency_key=UUID(int=702),
     )
+    acknowledgement = execution_acknowledgement(candidate)
     active = await store.activate_configuration(
         session,
         configuration_activation(
             fleet=fleet_proposal,
             subjects=(subject_proposal,),
+            static_candidate_provenance=(
+                StaticCandidateProvenanceV1(
+                    subject_id=subject.subject_id,
+                    subject_incarnation=subject.subject_incarnation,
+                    candidate_generation=subject.candidate_generation,
+                    algorithm=acknowledgement.candidate.algorithm,
+                    identity=acknowledgement.candidate.identity,
+                    publication_sha256=acknowledgement.candidate.publication_sha256,
+                ),
+            ),
         ),
         actor="fleet-operator",
         idempotency_key=UUID(int=703),
-    )
-    acknowledgement = execution_acknowledgement(candidate)
-    session.add(
-        CapacityCandidate(
-            subject_id=acknowledgement.subject_id,
-            subject_incarnation=acknowledgement.subject_incarnation,
-            candidate_generation=subject.candidate_generation,
-            candidate_digest=(
-                acknowledgement.candidate.identity
-                if acknowledgement.candidate.algorithm == "source-sha256"
-                else "a" * 64
-            ),
-            candidate_identity_algorithm=acknowledgement.candidate.algorithm,
-            candidate_identity=acknowledgement.candidate.identity,
-            source_payload={"publication_sha256": acknowledgement.candidate.publication_sha256},
-            artifact_payload={},
-            architecture_payload={},
-            launcher_payload={},
-            attestation_payload={},
-            protocol_payload={},
-        )
     )
     await session.flush()
     writer = await store.register_writer(session, AUTHORITY_ID, expected_epoch=0)
@@ -268,7 +283,7 @@ async def setup_execution(
                 executor_incarnation=registration.executor_incarnation,
                 signing_key_sha256=registration.signing_key_sha256,
                 local_authority_sha256=registration.local_authority_sha256,
-                controller_authority_sha256=CONTROLLER_DIGESTS[pool_id],
+                controller_authority_sha256=controller_digests[pool_id],
             )
         )
 
@@ -279,7 +294,7 @@ async def setup_execution(
         fleet_generation=fleet.fleet_generation,
         fleet_digest=fleet_proposal.digest,
         trusted_fleet_release_sha256=TRUSTED_RELEASE,
-        requested_ceiling=1,
+        requested_ceiling=ceiling,
         requested_rate_per_minute=1,
         executors=tuple(executors),
         subject_acknowledgements=(acknowledgement,),

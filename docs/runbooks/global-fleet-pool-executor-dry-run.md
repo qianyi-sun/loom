@@ -6,6 +6,12 @@ controller. It is usable only while the management authority has
 quarantine, and release dry-run records; it has no scheduler client, subprocess
 entry point, or Slurm mutation surface.
 
+`DryRun*V1` remains permanently `executable=false`, including after the
+executable-v2 bridge package merges. That package remains zero-ceiling and does
+not authorize live infrastructure mutation; use its separate
+[inert rehearsal runbook](executable-global-capacity-bridge-rehearsal.md) for
+read-only status and offline validation evidence.
+
 Do not install a second global manager or one executor per development
 environment. The single manager runs in the shared `loom-dev` infrastructure
 namespace. That Kubernetes namespace is not the logical shared-development

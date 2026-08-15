@@ -21,8 +21,10 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableBootstrapRegistrationV2,
     ExecutableExecutorHeartbeatV2,
     ExecutableExecutorInventoryV2,
+    ExecutableIntentBindingV2,
     ExecutableIntentCloseV2,
     ExecutableInventoryRecordV2,
+    ExecutableLaunchPermitV2,
     ExecutableOwnershipMetadataV2,
     ExecutablePartialReleaseV2,
     ExecutablePermitConsumptionV2,
@@ -31,11 +33,15 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableReservationProposalV2,
     ExecutionActivationV2,
     ExecutionContextV2,
+    ExecutionRetirementExecutorCheckpointV2,
+    ExecutionRetirementV2,
     SignedExecutableOwnershipProofV2,
     canonical_executable_bytes,
+    canonical_inventory_confirmation_journal_head,
 )
 from loom_capacity_manager.execution_store import CapacityExecutionStore
 from loom_capacity_manager.models import (
+    CapacityAccountPolicy,
     CapacityAllocation,
     CapacityAllocationEpoch,
     CapacityAuthorityState,
@@ -46,6 +52,7 @@ from loom_capacity_manager.models import (
     CapacityPool,
     CapacityPoolObservation,
     CapacitySubject,
+    CapacityTier,
     CapacityWorkerProfile,
 )
 from loom_capacity_manager.ownership import OwnershipKeyring
@@ -108,7 +115,7 @@ async def _active_plan_with_policy(  # type: ignore[no-untyped-def]
             expected_writer_epoch=prepared.writer_epoch,
             execution_epoch=prepared.execution_epoch,
             execution_manifest_sha256=prepared.execution_manifest_sha256,
-            executable_new_capacity_ceiling=1,
+            executable_new_capacity_ceiling=policy.executable_new_capacity_ceiling,
             executable_new_capacity_rate_per_minute=policy.executable_new_capacity_rate_per_minute,
         ),
         actor="activation-operator",
@@ -448,9 +455,7 @@ async def test_drain_telemetry_rejects_a_changed_original_active_context(
         )
     elif changed_field == "ceiling":
         changed = active.model_copy(
-            update={
-                "executable_new_capacity_ceiling": active.executable_new_capacity_ceiling + 1
-            }
+            update={"executable_new_capacity_ceiling": active.executable_new_capacity_ceiling + 1}
         )
     else:
         changed = active.model_copy(
@@ -551,9 +556,7 @@ async def _launch_ready(
             reporter_incarnation=subject_acknowledgement.reporter_incarnation,
             bootstrap_registration_epoch=1,
             bootstrap_evidence_sha256="8" * 64,
-            protected_admission_sha256=(
-                subject_acknowledgement.protected_admission_sha256
-            ),
+            protected_admission_sha256=(subject_acknowledgement.protected_admission_sha256),
         ),
         actor="development",
         idempotency_key=UUID(int=995),
@@ -562,6 +565,34 @@ async def _launch_ready(
     assert permit is not None
     assert permit.binding.intent_id == intent.intent_id
     return permit
+
+
+async def _accepted_binding(
+    store: CapacityExecutionStore,
+    session: AsyncSession,
+):
+    active, _allocation_epoch = await _active_plan(session)
+    binding = executor_binding("gb10")
+    await _heartbeat(store, session, active, pool_id="gb10")
+    proposal = await store.next_pool_work(session, binding)
+    assert isinstance(proposal, ExecutableReservationProposalV2)
+    accepted = await store.accept_reservation(
+        session,
+        ExecutableReservationAcceptanceV2(
+            execution=proposal.execution,
+            tranche_id=proposal.tranche_id,
+            proposal_digest=store.contract_digest(proposal),
+            pool_id=binding.pool_id,
+            pool_generation=binding.pool_generation,
+            executor_id=binding.executor_id,
+            executor_incarnation=binding.executor_incarnation,
+            command_sequence=1,
+        ),
+    )
+    intent = await store.next_pool_work(session, binding)
+    assert isinstance(intent, ExecutableIntentBindingV2)
+    assert intent.intent_id == accepted.intent_ids[0]
+    return active, intent
 
 
 async def _consume_then_publish_empty_inventory(
@@ -592,6 +623,214 @@ async def _consume_then_publish_empty_inventory(
     return permit, inventory
 
 
+def _submission_recovery(
+    store: CapacityExecutionStore,
+    permit,
+    inventory: ExecutableExecutorInventoryV2,
+    *,
+    command_sequence: int = 4,
+) -> executable_contracts_module.ExecutableSubmissionRecoveryV2:
+    return executable_contracts_module.ExecutableSubmissionRecoveryV2(
+        binding=permit.binding,
+        permit_id=permit.permit_id,
+        permit_digest=store.contract_digest(permit),
+        command_sequence=command_sequence,
+        inventory_sequence=inventory.inventory_sequence,
+        inventory_digest=store.contract_digest(inventory),
+        controller_query_completed_at=datetime.now(UTC),
+        submit_process_absent=True,
+        scheduler_submission_absent=True,
+        controller_evidence_sha256="a" * 64,
+    )
+
+
+def _successor_binding(binding):  # type: ignore[no-untyped-def]
+    return binding.model_copy(
+        update={
+            "tranche_id": uuid4(),
+            "intent_id": uuid4(),
+            "shape_instance_id": f"{binding.shape_instance_id}-successor",
+        }
+    )
+
+
+def _scaled_resources(resources, factor: int):  # type: ignore[no-untyped-def]
+    return resource_vector(
+        slots=resources.slots * factor,
+        cpu_millicores=resources.cpu_millicores * factor,
+        memory_bytes=resources.memory_bytes * factor,
+        gpu_count=resources.gpu_count * factor,
+        generic={key: value * factor for key, value in resources.generic.items()},
+    )
+
+
+def _authenticated_physical_commitment(permit):  # type: ignore[no-untyped-def]
+    return (
+        pool_observation(
+            pool_id=permit.binding.pool_id,
+            commitment_ids=(f"physical-{permit.binding.intent_id}",),
+        )
+        .commitments[0]
+        .model_copy(
+            update={
+                "physical_identity": permit.binding.shape_instance_id,
+                "reservation_identity": str(permit.binding.intent_id),
+                "ownership_state": "authenticated",
+                "subject_id": permit.binding.subject_id,
+                "subject_incarnation": permit.binding.subject_incarnation,
+                "deployment_generation": permit.binding.deployment_generation,
+                "pool_generation": permit.binding.pool_generation,
+                "profile_id": permit.binding.profile_id,
+                "profile_generation": permit.binding.profile_generation,
+                "profile_digest": permit.binding.profile_digest,
+                "shape_id": permit.binding.shape_id,
+                "resources": permit.binding.resources,
+                "state": "live",
+                "node_ids": permit.binding.node_ids,
+            }
+        )
+    )
+
+
+def _successor_proposed_row(
+    store: CapacityExecutionStore,
+    row: CapacityExecutableIntent,
+    binding,
+) -> CapacityExecutableIntent:
+    return CapacityExecutableIntent(
+        intent_id=binding.intent_id,
+        tranche_id=binding.tranche_id,
+        shape_instance_id=binding.shape_instance_id,
+        execution_epoch=row.execution_epoch,
+        execution_manifest_sha256=row.execution_manifest_sha256,
+        configuration_epoch=row.configuration_epoch,
+        allocation_epoch=row.allocation_epoch,
+        executor_id=row.executor_id,
+        executor_incarnation=row.executor_incarnation,
+        pool_id=row.pool_id,
+        pool_generation=row.pool_generation,
+        subject_id=row.subject_id,
+        subject_incarnation=row.subject_incarnation,
+        launch_rank=row.launch_rank + 1,
+        proposal_digest=row.proposal_digest,
+        proposal_payload=json.loads(json.dumps(row.proposal_payload)),
+        binding_digest=store.contract_digest(binding),
+        binding_payload=binding.model_dump(mode="json", exclude_none=False),
+        state="proposed",
+    )
+
+
+async def _quarantined_consumed_permit(
+    store: CapacityExecutionStore,
+    session: AsyncSession,
+    *,
+    policy=None,
+):  # type: ignore[no-untyped-def]
+    resolved_policy = execution_policy(ceiling=2) if policy is None else policy
+    permit = await _launch_ready(store, session, policy=resolved_policy)
+    await store.consume_launch_permit(
+        session,
+        ExecutablePermitConsumptionV2(
+            permit_id=permit.permit_id,
+            permit_digest=store.contract_digest(permit),
+            binding=permit.binding,
+            command_sequence=3,
+        ),
+    )
+    inventory = ExecutableExecutorInventoryV2(
+        execution=_inventory_execution(permit.binding),
+        executor_id=permit.binding.executor_id,
+        executor_incarnation=permit.binding.executor_incarnation,
+        pool_id=permit.binding.pool_id,
+        pool_generation=permit.binding.pool_generation,
+        inventory_sequence=2,
+        journal_sequence=0,
+        journal_digest="0" * 64,
+    )
+    await store.ingest_executor_inventory(session, inventory)
+    await store.recover_unsubmitted_permit(session, _submission_recovery(store, permit, inventory))
+    return permit, await _intent_row(session, permit.binding.intent_id)
+
+
+async def _intent_row(
+    session: AsyncSession,
+    intent_id: UUID,
+) -> CapacityExecutableIntent:
+    return (
+        await session.execute(
+            select(CapacityExecutableIntent).where(CapacityExecutableIntent.intent_id == intent_id)
+        )
+    ).scalar_one()
+
+
+async def _post_inventory_heartbeat(
+    store: CapacityExecutionStore,
+    session: AsyncSession,
+    execution: ExecutionContextV2,
+    *,
+    pool_id: str,
+) -> None:
+    state = (
+        await session.execute(
+            select(CapacityExecutableExecutorState).where(
+                CapacityExecutableExecutorState.pool_id == pool_id
+            )
+        )
+    ).scalar_one()
+    binding = executor_binding(pool_id)
+    await store.heartbeat_executor(
+        session,
+        ExecutableExecutorHeartbeatV2(
+            execution=execution,
+            executor_id=binding.executor_id,
+            executor_incarnation=binding.executor_incarnation,
+            pool_id=binding.pool_id,
+            pool_generation=binding.pool_generation,
+            heartbeat_sequence=state.heartbeat_high_water + 1,
+            journal_sequence=state.journal_high_water,
+            journal_digest=state.journal_digest,
+        ),
+    )
+
+
+async def _mark_retirement_safe(
+    session: AsyncSession,
+    *,
+    pool_id: str,
+) -> ExecutionRetirementExecutorCheckpointV2:
+    state = (
+        await session.execute(
+            select(CapacityExecutableExecutorState).where(
+                CapacityExecutableExecutorState.pool_id == pool_id
+            )
+        )
+    ).scalar_one()
+    inventory = ExecutableExecutorInventoryV2.model_validate_json(
+        json.dumps(state.inventory_payload)
+    )
+    _confirmation_sequence, confirmation_digest = canonical_inventory_confirmation_journal_head(
+        inventory
+    )
+    state.journal_high_water = _confirmation_sequence
+    state.journal_digest = confirmation_digest
+    state.inventory_confirmation_journal_digest = confirmation_digest
+    state.retirement_safe = True
+    state.retirement_inventory_digest = state.last_inventory_digest
+    await session.flush()
+    return ExecutionRetirementExecutorCheckpointV2(
+        executor_id=state.executor_id,
+        executor_incarnation=state.executor_incarnation,
+        pool_id=pool_id,  # type: ignore[arg-type]
+        pool_generation=state.pool_generation,
+        heartbeat_sequence=state.heartbeat_high_water,
+        command_sequence=state.command_high_water,
+        journal_sequence=state.journal_high_water,
+        journal_digest=state.journal_digest,
+        inventory_sequence=state.inventory_high_water,
+        inventory_digest=state.last_inventory_digest,
+    )
+
+
 async def _test_only_update_without_guard(
     session: AsyncSession,
     *,
@@ -601,13 +840,9 @@ async def _test_only_update_without_guard(
 ) -> None:  # type: ignore[no-untyped-def]
     """Build otherwise-impossible fixtures without weakening production guards."""
 
-    await session.execute(
-        text(f"ALTER TABLE public.{table_name} DISABLE TRIGGER {trigger_name}")
-    )
+    await session.execute(text(f"ALTER TABLE public.{table_name} DISABLE TRIGGER {trigger_name}"))
     await session.execute(statement.execution_options(synchronize_session=False))
-    await session.execute(
-        text(f"ALTER TABLE public.{table_name} ENABLE TRIGGER {trigger_name}")
-    )
+    await session.execute(text(f"ALTER TABLE public.{table_name} ENABLE TRIGGER {trigger_name}"))
 
 
 async def _test_only_release_intent(
@@ -653,6 +888,26 @@ async def _test_only_add_intent_without_guard(
             "ALTER TABLE public.capacity_executable_intents "
             "ENABLE TRIGGER capacity_executable_intent_mutation_guard"
         )
+    )
+
+
+def _test_only_synthetic_permit(
+    row: CapacityExecutableIntent,
+    binding: ExecutableIntentBindingV2,
+    now: datetime,
+) -> ExecutableLaunchPermitV2:
+    """Build work for a synthetic row whose real acknowledgement is intentionally absent."""
+
+    assert row.bootstrap_registration_epoch is not None
+    assert row.bootstrap_evidence_sha256 is not None
+    return ExecutableLaunchPermitV2(
+        permit_id=uuid4(),
+        binding=binding,
+        permit_epoch=1,
+        launch_rank=row.launch_rank,
+        expires_at=now + timedelta(minutes=1),
+        bootstrap_registration_epoch=row.bootstrap_registration_epoch,
+        bootstrap_evidence_sha256=row.bootstrap_evidence_sha256,
     )
 
 
@@ -1180,9 +1435,7 @@ async def _proposed_bootstrap(
     binding = await store.next_pool_work(session, executor)
     assert binding is not None
     assert binding.intent_id == accepted.intent_ids[0]
-    database_now = (
-        await session.execute(select(func.clock_timestamp()))
-    ).scalar_one()
+    database_now = (await session.execute(select(func.clock_timestamp()))).scalar_one()
     bootstrap = ExecutableBootstrapProposalV2(
         binding=binding,
         command_sequence=2,
@@ -1324,6 +1577,8 @@ async def test_launch_permit_requires_subject_agent_bootstrap_acknowledgement(
     permit = await store.next_pool_work(capacity_session, executor)
     assert permit is not None
     assert permit.binding.intent_id == binding.intent_id
+    assert permit.bootstrap_registration_epoch == 1
+    assert permit.bootstrap_evidence_sha256 == "8" * 64
 
 
 async def _insert_direct_bootstrap_acknowledgement(
@@ -1358,9 +1613,7 @@ async def _insert_direct_bootstrap_acknowledgement(
             "proposal_epoch": acknowledgement.proposal_epoch,
             "proposal_digest": acknowledgement.proposal_digest,
             "reporter_incarnation": acknowledgement.reporter_incarnation,
-            "bootstrap_registration_epoch": (
-                acknowledgement.bootstrap_registration_epoch
-            ),
+            "bootstrap_registration_epoch": (acknowledgement.bootstrap_registration_epoch),
             "bootstrap_evidence_sha256": acknowledgement.bootstrap_evidence_sha256,
             "protected_admission_sha256": acknowledgement.protected_admission_sha256,
             "acknowledgement_digest": "a" * 64,
@@ -1399,9 +1652,7 @@ async def test_bootstrap_ack_guard_rejects_direct_sql_forgery(
     )
     payload = acknowledgement.model_dump(mode="json", exclude_none=False)
     if forgery == "wrong-reporter":
-        acknowledgement = acknowledgement.model_copy(
-            update={"reporter_incarnation": uuid4()}
-        )
+        acknowledgement = acknowledgement.model_copy(update={"reporter_incarnation": uuid4()})
     elif forgery == "wrong-protected-admission":
         acknowledgement = acknowledgement.model_copy(
             update={"protected_admission_sha256": "f" * 64}
@@ -1414,9 +1665,7 @@ async def test_bootstrap_ack_guard_rejects_direct_sql_forgery(
             await _insert_direct_bootstrap_acknowledgement(
                 capacity_session,
                 acknowledgement,
-                acknowledgement_payload=(
-                    payload if forgery == "unknown-payload-key" else None
-                ),
+                acknowledgement_payload=(payload if forgery == "unknown-payload-key" else None),
             )
 
 
@@ -1449,9 +1698,7 @@ async def test_bootstrap_proposal_supersession_uses_wall_clock_and_fences_stale_
         capacity_session,
         expires_in=timedelta(seconds=1),
     )
-    database_now = (
-        await capacity_session.execute(select(func.clock_timestamp()))
-    ).scalar_one()
+    database_now = (await capacity_session.execute(select(func.clock_timestamp()))).scalar_one()
     second = first.model_copy(
         update={
             "command_sequence": 3,
@@ -1464,12 +1711,8 @@ async def test_bootstrap_proposal_supersession_uses_wall_clock_and_fences_stale_
         await store.propose_bootstrap(capacity_session, second)
 
     await capacity_session.execute(text("SELECT pg_sleep(1.1)"))
-    database_now = (
-        await capacity_session.execute(select(func.clock_timestamp()))
-    ).scalar_one()
-    second = second.model_copy(
-        update={"expires_at": database_now + timedelta(minutes=1)}
-    )
+    database_now = (await capacity_session.execute(select(func.clock_timestamp()))).scalar_one()
+    second = second.model_copy(update={"expires_at": database_now + timedelta(minutes=1)})
     await store.propose_bootstrap(capacity_session, second)
     subject_work = await store.next_subject_bootstrap(
         capacity_session,
@@ -1582,7 +1825,9 @@ async def test_expired_allocation_input_cannot_consume(
         allocation_epoch=permit.binding.execution.allocation_epoch,
         input_valid_until=datetime.now(UTC) - timedelta(seconds=1),
     )
-    expired_execution = permit.binding.execution.model_copy(update={"allocation_epoch": expired_epoch})
+    expired_execution = permit.binding.execution.model_copy(
+        update={"allocation_epoch": expired_epoch}
+    )
     expired_binding = permit.binding.model_copy(
         update={
             "execution": expired_execution,
@@ -1617,7 +1862,11 @@ async def test_expired_allocation_input_cannot_consume(
         launch_ready_at=datetime.now(UTC),
     )
     await _test_only_add_intent_without_guard(capacity_session, expired_row)
-    expired_permit = store._new_permit(expired_row, datetime.now(UTC))
+    expired_permit = _test_only_synthetic_permit(
+        expired_row,
+        expired_binding,
+        datetime.now(UTC),
+    )
     expired_row.permit_id = expired_permit.permit_id
     expired_row.permit_epoch = expired_permit.permit_epoch
     expired_row.permit_digest = store.contract_digest(expired_permit)
@@ -1769,7 +2018,11 @@ async def test_consume_launch_permit_locks_allocation_intents_in_canonical_order
         launch_ready_at=datetime.now(UTC),
     )
     await _test_only_add_intent_without_guard(capacity_session, target_row)
-    target_permit = store._new_permit(target_row, datetime.now(UTC))
+    target_permit = _test_only_synthetic_permit(
+        target_row,
+        target_binding,
+        datetime.now(UTC),
+    )
     target_row.permit_id = target_permit.permit_id
     target_row.permit_epoch = target_permit.permit_epoch
     target_row.permit_digest = store.contract_digest(target_permit)
@@ -1804,59 +2057,95 @@ async def test_consume_launch_permit_locks_allocation_intents_in_canonical_order
     assert lock_order == [earlier_row.intent_id, target_binding.intent_id]
 
 
-async def test_crash_before_submit_recovery_enters_protected_release_path(
+async def test_crash_before_submit_recovery_quarantines_and_remains_charged(
     capacity_session: AsyncSession,
 ) -> None:
     store = CapacityExecutionStore()
     permit, inventory = await _consume_then_publish_empty_inventory(store, capacity_session)
-    recovery = executable_contracts_module.ExecutableSubmissionRecoveryV2(
-        binding=permit.binding,
-        permit_id=permit.permit_id,
-        permit_digest=store.contract_digest(permit),
-        command_sequence=4,
-        inventory_sequence=inventory.inventory_sequence,
-        inventory_digest=store.contract_digest(inventory),
-        controller_query_completed_at=datetime.now(UTC),
-        submit_process_absent=True,
-        scheduler_submission_absent=True,
-        controller_evidence_sha256="a" * 64,
-    )
+    recovery = _submission_recovery(store, permit, inventory)
 
     recovered = await store.recover_unsubmitted_permit(capacity_session, recovery)
 
-    row = (
-        await capacity_session.execute(
-            select(CapacityExecutableIntent).where(
-                CapacityExecutableIntent.intent_id == permit.binding.intent_id
-            )
-        )
-    ).scalar_one()
+    row = await _intent_row(capacity_session, permit.binding.intent_id)
     assert recovered.intent_id == permit.binding.intent_id
     assert recovered.replayed is False
-    assert row.state == "closing"
-    assert row.inventory_sequence == inventory.inventory_sequence
-    assert row.terminal_kind == "unused"
-    assert row.terminal_identity == permit.binding.shape_instance_id
-    assert row.terminal_evidence_sha256 == store.contract_digest(recovery)
+    assert row.state == "quarantined"
+    assert row.inventory_sequence is None
+    assert row.observed_state is None
+    assert row.terminal_kind is None
+    assert row.terminal_identity is None
+    assert row.terminal_evidence_sha256 is None
+    receipt_payload = (
+        await capacity_session.execute(
+            text(
+                "SELECT result_payload FROM capacity_executable_command_receipts "
+                "WHERE executor_incarnation = :executor_incarnation "
+                "AND command_sequence = :command_sequence "
+                "AND operation_kind = 'submission-recovery'"
+            ),
+            {
+                "executor_incarnation": permit.binding.executor_incarnation,
+                "command_sequence": recovery.command_sequence,
+            },
+        )
+    ).scalar_one()
+    assert receipt_payload["recovery"]["inventory_sequence"] == inventory.inventory_sequence
+    assert receipt_payload["recovery"]["inventory_digest"] == store.contract_digest(inventory)
 
-    protected = ExecutableProtectedReleaseV2(
-        binding=permit.binding,
-        reporter_incarnation=demand_snapshot().reporter_incarnation,
-        bootstrap_registration_epoch=1,
-        protected_registration_epoch=2,
-        bootstrap_revoked=True,
-        protected_release_sha256="b" * 64,
-    )
-    await store.acknowledge_protected_release(
+    assert await store.next_pool_work(capacity_session, executor_binding("gb10")) is None
+    context = await store._locked_execution_context(
         capacity_session,
-        protected,
-        actor="development",
-        idempotency_key=UUID(int=991),
+        permit.binding.execution,
+        executor_binding(permit.binding.pool_id),
     )
-    release = await store.next_pool_work(capacity_session, executor_binding("gb10"))
-    assert isinstance(release, ExecutablePartialReleaseV2)
-    released = await store.release_shapes(capacity_session, release)
-    assert released.released_shape_ids == (permit.binding.shape_instance_id,)
+    await capacity_session.execute(
+        update(CapacityAuthorityState)
+        .where(CapacityAuthorityState.singleton_id == 1)
+        .values(global_pending_slot_ceiling=1, global_pending_job_ceiling=1)
+    )
+    second_binding = permit.binding.model_copy(
+        update={
+            "tranche_id": uuid4(),
+            "intent_id": uuid4(),
+            "shape_instance_id": f"{permit.binding.shape_instance_id}-second",
+        }
+    )
+    second_row = CapacityExecutableIntent(
+        intent_id=second_binding.intent_id,
+        tranche_id=second_binding.tranche_id,
+        shape_instance_id=second_binding.shape_instance_id,
+        execution_epoch=row.execution_epoch,
+        execution_manifest_sha256=row.execution_manifest_sha256,
+        configuration_epoch=row.configuration_epoch,
+        allocation_epoch=row.allocation_epoch,
+        executor_id=row.executor_id,
+        executor_incarnation=row.executor_incarnation,
+        pool_id=row.pool_id,
+        pool_generation=row.pool_generation,
+        subject_id=row.subject_id,
+        subject_incarnation=row.subject_incarnation,
+        launch_rank=row.launch_rank + 1,
+        proposal_digest=row.proposal_digest,
+        proposal_payload=json.loads(json.dumps(row.proposal_payload)),
+        binding_digest=store.contract_digest(second_binding),
+        binding_payload=second_binding.model_dump(mode="json", exclude_none=False),
+        state="proposed",
+    )
+    await _test_only_add_intent_without_guard(capacity_session, second_row)
+    with pytest.raises(ExecutionConflictError, match="global pending limit"):
+        await store._assert_pending_limits(capacity_session, context, second_row)
+    with pytest.raises(ExecutionConflictError, match="capacity ceiling"):
+        await store._assert_increase_eligible(
+            capacity_session,
+            context,
+            proposed=permit.binding,
+        )
+
+    replay = await store.recover_unsubmitted_permit(capacity_session, recovery)
+    assert replay.replayed is True
+    replay_row = await _intent_row(capacity_session, permit.binding.intent_id)
+    assert replay_row.state == "quarantined"
+    assert replay_row.terminal_kind is None
 
 
 async def test_crash_before_submit_recovery_rejects_preconsumption_inventory(
@@ -1899,7 +2188,7 @@ async def test_crash_before_submit_recovery_rejects_preconsumption_inventory(
         await store.recover_unsubmitted_permit(capacity_session, recovery)
 
 
-async def test_crash_before_submit_recovery_survives_drain_only_turnover(
+async def test_crash_before_submit_recovery_survives_drain_only_but_blocks_retirement(
     capacity_session: AsyncSession,
 ) -> None:
     store = CapacityExecutionStore()
@@ -1929,30 +2218,58 @@ async def test_crash_before_submit_recovery_survives_drain_only_turnover(
         journal_digest="0" * 64,
     )
     await store.ingest_executor_inventory(capacity_session, inventory)
-    recovery = executable_contracts_module.ExecutableSubmissionRecoveryV2(
-        binding=permit.binding,
-        permit_id=permit.permit_id,
-        permit_digest=store.contract_digest(permit),
-        command_sequence=4,
-        inventory_sequence=inventory.inventory_sequence,
-        inventory_digest=store.contract_digest(inventory),
-        controller_query_completed_at=datetime.now(UTC),
-        submit_process_absent=True,
-        scheduler_submission_absent=True,
-        controller_evidence_sha256="a" * 64,
-    )
+    recovery = _submission_recovery(store, permit, inventory)
 
     recovered = await store.recover_unsubmitted_permit(capacity_session, recovery)
 
     assert recovered.intent_id == permit.binding.intent_id
-    row = (
+    row = await _intent_row(capacity_session, permit.binding.intent_id)
+    assert row.state == "quarantined"
+    assert row.inventory_sequence is None
+    assert row.terminal_kind is None
+    assert row.terminal_identity is None
+    assert row.terminal_evidence_sha256 is None
+    assert await store.next_pool_work(capacity_session, executor_binding("gb10")) is None
+
+    execution = _inventory_execution(permit.binding)
+    await _heartbeat(store, capacity_session, execution, pool_id="oldlab")
+    await _post_inventory_heartbeat(store, capacity_session, execution, pool_id="gb10")
+    await _post_inventory_heartbeat(store, capacity_session, execution, pool_id="oldlab")
+    checkpoints = tuple(
+        [
+            await _mark_retirement_safe(capacity_session, pool_id="gb10"),
+            await _mark_retirement_safe(capacity_session, pool_id="oldlab"),
+        ]
+    )
+    authority = (
         await capacity_session.execute(
-            select(CapacityExecutableIntent).where(
-                CapacityExecutableIntent.intent_id == permit.binding.intent_id
+            select(CapacityAuthorityState).where(CapacityAuthorityState.singleton_id == 1)
+        )
+    ).scalar_one()
+    epoch = (
+        await capacity_session.execute(
+            select(CapacityAllocationEpoch.execution_epoch).where(
+                CapacityAllocationEpoch.allocation_epoch
+                == permit.binding.execution.allocation_epoch
             )
         )
     ).scalar_one()
-    assert row.state == "closing"
+    del epoch
+    retirement = ExecutionRetirementV2(
+        authority_incarnation=authority.authority_incarnation,
+        expected_writer_epoch=authority.writer_epoch,
+        execution_epoch=permit.binding.execution.execution_epoch,
+        execution_manifest_sha256=permit.binding.execution.execution_manifest_sha256,
+        executor_checkpoints=checkpoints,
+    )
+
+    with pytest.raises(ExecutionConflictError, match="every executable intent must be released"):
+        await CapacityManagementStore().retire_execution_epoch(
+            capacity_session,
+            retirement,
+            actor="activation-operator",
+            idempotency_key=UUID(int=995),
+        )
 
 
 async def test_permit_consumption_rechecks_final_deadlines_without_committing_state(
@@ -2333,9 +2650,7 @@ async def test_pending_physical_commitment_can_exhaust_pool_limit(
                 pending.commitments[0].model_copy(
                     update={
                         "state": "pending",
-                        "resources": resource_vector(
-                            slots=0, cpu_millicores=0, memory_bytes=0
-                        ),
+                        "resources": resource_vector(slots=0, cpu_millicores=0, memory_bytes=0),
                     }
                 ),
             )
@@ -2382,9 +2697,7 @@ async def test_pending_physical_commitment_can_exhaust_subject_limit(
                 pending.commitments[0].model_copy(
                     update={
                         "state": "pending",
-                        "resources": resource_vector(
-                            slots=0, cpu_millicores=0, memory_bytes=0
-                        ),
+                        "resources": resource_vector(slots=0, cpu_millicores=0, memory_bytes=0),
                     }
                 ),
             )
@@ -2434,9 +2747,7 @@ async def test_external_physical_commitment_pending_states_count_against_global_
                 external.commitments[0].model_copy(
                     update={
                         "state": external_state,
-                        "resources": resource_vector(
-                            slots=0, cpu_millicores=0, memory_bytes=0
-                        ),
+                        "resources": resource_vector(slots=0, cpu_millicores=0, memory_bytes=0),
                     }
                 ),
             )
@@ -2456,6 +2767,89 @@ async def test_external_physical_commitment_pending_states_count_against_global_
 
     with pytest.raises(ExecutionConflictError, match="global pending limit"):
         await store._assert_pending_limits(capacity_session, context, row)
+
+
+async def test_exact_authenticated_pending_physical_coalesces_with_charged_intent(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityExecutionStore()
+    permit, row = await _quarantined_consumed_permit(
+        store,
+        capacity_session,
+        policy=execution_policy(ceiling=2),
+    )
+    await capacity_session.execute(
+        update(CapacityAuthorityState)
+        .where(CapacityAuthorityState.singleton_id == 1)
+        .values(global_pending_slot_ceiling=8, global_pending_job_ceiling=2)
+    )
+    physical = _authenticated_physical_commitment(permit).model_copy(update={"state": "pending"})
+    observation = pool_observation(pool_id=permit.binding.pool_id).model_copy(
+        update={"commitments": (physical,)}
+    )
+    await capacity_session.execute(
+        update(CapacityPoolObservation)
+        .where(CapacityPoolObservation.pool_id == permit.binding.pool_id)
+        .values(payload=observation.model_dump(mode="json", exclude_none=False))
+    )
+    context = await store._locked_execution_context(
+        capacity_session,
+        permit.binding.execution,
+        executor_binding(permit.binding.pool_id),
+    )
+    successor = _successor_binding(permit.binding)
+    successor_row = _successor_proposed_row(store, row, successor)
+    await _test_only_add_intent_without_guard(capacity_session, successor_row)
+
+    await store._assert_pending_limits(capacity_session, context, successor_row)
+
+
+@pytest.mark.parametrize("drift", ("resources", "pool-generation", "nodes"))
+async def test_authenticated_pending_physical_drift_counts_separately_from_charged_intent(
+    capacity_session: AsyncSession,
+    drift: str,
+) -> None:
+    store = CapacityExecutionStore()
+    permit, row = await _quarantined_consumed_permit(
+        store,
+        capacity_session,
+        policy=execution_policy(ceiling=2),
+    )
+    await capacity_session.execute(
+        update(CapacityAuthorityState)
+        .where(CapacityAuthorityState.singleton_id == 1)
+        .values(global_pending_slot_ceiling=8, global_pending_job_ceiling=2)
+    )
+    physical = _authenticated_physical_commitment(permit).model_copy(update={"state": "pending"})
+    if drift == "resources":
+        physical = physical.model_copy(
+            update={"resources": _scaled_resources(permit.binding.resources, 2)}
+        )
+    elif drift == "pool-generation":
+        physical = physical.model_copy(
+            update={"pool_generation": permit.binding.pool_generation + 1}
+        )
+    else:
+        physical = physical.model_copy(update={"node_ids": ("gb10-drift",)})
+    observation = pool_observation(pool_id=permit.binding.pool_id).model_copy(
+        update={"commitments": (physical,)}
+    )
+    await capacity_session.execute(
+        update(CapacityPoolObservation)
+        .where(CapacityPoolObservation.pool_id == permit.binding.pool_id)
+        .values(payload=observation.model_dump(mode="json", exclude_none=False))
+    )
+    context = await store._locked_execution_context(
+        capacity_session,
+        permit.binding.execution,
+        executor_binding(permit.binding.pool_id),
+    )
+    successor = _successor_binding(permit.binding)
+    successor_row = _successor_proposed_row(store, row, successor)
+    await _test_only_add_intent_without_guard(capacity_session, successor_row)
+
+    with pytest.raises(ExecutionConflictError, match="global pending limit"):
+        await store._assert_pending_limits(capacity_session, context, successor_row)
 
 
 async def test_closing_intent_remains_charged_until_release(
@@ -2479,6 +2873,335 @@ async def test_closing_intent_remains_charged_until_release(
             capacity_session,
             context,
             proposed=permit.binding,
+        )
+
+
+@pytest.mark.parametrize(
+    ("scope", "expected"),
+    (
+        ("pool", "pool pending limit"),
+        ("subject", "subject pending limit"),
+        ("account", "account pending limit"),
+        ("tier", "tier pending limit"),
+    ),
+)
+async def test_quarantined_intent_counts_against_scoped_pending_limits(
+    capacity_session: AsyncSession,
+    scope: str,
+    expected: str,
+) -> None:
+    store = CapacityExecutionStore()
+    permit, row = await _quarantined_consumed_permit(store, capacity_session)
+    await capacity_session.execute(
+        update(CapacityAuthorityState)
+        .where(CapacityAuthorityState.singleton_id == 1)
+        .values(global_pending_slot_ceiling=8, global_pending_job_ceiling=8)
+    )
+    if scope == "pool":
+        await capacity_session.execute(
+            update(CapacityPool)
+            .where(
+                CapacityPool.configuration_epoch == permit.binding.execution.configuration_epoch,
+                CapacityPool.pool_id == permit.binding.pool_id,
+            )
+            .values(max_pending_slots=1, max_pending_jobs=1)
+        )
+    elif scope == "subject":
+        await capacity_session.execute(
+            update(CapacitySubject)
+            .where(
+                CapacitySubject.configuration_epoch == permit.binding.execution.configuration_epoch,
+                CapacitySubject.subject_id == permit.binding.subject_id,
+                CapacitySubject.subject_incarnation == permit.binding.subject_incarnation,
+            )
+            .values(max_pending_slots=1, max_pending_jobs=1)
+        )
+    elif scope == "account":
+        await capacity_session.execute(
+            update(CapacityAccountPolicy)
+            .where(
+                CapacityAccountPolicy.configuration_epoch
+                == permit.binding.execution.configuration_epoch,
+                CapacityAccountPolicy.account_id == permit.binding.account_id,
+            )
+            .values(max_pending_slots=1, max_pending_jobs=1)
+        )
+    else:
+        await capacity_session.execute(
+            update(CapacityTier)
+            .where(
+                CapacityTier.configuration_epoch == permit.binding.execution.configuration_epoch,
+                CapacityTier.tier_id == permit.binding.tier_id,
+            )
+            .values(max_pending_slots=1, max_pending_jobs=1)
+        )
+    context = await store._locked_execution_context(
+        capacity_session,
+        permit.binding.execution,
+        executor_binding(permit.binding.pool_id),
+    )
+    successor = _successor_binding(permit.binding)
+    successor_row = _successor_proposed_row(store, row, successor)
+    await _test_only_add_intent_without_guard(capacity_session, successor_row)
+
+    with pytest.raises(ExecutionConflictError, match=expected):
+        await store._assert_pending_limits(capacity_session, context, successor_row)
+
+
+async def test_quarantined_intent_counts_against_pool_resource_headroom(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityExecutionStore()
+    permit, _row = await _quarantined_consumed_permit(store, capacity_session)
+    pool = (
+        await capacity_session.execute(
+            select(CapacityPool).where(
+                CapacityPool.configuration_epoch == permit.binding.execution.configuration_epoch,
+                CapacityPool.pool_id == permit.binding.pool_id,
+            )
+        )
+    ).scalar_one()
+    topology = json.loads(json.dumps(pool.topology))
+    topology["resource_domains"][0]["nodes"][0]["allocatable"] = (
+        permit.binding.resources.model_dump(mode="json", exclude_none=False)
+    )
+    pool.topology = topology
+    context = await store._locked_execution_context(
+        capacity_session,
+        permit.binding.execution,
+        executor_binding(permit.binding.pool_id),
+    )
+
+    with pytest.raises(ExecutionConflictError, match="pool headroom"):
+        await store._assert_increase_eligible(
+            capacity_session,
+            context,
+            proposed=_successor_binding(permit.binding),
+        )
+
+
+async def test_authenticated_physical_observation_deduplicates_pool_resource_headroom(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityExecutionStore()
+    permit = await _launch_ready(store, capacity_session, policy=execution_policy(ceiling=2))
+    await store.consume_launch_permit(
+        capacity_session,
+        ExecutablePermitConsumptionV2(
+            permit_id=permit.permit_id,
+            permit_digest=store.contract_digest(permit),
+            binding=permit.binding,
+            command_sequence=3,
+        ),
+    )
+    pool = (
+        await capacity_session.execute(
+            select(CapacityPool).where(
+                CapacityPool.configuration_epoch == permit.binding.execution.configuration_epoch,
+                CapacityPool.pool_id == permit.binding.pool_id,
+            )
+        )
+    ).scalar_one()
+    topology = json.loads(json.dumps(pool.topology))
+    topology["resource_domains"][0]["nodes"] = [
+        {
+            **topology["resource_domains"][0]["nodes"][0],
+            "node_id": permit.binding.node_ids[0],
+            "allocatable": _scaled_resources(permit.binding.resources, 2).model_dump(
+                mode="json",
+                exclude_none=False,
+            ),
+        }
+    ]
+    pool.topology = topology
+    observation = pool_observation(pool_id=permit.binding.pool_id).model_copy(
+        update={"commitments": (_authenticated_physical_commitment(permit),)}
+    )
+    await capacity_session.execute(
+        update(CapacityPoolObservation)
+        .where(CapacityPoolObservation.pool_id == permit.binding.pool_id)
+        .values(payload=observation.model_dump(mode="json", exclude_none=False))
+    )
+    context = await store._locked_execution_context(
+        capacity_session,
+        permit.binding.execution,
+        executor_binding(permit.binding.pool_id),
+    )
+
+    await store._assert_increase_eligible(
+        capacity_session,
+        context,
+        proposed=_successor_binding(permit.binding),
+    )
+
+
+async def test_quarantined_intent_combines_with_external_resource_commitments(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityExecutionStore()
+    permit, _row = await _quarantined_consumed_permit(store, capacity_session)
+    pool = (
+        await capacity_session.execute(
+            select(CapacityPool).where(
+                CapacityPool.configuration_epoch == permit.binding.execution.configuration_epoch,
+                CapacityPool.pool_id == permit.binding.pool_id,
+            )
+        )
+    ).scalar_one()
+    topology = json.loads(json.dumps(pool.topology))
+    template = topology["resource_domains"][0]["nodes"][0]
+    topology["resource_domains"][0]["nodes"] = [
+        {
+            **template,
+            "node_id": permit.binding.node_ids[0],
+            "allocatable": permit.binding.resources.model_dump(mode="json", exclude_none=False),
+        },
+        {
+            **template,
+            "node_id": "gb10-node-b",
+            "allocatable": permit.binding.resources.model_dump(mode="json", exclude_none=False),
+        },
+    ]
+    pool.topology = topology
+    external = pool_observation(pool_id=permit.binding.pool_id).model_copy(
+        update={
+            "commitments": (
+                pool_observation(
+                    pool_id=permit.binding.pool_id,
+                    commitment_ids=("external-resource",),
+                )
+                .commitments[0]
+                .model_copy(
+                    update={
+                        "resources": permit.binding.resources,
+                        "node_ids": ("gb10-node-b",),
+                    }
+                ),
+            )
+        }
+    )
+    await capacity_session.execute(
+        update(CapacityPoolObservation)
+        .where(CapacityPoolObservation.pool_id == permit.binding.pool_id)
+        .values(payload=external.model_dump(mode="json", exclude_none=False))
+    )
+    context = await store._locked_execution_context(
+        capacity_session,
+        permit.binding.execution,
+        executor_binding(permit.binding.pool_id),
+    )
+
+    with pytest.raises(ExecutionConflictError, match="pool headroom"):
+        await store._assert_increase_eligible(
+            capacity_session,
+            context,
+            proposed=_successor_binding(permit.binding),
+        )
+
+
+async def test_authenticated_physical_observation_deduplicates_selected_node_topology(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityExecutionStore()
+    permit = await _launch_ready(store, capacity_session, policy=execution_policy(ceiling=2))
+    await store.consume_launch_permit(
+        capacity_session,
+        ExecutablePermitConsumptionV2(
+            permit_id=permit.permit_id,
+            permit_digest=store.contract_digest(permit),
+            binding=permit.binding,
+            command_sequence=3,
+        ),
+    )
+    pool = (
+        await capacity_session.execute(
+            select(CapacityPool).where(
+                CapacityPool.configuration_epoch == permit.binding.execution.configuration_epoch,
+                CapacityPool.pool_id == permit.binding.pool_id,
+            )
+        )
+    ).scalar_one()
+    topology = json.loads(json.dumps(pool.topology))
+    template = topology["resource_domains"][0]["nodes"][0]
+    topology["resource_domains"][0]["nodes"] = [
+        {
+            **template,
+            "node_id": permit.binding.node_ids[0],
+            "allocatable": _scaled_resources(permit.binding.resources, 2).model_dump(
+                mode="json",
+                exclude_none=False,
+            ),
+        },
+        {
+            **template,
+            "node_id": "gb10-spare",
+            "allocatable": permit.binding.resources.model_dump(
+                mode="json",
+                exclude_none=False,
+            ),
+        },
+    ]
+    pool.topology = topology
+    observation = pool_observation(pool_id=permit.binding.pool_id).model_copy(
+        update={"commitments": (_authenticated_physical_commitment(permit),)}
+    )
+    await capacity_session.execute(
+        update(CapacityPoolObservation)
+        .where(CapacityPoolObservation.pool_id == permit.binding.pool_id)
+        .values(payload=observation.model_dump(mode="json", exclude_none=False))
+    )
+    context = await store._locked_execution_context(
+        capacity_session,
+        permit.binding.execution,
+        executor_binding(permit.binding.pool_id),
+    )
+
+    await store._assert_increase_eligible(
+        capacity_session,
+        context,
+        proposed=_successor_binding(permit.binding),
+    )
+
+
+async def test_quarantined_intent_counts_against_selected_node_headroom(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityExecutionStore()
+    permit, _row = await _quarantined_consumed_permit(store, capacity_session)
+    pool = (
+        await capacity_session.execute(
+            select(CapacityPool).where(
+                CapacityPool.configuration_epoch == permit.binding.execution.configuration_epoch,
+                CapacityPool.pool_id == permit.binding.pool_id,
+            )
+        )
+    ).scalar_one()
+    topology = json.loads(json.dumps(pool.topology))
+    template = topology["resource_domains"][0]["nodes"][0]
+    topology["resource_domains"][0]["nodes"] = [
+        {
+            **template,
+            "node_id": permit.binding.node_ids[0],
+            "allocatable": permit.binding.resources.model_dump(mode="json", exclude_none=False),
+        },
+        {
+            **template,
+            "node_id": "gb10-spare",
+            "allocatable": permit.binding.resources.model_dump(mode="json", exclude_none=False),
+        },
+    ]
+    pool.topology = topology
+    context = await store._locked_execution_context(
+        capacity_session,
+        permit.binding.execution,
+        executor_binding(permit.binding.pool_id),
+    )
+
+    with pytest.raises(ExecutionConflictError, match="node headroom"):
+        await store._assert_increase_eligible(
+            capacity_session,
+            context,
+            proposed=_successor_binding(permit.binding),
         )
 
 
@@ -2542,8 +3265,9 @@ async def _heterogeneous_multi_node_permit(
     *,
     reverse_shape_parts: bool,
     commitment_headroom: bool = False,
+    policy=None,
 ):  # type: ignore[no-untyped-def]
-    permit = await _launch_ready(store, session)
+    permit = await _launch_ready(store, session, policy=policy)
     small = resource_vector(slots=0, cpu_millicores=2, memory_bytes=2)
     large = resource_vector(slots=1, cpu_millicores=8, memory_bytes=8)
     worker_shape = shape(
@@ -2696,7 +3420,73 @@ async def test_overlapping_multi_node_commitment_fails_closed(
         )
 
 
-async def test_increase_freeze_turns_accepted_work_into_close(
+async def test_quarantined_intent_counts_against_multi_node_topology(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityExecutionStore()
+    permit = await _heterogeneous_multi_node_permit(
+        store,
+        capacity_session,
+        reverse_shape_parts=False,
+        policy=execution_policy(ceiling=2),
+    )
+    await store.consume_launch_permit(
+        capacity_session,
+        ExecutablePermitConsumptionV2(
+            permit_id=permit.permit_id,
+            permit_digest=store.contract_digest(permit),
+            binding=permit.binding,
+            command_sequence=3,
+        ),
+    )
+    inventory = ExecutableExecutorInventoryV2(
+        execution=_inventory_execution(permit.binding),
+        executor_id=permit.binding.executor_id,
+        executor_incarnation=permit.binding.executor_incarnation,
+        pool_id=permit.binding.pool_id,
+        pool_generation=permit.binding.pool_generation,
+        inventory_sequence=2,
+        journal_sequence=0,
+        journal_digest="0" * 64,
+    )
+    await store.ingest_executor_inventory(capacity_session, inventory)
+    await store.recover_unsubmitted_permit(
+        capacity_session,
+        _submission_recovery(store, permit, inventory),
+    )
+    pool = (
+        await capacity_session.execute(
+            select(CapacityPool).where(
+                CapacityPool.configuration_epoch == permit.binding.execution.configuration_epoch,
+                CapacityPool.pool_id == permit.binding.pool_id,
+            )
+        )
+    ).scalar_one()
+    topology = json.loads(json.dumps(pool.topology))
+    template = topology["resource_domains"][0]["nodes"][0]
+    topology["resource_domains"][0]["nodes"].append(
+        {
+            **template,
+            "node_id": "gb10-spare",
+            "allocatable": permit.binding.resources.model_dump(mode="json", exclude_none=False),
+        }
+    )
+    pool.topology = topology
+    context = await store._locked_execution_context(
+        capacity_session,
+        permit.binding.execution,
+        executor_binding(permit.binding.pool_id),
+    )
+
+    with pytest.raises(ExecutionConflictError, match="node headroom"):
+        await store._assert_increase_eligible(
+            capacity_session,
+            context,
+            proposed=_successor_binding(permit.binding),
+        )
+
+
+async def test_increase_freeze_begins_central_close_for_accepted_work(
     capacity_session: AsyncSession,
 ) -> None:
     store = CapacityExecutionStore()
@@ -2727,15 +3517,24 @@ async def test_increase_freeze_turns_accepted_work_into_close(
     work = await store.next_pool_work(capacity_session, binding)
 
     assert isinstance(work, ExecutableIntentCloseV2)
+    result = await store.begin_intent_close(capacity_session, work)
+    assert result.intent_id == work.binding.intent_id
+    row = (
+        await capacity_session.execute(
+            select(CapacityExecutableIntent).where(
+                CapacityExecutableIntent.executor_incarnation == binding.executor_incarnation,
+                CapacityExecutableIntent.pool_id == binding.pool_id,
+            )
+        )
+    ).scalar_one()
+    assert row.state == "closing"
 
 
 async def test_global_authority_rate_ceiling_limits_second_consumption(
     capacity_session: AsyncSession,
 ) -> None:
     store = CapacityExecutionStore()
-    policy = execution_policy().model_copy(
-        update={"executable_new_capacity_rate_per_minute": 2}
-    )
+    policy = execution_policy().model_copy(update={"executable_new_capacity_rate_per_minute": 2})
     permit = await _launch_ready(store, capacity_session, policy=policy)
     await capacity_session.execute(
         update(CapacityAuthorityState)
@@ -2820,7 +3619,11 @@ async def test_global_authority_rate_ceiling_limits_second_consumption(
         launch_ready_at=datetime.now(UTC),
     )
     await _test_only_add_intent_without_guard(capacity_session, second_row)
-    second_permit = store._new_permit(second_row, datetime.now(UTC))
+    second_permit = _test_only_synthetic_permit(
+        second_row,
+        second_binding,
+        datetime.now(UTC),
+    )
     second_row.permit_id = second_permit.permit_id
     second_row.permit_epoch = second_permit.permit_epoch
     second_row.permit_digest = store.contract_digest(second_permit)
@@ -2871,7 +3674,37 @@ async def test_drain_only_writer_transition_allows_retained_intent_close(
     close = await store.next_pool_work(capacity_session, binding)
 
     assert isinstance(close, ExecutableIntentCloseV2)
-    result = await store.begin_intent_close(capacity_session, close)
+    assert close.bootstrap_registration_epoch is None
+    assert close.bootstrap_evidence_sha256 is None
+    bootstrap = ExecutableBootstrapProposalV2(
+        binding=close.binding,
+        command_sequence=close.command_sequence,
+        proposal_epoch=1,
+        bootstrap_sha256="7" * 64,
+        expires_at=datetime.now(UTC) + timedelta(minutes=1),
+    )
+    await store.propose_bootstrap(capacity_session, bootstrap)
+    await store.acknowledge_bootstrap(
+        capacity_session,
+        ExecutableBootstrapAcknowledgementV2(
+            binding=close.binding,
+            proposal_epoch=bootstrap.proposal_epoch,
+            proposal_digest=store.contract_digest(bootstrap),
+            reporter_incarnation=demand_snapshot().reporter_incarnation,
+            bootstrap_registration_epoch=1,
+            bootstrap_evidence_sha256="8" * 64,
+            protected_admission_sha256="3" * 64,
+        ),
+        actor="development",
+        idempotency_key=UUID(int=996),
+    )
+
+    successor = await store.next_pool_work(capacity_session, binding)
+
+    assert isinstance(successor, ExecutableIntentCloseV2)
+    assert successor.bootstrap_registration_epoch == 1
+    assert successor.bootstrap_evidence_sha256 == "8" * 64
+    result = await store.begin_intent_close(capacity_session, successor)
     assert result.intent_id == close.binding.intent_id
 
 
@@ -2947,7 +3780,6 @@ async def test_drain_only_transition_emits_close_for_observed_worker(
     assert isinstance(close, ExecutableIntentCloseV2)
     result = await store.begin_intent_close(capacity_session, close)
     assert result.intent_id == binding.intent_id
-
 
 
 async def test_duplicate_inventory_claims_for_one_intent_fence_the_executor(
@@ -3532,21 +4364,40 @@ async def test_release_requires_matching_protected_and_physical_terminal_evidenc
 async def test_protected_release_receipts_retain_monotonic_successors_and_old_replays(
     capacity_session: AsyncSession,
 ) -> None:
-    store = CapacityExecutionStore()
-    permit, inventory = await _consume_then_publish_empty_inventory(store, capacity_session)
-    recovery = executable_contracts_module.ExecutableSubmissionRecoveryV2(
-        binding=permit.binding,
-        permit_id=permit.permit_id,
-        permit_digest=store.contract_digest(permit),
-        command_sequence=4,
-        inventory_sequence=inventory.inventory_sequence,
-        inventory_digest=store.contract_digest(inventory),
-        controller_query_completed_at=datetime.now(UTC),
-        submit_process_absent=True,
-        scheduler_submission_absent=True,
-        controller_evidence_sha256="a" * 64,
+    store = CapacityExecutionStore(
+        ownership_keyring=OwnershipKeyring({"gb10-key": EXECUTOR_KEYS["gb10"].public_key()})
     )
-    await store.recover_unsubmitted_permit(capacity_session, recovery)
+    permit = await _launch_ready(store, capacity_session)
+    await store.consume_launch_permit(
+        capacity_session,
+        ExecutablePermitConsumptionV2(
+            permit_id=permit.permit_id,
+            permit_digest=store.contract_digest(permit),
+            binding=permit.binding,
+            command_sequence=3,
+        ),
+    )
+    await store.ingest_executor_inventory(
+        capacity_session,
+        ExecutableExecutorInventoryV2(
+            execution=_inventory_execution(permit.binding),
+            executor_id=permit.binding.executor_id,
+            executor_incarnation=permit.binding.executor_incarnation,
+            pool_id=permit.binding.pool_id,
+            pool_generation=permit.binding.pool_generation,
+            inventory_sequence=2,
+            journal_sequence=0,
+            journal_digest="0" * 64,
+            records=(
+                _inventory_record(
+                    permit.binding,
+                    physical_identity="job-123",
+                    state="terminal",
+                    terminal_evidence_sha256="a" * 64,
+                ),
+            ),
+        ),
+    )
     first = ExecutableProtectedReleaseV2(
         binding=permit.binding,
         reporter_incarnation=demand_snapshot().reporter_incarnation,
@@ -3599,6 +4450,9 @@ async def test_protected_release_receipts_retain_monotonic_successors_and_old_re
     ).all()
     assert receipts == [(2, "b" * 64), (3, "c" * 64)]
 
+    close = await store.next_pool_work(capacity_session, executor_binding("gb10"))
+    assert isinstance(close, ExecutableIntentCloseV2)
+    await store.begin_intent_close(capacity_session, close)
     release = await store.next_pool_work(capacity_session, executor_binding("gb10"))
     assert isinstance(release, ExecutablePartialReleaseV2)
     assert release.releases[0].protected_registration_epoch == 3
@@ -3854,22 +4708,43 @@ async def test_intent_guard_rejects_release_without_terminal_and_protected_evide
 async def test_intent_guard_rejects_release_without_protected_receipt(
     capacity_session: AsyncSession,
 ) -> None:
-    store = CapacityExecutionStore()
-    permit, inventory = await _consume_then_publish_empty_inventory(store, capacity_session)
-    await store.recover_unsubmitted_permit(
+    store = CapacityExecutionStore(
+        ownership_keyring=OwnershipKeyring({"gb10-key": EXECUTOR_KEYS["gb10"].public_key()})
+    )
+    permit = await _launch_ready(store, capacity_session)
+    await store.consume_launch_permit(
         capacity_session,
-        executable_contracts_module.ExecutableSubmissionRecoveryV2(
-            binding=permit.binding,
+        ExecutablePermitConsumptionV2(
             permit_id=permit.permit_id,
             permit_digest=store.contract_digest(permit),
-            command_sequence=4,
-            inventory_sequence=inventory.inventory_sequence,
-            inventory_digest=store.contract_digest(inventory),
-            controller_query_completed_at=datetime.now(UTC),
-            submit_process_absent=True,
-            scheduler_submission_absent=True,
-            controller_evidence_sha256="a" * 64,
+            binding=permit.binding,
+            command_sequence=3,
         ),
+    )
+    await store.ingest_executor_inventory(
+        capacity_session,
+        ExecutableExecutorInventoryV2(
+            execution=_inventory_execution(permit.binding),
+            executor_id=permit.binding.executor_id,
+            executor_incarnation=permit.binding.executor_incarnation,
+            pool_id=permit.binding.pool_id,
+            pool_generation=permit.binding.pool_generation,
+            inventory_sequence=2,
+            journal_sequence=0,
+            journal_digest="0" * 64,
+            records=(
+                _inventory_record(
+                    permit.binding,
+                    physical_identity="job-123",
+                    state="terminal",
+                    terminal_evidence_sha256="a" * 64,
+                ),
+            ),
+        ),
+    )
+    await store.begin_intent_close(
+        capacity_session,
+        ExecutableIntentCloseV2(binding=permit.binding, command_sequence=4),
     )
 
     with pytest.raises(DBAPIError, match="executable intent release"):
@@ -3978,8 +4853,7 @@ async def test_queue_receipts_are_append_only_under_direct_sql(
     )
 
     for statement in (
-        "UPDATE public.capacity_executable_command_receipts "
-        "SET request_digest = repeat('f', 64)",
+        "UPDATE public.capacity_executable_command_receipts SET request_digest = repeat('f', 64)",
         "DELETE FROM public.capacity_executable_command_receipts",
         "TRUNCATE public.capacity_executable_command_receipts",
         "UPDATE public.capacity_executable_protected_release_receipts "
@@ -4124,9 +4998,7 @@ async def test_protected_release_insert_guard_serializes_concurrent_epochs(
                 join_transaction_mode="create_savepoint",
             )
             store = CapacityExecutionStore()
-            permit, inventory = await _consume_then_publish_empty_inventory(
-                store, setup_session
-            )
+            permit, inventory = await _consume_then_publish_empty_inventory(store, setup_session)
             recovery = executable_contracts_module.ExecutableSubmissionRecoveryV2(
                 binding=permit.binding,
                 permit_id=permit.permit_id,
@@ -4182,10 +5054,7 @@ async def test_protected_release_insert_guard_serializes_concurrent_epochs(
             for _attempt in range(200):
                 wait_event_type = (
                     await observer_session.execute(
-                        text(
-                            "SELECT wait_event_type FROM pg_stat_activity "
-                            "WHERE pid = :pid"
-                        ),
+                        text("SELECT wait_event_type FROM pg_stat_activity WHERE pid = :pid"),
                         {"pid": earlier_pid},
                     )
                 ).scalar_one()
@@ -4201,15 +5070,19 @@ async def test_protected_release_insert_guard_serializes_concurrent_epochs(
             await earlier_session.rollback()
             await observer_session.rollback()
             committed_epochs = (
-                await observer_session.execute(
-                    text(
-                        "SELECT protected_registration_epoch FROM "
-                        "public.capacity_executable_protected_release_receipts "
-                        "WHERE intent_id = :intent_id ORDER BY protected_registration_epoch"
-                    ),
-                    {"intent_id": release.binding.intent_id},
+                (
+                    await observer_session.execute(
+                        text(
+                            "SELECT protected_registration_epoch FROM "
+                            "public.capacity_executable_protected_release_receipts "
+                            "WHERE intent_id = :intent_id ORDER BY protected_registration_epoch"
+                        ),
+                        {"intent_id": release.binding.intent_id},
+                    )
                 )
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
             assert committed_epochs == [3]
     finally:
         await engine.dispose()

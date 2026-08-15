@@ -1,21 +1,82 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from contextlib import suppress
 from dataclasses import replace
+from pathlib import Path
 from unittest.mock import AsyncMock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import psycopg
 import pytest
+from alembic import command
+from alembic.config import Config as AlembicConfig
 from psycopg.errors import InsufficientPrivilege
+from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
 from loom.dev_instance import derive_identity
+from loom.personal_dev_capacity import (
+    PersonalDevCapacityAvailability,
+    PersonalDevCapacityManagerCheckpoint,
+    PersonalDevCapacitySubjectStatus,
+)
 from loom.personal_dev_capacity_runtime import (
     PersonalDevCapacityInstallationError,
+    PersonalDevCapacityStatusReader,
     PsycopgPersonalDevCapacityDatabase,
     _new_credentials,
+    _role_names,
 )
+from loom_capacity_manager.contracts import ResourceVectorV1
+from loom_capacity_manager.executable_contracts import (
+    CandidateBindingV2,
+    ExecutableIntentBindingV2,
+    ExecutionFenceV2,
+)
+
+
+def _active_binding(subject_id: UUID, subject_incarnation: UUID) -> ExecutableIntentBindingV2:
+    return ExecutableIntentBindingV2(
+        execution=ExecutionFenceV2(
+            authority_incarnation=UUID(int=101),
+            writer_epoch=3,
+            configuration_epoch=5,
+            execution_epoch=7,
+            execution_manifest_sha256="1" * 64,
+            execution_state="active",
+            executable_new_capacity_ceiling=1,
+            executable_new_capacity_rate_per_minute=1,
+            trusted_fleet_release_sha256="2" * 64,
+            allocation_epoch=11,
+        ),
+        tranche_id=UUID(int=102),
+        intent_id=UUID(int=103),
+        shape_instance_id="oldlab-shape-0001",
+        subject_id=subject_id,
+        subject_incarnation=subject_incarnation,
+        account_id="owner-alice",
+        tier_id="development",
+        candidate=CandidateBindingV2(
+            algorithm="git-sha1",
+            identity="a" * 40,
+            publication_sha256="a" * 64,
+        ),
+        candidate_generation=7,
+        deployment_generation=7,
+        pool_id="oldlab",
+        pool_generation=13,
+        executor_id="oldlab-executor",
+        executor_incarnation=UUID(int=104),
+        shape_id="oldlab-cpu-small",
+        profile_id="oldlab-default",
+        profile_generation=17,
+        profile_digest="3" * 64,
+        concurrency_slots=1,
+        resources=ResourceVectorV1(slots=1, cpu_millicores=1000, memory_bytes=1024),
+        node_ids=("oldlab-node-01",),
+    )
 
 
 @pytest.mark.asyncio
@@ -50,10 +111,15 @@ async def test_capacity_role_convergence_rejects_external_owner_membership(
     credentials = _new_credentials()
     database = PsycopgPersonalDevCapacityDatabase(postgres_url)
 
-    owner, migrator, agent, executor, _migrator_url, _agent_url = await database._converge_roles(
-        identity,
-        credentials,
-    )
+    (
+        owner,
+        migrator,
+        agent,
+        executor,
+        _observer,
+        _migrator_url,
+        _agent_url,
+    ) = await database._converge_roles(identity, credentials)
     outsider = f"loom_cap_outsider_{uuid4().hex[:8]}"
     async with await psycopg.AsyncConnection.connect(
         postgres_url.replace("postgresql+psycopg://", "postgresql://", 1),
@@ -109,10 +175,15 @@ async def test_capacity_role_convergence_grants_only_required_reference_columns(
     identity = replace(derive_identity(name), database=database_name)
     database = PsycopgPersonalDevCapacityDatabase(postgres_url)
 
-    owner, _migrator, _agent, _executor, _migrator_url, _agent_url = await database._converge_roles(
-        identity,
-        _new_credentials(),
-    )
+    (
+        owner,
+        _migrator,
+        _agent,
+        _executor,
+        _observer,
+        _migrator_url,
+        _agent_url,
+    ) = await database._converge_roles(identity, _new_credentials())
 
     async with await psycopg.AsyncConnection.connect(
         postgres_url.replace("postgresql+psycopg://", "postgresql://", 1),
@@ -149,6 +220,7 @@ async def test_capacity_role_convergence_removes_contaminated_executor_privilege
         _migrator,
         _agent,
         executor,
+        _observer,
         _migrator_url,
         _agent_url,
     ) = await database._converge_roles(identity, credentials)
@@ -256,6 +328,7 @@ async def test_capacity_role_convergence_isolates_executor_from_public_functions
             _migrator,
             _agent,
             executor,
+            _observer,
             _migrator_url,
             _agent_url,
         ) = await database._converge_roles(identity, _new_credentials())
@@ -314,10 +387,15 @@ async def test_capacity_migrator_authority_is_sealed_between_reconciliations(
     assert database_name is not None
     identity = replace(derive_identity(name), database=database_name)
     database = PsycopgPersonalDevCapacityDatabase(postgres_url)
-    owner, migrator, _agent, _executor, _migrator_url, _agent_url = await database._converge_roles(
-        identity,
-        _new_credentials(),
-    )
+    (
+        owner,
+        migrator,
+        _agent,
+        _executor,
+        _observer,
+        _migrator_url,
+        _agent_url,
+    ) = await database._converge_roles(identity, _new_credentials())
 
     await database._seal_migrator(identity, owner=owner, migrator=migrator)
 
@@ -358,10 +436,15 @@ async def test_destroy_seal_disables_primary_and_capacity_database_logins(
         await connection.execute(
             f"CREATE ROLE \"{identity.db_role}\" LOGIN PASSWORD 'primary-password'"
         )
-    owner, migrator, agent, executor, _migrator_url, _agent_url = await database._converge_roles(
-        identity,
-        _new_credentials(),
-    )
+    (
+        owner,
+        migrator,
+        agent,
+        executor,
+        observer,
+        _migrator_url,
+        _agent_url,
+    ) = await database._converge_roles(identity, _new_credentials())
 
     await database.seal(identity)
 
@@ -369,8 +452,397 @@ async def test_destroy_seal_disables_primary_and_capacity_database_logins(
         roles = await connection.execute(
             "SELECT rolname, rolcanlogin, rolpassword IS NULL FROM pg_authid "
             "WHERE rolname = ANY(%s) ORDER BY rolname",
-            ([identity.db_role, owner, migrator, agent, executor],),
+            ([identity.db_role, owner, migrator, agent, executor, observer],),
         )
         assert await roles.fetchall() == sorted(
-            (role, False, True) for role in (identity.db_role, owner, migrator, agent, executor)
+            (role, False, True)
+            for role in (identity.db_role, owner, migrator, agent, executor, observer)
         )
+
+
+@pytest.mark.asyncio
+async def test_destroy_seal_terminates_live_sessions_and_blocks_reconnects(
+    postgres_url: str,
+) -> None:
+    name = f"sealrace-{uuid4().hex[:8]}"
+    database_name = make_url(postgres_url).database
+    assert database_name is not None
+    identity = replace(derive_identity(name), database=database_name)
+    database = PsycopgPersonalDevCapacityDatabase(postgres_url)
+    connect_url = postgres_url.replace("postgresql+psycopg://", "postgresql://", 1)
+    application_password = f"app-password-{uuid4().hex}"
+    async with await psycopg.AsyncConnection.connect(connect_url, autocommit=True) as connection:
+        await connection.execute(
+            f"CREATE ROLE \"{identity.db_role}\" LOGIN PASSWORD '{application_password}'"
+        )
+    credentials = _new_credentials()
+    (
+        owner,
+        migrator,
+        agent,
+        executor,
+        observer,
+        _migrator_url,
+        _agent_url,
+    ) = await database._converge_roles(identity, credentials)
+
+    role_urls = {
+        migrator: make_url(postgres_url)
+        .set(database=database_name, username=migrator, password=credentials.migrator_password)
+        .render_as_string(hide_password=False)
+        .replace("postgresql+psycopg://", "postgresql://", 1),
+        agent: make_url(postgres_url)
+        .set(database=database_name, username=agent, password=credentials.agent_password)
+        .render_as_string(hide_password=False)
+        .replace("postgresql+psycopg://", "postgresql://", 1),
+        observer: make_url(postgres_url)
+        .set(database=database_name, username=observer, password=credentials.observer_password)
+        .render_as_string(hide_password=False)
+        .replace("postgresql+psycopg://", "postgresql://", 1),
+        identity.db_role: make_url(postgres_url)
+        .set(database=database_name, username=identity.db_role, password=application_password)
+        .render_as_string(hide_password=False)
+        .replace("postgresql+psycopg://", "postgresql://", 1),
+    }
+    live_connections: dict[str, psycopg.AsyncConnection] = {}
+    backend_pids: dict[str, int] = {}
+    protected_roles = (*_role_names(identity), identity.db_role)
+    role_lock: psycopg.AsyncConnection | None = None
+    try:
+        for role, url in role_urls.items():
+            connection = await psycopg.AsyncConnection.connect(url, autocommit=True)
+            live_connections[role] = connection
+            row = await connection.execute("SELECT pg_backend_pid()")
+            pid = await row.fetchone()
+            assert pid is not None
+            backend_pids[role] = pid[0]
+
+        race_connected = asyncio.Event()
+
+        async def race_reconnect(role: str) -> str:
+            try:
+                connection = await psycopg.AsyncConnection.connect(role_urls[role], autocommit=True)
+            except psycopg.Error:
+                return "blocked"
+            try:
+                race_connected.set()
+                await seal_task
+                with pytest.raises(psycopg.Error):
+                    await connection.execute("SELECT 1")
+                return "terminated"
+            finally:
+                with suppress(Exception):
+                    await connection.close()
+
+        # Hold the first role update so a reversed terminate-before-NOLOGIN
+        # implementation has a deterministic observable failure window.
+        role_lock = await psycopg.AsyncConnection.connect(connect_url)
+        await role_lock.execute(
+            "SELECT oid FROM pg_authid WHERE rolname = %s FOR UPDATE",
+            (owner,),
+        )
+        seal_task = asyncio.create_task(database.seal(identity))
+        async with asyncio.timeout(5):
+            while True:
+                async with await psycopg.AsyncConnection.connect(connect_url) as probe:
+                    waiting = await probe.execute(
+                        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity "
+                        "WHERE query LIKE %s AND wait_event_type = 'Lock')",
+                        (f'ALTER ROLE "%{owner}%" NOLOGIN PASSWORD NULL',),
+                    )
+                    if bool((await waiting.fetchone())[0]):
+                        break
+                await asyncio.sleep(0.01)
+        for connection in live_connections.values():
+            await connection.execute("SELECT 1")
+
+        race_task = asyncio.create_task(race_reconnect(agent))
+        async with asyncio.timeout(5):
+            await race_connected.wait()
+        await role_lock.commit()
+        race_result = await race_task
+        await seal_task
+
+        for connection in live_connections.values():
+            with pytest.raises(psycopg.Error):
+                await connection.execute("SELECT 1")
+
+        async with await psycopg.AsyncConnection.connect(connect_url) as admin:
+            roles = await admin.execute(
+                "SELECT rolname, rolcanlogin, rolpassword IS NULL FROM pg_authid "
+                "WHERE rolname = ANY(%s) ORDER BY rolname",
+                ([identity.db_role, owner, migrator, agent, executor, observer],),
+            )
+            assert await roles.fetchall() == sorted(
+                (role, False, True)
+                for role in (identity.db_role, owner, migrator, agent, executor, observer)
+            )
+            active = await admin.execute(
+                "SELECT pid FROM pg_stat_activity WHERE pid = ANY(%s)",
+                (list(backend_pids.values()),),
+            )
+            assert await active.fetchall() == []
+
+        assert race_result in {"blocked", "terminated"}
+        for _role, url in role_urls.items():
+            with pytest.raises(psycopg.Error):
+                async with await psycopg.AsyncConnection.connect(url, autocommit=True):
+                    pass
+    finally:
+        if role_lock is not None:
+            with suppress(Exception):
+                await role_lock.rollback()
+            with suppress(Exception):
+                await role_lock.close()
+        for connection in live_connections.values():
+            with suppress(Exception):
+                await connection.close()
+        async with await psycopg.AsyncConnection.connect(
+            connect_url, autocommit=True
+        ) as connection:
+            existing_roles = await connection.execute(
+                "SELECT rolname FROM pg_roles WHERE rolname = ANY(%s)",
+                (list(protected_roles),),
+            )
+            for (role_name,) in await existing_roles.fetchall():
+                await connection.execute(f'DROP OWNED BY "{role_name}"')
+                await connection.execute(f'DROP ROLE IF EXISTS "{role_name}"')
+
+
+@pytest.mark.asyncio
+async def test_personal_capacity_status_reader_accepts_jsonb_uuid_dict_observation(
+    postgres_url: str,
+) -> None:
+    database_name = f"loom_capacity_status_{uuid4().hex[:8]}"
+    admin_url = (
+        make_url(postgres_url).set(database="postgres").render_as_string(hide_password=False)
+    )
+    admin_engine = create_engine(admin_url, isolation_level="AUTOCOMMIT")
+    quoted_database = admin_engine.dialect.identifier_preparer.quote(database_name)
+    try:
+        with admin_engine.connect() as connection:
+            connection.exec_driver_sql(f"CREATE DATABASE {quoted_database} TEMPLATE template0")
+        repo_root = Path(__file__).resolve().parents[2]
+        cfg = AlembicConfig(str(repo_root / "migrations" / "alembic.ini"))
+        cfg.set_main_option("script_location", str(repo_root / "migrations"))
+        cfg.set_main_option(
+            "sqlalchemy.url",
+            make_url(postgres_url)
+            .set(database=database_name)
+            .render_as_string(hide_password=False),
+        )
+        command.upgrade(cfg, "head")
+
+        identity = replace(derive_identity(f"status-{uuid4().hex[:8]}"), database=database_name)
+        database = PsycopgPersonalDevCapacityDatabase(postgres_url)
+        credentials = _new_credentials()
+        (
+            owner,
+            _migrator,
+            agent,
+            executor,
+            observer,
+            migrator_url,
+            _agent_url,
+        ) = await database._converge_roles(identity, credentials)
+        await database._migrate(
+            migrator_url=migrator_url,
+            owner=owner,
+            agent=agent,
+            executor=executor,
+            observer=observer,
+        )
+        await database._converge_executor_surface(
+            migrator_url=migrator_url,
+            owner=owner,
+            executor=executor,
+            observer=observer,
+        )
+
+        subject_id = uuid4()
+        subject_incarnation = uuid4()
+        binding = _active_binding(subject_id, subject_incarnation)
+        binding_json = json.dumps(binding.model_dump(mode="json"), sort_keys=True)
+        worker_id = uuid4()
+        worker_incarnation = uuid4()
+        engine = create_engine(
+            make_url(postgres_url)
+            .set(database=database_name)
+            .render_as_string(hide_password=False),
+            isolation_level="SERIALIZABLE",
+        )
+        quoted_owner = engine.dialect.identifier_preparer.quote(owner)
+        try:
+            with engine.begin() as connection:
+                connection.exec_driver_sql(f"SET LOCAL ROLE {quoted_owner}")
+                connection.execute(
+                    text(
+                        "INSERT INTO loom_capacity_guard.authority_state "
+                        "(singleton_id, schema_version, environment_id, subject_id, "
+                        "subject_incarnation, authority_mode, authority_incarnation, "
+                        "reporter_incarnation, reporter_high_water, allocation_epoch, "
+                        "deployment_generation, configuration_generation, candidate_digest) "
+                        "VALUES (1, 1, 'dev-status', :subject_id, :subject_incarnation, "
+                        "'disabled', :authority_incarnation, :reporter_incarnation, 0, 0, 7, 5, "
+                        ":digest)"
+                    ),
+                    {
+                        "subject_id": subject_id,
+                        "subject_incarnation": subject_incarnation,
+                        "authority_incarnation": binding.execution.authority_incarnation,
+                        "reporter_incarnation": uuid4(),
+                        "digest": "b" * 64,
+                    },
+                )
+                agent_incarnation = uuid4()
+                connection.execute(
+                    text(
+                        "INSERT INTO loom_capacity_guard.agent_registrations "
+                        "(agent_incarnation, singleton_id, schema_version, environment_id, "
+                        "subject_id, subject_incarnation, authority_incarnation, "
+                        "reporter_incarnation, authority_mode, allocation_epoch, "
+                        "candidate_digest, candidate_identity_algorithm, "
+                        "candidate_identity, candidate_publication_sha256, "
+                        "deployment_generation, configuration_generation, registration_state) "
+                        "VALUES (:agent_incarnation, 1, 1, 'dev-status', :subject_id, "
+                        ":subject_incarnation, :authority_incarnation, :reporter_incarnation, "
+                        "'disabled', 0, :digest, 'source-sha256', :digest, :digest, "
+                        "7, 5, 'registered')"
+                    ),
+                    {
+                        "agent_incarnation": agent_incarnation,
+                        "subject_id": subject_id,
+                        "subject_incarnation": subject_incarnation,
+                        "authority_incarnation": binding.execution.authority_incarnation,
+                        "reporter_incarnation": uuid4(),
+                        "digest": "c" * 64,
+                    },
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO loom_capacity_guard.executable_claim_state "
+                        "(intent_id, subject_id, subject_incarnation, binding, claim_high_water, "
+                        "terminal_high_water, draining) VALUES (:intent_id, :subject_id, "
+                        ":subject_incarnation, CAST(:binding AS jsonb), 0, 0, false)"
+                    ),
+                    {
+                        "intent_id": binding.intent_id,
+                        "subject_id": subject_id,
+                        "subject_incarnation": subject_incarnation,
+                        "binding": binding_json,
+                    },
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO loom_capacity_guard.executable_admission_events "
+                        "(operation_id, event_kind, agent_incarnation, subject_id, "
+                        "subject_incarnation, intent_id, bootstrap_registration_epoch, "
+                        "protected_registration_epoch, physical_job_id, worker_id, "
+                        "worker_incarnation, worker_credential_sha256, bootstrap_revoked, "
+                        "predecessor_credential_revoked, worker_credential_revoked, binding, "
+                        "request_payload, request_digest, receipt) "
+                        "VALUES (:operation_id, 'worker-registered', :agent_incarnation, "
+                        ":subject_id, :subject_incarnation, :intent_id, 19, 23, 'oldlab-12345', "
+                        ":worker_id, :worker_incarnation, :worker_credential_sha256, true, "
+                        "false, false, CAST(:binding AS jsonb), "
+                        "CAST(:request_payload AS jsonb), :request_digest, "
+                        "CAST(:receipt AS jsonb))"
+                    ),
+                    {
+                        "operation_id": uuid4(),
+                        "agent_incarnation": agent_incarnation,
+                        "subject_id": subject_id,
+                        "subject_incarnation": subject_incarnation,
+                        "intent_id": binding.intent_id,
+                        "worker_id": worker_id,
+                        "worker_incarnation": worker_incarnation,
+                        "worker_credential_sha256": "d" * 64,
+                        "binding": binding_json,
+                        "request_payload": '{"schema_version":2}',
+                        "request_digest": "e" * 64,
+                        "receipt": '{"schema_version":2}',
+                    },
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO loom_capacity_guard.executable_admission_events "
+                        "(operation_id, event_kind, agent_incarnation, subject_id, "
+                        "subject_incarnation, intent_id, bootstrap_registration_epoch, "
+                        "bootstrap_sha256, binding, request_payload, request_digest, receipt) "
+                        "VALUES (:operation_id, 'prepared', :agent_incarnation, :subject_id, "
+                        ":subject_incarnation, :intent_id, 19, :bootstrap_sha256, "
+                        "CAST(:binding AS jsonb), CAST(:request_payload AS jsonb), "
+                        ":request_digest, CAST(:receipt AS jsonb))"
+                    ),
+                    {
+                        "operation_id": uuid4(),
+                        "agent_incarnation": agent_incarnation,
+                        "subject_id": subject_id,
+                        "subject_incarnation": subject_incarnation,
+                        "intent_id": binding.intent_id,
+                        "bootstrap_sha256": "f" * 64,
+                        "binding": binding_json,
+                        "request_payload": '{"schema_version":2}',
+                        "request_digest": "0" * 64,
+                        "receipt": '{"schema_version":2}',
+                    },
+                )
+        finally:
+            engine.dispose()
+
+        class _Kubectl:
+            async def read_secret_optional(self, namespace: str, name: str):
+                assert namespace == identity.namespace
+                assert name == "loom-capacity-agent-credentials"
+                return {
+                    "observer-password": credentials.observer_password.encode("ascii"),
+                    "subject-incarnation": str(subject_incarnation).encode("ascii"),
+                }
+
+        class _Projector:
+            async def subject_status(self, **kwargs: object) -> PersonalDevCapacitySubjectStatus:
+                assert kwargs == {
+                    "subject_id": subject_id,
+                    "subject_incarnation": subject_incarnation,
+                    "deployment_generation": 7,
+                }
+                return PersonalDevCapacitySubjectStatus(
+                    subject_id=subject_id,
+                    subject_incarnation=subject_incarnation,
+                    deployment_generation=7,
+                    checkpoint=PersonalDevCapacityManagerCheckpoint(
+                        configuration_epoch=5,
+                        execution_state="active",
+                        execution_epoch=7,
+                        executable_new_capacity_ceiling=1,
+                    ),
+                    capacity_prepared=True,
+                    capacity_status="waiting",
+                    active_bindings=(binding,),
+                )
+
+        reader = PersonalDevCapacityStatusReader(
+            kubectl=_Kubectl(),  # type: ignore[arg-type]
+            database_admin_url=postgres_url,
+            projector=_Projector(),  # type: ignore[arg-type]
+        )
+
+        assert await reader.read(
+            namespace=identity.namespace,
+            database=database_name,
+            subject_id=subject_id,
+            subject_incarnation=subject_incarnation,
+            deployment_generation=7,
+        ) == PersonalDevCapacityAvailability("available", True, True)
+        await database.destroy(identity)
+    finally:
+        with admin_engine.connect() as connection:
+            connection.execute(
+                text(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                    "WHERE datname = :database_name AND pid <> pg_backend_pid()"
+                ),
+                {"database_name": database_name},
+            )
+            connection.exec_driver_sql(f"DROP DATABASE IF EXISTS {quoted_database}")
+        admin_engine.dispose()

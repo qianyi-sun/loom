@@ -30,6 +30,7 @@ from loom.personal_dev_activation import (
     PersonalDevActivationIntentRequest,
     PersonalDevActivationVerifier,
 )
+from loom.personal_dev_capacity import PersonalDevCapacityAvailability
 from loom.personal_dev_environment import (
     PersonalDevApplyReservation,
     PersonalDevEnvironmentApplyRequest,
@@ -192,6 +193,19 @@ class DevInstanceResponse(BaseModel):
         "failed",
         "deleted",
     ]
+    application_status: Literal[
+        "provisioning",
+        "ready",
+        "updating",
+        "activating",
+        "deleting",
+        "draining",
+        "failed",
+        "deleted",
+    ]
+    capacity_status: Literal["shadow", "prepared", "waiting", "available"]
+    capacity_prepared: bool
+    worker_available: bool
     min_slots: int
     max_slots: int
     deployment_generation: int
@@ -235,6 +249,19 @@ class PersonalDevEnvironmentResponse(BaseModel):
         "failed",
         "deleted",
     ]
+    application_status: Literal[
+        "provisioning",
+        "ready",
+        "updating",
+        "activating",
+        "deleting",
+        "draining",
+        "failed",
+        "deleted",
+    ]
+    capacity_status: Literal["shadow", "prepared", "waiting", "available"]
+    capacity_prepared: bool
+    worker_available: bool
     min_slots: int
     max_slots: int
     deployment_generation: int
@@ -317,12 +344,25 @@ def _identity_response(identity: DevInstanceIdentity) -> DevInstanceIdentityResp
 
 def _response(
     record: DevInstanceRecord | PersonalDevEnvironmentRecord,
+    availability: PersonalDevCapacityAvailability | None = None,
 ) -> DevInstanceResponse:
+    personal = (
+        record.subject_id is not None
+        and record.subject_incarnation is not None
+        and record.candidate_id is not None
+    )
+    status = availability or PersonalDevCapacityAvailability(
+        "waiting" if personal else "shadow", personal, False
+    )
     return DevInstanceResponse(
         name=record.name,
         owner_user_id=record.owner_user_id,
         owner_team_id=record.owner_team_id,
         status=record.status,
+        application_status=record.status,
+        capacity_status=status.capacity_status,
+        capacity_prepared=status.capacity_prepared,
+        worker_available=status.worker_available,
         min_slots=record.min_slots,
         max_slots=record.max_slots,
         deployment_generation=record.deployment_generation,
@@ -343,9 +383,37 @@ def _response(
     )
 
 
+async def _enriched_response(request: Request, record: DevInstanceRecord) -> DevInstanceResponse:
+    """Keep GET/list truthful when the optional observer cannot prove a worker."""
+
+    if (
+        record.subject_id is None
+        or record.subject_incarnation is None
+        or record.candidate_id is None
+        or record.capacity_namespace is None
+        or record.capacity_database is None
+    ):
+        return _response(record)
+    reader = getattr(request.app.state, "personal_dev_capacity_status_reader", None)
+    if reader is None:
+        return _response(record, PersonalDevCapacityAvailability("waiting", True, False))
+    try:
+        availability = await reader.read(
+            namespace=record.capacity_namespace,
+            database=record.capacity_database,
+            subject_id=record.subject_id,
+            subject_incarnation=record.subject_incarnation,
+            deployment_generation=record.deployment_generation,
+        )
+    except Exception:
+        availability = PersonalDevCapacityAvailability("waiting", True, False)
+    return _response(record, availability)
+
+
 def _personal_environment_response(
     record: PersonalDevEnvironmentRecord,
 ) -> PersonalDevEnvironmentResponse:
+    capacity_prepared = record.capacity_configuration_epoch is not None
     return PersonalDevEnvironmentResponse(
         name=record.name,
         subject_id=record.subject_id,
@@ -353,6 +421,12 @@ def _personal_environment_response(
         owner_user_id=record.owner_user_id,
         owner_team_id=record.owner_team_id,
         status=record.status,
+        application_status=record.status,
+        capacity_status="prepared" if capacity_prepared else "shadow",
+        capacity_prepared=capacity_prepared,
+        # No protected worker-availability evidence is stored on this record.
+        # Application/pod readiness must never imply worker availability.
+        worker_available=False,
         min_slots=record.min_slots,
         max_slots=record.max_slots,
         deployment_generation=record.deployment_generation,
@@ -773,7 +847,7 @@ async def list_dev_instances(
         owner_user_id=owner_filter,
         include_deleted=include_deleted,
     )
-    return DevInstanceListResponse(items=[_response(row) for row in rows])
+    return DevInstanceListResponse(items=[await _enriched_response(request, row) for row in rows])
 
 
 @router.get("/dev-instances/{name}", response_model=DevInstanceResponse)
@@ -785,7 +859,7 @@ async def get_dev_instance(
     session, ctx = sc
     require_scope(ctx, "read:own")
     record = _visible(await _store(request, session).get(name), ctx)
-    return _response(record)
+    return await _enriched_response(request, record)
 
 
 @router.get(
@@ -831,8 +905,7 @@ async def delete_dev_instance(
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "personal-dev destroy requires expected_operation_epoch "
-                    "and idempotency_key"
+                    "personal-dev destroy requires expected_operation_epoch and idempotency_key"
                 ),
             )
         try:
@@ -866,9 +939,7 @@ async def delete_dev_instance(
                 status_code=503,
                 detail="personal-dev destroy failed before manager retirement",
             ) from None
-        response.status_code = (
-            200 if personal_reservation.operation.state == "succeeded" else 202
-        )
+        response.status_code = 200 if personal_reservation.operation.state == "succeeded" else 202
         return _response(personal_reservation.environment)
     provisioner = _factory(request)(store)
     try:

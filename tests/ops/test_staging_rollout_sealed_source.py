@@ -14,6 +14,7 @@ def _git(repo: Path, *args: str) -> str:
         check=True,
         capture_output=True,
         text=True,
+        umask=0o022,
         env={
             **os.environ,
             "GIT_AUTHOR_NAME": "Sealed Test",
@@ -25,13 +26,17 @@ def _git(repo: Path, *args: str) -> str:
 
 
 def _source(repo: Path) -> sealed.SealedSource:
-    repo.mkdir()
+    repo.mkdir(mode=0o755)
     _git(repo, "init")
     _git(repo, "remote", "add", "origin", sealed.APPROVED_REMOTE_URL)
-    (repo / ".gitignore").write_text("/ignored-link\n", encoding="utf-8")
-    (repo / "deploy").mkdir()
+    gitignore = repo / ".gitignore"
+    gitignore.write_text("/ignored-link\n", encoding="utf-8")
+    gitignore.chmod(0o644)
+    (repo / "deploy").mkdir(mode=0o755)
     os.symlink("../.env", repo / "deploy/.env")
-    (repo / "value.txt").write_text("base\n", encoding="utf-8")
+    value = repo / "value.txt"
+    value.write_text("base\n", encoding="utf-8")
+    value.chmod(0o644)
     _git(repo, "add", ".gitignore", "deploy/.env", "value.txt")
     _git(repo, "commit", "-m", "base")
     base = _git(repo, "rev-parse", "HEAD")
@@ -63,7 +68,8 @@ def _validate_real_checkout(source: sealed.SealedSource) -> None:
 
 def _commit_symlink(source: sealed.SealedSource, path: str, target: str) -> sealed.SealedSource:
     destination = source.path / path
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+    destination.parent.chmod(0o755)
     os.symlink(target, destination)
     _git(source.path, "add", "--", path)
     _git(source.path, "commit", "-m", f"add {path}")
@@ -78,6 +84,7 @@ def _standalone_checkout(source: sealed.SealedSource, destination: Path) -> seal
         check=True,
         capture_output=True,
         text=True,
+        umask=0o022,
     )
     _git(destination, "remote", "set-url", "origin", sealed.APPROVED_REMOTE_URL)
     _git(destination, "checkout", "--detach", source.commit_sha)
@@ -173,6 +180,7 @@ def test_sealed_source_rejects_git_indirection_before_identity_checks(
     _trust_tmp_parents(monkeypatch)
     alternates = source.path / ".git/objects/info/alternates"
     alternates.write_text("/tmp/objects\n", encoding="utf-8")
+    alternates.chmod(0o644)
 
     with pytest.raises(sealed.SealedSourceError, match="indirection"):
         _validate_real_checkout(source)

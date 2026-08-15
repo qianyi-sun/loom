@@ -17,7 +17,7 @@ def test_upstream_1415_union_has_one_exact_capacity_history() -> None:
     script = _script("capacity_migrations")
     assert tuple(script.get_heads()) == ("capacity_0012",)
     assert tuple(
-        revision.revision for revision in script.walk_revisions("capacity_0012", "capacity_0003")
+        revision.revision for revision in script.walk_revisions("capacity_0004", "capacity_0012")
     ) == (
         "capacity_0012",
         "capacity_0011",
@@ -38,7 +38,7 @@ def test_upstream_1415_union_has_one_exact_guard_history() -> None:
     script = _script("capacity_guard_migrations")
     assert tuple(script.get_heads()) == ("guard_0019",)
     assert tuple(
-        revision.revision for revision in script.walk_revisions("guard_0019", "guard_0011")
+        revision.revision for revision in script.walk_revisions("guard_0012", "guard_0019")
     ) == (
         "guard_0019",
         "guard_0018",

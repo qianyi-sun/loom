@@ -165,8 +165,11 @@ async def test_executor_binding_and_heartbeat_are_fail_closed(tmp_path: Path) ->
         assert store.heartbeat.journal_digest == journal.head.digest
 
 
-def test_dry_run_executor_has_no_scheduler_or_process_execution_surface() -> None:
-    sources = (Path(__file__).parents[2] / "src/loom_capacity_executor").glob("*.py")
+def test_permanent_v1_executor_modules_have_no_scheduler_or_process_execution_surface() -> None:
+    executor_package = Path(__file__).parents[2] / "src/loom_capacity_executor"
+    sources = tuple(
+        executor_package / name for name in ("dry_run.py", "remote.py", "client.py", "journal.py")
+    )
     forbidden = ("import subprocess", "create_subprocess", "sbatch", "squeue", "scancel")
     assert not any(
         token in source.read_text(encoding="utf-8") for source in sources for token in forbidden

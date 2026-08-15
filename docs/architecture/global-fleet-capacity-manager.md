@@ -418,3 +418,20 @@ prove v1 isolation, exact current-allocation fencing, crash recovery,
 authority-first release replay, hostile-search-path safety, direct-SQL guards,
 and upgrade/downgrade/re-upgrade parity. Deployment tests separately prove the
 checked-in Package 5A remains at a zero executable ceiling.
+
+## Inert executable bridge package
+
+The executable-v2 package has one global manager spanning production, staging,
+shared development, and personal-development subjects, and exactly one
+controller-local executor for OLDLAB and GB10. Users do not configure pool
+weights, QoS, shapes, profiles, or priorities: `min_slots` defaults to zero,
+architecture-specific demand constrains eligibility, and neutral placement is
+manager-owned. `loom-dev` is shared infrastructure; personal namespaces are
+`loom-dev-<owner>`, never `loom-dev-shared`.
+
+The checked-in executor profile has immutable images and an exact zero
+executable ceiling. Rendering and systemd validation are read-only; no merge
+authorizes activation or live infrastructure mutation. The manager's v2 status
+may report exact active physical Slurm-job intent, but only a matching fresh
+protected personal guard registration, with no later release/drain, can make a
+worker available. Scheduler evidence and pod readiness alone are insufficient.

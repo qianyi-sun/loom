@@ -21,6 +21,7 @@ db_url = os.environ.get("LOOM_CAPACITY_GUARD_DB_URL", "").strip()
 owner_role = os.environ.get("LOOM_CAPACITY_GUARD_OWNER_ROLE", "").strip()
 agent_role = os.environ.get("LOOM_CAPACITY_GUARD_AGENT_ROLE", "").strip()
 executor_role = os.environ.get("LOOM_CAPACITY_GUARD_EXECUTOR_ROLE", "").strip()
+observer_role = os.environ.get("LOOM_CAPACITY_GUARD_OBSERVER_ROLE", "").strip()
 if not db_url:
     raise RuntimeError(
         "LOOM_CAPACITY_GUARD_DB_URL must be set to run protected capacity migrations"
@@ -31,6 +32,12 @@ if _ROLE_PATTERN.fullmatch(agent_role) is None or agent_role == owner_role:
     raise RuntimeError("LOOM_CAPACITY_GUARD_AGENT_ROLE must name a distinct canonical SQL role")
 if _ROLE_PATTERN.fullmatch(executor_role) is None or executor_role in {owner_role, agent_role}:
     raise RuntimeError("LOOM_CAPACITY_GUARD_EXECUTOR_ROLE must name a distinct canonical SQL role")
+if _ROLE_PATTERN.fullmatch(observer_role) is None or observer_role in {
+    owner_role,
+    agent_role,
+    executor_role,
+}:
+    raise RuntimeError("LOOM_CAPACITY_GUARD_OBSERVER_ROLE must name a distinct canonical SQL role")
 # Alembic stores options in ConfigParser, where URL-encoded percent signs in
 # credentials are interpolation markers unless doubled at this one boundary.
 config.set_main_option("sqlalchemy.url", db_url.replace("%", "%%"))
@@ -159,8 +166,55 @@ def run_migrations_online() -> None:
                     "protected capacity executor must be a distinct least-privileged "
                     "NOINHERIT role with no memberships"
                 )
+            observer = (
+                connection.execute(
+                    text(
+                        "SELECT rolname, rolcanlogin, rolinherit, rolsuper, rolcreatedb, "
+                        "rolcreaterole, rolreplication, rolbypassrls, "
+                        "pg_has_role(rolname, :owner_role, 'MEMBER') AS owner_member, "
+                        "pg_has_role(rolname, :agent_role, 'MEMBER') AS agent_member, "
+                        "pg_has_role(rolname, :executor_role, 'MEMBER') AS executor_member, "
+                        "(SELECT count(*) FROM pg_auth_members AS m "
+                        "WHERE m.member = pg_roles.oid) AS role_memberships "
+                        "FROM pg_roles WHERE rolname = :observer_role"
+                    ),
+                    {
+                        "observer_role": observer_role,
+                        "owner_role": owner_role,
+                        "agent_role": agent_role,
+                        "executor_role": executor_role,
+                    },
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if (
+                observer is None
+                or observer["rolcanlogin"] is not True
+                or observer["rolinherit"] is not False
+                or observer["owner_member"] is not False
+                or observer["agent_member"] is not False
+                or observer["executor_member"] is not False
+                or observer["role_memberships"] != 0
+                or observer["rolname"] in {login["rolname"], owner_role, agent_role, executor_role}
+                or any(
+                    observer[field] is True
+                    for field in (
+                        "rolsuper",
+                        "rolcreatedb",
+                        "rolcreaterole",
+                        "rolreplication",
+                        "rolbypassrls",
+                    )
+                )
+            ):
+                raise RuntimeError(
+                    "protected capacity observer must be a distinct least-privileged "
+                    "NOINHERIT login with no memberships"
+                )
             config.attributes["capacity_guard_agent_role"] = agent_role
             config.attributes["capacity_guard_executor_role"] = executor_role
+            config.attributes["capacity_guard_observer_role"] = observer_role
             connection.exec_driver_sql(f"SET ROLE {quoted_owner}")
             role = (
                 connection.execute(

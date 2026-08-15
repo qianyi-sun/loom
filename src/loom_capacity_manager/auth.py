@@ -106,6 +106,7 @@ class _PrincipalDocument(_StrictModel):
                 self.pool_id,
                 self.executor_id,
                 self.executor_incarnation,
+                self.executor_pool_generation,
             )
         ):
             raise ValueError("incomplete executor binding")

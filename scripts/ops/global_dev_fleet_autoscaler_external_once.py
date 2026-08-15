@@ -36,6 +36,11 @@ from loom_control_plane.global_dev_fleet_autoscaler import (
     GlobalDevFleetAutoscaler,
     capacity_grants_from_report,
 )
+from loom_control_plane.global_execution_fence import (
+    GlobalExecutionFenceError,
+    GlobalExecutionWitness,
+    load_global_execution_witness,
+)
 from loom_control_plane.shared_capacity_broker import (
     BrokerBudgets,
     BrokerError,
@@ -114,6 +119,16 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--kube-context", default="")
     parser.add_argument("--snapshot-freshness-seconds", type=int, default=120)
     parser.add_argument("--lease-ttl-seconds", type=int, default=300)
+    parser.add_argument(
+        "--global-execution-witness-json",
+        type=Path,
+        required=True,
+        help="Authenticated manager witness; absence permits drain only.",
+    )
+    parser.add_argument("--manager-public-key", type=Path, required=True)
+    manager_pin = parser.add_mutually_exclusive_group(required=True)
+    manager_pin.add_argument("--expected-manager-public-key-sha256")
+    manager_pin.add_argument("--expected-manager-public-key-sha256-file", type=Path)
     return parser
 
 
@@ -420,6 +435,8 @@ async def _reconcile_instance(
     admin_url: str,
     snapshot: InstanceSnapshot,
     grants: dict[tuple[str, str], Any],
+    *,
+    global_execution_witness: GlobalExecutionWitness | None,
 ) -> None:
     url = fixture_database_url(admin_url, snapshot.database)
     engine = create_async_engine(_sqlalchemy_url(url), pool_pre_ping=True)
@@ -433,6 +450,7 @@ async def _reconcile_instance(
                 pool_names=(snapshot.pool_name,),
                 capacity_grants=grants,
                 deployment_generation=snapshot.deployment_generation,
+                global_execution_witness=global_execution_witness,
             )
             await session.commit()
     except Exception as exc:
@@ -455,6 +473,12 @@ async def _main(args: argparse.Namespace) -> dict[str, object]:
         raise GlobalDevExternalError("global pending budget must be non-negative")
     management_url = _read_secret_file(args.management_db_url_file, "management DB URL file")
     admin_url = _read_secret_file(args.fixture_admin_db_url_file, "fixture admin DB URL file")
+    global_execution_witness = load_global_execution_witness(
+        args.global_execution_witness_json,
+        manager_public_key_path=args.manager_public_key,
+        expected_manager_public_key_sha256=args.expected_manager_public_key_sha256,
+        expected_manager_public_key_sha256_file=args.expected_manager_public_key_sha256_file,
+    )
     _validate_owner_only_directory(args.worker_env_dir, "worker environment directory")
     _validate_owner_only_directory(args.output_json.parent, "grant report directory")
     rows = await _registry_rows(management_url)
@@ -489,31 +513,53 @@ async def _main(args: argparse.Namespace) -> dict[str, object]:
         global_pending_slots=pending_budget,
         pool_pending_slots={pool: pending_budget for pool in pools},
     )
-    broker = SharedCapacityBroker(args.state_db)
-    report = GlobalDevFleetAutoscaler(
-        broker,
-        snapshot_freshness_seconds=args.snapshot_freshness_seconds,
-        lease_ttl_seconds=args.lease_ttl_seconds,
-    ).reconcile(
-        demands,
-        budgets,
-        observations=_lease_observations(broker, snapshots),
-    )
+    try:
+        broker = SharedCapacityBroker(args.state_db)
+        report = GlobalDevFleetAutoscaler(
+            broker,
+            snapshot_freshness_seconds=args.snapshot_freshness_seconds,
+            lease_ttl_seconds=args.lease_ttl_seconds,
+        ).reconcile(
+            demands,
+            budgets,
+            observations=_lease_observations(broker, snapshots),
+            execution_witness=global_execution_witness,
+        )
+    except GlobalExecutionFenceError:
+        # Do not touch the legacy broker or mint worker credentials.  The
+        # local policy path receives an empty grant set and its own reciprocal
+        # fence, retaining the established drain-safe behavior for workers
+        # already running under a prior legacy grant.
+        report = {
+            "schema_version": 1,
+            "authority": "global-dev-fleet-autoscaler",
+            "status": "fenced",
+            "generated_at": now.isoformat().replace("+00:00", "Z"),
+            "demands": [demand.public_dict() for demand in demands],
+            "grants": [],
+            "aggregate": {"legacy_scale_up_fenced": True},
+        }
     _write_report(args.output_json, report)
-    grants = capacity_grants_from_report(report)
+    grants = capacity_grants_from_report(report) if report["status"] == "ok" else {}
     kubectl = KubectlClient(args.kubectl, context=args.kube_context)
     for snapshot in snapshots:
         # Provisioning/failed/deleting instances publish zero demand and must
         # never mint fresh worker credentials. Existing deleting credentials
         # stay on disk just long enough for the external actuator to drain and
         # are pruned once the registry row becomes deleted.
-        if snapshot.status == "ready":
+        if snapshot.status == "ready" and report["grants"]:
             await _ensure_worker_env(args, kubectl, snapshot)
-        await _reconcile_instance(admin_url, snapshot, grants)
+        await _reconcile_instance(
+            admin_url,
+            snapshot,
+            grants,
+            global_execution_witness=global_execution_witness,
+        )
     return {
         "authority": report["authority"],
         "aggregate": report["aggregate"],
         "instances": len(snapshots),
+        "status": report["status"],
     }
 
 
@@ -521,7 +567,7 @@ def main() -> int:
     try:
         result = asyncio.run(_main(_parser().parse_args()))
         print(json.dumps(result, sort_keys=True))
-        return 0
+        return 0 if result["status"] == "ok" else 2
     except (BrokerError, GlobalDevAutoscalerError, GlobalDevExternalError):
         sys.stderr.write("error: global development fleet reconcile failed safely\n")
         return 2

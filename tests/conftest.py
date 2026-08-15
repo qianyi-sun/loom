@@ -7,11 +7,13 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
 import pytest
 from testcontainers.postgres import PostgresContainer
+
+from tests.support.executable_capacity_harness import ExecutableCapacityHarness
 
 _TEST_STEP_JWT_SIGNING_KEY = "test-step-jwt-signing-key-do-not-use-in-prod"
 
@@ -37,13 +39,33 @@ def postgres_url() -> Iterator[str]:
     """
     with PostgresContainer("postgres:16") as pg:
         url = pg.get_connection_url().replace(
-            "postgresql+psycopg2://", "postgresql+psycopg://",
+            "postgresql+psycopg2://",
+            "postgresql+psycopg://",
         )
         os.environ["LOOM_DB_URL"] = url
         repo_root = Path(__file__).resolve().parents[1]
         subprocess.run(
-            [sys.executable, "-m", "alembic",
-             "-c", "migrations/alembic.ini", "upgrade", "head"],
-            cwd=repo_root, check=True,
+            [sys.executable, "-m", "alembic", "-c", "migrations/alembic.ini", "upgrade", "head"],
+            cwd=repo_root,
+            check=True,
         )
         yield url
+
+
+@pytest.fixture
+async def executable_capacity_harness(
+    tmp_path: Path,
+    postgres_url: str,
+    capacity_guard_template_database: dict[str, object],
+) -> AsyncIterator[ExecutableCapacityHarness]:
+    """Create the isolated two-pool executable bridge proof deployment."""
+
+    harness = await ExecutableCapacityHarness.create(
+        tmp_path,
+        postgres_url,
+        capacity_guard_template_database,
+    )
+    try:
+        yield harness
+    finally:
+        await harness.aclose()

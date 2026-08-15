@@ -723,6 +723,8 @@ class ExecutableLaunchPermitV2(StrictV2Model):
     permit_epoch: PositiveQuantity
     launch_rank: PositiveQuantity
     expires_at: datetime
+    bootstrap_registration_epoch: PositiveQuantity
+    bootstrap_evidence_sha256: Digest
     executable: Literal[True] = True
 
     _expires_at_utc = field_validator("expires_at")(_utc_time)
@@ -753,9 +755,7 @@ class ExecutableSubmissionRecoveryV2(StrictV2Model):
     controller_evidence_sha256: Digest
     executable: Literal[True] = True
 
-    _controller_query_completed_at_utc = field_validator("controller_query_completed_at")(
-        _utc_time
-    )
+    _controller_query_completed_at_utc = field_validator("controller_query_completed_at")(_utc_time)
 
 
 class ExecutableIntentCloseV2(StrictV2Model):
@@ -763,7 +763,15 @@ class ExecutableIntentCloseV2(StrictV2Model):
 
     binding: ExecutableIntentBindingV2
     command_sequence: PositiveQuantity
+    bootstrap_registration_epoch: PositiveQuantity | None = None
+    bootstrap_evidence_sha256: Digest | None = None
     executable: Literal[True] = True
+
+    @model_validator(mode="after")
+    def _bootstrap_evidence_pair(self) -> ExecutableIntentCloseV2:
+        if (self.bootstrap_registration_epoch is None) != (self.bootstrap_evidence_sha256 is None):
+            raise ValueError("close bootstrap registration epoch and evidence must appear together")
+        return self
 
 
 class ExecutableProtectedReleaseV2(StrictV2Model):
@@ -862,6 +870,53 @@ def canonical_executable_digest(contract: StrictV2Model) -> str:
     return hashlib.sha256(canonical_executable_bytes(contract)).hexdigest()
 
 
+def canonical_inventory_confirmation_journal_head(
+    inventory: ExecutableExecutorInventoryV2,
+) -> tuple[int, str]:
+    """Derive the exact journal head after requested/confirmed publication."""
+
+    if not isinstance(inventory, ExecutableExecutorInventoryV2):
+        raise ValueError("inventory confirmation requires an executable inventory")
+    payload = canonical_executable_bytes(inventory)
+    payload_digest = hashlib.sha256(payload).hexdigest()
+    payload_base64 = base64.b64encode(payload).decode("ascii")
+    object_id = str(inventory.executor_incarnation)
+
+    def record_digest(*, sequence: int, previous_digest: str, event_kind: str) -> str:
+        record = {
+            "schema_version": 2,
+            "sequence": sequence,
+            "previous_digest": previous_digest,
+            "event_kind": event_kind,
+            "object_kind": "inventory",
+            "object_id": object_id,
+            "payload_digest": payload_digest,
+            "payload_base64": payload_base64,
+        }
+        encoded = json.dumps(
+            record,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("ascii")
+        return hashlib.sha256(encoded).hexdigest()
+
+    requested_sequence = inventory.journal_sequence + 1
+    requested_digest = record_digest(
+        sequence=requested_sequence,
+        previous_digest=inventory.journal_digest,
+        event_kind="inventory-publish-requested",
+    )
+    confirmation_sequence = requested_sequence + 1
+    confirmation_digest = record_digest(
+        sequence=confirmation_sequence,
+        previous_digest=requested_digest,
+        event_kind="inventory-publish-confirmed",
+    )
+    return confirmation_sequence, confirmation_digest
+
+
 __all__ = [
     "CandidateBindingV2",
     "ExecutableBootstrapAcknowledgementV2",
@@ -899,4 +954,5 @@ __all__ = [
     "SubjectExecutionAcknowledgementV2",
     "canonical_executable_bytes",
     "canonical_executable_digest",
+    "canonical_inventory_confirmation_journal_head",
 ]

@@ -623,6 +623,7 @@ include_paths = [
   "tests/loom_service/**/*.py",
   "tests/ops/**/*.py",
   "tests/property/**/*.py",
+  "tests/support/**/*.py",
   "tests/unit/**/*.py",
 ]
 
