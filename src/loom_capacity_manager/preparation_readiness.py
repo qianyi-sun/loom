@@ -94,6 +94,41 @@ class PreparedExecutorReadinessV1(StrictV2Model):
     quarantined_record_count: Quantity
     blockers: tuple[PreparedReadinessBlocker, ...]
 
+    @field_validator(
+        "lease_expires_at",
+        "last_heartbeat_at",
+        "inventory_observed_at",
+        mode="before",
+    )
+    @classmethod
+    def _parse_optional_wire_time(
+        cls,
+        value: datetime | str | None,
+    ) -> datetime | str | None:
+        if not isinstance(value, str):
+            return value
+        timestamp = f"{value[:-1]}+00:00" if value.endswith("Z") else value
+        try:
+            return datetime.fromisoformat(timestamp)
+        except ValueError:
+            return value
+
+    @field_validator(
+        "lease_expires_at",
+        "last_heartbeat_at",
+        "inventory_observed_at",
+    )
+    @classmethod
+    def _optional_times_are_utc(
+        cls,
+        value: datetime | None,
+    ) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("prepared readiness time must be timezone-aware")
+        return value.astimezone(UTC)
+
     @field_validator("blockers")
     @classmethod
     def _blockers_are_canonical(

@@ -1,4 +1,4 @@
-"""Authenticated, shadow-only HTTP surface for global capacity evidence."""
+"""Authenticated zero-ceiling HTTP surface for global capacity evidence."""
 
 # ruff: noqa: B008 - FastAPI declares dependency injection in parameter defaults.
 
@@ -51,6 +51,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableBootstrapProposalV2,
     ExecutableExecutorHeartbeatV2,
     ExecutableExecutorInventoryV2,
+    ExecutableExecutorRegistrationV2,
     ExecutableIntentBindingV2,
     ExecutableIntentCloseV2,
     ExecutablePartialReleaseV2,
@@ -59,6 +60,8 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableReservationAcceptanceV2,
     ExecutableSubmissionRecoveryV2,
     ExecutionContextV2,
+    ExecutionPreparationAbortV2,
+    ExecutionPreparationV2,
     PreparedExecutorBindingV2,
     canonical_executable_digest,
 )
@@ -111,6 +114,9 @@ from loom_capacity_manager.models import (
     CapacitySubmissionIntent,
 )
 from loom_capacity_manager.ownership import OwnershipKeyring
+from loom_capacity_manager.preparation_readiness import (
+    load_prepared_execution_readiness,
+)
 from loom_capacity_manager.reconciler import (
     ShadowAllocator,
     ShadowRunResult,
@@ -389,6 +395,7 @@ def create_app(
 
     resolved_verifier = verifier or CapacityPrincipalVerifier.from_file(settings.principals_file)
     metrics = CapacityMetrics()
+    resolved_execution_policy_sha256: str | None = None
     if management_store is None:
         execution_policy = (
             None
@@ -402,6 +409,8 @@ def create_app(
             freshness_seconds=settings.freshness_seconds,
             execution_policy=execution_policy,
         )
+        if execution_policy is not None:
+            resolved_execution_policy_sha256 = cast(str, settings.execution_policy_sha256)
     else:
         resolved_management_store = management_store
     ownership_keyring = OwnershipKeyring()
@@ -530,6 +539,9 @@ def create_app(
     protected_release_acknowledgement_body = contract_body(DryRunProtectedReleaseAcknowledgementV1)
     executable_heartbeat_body = contract_body(ExecutableExecutorHeartbeatV2)
     executable_inventory_body = contract_body(ExecutableExecutorInventoryV2)
+    execution_preparation_body = contract_body(ExecutionPreparationV2)
+    execution_registration_body = contract_body(ExecutableExecutorRegistrationV2)
+    execution_abort_body = contract_body(ExecutionPreparationAbortV2)
     executable_acceptance_body = contract_body(ExecutableReservationAcceptanceV2)
     executable_bootstrap_proposal_body = contract_body(ExecutableBootstrapProposalV2)
     executable_bootstrap_acknowledgement_body = contract_body(ExecutableBootstrapAcknowledgementV2)
@@ -823,6 +835,22 @@ def create_app(
         ):
             raise HTTPException(status_code=403, detail="forbidden")
 
+    def assert_unbound_execution_actor(actor: CapacityPrincipal) -> None:
+        if any(
+            value is not None
+            for value in (
+                actor.subject_id,
+                actor.subject_incarnation,
+                actor.demand_reporter_incarnation,
+                actor.pool_id,
+                actor.pool_reporter_incarnation,
+                actor.executor_id,
+                actor.executor_incarnation,
+                actor.executor_pool_generation,
+            )
+        ):
+            raise HTTPException(status_code=403, detail="forbidden")
+
     def executor_binding(actor: CapacityPrincipal, *, pool_id: str) -> PreparedExecutorBindingV2:
         if (
             actor.pool_id != pool_id
@@ -840,6 +868,81 @@ def create_app(
             local_authority_sha256="0" * 64,
             controller_authority_sha256="0" * 64,
         )
+
+    @app.post("/v2/execution-preparations")
+    async def prepare_execution_epoch(
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:execution:prepare")),
+        value: ExecutionPreparationV2 = Depends(execution_preparation_body),
+        idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    ) -> Any:
+        assert_unbound_execution_actor(actor)
+        session_factory, store, _writer = runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await store.prepare_execution_epoch(
+                    session,
+                    value,
+                    actor=actor.principal_id,
+                    idempotency_key=idempotency_key,
+                )
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.put("/v2/executors/{pool_id}/registration")
+    async def register_execution_executor(
+        pool_id: str,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:execute:pool")),
+        value: ExecutableExecutorRegistrationV2 = Depends(execution_registration_body),
+        idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    ) -> Any:
+        assert_executor_actor(
+            actor,
+            pool_id=pool_id,
+            executor_id=value.executor_id,
+            executor_incarnation=value.executor_incarnation,
+            pool_generation=value.pool_generation,
+        )
+        if value.pool_id != pool_id:
+            raise HTTPException(status_code=403, detail="forbidden")
+        session_factory, store, _writer = runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await store.register_execution_executor(
+                    session,
+                    value,
+                    actor=actor.principal_id,
+                    idempotency_key=idempotency_key,
+                )
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.post("/v2/execution-preparations/{execution_epoch}/abort")
+    async def abort_execution_preparation(
+        execution_epoch: int,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:execution:abort")),
+        value: ExecutionPreparationAbortV2 = Depends(execution_abort_body),
+        idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    ) -> Any:
+        assert_unbound_execution_actor(actor)
+        if value.execution_epoch != execution_epoch:
+            raise HTTPException(status_code=403, detail="forbidden")
+        session_factory, store, _writer = runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await store.abort_prepared_execution_epoch(
+                    session,
+                    value,
+                    actor=actor.principal_id,
+                    idempotency_key=idempotency_key,
+                )
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
 
     @app.put("/v1/executors/{pool_id}/registration")
     async def register_executor(
@@ -1672,6 +1775,34 @@ def create_app(
                 for row in rows
             ]
         }
+
+    @app.get("/v2/status/execution-preparation")
+    async def execution_preparation_status(
+        request: Request,
+        _actor: CapacityPrincipal = Depends(require("capacity:read")),
+    ) -> Any:
+        session_factory, store, _writer = runtime(request)
+        policy = store.execution_policy
+        policy_sha256 = resolved_execution_policy_sha256 if policy is not None else None
+        if policy is not None and policy_sha256 is None:
+            raise HTTPException(
+                status_code=503,
+                detail="execution preparation status unavailable",
+            )
+        try:
+            async with session_factory() as session:
+                result = await load_prepared_execution_readiness(
+                    session,
+                    execution_policy=policy,
+                    execution_policy_sha256=policy_sha256,
+                    freshness_seconds=settings.freshness_seconds,
+                )
+            return jsonable_encoder(result)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="execution preparation status unavailable",
+            ) from exc
 
     @app.get("/v2/status/executors")
     async def executable_executor_status(
