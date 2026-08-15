@@ -111,6 +111,47 @@ def test_cross_loaded_pool_configuration_fails_before_registration(tmp_path: Pat
         config.assert_pool("gb10")
 
 
+def test_config_accepts_its_exact_inventory_policy_binding(tmp_path: Path) -> None:
+    config = PoolExecutorConfig.from_files(executor_files(tmp_path, pool_id="oldlab").config)
+
+    config.assert_inventory_policy_binding(
+        pool_id="oldlab",
+        pool_generation=1,
+        query_uid=os.geteuid(),
+        controller_cluster="oldlab",
+        relevant_partitions=("oldlab-workers",),
+    )
+
+
+@pytest.mark.parametrize(
+    "change",
+    (
+        {"pool_id": "gb10"},
+        {"pool_generation": 2},
+        {"query_uid": 0},
+        {"query_uid": 1001 if os.geteuid() != 1001 else 1002},
+        {"controller_cluster": "gb10"},
+        {"relevant_partitions": ("another-partition",)},
+    ),
+)
+def test_config_rejects_inventory_policy_binding_drift(
+    tmp_path: Path,
+    change: dict[str, object],
+) -> None:
+    config = PoolExecutorConfig.from_files(executor_files(tmp_path, pool_id="oldlab").config)
+    binding: dict[str, object] = {
+        "pool_id": "oldlab",
+        "pool_generation": 1,
+        "query_uid": os.geteuid(),
+        "controller_cluster": "oldlab",
+        "relevant_partitions": ("oldlab-workers",),
+    }
+    binding.update(change)
+
+    with pytest.raises(ExecutorConfigError, match="inventory policy"):
+        config.assert_inventory_policy_binding(**binding)  # type: ignore[arg-type]
+
+
 def test_config_requires_an_absolute_journal_path(tmp_path: Path) -> None:
     files = executor_files(tmp_path)
     payload = json.loads(files.config.read_text(encoding="utf-8"))
