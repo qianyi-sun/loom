@@ -19,6 +19,7 @@ from pydantic import Field, field_validator
 
 from loom_capacity_agent.admission import (
     ExecutableDrainRequestV2,
+    ExecutablePreparedBootstrapRevocationV2,
     ExecutableReleaseRequestV2,
     ExecutableWorkerRegistrationV2,
     ExecutableWorkerWithdrawalRequestV2,
@@ -68,6 +69,36 @@ def _execution_context_payload(value: ExecutionContextV2) -> dict[str, Any]:
     return value.model_dump(
         mode="json",
         exclude={"allocation_epoch", "executable"},
+    )
+
+
+def retained_drain_execution_matches(
+    retained: ExecutionContextV2,
+    current: ExecutionContextV2,
+) -> bool:
+    """Match an immutable pre-drain binding to a monotonic drain authority."""
+
+    if not isinstance(retained, ExecutionContextV2) or not isinstance(current, ExecutionContextV2):
+        return False
+    if (
+        retained.execution_state not in {"prepared", "active"}
+        or current.execution_state != "drain-only"
+        or current.executable_new_capacity_ceiling != 0
+        or current.executable_new_capacity_rate_per_minute != 0
+        or current.writer_epoch not in {retained.writer_epoch, retained.writer_epoch + 1}
+    ):
+        return False
+    mutable_fields = {
+        "writer_epoch",
+        "execution_state",
+        "executable_new_capacity_ceiling",
+        "executable_new_capacity_rate_per_minute",
+        "allocation_epoch",
+        "executable",
+    }
+    return retained.model_dump(mode="json", exclude=mutable_fields) == current.model_dump(
+        mode="json",
+        exclude=mutable_fields,
     )
 
 
@@ -335,7 +366,7 @@ def build_executable_runtime(
         raise RuntimeAssemblyError("activation runtime artifact is invalid")
     if _execution_context_payload(current_context) != _execution_context_payload(
         artifact.execution
-    ):
+    ) and not retained_drain_execution_matches(artifact.execution, current_context):
         raise RuntimeAssemblyError("current execution context differs from activation artifact")
     _assert_config_artifact_binding(config, artifact)
     _assert_profiles(config, artifact)
@@ -713,6 +744,12 @@ class RoutedExecutableAdmissionClient:
         request: ExecutableWorkerWithdrawalRequestV2,
     ) -> Any:
         return await self._call(request.binding, "withdraw_unregistered_worker", request)
+
+    async def revoke_prepared_bootstrap(
+        self,
+        request: ExecutablePreparedBootstrapRevocationV2,
+    ) -> Any:
+        return await self._call(request.binding, "revoke_prepared_bootstrap", request)
 
     async def register_worker(
         self,

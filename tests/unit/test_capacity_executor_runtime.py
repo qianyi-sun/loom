@@ -463,6 +463,56 @@ def test_activation_runtime_artifact_builds_exact_executor_runtime(tmp_path: Pat
     assert executor.admission is admission
     assert seen == [artifact.slurm_authority]
     assert len(executor.profiles) == 2
+    executor.journal.close()
+
+    drain_only = active.model_copy(
+        update={
+            "writer_epoch": active.writer_epoch + 1,
+            "execution_state": "drain-only",
+            "executable_new_capacity_ceiling": 0,
+            "executable_new_capacity_rate_per_minute": 0,
+        }
+    )
+    retained = build_executable_runtime(
+        config,
+        artifact,
+        manager_client=manager,
+        current_context=drain_only,
+        admission_client_factory=lambda *_args, **_kwargs: admission,
+        slurm_backend_factory=slurm_factory,
+    )
+    try:
+        assert retained.registration.execution == active
+    finally:
+        retained.journal.close()
+
+    with pytest.raises(RuntimeAssemblyError, match="activation artifact"):
+        build_executable_runtime(
+            config,
+            artifact,
+            manager_client=manager,
+            current_context=drain_only.model_copy(update={"execution_manifest_sha256": "f" * 64}),
+            admission_client_factory=lambda *_args, **_kwargs: admission,
+            slurm_backend_factory=slurm_factory,
+        )
+    with pytest.raises(RuntimeAssemblyError, match="activation artifact"):
+        build_executable_runtime(
+            config,
+            artifact,
+            manager_client=manager,
+            current_context=active.model_copy(update={"writer_epoch": active.writer_epoch + 1}),
+            admission_client_factory=lambda *_args, **_kwargs: admission,
+            slurm_backend_factory=slurm_factory,
+        )
+    with pytest.raises(RuntimeAssemblyError, match="activation artifact"):
+        build_executable_runtime(
+            config,
+            artifact,
+            manager_client=manager,
+            current_context=drain_only.model_copy(update={"writer_epoch": active.writer_epoch + 2}),
+            admission_client_factory=lambda *_args, **_kwargs: admission,
+            slurm_backend_factory=slurm_factory,
+        )
 
 
 # Production break caught: per-profile manager-resource to Slurm-TRES mappings

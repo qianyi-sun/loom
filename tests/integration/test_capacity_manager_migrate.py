@@ -72,6 +72,26 @@ def _seed_active_execution(connection: Connection) -> int:
             "configuration_key": uuid4(),
         },
     )
+    for pool_id in ("gb10", "oldlab"):
+        connection.execute(
+            text(
+                "INSERT INTO capacity_pools "
+                "(id, configuration_epoch, pool_id, pool_generation, pool_digest, "
+                "controller, partition, association, protocol_generation, "
+                "protocol_digest, topology, envelope, health, max_slots, "
+                "max_pending_slots, max_pending_jobs, submission_rate_per_minute) "
+                "VALUES (:id, :configuration_epoch, :pool_id, 1, repeat('a', 64), "
+                ":controller, 'migration-test', :association, 1, repeat('b', 64), "
+                "'{}'::jsonb, '{}'::jsonb, 'eligible', 1, 1, 1, 1)"
+            ),
+            {
+                "id": uuid4(),
+                "configuration_epoch": configuration_epoch,
+                "pool_id": pool_id,
+                "controller": f"{pool_id}-controller",
+                "association": f"{pool_id}-association",
+            },
+        )
     connection.execute(
         text(
             "INSERT INTO capacity_execution_epochs "
@@ -80,15 +100,21 @@ def _seed_active_execution(connection: Connection) -> int:
             "fleet_digest, execution_manifest_sha256, manifest_payload, "
             "trusted_fleet_release_sha256, oldlab_executor_id, "
             "oldlab_executor_incarnation, oldlab_pool_id, oldlab_pool_generation, "
+            "oldlab_signing_key_sha256, oldlab_local_authority_sha256, "
+            "oldlab_controller_authority_sha256, "
             "gb10_executor_id, gb10_executor_incarnation, gb10_pool_id, "
-            "gb10_pool_generation, environment_acknowledgements_sha256, "
+            "gb10_pool_generation, gb10_signing_key_sha256, "
+            "gb10_local_authority_sha256, gb10_controller_authority_sha256, "
+            "environment_acknowledgements_sha256, "
             "legacy_writer_manifest_sha256, rollback_evidence_sha256, "
             "requested_ceiling, effective_ceiling, requested_rate_per_minute, "
             "effective_rate_per_minute, state, actor, idempotency_key, request_digest) "
             "VALUES (:execution_epoch, :authority, 1, 1, :configuration_epoch, 1, "
             "repeat('1', 64), repeat('4', 64), '{}'::jsonb, repeat('5', 64), "
             "'oldlab-executor', :oldlab_incarnation, 'oldlab', 1, "
-            "'gb10-executor', :gb10_incarnation, 'gb10', 1, repeat('6', 64), "
+            "repeat('a', 64), repeat('b', 64), repeat('c', 64), "
+            "'gb10-executor', :gb10_incarnation, 'gb10', 1, "
+            "repeat('a', 64), repeat('b', 64), repeat('c', 64), repeat('6', 64), "
             "repeat('7', 64), repeat('8', 64), 2, 0, 2, 0, 'prepared', "
             "'migration-test', :execution_key, repeat('9', 64))"
         ),
@@ -127,6 +153,17 @@ def _seed_active_execution(connection: Connection) -> int:
             },
         )
     connection.execute(
+        text("UPDATE capacity_authority_state SET writer_epoch = 1 WHERE singleton_id = 1")
+    )
+    connection.execute(
+        text(
+            "UPDATE capacity_authority_state SET execution_epoch = :execution_epoch, "
+            "execution_state = 'prepared', execution_manifest_sha256 = repeat('4', 64), "
+            "executable_new_capacity_ceiling = 0 WHERE singleton_id = 1"
+        ),
+        {"execution_epoch": execution_epoch},
+    )
+    connection.execute(
         text(
             "UPDATE capacity_execution_epochs SET state = 'active', "
             "effective_ceiling = 1, effective_rate_per_minute = 1, "
@@ -136,6 +173,12 @@ def _seed_active_execution(connection: Connection) -> int:
             "WHERE execution_epoch = :execution_epoch"
         ),
         {"activation_key": uuid4(), "execution_epoch": execution_epoch},
+    )
+    connection.execute(
+        text(
+            "UPDATE capacity_authority_state SET execution_state = 'active', "
+            "executable_new_capacity_ceiling = 1 WHERE singleton_id = 1"
+        )
     )
     return execution_epoch
 

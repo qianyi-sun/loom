@@ -278,7 +278,7 @@ async def test_prepare_rejects_executor_pool_generation_outside_active_fleet(
     fixture = await _setup(capacity_session, execution_policy=stale_policy)
     stale_request = fixture.request.model_copy(update={"executors": stale_executors})
 
-    with pytest.raises(ExecutionConflictError, match="executor pool generation"):
+    with pytest.raises(ExecutionConflictError, match="fleet pool generation"):
         await fixture.store.prepare_execution_epoch(
             capacity_session,
             stale_request,

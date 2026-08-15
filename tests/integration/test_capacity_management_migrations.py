@@ -17,7 +17,7 @@ from alembic.config import Config as AlembicConfig
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy import create_engine, inspect, select, text
-from sqlalchemy.engine import make_url
+from sqlalchemy.engine import Connection, make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -72,6 +72,29 @@ def _capacity_config(url: str) -> AlembicConfig:
     cfg.set_main_option("script_location", str(root / "capacity_migrations"))
     os.environ["LOOM_CAPACITY_DB_URL"] = url
     return cfg
+
+
+def _seed_execution_pools(connection: Connection, *, configuration_epoch: int) -> None:
+    for pool_id in ("gb10", "oldlab"):
+        connection.execute(
+            text(
+                "INSERT INTO capacity_pools "
+                "(id, configuration_epoch, pool_id, pool_generation, pool_digest, "
+                "controller, partition, association, protocol_generation, "
+                "protocol_digest, topology, envelope, health, max_slots, "
+                "max_pending_slots, max_pending_jobs, submission_rate_per_minute) "
+                "VALUES (:id, :configuration_epoch, :pool_id, 1, repeat('a', 64), "
+                ":controller, 'migration-test', :association, 1, repeat('b', 64), "
+                "'{}'::jsonb, '{}'::jsonb, 'eligible', 1, 1, 1, 1)"
+            ),
+            {
+                "id": uuid4(),
+                "configuration_epoch": configuration_epoch,
+                "pool_id": pool_id,
+                "controller": f"{pool_id}-controller",
+                "association": f"{pool_id}-association",
+            },
+        )
 
 
 @pytest.fixture
@@ -136,6 +159,7 @@ def test_forward_migration_replaces_existing_0004_retirement_constraint(
                     "configuration_key": uuid4(),
                 },
             )
+            _seed_execution_pools(connection, configuration_epoch=configuration_epoch)
             connection.execute(
                 text(
                     "INSERT INTO capacity_execution_epochs "
@@ -144,8 +168,12 @@ def test_forward_migration_replaces_existing_0004_retirement_constraint(
                     "fleet_digest, execution_manifest_sha256, manifest_payload, "
                     "trusted_fleet_release_sha256, oldlab_executor_id, "
                     "oldlab_executor_incarnation, oldlab_pool_id, oldlab_pool_generation, "
+                    "oldlab_signing_key_sha256, oldlab_local_authority_sha256, "
+                    "oldlab_controller_authority_sha256, "
                     "gb10_executor_id, gb10_executor_incarnation, gb10_pool_id, "
-                    "gb10_pool_generation, environment_acknowledgements_sha256, "
+                    "gb10_pool_generation, gb10_signing_key_sha256, "
+                    "gb10_local_authority_sha256, gb10_controller_authority_sha256, "
+                    "environment_acknowledgements_sha256, "
                     "legacy_writer_manifest_sha256, rollback_evidence_sha256, "
                     "requested_ceiling, effective_ceiling, requested_rate_per_minute, "
                     "effective_rate_per_minute, state, actor, idempotency_key, "
@@ -153,7 +181,9 @@ def test_forward_migration_replaces_existing_0004_retirement_constraint(
                     "(:execution_epoch, :authority, 1, 1, :configuration_epoch, 1, "
                     "repeat('1', 64), repeat('4', 64), '{}'::jsonb, repeat('5', 64), "
                     "'oldlab-executor', :oldlab_incarnation, 'oldlab', 1, "
-                    "'gb10-executor', :gb10_incarnation, 'gb10', 1, repeat('6', 64), "
+                    "repeat('a', 64), repeat('b', 64), repeat('c', 64), "
+                    "'gb10-executor', :gb10_incarnation, 'gb10', 1, "
+                    "repeat('a', 64), repeat('b', 64), repeat('c', 64), repeat('6', 64), "
                     "repeat('7', 64), repeat('8', 64), 2, 0, 2, 0, 'prepared', "
                     "'migration-test', :execution_key, repeat('9', 64))"
                 ),
@@ -808,6 +838,7 @@ def test_capacity_0004_refuses_downgrade_with_executable_allocation_history(
                 ),
                 {"configuration_key": uuid4()},
             )
+            _seed_execution_pools(connection, configuration_epoch=1)
             execution_manifest = "4" * 64
             connection.execute(
                 text(
@@ -817,8 +848,12 @@ def test_capacity_0004_refuses_downgrade_with_executable_allocation_history(
                     "fleet_digest, execution_manifest_sha256, manifest_payload, "
                     "trusted_fleet_release_sha256, oldlab_executor_id, "
                     "oldlab_executor_incarnation, oldlab_pool_id, "
-                    "oldlab_pool_generation, gb10_executor_id, "
+                    "oldlab_pool_generation, oldlab_signing_key_sha256, "
+                    "oldlab_local_authority_sha256, oldlab_controller_authority_sha256, "
+                    "gb10_executor_id, "
                     "gb10_executor_incarnation, gb10_pool_id, gb10_pool_generation, "
+                    "gb10_signing_key_sha256, gb10_local_authority_sha256, "
+                    "gb10_controller_authority_sha256, "
                     "environment_acknowledgements_sha256, legacy_writer_manifest_sha256, "
                     "rollback_evidence_sha256, requested_ceiling, effective_ceiling, "
                     "requested_rate_per_minute, effective_rate_per_minute, state, actor, "
@@ -826,7 +861,9 @@ def test_capacity_0004_refuses_downgrade_with_executable_allocation_history(
                     "(1, :authority, 1, 1, 1, 1, repeat('1', 64), "
                     ":execution_manifest, '{}'::jsonb, repeat('5', 64), "
                     "'oldlab-executor', :oldlab_incarnation, 'oldlab', 1, "
+                    "repeat('a', 64), repeat('b', 64), repeat('c', 64), "
                     "'gb10-executor', :gb10_incarnation, 'gb10', 1, "
+                    "repeat('a', 64), repeat('b', 64), repeat('c', 64), "
                     "repeat('6', 64), repeat('7', 64), repeat('8', 64), "
                     "1, 0, 1, 0, 'prepared', 'migration-test', :execution_key, "
                     "repeat('9', 64))"
@@ -852,8 +889,8 @@ def test_capacity_0004_refuses_downgrade_with_executable_allocation_history(
             )
 
         with pytest.raises(
-            sqlalchemy.exc.DBAPIError,
-            match="cannot downgrade capacity_0004 with executable allocation history",
+            RuntimeError,
+            match="cannot downgrade capacity_0004 with executable epoch evidence",
         ):
             command.downgrade(cfg, "capacity_0003")
 
@@ -909,6 +946,7 @@ def test_existing_executable_intents_upgrade_to_observed_state_database_check(
                     "configuration_key": uuid4(),
                 },
             )
+            _seed_execution_pools(connection, configuration_epoch=configuration_epoch)
             connection.execute(
                 text(
                     "INSERT INTO capacity_execution_epochs "
@@ -917,8 +955,12 @@ def test_existing_executable_intents_upgrade_to_observed_state_database_check(
                     "fleet_digest, execution_manifest_sha256, manifest_payload, "
                     "trusted_fleet_release_sha256, oldlab_executor_id, "
                     "oldlab_executor_incarnation, oldlab_pool_id, oldlab_pool_generation, "
+                    "oldlab_signing_key_sha256, oldlab_local_authority_sha256, "
+                    "oldlab_controller_authority_sha256, "
                     "gb10_executor_id, gb10_executor_incarnation, gb10_pool_id, "
-                    "gb10_pool_generation, environment_acknowledgements_sha256, "
+                    "gb10_pool_generation, gb10_signing_key_sha256, "
+                    "gb10_local_authority_sha256, gb10_controller_authority_sha256, "
+                    "environment_acknowledgements_sha256, "
                     "legacy_writer_manifest_sha256, rollback_evidence_sha256, "
                     "requested_ceiling, effective_ceiling, requested_rate_per_minute, "
                     "effective_rate_per_minute, state, actor, idempotency_key, "
@@ -926,7 +968,9 @@ def test_existing_executable_intents_upgrade_to_observed_state_database_check(
                     "(:execution_epoch, :authority, 1, 1, :configuration_epoch, 1, "
                     "repeat('1', 64), :execution_manifest, '{}'::jsonb, repeat('5', 64), "
                     "'oldlab-executor', :oldlab_incarnation, 'oldlab', 1, "
-                    "'gb10-executor', :executor_incarnation, 'gb10', 1, repeat('6', 64), "
+                    "repeat('a', 64), repeat('b', 64), repeat('c', 64), "
+                    "'gb10-executor', :executor_incarnation, 'gb10', 1, "
+                    "repeat('a', 64), repeat('b', 64), repeat('c', 64), repeat('6', 64), "
                     "repeat('7', 64), repeat('8', 64), 2, 0, 2, 0, 'prepared', "
                     "'migration-test', :execution_key, repeat('9', 64))"
                 ),

@@ -8,7 +8,7 @@ from threading import Event
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import delete, event, func, select, text, update
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -37,6 +37,7 @@ from loom_capacity_manager.models import (
     CapacityDemandReporter,
     CapacityDeploymentGeneration,
     CapacityDevelopmentProjection,
+    CapacityFairnessState,
     CapacityObservedCommitment,
     CapacitySubject,
     CapacityWorkerProfile,
@@ -1349,6 +1350,62 @@ async def test_epoch_commit_failure_leaves_no_partial_allocations(
     assert await committed_shadow_epoch_count(capacity_session_factory) == 0
     assert await allocation_row_count(capacity_session_factory) == 0
     assert await latest_audit_kind(capacity_session_factory) == "shadow_allocation_failure"
+
+
+async def test_shadow_epoch_post_flush_failure_rolls_back_all_commit_state(
+    capacity_session: AsyncSession,
+) -> None:
+    store, _ = await _activate_default(capacity_session)
+    authority = await _authority_uuid(capacity_session)
+    writer = await store.register_writer(capacity_session, authority, expected_epoch=0)
+    allocation_input = await store.load_allocation_input(capacity_session, writer)
+    fairness_before = tuple(
+        (
+            await capacity_session.execute(
+                select(CapacityFairnessState).order_by(CapacityFairnessState.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    failed = False
+
+    def fail_after_flush(*_args: object) -> None:
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise RuntimeError("synthetic post-flush failure")
+
+    event.listen(capacity_session.sync_session, "after_flush_postexec", fail_after_flush)
+    try:
+        with pytest.raises(RuntimeError, match="synthetic post-flush failure"):
+            await store.commit_shadow_epoch(
+                capacity_session,
+                writer,
+                allocate_shadow(allocation_input),
+            )
+    finally:
+        event.remove(capacity_session.sync_session, "after_flush_postexec", fail_after_flush)
+
+    assert failed is True
+    assert (
+        await capacity_session.execute(select(func.count()).select_from(CapacityAllocationEpoch))
+    ).scalar_one() == 0
+    assert (
+        await capacity_session.execute(select(func.count()).select_from(CapacityAllocation))
+    ).scalar_one() == 0
+    assert (
+        tuple(
+            (
+                await capacity_session.execute(
+                    select(CapacityFairnessState).order_by(CapacityFairnessState.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        == fairness_before
+    )
 
 
 async def test_writer_change_during_allocation_fences_old_result(

@@ -11,7 +11,11 @@ from types import SimpleNamespace
 
 import pytest
 from scripts.ops import global_fleet_pool_executor_once as once
-from scripts.ops.global_fleet_pool_executor_once import run_daemon_once, run_executor_once
+from scripts.ops.global_fleet_pool_executor_once import (
+    ExecutorConfigError,
+    run_daemon_once,
+    run_executor_once,
+)
 from tests.support.fake_slurm import FakeSlurm
 from tests.unit.test_capacity_executor_config import executor_files
 from tests.unit.test_capacity_executor_executable import executor_fixture
@@ -406,9 +410,11 @@ async def test_current_drain_only_authority_rejects_an_arbitrary_tick_object(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("writer_increment", (0, 1))
 async def test_current_drain_only_authority_executes_drain_boundary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    writer_increment: int,
 ) -> None:
     executor, journal, manager, _admission, _slurm, launch = executor_fixture(tmp_path, work=None)
     called = False
@@ -473,6 +479,7 @@ async def test_current_drain_only_authority_executes_drain_boundary(
         authority = ExecutionAuthorityV2.model_validate(
             executor.registration.execution.model_dump()
             | {
+                "writer_epoch": (executor.registration.execution.writer_epoch + writer_increment),
                 "execution_state": "drain-only",
                 "executable_new_capacity_ceiling": 0,
                 "executable_new_capacity_rate_per_minute": 0,
@@ -492,6 +499,59 @@ async def test_current_drain_only_authority_executes_drain_boundary(
 
     assert result.mode == "drain-only"
     assert called
+
+
+@pytest.mark.asyncio
+async def test_current_drain_only_authority_rejects_non_boundary_writer_epoch(
+    tmp_path: Path,
+) -> None:
+    executor, journal, manager, _admission, _slurm, launch = executor_fixture(tmp_path, work=None)
+    try:
+        config = PoolExecutorConfig.from_files(executor_files(tmp_path).config)
+        config = replace(
+            config,
+            pool_generation=executor.registration.pool_generation,
+            executor_id=executor.registration.executor_id,
+            executor_incarnation=executor.registration.executor_incarnation,
+            controller_authority_sha256=executor.controller_authority.controller_authority_sha256,
+            local_authority_sha256=executor.registration.local_authority_sha256,
+            signing_key_id=executor.ownership_key.signing_key_id,
+            signing_key_sha256=executor.ownership_key.public_key_sha256,
+            ownership_key=executor.ownership_key,
+            journal_file=journal.path,
+            slurm_cluster=launch.profile.slurm_cluster,
+            controller_host=launch.profile.controller_host,
+            partition=launch.profile.partition,
+            association=launch.profile.association,
+            submitter=launch.profile.submitter,
+            qos=launch.profile.qos,
+            profile_id=launch.profile.profile_id,
+            profile_generation=launch.profile.profile_generation,
+            profile_digest=launch.profile.profile_digest,
+            execution=executor.registration.execution,
+        )
+        authority = ExecutionAuthorityV2.model_validate(
+            executor.registration.execution.model_dump()
+            | {
+                "writer_epoch": executor.registration.execution.writer_epoch + 2,
+                "execution_state": "drain-only",
+                "executable_new_capacity_ceiling": 0,
+                "executable_new_capacity_rate_per_minute": 0,
+            }
+        )
+
+        with pytest.raises(
+            ExecutorConfigError,
+            match="current execution authority differs from local binding",
+        ):
+            await run_executor_once(
+                config,
+                client=manager,
+                authority=authority,
+                executor=executor,
+            )
+    finally:
+        journal.close()
 
 
 @pytest.mark.asyncio

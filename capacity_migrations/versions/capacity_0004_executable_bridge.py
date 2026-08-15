@@ -317,11 +317,6 @@ def upgrade() -> None:
             "effective_ceiling",
             name="capacity_execution_epoch_complete_authority_binding_key",
         ),
-        sa.UniqueConstraint(
-            "execution_epoch",
-            "execution_manifest_sha256",
-            name="capacity_execution_epoch_manifest_binding_key",
-        ),
     )
     op.create_table(
         "capacity_execution_executors",
@@ -1328,7 +1323,7 @@ def upgrade() -> None:
                 USING ERRCODE = '23514';
             END IF;
             PERFORM executor.id
-            FROM capacity_executable_executor_states executor
+            FROM public.capacity_executable_executor_states executor
             WHERE executor.execution_epoch = NEW.execution_epoch
             ORDER BY executor.pool_id
             FOR UPDATE;
@@ -1337,7 +1332,7 @@ def upgrade() -> None:
               FROM jsonb_array_elements(
                 NEW.retirement_request_payload -> 'executor_checkpoints'
               ) WITH ORDINALITY AS checkpoint(value, position)
-              JOIN capacity_executable_executor_states executor
+              JOIN public.capacity_executable_executor_states executor
                 ON executor.execution_epoch = NEW.execution_epoch
                AND executor.execution_manifest_sha256 = NEW.execution_manifest_sha256
                AND executor.pool_id = checkpoint.value ->> 'pool_id'
@@ -1392,13 +1387,13 @@ def upgrade() -> None:
                 USING ERRCODE = '23514';
             END IF;
             PERFORM intent.id
-            FROM capacity_executable_intents intent
+            FROM public.capacity_executable_intents intent
             WHERE intent.execution_epoch = NEW.execution_epoch
             ORDER BY intent.launch_rank
             FOR UPDATE;
             IF EXISTS (
               SELECT 1
-              FROM capacity_executable_intents intent
+              FROM public.capacity_executable_intents intent
               WHERE intent.execution_epoch = NEW.execution_epoch
                 AND intent.state <> 'released'
             ) THEN
@@ -1494,11 +1489,19 @@ def upgrade() -> None:
                 USING ERRCODE = '23514';
             END IF;
           ELSIF OLD.execution_state = 'active' AND NEW.execution_state = 'drain-only' THEN
-            IF NEW.writer_epoch <> OLD.writer_epoch + 1
+            IF NEW.writer_epoch NOT IN (OLD.writer_epoch, OLD.writer_epoch + 1)
                OR NEW.execution_epoch <> OLD.execution_epoch
                OR NEW.execution_manifest_sha256 <> OLD.execution_manifest_sha256
                OR NEW.executable_new_capacity_ceiling <> 0 THEN
               RAISE EXCEPTION 'authority execution drain is invalid'
+                USING ERRCODE = '23514';
+            END IF;
+          ELSIF OLD.execution_state = 'drain-only' AND NEW.execution_state = 'shadow' THEN
+            IF NEW.writer_epoch <> OLD.writer_epoch
+               OR NEW.execution_epoch <> 0
+               OR NEW.execution_manifest_sha256 IS NOT NULL
+               OR NEW.executable_new_capacity_ceiling <> 0 THEN
+              RAISE EXCEPTION 'authority execution retirement is invalid'
                 USING ERRCODE = '23514';
             END IF;
           ELSE

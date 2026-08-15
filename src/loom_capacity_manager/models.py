@@ -360,11 +360,6 @@ class CapacityExecutionEpoch(Base):
             "effective_ceiling",
             name="capacity_execution_epoch_complete_authority_binding_key",
         ),
-        UniqueConstraint(
-            "execution_epoch",
-            "execution_manifest_sha256",
-            name="capacity_execution_epoch_manifest_binding_key",
-        ),
     )
 
     execution_epoch: Mapped[int] = mapped_column(BigInteger, primary_key=True)

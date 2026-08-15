@@ -144,39 +144,52 @@ async def _reset_capacity_database(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory() as session, session.begin():
+        authority_transition_trigger_disabled = False
         await session.execute(
             text(
                 "ALTER TABLE capacity_authority_state DISABLE TRIGGER "
                 "capacity_authority_execution_transition_guard"
             )
         )
-        for table in reversed(Base.metadata.sorted_tables):
-            if table.name != CapacityAuthorityState.__tablename__:
-                await session.execute(delete(table))
-        await session.execute(
-            update(CapacityAuthorityState)
-            .where(CapacityAuthorityState.singleton_id == 1)
-            .values(
-                authority_incarnation=AUTHORITY_ID,
-                writer_epoch=0,
-                recovery_state="shadow",
-                increase_freeze=True,
-                increase_freeze_reason="initial_shadow_freeze",
-                executable_new_capacity_ceiling=0,
-                execution_epoch=0,
-                execution_state="shadow",
-                execution_manifest_sha256=None,
-                global_pending_slot_ceiling=0,
-                global_pending_job_ceiling=0,
-                global_submission_rate_ceiling=0,
+        authority_transition_trigger_disabled = True
+        try:
+            await session.execute(
+                update(CapacityAuthorityState)
+                .where(CapacityAuthorityState.singleton_id == 1)
+                .values(
+                    authority_incarnation=AUTHORITY_ID,
+                    writer_epoch=0,
+                    recovery_state="shadow",
+                    increase_freeze=True,
+                    increase_freeze_reason="initial_shadow_freeze",
+                    executable_new_capacity_ceiling=0,
+                    execution_epoch=0,
+                    execution_state="shadow",
+                    execution_manifest_sha256=None,
+                    global_pending_slot_ceiling=0,
+                    global_pending_job_ceiling=0,
+                    global_submission_rate_ceiling=0,
+                )
             )
-        )
-        await session.execute(
-            text(
-                "ALTER TABLE capacity_authority_state ENABLE TRIGGER "
-                "capacity_authority_execution_transition_guard"
-            )
-        )
+            for table in reversed(Base.metadata.sorted_tables):
+                if table.name == CapacityAuthorityState.__tablename__:
+                    continue
+                user_triggers_disabled = False
+                await session.execute(text(f"ALTER TABLE {table.name} DISABLE TRIGGER USER"))
+                user_triggers_disabled = True
+                try:
+                    await session.execute(delete(table))
+                finally:
+                    if user_triggers_disabled:
+                        await session.execute(text(f"ALTER TABLE {table.name} ENABLE TRIGGER USER"))
+        finally:
+            if authority_transition_trigger_disabled:
+                await session.execute(
+                    text(
+                        "ALTER TABLE capacity_authority_state ENABLE TRIGGER "
+                        "capacity_authority_execution_transition_guard"
+                    )
+                )
 
 
 class BlockingAllocator:
@@ -1220,6 +1233,60 @@ async def test_allocation_reconcile_commits_fresh_plan_under_active_execution_fe
             await capacity_session.flush()
 
 
+async def test_v1_shadow_routes_reject_executable_allocation_epoch(
+    api_context: tuple[TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator],
+    operator_headers: dict[str, str],
+    capacity_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    client, _app, _settings, _allocator = api_context
+    await _reset_capacity_database(capacity_session_factory)
+    async with capacity_session_factory() as session:
+        fixture = await setup_execution(session, execution_policy=execution_policy())
+        prepared = await fixture.store.prepare_execution_epoch(
+            session,
+            fixture.request,
+            actor="activation-operator",
+            idempotency_key=uuid4(),
+        )
+        await register_execution_executors(session, fixture, prepared)
+        await fixture.store.activate_execution_epoch(
+            session,
+            ExecutionActivationV2(
+                authority_incarnation=AUTHORITY_ID,
+                expected_writer_epoch=fixture.writer.writer_epoch,
+                execution_epoch=prepared.execution_epoch,
+                execution_manifest_sha256=prepared.execution_manifest_sha256,
+                executable_new_capacity_ceiling=1,
+                executable_new_capacity_rate_per_minute=1,
+            ),
+            actor="activation-operator",
+            idempotency_key=uuid4(),
+        )
+        await session.commit()
+
+    result = await reconcile_shadow_once(
+        capacity_session_factory,
+        fixture.writer,
+        store=fixture.store,
+    )
+    assert result.status == "committed"
+    assert result.allocation_epoch is not None
+
+    epoch_response = client.get(
+        f"/v1/shadow-epochs/{result.allocation_epoch}",
+        headers=operator_headers,
+    )
+    allocations_response = client.get(
+        f"/v1/shadow-epochs/{result.allocation_epoch}/allocations",
+        headers=operator_headers,
+    )
+
+    assert epoch_response.status_code == 404
+    assert epoch_response.json() == {"detail": "shadow epoch not found"}
+    assert allocations_response.status_code == 404
+    assert allocations_response.json() == {"detail": "shadow epoch not found"}
+
+
 async def _active_execution_fixture(capacity_session: AsyncSession):  # type: ignore[no-untyped-def]
     fixture = await setup_execution(capacity_session, execution_policy=execution_policy())
     prepared = await fixture.store.prepare_execution_epoch(
@@ -1390,9 +1457,7 @@ async def test_allocation_commit_and_failure_recorder_errors_propagate_hard_fail
 
     assert caught.value.__cause__ is not None
     assert "synthetic recorder failure" in str(caught.value.__cause__)
-    statuses = (
-        await capacity_session.execute(select(CapacityAllocationEpoch.status))
-    ).scalars()
+    statuses = (await capacity_session.execute(select(CapacityAllocationEpoch.status))).scalars()
     assert set(statuses) == set()
     assert (
         await capacity_session.execute(select(CapacityAuthorityState.increase_freeze))

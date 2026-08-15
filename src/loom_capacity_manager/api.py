@@ -1864,7 +1864,13 @@ def create_app(
         session_factory, _store, _writer = runtime(request)
         async with session_factory() as session:
             row = await session.get(CapacityAllocationEpoch, allocation_epoch)
-        if row is None:
+        if (
+            row is None
+            or row.status == "executable"
+            or row.executable
+            or row.execution_epoch is not None
+            or row.execution_manifest_sha256 is not None
+        ):
             raise HTTPException(status_code=404, detail="shadow epoch not found")
         return {
             "allocation_epoch": row.allocation_epoch,
@@ -1885,12 +1891,25 @@ def create_app(
     ) -> Any:
         limit = _bounded_limit(limit)
         session_factory, _store, _writer = runtime(request)
-        query = select(CapacityAllocation).where(
-            CapacityAllocation.allocation_epoch == allocation_epoch
-        )
-        if cursor is not None:
-            query = query.where(CapacityAllocation.id > cursor)
         async with session_factory() as session:
+            epoch = await session.get(CapacityAllocationEpoch, allocation_epoch)
+            if (
+                epoch is None
+                or epoch.status == "executable"
+                or epoch.executable
+                or epoch.execution_epoch is not None
+                or epoch.execution_manifest_sha256 is not None
+            ):
+                raise HTTPException(status_code=404, detail="shadow epoch not found")
+            query = select(CapacityAllocation).where(
+                CapacityAllocation.allocation_epoch == allocation_epoch,
+                CapacityAllocation.mode == "shadow",
+                CapacityAllocation.executable.is_(False),
+                CapacityAllocation.execution_epoch.is_(None),
+                CapacityAllocation.execution_manifest_sha256.is_(None),
+            )
+            if cursor is not None:
+                query = query.where(CapacityAllocation.id > cursor)
             rows = (
                 (await session.execute(query.order_by(CapacityAllocation.id).limit(limit + 1)))
                 .scalars()

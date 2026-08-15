@@ -25,6 +25,7 @@ from loom_capacity_executor.journal import ExecutorJournal
 from loom_capacity_executor.runtime import (
     build_executable_runtime,
     load_activation_runtime_artifact,
+    retained_drain_execution_matches,
 )
 from loom_capacity_executor.slurm_backend import AsyncSlurmBackend
 from loom_capacity_executor.slurm_contracts import SlurmAuthorityV2
@@ -160,7 +161,10 @@ async def run_executor_once(
                 "executable",
             }
         )
-        if actual != expected:
+        if actual != expected and not retained_drain_execution_matches(
+            config.execution,
+            current_context,
+        ):
             raise ExecutorConfigError("current execution authority differs from local binding")
     current = current_context or config.execution
     if validate_only or current.execution_state == "prepared":
@@ -296,20 +300,9 @@ def _assert_executable_runtime(
     )
     registration_execution = executor.registration.execution.model_dump()
     authority_execution = authority.model_dump(exclude={"executable"})
-    retained_drain_execution = (
-        authority.execution_state == "drain-only"
-        and authority.executable_new_capacity_ceiling == 0
-        and authority.executable_new_capacity_rate_per_minute == 0
-        and executor.registration.execution.execution_state == "active"
-        and registration_execution
-        | {
-            "execution_state": "drain-only",
-            "executable_new_capacity_ceiling": 0,
-            "executable_new_capacity_rate_per_minute": 0,
-        }
-        == authority_execution
+    execution_matches = registration_execution == authority_execution or (
+        retained_drain_execution_matches(executor.registration.execution, authority)
     )
-    execution_matches = registration_execution == authority_execution or retained_drain_execution
     if (
         actual_registration != expected_registration
         or not execution_matches
