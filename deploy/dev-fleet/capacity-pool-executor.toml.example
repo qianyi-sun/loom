@@ -47,6 +47,43 @@ sbatch = "/usr/bin/sbatch"
 scancel = "/usr/bin/scancel"
 sacct = "/usr/bin/sacct"
 
+[pools.inventory]
+schema_version = 1
+pool_id = "gb10"
+pool_generation = 1
+reporter_incarnation = "33333333-3333-4333-8333-333333333331"
+relevant_partitions = ["gb10-workers"]
+controller_cluster = "gb10"
+slurm_version = [23, 11, 4]
+data_parser = "data_parser/v0.0.40"
+query_principal = "loom-capacity-slurm-reader"
+query_uid = 1001
+job_visibility_evidence_sha256 = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+scontrol_sha256 = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+squeue_sha256 = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+slurm_conf_sha256 = "1212121212121212121212121212121212121212121212121212121212121212"
+
+[pools.inventory.slot_resources]
+schema_version = 1
+slots = 1
+cpu_millicores = 2000
+memory_bytes = 17179869184
+gpu_count = 0
+generic = {}
+
+[[pools.inventory.nodes]]
+pool_id = "gb10"
+node_id = "gb10-node-a"
+features = ["arm64"]
+
+[pools.inventory.nodes.allocatable]
+schema_version = 1
+slots = 4
+cpu_millicores = 8000
+memory_bytes = 68719476736
+gpu_count = 1
+generic = {}
+
 [[pools]]
 pool_id = "oldlab"
 pool_generation = 1
@@ -82,3 +119,40 @@ squeue = "/usr/bin/squeue"
 sbatch = "/usr/bin/sbatch"
 scancel = "/usr/bin/scancel"
 sacct = "/usr/bin/sacct"
+
+[pools.inventory]
+schema_version = 1
+pool_id = "oldlab"
+pool_generation = 1
+reporter_incarnation = "33333333-3333-4333-8333-333333333332"
+relevant_partitions = ["oldlab-workers"]
+controller_cluster = "oldlab"
+slurm_version = [23, 11, 4]
+data_parser = "data_parser/v0.0.40"
+query_principal = "loom-capacity-slurm-reader"
+query_uid = 1001
+job_visibility_evidence_sha256 = "1313131313131313131313131313131313131313131313131313131313131313"
+scontrol_sha256 = "1414141414141414141414141414141414141414141414141414141414141414"
+squeue_sha256 = "1515151515151515151515151515151515151515151515151515151515151515"
+slurm_conf_sha256 = "1616161616161616161616161616161616161616161616161616161616161616"
+
+[pools.inventory.slot_resources]
+schema_version = 1
+slots = 1
+cpu_millicores = 4000
+memory_bytes = 17179869184
+gpu_count = 0
+generic = {}
+
+[[pools.inventory.nodes]]
+pool_id = "oldlab"
+node_id = "oldlab-node-a"
+features = ["x86_64"]
+
+[pools.inventory.nodes.allocatable]
+schema_version = 1
+slots = 8
+cpu_millicores = 32000
+memory_bytes = 137438953472
+gpu_count = 0
+generic = {}

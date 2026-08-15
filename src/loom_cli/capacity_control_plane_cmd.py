@@ -17,6 +17,7 @@ from loom_cli.capacity_control_plane import (
     render_capacity_control_plane_manifests,
     render_capacity_pool_executor_configs,
     render_capacity_pool_executor_service_environment,
+    render_capacity_pool_inventory_policies,
 )
 
 _NAMESPACE = "loom-dev"
@@ -58,8 +59,12 @@ def _render_executor(args: argparse.Namespace) -> int:
         profile = load_capacity_pool_executor_profile(Path(args.file).resolve())
         if args.output == "config":
             rendered = render_capacity_pool_executor_configs(profile)[args.pool]
-        else:
+        elif args.output == "inventory-policy":
+            rendered = render_capacity_pool_inventory_policies(profile)[args.pool]
+        elif args.output == "service-environment":
             rendered = render_capacity_pool_executor_service_environment(profile, args.pool)
+        else:
+            raise ValueError("capacity pool-executor output is invalid")
     except ValidationError:
         sys.stderr.write("error: capacity pool-executor render inputs are invalid\n")
         return 2
@@ -166,9 +171,9 @@ def add_capacity_control_plane_subparser(subparsers: Any) -> None:
     )
     render_executor.add_argument(
         "--output",
-        choices=("config", "service-environment"),
+        choices=("config", "inventory-policy", "service-environment"),
         default="config",
-        help="Render production JSON or the non-secret systemd environment.",
+        help="Render production JSON, inventory policy, or non-secret systemd environment.",
     )
     render_executor.set_defaults(handler=_render_executor)
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -168,6 +169,65 @@ def test_admin_render_executor_service_environment_is_nonsecret_and_zero_ceiling
     assert "LOOM_CAPACITY_EXECUTOR_EXECUTABLE_CEILING=0\n" in captured.out
     assert "token" not in captured.out.lower()
     assert "private" not in captured.out.lower()
+
+
+def test_admin_render_executor_writes_only_the_selected_inventory_policy(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = dispatch(
+        [
+            "capacity-control-plane",
+            "render-executor",
+            "--file",
+            str(_EXECUTOR_PROFILE),
+            "--pool",
+            "gb10",
+            "--output",
+            "inventory-policy",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert result == 0
+    assert captured.err == ""
+    assert payload["pool_id"] == "gb10"
+    assert payload["controller_cluster"] == "gb10"
+    assert payload["relevant_partitions"] == ["gb10-workers"]
+    assert {node["pool_id"] for node in payload["nodes"]} == {"gb10"}
+    assert "oldlab-node" not in captured.out
+
+
+def test_admin_render_executor_rejects_invalid_inventory_without_partial_or_leaked_output(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rejected_value = "do-not-echo-this-inventory-policy-value"
+    profile = tmp_path / "capacity-pool-executor.toml"
+    profile.write_text(
+        _EXECUTOR_PROFILE.read_text(encoding="utf-8")
+        + f'\nunexpected_inventory_secret = "{rejected_value}"\n',
+        encoding="utf-8",
+    )
+
+    result = dispatch(
+        [
+            "capacity-control-plane",
+            "render-executor",
+            "--file",
+            str(profile),
+            "--pool",
+            "oldlab",
+            "--output",
+            "inventory-policy",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert captured.out == ""
+    assert captured.err == "error: capacity pool-executor render inputs are invalid\n"
+    assert rejected_value not in captured.err
 
 
 def test_admin_status_executes_the_fixed_in_pod_zero_ceiling_probe(

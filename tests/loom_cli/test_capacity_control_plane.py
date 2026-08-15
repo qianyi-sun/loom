@@ -16,6 +16,10 @@ from pydantic import ValidationError
 import loom_cli.capacity_control_plane as capacity_control_plane
 from loom_capacity_executor.config import PoolExecutorConfig
 from loom_capacity_manager.ownership import public_key_fingerprint
+from loom_capacity_pool_executor.config import (
+    SlurmInventoryPolicyDocument,
+    canonical_slurm_inventory_policy_bytes,
+)
 from loom_cli.capacity_control_plane import (
     CapacityControlPlaneProfile,
     CapacityPoolExecutorProfile,
@@ -25,6 +29,7 @@ from loom_cli.capacity_control_plane import (
     render_capacity_control_plane_manifests,
     render_capacity_pool_executor_configs,
     render_capacity_pool_executor_service_environment,
+    render_capacity_pool_inventory_policies,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -100,6 +105,104 @@ def test_checked_in_executor_profile_is_inert_and_pool_complete() -> None:
         )
 
 
+def test_checked_in_executor_profile_renders_distinct_canonical_inventory_policies() -> None:
+    profile = load_capacity_pool_executor_profile(_EXECUTOR_PROFILE)
+
+    rendered = render_capacity_pool_inventory_policies(profile)
+
+    assert tuple(rendered) == ("gb10", "oldlab")
+    assert rendered["gb10"] != rendered["oldlab"]
+    for pool in profile.pools:
+        encoded = rendered[pool.pool_id].encode("ascii")
+        assert encoded.endswith(b"\n")
+        document = SlurmInventoryPolicyDocument.model_validate_json(encoded)
+        assert document == pool.inventory
+        assert document.pool_id == pool.pool_id
+        assert document.pool_generation == pool.pool_generation
+        assert document.controller_cluster == pool.slurm_cluster
+        assert document.query_uid == pool.local_uid
+        assert pool.partition in document.relevant_partitions
+        assert encoded[:-1] == canonical_slurm_inventory_policy_bytes(document)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("controller_cluster", "changed-controller"),
+        ("query_principal", "changed-query-principal"),
+        ("query_uid", 1002),
+        ("job_visibility_evidence_sha256", "e" * 64),
+        ("scontrol_sha256", "f" * 64),
+    ),
+)
+def test_inventory_policy_render_digest_changes_for_every_consumed_controller_fact(
+    field: str,
+    value: object,
+) -> None:
+    profile = load_capacity_pool_executor_profile(_EXECUTOR_PROFILE)
+    pool = profile.pools[0]
+    changed_inventory = pool.inventory.model_copy(update={field: value})
+    changed_pool = pool.model_copy(update={"inventory": changed_inventory})
+    changed_profile = profile.model_copy(update={"pools": (changed_pool, profile.pools[1])})
+
+    original = render_capacity_pool_inventory_policies(profile)[pool.pool_id]
+    changed = render_capacity_pool_inventory_policies(changed_profile)[pool.pool_id]
+
+    assert changed != original
+    assert (
+        hashlib.sha256(changed.encode("ascii")).hexdigest()
+        != hashlib.sha256(original.encode("ascii")).hexdigest()
+    )
+
+
+@pytest.mark.parametrize(
+    "change",
+    (
+        {"pool_id": "oldlab"},
+        {"pool_generation": 2},
+        {"controller_cluster": "another-controller"},
+        {"query_uid": 1002},
+        {"relevant_partitions": ("another-partition",)},
+    ),
+)
+def test_executor_profile_rejects_inventory_binding_drift(change: dict[str, object]) -> None:
+    profile = load_capacity_pool_executor_profile(_EXECUTOR_PROFILE)
+    payload = profile.model_dump(mode="python")
+    inventory = payload["pools"][0]["inventory"]
+    assert isinstance(inventory, dict)
+    inventory.update(change)
+
+    with pytest.raises(ValidationError, match=r"inventory|pool|controller|query|partition"):
+        CapacityPoolExecutorProfile.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "shared_fact",
+    ("slurm_cluster", "controller_host", "partition", "reporter_incarnation", "node_id"),
+)
+def test_executor_profile_rejects_shared_controller_local_facts(shared_fact: str) -> None:
+    profile = load_capacity_pool_executor_profile(_EXECUTOR_PROFILE)
+    payload = profile.model_dump(mode="python")
+    gb10 = payload["pools"][0]
+    oldlab = payload["pools"][1]
+
+    if shared_fact == "slurm_cluster":
+        oldlab["slurm_cluster"] = gb10["slurm_cluster"]
+        oldlab["inventory"]["controller_cluster"] = gb10["slurm_cluster"]
+    elif shared_fact == "controller_host":
+        oldlab["controller_host"] = gb10["controller_host"]
+    elif shared_fact == "partition":
+        oldlab["partition"] = gb10["partition"]
+        oldlab["inventory"]["relevant_partitions"] = (gb10["partition"],)
+    elif shared_fact == "reporter_incarnation":
+        oldlab["inventory"]["reporter_incarnation"] = gb10["inventory"]["reporter_incarnation"]
+    else:
+        oldlab["inventory"]["nodes"][0]["node_id"] = gb10["inventory"]["nodes"][0]["node_id"]
+
+    with pytest.raises(ValidationError, match=r"distinct|controller|inventory|partition"):
+        CapacityPoolExecutorProfile.model_validate(payload)
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -160,6 +263,7 @@ def test_rendered_executor_config_is_accepted_by_the_production_loader(
         signing_key_sha256=public_key_fingerprint(private_key.public_key()),
         **{name: str(path) for name, path in secret_paths.items()},
     )
+    pool["inventory"]["query_uid"] = os.geteuid()
     candidate = CapacityPoolExecutorProfile.model_validate(payload)
     config_file.write_text(
         render_capacity_pool_executor_configs(candidate)[pool["pool_id"]],
@@ -279,7 +383,7 @@ def test_renderer_emits_one_inert_control_plane_in_dependency_order() -> None:
         ("Namespace", "loom-dev"),
         ("Service", "loom-capacity-postgres"),
         ("StatefulSet", "loom-capacity-postgres"),
-        ("Job", "loom-capacity-migrate-capacity-0012-aaaaaaaaaa-5a87ec3015"),
+        ("Job", "loom-capacity-migrate-capacity-0013-aaaaaaaaaa-3c78cbaa7f"),
         ("Service", "loom-capacity-manager"),
         ("Deployment", "loom-capacity-manager"),
         ("NetworkPolicy", "capacity-default-deny"),
@@ -338,7 +442,7 @@ def test_migration_job_name_binds_the_complete_immutable_spec() -> None:
     job = next(document for document in _documents() if document["kind"] == "Job")
     expected_suffix = hashlib.sha256(
         json.dumps(
-            {"migration_head": "capacity_0012", "spec": job["spec"]},
+            {"migration_head": "capacity_0013", "spec": job["spec"]},
             sort_keys=True,
             separators=(",", ":"),
         ).encode()

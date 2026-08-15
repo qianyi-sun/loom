@@ -15,6 +15,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from loom_capacity_executor.config import ImmutablePoolManifest
 from loom_capacity_manager.schema_startup import _capacity_head
+from loom_capacity_pool_executor.config import (
+    SlurmInventoryPolicyDocument,
+    canonical_slurm_inventory_policy_bytes,
+)
 
 _DNS_LABEL_RE = re.compile(r"[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?")
 _LABEL_NAME_RE = re.compile(r"[A-Za-z0-9](?:[-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?")
@@ -228,6 +232,7 @@ class CapacityPoolExecutorBinding(_StrictModel):
     tls_certificate_file: str = Field(min_length=1, max_length=4096)
     tls_private_key_file: str = Field(min_length=1, max_length=4096)
     ownership_key_file: str = Field(min_length=1, max_length=4096)
+    inventory: SlurmInventoryPolicyDocument
 
     @model_validator(mode="after")
     def _exact_binding(self) -> CapacityPoolExecutorBinding:
@@ -258,6 +263,16 @@ class CapacityPoolExecutorBinding(_StrictModel):
             raise ValueError("pool executor configuration must be controller-local JSON")
         if Path(self.journal_file).parent != Path(self.state_directory):
             raise ValueError("pool executor journal must be directly inside its state directory")
+        if self.inventory.pool_id != self.pool_id:
+            raise ValueError("inventory policy differs from its pool binding")
+        if self.inventory.pool_generation != self.pool_generation:
+            raise ValueError("inventory policy differs from its pool generation")
+        if self.inventory.controller_cluster != self.slurm_cluster:
+            raise ValueError("inventory controller differs from its Slurm cluster binding")
+        if self.inventory.query_uid != self.local_uid:
+            raise ValueError("inventory query uid differs from its pool binding")
+        if self.partition not in self.inventory.relevant_partitions:
+            raise ValueError("inventory policy omits the bound Slurm partition")
         return self
 
 
@@ -317,10 +332,19 @@ class CapacityPoolExecutorProfile(_StrictModel):
             "TLS certificate credential": tuple(pool.tls_certificate_file for pool in self.pools),
             "TLS private-key credential": tuple(pool.tls_private_key_file for pool in self.pools),
             "ownership-key credential": tuple(pool.ownership_key_file for pool in self.pools),
+            "Slurm cluster": tuple(pool.slurm_cluster for pool in self.pools),
+            "controller host": tuple(pool.controller_host for pool in self.pools),
+            "inventory reporter": tuple(pool.inventory.reporter_incarnation for pool in self.pools),
+            "partition": tuple(pool.partition for pool in self.pools),
         }
         for label, values in unique_fields.items():
             if len(set(values)) != len(values):
-                raise ValueError(f"pool {label} bindings must use distinct credentials/state")
+                raise ValueError(f"pool {label} bindings must be distinct")
+        node_ids = tuple(
+            node.node_id.casefold() for pool in self.pools for node in pool.inventory.nodes
+        )
+        if len(node_ids) != len(set(node_ids)):
+            raise ValueError("pool inventory nodes must be distinct across controllers")
         return self
 
 
@@ -455,6 +479,19 @@ def render_capacity_pool_executor_configs(
             ensure_ascii=True,
         )
         + "\n"
+        for pool in profile.pools
+    }
+
+
+def render_capacity_pool_inventory_policies(
+    profile: CapacityPoolExecutorProfile,
+) -> dict[str, str]:
+    """Render canonical controller-local read-only inventory policies."""
+
+    if not isinstance(profile, CapacityPoolExecutorProfile):
+        raise TypeError("capacity pool-executor profile is invalid")
+    return {
+        pool.pool_id: canonical_slurm_inventory_policy_bytes(pool.inventory).decode("ascii") + "\n"
         for pool in profile.pools
     }
 
@@ -1099,4 +1136,5 @@ __all__ = [
     "render_capacity_control_plane_manifests",
     "render_capacity_pool_executor_configs",
     "render_capacity_pool_executor_service_environment",
+    "render_capacity_pool_inventory_policies",
 ]
