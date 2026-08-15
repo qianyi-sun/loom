@@ -1248,10 +1248,20 @@ async def test_v2_executor_context_returns_public_execution_context_exactly(
                 )
 
             assert response.status_code == 200
+            active_json = active.model_dump(mode="json")
             expected = {
-                name: value
-                for name, value in active.model_dump(mode="json").items()
-                if name in ExecutionContextV2.model_fields
+                "schema_version": 2,
+                "authority_incarnation": active_json["authority_incarnation"],
+                "writer_epoch": active_json["writer_epoch"],
+                "configuration_epoch": active_json["configuration_epoch"],
+                "execution_epoch": active_json["execution_epoch"],
+                "execution_manifest_sha256": active_json["execution_manifest_sha256"],
+                "execution_state": active_json["execution_state"],
+                "executable_new_capacity_ceiling": active_json["executable_new_capacity_ceiling"],
+                "executable_new_capacity_rate_per_minute": active_json[
+                    "executable_new_capacity_rate_per_minute"
+                ],
+                "trusted_fleet_release_sha256": active_json["trusted_fleet_release_sha256"],
             }
             assert response.json() == expected
             assert "executable" not in response.json()
