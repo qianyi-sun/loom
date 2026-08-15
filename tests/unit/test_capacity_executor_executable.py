@@ -11,6 +11,7 @@ from uuid import UUID
 
 import pytest
 
+import loom_capacity_executor.executable as executable_module
 from loom_capacity_agent.admission import (
     BoundExecutableWorkerV2,
     DrainedExecutableWorkerV2,
@@ -29,6 +30,7 @@ from loom_capacity_executor.launch_renderer import (
     TrustedLaunchContextV2,
     canonical_launch_policy_digest,
 )
+from loom_capacity_executor.runtime import RuntimeAssemblyError
 from loom_capacity_executor.slurm_contracts import (
     SlurmAccountingHighWaterV2,
     SlurmCancelRequestV2,
@@ -485,6 +487,49 @@ def _binding_for_profile(
             "resources": profile.resources,
         }
     )
+
+
+# Production break caught: render/acceptance must consume the same public
+# runtime profile resolver used by daemon assembly. Reintroducing a private
+# duplicate matcher would let executor work selection drift from runtime policy.
+def test_render_launch_uses_public_runtime_profile_resolver(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launch = launch_context_fixture()
+    executor, journal, _manager, _admission, _slurm, _launch = executor_fixture(
+        tmp_path,
+        work=None,
+    )
+    calls: list[tuple[UUID, int, str]] = []
+
+    def resolver(
+        binding: ExecutableIntentBindingV2,
+        profiles: tuple[OperatorLaunchProfileV2, ...],
+        *,
+        controller_authority_sha256: str,
+    ) -> OperatorLaunchProfileV2:
+        calls.append((binding.intent_id, len(profiles), controller_authority_sha256))
+        raise RuntimeAssemblyError("resolver sentinel")
+
+    monkeypatch.setattr(
+        executable_module,
+        "resolve_runtime_profile",
+        resolver,
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeAssemblyError, match="resolver sentinel"):
+        executor.render_launch(launch.binding)
+
+    assert calls == [
+        (
+            launch.binding.intent_id,
+            1,
+            launch.controller_authority.controller_authority_sha256,
+        )
+    ]
+    journal.close()
 
 
 def permit_fixture(binding: ExecutableIntentBindingV2) -> ExecutableLaunchPermitV2:

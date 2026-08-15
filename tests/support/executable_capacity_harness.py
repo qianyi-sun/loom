@@ -2072,10 +2072,19 @@ class ExecutableCapacityHarness:
                 self._admission_entries(pool_id),
             )
             admission_digest = canonical_admission_directory_digest(admission_directory)
+            candidate_path = Path("/usr/bin/true")
+            candidate_metadata = candidate_path.stat()
             config = TrustedLauncherConfigV2(
                 handoff_directory=str(self.pools[pool_id].handoff_directory),
                 admission_directory=str(admission_directory),
                 admission_directory_sha256=admission_digest,
+                candidate_executable={
+                    "path": str(candidate_path),
+                    "sha256": hashlib.sha256(candidate_path.read_bytes()).hexdigest(),
+                    "owner_uid": candidate_metadata.st_uid,
+                    "mode": candidate_metadata.st_mode & 0o777,
+                },
+                candidate_image_digest=self.profiles[pool_id].image_digest,
                 candidate_argv=("/usr/bin/true",),
             )
             payload = canonical_executable_bytes(config)

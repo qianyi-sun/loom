@@ -7,6 +7,7 @@ import asyncio
 import errno
 import hashlib
 import os
+import posixpath
 import stat
 import sys
 from collections.abc import Callable, Mapping, Sequence
@@ -15,7 +16,7 @@ from pathlib import Path
 from typing import Annotated, Any
 from uuid import UUID
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from loom_capacity_agent.admission import PhysicalJobBindingV2
 from loom_capacity_executor.bootstrap_handoff import (
@@ -30,9 +31,47 @@ from loom_capacity_manager.executable_contracts import StrictV2Model
 
 WORKER_CREDENTIAL_ENV = "LOOM_EXECUTOR_WORKER_CREDENTIAL"
 _MAX_TRUSTED_CONFIG_BYTES = 64 * 1024
+_IMAGE_DIGEST_PATTERN = (
+    r"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?"
+    r"(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}$"
+)
 
 _Execvpe = Callable[[str, tuple[str, ...], Mapping[str, str]], Any]
 _AdmissionFactory = Callable[..., object]
+
+
+class TrustedCandidateExecutableV2(StrictV2Model):
+    """Candidate executable identity verified before scoped credential handoff."""
+
+    path: Annotated[str, Field(min_length=1, max_length=4096)]
+    sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    owner_uid: Annotated[int, Field(ge=0, le=(1 << 31) - 1)]
+    mode: Annotated[int, Field(ge=0, le=0o7777)]
+
+    @field_validator("path")
+    @classmethod
+    def _absolute_path(cls, value: str) -> str:
+        components = value.split("/")[1:]
+        if (
+            "\0" in value
+            or not Path(value).is_absolute()
+            or value == "/"
+            or value.startswith("//")
+            or value.endswith("/")
+            or any(component in {"", ".", ".."} for component in components)
+            or posixpath.normpath(value) != value
+        ):
+            raise ValueError("trusted launcher candidate path must be canonical and absolute")
+        return value
+
+    @field_validator("mode")
+    @classmethod
+    def _safe_executable_mode(cls, value: int) -> int:
+        if value & 0o7000 or not (value & stat.S_IXUSR) or value & 0o022:
+            raise ValueError(
+                "trusted launcher candidate mode must be owner-executable and unwritable"
+            )
+        return value
 
 
 class TrustedLauncherConfigV2(StrictV2Model):
@@ -41,6 +80,8 @@ class TrustedLauncherConfigV2(StrictV2Model):
     handoff_directory: Annotated[str, Field(min_length=1, max_length=4096)]
     admission_directory: Annotated[str, Field(min_length=1, max_length=4096)]
     admission_directory_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    candidate_executable: TrustedCandidateExecutableV2
+    candidate_image_digest: Annotated[str, Field(max_length=512, pattern=_IMAGE_DIGEST_PATTERN)]
     candidate_argv: Annotated[tuple[str, ...], Field(min_length=1, max_length=128)]
 
     @field_validator("handoff_directory", "admission_directory")
@@ -55,6 +96,12 @@ class TrustedLauncherConfigV2(StrictV2Model):
     @classmethod
     def _candidate(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         return _candidate_argv(value)
+
+    @model_validator(mode="after")
+    def _candidate_binding(self) -> TrustedLauncherConfigV2:
+        if self.candidate_argv[0] != self.candidate_executable.path:
+            raise ValueError("trusted launcher candidate argv differs from executable identity")
+        return self
 
 
 def _candidate_argv(value: tuple[str, ...]) -> tuple[str, ...]:
@@ -76,6 +123,7 @@ async def exec_bootstrap_handoff_candidate(
     admission: object,
     *,
     candidate_argv: tuple[str, ...],
+    candidate_exec_file: str | None = None,
     now: Callable[[], datetime],
     environment: Mapping[str, str] | None = None,
     execvpe: _Execvpe = os.execvpe,
@@ -93,7 +141,7 @@ async def exec_bootstrap_handoff_candidate(
     )
     next_environment = dict(os.environ if environment is None else environment)
     next_environment[WORKER_CREDENTIAL_ENV] = worker_credential
-    execvpe(argv[0], argv, next_environment)
+    execvpe(candidate_exec_file or argv[0], argv, next_environment)
     raise BootstrapHandoffError("trusted launcher candidate exec returned")
 
 
@@ -189,6 +237,64 @@ def _read_verified_file(
     return payload
 
 
+def _open_verified_candidate(identity: TrustedCandidateExecutableV2) -> int:
+    path = Path(identity.path)
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise BootstrapHandoffError("trusted launcher candidate executable is unavailable") from exc
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_uid != identity.owner_uid
+        or stat.S_IMODE(before.st_mode) != identity.mode
+        or not (before.st_mode & stat.S_IXUSR)
+    ):
+        raise BootstrapHandoffError("trusted launcher candidate executable identity is invalid")
+    if before.st_uid == os.geteuid() and stat.S_IMODE(before.st_mode) & stat.S_IWUSR:
+        raise BootstrapHandoffError(
+            "trusted launcher candidate executable mode is writable by current uid"
+        )
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        if exc.errno in {errno.ELOOP, errno.EMLINK}:
+            raise BootstrapHandoffError(
+                "trusted launcher candidate executable must be a nonsymlink"
+            ) from exc
+        raise BootstrapHandoffError("trusted launcher candidate executable is unavailable") from exc
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+            or not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != identity.owner_uid
+            or stat.S_IMODE(opened.st_mode) != identity.mode
+            or not (opened.st_mode & stat.S_IXUSR)
+        ):
+            raise BootstrapHandoffError(
+                "trusted launcher candidate executable changed while opening"
+            )
+        if opened.st_uid == os.geteuid() and stat.S_IMODE(opened.st_mode) & stat.S_IWUSR:
+            raise BootstrapHandoffError(
+                "trusted launcher candidate executable mode is writable by current uid"
+            )
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+        if digest.hexdigest() != identity.sha256:
+            raise BootstrapHandoffError("trusted launcher candidate executable digest changed")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+    except Exception:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
 def _load_trusted_config(identity: SlurmFileIdentityV2) -> TrustedLauncherConfigV2:
     payload = _read_verified_file(identity, label="config", executable=False)
     if len(payload) > _MAX_TRUSTED_CONFIG_BYTES:
@@ -248,37 +354,44 @@ async def run_trusted_launcher_process(
     )
     config = _load_trusted_config(config_identity)
     release_sha256 = _sha256(args.release_sha256, label="release digest")
+    if args.image_digest != config.candidate_image_digest:
+        raise BootstrapHandoffError("trusted launcher image digest differs from config")
+    candidate_descriptor = _open_verified_candidate(config.candidate_executable)
     runtime_environment = os.environ if environment is None else environment
-    slurm_job_id = runtime_environment.get("SLURM_JOB_ID")
-    if not isinstance(slurm_job_id, str) or not slurm_job_id:
-        raise BootstrapHandoffError("trusted launcher SLURM_JOB_ID is unavailable")
     try:
-        operation_id = UUID(args.operation_id)
-    except (TypeError, ValueError) as exc:
-        raise BootstrapHandoffError("trusted launcher operation id is invalid") from exc
-    admission = admission_factory(
-        Path(config.admission_directory),
-        expected_directory_sha256=config.admission_directory_sha256,
-    )
-    physical = resolve_bootstrap_handoff_physical_binding(
-        Path(config.handoff_directory),
-        args.bootstrap_handoff,
-        operation_id=operation_id,
-        slurm_job_id=slurm_job_id,
-        ownership_token=args.ownership_token,
-        trusted_launcher_release_sha256=release_sha256,
-        now=now,
-    )
-    await exec_bootstrap_handoff_candidate(
-        Path(config.handoff_directory),
-        args.bootstrap_handoff,
-        physical,
-        admission,
-        candidate_argv=config.candidate_argv,
-        now=now,
-        environment=runtime_environment,
-        execvpe=execvpe,
-    )
+        slurm_job_id = runtime_environment.get("SLURM_JOB_ID")
+        if not isinstance(slurm_job_id, str) or not slurm_job_id:
+            raise BootstrapHandoffError("trusted launcher SLURM_JOB_ID is unavailable")
+        try:
+            operation_id = UUID(args.operation_id)
+        except (TypeError, ValueError) as exc:
+            raise BootstrapHandoffError("trusted launcher operation id is invalid") from exc
+        admission = admission_factory(
+            Path(config.admission_directory),
+            expected_directory_sha256=config.admission_directory_sha256,
+        )
+        physical = resolve_bootstrap_handoff_physical_binding(
+            Path(config.handoff_directory),
+            args.bootstrap_handoff,
+            operation_id=operation_id,
+            slurm_job_id=slurm_job_id,
+            ownership_token=args.ownership_token,
+            trusted_launcher_release_sha256=release_sha256,
+            now=now,
+        )
+        await exec_bootstrap_handoff_candidate(
+            Path(config.handoff_directory),
+            args.bootstrap_handoff,
+            physical,
+            admission,
+            candidate_argv=config.candidate_argv,
+            candidate_exec_file=f"/proc/self/fd/{candidate_descriptor}",
+            now=now,
+            environment=runtime_environment,
+            execvpe=execvpe,
+        )
+    finally:
+        os.close(candidate_descriptor)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -293,6 +406,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 __all__ = [
     "WORKER_CREDENTIAL_ENV",
+    "TrustedCandidateExecutableV2",
     "TrustedLauncherConfigV2",
     "exec_bootstrap_handoff_candidate",
     "main",

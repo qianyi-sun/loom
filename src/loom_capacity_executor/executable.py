@@ -35,6 +35,7 @@ from loom_capacity_executor.launch_renderer import (
     executable_ownership_token,
     render_signed_launch,
 )
+from loom_capacity_executor.runtime_profiles import RuntimeAssemblyError, resolve_runtime_profile
 from loom_capacity_executor.slurm_contracts import (
     SlurmAuthorityV2,
     SlurmCancelRequestV2,
@@ -236,25 +237,11 @@ class ExecutablePoolExecutor:
             raise ValueError("manager work differs from exact executable execution")
 
     def _profile_for(self, binding: ExecutableIntentBindingV2) -> OperatorLaunchProfileV2:
-        matches = tuple(
-            profile
-            for profile in self.profiles
-            if binding.pool_id == profile.pool_id
-            and binding.pool_generation == profile.pool_generation
-            and binding.profile_id == profile.profile_id
-            and binding.profile_generation == profile.profile_generation
-            and binding.profile_digest == profile.profile_digest
-            and binding.shape_id == profile.shape_id
-            and binding.concurrency_slots == profile.concurrency_slots
-            and binding.resources == profile.resources
-            and profile.controller_authority_sha256
-            == self.controller_authority.controller_authority_sha256
-            and canonical_launch_policy_digest(profile)
-            == self.controller_authority.controller_authority_sha256
+        return resolve_runtime_profile(
+            binding,
+            self.profiles,
+            controller_authority_sha256=self.controller_authority.controller_authority_sha256,
         )
-        if len(matches) != 1:
-            raise ValueError("manager work does not match one approved runtime profile")
-        return matches[0]
 
     async def _checkpoint(self) -> Any:
         checkpoint = await self.client.executable_checkpoint()
@@ -439,7 +426,7 @@ class ExecutablePoolExecutor:
                     ),
                     ownership_proof=expected.ownership_proof,
                 )
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, RuntimeAssemblyError) as exc:
             raise JournalRegressionError(
                 "stored ownership evidence differs from launch authority"
             ) from exc

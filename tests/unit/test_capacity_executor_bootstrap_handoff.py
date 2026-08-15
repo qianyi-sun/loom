@@ -3,6 +3,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import json
+import os
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,6 +32,8 @@ from loom_capacity_manager.executable_contracts import (
 from tests.unit.test_capacity_executor_launch_renderer import launch_context_fixture
 
 _NOW = datetime(2026, 8, 13, 16, 0, tzinfo=UTC)
+_CANDIDATE_IMAGE = f"registry.example.com/loom/candidate@sha256:{'1' * 64}"
+_OTHER_CANDIDATE_IMAGE = f"registry.example.com/loom/candidate@sha256:{'2' * 64}"
 
 
 class _Admission:
@@ -528,12 +533,21 @@ async def test_trusted_launcher_process_entry_derives_physical_binding_from_slur
     launcher_path = tmp_path / "trusted-launcher"
     launcher_path.write_text("#!/bin/sh\nexit 70\n", encoding="utf-8")
     launcher_path.chmod(0o755)
+    candidate_path = tmp_path / "candidate-worker"
+    _write_candidate(candidate_path)
     context = launch_context_fixture()
     trusted_config = TrustedLauncherConfigV2(
         handoff_directory=str(directory),
         admission_directory=str(admission_directory),
         admission_directory_sha256=_Admission.route_sha256,
-        candidate_argv=("/opt/loom/bin/worker", "--once"),
+        candidate_executable={
+            "path": str(candidate_path),
+            "sha256": hashlib.sha256(candidate_path.read_bytes()).hexdigest(),
+            "owner_uid": candidate_path.stat().st_uid,
+            "mode": candidate_path.stat().st_mode & 0o777,
+        },
+        candidate_image_digest=context.profile.image_digest,
+        candidate_argv=(str(candidate_path), "--once"),
     )
     config_path = tmp_path / "trusted-launcher-config.json"
     config_path.write_bytes(canonical_executable_bytes(trusted_config))
@@ -607,8 +621,8 @@ async def test_trusted_launcher_process_entry_derives_physical_binding_from_slur
         )
 
     assert len(exec_calls) == 1
-    assert exec_calls[0][0] == "/opt/loom/bin/worker"
-    assert exec_calls[0][1] == ("/opt/loom/bin/worker", "--once")
+    assert exec_calls[0][0].startswith("/proc/self/fd/")
+    assert exec_calls[0][1] == (str(candidate_path), "--once")
     worker_credential = exec_calls[0][2][WORKER_CREDENTIAL_ENV]
     assert (
         admission.requests[0].worker_credential_sha256
@@ -671,6 +685,365 @@ def test_handoff_physical_resolution_rejects_changed_ownership_token(
             trusted_launcher_release_sha256=context.binding.execution.trusted_fleet_release_sha256,
             now=lambda: _NOW,
         )
+
+
+def _write_candidate(path: Path, payload: bytes = b"#!/bin/sh\nexit 0\n") -> bytes:
+    path.write_bytes(payload)
+    path.chmod(0o555)
+    return payload
+
+
+def _trusted_candidate_config_payload(
+    *,
+    handoff_directory: Path,
+    admission_directory: Path,
+    candidate_path: Path,
+    candidate_sha256: str | None = None,
+    candidate_owner_uid: int | None = None,
+    candidate_mode: int | None = None,
+    candidate_image_digest: str = _CANDIDATE_IMAGE,
+) -> dict[str, object]:
+    metadata = candidate_path.stat()
+    return {
+        "schema_version": 2,
+        "handoff_directory": str(handoff_directory),
+        "admission_directory": str(admission_directory),
+        "admission_directory_sha256": _Admission.route_sha256,
+        "candidate_argv": (str(candidate_path), "--once"),
+        "candidate_executable": {
+            "schema_version": 2,
+            "path": str(candidate_path),
+            "sha256": candidate_sha256 or hashlib.sha256(candidate_path.read_bytes()).hexdigest(),
+            "owner_uid": (
+                candidate_owner_uid if candidate_owner_uid is not None else metadata.st_uid
+            ),
+            "mode": (candidate_mode if candidate_mode is not None else metadata.st_mode & 0o777),
+        },
+        "candidate_image_digest": candidate_image_digest,
+    }
+
+
+async def _run_trusted_process_with_candidate_config(
+    tmp_path: Path,
+    *,
+    config_payload: dict[str, object],
+    process_image_digest: str = _CANDIDATE_IMAGE,
+    on_exec: Callable[[str, tuple[str, ...], dict[str, str]], None] | None = None,
+    admission: _Admission | None = None,
+    exec_calls: list[tuple[str, tuple[str, ...], dict[str, str]]] | None = None,
+) -> tuple[_Admission, list[tuple[str, tuple[str, ...], dict[str, str]]]]:
+    from dataclasses import replace
+
+    from loom_capacity_executor.launch_renderer import (
+        canonical_launch_policy_digest,
+        render_signed_launch,
+    )
+    from loom_capacity_executor.slurm_contracts import (
+        SlurmExecutableIdentityV2,
+        SlurmFileIdentityV2,
+    )
+    from loom_capacity_executor.trusted_launcher import run_trusted_launcher_process
+
+    directory = Path(config_payload["handoff_directory"])
+    admission_directory = Path(config_payload["admission_directory"])
+    launcher_path = tmp_path / "trusted-launcher"
+    launcher_path.write_text("#!/bin/sh\nexit 70\n", encoding="utf-8")
+    launcher_path.chmod(0o755)
+    config_path = tmp_path / "trusted-launcher-config.json"
+    config_path.write_bytes(
+        json.dumps(
+            config_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+    )
+    config_path.chmod(0o600)
+
+    context = launch_context_fixture()
+    profile = context.profile.model_copy(
+        update={
+            "launcher": SlurmExecutableIdentityV2(
+                path=str(launcher_path),
+                sha256=hashlib.sha256(launcher_path.read_bytes()).hexdigest(),
+                owner_uid=launcher_path.stat().st_uid,
+            ),
+            "trusted_launcher_config": SlurmFileIdentityV2(
+                path=str(config_path),
+                sha256=hashlib.sha256(config_path.read_bytes()).hexdigest(),
+                owner_uid=config_path.stat().st_uid,
+            ),
+        }
+    )
+    profile = profile.model_copy(update={"controller_authority_sha256": "0" * 64})
+    profile = profile.model_copy(
+        update={"controller_authority_sha256": canonical_launch_policy_digest(profile)}
+    )
+    rendered = render_signed_launch(
+        replace(
+            context,
+            profile=profile,
+            controller_authority=context.controller_authority.model_copy(
+                update={"controller_authority_sha256": profile.controller_authority_sha256}
+            ),
+        )
+    )
+    store = BootstrapHandoffStore(directory)
+    lease = store.prepare(
+        context.binding,
+        bootstrap_registration_epoch=1,
+        expires_at=_NOW + timedelta(minutes=5),
+        trusted_launcher_release_sha256=context.binding.execution.trusted_fleet_release_sha256,
+        protected_admission_route_sha256=_Admission.route_sha256,
+    )
+    bind_bootstrap_handoff_ownership(
+        directory,
+        lease.reference,
+        context.binding,
+        bootstrap_registration_epoch=1,
+        ownership_evidence_sha256=canonical_executable_digest(rendered.ownership_proof),
+        trusted_launcher_release_sha256=context.binding.execution.trusted_fleet_release_sha256,
+        now=lambda: _NOW,
+    )
+    launch_request = rendered.request.model_copy(
+        update={
+            "bootstrap_handoff_reference": lease.reference,
+            "image_digest": process_image_digest,
+        }
+    )
+    admission = admission or _Admission()
+    exec_calls = exec_calls if exec_calls is not None else []
+
+    def admission_factory(directory_arg: Path, *, expected_directory_sha256: str) -> _Admission:
+        assert directory_arg == admission_directory
+        assert expected_directory_sha256 == _Admission.route_sha256
+        return admission
+
+    def fake_execvpe(file: str, argv: tuple[str, ...], env: dict[str, str]) -> None:
+        if on_exec is not None:
+            on_exec(file, argv, env)
+        exec_calls.append((file, argv, env))
+        raise _ExecBoundaryError
+
+    await run_trusted_launcher_process(
+        launch_request.trusted_launcher_argv(),
+        environment={"SLURM_JOB_ID": "101"},
+        now=lambda: _NOW,
+        admission_factory=admission_factory,
+        execvpe=fake_execvpe,
+    )
+    raise AssertionError("trusted process returned without exec")
+
+
+# Production break caught: a candidate path with changed bytes must be rejected
+# before the wrapper exchanges the one-time capability or exposes a credential.
+async def test_trusted_launcher_rejects_wrong_candidate_hash_before_credential(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "handoff"
+    directory.mkdir(mode=0o700)
+    admission_directory = tmp_path / "admission"
+    admission_directory.mkdir(mode=0o700)
+    candidate = tmp_path / "candidate-worker"
+    _write_candidate(candidate)
+    config = _trusted_candidate_config_payload(
+        handoff_directory=directory,
+        admission_directory=admission_directory,
+        candidate_path=candidate,
+        candidate_sha256="0" * 64,
+    )
+    admission = _Admission()
+    exec_calls: list[tuple[str, tuple[str, ...], dict[str, str]]] = []
+
+    with pytest.raises(BootstrapHandoffError, match="candidate executable digest"):
+        await _run_trusted_process_with_candidate_config(
+            tmp_path,
+            config_payload=config,
+            admission=admission,
+            exec_calls=exec_calls,
+        )
+    assert admission.requests == []
+    assert admission.capabilities == []
+    assert exec_calls == []
+
+
+# Production break caught: a candidate executable owned by a different UID than
+# the pinned config identity must not receive the scoped worker credential.
+async def test_trusted_launcher_rejects_wrong_candidate_owner_before_credential(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "handoff"
+    directory.mkdir(mode=0o700)
+    admission_directory = tmp_path / "admission"
+    admission_directory.mkdir(mode=0o700)
+    candidate = tmp_path / "candidate-worker"
+    _write_candidate(candidate)
+    wrong_owner = os.geteuid() + 1 if os.geteuid() < (1 << 31) - 1 else 0
+    config = _trusted_candidate_config_payload(
+        handoff_directory=directory,
+        admission_directory=admission_directory,
+        candidate_path=candidate,
+        candidate_owner_uid=wrong_owner,
+    )
+    admission = _Admission()
+    exec_calls: list[tuple[str, tuple[str, ...], dict[str, str]]] = []
+
+    with pytest.raises(BootstrapHandoffError, match="candidate executable identity"):
+        await _run_trusted_process_with_candidate_config(
+            tmp_path,
+            config_payload=config,
+            admission=admission,
+            exec_calls=exec_calls,
+        )
+    assert admission.requests == []
+    assert admission.capabilities == []
+    assert exec_calls == []
+
+
+# Production break caught: if the candidate is owned by the trusted-wrapper UID,
+# a writable mode lets same-UID candidate code mutate the verified inode before
+# exec; reject it before protected registration/credential issue.
+async def test_trusted_launcher_rejects_current_uid_writable_candidate_mode(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "handoff"
+    directory.mkdir(mode=0o700)
+    admission_directory = tmp_path / "admission"
+    admission_directory.mkdir(mode=0o700)
+    candidate = tmp_path / "candidate-worker"
+    _write_candidate(candidate)
+    candidate.chmod(0o755)
+    config = _trusted_candidate_config_payload(
+        handoff_directory=directory,
+        admission_directory=admission_directory,
+        candidate_path=candidate,
+    )
+    admission = _Admission()
+    exec_calls: list[tuple[str, tuple[str, ...], dict[str, str]]] = []
+
+    with pytest.raises(BootstrapHandoffError, match="candidate executable mode"):
+        await _run_trusted_process_with_candidate_config(
+            tmp_path,
+            config_payload=config,
+            admission=admission,
+            exec_calls=exec_calls,
+        )
+    assert admission.requests == []
+    assert admission.capabilities == []
+    assert exec_calls == []
+
+
+# Production break caught: image identity belongs to the trusted wrapper
+# boundary; a Slurm argv image different from the config-pinned image must be
+# rejected before the handoff is consumed.
+async def test_trusted_launcher_rejects_image_digest_mismatch_before_credential(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "handoff"
+    directory.mkdir(mode=0o700)
+    admission_directory = tmp_path / "admission"
+    admission_directory.mkdir(mode=0o700)
+    candidate = tmp_path / "candidate-worker"
+    _write_candidate(candidate)
+    config = _trusted_candidate_config_payload(
+        handoff_directory=directory,
+        admission_directory=admission_directory,
+        candidate_path=candidate,
+        candidate_image_digest=_CANDIDATE_IMAGE,
+    )
+    admission = _Admission()
+    exec_calls: list[tuple[str, tuple[str, ...], dict[str, str]]] = []
+
+    with pytest.raises(BootstrapHandoffError, match="image digest"):
+        await _run_trusted_process_with_candidate_config(
+            tmp_path,
+            config_payload=config,
+            process_image_digest=_OTHER_CANDIDATE_IMAGE,
+            admission=admission,
+            exec_calls=exec_calls,
+        )
+    assert admission.requests == []
+    assert admission.capabilities == []
+    assert exec_calls == []
+
+
+# Production break caught: replacement of the configured candidate pathname
+# before wrapper startup must be detected before registration/credential issue.
+async def test_trusted_launcher_rejects_replaced_candidate_before_credential(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "handoff"
+    directory.mkdir(mode=0o700)
+    admission_directory = tmp_path / "admission"
+    admission_directory.mkdir(mode=0o700)
+    candidate = tmp_path / "candidate-worker"
+    _write_candidate(candidate, b"#!/bin/sh\nexit 0\n")
+    config = _trusted_candidate_config_payload(
+        handoff_directory=directory,
+        admission_directory=admission_directory,
+        candidate_path=candidate,
+    )
+    candidate.unlink()
+    _write_candidate(candidate, b"#!/bin/sh\nexit 99\n")
+    admission = _Admission()
+    exec_calls: list[tuple[str, tuple[str, ...], dict[str, str]]] = []
+
+    with pytest.raises(BootstrapHandoffError, match="candidate executable digest"):
+        await _run_trusted_process_with_candidate_config(
+            tmp_path,
+            config_payload=config,
+            admission=admission,
+            exec_calls=exec_calls,
+        )
+    assert admission.requests == []
+    assert admission.capabilities == []
+    assert exec_calls == []
+
+
+# Production break caught: after successful authentication, the candidate exec
+# target must be the already-open verified object, not a pathname that attacker
+# code can replace between verification and exec.
+async def test_trusted_launcher_executes_already_open_verified_candidate(
+    tmp_path: Path,
+) -> None:
+    from loom_capacity_executor.trusted_launcher import WORKER_CREDENTIAL_ENV
+
+    directory = tmp_path / "handoff"
+    directory.mkdir(mode=0o700)
+    admission_directory = tmp_path / "admission"
+    admission_directory.mkdir(mode=0o700)
+    candidate = tmp_path / "candidate-worker"
+    original_payload = _write_candidate(candidate, b"#!/bin/sh\nexit 0\n")
+    config = _trusted_candidate_config_payload(
+        handoff_directory=directory,
+        admission_directory=admission_directory,
+        candidate_path=candidate,
+    )
+    observed: list[tuple[str, tuple[str, ...], str]] = []
+    admission = _Admission()
+    exec_calls: list[tuple[str, tuple[str, ...], dict[str, str]]] = []
+
+    def replace_path_before_exec(file: str, argv: tuple[str, ...], env: dict[str, str]) -> None:
+        candidate.unlink()
+        _write_candidate(candidate, b"#!/bin/sh\nexit 99\n")
+        assert file.startswith("/proc/self/fd/")
+        assert Path(file).read_bytes() == original_payload
+        observed.append((file, argv, env[WORKER_CREDENTIAL_ENV]))
+
+    with pytest.raises(_ExecBoundaryError):
+        await _run_trusted_process_with_candidate_config(
+            tmp_path,
+            config_payload=config,
+            on_exec=replace_path_before_exec,
+            admission=admission,
+            exec_calls=exec_calls,
+        )
+
+    assert len(exec_calls) == 1
+    assert observed[0][1] == (str(candidate), "--once")
+    assert (
+        admission.requests[0].worker_credential_sha256
+        == hashlib.sha256(observed[0][2].encode("ascii")).hexdigest()
+    )
 
 
 def test_prepare_keeps_concurrent_existing_capability_without_replacement(

@@ -253,3 +253,151 @@ and check gates above passed.
   - `39 passed in 3.14s`
 - `uv run --no-sync pytest tests/loom_cli/test_capacity_control_plane.py -q`
   - `36 passed in 0.68s`
+
+## Fix Round 2 — scoped review remediation
+
+Base: `c8085c5f4` (`fix: close executable runtime production-entry gaps`).
+
+Scoped review status: two Important findings open:
+
+1. Production-entry profile resolution needed to prove executor work selection
+   consumes the public runtime profile resolver instead of a private duplicate.
+   The lifecycle-store/API portion required a technical ruling against adding a
+   new operator mutation route.
+2. The shipped trusted wrapper needed to authenticate the exact candidate
+   executable and image before exposing the scoped worker credential, without a
+   pathname verify-then-exec race.
+
+### Root cause
+
+- `ExecutablePoolExecutor._profile_for()` duplicated the
+  `resolve_runtime_profile()` matching logic, so daemon assembly and executor
+  render/acceptance could drift as profile policy evolved.
+- `TrustedLauncherConfigV2` pinned only `candidate_argv`. The process parsed
+  `--image-digest` but did not compare it, and
+  `exec_bootstrap_handoff_candidate()` claimed the handoff/credential before
+  the shipped process authenticated the candidate executable.
+
+### Remediation
+
+- Added `src/loom_capacity_executor/runtime_profiles.py` as the shared public
+  runtime-profile resolver module. `runtime.py` re-exports
+  `RuntimeAssemblyError` and `resolve_runtime_profile()`, while
+  `ExecutablePoolExecutor._profile_for()` now calls that resolver directly.
+- Added `TrustedCandidateExecutableV2` and required
+  `candidate_executable`/`candidate_image_digest` fields in
+  `TrustedLauncherConfigV2`.
+- The shipped trusted process now:
+  1. verifies the config-pinned image digest against Slurm argv;
+  2. opens the candidate with `O_NOFOLLOW`;
+  3. checks canonical path, owner, exact mode, current-UID writable mode,
+     regular-file/nonsymlink identity, and SHA-256 on the opened object;
+  4. consumes/claims the bootstrap handoff only after those checks; and
+  5. execs `/proc/self/fd/<fd>` with the original argv so pathname replacement
+     after verification does not change the executed object.
+- Updated bridge trusted-launcher config publication to include the pinned
+  `/usr/bin/true` candidate identity and image digest for the offline fake
+  Slurm process harness.
+
+### Lifecycle-store/API technical ruling for finding 1
+
+No new lifecycle or operator activation route was added.
+
+Evidence:
+
+- Plan Task 2 Step 5 says: `Do not add a renderable ceiling or activation CLI/API route`.
+- Plan Task 4 Step 5 says strict executor API routes must not expose an
+  operator activation route.
+- Plan Task 12 permits exact `management_store` injection and explicitly says
+  no prepare, activate, drain, retire, apply, start, enable, or ceiling-change
+  route.
+- Plan Task 13 Step 4 requires public/database/wire boundaries with one real
+  manager store/API; it does not require a renderable or routable operator
+  activation surface.
+- Current API coverage already asserts
+  `POST /v1/execution-activations` returns `404`.
+- The harness uses existing public `CapacityManagementStore` methods for
+  offline fixture epoch setup (`prepare_execution_epoch`,
+  `activate_execution_epoch`, `begin_execution_drain`,
+  `retire_execution_epoch`) and real API/client paths for normal manager,
+  executor, heartbeat, inventory, protected admission, and lifecycle
+  interactions. This round added no private helpers, direct SQL activation
+  shortcut, or operator mutation route.
+
+### RED evidence
+
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_bootstrap_handoff.py -q -k 'candidate_hash or candidate_owner or image_digest_mismatch or replaced_candidate or already_open_verified_candidate'`
+  - RED: `5 failed, 16 deselected in 0.25s`
+  - Representative failure: config rejected `candidate_executable` and
+    `candidate_image_digest` as extra fields, yielding generic
+    `trusted launcher config is invalid` instead of authenticating candidate
+    hash/owner/image and executing the verified object.
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_bootstrap_handoff.py::test_trusted_launcher_rejects_current_uid_writable_candidate_mode -q`
+  - RED: `1 failed in 0.38s`
+  - Failure reached `_ExecBoundaryError` with
+    `LOOM_EXECUTOR_WORKER_CREDENTIAL` in the environment, proving a
+    current-UID writable candidate mode could receive the credential.
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_executable.py::test_render_launch_uses_public_runtime_profile_resolver -q`
+  - RED: `1 failed in 0.19s`
+  - Failure: `Failed: DID NOT RAISE <class 'loom_capacity_executor.runtime.RuntimeAssemblyError'>`, proving render/acceptance bypassed the public resolver sentinel.
+
+### GREEN evidence
+
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_bootstrap_handoff.py -q -k 'candidate_hash or candidate_owner or current_uid_writable or image_digest_mismatch or replaced_candidate or already_open_verified_candidate or process_entry_derives_physical_binding'`
+  - `7 passed, 15 deselected in 0.76s`
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_executable.py::test_render_launch_uses_public_runtime_profile_resolver -q`
+  - `1 passed in 0.13s`
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_bootstrap_handoff.py -q`
+  - `22 passed in 1.93s`
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_executable.py -q`
+  - `27 passed in 1.90s`
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_runtime.py -q`
+  - `16 passed in 0.43s`
+- `uv run --no-sync pytest tests/integration/test_executable_global_capacity_bridge.py::test_harness_uses_public_runtime_and_trusted_process_entry -q`
+  - `1 passed in 15.53s`
+
+### Final verification on source state before report/ledger append
+
+- `uv run --no-sync pytest tests/unit/test_capacity_executor_slurm_backend.py tests/unit/test_capacity_executor_executable.py tests/unit/test_capacity_executor_recovery.py tests/unit/test_capacity_executor_client.py tests/unit/test_capacity_executor_admission_client.py tests/unit/test_capacity_executor_config.py tests/unit/test_capacity_executor_runtime.py tests/unit/test_capacity_executor_bootstrap_handoff.py tests/unit/test_capacity_executor_heartbeat.py tests/unit/test_capacity_executor_launch_renderer.py -q`
+  - `212 passed in 12.71s`
+- `uv run --no-sync pytest tests/integration/test_executable_global_capacity_bridge.py -q`
+  - pass 1: `5 passed in 70.29s (0:01:10)`
+  - pass 2: `5 passed in 59.41s`
+- `uv run --no-sync pytest tests/integration/test_capacity_manager_api.py tests/integration/test_capacity_manager_execution_store.py tests/integration/test_capacity_manager_execution_epoch.py -q`
+  - `112 passed, 1 warning in 20.37s`
+- `uv run --no-sync pytest tests/ops/test_global_fleet_pool_executor_once.py tests/ops/test_global_fleet_capacity_shadow_once.py tests/ops/test_capacity_mutation_inventory.py tests/ops/test_capacity_guard_package_boundary.py -q`
+  - `39 passed in 1.55s`
+- `uv run --no-sync pytest tests/loom_cli/test_capacity_control_plane.py -q`
+  - `36 passed in 0.66s`
+- `uv run --no-sync ruff format --check <7 pending Python files> && uv run --no-sync ruff check <7 pending Python files>`
+  - `7 files already formatted`
+  - `All checks passed!`
+- `uv run --no-sync mypy`
+  - `Success: no issues found in 810 source files`
+- `git diff --check && find docs -maxdepth 1 -type d -name superpowers -print`
+  - exit 0; no output.
+
+### Files changed
+
+- `src/loom_capacity_executor/executable.py`
+- `src/loom_capacity_executor/runtime.py`
+- `src/loom_capacity_executor/runtime_profiles.py`
+- `src/loom_capacity_executor/trusted_launcher.py`
+- `tests/support/executable_capacity_harness.py`
+- `tests/unit/test_capacity_executor_bootstrap_handoff.py`
+- `tests/unit/test_capacity_executor_executable.py`
+- this report and `progress.md`
+
+### Self-review
+
+- DryRun V1 contracts were not changed.
+- Checked-in/rendered executable ceiling remains zero; no activation artifact,
+  activation CLI, activation API, systemd install/start, Slurm, Kubernetes, or
+  origin/dev mutation was performed.
+- The trusted-wrapper rejection tests assert no protected registration,
+  capability consumption, exec call, or worker credential exposure on rejected
+  candidate hash, owner, current-UID writable mode, replacement, or image
+  mismatch.
+- The success test proves the exec target is `/proc/self/fd/<fd>` and still
+  reads the originally verified candidate after the configured pathname is
+  replaced.
