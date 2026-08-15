@@ -329,4 +329,4 @@ async def test_protected_bootstrap_evidence_blocks_guard_downgrade(
             await session.execute(
                 text("SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version")
             )
-        ).scalar_one() == "guard_0013"
+        ).scalar_one() == "guard_0014"
