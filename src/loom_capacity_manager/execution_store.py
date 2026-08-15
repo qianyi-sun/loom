@@ -601,7 +601,10 @@ class CapacityExecutionStore:
                 )
                 if current is None:
                     break
-                if latest_epoch is not None and current.allocation_epoch != latest_epoch.allocation_epoch:
+                if (
+                    latest_epoch is not None
+                    and current.allocation_epoch != latest_epoch.allocation_epoch
+                ):
                     if current.state == "proposed":
                         current.state = "released"
                         current.released_at = now
@@ -850,7 +853,11 @@ class CapacityExecutionStore:
             )
             locked_intents = await self._locked_allocation_intents(session, consumption.binding)
             row = next(
-                (item for item in locked_intents if item.intent_id == consumption.binding.intent_id),
+                (
+                    item
+                    for item in locked_intents
+                    if item.intent_id == consumption.binding.intent_id
+                ),
                 None,
             )
             if row is None:
@@ -984,12 +991,7 @@ class CapacityExecutionStore:
                     for record in inventory.records
                 ):
                     raise ExecutionConflictError("submission recovery found physical work")
-                row.inventory_sequence = recovery.inventory_sequence
-                row.observed_state = "terminal"
-                row.terminal_kind = "unused"
-                row.terminal_identity = row.shape_instance_id
-                row.terminal_evidence_sha256 = digest
-                row.state = "closing"
+                row.state = "quarantined"
                 await self._record_command(
                     session,
                     row,
@@ -1106,8 +1108,7 @@ class CapacityExecutionStore:
                 await session.execute(
                     select(CapacityExecutableProtectedReleaseReceipt)
                     .where(
-                        CapacityExecutableProtectedReleaseReceipt.idempotency_key
-                        == idempotency_key
+                        CapacityExecutableProtectedReleaseReceipt.idempotency_key == idempotency_key
                     )
                     .with_for_update()
                 )
@@ -1133,9 +1134,7 @@ class CapacityExecutionStore:
                 prior is not None
                 and release.protected_registration_epoch <= prior.protected_registration_epoch
             ):
-                raise ExecutionConflictError(
-                    "protected release registration epoch must advance"
-                )
+                raise ExecutionConflictError("protected release registration epoch must advance")
             reporter = (
                 await session.execute(
                     select(CapacityDemandReporter).where(
@@ -1192,17 +1191,17 @@ class CapacityExecutionStore:
             ordered_intent_ids = tuple(
                 (
                     await session.execute(
-                    select(CapacityExecutableIntent.intent_id)
-                    .where(CapacityExecutableIntent.intent_id.in_(intent_ids))
-                    .order_by(
-                        CapacityExecutableIntent.allocation_epoch,
-                        CapacityExecutableIntent.launch_rank,
-                        CapacityExecutableIntent.intent_id,
+                        select(CapacityExecutableIntent.intent_id)
+                        .where(CapacityExecutableIntent.intent_id.in_(intent_ids))
+                        .order_by(
+                            CapacityExecutableIntent.allocation_epoch,
+                            CapacityExecutableIntent.launch_rank,
+                            CapacityExecutableIntent.intent_id,
+                        )
                     )
                 )
-            )
-            .scalars()
-            .all()
+                .scalars()
+                .all()
             )
             if set(ordered_intent_ids) != set(intent_ids):
                 raise ExecutionConflictError("executable intent is unknown")
@@ -1702,7 +1701,9 @@ class CapacityExecutionStore:
         )
         if context.executor.last_inventory_at is None:
             raise ExecutionConflictError("fresh complete executor inventory is required")
-        executor_inventory_fresh_until = context.executor.last_inventory_at + self._inventory_freshness
+        executor_inventory_fresh_until = (
+            context.executor.last_inventory_at + self._inventory_freshness
+        )
         if (
             inventory.inventory_sequence != context.executor.inventory_high_water
             or executor_inventory_fresh_until <= now
@@ -2131,6 +2132,7 @@ class CapacityExecutionStore:
                         CapacityExecutableIntent.id != target.id,
                         (
                             (CapacityExecutableIntent.state == "submitting-unknown")
+                            | (CapacityExecutableIntent.state == "quarantined")
                             | (CapacityExecutableIntent.observed_state == "pending")
                         ),
                     )
@@ -2368,8 +2370,10 @@ class CapacityExecutionStore:
                 await session.execute(
                     select(CapacityExecutableIntent)
                     .where(
-                        CapacityExecutableIntent.execution_epoch == target.execution.execution_epoch,
-                        CapacityExecutableIntent.allocation_epoch == target.execution.allocation_epoch,
+                        CapacityExecutableIntent.execution_epoch
+                        == target.execution.execution_epoch,
+                        CapacityExecutableIntent.allocation_epoch
+                        == target.execution.allocation_epoch,
                     )
                     .order_by(
                         CapacityExecutableIntent.allocation_epoch,
@@ -2394,9 +2398,7 @@ class CapacityExecutionStore:
             (
                 await session.execute(
                     select(CapacityExecutableProtectedReleaseReceipt)
-                    .where(
-                        CapacityExecutableProtectedReleaseReceipt.intent_id.in_(intent_ids)
-                    )
+                    .where(CapacityExecutableProtectedReleaseReceipt.intent_id.in_(intent_ids))
                     .order_by(
                         CapacityExecutableProtectedReleaseReceipt.intent_id,
                         CapacityExecutableProtectedReleaseReceipt.protected_registration_epoch,
@@ -2489,7 +2491,10 @@ class CapacityExecutionStore:
             return False
         if intent.state in {"closing", "terminal"}:
             return False
-        if intent.terminal_identity is not None and intent.terminal_identity != record.physical_identity:
+        if (
+            intent.terminal_identity is not None
+            and intent.terminal_identity != record.physical_identity
+        ):
             intent.state = "quarantined"
             return False
         if intent.state in {"proposed", "accepted", "launch-ready", "permitted", "bound"}:
