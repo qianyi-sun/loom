@@ -9,6 +9,7 @@ from loom_cli.rollout.final_attestation_admission import (
     PostApplyDriftTransientError,
     validate_final_attestation,
     validate_post_apply_attestation_drift,
+    validate_post_apply_resume_attestation,
 )
 from loom_cli.rollout.operator.model import APPROVED_REMOTE_URL, CandidateBinding
 from loom_cli.rollout.preflight_authority import CandidatePreflightPlan
@@ -84,6 +85,7 @@ def _baseline_check(
     dependencies: tuple[str, ...],
     resource_digest: str,
     ready: bool = True,
+    observed_epoch: int = 7,
 ) -> RegisteredCheck:
     return RegisteredCheck(
         spec=CheckSpec(
@@ -112,7 +114,7 @@ def _baseline_check(
                 passed=ready,
                 evidence={
                     "ready": ready,
-                    "observed-epoch": 7,
+                    "observed-epoch": observed_epoch,
                     "readonly-principal": "system:serviceaccount:loom-staging:readonly",
                     "resource-digest": resource_digest,
                     "blockers": {},
@@ -132,6 +134,7 @@ def _checks(
     predecessor_pool_digest: str = "2" * 64,
     gb10_inventory_digest: str = "4" * 64,
     baseline_ready: bool = True,
+    baseline_epoch: int = 7,
 ) -> tuple[RegisteredCheck, ...]:
     predecessor_units = {
         "loom-autoscaler-gb10-staging.service": "e" * 64,
@@ -242,26 +245,31 @@ def _checks(
             dependencies=(),
             resource_digest=baseline_digest,
             ready=baseline_ready,
+            observed_epoch=baseline_epoch,
         ),
         _baseline_check(
             "staging.auth",
             dependencies=("staging.health",),
             resource_digest="7" * 64,
+            observed_epoch=baseline_epoch,
         ),
         _baseline_check(
             "staging.catalog-task",
             dependencies=("staging.auth",),
             resource_digest="8" * 64,
+            observed_epoch=baseline_epoch,
         ),
         _baseline_check(
             "staging.storage-db",
             dependencies=("staging.health",),
             resource_digest="9" * 64,
+            observed_epoch=baseline_epoch,
         ),
         _baseline_check(
             "staging.network",
             dependencies=("staging.health",),
             resource_digest="a" * 64,
+            observed_epoch=baseline_epoch,
         ),
         _baseline_check(
             "staging.release-baseline",
@@ -271,6 +279,7 @@ def _checks(
                 "staging.network",
             ),
             resource_digest="b" * 64,
+            observed_epoch=baseline_epoch,
         ),
     )
     return tier0 + tier2
@@ -741,6 +750,64 @@ def test_post_apply_drift_rejects_route_or_config_context_drift() -> None:
         validate_post_apply_attestation_drift(
             admission=admission,
             plan=drifted_plan,
+            current_mutation_epoch=8,
+            now=NOW,
+        )
+
+
+def test_post_apply_resume_reuses_original_baseline_after_current_health_recheck() -> None:
+    plan = _plan(_checks())
+    prior = validate_final_attestation(
+        attestation=_attestation(plan),
+        candidate=_candidate(),
+        plan=plan,
+        current_mutation_epoch=7,
+        now=NOW,
+    )
+    post_apply_plan = _at_epoch(
+        _plan(
+            _checks(
+                baseline_epoch=8,
+                predecessor_live_digest="0" * 64,
+            )
+        ),
+        8,
+    )
+
+    resumed = validate_post_apply_resume_attestation(
+        prior_admission=prior,
+        candidate=_candidate(),
+        plan=post_apply_plan,
+        current_mutation_epoch=8,
+        now=NOW + timedelta(hours=2),
+    )
+
+    assert resumed.attestation is prior.attestation
+    assert resumed.tier0_executions == prior.tier0_executions
+    assert resumed.tier2_executions == prior.tier2_executions
+    assert resumed.preflight_plan is post_apply_plan
+    assert resumed.post_apply_resume is True
+
+
+def test_post_apply_resume_rejects_unhealthy_current_baseline() -> None:
+    plan = _plan(_checks())
+    prior = validate_final_attestation(
+        attestation=_attestation(plan),
+        candidate=_candidate(),
+        plan=plan,
+        current_mutation_epoch=7,
+        now=NOW,
+    )
+    post_apply_plan = _at_epoch(
+        _plan(_checks(baseline_epoch=8, baseline_ready=False)),
+        8,
+    )
+
+    with pytest.raises(ValueError, match="post-apply resume baseline"):
+        validate_post_apply_resume_attestation(
+            prior_admission=prior,
+            candidate=_candidate(),
+            plan=post_apply_plan,
             current_mutation_epoch=8,
             now=NOW,
         )

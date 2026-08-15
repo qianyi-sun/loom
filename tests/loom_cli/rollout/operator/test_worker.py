@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -29,6 +30,7 @@ from loom_cli.rollout.operator.worker import (
     run_backup_job,
 )
 from loom_cli.rollout.operator.worker import main as worker_main
+from loom_cli.rollout.preflight_contract import CheckOperation, StageCapability
 from tests.loom_cli.rollout.operator.test_backup import RecordingRunner
 from tests.loom_cli.rollout.operator.test_backup import make_config as make_backup_config
 from tests.loom_cli.rollout.operator.test_broker import fakes as broker_fakes
@@ -436,8 +438,7 @@ def test_backup_worker_promotes_verified_request_then_launches_exact_attempt(
         assert envelope == job
         assert verified.manifest_sha256 == "d" * 64
         assert (
-            store.read_preflight_backup_job_state(REQUEST_ID).phase
-            is LifecyclePhase.BACKUP_RUNNING
+            store.read_preflight_backup_job_state(REQUEST_ID).phase is LifecyclePhase.BACKUP_RUNNING
         )
         order.append("reconcile")
 
@@ -833,3 +834,100 @@ def test_default_worker_run_uses_exact_sanitized_environment(
 
     assert environments == [expected]
     assert timeouts == [120]
+
+
+@pytest.mark.parametrize(
+    ("attempt_number", "resume", "apply_attempt"),
+    ((2, True, 1), (1, False, 1)),
+)
+def test_final_admission_resumes_only_from_exact_prior_or_current_apply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    attempt_number: int,
+    resume: bool,
+    apply_attempt: int,
+) -> None:
+    attestation = SimpleNamespace(
+        attestation_digest="3" * 64,
+        registry_digest="4" * 64,
+        coverage_digest="5" * 64,
+        bindings=SimpleNamespace(staging_mutation_epoch=7),
+    )
+    prior_admission = SimpleNamespace(attestation=attestation)
+    resumed_admission = SimpleNamespace(attestation=attestation, resumed=True)
+    published: list[tuple[int, object]] = []
+
+    class AdmissionStore:
+        def __init__(self, _root, *, request_id, attempt_number, service_uid):
+            assert request_id == REQUEST_ID
+            assert service_uid == os.geteuid()
+            self.attempt_number = attempt_number
+
+        def read(self, found_attestation):
+            assert self.attempt_number == apply_attempt
+            assert found_attestation is attestation
+            return prior_admission
+
+        def publish(self, admission):
+            published.append((self.attempt_number, admission))
+
+    protected_apply = SimpleNamespace(
+        passed=True,
+        tier=4,
+        stage=StageCapability.FINAL_ONLY,
+        operation=CheckOperation.APPLY,
+        evidence={
+            "ready": True,
+            "candidate-sha": "a" * 40,
+            "attestation-digest": "3" * 64,
+            "observed-epoch": 8,
+            "protected-mutation": True,
+            "blockers": {},
+        },
+    )
+
+    class GateStore:
+        def __init__(self, _root, *, request_id, attempt_number, service_uid):
+            assert request_id == REQUEST_ID
+            assert service_uid == os.geteuid()
+            self.attempt_number = attempt_number
+
+        def read_all(self):
+            return (
+                {"final.protected-apply": protected_apply}
+                if self.attempt_number == apply_attempt
+                else {}
+            )
+
+    class DeepPreflight:
+        def admit_final(self, *_args, **_kwargs):
+            pytest.fail("post-apply resume repeated pre-apply admission")
+
+        def admit_post_apply_resume(self, candidate, **kwargs):
+            assert candidate.resolved_sha == "a" * 40
+            assert kwargs["prior_admission"] is prior_admission
+            assert kwargs["attestation_digest"] == "3" * 64
+            return resumed_admission
+
+    monkeypatch.setattr(worker_module, "FinalAdmissionStore", AdmissionStore)
+    monkeypatch.setattr(worker_module, "FinalGateExecutionStore", GateStore)
+    envelope = valid_envelope()
+    if attempt_number == 2:
+        envelope = replace(
+            envelope,
+            attempt_number=attempt_number,
+            attempt_operator="devansh",
+            attempt_uid=2003,
+            resume=resume,
+        )
+
+    result = worker_module._admit_final_attempt(
+        envelope,
+        deep_preflight=DeepPreflight(),
+        attestation_store=SimpleNamespace(read=lambda _digest: attestation),
+        state_root=tmp_path,
+        service_uid=os.geteuid(),
+    )
+
+    assert result is resumed_admission
+    assert published == [(attempt_number, resumed_admission)]

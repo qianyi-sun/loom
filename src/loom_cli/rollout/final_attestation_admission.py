@@ -67,6 +67,7 @@ class FinalAttestationAdmission:
     tier0_executions: tuple[CheckExecution, ...]
     tier2_executions: tuple[CheckExecution, ...]
     preflight_plan: CandidatePreflightPlan | None = None
+    post_apply_resume: bool = False
 
     def __post_init__(self) -> None:
         tier2_by_id = {execution.check_id: execution for execution in self.tier2_executions}
@@ -76,6 +77,7 @@ class FinalAttestationAdmission:
             or len(self.tier2_executions) != len(_BASELINE_CHECKS)
             or set(tier2_by_id) != _BASELINE_CHECKS
             or any(result.tier != 2 or not result.passed for result in self.tier2_executions)
+            or type(self.post_apply_resume) is not bool
         ):
             raise ValueError("final attestation admission is incomplete")
 
@@ -275,7 +277,7 @@ def validate_post_apply_attestation_drift(
     attestation = admission.attestation
     bindings = attestation.bindings
     if (
-        now >= attestation.expires_at
+        (now >= attestation.expires_at and not admission.post_apply_resume)
         or current_mutation_epoch != bindings.staging_mutation_epoch + 1
         or plan.candidate.resolved_sha != bindings.candidate_sha
         or plan.candidate.resolved_tree != bindings.candidate_tree
@@ -398,10 +400,68 @@ def validate_post_apply_attestation_drift(
     return PostApplyDriftEvidence(current_mutation_epoch, executions, digest)
 
 
+def validate_post_apply_resume_attestation(
+    *,
+    prior_admission: FinalAttestationAdmission,
+    candidate: CandidateBinding,
+    plan: CandidatePreflightPlan,
+    current_mutation_epoch: int,
+    now: datetime,
+    max_concurrency: int = 8,
+) -> FinalAttestationAdmission:
+    """Re-admit an interrupted final chain after its exact protected apply."""
+    attestation = prior_admission.attestation
+    resumed = FinalAttestationAdmission(
+        attestation,
+        prior_admission.tier0_executions,
+        prior_admission.tier2_executions,
+        plan,
+        post_apply_resume=True,
+    )
+    if plan.candidate != candidate:
+        raise ValueError("post-apply resume candidate drifted")
+    validate_post_apply_attestation_drift(
+        admission=resumed,
+        plan=plan,
+        current_mutation_epoch=current_mutation_epoch,
+        now=now,
+        max_concurrency=max_concurrency,
+    )
+    checks = tuple(check for check in plan.registry.checks if check.spec.tier in {0, 2})
+    executions = PreflightDag(checks, max_concurrency=max_concurrency).run(
+        plan.context,
+        through_tier=2,
+        now=lambda: now,
+    )
+    tier2 = {execution.check_id: execution for execution in executions if execution.tier == 2}
+    if (
+        set(tier2) != _BASELINE_CHECKS
+        or any(not execution.passed for execution in executions)
+        or any(
+            execution.implementation_digest
+            != attestation.check_implementation_digests.get(execution.check_id)
+            for execution in executions
+        )
+    ):
+        raise ValueError("post-apply resume baseline recheck failed")
+    for execution in tier2.values():
+        evidence = execution.evidence
+        if (
+            evidence.get("ready") is not True
+            or evidence.get("observed-epoch") != current_mutation_epoch
+            or evidence.get("readonly-principal") in {None, ""}
+            or evidence.get("resource-digest") in {None, ""}
+            or evidence.get("blockers") != {}
+        ):
+            raise ValueError("post-apply resume baseline changed")
+    return resumed
+
+
 __all__ = [
     "FinalAttestationAdmission",
     "PostApplyDriftEvidence",
     "PostApplyDriftTransientError",
     "validate_final_attestation",
     "validate_post_apply_attestation_drift",
+    "validate_post_apply_resume_attestation",
 ]

@@ -15,12 +15,17 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Never, TextIO
+from typing import Any, Never, Protocol, TextIO
 
 from loom_cli.rollout.evidence import EvidenceDirectory
 from loom_cli.rollout.failure_authority import RolloutFailureEvidence
 from loom_cli.rollout.final_attestation_admission import FinalAttestationAdmission
 from loom_cli.rollout.lifecycle_protocol import LifecycleAction, LifecyclePhase
+from loom_cli.rollout.preflight_contract import (
+    CheckOperation,
+    PreflightAttestation,
+    StageCapability,
+)
 
 from .backup import BackupCreator, BackupError, backup_public_reason_for_code
 from .backup_job import (
@@ -32,6 +37,8 @@ from .backup_retirement import BackupPayloadActivator
 from .config import OperatorConfig
 from .envelope import fixed_operator_config_path, load_validated_envelope
 from .failure_diagnostics import unclassified_failure_diagnostic
+from .final_admission_store import FinalAdmissionStore
+from .final_gate_store import FinalGateExecutionStore
 from .installed_backup_retention import converge_verified_backup_candidate
 from .lifecycle import LifecycleCoordinator
 from .model import (
@@ -206,6 +213,110 @@ class WorkerDependencies:
     read_driver_failure: Callable[[DriverEnvelope], RolloutFailureEvidence | None] | None = None
     final_admission: Callable[[DriverEnvelope], FinalAttestationAdmission] | None = None
     run_final_gates: Callable[[DriverEnvelope, FinalAttestationAdmission], int] | None = None
+
+
+class _FinalAdmissionAuthority(Protocol):
+    def admit_final(
+        self,
+        candidate: CandidateBinding,
+        *,
+        attestation_digest: str,
+        expected_registry_digest: str,
+        expected_coverage_digest: str,
+    ) -> FinalAttestationAdmission: ...
+
+    def admit_post_apply_resume(
+        self,
+        candidate: CandidateBinding,
+        *,
+        prior_admission: FinalAttestationAdmission,
+        attestation_digest: str,
+        expected_registry_digest: str,
+        expected_coverage_digest: str,
+    ) -> FinalAttestationAdmission: ...
+
+
+class _AttestationReader(Protocol):
+    def read(self, digest: str) -> PreflightAttestation: ...
+
+
+def _admit_final_attempt(
+    envelope: DriverEnvelope,
+    *,
+    deep_preflight: _FinalAdmissionAuthority,
+    attestation_store: _AttestationReader,
+    state_root: Path,
+    service_uid: int,
+) -> FinalAttestationAdmission:
+    """Persist initial admission or re-admit one proven post-apply resume."""
+    candidate = CandidateBinding(
+        remote_url=envelope.remote_url,
+        target_ref=envelope.target_ref,
+        resolved_sha=envelope.resolved_sha,
+        image_tag=envelope.image_tag,
+        fetched_at=envelope.fetched_at,
+        source_mode=envelope.source_mode,
+        resolved_tree=envelope.resolved_tree,
+        approved_base_sha=envelope.approved_base_sha,
+    )
+    attestation = attestation_store.read(envelope.preflight_attestation_sha256)
+    current_store = FinalAdmissionStore(
+        state_root,
+        request_id=envelope.request_id,
+        attempt_number=envelope.attempt_number,
+        service_uid=service_uid,
+    )
+    prior_admission: FinalAttestationAdmission | None = None
+    recovery_attempts = [envelope.attempt_number]
+    if envelope.resume:
+        recovery_attempts.extend(range(envelope.attempt_number - 1, 0, -1))
+    for attempt_number in recovery_attempts:
+        executions = FinalGateExecutionStore(
+            state_root,
+            request_id=envelope.request_id,
+            attempt_number=attempt_number,
+            service_uid=service_uid,
+        ).read_all()
+        protected_apply = executions.get("final.protected-apply")
+        if protected_apply is None or not protected_apply.passed:
+            continue
+        evidence = protected_apply.evidence
+        if (
+            protected_apply.tier != 4
+            or protected_apply.stage is not StageCapability.FINAL_ONLY
+            or protected_apply.operation is not CheckOperation.APPLY
+            or evidence.get("ready") is not True
+            or evidence.get("candidate-sha") != envelope.resolved_sha
+            or evidence.get("attestation-digest") != envelope.preflight_attestation_sha256
+            or evidence.get("observed-epoch") != attestation.bindings.staging_mutation_epoch + 1
+            or evidence.get("protected-mutation") is not True
+            or evidence.get("blockers") != {}
+        ):
+            raise ValueError("prior protected apply evidence drifted")
+        prior_admission = FinalAdmissionStore(
+            state_root,
+            request_id=envelope.request_id,
+            attempt_number=attempt_number,
+            service_uid=service_uid,
+        ).read(attestation)
+        break
+    if prior_admission is None:
+        admission = deep_preflight.admit_final(
+            candidate,
+            attestation_digest=envelope.preflight_attestation_sha256,
+            expected_registry_digest=envelope.preflight_registry_sha256,
+            expected_coverage_digest=envelope.preflight_coverage_sha256,
+        )
+    else:
+        admission = deep_preflight.admit_post_apply_resume(
+            candidate,
+            prior_admission=prior_admission,
+            attestation_digest=envelope.preflight_attestation_sha256,
+            expected_registry_digest=envelope.preflight_registry_sha256,
+            expected_coverage_digest=envelope.preflight_coverage_sha256,
+        )
+    current_store.publish(admission)
+    return admission
 
 
 @dataclass(slots=True)
@@ -813,21 +924,12 @@ def _default_dependencies(config: OperatorConfig, *, service_uid: int) -> Worker
         return dispatch(argv)
 
     def final_admission(envelope: DriverEnvelope) -> FinalAttestationAdmission:
-        candidate = CandidateBinding(
-            remote_url=envelope.remote_url,
-            target_ref=envelope.target_ref,
-            resolved_sha=envelope.resolved_sha,
-            image_tag=envelope.image_tag,
-            fetched_at=envelope.fetched_at,
-            source_mode=envelope.source_mode,
-            resolved_tree=envelope.resolved_tree,
-            approved_base_sha=envelope.approved_base_sha,
-        )
-        return deep_preflight.admit_final(
-            candidate,
-            attestation_digest=envelope.preflight_attestation_sha256,
-            expected_registry_digest=envelope.preflight_registry_sha256,
-            expected_coverage_digest=envelope.preflight_coverage_sha256,
+        return _admit_final_attempt(
+            envelope,
+            deep_preflight=deep_preflight,
+            attestation_store=composition.attestation_store,
+            state_root=config.state_root,
+            service_uid=service_uid,
         )
 
     def post_apply_plan(

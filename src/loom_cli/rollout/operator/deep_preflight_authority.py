@@ -10,6 +10,7 @@ from enum import StrEnum
 from loom_cli.rollout.final_attestation_admission import (
     FinalAttestationAdmission,
     validate_final_attestation,
+    validate_post_apply_resume_attestation,
 )
 from loom_cli.rollout.operator.model import CandidateBinding
 from loom_cli.rollout.preflight_attestation_store import PreflightAttestationStore
@@ -78,6 +79,37 @@ class DeepPreflightAuthority:
         plan = runtime.prebackup_plan(candidate)
         return validate_final_attestation(
             attestation=attestation,
+            candidate=candidate,
+            plan=plan,
+            current_mutation_epoch=mutation_epoch,
+            now=self.now(),
+            max_concurrency=self.max_concurrency,
+        )
+
+    def admit_post_apply_resume(
+        self,
+        candidate: CandidateBinding,
+        *,
+        prior_admission: FinalAttestationAdmission,
+        attestation_digest: str,
+        expected_registry_digest: str,
+        expected_coverage_digest: str,
+    ) -> FinalAttestationAdmission:
+        """Recheck current authority before resuming an already applied chain."""
+        attestation = self.attestation_store.read(attestation_digest)
+        if (
+            prior_admission.attestation != attestation
+            or attestation.registry_digest != expected_registry_digest
+            or attestation.coverage_digest != expected_coverage_digest
+        ):
+            raise ValueError("post-apply resume envelope authority drifted")
+        mutation_epoch = self.current_mutation_epoch()
+        sources = self.sources_factory(candidate, mutation_epoch, RuntimePurpose.ADMISSION)
+        if sources.candidate != candidate:
+            raise ValueError("post-apply resume source candidate drifted")
+        plan = sources.build(mutation_epoch=mutation_epoch).prebackup_plan(candidate)
+        return validate_post_apply_resume_attestation(
+            prior_admission=prior_admission,
             candidate=candidate,
             plan=plan,
             current_mutation_epoch=mutation_epoch,
