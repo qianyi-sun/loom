@@ -329,6 +329,29 @@ async def test_execution_preparation_is_disabled_without_owner_policy(
         )
 
 
+async def test_prepare_rejects_executor_pool_generation_outside_active_fleet(
+    capacity_session: AsyncSession,
+) -> None:
+    """Owner policy cannot prepare an executor against a stale pool generation."""
+
+    policy = _policy()
+    stale_executors = tuple(
+        binding.model_copy(update={"pool_generation": 2}) if binding.pool_id == "gb10" else binding
+        for binding in policy.executors
+    )
+    stale_policy = policy.model_copy(update={"executors": stale_executors})
+    fixture = await _setup(capacity_session, execution_policy=stale_policy)
+    stale_request = fixture.request.model_copy(update={"executors": stale_executors})
+
+    with pytest.raises(ExecutionConflictError, match="executor pool generation"):
+        await fixture.store.prepare_execution_epoch(
+            capacity_session,
+            stale_request,
+            actor="activation-operator",
+            idempotency_key=UUID(int=719),
+        )
+
+
 async def test_prepare_is_exact_replay_and_keeps_the_ceiling_zero(
     capacity_session: AsyncSession,
 ) -> None:

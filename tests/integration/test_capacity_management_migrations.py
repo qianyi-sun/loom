@@ -94,9 +94,18 @@ def test_shadow_schema_has_execution_epoch_table_and_zero_execution_guard(
     engine = create_engine(capacity_postgres_url)
     try:
         with engine.connect() as connection:
-            tables = set(inspect(connection).get_table_names())
+            inspector = inspect(connection)
+            tables = set(inspector.get_table_names())
             assert tables == EXPECTED_TABLES | {"alembic_version"}
             assert "teams" not in tables
+            execution_pool_foreign_keys = {
+                tuple(item["constrained_columns"])
+                for item in inspector.get_foreign_keys("capacity_execution_epochs")
+            }
+            assert {
+                ("configuration_epoch", "oldlab_pool_id", "oldlab_pool_generation"),
+                ("configuration_epoch", "gb10_pool_id", "gb10_pool_generation"),
+            } <= execution_pool_foreign_keys
             authority = (
                 connection.execute(
                     text(

@@ -163,6 +163,26 @@ def upgrade() -> None:
             name="capacity_execution_epoch_configuration_fkey",
             ondelete="RESTRICT",
         ),
+        sa.ForeignKeyConstraint(
+            ["configuration_epoch", "oldlab_pool_id", "oldlab_pool_generation"],
+            [
+                "capacity_pools.configuration_epoch",
+                "capacity_pools.pool_id",
+                "capacity_pools.pool_generation",
+            ],
+            name="capacity_execution_epoch_oldlab_pool_fkey",
+            ondelete="RESTRICT",
+        ),
+        sa.ForeignKeyConstraint(
+            ["configuration_epoch", "gb10_pool_id", "gb10_pool_generation"],
+            [
+                "capacity_pools.configuration_epoch",
+                "capacity_pools.pool_id",
+                "capacity_pools.pool_generation",
+            ],
+            name="capacity_execution_epoch_gb10_pool_fkey",
+            ondelete="RESTRICT",
+        ),
         sa.PrimaryKeyConstraint("execution_epoch"),
         sa.UniqueConstraint(
             "activation_idempotency_key",

@@ -253,6 +253,26 @@ class CapacityExecutionEpoch(Base):
             "AND effective_rate_per_minute = 0 AND retired_at IS NOT NULL)",
             name="capacity_execution_epoch_state_time_check",
         ),
+        ForeignKeyConstraint(
+            ("configuration_epoch", "oldlab_pool_id", "oldlab_pool_generation"),
+            (
+                "capacity_pools.configuration_epoch",
+                "capacity_pools.pool_id",
+                "capacity_pools.pool_generation",
+            ),
+            name="capacity_execution_epoch_oldlab_pool_fkey",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ("configuration_epoch", "gb10_pool_id", "gb10_pool_generation"),
+            (
+                "capacity_pools.configuration_epoch",
+                "capacity_pools.pool_id",
+                "capacity_pools.pool_generation",
+            ),
+            name="capacity_execution_epoch_gb10_pool_fkey",
+            ondelete="RESTRICT",
+        ),
         UniqueConstraint(
             "activation_idempotency_key",
             name="capacity_execution_epoch_activation_idempotency_key",

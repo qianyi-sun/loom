@@ -2147,6 +2147,24 @@ class CapacityManagementStore:
         ):
             raise ExecutionConflictError("executor controller authority changed")
 
+        pool_generation_rows = (
+            (
+                await session.execute(
+                    select(CapacityPool.pool_id, CapacityPool.pool_generation).where(
+                        CapacityPool.configuration_epoch == request.configuration_epoch
+                    )
+                )
+            )
+            .tuples()
+            .all()
+        )
+        active_pool_generations: dict[str, int] = dict(pool_generation_rows)
+        if any(
+            active_pool_generations.get(item.pool_id) != item.pool_generation
+            for item in request.executors
+        ):
+            raise ExecutionConflictError("executor pool generation changed")
+
         subject_rows = (
             (
                 await session.execute(
