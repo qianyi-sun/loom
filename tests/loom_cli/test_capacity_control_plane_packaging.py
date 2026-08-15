@@ -189,4 +189,4 @@ def test_installed_wheel_renders_capacity_manifests_outside_checkout(
         "StatefulSet",
         "Job",
     ]
-    assert documents[3]["metadata"]["name"].startswith("loom-capacity-migrate-capacity-0006-")
+    assert documents[3]["metadata"]["name"].startswith("loom-capacity-migrate-capacity-0007-")
