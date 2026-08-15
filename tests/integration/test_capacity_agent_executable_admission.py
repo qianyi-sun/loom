@@ -27,6 +27,9 @@ from loom_capacity_agent.admission import (
     ExecutableWorkerRegistrationV2,
     ExecutableWorkerWithdrawalRequestV2,
     PhysicalJobBindingV2,
+    PreparedAdmissionPlanV1,
+    PreparedPlacementAllowanceV1,
+    PreparedWorkerShapeV1,
     ProtectedReleasePublicationCheckpointV2,
     PublishableExecutableProtectedReleaseV2,
 )
@@ -48,12 +51,16 @@ from loom_capacity_agent.executable_bootstrap import (
     ProtectedExecutableBootstrapCoordinator,
 )
 from loom_capacity_agent.lifecycle_store import CapacityAttemptLifecycleStore
+from loom_capacity_agent.prepared_store import CapacityPreparedAdmissionStore
 from loom_capacity_agent.store import (
     acknowledge_executable_protected_release_publication,
     read_next_executable_protected_release,
 )
 from loom_capacity_guard.contracts import GuardFenceV1
-from loom_capacity_manager.contracts import ResourceVectorV1
+from loom_capacity_manager.contracts import ResourceVectorV1, WorkerShapeV1
+from loom_capacity_manager.contracts import (
+    canonical_digest as manager_canonical_digest,
+)
 from loom_capacity_manager.executable_contracts import (
     CandidateBindingV2,
     ExecutableBootstrapProposalV2,
@@ -155,8 +162,157 @@ async def _seed_protected_attempt(
         )
 
 
+async def _assign_protected_attempts(
+    database: dict[str, object],
+    *,
+    registration: AgentRegistrationV1,
+    assignments: tuple[
+        tuple[ExecutableBootstrapRegistrationV2, UUID, int, str],
+        ...,
+    ],
+) -> PreparedAdmissionPlanV1:
+    if not assignments:
+        raise ValueError("protected assignment fixture requires work")
+    binding = assignments[0][0].binding
+    prepared_shapes: list[PreparedWorkerShapeV1] = []
+    allowances: list[PreparedPlacementAllowanceV1] = []
+    for request, protected_attempt_id, execution_generation, requirements_digest in assignments:
+        item = request.binding
+        if (
+            item.execution != binding.execution
+            or item.pool_id != binding.pool_id
+            or item.pool_generation != binding.pool_generation
+            or item.profile_id != binding.profile_id
+            or item.profile_generation != binding.profile_generation
+            or item.profile_digest != binding.profile_digest
+        ):
+            raise ValueError("protected assignment fixture requires one manager plan")
+        worker_shape = WorkerShapeV1(
+            shape_id=item.shape_id,
+            concurrency_slots=item.concurrency_slots,
+            total_resources=item.resources,
+            node_resources=(item.resources,),
+            compatible_domain_ids=(item.pool_id,),
+            capabilities=(
+                "cpu_arch.x86_64",
+                "gpu_vendor.none",
+                "network.public",
+                "os.linux",
+            ),
+        )
+        prepared_shapes.append(
+            PreparedWorkerShapeV1(
+                shape_instance_id=item.shape_instance_id,
+                submission_intent_id=item.intent_id,
+                pool_id=item.pool_id,
+                pool_generation=item.pool_generation,
+                profile_id=item.profile_id,
+                profile_generation=item.profile_generation,
+                profile_digest=item.profile_digest,
+                protocol_generation=1,
+                protocol_digest="5" * 64,
+                worker_shape=worker_shape,
+                worker_shape_digest=manager_canonical_digest(worker_shape),
+                bootstrap_registration_epoch=request.bootstrap_registration_epoch,
+            )
+        )
+        allowances.append(
+            PreparedPlacementAllowanceV1(
+                allowance_id=uuid4(),
+                protected_attempt_id=protected_attempt_id,
+                execution_generation=execution_generation,
+                requirements_digest=requirements_digest,
+                pool_id=item.pool_id,
+                shape_instance_id=item.shape_instance_id,
+                shape_slot_index=0,
+                submission_intent_id=item.intent_id,
+            )
+        )
+    protocol_generation = prepared_shapes[0].protocol_generation
+    protocol_digest = prepared_shapes[0].protocol_digest
+    plan_id = uuid4()
+    admission_incarnation = uuid4()
+    plan = PreparedAdmissionPlanV1(
+        **registration.model_dump(mode="python"),
+        plan_id=plan_id,
+        admission_incarnation=admission_incarnation,
+        manager_authority_incarnation=binding.execution.authority_incarnation,
+        manager_writer_epoch=binding.execution.writer_epoch,
+        manager_allocation_epoch=binding.execution.allocation_epoch,
+        manager_input_digest="6" * 64,
+        manager_allocation_digest="7" * 64,
+        pool_id=binding.pool_id,
+        pool_generation=binding.pool_generation,
+        profile_id=binding.profile_id,
+        profile_generation=binding.profile_generation,
+        profile_digest=binding.profile_digest,
+        protocol_generation=protocol_generation,
+        protocol_digest=protocol_digest,
+        lease_not_after=datetime.now(UTC) + timedelta(hours=1),
+        worker_shapes=tuple(prepared_shapes),
+        placement_allowances=tuple(allowances),
+    )
+    async with _agent_session(database) as session:
+        await CapacityPreparedAdmissionStore(
+            session,
+            registration=registration,
+        ).prepare_plan(plan)
+        lifecycle = CapacityAttemptLifecycleStore(
+            session,
+            registration=registration,
+        )
+        for allowance in allowances:
+            await lifecycle.apply_transition(
+                InertAttemptTransitionV1(
+                    **registration.model_dump(mode="python"),
+                    transition_id=uuid4(),
+                    protected_attempt_id=allowance.protected_attempt_id,
+                    execution_generation=allowance.execution_generation,
+                    requirements_digest=allowance.requirements_digest,
+                    expected_transition_sequence=0,
+                    operation="assign",
+                    expected_state="pending-unassigned",
+                    target_state="assigned",
+                    allowance_id=allowance.allowance_id,
+                    plan_id=plan_id,
+                    admission_incarnation=admission_incarnation,
+                    manager_allocation_epoch=plan.manager_allocation_epoch,
+                    pool_id=plan.pool_id,
+                    shape_instance_id=allowance.shape_instance_id,
+                    submission_intent_id=allowance.submission_intent_id,
+                    transition_reason="manager-placement",
+                )
+            )
+    return plan
+
+
+async def _assign_protected_attempt(
+    database: dict[str, object],
+    *,
+    registration: AgentRegistrationV1,
+    request: ExecutableBootstrapRegistrationV2,
+    protected_attempt_id: UUID,
+    execution_generation: int,
+    requirements_digest: str,
+) -> PreparedAdmissionPlanV1:
+    return await _assign_protected_attempts(
+        database,
+        registration=registration,
+        assignments=(
+            (
+                request,
+                protected_attempt_id,
+                execution_generation,
+                requirements_digest,
+            ),
+        ),
+    )
+
+
 async def _prepare_claim_terminal_race(
     database: dict[str, object],
+    *,
+    assigned: bool = True,
 ) -> tuple[
     AgentRegistrationV1,
     ExecutableWorkerRegistrationV2,
@@ -179,6 +335,18 @@ async def _prepare_claim_terminal_race(
         protected_attempt_id=protected_attempt_id,
         execution_generation=14,
         requirements_digest=requirements_digest,
+    )
+    plan = (
+        await _assign_protected_attempt(
+            database,
+            registration=registration,
+            request=request,
+            protected_attempt_id=protected_attempt_id,
+            execution_generation=14,
+            requirements_digest=requirements_digest,
+        )
+        if assigned
+        else None
     )
     async with _serializable_executor_session(database) as session:
         store = ExecutableAdmissionStore(session, registration=registration)
@@ -206,10 +374,19 @@ async def _prepare_claim_terminal_race(
             protected_attempt_id=protected_attempt_id,
             execution_generation=14,
             requirements_digest=requirements_digest,
-            expected_transition_sequence=0,
+            expected_transition_sequence=1 if assigned else 0,
             operation="cancel",
-            expected_state="pending-unassigned",
+            expected_state="assigned" if assigned else "pending-unassigned",
             target_state="cancelled-terminal",
+            allowance_id=plan.placement_allowances[0].allowance_id if plan else None,
+            plan_id=plan.plan_id if plan else None,
+            admission_incarnation=plan.admission_incarnation if plan else None,
+            manager_allocation_epoch=plan.manager_allocation_epoch if plan else None,
+            pool_id=plan.pool_id if plan else None,
+            shape_instance_id=(plan.placement_allowances[0].shape_instance_id if plan else None),
+            submission_intent_id=(
+                plan.placement_allowances[0].submission_intent_id if plan else None
+            ),
             transition_reason="claimed-attempt-terminal",
         ),
     )
@@ -738,7 +915,7 @@ async def test_store_rejects_drain_receipt_for_another_intent(
 
 
 @pytest.mark.asyncio
-async def test_guard_0013_downgrade_serializes_committing_executable_evidence(
+async def test_guard_0020_downgrade_serializes_committing_executable_evidence(
     capacity_guard_database: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -751,7 +928,7 @@ async def test_guard_0013_downgrade_serializes_committing_executable_evidence(
         registration,
         bootstrap_sha256=bootstrap_sha256,
     )
-    application_name = f"guard-0013-downgrade-race-{uuid4().hex}"
+    application_name = f"guard-0020-downgrade-race-{uuid4().hex}"
     config = _guard_downgrade_config(
         capacity_guard_database,
         monkeypatch,
@@ -773,7 +950,7 @@ async def test_guard_0013_downgrade_serializes_committing_executable_evidence(
                 registration=registration,
             ).prepare_worker(request, bootstrap_sha256=bootstrap_sha256)
             downgrade_task = asyncio.create_task(
-                asyncio.to_thread(command.downgrade, config, "guard_0012")
+                asyncio.to_thread(command.downgrade, config, "guard_0019")
             )
 
             admin = create_engine(_value(capacity_guard_database, "admin_url"))
@@ -792,7 +969,7 @@ async def test_guard_0013_downgrade_serializes_committing_executable_evidence(
                             break
                         if downgrade_task.done():
                             pytest.fail(
-                                "guard_0013 downgrade completed before overlapping the "
+                                "guard_0020 downgrade completed before overlapping the "
                                 f"executable writer: {downgrade_task.exception()!r}"
                             )
                         await asyncio.sleep(0.01)
@@ -802,7 +979,7 @@ async def test_guard_0013_downgrade_serializes_committing_executable_evidence(
             await transaction.commit()
             with pytest.raises(
                 (DBAPIError, RuntimeError),
-                match=r"cannot downgrade guard_0013.*executable",
+                match=r"cannot downgrade guard_0020.*executable",
             ):
                 await downgrade_task
 
@@ -826,12 +1003,12 @@ async def test_guard_0013_downgrade_serializes_committing_executable_evidence(
             await downgrade_task
         await executor_engine.dispose()
 
-    assert version == "guard_0019"
+    assert version == "guard_0020"
     assert evidence == 1
 
 
 @pytest.mark.asyncio
-async def test_guard_0013_downgrade_gates_new_executor_calls_before_evidence(
+async def test_guard_0020_downgrade_gates_new_executor_calls_before_evidence(
     capacity_guard_database: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -850,7 +1027,7 @@ async def test_guard_0013_downgrade_gates_new_executor_calls_before_evidence(
             registration=registration,
         ).prepare_worker(request, bootstrap_sha256=bootstrap_sha256)
 
-    application_name = f"guard-0013-executor-gate-{uuid4().hex}"
+    application_name = f"guard-0020-executor-gate-{uuid4().hex}"
     config = _guard_downgrade_config(
         capacity_guard_database,
         monkeypatch,
@@ -881,7 +1058,7 @@ async def test_guard_0013_downgrade_gates_new_executor_calls_before_evidence(
                 text("LOCK TABLE loom_capacity_guard.executable_claim_leases IN ACCESS SHARE MODE")
             )
             downgrade_task = asyncio.create_task(
-                asyncio.to_thread(command.downgrade, config, "guard_0012")
+                asyncio.to_thread(command.downgrade, config, "guard_0019")
             )
             assert await _application_waited_for_lock(
                 capacity_guard_database,
@@ -895,6 +1072,25 @@ async def test_guard_0013_downgrade_gates_new_executor_calls_before_evidence(
                 backend_pid=await writer_pid,
                 task=writer_task,
             )
+            observer = create_async_engine(make_url(_value(capacity_guard_database, "admin_url")))
+            try:
+                async with observer.connect() as connection:
+                    waiting_relation = (
+                        await connection.execute(
+                            text(
+                                "SELECT relation.relname FROM pg_locks AS lock "
+                                "JOIN pg_class AS relation ON relation.oid = lock.relation "
+                                "JOIN pg_namespace AS namespace "
+                                "ON namespace.oid = relation.relnamespace "
+                                "WHERE lock.pid = :writer_pid AND lock.granted IS FALSE "
+                                "AND namespace.nspname = 'loom_capacity_guard'"
+                            ),
+                            {"writer_pid": await writer_pid},
+                        )
+                    ).scalar_one()
+            finally:
+                await observer.dispose()
+            assert waiting_relation == "executable_admission_authority"
 
         downgrade_result, writer_result = await asyncio.gather(
             downgrade_task,
@@ -909,12 +1105,12 @@ async def test_guard_0013_downgrade_gates_new_executor_calls_before_evidence(
         await executor_engine.dispose()
 
     assert isinstance(downgrade_result, RuntimeError)
-    assert "cannot downgrade guard_0013" in str(downgrade_result)
+    assert "cannot downgrade guard_0020" in str(downgrade_result)
     assert writer_result == prepared
 
 
 @pytest.mark.asyncio
-async def test_guard_0013_downgrade_does_not_deadlock_terminal_projection(
+async def test_guard_0020_downgrade_does_not_deadlock_terminal_projection(
     capacity_guard_database: dict[str, object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -930,7 +1126,7 @@ async def test_guard_0013_downgrade_does_not_deadlock_terminal_projection(
         ).admit_claim(claim)
         assert admitted is not None
 
-    application_name = f"guard-0013-terminal-race-{uuid4().hex}"
+    application_name = f"guard-0020-terminal-race-{uuid4().hex}"
     config = _guard_downgrade_config(
         capacity_guard_database,
         monkeypatch,
@@ -970,7 +1166,7 @@ async def test_guard_0013_downgrade_does_not_deadlock_terminal_projection(
             )
 
             downgrade_task = asyncio.create_task(
-                asyncio.to_thread(command.downgrade, config, "guard_0012")
+                asyncio.to_thread(command.downgrade, config, "guard_0019")
             )
             assert await _application_waited_for_lock(
                 capacity_guard_database,
@@ -990,7 +1186,7 @@ async def test_guard_0013_downgrade_does_not_deadlock_terminal_projection(
             await terminal_task
 
     assert isinstance(downgrade_result, RuntimeError)
-    assert "cannot downgrade guard_0013" in str(downgrade_result)
+    assert "cannot downgrade guard_0020" in str(downgrade_result)
     assert terminal_result == terminal
     assert await _claim_terminal_counts(capacity_guard_database) == (1, 1, 0)
 
@@ -1053,6 +1249,87 @@ async def test_reconfiguration_denies_new_claims_on_stale_worker_registration(
 
     assert denied is None
     assert lease_count == 0
+
+
+@pytest.mark.asyncio
+async def test_claim_rejects_attempt_without_exact_assigned_executable_intent(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    """Catch a registered worker consuming an unassigned protected attempt."""
+
+    registration, _worker_registration, claim, _terminal = await _prepare_claim_terminal_race(
+        capacity_guard_database,
+        assigned=False,
+    )
+
+    with pytest.raises(DBAPIError, match="exact assigned executable intent"):
+        async with _serializable_executor_session(capacity_guard_database) as session:
+            await ExecutableAdmissionStore(
+                session,
+                registration=registration,
+            ).admit_claim(claim)
+
+    assert await _claim_terminal_counts(capacity_guard_database) == (0, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_guard_0020_upgrade_rejects_preexisting_claim_without_temporal_assignment_evidence(
+    capacity_guard_database: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch migration inferring temporal safety from a later assignment head."""
+
+    config = _guard_downgrade_config(
+        capacity_guard_database,
+        monkeypatch,
+        application_name=f"guard-0020-upgrade-audit-{uuid4().hex}",
+    )
+    await asyncio.to_thread(command.downgrade, config, "guard_0019")
+    _fence, registration = await _initialize_and_register(capacity_guard_database)
+    capability = "pre-exact-assignment-bootstrap-capability"
+    bootstrap_sha256 = hashlib.sha256(capability.encode("ascii")).hexdigest()
+    request = await _protect_bootstrap(
+        capacity_guard_database,
+        registration,
+        bootstrap_sha256=bootstrap_sha256,
+    )
+    worker = _worker(request)
+    protected_attempt_id = UUID(int=153)
+    await _seed_protected_attempt(
+        capacity_guard_database,
+        protected_attempt_id=protected_attempt_id,
+        execution_generation=16,
+        requirements_digest="4" * 64,
+    )
+    async with _serializable_executor_session(capacity_guard_database) as session:
+        store = ExecutableAdmissionStore(session, registration=registration)
+        await store.prepare_worker(request, bootstrap_sha256=bootstrap_sha256)
+        await store.bind_slurm_job(_physical(request))
+        await store.register_worker(worker, bootstrap_capability=capability)
+        admitted = await store.admit_claim(
+            ExecutableClaimProposalV2(
+                operation_id=UUID(int=154),
+                protected_attempt_id=protected_attempt_id,
+                execution_generation=16,
+                requirements_digest="4" * 64,
+                worker_id=worker.worker_id,
+                worker_incarnation=worker.worker_incarnation,
+                expected_claim_high_water=0,
+            )
+        )
+        assert admitted is not None
+
+    await _assign_protected_attempt(
+        capacity_guard_database,
+        registration=registration,
+        request=request,
+        protected_attempt_id=protected_attempt_id,
+        execution_generation=16,
+        requirements_digest="4" * 64,
+    )
+
+    with pytest.raises(DBAPIError, match="pre-exact-assignment executable claim cannot prove"):
+        await asyncio.to_thread(command.upgrade, config, "head")
 
 
 @pytest.mark.asyncio
@@ -1383,6 +1660,14 @@ async def test_claim_and_drain_share_one_locked_protected_transaction(
         execution_generation=8,
         requirements_digest=requirements_digest,
     )
+    await _assign_protected_attempt(
+        capacity_guard_database,
+        registration=registration,
+        request=request,
+        protected_attempt_id=first_attempt,
+        execution_generation=7,
+        requirements_digest=requirements_digest,
+    )
     async with _serializable_executor_session(capacity_guard_database) as session:
         store = ExecutableAdmissionStore(session, registration=registration)
         await store.prepare_worker(
@@ -1488,6 +1773,15 @@ async def test_protected_terminal_lifecycle_closes_immutable_claim_and_allows_re
         execution_generation=13,
         requirements_digest=requirements_digest,
     )
+    plan = await _assign_protected_attempt(
+        capacity_guard_database,
+        registration=registration,
+        request=request,
+        protected_attempt_id=protected_attempt_id,
+        execution_generation=13,
+        requirements_digest=requirements_digest,
+    )
+    allowance = plan.placement_allowances[0]
     claim = ExecutableClaimProposalV2(
         operation_id=UUID(int=144),
         protected_attempt_id=protected_attempt_id,
@@ -1503,10 +1797,17 @@ async def test_protected_terminal_lifecycle_closes_immutable_claim_and_allows_re
         protected_attempt_id=protected_attempt_id,
         execution_generation=13,
         requirements_digest=requirements_digest,
-        expected_transition_sequence=0,
+        expected_transition_sequence=1,
         operation="cancel",
-        expected_state="pending-unassigned",
+        expected_state="assigned",
         target_state="cancelled-terminal",
+        allowance_id=allowance.allowance_id,
+        plan_id=plan.plan_id,
+        admission_incarnation=plan.admission_incarnation,
+        manager_allocation_epoch=plan.manager_allocation_epoch,
+        pool_id=plan.pool_id,
+        shape_instance_id=allowance.shape_instance_id,
+        submission_intent_id=allowance.submission_intent_id,
         transition_reason="claimed-attempt-terminal",
     )
     drain = ExecutableDrainRequestV2(
@@ -1555,7 +1856,7 @@ async def test_protected_terminal_lifecycle_closes_immutable_claim_and_allows_re
         with pytest.raises(DBAPIError, match="conflicting inert lifecycle replay"):
             await lifecycle.apply_transition(conflicting)
         delayed = terminal.model_copy(
-            update={"transition_id": UUID(int=148), "expected_transition_sequence": 0}
+            update={"transition_id": UUID(int=148), "expected_transition_sequence": 1}
         )
         with pytest.raises(DBAPIError, match="compare-and-set"):
             await lifecycle.apply_transition(delayed)
@@ -1774,6 +2075,14 @@ async def test_claimability_is_independent_for_concurrent_intents(
         execution_generation=12,
         requirements_digest="f" * 64,
     )
+    await _assign_protected_attempts(
+        capacity_guard_database,
+        registration=registration,
+        assignments=(
+            (first_request, first_attempt, 11, "e" * 64),
+            (second_request, second_attempt, 12, "f" * 64),
+        ),
+    )
 
     async with _serializable_executor_session(capacity_guard_database) as session:
         store = ExecutableAdmissionStore(session, registration=registration)
@@ -1808,6 +2117,19 @@ async def test_claimability_is_independent_for_concurrent_intents(
             await store.register_worker(
                 worker.model_copy(update={"slurm_job_id": slurm_job_id}),
                 bootstrap_capability=capability,
+            )
+
+        with pytest.raises(DBAPIError, match="exact assigned executable intent"):
+            await store.admit_claim(
+                ExecutableClaimProposalV2(
+                    operation_id=UUID(int=152),
+                    protected_attempt_id=second_attempt,
+                    execution_generation=12,
+                    requirements_digest="f" * 64,
+                    worker_id=first_worker.worker_id,
+                    worker_incarnation=first_worker.worker_incarnation,
+                    expected_claim_high_water=0,
+                )
             )
 
         first_claim = await store.admit_claim(

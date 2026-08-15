@@ -263,7 +263,14 @@ A separate least-privileged executor role can call serializable protected
 procedures that prepare an executable intent, bind its exact Slurm job,
 register or drain its worker incarnation, admit an exact protected attempt,
 project an admitted claim's terminal evidence, and acknowledge terminal worker
-release. Preparation requires the exact append-only protected bootstrap
+release. Claim admission requires the attempt's current protected assignment to
+name the same intent, allocation epoch, pool, and shape as the exact registered
+worker; an unassigned or cross-intent attempt fails before a lease can persist.
+Guard 0020 activation is fail-closed: it requires zero pre-exact-assignment
+`executable_claim_leases` rows because guard 0013 stored no immutable
+claim-to-assignment transition reference, so a later lifecycle head cannot
+prove the claim's exact assigned intent at admission time.
+Preparation requires the exact append-only protected bootstrap
 registration produced by the trusted demand agent, including its subject,
 intent, full execution binding, command sequence, epochs, bootstrap hash, and
 receipt digest. These transitions are append-only, bind the subject, candidate

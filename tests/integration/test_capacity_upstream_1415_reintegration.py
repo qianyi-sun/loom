@@ -36,10 +36,11 @@ def test_upstream_1415_union_has_one_exact_capacity_history() -> None:
 
 def test_upstream_1415_union_has_one_exact_guard_history() -> None:
     script = _script("capacity_guard_migrations")
-    assert tuple(script.get_heads()) == ("guard_0019",)
+    assert tuple(script.get_heads()) == ("guard_0020",)
     assert tuple(
-        revision.revision for revision in script.walk_revisions("guard_0012", "guard_0019")
+        revision.revision for revision in script.walk_revisions("guard_0012", "guard_0020")
     ) == (
+        "guard_0020",
         "guard_0019",
         "guard_0018",
         "guard_0017",
@@ -51,7 +52,10 @@ def test_upstream_1415_union_has_one_exact_guard_history() -> None:
     )
     handshake = script.get_revision("guard_0012")
     admission = script.get_revision("guard_0013")
+    exact_assignment = script.get_revision("guard_0020")
     assert handshake is not None
     assert admission is not None
+    assert exact_assignment is not None
     assert handshake.path.endswith("guard_0012_protected_bootstrap_handshake.py")
     assert admission.path.endswith("guard_0013_executable_admission.py")
+    assert exact_assignment.path.endswith("guard_0020_exact_claim_assignment.py")

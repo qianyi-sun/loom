@@ -95,7 +95,7 @@ async def test_guard_schema_startup_returns_numeric_head(
 ) -> None:
     engine = create_async_engine(_value(capacity_guard_database, "migrator_url"))
     try:
-        assert await assert_capacity_guard_schema_at_head(engine) == 19
+        assert await assert_capacity_guard_schema_at_head(engine) == 20
     finally:
         await engine.dispose()
 
@@ -393,7 +393,7 @@ def test_guard_schema_has_exact_owner_and_preserves_public_application_tables(
             revision = connection.execute(
                 text("SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version")
             ).scalar_one()
-            assert revision == "guard_0019"
+            assert revision == "guard_0020"
             public_before = capacity_guard_database["public_tables_before"]
             assert isinstance(public_before, frozenset)
             assert frozenset(inspect(connection).get_table_names(schema="public")) == public_before
@@ -898,7 +898,7 @@ def test_guard_0015_downgrade_restores_executor_only_observation(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0019"
+                == "guard_0020"
             )
         with observer.connect() as connection, pytest.raises(DBAPIError) as caught:
             connection.execute(statement)
@@ -1056,7 +1056,7 @@ def test_guard_0018_downgrades_to_0016_and_reupgrades_observation_faithfully(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0019"
+                == "guard_0020"
             )
             row = (
                 connection.execute(
@@ -1095,6 +1095,7 @@ def test_guard_0018_refuses_downgrade_with_prepared_revocation_evidence(
     capacity_guard_database: dict[str, object],
 ) -> None:
     cfg = _guard_config(capacity_guard_database)
+    command.downgrade(cfg, "guard_0018")
     with _owner_connection(capacity_guard_database) as connection:
         subject_id, subject_incarnation, intent_id, _worker_id, _worker_incarnation = (
             _seed_executable_observation_rows(connection)
@@ -1228,7 +1229,7 @@ def test_guard_0019_downgrades_to_0017_and_reupgrades_outbox_faithfully(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0019"
+                == "guard_0020"
             )
             for signature in (read_signature, ack_signature):
                 assert (
@@ -1255,6 +1256,7 @@ def test_guard_0019_refuses_downgrade_with_publication_evidence(
     capacity_guard_database: dict[str, object],
 ) -> None:
     cfg = _guard_config(capacity_guard_database)
+    command.downgrade(cfg, "guard_0019")
     with _owner_connection(capacity_guard_database) as connection:
         _subject_id, _subject_incarnation, intent_id, _worker_id, _worker_incarnation = (
             _seed_executable_observation_rows(connection)
