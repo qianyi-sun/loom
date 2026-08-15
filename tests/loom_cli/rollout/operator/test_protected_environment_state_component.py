@@ -156,6 +156,7 @@ def test_http_transport_binds_profile_token_and_fixed_cp_paths(
     profile_path = candidate / "deploy/environment-state/staging.toml"
     profile_path.parent.mkdir(parents=True)
     profile_path.write_bytes(Path("deploy/environment-state/staging.toml").read_bytes())
+    profile_path.chmod(0o644)
     token_path = tmp_path / "admin-token"
     token_path.write_text("admin-secret\n", encoding="ascii")
     token_path.chmod(0o600)
@@ -323,6 +324,7 @@ LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO = "192.168.50.103:5443/loom-trial-cache"
         + "\n",
         encoding="utf-8",
     )
+    profile_path.chmod(0o644)
     subprocess.run(("git", "init", "-q", str(candidate)), check=True)
     subprocess.run(("git", "-C", str(candidate), "config", "user.name", "Test"), check=True)
     subprocess.run(
