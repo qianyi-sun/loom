@@ -150,3 +150,42 @@ Earlier exact broad Ruff format command from the original brief was also run and
 ### Fix round 1 concerns
 
 - The unrelated unstaged retained-runtime/capacity migration files remain preserved.
+
+## Fix round 2
+
+### Findings addressed
+
+- Direct SQL acknowledgement now rejects JSONB-equivalent but noncanonical executable release bytes even when the caller supplies a digest matching those noncanonical bytes.
+- Database-side acknowledgement rederives the release payload and compares the provided canonical payload bytes to a compact sorted-key canonical rendering before inserting publication evidence or advancing the cursor.
+- Added coverage that a disabled/current authority-agent reconfiguration between read and acknowledgement fails closed without publication cursor or evidence mutation.
+
+### Fix round 2 RED evidence
+
+- `uv run --no-sync pytest -q tests/integration/test_capacity_agent_executable_admission.py -k release_outbox`
+  - RED: `1 failed, 7 passed, 34 deselected`.
+  - Failure: `test_release_outbox_sql_rejects_json_equivalent_noncanonical_bytes_without_mutation` did not raise `DBAPIError`, proving SQL accepted JSON-equivalent noncanonical bytes with a matching noncanonical digest.
+
+### Fix round 2 GREEN evidence
+
+- `uv run --no-sync pytest -q tests/integration/test_capacity_agent_executable_admission.py -k release_outbox`
+  - GREEN: `8 passed, 34 deselected`.
+- `uv run --no-sync pytest -q tests/integration/test_capacity_agent_executable_admission.py tests/integration/test_capacity_agent_migrations.py tests/integration/test_capacity_guard_migrations.py tests/integration/test_capacity_submission_store.py tests/unit/test_capacity_agent_admission_contracts.py`
+  - GREEN: `121 passed`.
+
+### Fix round 2 quality gates
+
+- `uv run --no-sync ruff format --check capacity_guard_migrations/versions/guard_0018_executable_release_outbox.py src/loom_capacity_agent/admission.py src/loom_capacity_agent/store.py tests/unit/test_capacity_agent_admission_contracts.py tests/integration/test_capacity_agent_executable_admission.py tests/integration/test_capacity_agent_migrations.py tests/integration/test_capacity_guard_migrations.py tests/integration/test_capacity_submission_store.py`
+  - PASS: `8 files already formatted`.
+- `uv run --no-sync ruff check capacity_guard_migrations/versions/guard_0018_executable_release_outbox.py src/loom_capacity_agent/admission.py src/loom_capacity_agent/store.py tests/unit/test_capacity_agent_admission_contracts.py tests/integration/test_capacity_agent_executable_admission.py tests/integration/test_capacity_agent_migrations.py tests/integration/test_capacity_guard_migrations.py tests/integration/test_capacity_submission_store.py`
+  - PASS: `All checks passed!`
+- `uv run --no-sync mypy src/loom_capacity_agent/admission.py src/loom_capacity_agent/store.py`
+  - PASS: `Success: no issues found in 2 source files`.
+- `git diff --check`
+  - PASS.
+
+### Fix round 2 self-review
+
+- The new SQL canonical helper is private to `loom_capacity_guard`, has no agent grant, revokes `PUBLIC`, and is schema-qualified from the SECURITY DEFINER acknowledgement function with `search_path = pg_catalog`.
+- First acknowledgement still validates JSONB equivalence, bounded byte size, lowercase SHA-256 digest shape, digest over the supplied bytes, rederived release payload equality, and now exact canonical byte rendering before evidence insertion.
+- Replay behavior remains exact: stored `publication_canonical_payload`, `publication_payload`, `publication_digest`, and manager acknowledgement digest must all match.
+- The unrelated unstaged retained-runtime/capacity files remain preserved and were not staged.

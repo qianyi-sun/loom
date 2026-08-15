@@ -17,6 +17,7 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 SCHEMA = "loom_capacity_guard"
+CANONICAL_FUNCTION = "canonical_executable_publication_payload(jsonb)"
 READ_FUNCTION = "read_next_executable_protected_release(uuid)"
 ACK_FUNCTION = (
     "acknowledge_executable_protected_release_publication(uuid,bigint,jsonb,bytea,text,text)"
@@ -31,6 +32,48 @@ def _role(attribute: str = "capacity_guard_agent_role") -> tuple[str, str]:
     if not isinstance(role, str) or not role:
         raise RuntimeError("executable release outbox migration is missing the agent role")
     return role, op.get_bind().dialect.identifier_preparer.quote(role)
+
+
+def _install_canonical_payload_function() -> None:
+    op.execute(
+        f"""
+        CREATE FUNCTION {SCHEMA}.canonical_executable_publication_payload(
+          p_payload jsonb
+        )
+        RETURNS text
+        LANGUAGE plpgsql
+        IMMUTABLE
+        STRICT
+        SET search_path = pg_catalog
+        AS $function$
+        DECLARE
+          v_rendered text;
+        BEGIN
+          CASE jsonb_typeof(p_payload)
+            WHEN 'object' THEN
+              SELECT string_agg(
+                       to_jsonb(entry.key)::text || ':' ||
+                         {SCHEMA}.canonical_executable_publication_payload(entry.value),
+                       ',' ORDER BY entry.key
+                     )
+                INTO v_rendered
+                FROM jsonb_each(p_payload) AS entry(key, value);
+              RETURN '{{' || COALESCE(v_rendered, '') || '}}';
+            WHEN 'array' THEN
+              SELECT string_agg(
+                       {SCHEMA}.canonical_executable_publication_payload(entry.value),
+                       ',' ORDER BY entry.ordinality
+                     )
+                INTO v_rendered
+                FROM jsonb_array_elements(p_payload) WITH ORDINALITY AS entry(value, ordinality);
+              RETURN '[' || COALESCE(v_rendered, '') || ']';
+            ELSE
+              RETURN p_payload::text;
+          END CASE;
+        END
+        $function$
+        """
+    )
 
 
 def _install_read_function() -> None:
@@ -332,6 +375,11 @@ def _install_ack_function() -> None:
             RAISE EXCEPTION 'executable protected release publication payload changed'
               USING ERRCODE = '55000';
           END IF;
+          IF convert_from(p_canonical_payload, 'UTF8') IS DISTINCT FROM
+             {SCHEMA}.canonical_executable_publication_payload(v_release) THEN
+            RAISE EXCEPTION 'executable protected release publication canonical payload changed'
+              USING ERRCODE = '22023';
+          END IF;
 
           INSERT INTO {SCHEMA}.executable_release_publication_events
             (agent_incarnation, admission_event_id, publication_payload,
@@ -412,7 +460,9 @@ def upgrade() -> None:
         """
     )
     _install_read_function()
+    _install_canonical_payload_function()
     _install_ack_function()
+    op.execute(f"REVOKE ALL PRIVILEGES ON FUNCTION {SCHEMA}.{CANONICAL_FUNCTION} FROM PUBLIC")
     op.execute(f"REVOKE ALL PRIVILEGES ON FUNCTION {SCHEMA}.{READ_FUNCTION} FROM PUBLIC")
     op.execute(f"REVOKE ALL PRIVILEGES ON FUNCTION {SCHEMA}.{ACK_FUNCTION} FROM PUBLIC")
     op.execute(f"GRANT EXECUTE ON FUNCTION {SCHEMA}.{READ_FUNCTION} TO {quoted_agent}")
@@ -436,6 +486,7 @@ def downgrade() -> None:
     op.execute(f"REVOKE EXECUTE ON FUNCTION {SCHEMA}.{ACK_FUNCTION} FROM {quoted_agent}")
     op.execute(f"REVOKE EXECUTE ON FUNCTION {SCHEMA}.{READ_FUNCTION} FROM {quoted_agent}")
     op.execute(f"DROP FUNCTION {SCHEMA}.{ACK_FUNCTION}")
+    op.execute(f"DROP FUNCTION {SCHEMA}.{CANONICAL_FUNCTION}")
     op.execute(f"DROP FUNCTION {SCHEMA}.{READ_FUNCTION}")
     op.execute(
         f"DROP TRIGGER guard_executable_release_publication_events_truncate_guard "

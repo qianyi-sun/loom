@@ -480,6 +480,30 @@ async def _prepare_release_event(
         return registration, publication, None
 
 
+async def _release_publication_cursor_and_evidence_count(
+    database: dict[str, object],
+    *,
+    agent_incarnation: UUID,
+) -> tuple[int, int]:
+    async with _owner_session(database) as (_, _, session):
+        row = (
+            await session.execute(
+                text(
+                    "SELECT "
+                    "COALESCE((SELECT state.last_event_id "
+                    "FROM loom_capacity_guard.executable_release_publication_state AS state "
+                    "WHERE state.agent_incarnation = :agent_incarnation), 0) "
+                    "AS last_event_id, "
+                    "(SELECT count(*) "
+                    "FROM loom_capacity_guard.executable_release_publication_events AS event "
+                    "WHERE event.agent_incarnation = :agent_incarnation) AS evidence"
+                ),
+                {"agent_incarnation": agent_incarnation},
+            )
+        ).one()
+        return row.last_event_id, row.evidence
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("event_kind", ("released", "withdrawn", "prepared-revoked"))
 async def test_agent_release_outbox_normalizes_exact_protected_events(
@@ -632,6 +656,119 @@ async def test_agent_release_outbox_rejects_wrong_authority_and_changed_replay(
                 manager_acknowledgement_digest="8" * 64,
             )
         assert checkpoint.event_id == publication.event_id
+
+
+# Production break caught: direct SQL callers could provide JSONB-equivalent
+# bytes whose digest matched those noncanonical bytes, causing evidence to bind
+# a release digest the manager never canonicalized.
+@pytest.mark.asyncio
+async def test_release_outbox_sql_rejects_json_equivalent_noncanonical_bytes_without_mutation(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    registration, publication, _ = await _prepare_release_event(
+        capacity_guard_database,
+        event_kind="released",
+    )
+    canonical_payload = canonical_executable_bytes(publication.release)
+    noncanonical_payload = json.dumps(
+        publication.release.model_dump(mode="json", exclude_none=False),
+        indent=2,
+        sort_keys=False,
+    ).encode("ascii")
+    assert noncanonical_payload != canonical_payload
+
+    async with _serializable_agent_session(capacity_guard_database) as session:
+        with pytest.raises(DBAPIError, match=r"canonical|publication|invalid"):
+            await session.execute(
+                text(
+                    "SELECT loom_capacity_guard."
+                    "acknowledge_executable_protected_release_publication("
+                    ":agent_incarnation, :event_id, CAST(:publication_payload AS jsonb), "
+                    "CAST(:canonical_payload AS bytea), :publication_digest, "
+                    ":manager_acknowledgement_digest)"
+                ),
+                {
+                    "agent_incarnation": registration.agent_incarnation,
+                    "event_id": publication.event_id,
+                    "publication_payload": canonical_payload.decode("ascii"),
+                    "canonical_payload": noncanonical_payload,
+                    "publication_digest": hashlib.sha256(noncanonical_payload).hexdigest(),
+                    "manager_acknowledgement_digest": "9" * 64,
+                },
+            )
+
+    assert await _release_publication_cursor_and_evidence_count(
+        capacity_guard_database,
+        agent_incarnation=registration.agent_incarnation,
+    ) == (0, 0)
+    async with _serializable_agent_session(capacity_guard_database) as session:
+        assert await read_next_executable_protected_release(session, registration=registration) == (
+            publication
+        )
+
+
+# Production break caught: acknowledgement must fail closed if the disabled
+# authority's current agent binding has advanced since the release was read.
+@pytest.mark.asyncio
+async def test_release_outbox_ack_rejects_disabled_current_agent_reconfiguration_without_mutation(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    fence, registration = await _initialize_and_register(capacity_guard_database)
+    request = _bootstrap(registration.subject_id, registration.subject_incarnation)
+    async with _serializable_executor_session(capacity_guard_database) as session:
+        store = ExecutableAdmissionStore(session, registration=registration)
+        await store.prepare_worker(request, bootstrap_sha256="a" * 64)
+        revoked = await store.revoke_prepared_bootstrap(_prepared_revocation(request))
+
+    async with _serializable_agent_session(capacity_guard_database) as session:
+        publication = await read_next_executable_protected_release(
+            session,
+            registration=registration,
+        )
+        assert publication is not None
+        assert publication.release.protected_release_sha256 == revoked.protected_release_sha256
+
+    replacement_fence = fence.model_copy(
+        update={
+            "reporter_incarnation": uuid4(),
+            "candidate_digest": "b" * 64,
+            "deployment_generation": fence.deployment_generation + 1,
+            "configuration_generation": fence.configuration_generation + 1,
+        }
+    )
+    replacement_registration = registration.model_copy(
+        update={
+            "reporter_incarnation": replacement_fence.reporter_incarnation,
+            "candidate_digest": replacement_fence.candidate_digest,
+            "candidate_identity": replacement_fence.candidate_digest,
+            "candidate_publication_sha256": replacement_fence.candidate_digest,
+            "deployment_generation": replacement_fence.deployment_generation,
+            "configuration_generation": replacement_fence.configuration_generation,
+        }
+    )
+    async with _owner_session(capacity_guard_database) as (agent_store, guard_store, _):
+        await guard_store.reconfigure_disabled_authority(
+            replacement_fence,
+            expected_configuration_generation=fence.configuration_generation,
+        )
+        await agent_store.reconfigure_agent(
+            replacement_registration,
+            expected_configuration_generation=registration.configuration_generation,
+        )
+
+    async with _serializable_agent_session(capacity_guard_database) as session:
+        with pytest.raises(DBAPIError, match=r"stale|changed|next event|registered"):
+            await acknowledge_executable_protected_release_publication(
+                session,
+                registration=replacement_registration,
+                publication=publication,
+                manager_acknowledgement_digest="9" * 64,
+            )
+
+    assert await _release_publication_cursor_and_evidence_count(
+        capacity_guard_database,
+        agent_incarnation=registration.agent_incarnation,
+    ) == (0, 0)
 
 
 @pytest.mark.asyncio
