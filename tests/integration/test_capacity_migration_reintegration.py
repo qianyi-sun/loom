@@ -36,6 +36,55 @@ UPSTREAM_ALLOCATION_EVENT_TRIGGERS = (
     "capacity_allocation_truncate_guard",
 )
 
+UPSTREAM_QUEUE_GUARD_ROUTINES = (
+    "capacity_executable_executor_state_guard",
+    "capacity_executable_intent_guard",
+    "capacity_executable_launch_rate_bucket_guard",
+    "capacity_executable_protected_release_insert_guard",
+    "capacity_executable_receipt_append_only_guard",
+)
+
+UPSTREAM_QUEUE_GUARD_TRIGGERS = (
+    "capacity_executable_command_receipts_append_only_guard",
+    "capacity_executable_command_receipts_truncate_guard",
+    "capacity_executable_executor_state_mutation_guard",
+    "capacity_executable_executor_state_truncate_guard",
+    "capacity_executable_intent_mutation_guard",
+    "capacity_executable_intent_truncate_guard",
+    "capacity_executable_launch_rate_bucket_mutation_guard",
+    "capacity_executable_launch_rate_bucket_truncate_guard",
+    "capacity_executable_protected_release_insert_guard",
+    "capacity_executable_protected_release_receipts_append_only_guar",
+    "capacity_executable_protected_release_receipts_truncate_guard",
+)
+
+UPSTREAM_QUEUE_GUARD_TABLES = (
+    "capacity_allocation_epochs",
+    "capacity_executable_command_receipts",
+    "capacity_executable_executor_states",
+    "capacity_executable_intents",
+    "capacity_executable_launch_rate_buckets",
+    "capacity_executable_protected_release_receipts",
+)
+
+UPSTREAM_QUEUE_GUARD_SENTINEL_CONSTRAINTS = {
+    ("capacity_allocation_epochs", "capacity_allocation_epoch_mode_check"): (
+        "input_valid_until IS NOT NULL"
+    ),
+    (
+        "capacity_executable_command_receipts",
+        "capacity_executable_command_receipt_quantity_check",
+    ): ("command_sequence > 0"),
+    (
+        "capacity_executable_launch_rate_buckets",
+        "capacity_executable_launch_rate_bucket_quantity_check",
+    ): "refill_remainder < 60",
+    (
+        "capacity_executable_protected_release_receipts",
+        "capacity_executable_protected_release_receipt_epoch_check",
+    ): "protected_registration_epoch > bootstrap_registration_epoch",
+}
+
 BRIDGE_COMPLETION_TABLES = {
     "capacity_executable_command_receipts",
     "capacity_executable_executor_states",
@@ -184,6 +233,27 @@ def _routine_grants(connection: Connection, names: Sequence[str]) -> set[tuple[s
     ).mappings()
     return {
         (str(row["grantee"]), str(row["routine_name"]), str(row["privilege_type"])) for row in rows
+    }
+
+
+def _routine_search_paths(
+    connection: Connection,
+    names: Sequence[str],
+) -> dict[str, str | None]:
+    rows = connection.execute(
+        text(
+            """
+            SELECT p.proname, array_to_string(p.proconfig, ',') AS config
+            FROM pg_proc AS p
+            JOIN pg_namespace AS n ON n.oid = p.pronamespace
+            WHERE n.nspname = 'public' AND p.proname = ANY(:names)
+            ORDER BY p.proname
+            """
+        ),
+        {"names": list(names)},
+    ).mappings()
+    return {
+        str(row["proname"]): (None if row["config"] is None else str(row["config"])) for row in rows
     }
 
 
@@ -383,6 +453,27 @@ def test_capacity_0007_adds_bridge_completion_without_replacing_upstream_guards(
                 ("capacity_allocation_epochs", "capacity_allocations"),
             )
             base_grants = _routine_grants(connection, UPSTREAM_ALLOCATION_ROUTINES)
+            base_queue_routines = _routine_definitions(connection, UPSTREAM_QUEUE_GUARD_ROUTINES)
+            assert set(base_queue_routines) == set(UPSTREAM_QUEUE_GUARD_ROUTINES)
+            base_queue_triggers = _trigger_definitions(connection, UPSTREAM_QUEUE_GUARD_TRIGGERS)
+            assert set(base_queue_triggers) == set(UPSTREAM_QUEUE_GUARD_TRIGGERS)
+            base_queue_constraints = _constraint_definitions(
+                connection, UPSTREAM_QUEUE_GUARD_TABLES
+            )
+            assert set(UPSTREAM_QUEUE_GUARD_SENTINEL_CONSTRAINTS) <= set(base_queue_constraints)
+            for (
+                constraint_name,
+                expected_fragment,
+            ) in UPSTREAM_QUEUE_GUARD_SENTINEL_CONSTRAINTS.items():
+                assert expected_fragment in base_queue_constraints[constraint_name]
+            base_queue_grants = _routine_grants(connection, UPSTREAM_QUEUE_GUARD_ROUTINES)
+            base_queue_search_paths = _routine_search_paths(
+                connection, UPSTREAM_QUEUE_GUARD_ROUTINES
+            )
+            assert base_queue_search_paths == {
+                routine_name: "search_path=pg_catalog"
+                for routine_name in UPSTREAM_QUEUE_GUARD_ROUTINES
+            }
             inspector = inspect(connection)
             assert BRIDGE_COMPLETION_TABLES <= set(inspector.get_table_names())
             for table_name, columns in BRIDGE_COMPLETION_0007_COLUMNS.items():
@@ -414,6 +505,25 @@ def test_capacity_0007_adds_bridge_completion_without_replacing_upstream_guards(
                 == base_constraints
             )
             assert _routine_grants(connection, UPSTREAM_ALLOCATION_ROUTINES) == base_grants
+            assert (
+                _routine_definitions(connection, UPSTREAM_QUEUE_GUARD_ROUTINES)
+                == base_queue_routines
+            )
+            assert (
+                _trigger_definitions(connection, UPSTREAM_QUEUE_GUARD_TRIGGERS)
+                == base_queue_triggers
+            )
+            current_queue_constraints = _constraint_definitions(
+                connection, UPSTREAM_QUEUE_GUARD_TABLES
+            )
+            assert set(base_queue_constraints) <= set(current_queue_constraints)
+            for constraint_name, definition in base_queue_constraints.items():
+                assert current_queue_constraints[constraint_name] == definition
+            assert _routine_grants(connection, UPSTREAM_QUEUE_GUARD_ROUTINES) == base_queue_grants
+            assert (
+                _routine_search_paths(connection, UPSTREAM_QUEUE_GUARD_ROUTINES)
+                == base_queue_search_paths
+            )
     finally:
         engine.dispose()
 
@@ -470,6 +580,16 @@ def test_reintegrated_capacity_round_trip_restores_exact_upstream_capacity_0005_
                 "capacity_executable_intents",
                 "capacity_executable_intent_observed_state_check",
             ) not in (surface_0007.constraints)
+
+        command.downgrade(cfg, "capacity_0006")
+        with engine.connect() as connection:
+            roundtrip_0006_from_0007 = _schema_surface(connection)
+            assert roundtrip_0006_from_0007 == surface_0006
+
+        command.upgrade(cfg, "capacity_0007")
+        with engine.connect() as connection:
+            roundtrip_0007_from_0006 = _schema_surface(connection)
+            assert roundtrip_0007_from_0006 == surface_0007
 
         command.upgrade(cfg, "capacity_0011")
         with engine.connect() as connection:
