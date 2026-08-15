@@ -34,9 +34,7 @@ def _settings(**changes: object) -> CapacityManagerSettings:
     values: dict[str, object] = {
         "principals_file": Path("/run/loom/principals.json"),
         "db_url_file": Path("/run/loom/database-url"),
-        "expected_authority_incarnation": UUID(
-            "11111111-1111-4111-8111-111111111111"
-        ),
+        "expected_authority_incarnation": UUID("11111111-1111-4111-8111-111111111111"),
         "tls_cert_file": Path("/run/loom/server.pem"),
         "tls_key_file": Path("/run/loom/server-key.pem"),
         "tls_client_ca_file": Path("/run/loom/client-ca.pem"),
@@ -77,6 +75,20 @@ def test_policy_loader_rejects_noncanonical_expected_digest(
     assert str(caught.value) == "execution preparation policy is invalid"
 
 
+@pytest.mark.parametrize("digest", (None, b"a" * 64, 7))
+def test_policy_loader_maps_non_string_digest_to_generic_error(
+    tmp_path: Path,
+    digest: object,
+) -> None:
+    module = _policy_module()
+    path, _ = _write_policy(tmp_path / "execution-policy.json")
+
+    with pytest.raises(module.ExecutionPolicyError) as caught:
+        module.load_execution_preparation_policy(path, digest)
+
+    assert str(caught.value) == "execution preparation policy is invalid"
+
+
 def test_policy_loader_rejects_digest_mismatch_without_echoing_input(tmp_path: Path) -> None:
     module = _policy_module()
     path, _ = _write_policy(tmp_path / "sensitive-policy-name.json")
@@ -100,6 +112,27 @@ def test_policy_loader_rejects_symlink_and_group_writable_file(tmp_path: Path) -
     target.chmod(0o620)
     with pytest.raises(module.ExecutionPolicyError):
         module.load_execution_preparation_policy(target, digest)
+
+
+def test_policy_loader_opens_fifo_nonblocking_and_rejects_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _policy_module()
+    path = tmp_path / "execution-policy.fifo"
+    os.mkfifo(path, mode=0o600)
+    real_open = os.open
+
+    def open_nonblocking(candidate: Path, flags: int) -> int:
+        assert flags & os.O_NONBLOCK
+        return real_open(candidate, flags)
+
+    monkeypatch.setattr(module.os, "open", open_nonblocking)
+
+    with pytest.raises(module.ExecutionPolicyError) as caught:
+        module.load_execution_preparation_policy(path, "a" * 64)
+
+    assert str(caught.value) == "execution preparation policy is invalid"
 
 
 def test_policy_loader_rejects_oversized_or_malformed_content(tmp_path: Path) -> None:

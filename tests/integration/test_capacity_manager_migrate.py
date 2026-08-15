@@ -640,12 +640,23 @@ def test_direct_sql_cannot_skip_drain_or_mutate_active_envelope(
 def test_prepared_abort_guard_accepts_only_exact_operator_request_evidence(
     capacity_postgres_url: str,
 ) -> None:
-    """The database recognizes canonical abort evidence without weakening replacement."""
+    """Canonical abort evidence is independent of the caller's search path."""
 
     engine = create_engine(capacity_postgres_url)
     connection = engine.connect()
     transaction = connection.begin()
     try:
+        connection.execute(text("CREATE SCHEMA capacity_prepared_abort_decoy"))
+        connection.execute(
+            text(
+                "CREATE FUNCTION capacity_prepared_abort_decoy.sha256(bytea) "
+                "RETURNS bytea LANGUAGE sql IMMUTABLE AS "
+                "'SELECT decode(repeat(''00'', 32), ''hex'')'"
+            )
+        )
+        connection.execute(
+            text("SET LOCAL search_path TO capacity_prepared_abort_decoy, public, pg_catalog")
+        )
         execution_epoch = _seed_prepared_execution(connection)
         authority = connection.execute(
             select(CapacityAuthorityState.authority_incarnation).where(

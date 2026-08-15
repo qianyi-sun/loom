@@ -940,6 +940,15 @@ def create_app(
                     actor=actor.principal_id,
                     idempotency_key=idempotency_key,
                 )
+                current_writer = cast(WriterFence, request.app.state.writer)
+                if (
+                    current_writer.authority_incarnation == value.authority_incarnation
+                    and current_writer.writer_epoch == value.expected_writer_epoch
+                ):
+                    request.app.state.writer = WriterFence(
+                        authority_incarnation=value.authority_incarnation,
+                        writer_epoch=value.expected_writer_epoch + 1,
+                    )
             return jsonable_encoder(result)
         except CapacityStoreError as exc:
             raise _store_error(exc) from exc

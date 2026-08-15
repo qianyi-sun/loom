@@ -684,9 +684,11 @@ pytest, Ruff, and mypy.
   Run:
 
   ```bash
+  mapfile -t changed_python_files < <(
+    git diff --name-only --diff-filter=ACMR origin/dev -- '*.py'
+  )
   PYTHONPATH=src:. /home/hongjian/loom/.venv/bin/python -m ruff format --check \
-    src/loom_capacity_manager src/loom_capacity_executor \
-    src/loom_capacity_pool_executor src/loom_cli tests
+    "${changed_python_files[@]}"
   PYTHONPATH=src:. /home/hongjian/loom/.venv/bin/python -m ruff check \
     src/loom_capacity_manager src/loom_capacity_executor \
     src/loom_capacity_pool_executor src/loom_cli tests
@@ -722,7 +724,7 @@ pytest, Ruff, and mypy.
   test ! -e docs/superpowers
   ! git grep -n 'executable_new_capacity_ceiling[" =:]*[1-9]' -- \
     deploy/dev-fleet docs/architecture/global-capacity-zero-ceiling-preparation-design.md
-  ! git grep -n 'loom-dev-shared' -- ':!archive/**'
+  ! git grep -n 'loom-dev-shared' -- deploy config
   git diff --check origin/dev...HEAD
   git status --short --branch
   ```

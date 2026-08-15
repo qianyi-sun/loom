@@ -497,7 +497,6 @@ async def load_prepared_execution_readiness(
     if execution_policy is None:
         blockers.append("execution-policy-disabled")
     async with _read_transaction(session):
-        now = await _database_now(session)
         authority = (
             await session.execute(
                 select(CapacityAuthorityState)
@@ -612,6 +611,7 @@ async def load_prepared_execution_readiness(
             )
             registrations_by_pool = {row.pool_id: row for row in registrations}
             runtimes_by_pool = {row.pool_id: row for row in runtimes}
+            now = await _database_now(session)
             items: list[PreparedExecutorReadinessV1] = []
             for expected in execution_policy.executors:
                 registration = registrations_by_pool.get(expected.pool_id)

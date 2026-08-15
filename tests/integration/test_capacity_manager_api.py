@@ -1349,7 +1349,7 @@ def test_execution_preparation_abort_is_exact_and_keeps_active_routes_absent(
 ) -> None:
     """Abort is separately scoped, exactly fenced, replayable, and zero-only."""
 
-    client, _app, _settings, request, _policy = execution_preparation_api_context
+    client, app, settings, request, _policy = execution_preparation_api_context
     prepare_headers = {
         "Authorization": f"Bearer {EXECUTION_PREPARE_TOKEN}",
         "Idempotency-Key": str(UUID(int=15100)),
@@ -1404,6 +1404,14 @@ def test_execution_preparation_abort_is_exact_and_keeps_active_routes_absent(
     assert retired.json()["execution_epoch"] == prepared.execution_epoch
     assert retired.json()["execution_manifest_sha256"] == prepared.execution_manifest_sha256
     assert retired.json()["replayed"] is False
+    assert app.state.writer == WriterFence(
+        authority_incarnation=prepared.authority_incarnation,
+        writer_epoch=prepared.writer_epoch + 1,
+    )
+    assert client.get("/healthz").json() == {
+        "status": "ready",
+        "executable_new_capacity_ceiling": 0,
+    }
     replay = client.post(
         abort_path,
         headers=abort_headers | {"Idempotency-Key": str(abort_key)},
@@ -1432,6 +1440,20 @@ def test_execution_preparation_abort_is_exact_and_keeps_active_routes_absent(
             json={},
         )
         assert response.status_code == 404
+
+    replacement_app = create_app(settings)
+    with TestClient(replacement_app) as replacement_client:
+        replacement_writer = replacement_app.state.writer
+        assert replacement_writer.writer_epoch == prepared.writer_epoch + 2
+        replacement_replay = replacement_client.post(
+            abort_path,
+            headers=abort_headers | {"Idempotency-Key": str(abort_key)},
+            json=abort.model_dump(mode="json"),
+        )
+        assert replacement_replay.status_code == 200
+        assert replacement_replay.json() == retired.json() | {"replayed": True}
+        assert replacement_app.state.writer == replacement_writer
+        assert replacement_client.get("/healthz").status_code == 200
 
 
 def test_execution_preparation_status_requires_complete_fresh_two_pool_evidence(

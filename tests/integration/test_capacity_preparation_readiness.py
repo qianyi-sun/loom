@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from uuid import UUID
 
 import pytest
-from sqlalchemy import select, text, update
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import delete, select, text, update
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom_capacity_manager.contracts import ResourceVectorV1
 from loom_capacity_manager.executable_contracts import (
@@ -21,6 +22,8 @@ from loom_capacity_manager.executable_contracts import (
 )
 from loom_capacity_manager.execution_store import CapacityExecutionStore
 from loom_capacity_manager.models import (
+    Base,
+    CapacityAuthorityState,
     CapacityCandidate,
     CapacityExecutableExecutorState,
 )
@@ -150,6 +153,55 @@ async def _readiness(
     )
 
 
+async def _reset_committed_capacity_state(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session, session.begin():
+        authority_trigger_disabled = False
+        await session.execute(
+            text(
+                "ALTER TABLE capacity_authority_state DISABLE TRIGGER "
+                "capacity_authority_execution_transition_guard"
+            )
+        )
+        authority_trigger_disabled = True
+        try:
+            await session.execute(
+                update(CapacityAuthorityState)
+                .where(CapacityAuthorityState.singleton_id == 1)
+                .values(
+                    writer_epoch=0,
+                    recovery_state="shadow",
+                    increase_freeze=True,
+                    increase_freeze_reason="initial_shadow_freeze",
+                    executable_new_capacity_ceiling=0,
+                    execution_epoch=0,
+                    execution_state="shadow",
+                    execution_manifest_sha256=None,
+                    global_pending_slot_ceiling=0,
+                    global_pending_job_ceiling=0,
+                    global_submission_rate_ceiling=0,
+                )
+            )
+            for table in reversed(Base.metadata.sorted_tables):
+                if table.name == CapacityAuthorityState.__tablename__:
+                    continue
+                table_name = table.name
+                await session.execute(text(f"ALTER TABLE {table_name} DISABLE TRIGGER USER"))
+                try:
+                    await session.execute(delete(table))
+                finally:
+                    await session.execute(text(f"ALTER TABLE {table_name} ENABLE TRIGGER USER"))
+        finally:
+            if authority_trigger_disabled:
+                await session.execute(
+                    text(
+                        "ALTER TABLE capacity_authority_state ENABLE TRIGGER "
+                        "capacity_authority_execution_transition_guard"
+                    )
+                )
+
+
 async def test_readiness_distinguishes_disabled_and_shadow_manager(
     capacity_session: AsyncSession,
 ) -> None:
@@ -247,6 +299,64 @@ async def test_complete_empty_two_pool_inventory_is_ready(
         assert item.journal_sequence == 2
         assert item.inventory_record_count == 0
         assert item.blockers == ()
+
+
+async def test_readiness_samples_database_time_after_waiting_for_evidence_locks(
+    capacity_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A lock wait cannot preserve already-expired readiness with an old clock sample."""
+
+    await _reset_committed_capacity_state(capacity_session_factory)
+    try:
+        async with capacity_session_factory() as setup_session:
+            fixture, prepared, policy = await _prepare(setup_session)
+            await _publish_prepared_inventories(
+                setup_session,
+                fixture,
+                prepared,
+                executor_lease_seconds=1,
+            )
+            await setup_session.commit()
+
+        async with (
+            capacity_session_factory() as blocker_session,
+            capacity_session_factory() as readiness_session,
+            capacity_session_factory() as observer_session,
+        ):
+            await blocker_session.execute(
+                select(CapacityAuthorityState)
+                .where(CapacityAuthorityState.singleton_id == 1)
+                .with_for_update()
+            )
+            readiness_pid = (
+                await readiness_session.execute(text("SELECT pg_backend_pid()"))
+            ).scalar_one()
+            readiness_task = asyncio.create_task(
+                _readiness(readiness_session, policy, freshness_seconds=1)
+            )
+            blocked = False
+            for _attempt in range(200):
+                wait_event_type = (
+                    await observer_session.execute(
+                        text("SELECT wait_event_type FROM pg_stat_activity WHERE pid = :pid"),
+                        {"pid": readiness_pid},
+                    )
+                ).scalar_one()
+                if wait_event_type == "Lock":
+                    blocked = True
+                    break
+                await asyncio.sleep(0.01)
+            assert blocked, "readiness did not wait on the authority evidence lock"
+
+            await asyncio.sleep(1.05)
+            await blocker_session.commit()
+            result = await readiness_task
+
+            assert result.ready is False
+            assert "executor-lease-expired" in result.blockers
+            assert "executor-inventory-stale" in result.blockers
+    finally:
+        await _reset_committed_capacity_state(capacity_session_factory)
 
 
 @pytest.mark.parametrize(

@@ -182,6 +182,47 @@ for executable admission, and ceiling zero. Renderers, example configuration,
 tests, and service installers must reject a command-line or environment
 override that attempts to bypass this state.
 
+### Zero-ceiling preparation boundary
+
+Package 5C1 makes only the intermediate prepared state operational. The
+manager may load one current-UID-owned, bounded, immutable and digest-pinned
+`ExecutionPreparationPolicyV2`, accept an exactly matching preparation, and
+return an effective ceiling and rate of zero. A separately scoped exact abort
+append-only retires that preparation and restores shadow at zero. Both are
+management-database mutations reserved for issue #906's operator window.
+
+The production HTTP surface added for this boundary is deliberately closed:
+
+- unbound `capacity:execution:prepare` may call `POST
+  /v2/execution-preparations` with an idempotency UUID;
+- each exact pool-bound `capacity:execute:pool` identity may call `PUT
+  /v2/executors/{pool_id}/registration` only for itself;
+- `capacity:read` may call `GET /v2/status/execution-preparation`; and
+- a distinct unbound `capacity:execution:abort` identity may call `POST
+  /v2/execution-preparations/{execution_epoch}/abort` for the exact prepared
+  fence.
+
+There is no production activation, generic transition, ceiling-change, apply,
+drain, or retirement route in this package. Preparation credentials therefore
+cannot be repurposed as activation authority.
+
+The two controller-local prepared services register themselves, maintain their
+leases, and publish complete journal-first read-only Slurm inventories. They
+accept only the exact prepared manager context and never construct the
+submission/cancellation backend. Manager readiness is derived from locked
+database state and database time; it requires the complete subject set, exact
+GB10 and OLDLAB bindings, fresh post-inventory heartbeats, confirmed journals,
+and no foreign, unknown, ownership-missing, or quarantined record. Readiness is
+an observation, never a state transition.
+
+The canonical operating order is: retain live environment-local authority
+until the #906 window; collect and pin complete legacy-freeze and rollback
+evidence; render and shadow-deploy the manager at zero; prepare the exact epoch;
+render and start each prepared-only controller timer; wait for prepared
+readiness; stop both timers; and either retain the frozen prepared evidence or
+abort exactly back to shadow at zero. No activation step is part of that
+sequence.
+
 The personal lifecycle's current assertion that the manager ceiling is zero
 is replaced only by an activation-aware response validator: normal lifecycle
 operations accept zero or a valid active epoch, but never infer that application
@@ -403,6 +444,17 @@ and environment-binding directory. Installation and validation are separate
 from service activation. Repository manifests and installers render inert
 services with no activation epoch and ceiling zero.
 
+For the zero-ceiling rehearsal, the controller also receives an independently
+digest-pinned read-only inventory policy. Executor config, inventory policy,
+service environment, bearer/TLS/ownership material, state, and journal paths
+remain pool-local. Regular inputs are service-UID-owned mode `0600`; state and
+journal directories are mode `0700`. The prepared oneshot has no install
+target. Only its nonpersistent, nonoverlapping timer can be enabled, and only
+inside #906's window. The manager's non-secret owner policy is rendered as an
+immutable digest-addressed ConfigMap, copied by an init container into a
+manager-UID-owned mode-`0600` memory-backed file, and mounted into the manager
+read-only.
+
 No secret, mutable tag, controller-local artifact, personal candidate source,
 or untracked file is committed. Trusted fleet images use exact verified
 digests. Personal candidates may contain arbitrary committed, modified,
@@ -493,14 +545,20 @@ before it exposes scheduler mutation methods.
 
 ## Subsequent gates to the final objective
 
-Package 5B is followed in order by:
+Package 5B's zero-ceiling preparation follow-up is implemented by Package 5C1.
+After that repository package is merged and exact-head CI is green, the live
+gates remain, in order:
 
-1. protected mutation-path closure and signed legacy adoption tooling;
-2. zero-ceiling manager/executor/agent deployment plus restore and rollback
+1. protected mutation-path closure plus authenticated legacy freeze/adoption
+   evidence and signed restore/rollback rehearsal;
+2. an explicit #906 window for the zero-ceiling manager, both prepared-only
+   executor inventories, every environment acknowledgement, and abort/restore
    rehearsal;
-3. an explicit operator window with a one-slot x86, ARM, and neutral sequence;
-4. bounded expansion and mixed-workload soak; and
-5. live concurrent acceptance in which at least two owners deploy different
+3. a separately reviewed activation interlock and operator surface that
+   consumes the passing prepared-readiness checkpoint;
+4. an explicit operator window with a one-slot x86, ARM, and neutral sequence;
+5. bounded expansion and mixed-workload soak; and
+6. live concurrent acceptance in which at least two owners deploy different
    arbitrary local sources, execute real work fairly on shared OLDLAB/GB10
    capacity, redeploy safely, scale to zero, tear down, and pass artifact
    garbage collection without cross-owner leakage.

@@ -20,6 +20,7 @@ depends_on: str | Sequence[str] | None = None
 _WRITER_REPLACEMENT_ONLY_GUARD = r"""CREATE OR REPLACE FUNCTION capacity_prepared_retirement_evidence_guard()
 RETURNS trigger
 LANGUAGE plpgsql
+SET search_path = pg_catalog
 AS $$
 DECLARE
   expected_name text;
@@ -99,6 +100,7 @@ $$"""
 _ABORT_OR_WRITER_REPLACEMENT_GUARD = r"""CREATE OR REPLACE FUNCTION capacity_prepared_retirement_evidence_guard()
 RETURNS trigger
 LANGUAGE plpgsql
+SET search_path = pg_catalog
 AS $$
 DECLARE
   writer_name text;

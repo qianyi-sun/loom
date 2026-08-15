@@ -15,10 +15,11 @@ def _script(package: str) -> ScriptDirectory:
 
 def test_upstream_1415_union_has_one_exact_capacity_history() -> None:
     script = _script("capacity_migrations")
-    assert tuple(script.get_heads()) == ("capacity_0012",)
+    assert tuple(script.get_heads()) == ("capacity_0013",)
     assert tuple(
-        revision.revision for revision in script.walk_revisions("capacity_0004", "capacity_0012")
+        revision.revision for revision in script.walk_revisions("capacity_0004", "capacity_0013")
     ) == (
+        "capacity_0013",
         "capacity_0012",
         "capacity_0011",
         "capacity_0010",

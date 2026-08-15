@@ -33,11 +33,17 @@ def load_execution_preparation_policy(
     """Load one bounded stable regular file and verify its exact digest."""
 
     if (
-        _DIGEST.fullmatch(expected_sha256) is None
+        not isinstance(expected_sha256, str)
+        or _DIGEST.fullmatch(expected_sha256) is None
         or expected_sha256 == "0" * 64
     ):
         raise _invalid()
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     try:
         descriptor = os.open(path, flags)
         try:
