@@ -1092,3 +1092,41 @@ def test_executable_inventory_rejects_authority_binding_drift() -> None:
             journal_digest="0" * 64,
             records=(record,),
         )
+
+
+def test_prepared_abort_contract_requires_the_exact_nonzero_fence() -> None:
+    """A generic or incomplete zeroing request must not retire preparation."""
+
+    contracts = _contracts()
+    request = contracts.ExecutionPreparationAbortV2(
+        authority_incarnation=UUID(int=1),
+        expected_writer_epoch=2,
+        execution_epoch=3,
+        execution_manifest_sha256="a" * 64,
+    )
+
+    assert request.executable is True
+    assert request.model_dump(mode="json") == {
+        "schema_version": 2,
+        "authority_incarnation": str(UUID(int=1)),
+        "expected_writer_epoch": 2,
+        "execution_epoch": 3,
+        "execution_manifest_sha256": "a" * 64,
+        "executable": True,
+    }
+    with pytest.raises(ValidationError):
+        contracts.ExecutionPreparationAbortV2.model_validate(
+            request.model_dump() | {"execution_epoch": 0}
+        )
+    with pytest.raises(ValidationError):
+        contracts.ExecutionPreparationAbortV2.model_validate(
+            request.model_dump() | {"unexpected": True}
+        )
+    for invalid in (
+        {"expected_writer_epoch": 0},
+        {"execution_manifest_sha256": "A" * 64},
+        {"execution_manifest_sha256": "a" * 63},
+        {"executable": False},
+    ):
+        with pytest.raises(ValidationError):
+            contracts.ExecutionPreparationAbortV2.model_validate(request.model_dump() | invalid)

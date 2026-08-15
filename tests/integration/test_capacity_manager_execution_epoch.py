@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
-from sqlalchemy import select, text, update
+from sqlalchemy import insert, select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -24,6 +24,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutionActivationV2,
     ExecutionContextV2,
     ExecutionDrainV2,
+    ExecutionPreparationAbortV2,
     ExecutionPreparationPolicyV2,
     ExecutionRetirementExecutorCheckpointV2,
     ExecutionRetirementV2,
@@ -35,6 +36,7 @@ from loom_capacity_manager.models import (
     CapacityAllocationEpoch,
     CapacityAuthorityState,
     CapacityCandidate,
+    CapacityExecutableIntent,
     CapacityExecutionEpoch,
     CapacityExecutionExecutor,
     CapacityPoolReporter,
@@ -1566,4 +1568,373 @@ async def test_retirement_replay_is_exact_after_shadow_restoration(
             request,
             actor="activation-operator",
             idempotency_key=UUID(int=12004),
+        )
+
+
+async def test_prepared_abort_is_exact_replay_and_returns_shadow(
+    capacity_session: AsyncSession,
+) -> None:
+    """A failed zero-ceiling rehearsal has a direct append-only rollback."""
+
+    from loom_capacity_manager import executable_contracts as contracts
+
+    fixture = await _setup(capacity_session, execution_policy=_policy())
+    prepared = await fixture.store.prepare_execution_epoch(
+        capacity_session,
+        fixture.request,
+        actor="preparation-operator",
+        idempotency_key=UUID(int=13001),
+    )
+    await _register_execution_executors(capacity_session, fixture, prepared)
+    request = contracts.ExecutionPreparationAbortV2(
+        authority_incarnation=prepared.authority_incarnation,
+        expected_writer_epoch=prepared.writer_epoch,
+        execution_epoch=prepared.execution_epoch,
+        execution_manifest_sha256=prepared.execution_manifest_sha256,
+    )
+
+    first = await fixture.store.abort_prepared_execution_epoch(
+        capacity_session,
+        request,
+        actor="preparation-operator",
+        idempotency_key=UUID(int=13002),
+    )
+    replay = await fixture.store.abort_prepared_execution_epoch(
+        capacity_session,
+        request,
+        actor="preparation-operator",
+        idempotency_key=UUID(int=13002),
+    )
+
+    assert first.replayed is False
+    assert replay.replayed is True
+    assert replay.execution_epoch == prepared.execution_epoch
+    assert replay.execution_manifest_sha256 == prepared.execution_manifest_sha256
+    assert await fixture.store.execution_authority(capacity_session) is None
+    authority = (await capacity_session.execute(select(CapacityAuthorityState))).scalar_one()
+    retired = (
+        await capacity_session.execute(
+            select(CapacityExecutionEpoch).where(
+                CapacityExecutionEpoch.execution_epoch == prepared.execution_epoch
+            )
+        )
+    ).scalar_one()
+    expected_payload = request.model_dump(mode="json", exclude_none=False)
+    assert authority.writer_epoch == prepared.writer_epoch + 1
+    assert retired.current_writer_epoch == authority.writer_epoch
+    assert retired.retirement_actor == "preparation-operator"
+    assert retired.retirement_idempotency_key == UUID(int=13002)
+    assert retired.retirement_request_digest == canonical_executable_digest(request)
+    assert retired.retirement_request_payload == expected_payload
+    assert retired.retired_at == first.retired_at
+    assert (
+        authority.execution_state,
+        authority.execution_epoch,
+        authority.execution_manifest_sha256,
+        authority.executable_new_capacity_ceiling,
+        authority.increase_freeze,
+        authority.increase_freeze_reason,
+    ) == ("shadow", 0, None, 0, True, "execution_preparation_aborted")
+
+    changed = request.model_copy(update={"execution_manifest_sha256": "f" * 64})
+    with pytest.raises(IdempotencyConflictError):
+        await fixture.store.abort_prepared_execution_epoch(
+            capacity_session,
+            changed,
+            actor="preparation-operator",
+            idempotency_key=UUID(int=13002),
+        )
+    with pytest.raises(IdempotencyConflictError):
+        await fixture.store.abort_prepared_execution_epoch(
+            capacity_session,
+            request,
+            actor="another-operator",
+            idempotency_key=UUID(int=13002),
+        )
+    with pytest.raises(ExecutionConflictError):
+        await fixture.store.abort_prepared_execution_epoch(
+            capacity_session,
+            request,
+            actor="preparation-operator",
+            idempotency_key=UUID(int=13003),
+        )
+
+
+async def test_prepared_abort_rejects_an_active_epoch(
+    capacity_session: AsyncSession,
+) -> None:
+    """Prepared rollback must never substitute for the active drain protocol."""
+
+    from loom_capacity_manager import executable_contracts as contracts
+
+    fixture, prepared, _activation, _active = await _activate_fixture(capacity_session)
+    request = contracts.ExecutionPreparationAbortV2(
+        authority_incarnation=prepared.authority_incarnation,
+        expected_writer_epoch=prepared.writer_epoch,
+        execution_epoch=prepared.execution_epoch,
+        execution_manifest_sha256=prepared.execution_manifest_sha256,
+    )
+
+    with pytest.raises(ExecutionConflictError):
+        await fixture.store.abort_prepared_execution_epoch(
+            capacity_session,
+            request,
+            actor="preparation-operator",
+            idempotency_key=UUID(int=13004),
+        )
+
+
+@pytest.mark.parametrize("registered_executor_count", (0, 1))
+async def test_prepared_abort_does_not_require_executor_registration(
+    capacity_session: AsyncSession,
+    registered_executor_count: int,
+) -> None:
+    """A partial preparation can always be retired before any intent exists."""
+
+    fixture = await _setup(capacity_session, execution_policy=_policy())
+    prepared = await fixture.store.prepare_execution_epoch(
+        capacity_session,
+        fixture.request,
+        actor="preparation-operator",
+        idempotency_key=UUID(int=13100 + registered_executor_count),
+    )
+    for index, binding in enumerate(
+        fixture.request.executors[:registered_executor_count],
+        start=1,
+    ):
+        await fixture.store.register_execution_executor(
+            capacity_session,
+            ExecutableExecutorRegistrationV2(
+                execution=prepared,
+                executor_id=binding.executor_id,
+                executor_incarnation=binding.executor_incarnation,
+                pool_id=binding.pool_id,
+                pool_generation=binding.pool_generation,
+                signing_key_id=f"{binding.pool_id}-key",
+                signing_key_sha256=binding.signing_key_sha256,
+                local_authority_sha256=binding.local_authority_sha256,
+                controller_authority_sha256=binding.controller_authority_sha256,
+            ),
+            actor="executor-installer",
+            idempotency_key=UUID(int=13110 + index),
+        )
+    request = ExecutionPreparationAbortV2(
+        authority_incarnation=prepared.authority_incarnation,
+        expected_writer_epoch=prepared.writer_epoch,
+        execution_epoch=prepared.execution_epoch,
+        execution_manifest_sha256=prepared.execution_manifest_sha256,
+    )
+
+    receipt = await fixture.store.abort_prepared_execution_epoch(
+        capacity_session,
+        request,
+        actor="preparation-operator",
+        idempotency_key=UUID(int=13120 + registered_executor_count),
+    )
+
+    assert receipt.replayed is False
+    authority = (await capacity_session.execute(select(CapacityAuthorityState))).scalar_one()
+    assert authority.execution_state == "shadow"
+    assert authority.executable_new_capacity_ceiling == 0
+    assert authority.writer_epoch == prepared.writer_epoch + 1
+
+
+@pytest.mark.parametrize(
+    "change",
+    (
+        {"expected_writer_epoch": 2},
+        {"execution_epoch": 2},
+        {"execution_manifest_sha256": "f" * 64},
+        {"authority_incarnation": UUID(int=13130)},
+    ),
+)
+async def test_prepared_abort_rejects_any_stale_fence(
+    capacity_session: AsyncSession,
+    change: dict[str, object],
+) -> None:
+    """Every authority, writer, epoch, and manifest coordinate is required."""
+
+    fixture = await _setup(capacity_session, execution_policy=_policy())
+    prepared = await fixture.store.prepare_execution_epoch(
+        capacity_session,
+        fixture.request,
+        actor="preparation-operator",
+        idempotency_key=UUID(int=13131),
+    )
+    request = ExecutionPreparationAbortV2(
+        authority_incarnation=prepared.authority_incarnation,
+        expected_writer_epoch=prepared.writer_epoch,
+        execution_epoch=prepared.execution_epoch,
+        execution_manifest_sha256=prepared.execution_manifest_sha256,
+    ).model_copy(update=change)
+
+    with pytest.raises(ExecutionConflictError):
+        await fixture.store.abort_prepared_execution_epoch(
+            capacity_session,
+            request,
+            actor="preparation-operator",
+            idempotency_key=UUID(int=13132),
+        )
+    authority = (await capacity_session.execute(select(CapacityAuthorityState))).scalar_one()
+    assert authority.execution_state == "prepared"
+    assert authority.executable_new_capacity_ceiling == 0
+
+
+async def test_prepared_abort_rejects_drain_only_epoch(
+    capacity_session: AsyncSession,
+) -> None:
+    """Abort cannot replace the active drain and retirement protocol."""
+
+    fixture, prepared, _activation, active = await _activate_fixture(capacity_session)
+    await fixture.store.begin_execution_drain(
+        capacity_session,
+        _drain_request(active),
+        actor="activation-operator",
+        idempotency_key=UUID(int=13140),
+    )
+    request = ExecutionPreparationAbortV2(
+        authority_incarnation=prepared.authority_incarnation,
+        expected_writer_epoch=prepared.writer_epoch,
+        execution_epoch=prepared.execution_epoch,
+        execution_manifest_sha256=prepared.execution_manifest_sha256,
+    )
+
+    with pytest.raises(ExecutionConflictError):
+        await fixture.store.abort_prepared_execution_epoch(
+            capacity_session,
+            request,
+            actor="preparation-operator",
+            idempotency_key=UUID(int=13141),
+        )
+
+
+async def test_prepared_abort_rejects_any_existing_executable_intent(
+    capacity_session: AsyncSession,
+) -> None:
+    """Even corrupt prepared-state work evidence makes abort fail closed."""
+
+    fixture = await _setup(capacity_session, execution_policy=_policy())
+    prepared = await fixture.store.prepare_execution_epoch(
+        capacity_session,
+        fixture.request,
+        actor="preparation-operator",
+        idempotency_key=UUID(int=13150),
+    )
+    await _register_execution_executors(capacity_session, fixture, prepared)
+    subject = fixture.request.subject_acknowledgements[0]
+    executor = fixture.request.executors[0]
+    await capacity_session.execute(
+        text("ALTER TABLE capacity_allocation_epochs DISABLE TRIGGER USER")
+    )
+    await capacity_session.execute(
+        text("ALTER TABLE capacity_executable_intents DISABLE TRIGGER USER")
+    )
+    try:
+        await capacity_session.execute(
+            insert(CapacityAllocationEpoch).values(
+                allocation_epoch=13151,
+                writer_epoch=prepared.writer_epoch,
+                configuration_epoch=prepared.configuration_epoch,
+                input_digest="a" * 64,
+                status="executable",
+                complete_payload={"allocations": []},
+                executable=True,
+                execution_epoch=prepared.execution_epoch,
+                execution_manifest_sha256=prepared.execution_manifest_sha256,
+                input_valid_until=text("clock_timestamp() + interval '1 minute'"),
+                sealed=True,
+                allocation_count=0,
+            )
+        )
+        await capacity_session.execute(
+            insert(CapacityExecutableIntent).values(
+                intent_id=UUID(int=13152),
+                tranche_id=UUID(int=13153),
+                shape_instance_id="prepared-corruption",
+                execution_epoch=prepared.execution_epoch,
+                execution_manifest_sha256=prepared.execution_manifest_sha256,
+                configuration_epoch=prepared.configuration_epoch,
+                allocation_epoch=13151,
+                executor_id=executor.executor_id,
+                executor_incarnation=executor.executor_incarnation,
+                pool_id=executor.pool_id,
+                pool_generation=executor.pool_generation,
+                subject_id=subject.subject_id,
+                subject_incarnation=subject.subject_incarnation,
+                launch_rank=1,
+                proposal_digest="b" * 64,
+                proposal_payload={},
+                binding_digest="c" * 64,
+                binding_payload={},
+                state="proposed",
+            )
+        )
+    finally:
+        await capacity_session.execute(
+            text("ALTER TABLE capacity_executable_intents ENABLE TRIGGER USER")
+        )
+        await capacity_session.execute(
+            text("ALTER TABLE capacity_allocation_epochs ENABLE TRIGGER USER")
+        )
+    request = ExecutionPreparationAbortV2(
+        authority_incarnation=prepared.authority_incarnation,
+        expected_writer_epoch=prepared.writer_epoch,
+        execution_epoch=prepared.execution_epoch,
+        execution_manifest_sha256=prepared.execution_manifest_sha256,
+    )
+
+    with pytest.raises(ExecutionConflictError, match="empty intent"):
+        await fixture.store.abort_prepared_execution_epoch(
+            capacity_session,
+            request,
+            actor="preparation-operator",
+            idempotency_key=UUID(int=13154),
+        )
+
+
+async def test_prepared_abort_replay_rejects_changed_retired_binding(
+    capacity_session: AsyncSession,
+) -> None:
+    """Replay validates the retired row, not only its request evidence columns."""
+
+    fixture = await _setup(capacity_session, execution_policy=_policy())
+    prepared = await fixture.store.prepare_execution_epoch(
+        capacity_session,
+        fixture.request,
+        actor="preparation-operator",
+        idempotency_key=UUID(int=13160),
+    )
+    request = ExecutionPreparationAbortV2(
+        authority_incarnation=prepared.authority_incarnation,
+        expected_writer_epoch=prepared.writer_epoch,
+        execution_epoch=prepared.execution_epoch,
+        execution_manifest_sha256=prepared.execution_manifest_sha256,
+    )
+    await fixture.store.abort_prepared_execution_epoch(
+        capacity_session,
+        request,
+        actor="preparation-operator",
+        idempotency_key=UUID(int=13161),
+    )
+    await capacity_session.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
+    await capacity_session.execute(
+        text("ALTER TABLE capacity_execution_epochs DISABLE TRIGGER USER")
+    )
+    try:
+        await capacity_session.execute(
+            update(CapacityExecutionEpoch)
+            .where(CapacityExecutionEpoch.execution_epoch == prepared.execution_epoch)
+            .values(current_writer_epoch=prepared.writer_epoch + 2)
+        )
+    finally:
+        await capacity_session.execute(
+            text("ALTER TABLE capacity_execution_epochs ENABLE TRIGGER USER")
+        )
+
+    with pytest.raises(ExecutionConflictError, match="replay is incomplete"):
+        await fixture.store.abort_prepared_execution_epoch(
+            capacity_session,
+            request,
+            actor="preparation-operator",
+            idempotency_key=UUID(int=13161),
         )
