@@ -7,20 +7,34 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 from uuid import UUID, uuid5
 
 from loom_capacity_agent.admission import (
+    BoundExecutableWorkerV2,
+    DrainedExecutableWorkerV2,
     ExecutableDrainRequestV2,
     ExecutableWorkerWithdrawalRequestV2,
     PhysicalJobBindingV2,
+    PreparedExecutableAdmissionV2,
     ProtectedIntentObservationV2,
+    WithdrawnExecutableWorkerV2,
 )
 from loom_capacity_executor.bootstrap_handoff import (
     BootstrapHandoffStore,
     bind_bootstrap_handoff_ownership,
 )
-from loom_capacity_executor.client import ExecutorRejectedError
+from loom_capacity_executor.client import (
+    AcceptedExecutableReservationReceiptV2,
+    ClosingExecutableIntentReceiptV2,
+    ConsumedExecutablePermitReceiptV2,
+    ExecutableCheckpointReceiptV2,
+    ExecutableInventoryReceiptV2,
+    ExecutablePoolWorkV2,
+    ExecutorRejectedError,
+    RegisteredExecutableBootstrapReceiptV2,
+    ReleasedExecutableShapesReceiptV2,
+)
 from loom_capacity_executor.journal import (
     ExecutorJournal,
     JournalRecord,
@@ -37,10 +51,12 @@ from loom_capacity_executor.launch_renderer import (
 )
 from loom_capacity_executor.runtime_profiles import RuntimeAssemblyError, resolve_runtime_profile
 from loom_capacity_executor.slurm_contracts import (
+    SlurmAccountingHighWaterV2,
     SlurmAuthorityV2,
     SlurmCancelRequestV2,
     SlurmJobObservationV2,
     SlurmLaunchRequestV2,
+    SlurmSubmissionV2,
     SlurmTerminalEvidenceV2,
 )
 from loom_capacity_manager.contracts import ResourceVectorV1
@@ -70,25 +86,33 @@ _RECOVERY_LOOKBACK = timedelta(days=8)
 
 
 class _ManagerClient(Protocol):
-    async def executable_checkpoint(self) -> Any: ...
+    async def executable_checkpoint(self) -> ExecutableCheckpointReceiptV2: ...
 
-    async def next_executable_work(self, command_sequence: int) -> object | None: ...
+    async def next_executable_work(self, command_sequence: int) -> ExecutablePoolWorkV2 | None: ...
 
     async def accept_executable_reservation(
         self, value: ExecutableReservationAcceptanceV2
-    ) -> Any: ...
+    ) -> AcceptedExecutableReservationReceiptV2: ...
 
     async def register_executable_bootstrap(
         self, value: ExecutableBootstrapRegistrationV2
-    ) -> Any: ...
+    ) -> RegisteredExecutableBootstrapReceiptV2: ...
 
-    async def consume_executable_permit(self, value: ExecutablePermitConsumptionV2) -> Any: ...
+    async def consume_executable_permit(
+        self, value: ExecutablePermitConsumptionV2
+    ) -> ConsumedExecutablePermitReceiptV2: ...
 
-    async def close_executable_intent(self, value: ExecutableIntentCloseV2) -> Any: ...
+    async def close_executable_intent(
+        self, value: ExecutableIntentCloseV2
+    ) -> ClosingExecutableIntentReceiptV2: ...
 
-    async def release_executable_shapes(self, value: ExecutablePartialReleaseV2) -> Any: ...
+    async def release_executable_shapes(
+        self, value: ExecutablePartialReleaseV2
+    ) -> ReleasedExecutableShapesReceiptV2: ...
 
-    async def ingest_executable_inventory(self, value: ExecutableExecutorInventoryV2) -> Any: ...
+    async def ingest_executable_inventory(
+        self, value: ExecutableExecutorInventoryV2
+    ) -> ExecutableInventoryReceiptV2: ...
 
 
 class _AdmissionClient(Protocol):
@@ -97,31 +121,47 @@ class _AdmissionClient(Protocol):
         request: ExecutableBootstrapRegistrationV2,
         *,
         bootstrap_sha256: str,
-    ) -> Any: ...
+    ) -> PreparedExecutableAdmissionV2: ...
 
-    async def bind_slurm_job(self, request: PhysicalJobBindingV2) -> Any: ...
+    async def bind_slurm_job(self, request: PhysicalJobBindingV2) -> BoundExecutableWorkerV2: ...
 
     async def observe_intent(
         self, binding: ExecutableIntentBindingV2
     ) -> ProtectedIntentObservationV2: ...
 
-    async def begin_drain(self, request: ExecutableDrainRequestV2) -> Any: ...
+    async def begin_drain(self, request: ExecutableDrainRequestV2) -> DrainedExecutableWorkerV2: ...
 
     async def withdraw_unregistered_worker(
         self, request: ExecutableWorkerWithdrawalRequestV2
-    ) -> Any: ...
+    ) -> WithdrawnExecutableWorkerV2: ...
 
 
 class _SlurmBackend(Protocol):
-    async def submit(self, request: Any) -> Any: ...
+    async def submit(self, request: SlurmLaunchRequestV2) -> SlurmSubmissionV2: ...
 
     async def inventory(self) -> tuple[SlurmJobObservationV2, ...]: ...
 
-    async def accounting_high_water(self, *, since: datetime) -> Any: ...
+    async def accounting_high_water(self, *, since: datetime) -> SlurmAccountingHighWaterV2: ...
 
-    async def cancel_pending(self, request: SlurmCancelRequestV2) -> Any: ...
+    async def cancel_pending(self, request: SlurmCancelRequestV2) -> SlurmJobObservationV2: ...
 
-    async def validate_authority(self) -> Any: ...
+    async def validate_authority(self) -> SlurmAuthorityV2: ...
+
+
+if TYPE_CHECKING:
+    from loom_capacity_executor.admission_client import DatabaseExecutableAdmissionClient
+    from loom_capacity_executor.client import ExecutableCapacityExecutorClient
+    from loom_capacity_executor.slurm_backend import AsyncSlurmBackend
+
+    _manager_client_conformance: _ManagerClient = cast(
+        "ExecutableCapacityExecutorClient",
+        None,
+    )
+    _admission_client_conformance: _AdmissionClient = cast(
+        "DatabaseExecutableAdmissionClient",
+        None,
+    )
+    _slurm_backend_conformance: _SlurmBackend = cast("AsyncSlurmBackend", None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -547,7 +587,7 @@ class ExecutablePoolExecutor:
         self,
         record: JournalRecord,
         value: StrictV2Model,
-        checkpoint: Any,
+        checkpoint: ExecutableCheckpointReceiptV2,
     ) -> None:
         if self._event_object(value) != (record.object_kind, record.object_id):
             raise JournalRegressionError("central request object binding changed")
@@ -588,7 +628,9 @@ class ExecutablePoolExecutor:
             return
         raise JournalRegressionError("central request contract is unsupported")
 
-    async def _replay_central_request(self, checkpoint: Any) -> ExecutorTickResult | None:
+    async def _replay_central_request(
+        self, checkpoint: ExecutableCheckpointReceiptV2
+    ) -> ExecutorTickResult | None:
         central_events = {
             "reservation-accept-requested",
             "bootstrap-register-requested",
@@ -660,7 +702,7 @@ class ExecutablePoolExecutor:
 
     async def _replay_drain_only_central_request(
         self,
-        checkpoint: Any,
+        checkpoint: ExecutableCheckpointReceiptV2,
     ) -> ExecutorTickResult | None:
         records = tuple(
             record
@@ -748,7 +790,7 @@ class ExecutablePoolExecutor:
         self,
         record: JournalRecord,
         cancel: SlurmCancelRequestV2,
-        checkpoint: Any,
+        checkpoint: ExecutableCheckpointReceiptV2,
     ) -> ExecutorTickResult:
         self._validate_cancel_replay(record, cancel)
         jobs = await self.slurm.inventory()
@@ -833,7 +875,9 @@ class ExecutablePoolExecutor:
             detail="pending cancellation recovery could not prove exact scheduler outcome",
         )
 
-    async def _replay_local_request(self, checkpoint: Any) -> ExecutorTickResult | None:
+    async def _replay_local_request(
+        self, checkpoint: ExecutableCheckpointReceiptV2
+    ) -> ExecutorTickResult | None:
         local_events = {
             "protected-drain-requested",
             "protected-withdraw-requested",
@@ -885,7 +929,11 @@ class ExecutablePoolExecutor:
         cancel = SlurmCancelRequestV2.model_validate_json(payload)
         return await self._recover_pending_cancel(record, cancel, checkpoint)
 
-    async def _apply_one(self, work: object, checkpoint: Any) -> ExecutorTickResult:
+    async def _apply_one(
+        self,
+        work: ExecutablePoolWorkV2,
+        checkpoint: ExecutableCheckpointReceiptV2,
+    ) -> ExecutorTickResult:
         if isinstance(work, ExecutableReservationProposalV2):
             acceptance = ExecutableReservationAcceptanceV2(
                 execution=work.execution,
@@ -1194,7 +1242,11 @@ class ExecutablePoolExecutor:
             payload=payload,
         )
 
-    async def _close(self, close: ExecutableIntentCloseV2, checkpoint: Any) -> ExecutorTickResult:
+    async def _close(
+        self,
+        close: ExecutableIntentCloseV2,
+        checkpoint: ExecutableCheckpointReceiptV2,
+    ) -> ExecutorTickResult:
         observation = await self.admission.observe_intent(close.binding)
         envelope = self._load_launch(close.binding.intent_id)
         physical = self._physical_binding(envelope)
@@ -1629,7 +1681,7 @@ class ExecutablePoolExecutor:
 
     async def _publish_inventory(
         self,
-        checkpoint: Any,
+        checkpoint: ExecutableCheckpointReceiptV2,
         *,
         jobs: tuple[SlurmJobObservationV2, ...] | None = None,
         quarantine_all: bool = False,

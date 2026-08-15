@@ -1975,6 +1975,11 @@ class CapacityExecutableIntent(Base):
             name="capacity_executable_intent_state_check",
         ),
         CheckConstraint(
+            "observed_state IS NULL OR observed_state IN "
+            "('pending','active','draining','terminal','unknown')",
+            name="capacity_executable_intent_observed_state_check",
+        ),
+        CheckConstraint(
             "jsonb_typeof(binding_payload) = 'object' "
             "AND jsonb_typeof(proposal_payload) = 'object'",
             name="capacity_executable_intent_payload_check",

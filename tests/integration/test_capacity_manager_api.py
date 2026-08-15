@@ -48,7 +48,10 @@ from loom_capacity_manager.models import (
     CapacityAuthorityState,
 )
 from loom_capacity_manager.ownership import public_key_fingerprint
-from loom_capacity_manager.reconciler import reconcile_shadow_once
+from loom_capacity_manager.reconciler import (
+    ReconciliationFailurePersistenceError,
+    reconcile_shadow_once,
+)
 from loom_capacity_manager.store import (
     CapacityManagementStore,
     ExecutionPreparationDisabledError,
@@ -1375,7 +1378,10 @@ async def test_allocation_commit_and_failure_recorder_errors_propagate_hard_fail
         join_transaction_mode="create_savepoint",
     )
 
-    with pytest.raises(RuntimeError, match="failed to persist reconciliation failure") as caught:
+    with pytest.raises(
+        ReconciliationFailurePersistenceError,
+        match="failed to persist reconciliation failure",
+    ) as caught:
         await reconcile_shadow_once(
             session_factory,
             fixture.writer,
@@ -1384,6 +1390,13 @@ async def test_allocation_commit_and_failure_recorder_errors_propagate_hard_fail
 
     assert caught.value.__cause__ is not None
     assert "synthetic recorder failure" in str(caught.value.__cause__)
+    statuses = (
+        await capacity_session.execute(select(CapacityAllocationEpoch.status))
+    ).scalars()
+    assert set(statuses) == set()
+    assert (
+        await capacity_session.execute(select(CapacityAuthorityState.increase_freeze))
+    ).scalar_one() is False
 
 
 async def test_allocation_active_failure_rejects_a_stale_authority_fence(

@@ -129,6 +129,44 @@ def _terminal_from_job(
     )
 
 
+def _pending_cancel_request(
+    job: SlurmJobObservationV2,
+    ownership_evidence_sha256: str,
+) -> SlurmCancelRequestV2:
+    return SlurmCancelRequestV2(
+        cluster=job.cluster,
+        job_id=job.job_id,
+        submitter=job.submitter,
+        account=job.account,
+        partition=job.partition,
+        cpus=job.cpus,
+        memory_bytes=job.memory_bytes,
+        gpus=job.gpus,
+        generic_tres=job.generic_tres,
+        nodes=job.nodes,
+        ownership_token=job.ownership_token,
+        ownership_evidence_sha256=ownership_evidence_sha256,
+    )
+
+
+def _append_pending_cancel(
+    journal: ExecutorJournal,
+    cancel: SlurmCancelRequestV2,
+) -> None:
+    payload = json.dumps(
+        cancel.model_dump(mode="json"),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+    journal.append(
+        "pending-cancel-requested",
+        hashlib.sha256(payload).hexdigest(),
+        object_kind="job",
+        object_id=cancel.job_id,
+        payload=payload,
+    )
+
+
 # Production break caught: treating an interrupted sbatch as safely absent would
 # submit the same stable operation twice after process restart.
 async def test_crash_after_submit_never_resubmits(tmp_path: Path) -> None:
@@ -469,6 +507,143 @@ async def test_repeated_close_after_drain_confirmed_recovers_running_physical_bi
     assert slurm.cancel_requests == []
     assert len(admission.drain_requests) == 1
     assert manager.work == close
+    reopened.close()
+
+
+# Production break caught: a durable pending-cancel replay for an already-running
+# worker must remain drain-only; retrying scheduler cancellation would signal
+# mutable foreign or active work after the protected drain fence.
+async def test_pending_cancel_replay_of_running_job_is_drain_only(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    executor, journal, manager, admission, slurm, launch = executor_fixture(
+        tmp_path, work=permit_fixture(launch.binding)
+    )
+    await executor.tick()
+    submitted = slurm.jobs[0]
+    cancel = _pending_cancel_request(
+        submitted,
+        admission.bind_requests[0].ownership_evidence_sha256,
+    )
+    _append_pending_cancel(journal, cancel)
+    slurm.jobs[0] = submitted.model_copy(
+        update={"state": "RUNNING", "nodes": launch.binding.node_ids, "pending_reason": None}
+    )
+    manager.reject_work_fetch = True
+
+    result = await executor.tick()
+
+    assert result.status == "draining"
+    assert slurm.cancel_requests == []
+    retained = journal.latest("job", submitted.job_id)
+    assert retained is not None
+    assert retained.event_kind == "pending-cancel-running-drain-only"
+    journal.close()
+
+
+# Production break caught: a durable pending-cancel replay with exact terminal
+# accounting evidence must resolve idempotently without reissuing scancel.
+async def test_pending_cancel_replay_accepts_already_terminal_evidence_without_scancel(
+    tmp_path: Path,
+) -> None:
+    executor, journal, manager, admission, slurm, _launch = executor_fixture(
+        tmp_path, work=permit_fixture(launch_context_fixture().binding)
+    )
+    await executor.tick()
+    submitted = slurm.jobs.pop()
+    cancel = _pending_cancel_request(
+        submitted,
+        admission.bind_requests[0].ownership_evidence_sha256,
+    )
+    _append_pending_cancel(journal, cancel)
+    slurm.terminal_jobs = (_terminal_from_job(submitted),)
+    manager.reject_work_fetch = True
+
+    result = await executor.tick()
+
+    assert result.status == "pending-cancelled"
+    assert slurm.cancel_requests == []
+    retained = journal.latest("job", submitted.job_id)
+    assert retained is not None
+    assert retained.event_kind == "pending-cancel-already-terminal"
+    journal.close()
+
+
+# Production break caught: if neither live scheduler state nor exact terminal
+# accounting evidence exists, replay must fail closed instead of inferring that
+# the previous cancellation succeeded.
+async def test_pending_cancel_replay_without_live_or_terminal_evidence_quarantines(
+    tmp_path: Path,
+) -> None:
+    executor, journal, manager, admission, slurm, _launch = executor_fixture(
+        tmp_path, work=permit_fixture(launch_context_fixture().binding)
+    )
+    await executor.tick()
+    submitted = slurm.jobs.pop()
+    cancel = _pending_cancel_request(
+        submitted,
+        admission.bind_requests[0].ownership_evidence_sha256,
+    )
+    _append_pending_cancel(journal, cancel)
+    manager.reject_work_fetch = True
+
+    result = await executor.tick()
+
+    assert result.status == "quarantined"
+    assert slurm.cancel_requests == []
+    retained = journal.latest("job", submitted.job_id)
+    assert retained is not None
+    assert retained.event_kind == "pending-cancel-ambiguous-quarantined"
+    assert manager.inventories[-1].records == ()
+    journal.close()
+
+
+# Production break caught: if scancel committed but its response was lost, restart
+# must use exact terminal accounting evidence and not issue a second cancel.
+async def test_post_scancel_response_loss_recovers_idempotently_from_terminal_evidence(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    executor, journal, manager, admission, slurm, launch = executor_fixture(
+        tmp_path,
+        work=permit_fixture(launch.binding),
+    )
+    await executor.tick()
+    submitted = slurm.jobs[0]
+    manager.work = ExecutableIntentCloseV2(binding=launch.binding, command_sequence=2)
+    admission.observations[launch.binding.intent_id] = ProtectedIntentObservationV2(
+        binding=launch.binding,
+        bootstrap_registration_epoch=1,
+        worker_id=UUID(int=431),
+        worker_incarnation=UUID(int=432),
+        protected_registration_epoch=2,
+        claim_high_water=0,
+    )
+    slurm.cancel_failure = SimulatedCrash("process stopped after scancel committed")
+    slurm.cancel_commits_before_failure = True
+
+    with pytest.raises(SimulatedCrash):
+        await executor.tick()
+
+    assert slurm.jobs == []
+    assert len(slurm.cancel_requests) == 1
+    requested = journal.latest("job", submitted.job_id)
+    assert requested is not None
+    assert requested.event_kind == "pending-cancel-requested"
+    journal.close()
+
+    slurm.cancel_failure = None
+    slurm.terminal_jobs = (_terminal_from_job(submitted),)
+    manager.reject_work_fetch = True
+    recovered, reopened = _restart(journal.path, manager, admission, slurm, launch)
+    result = await recovered.tick()
+
+    assert result.status == "pending-cancelled"
+    assert len(slurm.cancel_requests) == 1
+    confirmed = reopened.latest("job", submitted.job_id)
+    assert confirmed is not None
+    assert confirmed.event_kind == "pending-cancel-already-terminal"
     reopened.close()
 
 

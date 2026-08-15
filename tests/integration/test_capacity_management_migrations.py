@@ -874,6 +874,166 @@ def test_capacity_0004_refuses_downgrade_with_executable_allocation_history(
         engine.dispose()
 
 
+def test_existing_executable_intents_upgrade_to_observed_state_database_check(
+    isolated_capacity_migration_url: str,
+) -> None:
+    """An already-0007 database must reject raw impossible observed states."""
+
+    cfg = _capacity_config(isolated_capacity_migration_url)
+    command.upgrade(cfg, "capacity_0007")
+    engine = create_engine(isolated_capacity_migration_url)
+    try:
+        execution_epoch = 1_700_001
+        configuration_epoch = 1_700_001
+        allocation_epoch = 1
+        execution_manifest = "4" * 64
+        executor_incarnation = UUID(int=17001)
+        subject_id = UUID(int=17002)
+        subject_incarnation = UUID(int=17003)
+        with engine.begin() as connection:
+            authority = connection.execute(
+                text("SELECT authority_incarnation FROM capacity_authority_state")
+            ).scalar_one()
+            connection.execute(
+                text(
+                    "INSERT INTO capacity_configuration_epochs "
+                    "(configuration_epoch, fleet_generation, fleet_digest, "
+                    "subject_generation_manifest, canonical_digest, "
+                    "activation_idempotency_key, activation_actor, "
+                    "activation_request_digest) VALUES "
+                    "(:configuration_epoch, 1, repeat('1', 64), '[]'::jsonb, "
+                    "repeat('2', 64), :configuration_key, 'migration-test', repeat('3', 64))"
+                ),
+                {
+                    "configuration_epoch": configuration_epoch,
+                    "configuration_key": uuid4(),
+                },
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO capacity_execution_epochs "
+                    "(execution_epoch, authority_incarnation, prepared_writer_epoch, "
+                    "current_writer_epoch, configuration_epoch, fleet_generation, "
+                    "fleet_digest, execution_manifest_sha256, manifest_payload, "
+                    "trusted_fleet_release_sha256, oldlab_executor_id, "
+                    "oldlab_executor_incarnation, oldlab_pool_id, oldlab_pool_generation, "
+                    "gb10_executor_id, gb10_executor_incarnation, gb10_pool_id, "
+                    "gb10_pool_generation, environment_acknowledgements_sha256, "
+                    "legacy_writer_manifest_sha256, rollback_evidence_sha256, "
+                    "requested_ceiling, effective_ceiling, requested_rate_per_minute, "
+                    "effective_rate_per_minute, state, actor, idempotency_key, "
+                    "request_digest) VALUES "
+                    "(:execution_epoch, :authority, 1, 1, :configuration_epoch, 1, "
+                    "repeat('1', 64), :execution_manifest, '{}'::jsonb, repeat('5', 64), "
+                    "'oldlab-executor', :oldlab_incarnation, 'oldlab', 1, "
+                    "'gb10-executor', :executor_incarnation, 'gb10', 1, repeat('6', 64), "
+                    "repeat('7', 64), repeat('8', 64), 2, 0, 2, 0, 'prepared', "
+                    "'migration-test', :execution_key, repeat('9', 64))"
+                ),
+                {
+                    "execution_epoch": execution_epoch,
+                    "authority": authority,
+                    "configuration_epoch": configuration_epoch,
+                    "execution_manifest": execution_manifest,
+                    "oldlab_incarnation": UUID(int=17004),
+                    "executor_incarnation": executor_incarnation,
+                    "execution_key": uuid4(),
+                },
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO capacity_allocation_epochs "
+                    "(writer_epoch, configuration_epoch, input_digest, status, failure_reason, "
+                    "complete_payload, executable, execution_epoch, execution_manifest_sha256, "
+                    "committed_at) VALUES "
+                    "(1, :configuration_epoch, repeat('a', 64), 'executable', NULL, "
+                    "'{}'::jsonb, true, :execution_epoch, :execution_manifest, now())"
+                ),
+                {
+                    "configuration_epoch": configuration_epoch,
+                    "execution_epoch": execution_epoch,
+                    "execution_manifest": execution_manifest,
+                },
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO capacity_execution_executors "
+                    "(id, execution_epoch, execution_manifest_sha256, executor_id, "
+                    "executor_incarnation, pool_id, pool_generation, signing_key_id, "
+                    "signing_key_sha256, local_authority_sha256, controller_authority_sha256, "
+                    "actor, idempotency_key, registration_digest, registration_payload) VALUES "
+                    "(:id, :execution_epoch, :execution_manifest, 'gb10-executor', "
+                    ":executor_incarnation, 'gb10', 1, 'gb10-key', repeat('a', 64), "
+                    "repeat('b', 64), repeat('c', 64), 'migration-test', :idempotency_key, "
+                    "repeat('d', 64), '{}'::jsonb)"
+                ),
+                {
+                    "id": uuid4(),
+                    "execution_epoch": execution_epoch,
+                    "execution_manifest": execution_manifest,
+                    "executor_incarnation": executor_incarnation,
+                    "idempotency_key": uuid4(),
+                },
+            )
+            for launch_rank, observed_state in enumerate(("pending", None), start=1):
+                connection.execute(
+                    text(
+                        "INSERT INTO capacity_executable_intents "
+                        "(id, intent_id, tranche_id, shape_instance_id, execution_epoch, "
+                        "execution_manifest_sha256, configuration_epoch, allocation_epoch, "
+                        "executor_id, executor_incarnation, pool_id, pool_generation, "
+                        "subject_id, subject_incarnation, launch_rank, proposal_digest, "
+                        "proposal_payload, binding_digest, binding_payload, observed_state) "
+                        "VALUES "
+                        "(:id, :intent_id, :tranche_id, :shape_instance_id, :execution_epoch, "
+                        ":execution_manifest, :configuration_epoch, :allocation_epoch, "
+                        "'gb10-executor', :executor_incarnation, 'gb10', 1, "
+                        ":subject_id, :subject_incarnation, :launch_rank, repeat('e', 64), "
+                        "'{}'::jsonb, repeat('f', 64), '{}'::jsonb, :observed_state)"
+                    ),
+                    {
+                        "id": uuid4(),
+                        "intent_id": uuid4(),
+                        "tranche_id": uuid4(),
+                        "shape_instance_id": f"shape-{launch_rank}",
+                        "execution_epoch": execution_epoch,
+                        "execution_manifest": execution_manifest,
+                        "configuration_epoch": configuration_epoch,
+                        "allocation_epoch": allocation_epoch,
+                        "executor_incarnation": executor_incarnation,
+                        "subject_id": subject_id,
+                        "subject_incarnation": subject_incarnation,
+                        "launch_rank": launch_rank,
+                        "observed_state": observed_state,
+                    },
+                )
+
+        command.upgrade(cfg, "head")
+
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE capacity_executable_intents "
+                    "SET observed_state = 'active' WHERE shape_instance_id = 'shape-1'"
+                )
+            )
+            connection.execute(
+                text(
+                    "UPDATE capacity_executable_intents "
+                    "SET observed_state = NULL WHERE shape_instance_id = 'shape-2'"
+                )
+            )
+            with pytest.raises(IntegrityError):
+                connection.execute(
+                    text(
+                        "UPDATE capacity_executable_intents "
+                        "SET observed_state = 'impossible' WHERE shape_instance_id = 'shape-1'"
+                    )
+                )
+    finally:
+        engine.dispose()
+
+
 def test_fleet_configuration_generation_is_unique_despite_null_subject_binding(
     capacity_postgres_url: str,
 ) -> None:
@@ -919,12 +1079,12 @@ def test_capacity_schema_has_independent_revision_table(
         with capacity_engine.connect() as connection:
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == ("capacity_0007")
+            ).scalar_one() == ("capacity_0008")
         with environment_engine.connect() as connection:
             environment_revision = connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one()
-            assert environment_revision != "capacity_0007"
+            assert environment_revision != "capacity_0008"
             assert not (EXPECTED_TABLES & set(inspect(connection).get_table_names()))
     finally:
         capacity_engine.dispose()
@@ -946,7 +1106,7 @@ async def test_capacity_schema_error_uses_installed_capacity_migration_command(
 async def test_capacity_schema_startup_returns_numeric_head(
     capacity_engine: AsyncEngine,
 ) -> None:
-    assert await assert_capacity_schema_at_head(capacity_engine) == 7
+    assert await assert_capacity_schema_at_head(capacity_engine) == 8
 
 
 def test_package3_tables_are_database_constrained_to_dry_run(
