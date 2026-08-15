@@ -24,7 +24,12 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom_capacity_manager.allocator import ShadowAllocatorError, allocate_shadow
-from loom_capacity_manager.api import RequestBodyLimitMiddleware, create_app
+from loom_capacity_manager.api import (
+    RequestBodyLimitMiddleware,
+    _health_payload,
+    _writer_matches_authority,
+    create_app,
+)
 from loom_capacity_manager.auth import CapacityPrincipalVerifier
 from loom_capacity_manager.config import CapacityManagerSettings, build_uvicorn_kwargs
 from loom_capacity_manager.contracts import MAX_CONTRACT_BYTES, canonical_digest
@@ -38,7 +43,7 @@ from loom_capacity_manager.models import (
 )
 from loom_capacity_manager.ownership import public_key_fingerprint
 from loom_capacity_manager.reconciler import reconcile_shadow_once
-from loom_capacity_manager.store import CapacityManagementStore, StaleWriterError
+from loom_capacity_manager.store import CapacityManagementStore, StaleWriterError, WriterFence
 from tests.capacity_execution_fixtures import (
     execution_policy,
     register_execution_executors,
@@ -68,6 +73,7 @@ GB10_TOKEN = "gb10-api-secret"
 OLDLAB_TOKEN = "oldlab-api-secret"
 DYNAMIC_DEMAND_TOKEN = "dynamic-demand-api-secret"
 OLDLAB_EXECUTOR_TOKEN = "oldlab-executor-secret"
+OLDLAB_V2_EXECUTOR_TOKEN = "oldlab-v2-executor-secret"
 OLDLAB_EXECUTOR_INCARNATION = UUID("00000000-0000-4000-8000-000000000601")
 OLDLAB_OWNERSHIP_PRIVATE_KEY = Ed25519PrivateKey.from_private_bytes(b"\x03" * 32)
 
@@ -88,6 +94,7 @@ def _principal(
     pool_reporter_incarnation: UUID | None = None,
     executor_id: str | None = None,
     executor_incarnation: UUID | None = None,
+    executor_pool_generation: int | None = None,
 ) -> dict[str, object]:
     return {
         "principal_id": principal_id,
@@ -106,6 +113,7 @@ def _principal(
         "executor_incarnation": (
             None if executor_incarnation is None else str(executor_incarnation)
         ),
+        "executor_pool_generation": executor_pool_generation,
     }
 
 
@@ -307,6 +315,23 @@ class ActivateBeforeShadowCommitStore(CapacityManagementStore):
         return await super().commit_shadow_epoch(session, writer, epoch)
 
 
+async def _ingest_fresh_execution_inputs(
+    session: AsyncSession,
+    store: CapacityManagementStore,
+) -> None:
+    await store.ingest_demand_snapshot(
+        session,
+        demand_snapshot(sequence=1, pending_attempt_ids=("attempt-pending",)),
+        actor="development",
+    )
+    for pool_id in ("gb10", "oldlab"):
+        await store.ingest_pool_observation(
+            session,
+            pool_observation(sequence=1, pool_id=pool_id),
+            actor=f"{pool_id}-reporter",
+        )
+
+
 @pytest.fixture
 def operator_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {OPERATOR_TOKEN}"}
@@ -499,6 +524,189 @@ async def api_context(
     await _reset_capacity_database(capacity_session_factory)
 
 
+@pytest.fixture
+async def api_context_v2_executor_generation(
+    tmp_path: Path,
+    capacity_postgres_url: str,
+    capacity_session_factory: async_sessionmaker[AsyncSession],
+) -> AsyncIterator[tuple[TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator]]:
+    await _reset_capacity_database(capacity_session_factory)
+    registry_path = _owner_file(
+        tmp_path / "principals-v2.json",
+        json.dumps(
+            {
+                "schema_version": 1,
+                "principals": [
+                    _principal(
+                        "fleet-operator",
+                        OPERATOR_TOKEN,
+                        [
+                            "capacity:configure:fleet",
+                            "capacity:configure:subject",
+                            "capacity:configure:activate",
+                            "capacity:project:development",
+                            "capacity:reconcile",
+                            "capacity:read",
+                            "capacity:grant:manage",
+                        ],
+                    ),
+                    _principal(
+                        "dev-reporter",
+                        DEMAND_TOKEN,
+                        ["capacity:report:demand"],
+                        subject_id=SUBJECT_ID,
+                        subject_incarnation=SUBJECT_INCARNATION,
+                        demand_reporter_incarnation=subject_configuration().demand_reporter_incarnation,
+                    ),
+                    _principal(
+                        "gb10-reporter",
+                        GB10_TOKEN,
+                        ["capacity:report:pool"],
+                        pool_id="gb10",
+                        pool_reporter_incarnation=POOL_REPORTER_GB10_ID,
+                    ),
+                    _principal(
+                        "oldlab-reporter",
+                        OLDLAB_TOKEN,
+                        ["capacity:report:pool"],
+                        pool_id="oldlab",
+                        pool_reporter_incarnation=POOL_REPORTER_OLDLAB_ID,
+                    ),
+                    _principal(
+                        "oldlab-executor-v2",
+                        OLDLAB_V2_EXECUTOR_TOKEN,
+                        ["capacity:execute:pool"],
+                        pool_id="oldlab",
+                        executor_id="oldlab-executor",
+                        executor_incarnation=OLDLAB_EXECUTOR_INCARNATION,
+                        executor_pool_generation=1,
+                    ),
+                ],
+            }
+        ),
+    )
+    db_url_path = _owner_file(tmp_path / "database-url-v2", capacity_postgres_url)
+    dummy_cert = _owner_file(tmp_path / "server-v2.crt", "test")
+    dummy_key = _owner_file(tmp_path / "server-v2.key", "test")
+    dummy_ca = _owner_file(tmp_path / "client-ca-v2.crt", "test")
+    ownership_keys = _owner_file(
+        tmp_path / "ownership-public-keys-v2.json",
+        json.dumps(
+            {
+                "schema_version": 1,
+                "keys": [
+                    {
+                        "signing_key_id": "oldlab-key-1",
+                        "public_key_base64": base64.b64encode(
+                            OLDLAB_OWNERSHIP_PRIVATE_KEY.public_key().public_bytes(
+                                encoding=serialization.Encoding.Raw,
+                                format=serialization.PublicFormat.Raw,
+                            )
+                        ).decode("ascii"),
+                    }
+                ],
+            }
+        ),
+    )
+    settings = CapacityManagerSettings(
+        principals_file=registry_path,
+        db_url_file=db_url_path,
+        expected_authority_incarnation=AUTHORITY_ID,
+        tls_cert_file=dummy_cert,
+        tls_key_file=dummy_key,
+        tls_client_ca_file=dummy_ca,
+        ownership_public_keys_file=ownership_keys,
+        allocation_timeout_seconds=5,
+    )
+    allocator = BlockingAllocator()
+    app = create_app(
+        settings,
+        verifier=CapacityPrincipalVerifier.from_file(registry_path),
+        allocator=allocator,
+    )
+    with TestClient(app) as client:
+        assert client.get("/healthz").status_code == 200
+        fleet = fleet_with_development_template()
+        subject = subject_configuration(fleet)
+        fleet_response = client.put(
+            "/v1/config-proposals/fleet",
+            headers={
+                "Authorization": f"Bearer {OPERATOR_TOKEN}",
+                "Idempotency-Key": str(uuid4()),
+            },
+            json=fleet.model_dump(mode="json"),
+        )
+        assert fleet_response.status_code == 200, fleet_response.text
+        subject_response = client.put(
+            f"/v1/config-proposals/subjects/{SUBJECT_ID}",
+            headers={
+                "Authorization": f"Bearer {OPERATOR_TOKEN}",
+                "Idempotency-Key": str(uuid4()),
+            },
+            json=subject.model_dump(mode="json"),
+        )
+        assert subject_response.status_code == 200, subject_response.text
+        fleet_proposal = fleet_response.json()
+        subject_proposal = subject_response.json()
+        activation = {
+            "schema_version": 1,
+            "expected_configuration_epoch": 0,
+            "fleet": {
+                "schema_version": 1,
+                "scope": "fleet",
+                "generation": fleet_proposal["generation"],
+                "digest": fleet_proposal["digest"],
+                "subject_id": None,
+                "subject_incarnation": None,
+            },
+            "subjects": [
+                {
+                    "schema_version": 1,
+                    "scope": "subject",
+                    "generation": subject_proposal["generation"],
+                    "digest": subject_proposal["digest"],
+                    "subject_id": str(SUBJECT_ID),
+                    "subject_incarnation": str(SUBJECT_INCARNATION),
+                }
+            ],
+        }
+        activation_response = client.post(
+            "/v1/config-activations",
+            headers={
+                "Authorization": f"Bearer {OPERATOR_TOKEN}",
+                "Idempotency-Key": str(uuid4()),
+            },
+            json=activation,
+        )
+        assert activation_response.status_code == 200, activation_response.text
+        assert (
+            client.put(
+                f"/v1/reports/demand/{SUBJECT_ID}",
+                headers={"Authorization": f"Bearer {DEMAND_TOKEN}"},
+                json=demand_snapshot(sequence=1).model_dump(mode="json"),
+            ).status_code
+            == 200
+        )
+        assert (
+            client.put(
+                "/v1/reports/pools/gb10",
+                headers={"Authorization": f"Bearer {GB10_TOKEN}"},
+                json=pool_observation(sequence=1, pool_id="gb10").model_dump(mode="json"),
+            ).status_code
+            == 200
+        )
+        assert (
+            client.put(
+                "/v1/reports/pools/oldlab",
+                headers={"Authorization": f"Bearer {OLDLAB_TOKEN}"},
+                json=pool_observation(sequence=1, pool_id="oldlab").model_dump(mode="json"),
+            ).status_code
+            == 200
+        )
+        yield client, app, settings, allocator
+    await _reset_capacity_database(capacity_session_factory)
+
+
 @contextmanager
 def hold_reconciliation_open(
     client: TestClient,
@@ -556,6 +764,26 @@ def test_shadow_api_exposes_exactly_the_approved_routes(
             "/v1/executors/{pool_id}/reservations/{tranche_id}/release",
             ("POST",),
         ),
+        ("/v2/executors/{pool_id}/heartbeat", ("PUT",)),
+        ("/v2/executors/{pool_id}/checkpoint", ("GET",)),
+        ("/v2/executors/{pool_id}/work", ("GET",)),
+        ("/v2/executors/{pool_id}/inventory", ("PUT",)),
+        (
+            "/v2/executors/{pool_id}/reservations/{tranche_id}/accept",
+            ("POST",),
+        ),
+        ("/v2/executors/{pool_id}/intents/{intent_id}/bootstrap", ("POST",)),
+        ("/v2/executors/{pool_id}/permits/{permit_id}/consume", ("POST",)),
+        ("/v2/executors/{pool_id}/permits/{permit_id}/recover", ("POST",)),
+        ("/v2/executors/{pool_id}/intents/{intent_id}/close", ("POST",)),
+        (
+            "/v2/executors/{pool_id}/reservations/{tranche_id}/release",
+            ("POST",),
+        ),
+        (
+            "/v2/reports/protected-releases/{subject_id}/{shape_instance_id}",
+            ("PUT",),
+        ),
         ("/v1/shadow-reconciliations", ("POST",)),
         ("/v1/status", ("GET",)),
         ("/v1/status/subjects", ("GET",)),
@@ -567,6 +795,63 @@ def test_shadow_api_exposes_exactly_the_approved_routes(
         ("/v1/audit-events", ("GET",)),
         ("/metrics", ("GET",)),
     }
+
+
+def test_v2_executor_work_route_rejects_legacy_v1_principal_without_generation(
+    api_context: tuple[TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator],
+) -> None:
+    client, _app, _settings, _allocator = api_context
+    headers = {"Authorization": f"Bearer {OLDLAB_EXECUTOR_TOKEN}"}
+
+    own_pool = client.get("/v2/executors/oldlab/work", headers=headers)
+    crossed_pool = client.get("/v2/executors/gb10/work", headers=headers)
+
+    assert own_pool.status_code == 403
+    assert crossed_pool.status_code == 403
+
+
+def test_v2_executor_routes_require_exact_positive_generation(
+    api_context_v2_executor_generation: tuple[
+        TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator
+    ],
+) -> None:
+    client, app, _settings, _allocator = api_context_v2_executor_generation
+    headers = {"Authorization": f"Bearer {OLDLAB_V2_EXECUTOR_TOKEN}"}
+
+    work = client.get("/v2/executors/oldlab/work", headers=headers)
+    assert work.status_code == 200
+    assert work.json() is None
+
+    wrong_generation = client.put(
+        "/v2/executors/oldlab/heartbeat",
+        headers=headers,
+        json={
+            "schema_version": 2,
+            "execution": {
+                "schema_version": 2,
+                "authority_incarnation": str(AUTHORITY_ID),
+                "writer_epoch": app.state.writer.writer_epoch,
+                "configuration_epoch": 1,
+                "execution_epoch": 1,
+                "execution_manifest_sha256": "0" * 64,
+                "execution_state": "active",
+                "executable_new_capacity_ceiling": 1,
+                "executable_new_capacity_rate_per_minute": 1,
+                "trusted_fleet_release_sha256": "1" * 64,
+            },
+            "executor_id": "oldlab-executor",
+            "executor_incarnation": str(OLDLAB_EXECUTOR_INCARNATION),
+            "pool_id": "oldlab",
+            "pool_generation": 2,
+            "heartbeat_sequence": 1,
+            "journal_sequence": 0,
+            "journal_digest": "0" * 64,
+            "journal_checkpoint_sequence": 0,
+            "journal_checkpoint_digest": "0" * 64,
+            "executable": True,
+        },
+    )
+    assert wrong_generation.status_code == 403, wrong_generation.text
 
 
 def test_lifecycle_can_project_and_authenticate_a_personal_demand_reporter(
@@ -791,7 +1076,7 @@ def test_reporter_cannot_publish_config_or_impersonate_subject(
     assert response.json() == {"detail": "forbidden"}
 
 
-def test_pool_executor_registration_heartbeat_and_cross_pool_rbac(
+def test_pool_executor_registration_heartbeat_inventory_and_cross_pool_rbac(
     api_context: tuple[TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator],
     operator_headers: dict[str, str],
 ) -> None:
@@ -851,6 +1136,30 @@ def test_pool_executor_registration_heartbeat_and_cross_pool_rbac(
     )
     assert response.status_code == 200, response.text
     assert response.json()["heartbeat_sequence"] == 1
+    inventory = {
+        "schema_version": 1,
+        "authority_incarnation": str(AUTHORITY_ID),
+        "writer_epoch": app.state.writer.writer_epoch,
+        "executor_id": "oldlab-executor",
+        "executor_incarnation": str(OLDLAB_EXECUTOR_INCARNATION),
+        "pool_id": "oldlab",
+        "pool_generation": 1,
+        "inventory_sequence": 1,
+        "journal_sequence": 0,
+        "journal_digest": "0" * 64,
+        "journal_checkpoint_sequence": 0,
+        "journal_checkpoint_digest": "0" * 64,
+        "complete": True,
+        "records": [],
+        "executable": False,
+    }
+    inventory_response = client.put(
+        "/v1/executors/oldlab/inventory",
+        headers=executor_headers,
+        json=inventory,
+    )
+    assert inventory_response.status_code == 200, inventory_response.text
+    assert inventory_response.json()["inventory_sequence"] == 1
     assert (
         client.put(
             "/v1/executors/gb10/heartbeat",
@@ -950,6 +1259,7 @@ async def test_allocation_activation_during_shadow_commit_retries_as_executable(
     capacity_session: AsyncSession,
 ) -> None:
     fixture = await setup_execution(capacity_session, execution_policy=execution_policy())
+    await _ingest_fresh_execution_inputs(capacity_session, fixture.store)
     prepared = await fixture.store.prepare_execution_epoch(
         capacity_session,
         fixture.request,
@@ -990,6 +1300,7 @@ async def test_allocation_reconcile_commits_fresh_plan_under_active_execution_fe
     capacity_session: AsyncSession,
 ) -> None:
     fixture = await setup_execution(capacity_session, execution_policy=execution_policy())
+    await _ingest_fresh_execution_inputs(capacity_session, fixture.store)
     prepared = await fixture.store.prepare_execution_epoch(
         capacity_session,
         fixture.request,
@@ -1025,10 +1336,12 @@ async def test_allocation_reconcile_commits_fresh_plan_under_active_execution_fe
     assert result.status == "committed"
     epoch = (await capacity_session.execute(select(CapacityAllocationEpoch))).scalar_one()
     allocations = (await capacity_session.execute(select(CapacityAllocation))).scalars().all()
+    current_input = await fixture.store.load_allocation_input(capacity_session, fixture.writer)
     assert epoch.status == "executable"
     assert epoch.executable is True
     assert epoch.execution_epoch == active.execution_epoch
     assert epoch.execution_manifest_sha256 == active.execution_manifest_sha256
+    assert epoch.input_valid_until == fixture.store.allocation_input_valid_until(current_input)
     assert epoch.sealed is True
     assert epoch.allocation_count == len(allocations)
     assert epoch.complete_payload["execution"]["allocation_epoch"] == epoch.allocation_epoch
@@ -1155,6 +1468,7 @@ async def test_executable_allocation_evidence_is_immutable_and_not_reparentable(
         executable=True,
         execution_epoch=active.execution_epoch,
         execution_manifest_sha256=active.execution_manifest_sha256,
+        input_valid_until=datetime.now(UTC),
         sealed=True,
         allocation_count=0,
         committed_at=parent.committed_at,
@@ -1222,6 +1536,7 @@ async def test_executable_allocation_evidence_is_immutable_and_not_reparentable(
 
 async def _active_execution_fixture(capacity_session: AsyncSession):  # type: ignore[no-untyped-def]
     fixture = await setup_execution(capacity_session, execution_policy=execution_policy())
+    await _ingest_fresh_execution_inputs(capacity_session, fixture.store)
     prepared = await fixture.store.prepare_execution_epoch(
         capacity_session,
         fixture.request,
@@ -1739,4 +2054,19 @@ async def test_health_fails_closed_after_another_process_takes_writer_fence(
     assert response.json() == {
         "status": "not-ready",
         "executable_new_capacity_ceiling": 0,
+    }
+
+
+def test_active_execution_ceiling_does_not_fence_current_writer_health() -> None:
+    writer = WriterFence(authority_incarnation=AUTHORITY_ID, writer_epoch=3)
+    authority = CapacityAuthorityState(
+        authority_incarnation=AUTHORITY_ID,
+        writer_epoch=3,
+        executable_new_capacity_ceiling=1,
+    )
+
+    assert _writer_matches_authority(writer, authority)
+    assert json.loads(_health_payload(ready=True, executable_new_capacity_ceiling=1)) == {
+        "status": "ready",
+        "executable_new_capacity_ceiling": 1,
     }

@@ -671,6 +671,7 @@ class ExecutableReservationAcceptanceV2(StrictV2Model):
     execution: ExecutionFenceV2
     tranche_id: UUID
     proposal_digest: Digest
+    pool_id: Identifier
     pool_generation: PositiveQuantity
     executor_id: Identifier
     executor_incarnation: UUID
@@ -709,6 +710,26 @@ class ExecutablePermitConsumptionV2(StrictV2Model):
     binding: ExecutableIntentBindingV2
     command_sequence: PositiveQuantity
     executable: Literal[True] = True
+
+
+class ExecutableSubmissionRecoveryV2(StrictV2Model):
+    """Authoritative post-crash proof that a consumed permit was never submitted."""
+
+    binding: ExecutableIntentBindingV2
+    permit_id: UUID
+    permit_digest: Digest
+    command_sequence: PositiveQuantity
+    inventory_sequence: PositiveQuantity
+    inventory_digest: Digest
+    controller_query_completed_at: datetime
+    submit_process_absent: Literal[True]
+    scheduler_submission_absent: Literal[True]
+    controller_evidence_sha256: Digest
+    executable: Literal[True] = True
+
+    _controller_query_completed_at_utc = field_validator("controller_query_completed_at")(
+        _utc_time
+    )
 
 
 class ExecutableIntentCloseV2(StrictV2Model):
@@ -832,6 +853,7 @@ __all__ = [
     "ExecutableReleasedShapeV2",
     "ExecutableReservationAcceptanceV2",
     "ExecutableReservationProposalV2",
+    "ExecutableSubmissionRecoveryV2",
     "ExecutionActivationV2",
     "ExecutionAuthorityV2",
     "ExecutionContextV2",

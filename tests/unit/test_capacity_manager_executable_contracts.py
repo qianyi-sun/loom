@@ -599,6 +599,7 @@ def test_executable_operation_family_is_v2_true_and_exactly_bound() -> None:
         "ExecutableBootstrapRegistrationV2",
         "ExecutableLaunchPermitV2",
         "ExecutablePermitConsumptionV2",
+        "ExecutableSubmissionRecoveryV2",
         "ExecutableIntentCloseV2",
         "ExecutableProtectedReleaseV2",
         "ExecutableReleasedShapeV2",
@@ -647,6 +648,7 @@ def test_executable_operation_family_is_v2_true_and_exactly_bound() -> None:
         execution=binding.execution,
         tranche_id=binding.tranche_id,
         proposal_digest="4" * 64,
+        pool_id=binding.pool_id,
         pool_generation=binding.pool_generation,
         executor_id=binding.executor_id,
         executor_incarnation=binding.executor_incarnation,
@@ -671,7 +673,19 @@ def test_executable_operation_family_is_v2_true_and_exactly_bound() -> None:
         binding=binding,
         command_sequence=3,
     )
-    close = contracts.ExecutableIntentCloseV2(binding=binding, command_sequence=4)
+    recovery = contracts.ExecutableSubmissionRecoveryV2(
+        binding=binding,
+        permit_id=permit.permit_id,
+        permit_digest="6" * 64,
+        command_sequence=4,
+        inventory_sequence=2,
+        inventory_digest="7" * 64,
+        controller_query_completed_at=datetime.now(UTC),
+        submit_process_absent=True,
+        scheduler_submission_absent=True,
+        controller_evidence_sha256="8" * 64,
+    )
+    close = contracts.ExecutableIntentCloseV2(binding=binding, command_sequence=5)
     protected = contracts.ExecutableProtectedReleaseV2(
         binding=binding,
         reporter_incarnation=UUID(int=40),
@@ -708,6 +722,7 @@ def test_executable_operation_family_is_v2_true_and_exactly_bound() -> None:
         bootstrap,
         permit,
         consumption,
+        recovery,
         close,
         protected,
         partial,
@@ -739,6 +754,19 @@ def test_journal_permit_and_release_boundaries_fail_closed() -> None:
             permit_epoch=1,
             launch_rank=1,
             expires_at=datetime(2026, 8, 12, 12, 0),
+        )
+    with pytest.raises(ValidationError, match="timezone-aware"):
+        contracts.ExecutableSubmissionRecoveryV2(
+            binding=binding,
+            permit_id=UUID(int=30),
+            permit_digest="6" * 64,
+            command_sequence=4,
+            inventory_sequence=2,
+            inventory_digest="7" * 64,
+            controller_query_completed_at=datetime(2026, 8, 12, 12, 0),
+            submit_process_absent=True,
+            scheduler_submission_absent=True,
+            controller_evidence_sha256="8" * 64,
         )
     with pytest.raises(ValidationError, match="advance past bootstrap"):
         contracts.ExecutableProtectedReleaseV2(
