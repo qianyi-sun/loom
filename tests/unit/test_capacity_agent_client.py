@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -26,7 +27,15 @@ from loom_capacity_agent.contracts import (
 )
 from loom_capacity_agent.reporter import build_demand_snapshot
 from loom_capacity_guard.contracts import canonical_digest as guard_canonical_digest
-from loom_capacity_manager.contracts import canonical_digest
+from loom_capacity_manager.contracts import ResourceVectorV1, canonical_digest
+from loom_capacity_manager.executable_contracts import (
+    CandidateBindingV2,
+    ExecutableBootstrapAcknowledgementV2,
+    ExecutableBootstrapProposalV2,
+    ExecutableIntentBindingV2,
+    ExecutionFenceV2,
+    canonical_executable_digest,
+)
 from loom_capacity_manager.grant_contracts import (
     DryRunProtectedReleaseAcknowledgementV1,
     canonical_grant_digest,
@@ -47,6 +56,7 @@ def _configuration() -> ReporterConfigurationV1:
     )
     return ReporterConfigurationV1(
         **registration.model_dump(mode="python"),
+        protected_admission_sha256="8" * 64,
         pool_capabilities=(
             AgentPoolCapabilityV1(
                 capability_id="oldlab-x86-none",
@@ -65,6 +75,57 @@ def _configuration() -> ReporterConfigurationV1:
                 network_policies=("public",),
             ),
         ),
+    )
+
+
+def _executable_bootstrap(
+    configuration: ReporterConfigurationV1,
+) -> ExecutableBootstrapProposalV2:
+    binding = ExecutableIntentBindingV2(
+        execution=ExecutionFenceV2(
+            authority_incarnation=UUID(int=101),
+            writer_epoch=2,
+            configuration_epoch=3,
+            execution_epoch=4,
+            execution_manifest_sha256="1" * 64,
+            execution_state="active",
+            executable_new_capacity_ceiling=1,
+            executable_new_capacity_rate_per_minute=1,
+            trusted_fleet_release_sha256="2" * 64,
+            allocation_epoch=5,
+        ),
+        tranche_id=UUID(int=102),
+        intent_id=UUID(int=103),
+        shape_instance_id="shape-oldlab-1",
+        subject_id=configuration.subject_id,
+        subject_incarnation=configuration.subject_incarnation,
+        account_id="owner-1",
+        tier_id="development",
+        candidate=CandidateBindingV2(
+            algorithm="source-sha256",
+            identity="3" * 64,
+            publication_sha256="4" * 64,
+        ),
+        candidate_generation=1,
+        deployment_generation=configuration.deployment_generation,
+        pool_id="oldlab",
+        pool_generation=1,
+        executor_id="oldlab-executor",
+        executor_incarnation=UUID(int=104),
+        shape_id="one-slot",
+        profile_id="oldlab-profile",
+        profile_generation=1,
+        profile_digest="5" * 64,
+        concurrency_slots=1,
+        resources=ResourceVectorV1(slots=1, cpu_millicores=1_000),
+        node_ids=("oldlab1",),
+    )
+    return ExecutableBootstrapProposalV2(
+        binding=binding,
+        command_sequence=2,
+        proposal_epoch=1,
+        bootstrap_sha256="6" * 64,
+        expires_at=datetime.now(UTC) + timedelta(minutes=1),
     )
 
 
@@ -221,6 +282,66 @@ async def test_publish_protected_release_maps_local_fence_and_verifies_receipt()
     acknowledgement = DryRunProtectedReleaseAcknowledgementV1.model_validate_json(request.content)
     assert acknowledgement.protected_release_sha256 == guard_canonical_digest(release)
     assert acknowledgement.intent_id == release.submission_intent_id
+
+
+@pytest.mark.asyncio
+async def test_subject_client_fetches_and_acknowledges_executable_bootstrap() -> None:
+    configuration = _configuration()
+    proposal = _executable_bootstrap(configuration)
+    acknowledgement = ExecutableBootstrapAcknowledgementV2(
+        binding=proposal.binding,
+        proposal_epoch=proposal.proposal_epoch,
+        proposal_digest=canonical_executable_digest(proposal),
+        reporter_incarnation=configuration.reporter_incarnation,
+        bootstrap_registration_epoch=1,
+        bootstrap_evidence_sha256="7" * 64,
+        protected_admission_sha256="8" * 64,
+    )
+    idempotency_key = uuid4()
+    seen: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.method == "GET":
+            return httpx.Response(200, content=proposal.model_dump_json().encode("ascii"))
+        assert json.loads(request.content) == acknowledgement.model_dump(mode="json")
+        return httpx.Response(
+            200,
+            json={
+                "intent_id": str(acknowledgement.binding.intent_id),
+                "bootstrap_registration_epoch": (
+                    acknowledgement.bootstrap_registration_epoch
+                ),
+                "receipt_digest": canonical_executable_digest(acknowledgement),
+                "replayed": False,
+                "executable": True,
+            },
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = DemandReporterClient(
+        configuration,
+        manager_origin="https://capacity.internal",
+        bearer_token="reporter-secret",
+        http_client=http,
+    )
+    try:
+        fetched = await client.next_executable_bootstrap()
+        receipt = await client.publish_executable_bootstrap_acknowledgement(
+            acknowledgement,
+            idempotency_key=idempotency_key,
+        )
+    finally:
+        await http.aclose()
+
+    assert fetched == proposal
+    assert receipt.intent_id == proposal.binding.intent_id
+    assert [request.url.path for request in seen] == [
+        f"/v2/subjects/{configuration.subject_id}/bootstrap-work",
+        f"/v2/subjects/{configuration.subject_id}/intents/"
+        f"{proposal.binding.intent_id}/bootstrap-acknowledgements",
+    ]
+    assert seen[1].headers["Idempotency-Key"] == str(idempotency_key)
 
 
 @pytest.mark.asyncio

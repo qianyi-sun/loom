@@ -15,6 +15,7 @@ from loom_capacity_agent.admission import (
     PreparedProtectedReleaseV1,
     PreparedWorkerBindingV1,
     PreparedWorkerShapeV1,
+    ProtectedExecutableBootstrapRegistrationV2,
 )
 from loom_capacity_agent.contracts import AgentRegistrationV1
 from loom_capacity_manager.contracts import ResourceVectorV1, WorkerShapeV1, canonical_digest
@@ -271,4 +272,25 @@ def test_protected_release_advances_registration_fence_and_is_non_executable() -
     with pytest.raises(ValidationError):
         PreparedProtectedReleaseV1.model_validate(
             release.model_dump(mode="python") | {"executable": True}
+        )
+
+
+def test_protected_executable_bootstrap_receipt_is_hash_only_and_non_executable() -> None:
+    receipt = ProtectedExecutableBootstrapRegistrationV2(
+        subject_id=uuid4(),
+        subject_incarnation=uuid4(),
+        intent_id=uuid4(),
+        proposal_epoch=1,
+        proposal_digest="1" * 64,
+        bootstrap_registration_epoch=1,
+        bootstrap_sha256="2" * 64,
+        protected_admission_sha256="3" * 64,
+        protected_high_water=1,
+    )
+
+    assert receipt.executable is False
+    assert "secret" not in ProtectedExecutableBootstrapRegistrationV2.model_fields
+    with pytest.raises(ValidationError):
+        ProtectedExecutableBootstrapRegistrationV2.model_validate(
+            receipt.model_dump(mode="python") | {"executable": True}
         )

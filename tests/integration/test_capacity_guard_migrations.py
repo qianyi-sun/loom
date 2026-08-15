@@ -40,6 +40,7 @@ EXPECTED_GUARD_TABLES = {
     "prepared_bootstrap_bindings",
     "prepared_worker_bindings",
     "protected_release_acknowledgements",
+    "protected_executable_bootstrap_registrations",
     "claim_guard_activation",
     "attempt_lifecycle_events",
     "attempt_lifecycle_heads",
@@ -64,7 +65,7 @@ async def test_guard_schema_startup_returns_numeric_head(
 ) -> None:
     engine = create_async_engine(_value(capacity_guard_database, "migrator_url"))
     try:
-        assert await assert_capacity_guard_schema_at_head(engine) == 11
+        assert await assert_capacity_guard_schema_at_head(engine) == 12
     finally:
         await engine.dispose()
 
@@ -191,7 +192,7 @@ def test_guard_schema_has_exact_owner_and_preserves_public_application_tables(
             revision = connection.execute(
                 text("SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version")
             ).scalar_one()
-            assert revision == "guard_0011"
+            assert revision == "guard_0012"
             public_before = capacity_guard_database["public_tables_before"]
             assert isinstance(public_before, frozenset)
             assert frozenset(inspect(connection).get_table_names(schema="public")) == public_before
@@ -502,6 +503,9 @@ def test_candidate_role_has_no_protected_privileges(
                 + "', '{}'::bytea, '"
                 + "c" * 64
                 + "')",
+                "SELECT loom_capacity_guard.protect_executable_bootstrap("
+                "'00000000-0000-0000-0000-000000000001'::uuid, '{}'::jsonb, "
+                "'{}'::bytea, '" + "a" * 64 + "', '" + "b" * 64 + "')",
             ]
         )
         for statement in statements:

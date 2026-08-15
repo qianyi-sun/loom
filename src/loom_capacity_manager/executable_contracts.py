@@ -689,6 +689,32 @@ class ExecutableBootstrapRegistrationV2(StrictV2Model):
     executable: Literal[True] = True
 
 
+class ExecutableBootstrapProposalV2(StrictV2Model):
+    """Executor proposal containing only a hash of one bootstrap secret."""
+
+    binding: ExecutableIntentBindingV2
+    command_sequence: PositiveQuantity
+    proposal_epoch: PositiveQuantity
+    bootstrap_sha256: Digest
+    expires_at: datetime
+    executable: Literal[True] = True
+
+    _expires_at_utc = field_validator("expires_at")(_utc_time)
+
+
+class ExecutableBootstrapAcknowledgementV2(StrictV2Model):
+    """Subject-agent proof that the exact bootstrap hash is protected locally."""
+
+    binding: ExecutableIntentBindingV2
+    proposal_epoch: PositiveQuantity
+    proposal_digest: Digest
+    reporter_incarnation: UUID
+    bootstrap_registration_epoch: PositiveQuantity
+    bootstrap_evidence_sha256: Digest
+    protected_admission_sha256: Digest
+    executable: Literal[True] = True
+
+
 class ExecutableLaunchPermitV2(StrictV2Model):
     """Manager launch order and bounded scheduler authorization."""
 
@@ -838,6 +864,8 @@ def canonical_executable_digest(contract: StrictV2Model) -> str:
 
 __all__ = [
     "CandidateBindingV2",
+    "ExecutableBootstrapAcknowledgementV2",
+    "ExecutableBootstrapProposalV2",
     "ExecutableBootstrapRegistrationV2",
     "ExecutableExecutorHeartbeatV2",
     "ExecutableExecutorInventoryV2",

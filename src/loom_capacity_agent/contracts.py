@@ -82,6 +82,7 @@ class AgentPoolCapabilityV1(StrictGuardModel):
 class ReporterConfigurationV1(AgentRegistrationV1):
     """Trusted local mapping sealed outside the candidate deployment."""
 
+    protected_admission_sha256: Digest | None = None
     pool_capabilities: Annotated[
         tuple[AgentPoolCapabilityV1, ...], Field(min_length=1, max_length=MAX_POOLS)
     ]

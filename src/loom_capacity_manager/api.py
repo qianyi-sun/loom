@@ -45,7 +45,8 @@ from loom_capacity_manager.contracts import (
     canonical_digest,
 )
 from loom_capacity_manager.executable_contracts import (
-    ExecutableBootstrapRegistrationV2,
+    ExecutableBootstrapAcknowledgementV2,
+    ExecutableBootstrapProposalV2,
     ExecutableExecutorHeartbeatV2,
     ExecutableExecutorInventoryV2,
     ExecutableIntentCloseV2,
@@ -412,7 +413,10 @@ def create_app(
     executable_heartbeat_body = contract_body(ExecutableExecutorHeartbeatV2)
     executable_inventory_body = contract_body(ExecutableExecutorInventoryV2)
     executable_acceptance_body = contract_body(ExecutableReservationAcceptanceV2)
-    executable_bootstrap_body = contract_body(ExecutableBootstrapRegistrationV2)
+    executable_bootstrap_proposal_body = contract_body(ExecutableBootstrapProposalV2)
+    executable_bootstrap_acknowledgement_body = contract_body(
+        ExecutableBootstrapAcknowledgementV2
+    )
     executable_consumption_body = contract_body(ExecutablePermitConsumptionV2)
     executable_recovery_body = contract_body(ExecutableSubmissionRecoveryV2)
     executable_close_body = contract_body(ExecutableIntentCloseV2)
@@ -1088,13 +1092,15 @@ def create_app(
         except CapacityStoreError as exc:
             raise _store_error(exc) from exc
 
-    @app.post("/v2/executors/{pool_id}/intents/{intent_id}/bootstrap")
-    async def register_executable_bootstrap(
+    @app.post("/v2/executors/{pool_id}/intents/{intent_id}/bootstrap-proposals")
+    async def propose_executable_bootstrap(
         pool_id: str,
         intent_id: UUID,
         request: Request,
         actor: CapacityPrincipal = Depends(require("capacity:execute:pool")),
-        value: ExecutableBootstrapRegistrationV2 = Depends(executable_bootstrap_body),
+        value: ExecutableBootstrapProposalV2 = Depends(
+            executable_bootstrap_proposal_body
+        ),
     ) -> Any:
         binding = value.binding
         assert_executor_actor(
@@ -1109,7 +1115,67 @@ def create_app(
         session_factory, executions = execution_runtime(request)
         try:
             async with session_factory() as session:
-                result = await executions.register_bootstrap(session, value)
+                result = await executions.propose_bootstrap(session, value)
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.get("/v2/subjects/{subject_id}/bootstrap-work")
+    async def next_subject_bootstrap_work(
+        subject_id: UUID,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:report:demand")),
+    ) -> Any:
+        if (
+            actor.subject_id != subject_id
+            or actor.subject_incarnation is None
+            or actor.demand_reporter_incarnation is None
+        ):
+            raise HTTPException(status_code=403, detail="forbidden")
+        session_factory, executions = execution_runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await executions.next_subject_bootstrap(
+                    session,
+                    subject_id=subject_id,
+                    subject_incarnation=actor.subject_incarnation,
+                    reporter_incarnation=actor.demand_reporter_incarnation,
+                )
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.put(
+        "/v2/subjects/{subject_id}/intents/{intent_id}/bootstrap-acknowledgements"
+    )
+    async def acknowledge_executable_bootstrap(
+        subject_id: UUID,
+        intent_id: UUID,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:report:demand")),
+        value: ExecutableBootstrapAcknowledgementV2 = Depends(
+            executable_bootstrap_acknowledgement_body
+        ),
+        idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    ) -> Any:
+        binding = value.binding
+        if (
+            binding.subject_id != subject_id
+            or binding.intent_id != intent_id
+            or actor.subject_id != subject_id
+            or actor.subject_incarnation != binding.subject_incarnation
+            or actor.demand_reporter_incarnation != value.reporter_incarnation
+        ):
+            raise HTTPException(status_code=403, detail="forbidden")
+        session_factory, executions = execution_runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await executions.acknowledge_bootstrap(
+                    session,
+                    value,
+                    actor=actor.principal_id,
+                    idempotency_key=idempotency_key,
+                )
             return jsonable_encoder(result)
         except CapacityStoreError as exc:
             raise _store_error(exc) from exc

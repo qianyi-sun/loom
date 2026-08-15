@@ -591,7 +591,7 @@ async def test_atomic_submission_blocks_guard_downgrade_without_data_loss(
     finally:
         admin.dispose()
     assert dict(row) == {
-        "version_num": "guard_0011",
+        "version_num": "guard_0012",
         "state": "protected-pending",
         "lifecycle_authority_id": receipt.lifecycle_authority_id,
         "protected_attempt_id": submission.protected_attempt_id,
@@ -657,7 +657,7 @@ async def test_concurrent_guard_downgrade_observes_committing_atomic_submission(
                 async with asyncio.timeout(10):
                     while True:
                         with admin.connect() as connection:
-                            waiting_on_submission_table = connection.execute(
+                            waiting_on_guard_relation = connection.execute(
                                 text(
                                     "SELECT EXISTS ("
                                     "SELECT 1 FROM pg_locks AS lock "
@@ -667,12 +667,11 @@ async def test_concurrent_guard_downgrade_observes_committing_atomic_submission(
                                     "ON namespace.oid = relation.relnamespace "
                                     "WHERE activity.application_name = :application_name "
                                     "AND namespace.nspname = 'loom_capacity_guard' "
-                                    "AND relation.relname = 'atomic_trial_submissions' "
                                     "AND lock.granted IS FALSE)"
                                 ),
                                 {"application_name": application_name},
                             ).scalar_one()
-                        if waiting_on_submission_table:
+                        if waiting_on_guard_relation:
                             break
                         if downgrade_task.done():
                             pytest.fail(
@@ -718,7 +717,7 @@ async def test_concurrent_guard_downgrade_observes_committing_atomic_submission(
         await agent_engine.dispose()
 
     assert dict(row) == {
-        "version_num": "guard_0011",
+        "version_num": "guard_0012",
         "state": "protected-pending",
         "lifecycle_authority_id": receipt.lifecycle_authority_id,
         "protected_attempt_id": submission.protected_attempt_id,

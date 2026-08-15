@@ -9,13 +9,15 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import event, select, text, update
+from sqlalchemy import event, func, select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 import loom_capacity_manager.executable_contracts as executable_contracts_module
 import loom_capacity_manager.execution_store as execution_store_module
 from loom_capacity_manager.executable_contracts import (
+    ExecutableBootstrapAcknowledgementV2,
+    ExecutableBootstrapProposalV2,
     ExecutableBootstrapRegistrationV2,
     ExecutableExecutorHeartbeatV2,
     ExecutableExecutorInventoryV2,
@@ -37,6 +39,8 @@ from loom_capacity_manager.models import (
     CapacityAllocation,
     CapacityAllocationEpoch,
     CapacityAuthorityState,
+    CapacityExecutableBootstrapAcknowledgement,
+    CapacityExecutableBootstrapProposal,
     CapacityExecutableExecutorState,
     CapacityExecutableIntent,
     CapacityPool,
@@ -500,9 +504,10 @@ async def _launch_ready(
     *,
     policy=None,
 ):
+    resolved_policy = execution_policy() if policy is None else policy
     active, _allocation_epoch = await _active_plan_with_policy(
         session,
-        policy=execution_policy() if policy is None else policy,
+        policy=resolved_policy,
     )
     binding = executor_binding("gb10")
     await _heartbeat(store, session, active, pool_id="gb10")
@@ -524,14 +529,34 @@ async def _launch_ready(
     intent = await store.next_pool_work(session, binding)
     assert intent is not None
     assert intent.intent_id == accepted.intent_ids[0]
-    await store.register_bootstrap(
+    bootstrap = ExecutableBootstrapProposalV2(
+        binding=intent,
+        command_sequence=2,
+        proposal_epoch=1,
+        bootstrap_sha256="7" * 64,
+        expires_at=datetime.now(UTC) + timedelta(minutes=1),
+    )
+    await store.propose_bootstrap(session, bootstrap)
+    subject_acknowledgement = next(
+        acknowledgement
+        for acknowledgement in resolved_policy.subject_acknowledgements
+        if acknowledgement.subject_id == intent.subject_id
+    )
+    await store.acknowledge_bootstrap(
         session,
-        ExecutableBootstrapRegistrationV2(
+        ExecutableBootstrapAcknowledgementV2(
             binding=intent,
-            command_sequence=2,
+            proposal_epoch=bootstrap.proposal_epoch,
+            proposal_digest=store.contract_digest(bootstrap),
+            reporter_incarnation=subject_acknowledgement.reporter_incarnation,
             bootstrap_registration_epoch=1,
             bootstrap_evidence_sha256="8" * 64,
+            protected_admission_sha256=(
+                subject_acknowledgement.protected_admission_sha256
+            ),
         ),
+        actor="development",
+        idempotency_key=UUID(int=995),
     )
     permit = await store.next_pool_work(session, binding)
     assert permit is not None
@@ -1128,7 +1153,48 @@ async def test_permit_consumption_rechecks_execution_fence(
         )
 
 
-async def test_register_bootstrap_locks_executor_context_before_intent(
+async def _proposed_bootstrap(
+    store: CapacityExecutionStore,
+    session: AsyncSession,
+    *,
+    expires_in: timedelta = timedelta(minutes=1),
+):  # type: ignore[no-untyped-def]
+    active, _allocation_epoch = await _active_plan(session)
+    executor = executor_binding("gb10")
+    await _heartbeat(store, session, active, pool_id="gb10")
+    reservation = await store.next_pool_work(session, executor)
+    assert isinstance(reservation, ExecutableReservationProposalV2)
+    accepted = await store.accept_reservation(
+        session,
+        ExecutableReservationAcceptanceV2(
+            execution=reservation.execution,
+            tranche_id=reservation.tranche_id,
+            proposal_digest=store.contract_digest(reservation),
+            pool_id=executor.pool_id,
+            pool_generation=executor.pool_generation,
+            executor_id=executor.executor_id,
+            executor_incarnation=executor.executor_incarnation,
+            command_sequence=1,
+        ),
+    )
+    binding = await store.next_pool_work(session, executor)
+    assert binding is not None
+    assert binding.intent_id == accepted.intent_ids[0]
+    database_now = (
+        await session.execute(select(func.clock_timestamp()))
+    ).scalar_one()
+    bootstrap = ExecutableBootstrapProposalV2(
+        binding=binding,
+        command_sequence=2,
+        proposal_epoch=1,
+        bootstrap_sha256="7" * 64,
+        expires_at=database_now + expires_in,
+    )
+    await store.propose_bootstrap(session, bootstrap)
+    return executor, binding, bootstrap
+
+
+async def test_propose_bootstrap_locks_executor_context_before_intent(
     capacity_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1155,13 +1221,14 @@ async def test_register_bootstrap_locks_executor_context_before_intent(
     assert intent is not None
     lock_order = _record_queue_lock_order(monkeypatch, store)
 
-    await store.register_bootstrap(
+    await store.propose_bootstrap(
         capacity_session,
-        ExecutableBootstrapRegistrationV2(
+        ExecutableBootstrapProposalV2(
             binding=intent,
             command_sequence=2,
-            bootstrap_registration_epoch=1,
-            bootstrap_evidence_sha256="8" * 64,
+            proposal_epoch=1,
+            bootstrap_sha256="7" * 64,
+            expires_at=datetime.now(UTC) + timedelta(minutes=1),
         ),
     )
 
@@ -1172,6 +1239,288 @@ async def test_register_bootstrap_locks_executor_context_before_intent(
         "executor-state",
         "intent",
     ]
+
+
+async def test_executor_cannot_self_register_protected_bootstrap(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityExecutionStore()
+    active, _allocation_epoch = await _active_plan(capacity_session)
+    binding = executor_binding("gb10")
+    await _heartbeat(store, capacity_session, active, pool_id="gb10")
+    proposal = await store.next_pool_work(capacity_session, binding)
+    assert isinstance(proposal, ExecutableReservationProposalV2)
+    await store.accept_reservation(
+        capacity_session,
+        ExecutableReservationAcceptanceV2(
+            execution=proposal.execution,
+            tranche_id=proposal.tranche_id,
+            proposal_digest=store.contract_digest(proposal),
+            pool_id=binding.pool_id,
+            pool_generation=binding.pool_generation,
+            executor_id=binding.executor_id,
+            executor_incarnation=binding.executor_incarnation,
+            command_sequence=1,
+        ),
+    )
+    intent = await store.next_pool_work(capacity_session, binding)
+    assert intent is not None
+
+    with pytest.raises(
+        ExecutionConflictError,
+        match="protected bootstrap acknowledgement is required",
+    ):
+        await store.register_bootstrap(
+            capacity_session,
+            ExecutableBootstrapRegistrationV2(
+                binding=intent,
+                command_sequence=2,
+                bootstrap_registration_epoch=1,
+                bootstrap_evidence_sha256="8" * 64,
+            ),
+        )
+
+
+async def test_launch_permit_requires_subject_agent_bootstrap_acknowledgement(
+    capacity_session: AsyncSession,
+) -> None:
+    """An executor bootstrap hash alone must never authorize scheduler launch."""
+
+    store = CapacityExecutionStore()
+    executor, binding, bootstrap = await _proposed_bootstrap(store, capacity_session)
+
+    intent = (
+        await capacity_session.execute(
+            select(CapacityExecutableIntent).where(
+                CapacityExecutableIntent.intent_id == binding.intent_id
+            )
+        )
+    ).scalar_one()
+    assert intent.state == "accepted"
+    assert await store.next_pool_work(capacity_session, executor) is None
+    subject_work = await store.next_subject_bootstrap(
+        capacity_session,
+        subject_id=binding.subject_id,
+        subject_incarnation=binding.subject_incarnation,
+        reporter_incarnation=demand_snapshot().reporter_incarnation,
+    )
+    assert subject_work == bootstrap
+
+    await store.acknowledge_bootstrap(
+        capacity_session,
+        ExecutableBootstrapAcknowledgementV2(
+            binding=binding,
+            proposal_epoch=bootstrap.proposal_epoch,
+            proposal_digest=store.contract_digest(bootstrap),
+            reporter_incarnation=demand_snapshot().reporter_incarnation,
+            bootstrap_registration_epoch=1,
+            bootstrap_evidence_sha256="8" * 64,
+            protected_admission_sha256="3" * 64,
+        ),
+        actor="development",
+        idempotency_key=UUID(int=995),
+    )
+
+    permit = await store.next_pool_work(capacity_session, executor)
+    assert permit is not None
+    assert permit.binding.intent_id == binding.intent_id
+
+
+async def _insert_direct_bootstrap_acknowledgement(
+    session: AsyncSession,
+    acknowledgement: ExecutableBootstrapAcknowledgementV2,
+    *,
+    acknowledgement_payload: dict[str, object] | None = None,
+) -> None:
+    await session.execute(
+        text(
+            "INSERT INTO public.capacity_executable_bootstrap_acknowledgements "
+            "(id, idempotency_key, intent_id, execution_epoch, "
+            "execution_manifest_sha256, proposal_epoch, proposal_digest, "
+            "reporter_incarnation, bootstrap_registration_epoch, "
+            "bootstrap_evidence_sha256, protected_admission_sha256, "
+            "acknowledgement_digest, actor_id, acknowledgement_payload) VALUES "
+            "(:id, :idempotency_key, :intent_id, :execution_epoch, "
+            ":execution_manifest_sha256, :proposal_epoch, :proposal_digest, "
+            ":reporter_incarnation, :bootstrap_registration_epoch, "
+            ":bootstrap_evidence_sha256, :protected_admission_sha256, "
+            ":acknowledgement_digest, 'direct-sql-test', "
+            "CAST(:acknowledgement_payload AS jsonb))"
+        ),
+        {
+            "id": uuid4(),
+            "idempotency_key": uuid4(),
+            "intent_id": acknowledgement.binding.intent_id,
+            "execution_epoch": acknowledgement.binding.execution.execution_epoch,
+            "execution_manifest_sha256": (
+                acknowledgement.binding.execution.execution_manifest_sha256
+            ),
+            "proposal_epoch": acknowledgement.proposal_epoch,
+            "proposal_digest": acknowledgement.proposal_digest,
+            "reporter_incarnation": acknowledgement.reporter_incarnation,
+            "bootstrap_registration_epoch": (
+                acknowledgement.bootstrap_registration_epoch
+            ),
+            "bootstrap_evidence_sha256": acknowledgement.bootstrap_evidence_sha256,
+            "protected_admission_sha256": acknowledgement.protected_admission_sha256,
+            "acknowledgement_digest": "a" * 64,
+            "acknowledgement_payload": json.dumps(
+                acknowledgement.model_dump(mode="json", exclude_none=False)
+                if acknowledgement_payload is None
+                else acknowledgement_payload
+            ),
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    ("forgery", "error"),
+    (
+        ("wrong-reporter", "reporter changed"),
+        ("wrong-protected-admission", "protected admission changed"),
+        ("unknown-payload-key", "payload binding changed"),
+    ),
+)
+async def test_bootstrap_ack_guard_rejects_direct_sql_forgery(
+    capacity_session: AsyncSession,
+    forgery: str,
+    error: str,
+) -> None:
+    store = CapacityExecutionStore()
+    _executor, binding, proposal = await _proposed_bootstrap(store, capacity_session)
+    acknowledgement = ExecutableBootstrapAcknowledgementV2(
+        binding=binding,
+        proposal_epoch=proposal.proposal_epoch,
+        proposal_digest=store.contract_digest(proposal),
+        reporter_incarnation=demand_snapshot().reporter_incarnation,
+        bootstrap_registration_epoch=1,
+        bootstrap_evidence_sha256="8" * 64,
+        protected_admission_sha256="3" * 64,
+    )
+    payload = acknowledgement.model_dump(mode="json", exclude_none=False)
+    if forgery == "wrong-reporter":
+        acknowledgement = acknowledgement.model_copy(
+            update={"reporter_incarnation": uuid4()}
+        )
+    elif forgery == "wrong-protected-admission":
+        acknowledgement = acknowledgement.model_copy(
+            update={"protected_admission_sha256": "f" * 64}
+        )
+    else:
+        payload["unexpected"] = "forged"
+
+    with pytest.raises(DBAPIError, match=error):
+        async with capacity_session.begin_nested():
+            await _insert_direct_bootstrap_acknowledgement(
+                capacity_session,
+                acknowledgement,
+                acknowledgement_payload=(
+                    payload if forgery == "unknown-payload-key" else None
+                ),
+            )
+
+
+async def test_direct_sql_cannot_mark_an_unacknowledged_intent_launch_ready(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityExecutionStore()
+    _executor, binding, _proposal = await _proposed_bootstrap(store, capacity_session)
+
+    with pytest.raises(DBAPIError, match="protected bootstrap acknowledgement"):
+        async with capacity_session.begin_nested():
+            await capacity_session.execute(
+                update(CapacityExecutableIntent)
+                .where(CapacityExecutableIntent.intent_id == binding.intent_id)
+                .values(
+                    state="launch-ready",
+                    bootstrap_registration_epoch=1,
+                    bootstrap_evidence_sha256="8" * 64,
+                    launch_ready_at=func.clock_timestamp(),
+                )
+            )
+
+
+async def test_bootstrap_proposal_supersession_uses_wall_clock_and_fences_stale_ack(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityExecutionStore()
+    _executor, binding, first = await _proposed_bootstrap(
+        store,
+        capacity_session,
+        expires_in=timedelta(seconds=1),
+    )
+    database_now = (
+        await capacity_session.execute(select(func.clock_timestamp()))
+    ).scalar_one()
+    second = first.model_copy(
+        update={
+            "command_sequence": 3,
+            "proposal_epoch": 2,
+            "bootstrap_sha256": "9" * 64,
+            "expires_at": database_now + timedelta(minutes=1),
+        }
+    )
+    with pytest.raises(ExecutionConflictError, match="still current"):
+        await store.propose_bootstrap(capacity_session, second)
+
+    await capacity_session.execute(text("SELECT pg_sleep(1.1)"))
+    database_now = (
+        await capacity_session.execute(select(func.clock_timestamp()))
+    ).scalar_one()
+    second = second.model_copy(
+        update={"expires_at": database_now + timedelta(minutes=1)}
+    )
+    await store.propose_bootstrap(capacity_session, second)
+    subject_work = await store.next_subject_bootstrap(
+        capacity_session,
+        subject_id=binding.subject_id,
+        subject_incarnation=binding.subject_incarnation,
+        reporter_incarnation=demand_snapshot().reporter_incarnation,
+    )
+    assert subject_work == second
+
+    stale = ExecutableBootstrapAcknowledgementV2(
+        binding=binding,
+        proposal_epoch=first.proposal_epoch,
+        proposal_digest=store.contract_digest(first),
+        reporter_incarnation=demand_snapshot().reporter_incarnation,
+        bootstrap_registration_epoch=1,
+        bootstrap_evidence_sha256="8" * 64,
+        protected_admission_sha256="3" * 64,
+    )
+    with pytest.raises(DBAPIError, match="proposal changed or expired"):
+        async with capacity_session.begin_nested():
+            await _insert_direct_bootstrap_acknowledgement(capacity_session, stale)
+
+
+async def test_bootstrap_evidence_is_append_only_under_direct_sql(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityExecutionStore()
+    await _launch_ready(store, capacity_session)
+
+    for statement in (
+        "UPDATE public.capacity_executable_bootstrap_proposals "
+        "SET bootstrap_sha256 = repeat('f', 64)",
+        "DELETE FROM public.capacity_executable_bootstrap_proposals",
+        "TRUNCATE public.capacity_executable_bootstrap_proposals CASCADE",
+        "UPDATE public.capacity_executable_bootstrap_acknowledgements "
+        "SET bootstrap_evidence_sha256 = repeat('f', 64)",
+        "DELETE FROM public.capacity_executable_bootstrap_acknowledgements",
+        "TRUNCATE public.capacity_executable_bootstrap_acknowledgements",
+    ):
+        with pytest.raises(DBAPIError, match="append-only"):
+            async with capacity_session.begin_nested():
+                await capacity_session.execute(text(statement))
+
+    assert (
+        await capacity_session.execute(select(func.count(CapacityExecutableBootstrapProposal.id)))
+    ).scalar_one() == 1
+    assert (
+        await capacity_session.execute(
+            select(func.count(CapacityExecutableBootstrapAcknowledgement.id))
+        )
+    ).scalar_one() == 1
 
 
 async def test_old_permit_cannot_consume_after_newer_sealed_epoch(

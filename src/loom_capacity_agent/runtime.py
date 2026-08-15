@@ -9,6 +9,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Protocol
+from uuid import UUID
 
 from pydantic import ValidationError
 from sqlalchemy.engine import make_url
@@ -30,6 +31,10 @@ from loom_capacity_agent.contracts import (
     GuardLifecycleDemandObservationV2,
     ReporterConfigurationV1,
 )
+from loom_capacity_agent.executable_bootstrap import (
+    ProtectedExecutableBootstrapCoordinator,
+    ProtectedExecutableBootstrapWork,
+)
 from loom_capacity_agent.reporter import build_lifecycle_demand_snapshot
 from loom_capacity_agent.store import (
     CapacityAgentStoreError,
@@ -38,6 +43,10 @@ from loom_capacity_agent.store import (
     read_agent_reporter_high_water,
 )
 from loom_capacity_manager.contracts import DemandSnapshotV1
+from loom_capacity_manager.executable_contracts import (
+    ExecutableBootstrapAcknowledgementV2,
+    ExecutableBootstrapProposalV2,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,10 +54,36 @@ logger = logging.getLogger(__name__)
 class DemandPublisher(Protocol):
     async def publish(self, snapshot: DemandSnapshotV1) -> object: ...
 
+    async def next_executable_bootstrap(
+        self,
+    ) -> ExecutableBootstrapProposalV2 | None: ...
+
+    async def publish_executable_bootstrap_acknowledgement(
+        self,
+        acknowledgement: ExecutableBootstrapAcknowledgementV2,
+        *,
+        idempotency_key: UUID,
+    ) -> object: ...
+
 
 Capture = Callable[..., Awaitable[GuardLifecycleDemandObservationV2]]
 Recover = Callable[..., Awaitable[GuardLifecycleDemandObservationV2]]
 ReadHighWater = Callable[..., Awaitable[int]]
+ProtectBootstrap = Callable[..., Awaitable[ProtectedExecutableBootstrapWork]]
+
+
+async def protect_executable_bootstrap(
+    session: AsyncSession,
+    *,
+    configuration: ReporterConfigurationV1,
+    proposal: ExecutableBootstrapProposalV2,
+) -> ProtectedExecutableBootstrapWork:
+    """Commit one manager proposal through the protected local coordinator."""
+
+    return await ProtectedExecutableBootstrapCoordinator(
+        session,
+        configuration=configuration,
+    ).protect(proposal)
 
 
 def load_reporter_configuration(path: Path) -> ReporterConfigurationV1:
@@ -98,6 +133,7 @@ class CapacityAgentRuntime:
         capture: Capture = capture_lifecycle_demand_observation,
         recover: Recover = read_agent_lifecycle_demand_observation,
         read_high_water: ReadHighWater = read_agent_reporter_high_water,
+        protect_bootstrap: ProtectBootstrap = protect_executable_bootstrap,
     ) -> None:
         if not 1 <= max_attempts <= 10_000:
             raise ValueError("capacity capture bound must be between 1 and 10000")
@@ -111,8 +147,10 @@ class CapacityAgentRuntime:
         self._capture = capture
         self._recover = recover
         self._read_high_water = read_high_water
+        self._protect_bootstrap = protect_bootstrap
         self._high_water = 0
         self._pending: DemandSnapshotV1 | None = None
+        self._pending_bootstrap: ProtectedExecutableBootstrapWork | None = None
         self._initialized = False
         self.ready = False
 
@@ -153,6 +191,14 @@ class CapacityAgentRuntime:
         if not self._initialized:
             raise CapacityAgentStoreError("capacity agent is not initialized")
         try:
+            if self._pending_bootstrap is not None:
+                await self._publisher.publish_executable_bootstrap_acknowledgement(
+                    self._pending_bootstrap.acknowledgement,
+                    idempotency_key=self._pending_bootstrap.idempotency_key,
+                )
+                self._pending_bootstrap = None
+                self.ready = True
+                return
             if self._pending is None:
                 async with self._session_factory() as session, session.begin():
                     observation = await self._capture(
@@ -167,10 +213,23 @@ class CapacityAgentRuntime:
                     self._configuration,
                 )
             await self._publisher.publish(self._pending)
+            self._pending = None
+            proposal = await self._publisher.next_executable_bootstrap()
+            if proposal is not None:
+                async with self._session_factory() as session, session.begin():
+                    self._pending_bootstrap = await self._protect_bootstrap(
+                        session,
+                        configuration=self._configuration,
+                        proposal=proposal,
+                    )
+                await self._publisher.publish_executable_bootstrap_acknowledgement(
+                    self._pending_bootstrap.acknowledgement,
+                    idempotency_key=self._pending_bootstrap.idempotency_key,
+                )
+                self._pending_bootstrap = None
         except BaseException:
             self.ready = False
             raise
-        self._pending = None
         self.ready = True
 
     async def run_forever(self, *, poll_interval_seconds: float) -> None:
@@ -291,4 +350,5 @@ __all__ = [
     "load_database_url",
     "load_reporter_configuration",
     "main",
+    "protect_executable_bootstrap",
 ]
