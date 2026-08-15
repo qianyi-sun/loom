@@ -26,7 +26,6 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from loom.db.schema import (
     GB10WorkerNodeStatus,
     GB10WorkerPoolDesiredState,
-    ProviderConnection,
     SlurmWorkerJob,
     Task,
     Team,
@@ -152,7 +151,6 @@ async def _cleanup_db(postgres_url: str) -> Iterator[None]:
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as s:
         await s.execute(delete(Trial))
-        await s.execute(delete(ProviderConnection))
         await s.execute(delete(SlurmWorkerJob))
         await s.execute(delete(GB10WorkerNodeStatus))
         await s.execute(delete(GB10WorkerPoolDesiredState))
