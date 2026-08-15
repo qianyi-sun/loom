@@ -37,6 +37,34 @@ def upgrade() -> None:
         "candidate_identity_algorithm = 'source-sha256', "
         "candidate_identity = candidate_digest"
     )
+    op.execute(
+        """
+        CREATE FUNCTION capacity_candidate_identity_compatibility_fill()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          IF NEW.candidate_identity_algorithm IS NULL
+             AND NEW.candidate_identity IS NULL THEN
+            NEW.candidate_identity_algorithm := 'source-sha256';
+            NEW.candidate_identity := NEW.candidate_digest;
+          ELSIF NEW.candidate_identity_algorithm IS NULL
+             OR NEW.candidate_identity IS NULL THEN
+            RAISE EXCEPTION 'candidate identity binding is incomplete'
+              USING ERRCODE = '23514';
+          END IF;
+          RETURN NEW;
+        END;
+        $$
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER capacity_candidate_identity_compatibility_fill
+        BEFORE INSERT ON capacity_candidates
+        FOR EACH ROW EXECUTE FUNCTION capacity_candidate_identity_compatibility_fill()
+        """
+    )
     op.alter_column(
         "capacity_candidates",
         "candidate_identity_algorithm",
@@ -71,10 +99,16 @@ def upgrade() -> None:
         sa.Column("oldlab_executor_incarnation", sa.UUID(), nullable=False),
         sa.Column("oldlab_pool_id", sa.Text(), nullable=False),
         sa.Column("oldlab_pool_generation", sa.BigInteger(), nullable=False),
+        sa.Column("oldlab_signing_key_sha256", sa.Text(), nullable=False),
+        sa.Column("oldlab_local_authority_sha256", sa.Text(), nullable=False),
+        sa.Column("oldlab_controller_authority_sha256", sa.Text(), nullable=False),
         sa.Column("gb10_executor_id", sa.Text(), nullable=False),
         sa.Column("gb10_executor_incarnation", sa.UUID(), nullable=False),
         sa.Column("gb10_pool_id", sa.Text(), nullable=False),
         sa.Column("gb10_pool_generation", sa.BigInteger(), nullable=False),
+        sa.Column("gb10_signing_key_sha256", sa.Text(), nullable=False),
+        sa.Column("gb10_local_authority_sha256", sa.Text(), nullable=False),
+        sa.Column("gb10_controller_authority_sha256", sa.Text(), nullable=False),
         sa.Column("environment_acknowledgements_sha256", sa.Text(), nullable=False),
         sa.Column("legacy_writer_manifest_sha256", sa.Text(), nullable=False),
         sa.Column("rollback_evidence_sha256", sa.Text(), nullable=False),
@@ -113,6 +147,12 @@ def upgrade() -> None:
             "fleet_digest ~ '^[0-9a-f]{64}$' "
             "AND execution_manifest_sha256 ~ '^[0-9a-f]{64}$' "
             "AND trusted_fleet_release_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND oldlab_signing_key_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND oldlab_local_authority_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND oldlab_controller_authority_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND gb10_signing_key_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND gb10_local_authority_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND gb10_controller_authority_sha256 ~ '^[0-9a-f]{64}$' "
             "AND environment_acknowledgements_sha256 ~ '^[0-9a-f]{64}$' "
             "AND legacy_writer_manifest_sha256 ~ '^[0-9a-f]{64}$' "
             "AND rollback_evidence_sha256 ~ '^[0-9a-f]{64}$' "
@@ -185,16 +225,23 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("execution_epoch"),
         sa.UniqueConstraint(
+            "execution_epoch",
+            "execution_manifest_sha256",
+            name="capacity_execution_epoch_manifest_key",
+        ),
+        sa.UniqueConstraint(
             "activation_idempotency_key",
             name="capacity_execution_epoch_activation_idempotency_key",
         ),
         sa.UniqueConstraint("idempotency_key", name="capacity_execution_epoch_idempotency_key"),
         sa.UniqueConstraint(
+            "authority_incarnation",
+            "current_writer_epoch",
             "execution_epoch",
             "execution_manifest_sha256",
             "state",
             "effective_ceiling",
-            name="capacity_execution_epoch_authority_binding_key",
+            name="capacity_execution_epoch_complete_authority_binding_key",
         ),
     )
     op.create_table(
@@ -233,9 +280,12 @@ def upgrade() -> None:
             name="capacity_execution_executor_digest_check",
         ),
         sa.ForeignKeyConstraint(
-            ["execution_epoch"],
-            ["capacity_execution_epochs.execution_epoch"],
-            name="capacity_execution_executor_epoch_fkey",
+            ["execution_epoch", "execution_manifest_sha256"],
+            [
+                "capacity_execution_epochs.execution_epoch",
+                "capacity_execution_epochs.execution_manifest_sha256",
+            ],
+            name="capacity_execution_executor_epoch_manifest_fkey",
             ondelete="RESTRICT",
         ),
         sa.PrimaryKeyConstraint("id"),
@@ -304,12 +354,16 @@ def upgrade() -> None:
         "capacity_authority_state",
         "capacity_execution_epochs",
         [
+            "authority_incarnation",
+            "writer_epoch",
             "execution_epoch",
             "execution_manifest_sha256",
             "execution_state",
             "executable_new_capacity_ceiling",
         ],
         [
+            "authority_incarnation",
+            "current_writer_epoch",
             "execution_epoch",
             "execution_manifest_sha256",
             "state",
@@ -324,6 +378,7 @@ def upgrade() -> None:
         CREATE FUNCTION capacity_execution_epoch_transition_guard()
         RETURNS trigger
         LANGUAGE plpgsql
+        SET search_path = pg_catalog
         AS $$
         BEGIN
           IF TG_OP = 'INSERT' THEN
@@ -369,10 +424,16 @@ def upgrade() -> None:
             NEW.oldlab_executor_incarnation,
             NEW.oldlab_pool_id,
             NEW.oldlab_pool_generation,
+            NEW.oldlab_signing_key_sha256,
+            NEW.oldlab_local_authority_sha256,
+            NEW.oldlab_controller_authority_sha256,
             NEW.gb10_executor_id,
             NEW.gb10_executor_incarnation,
             NEW.gb10_pool_id,
             NEW.gb10_pool_generation,
+            NEW.gb10_signing_key_sha256,
+            NEW.gb10_local_authority_sha256,
+            NEW.gb10_controller_authority_sha256,
             NEW.environment_acknowledgements_sha256,
             NEW.legacy_writer_manifest_sha256,
             NEW.rollback_evidence_sha256,
@@ -396,10 +457,16 @@ def upgrade() -> None:
             OLD.oldlab_executor_incarnation,
             OLD.oldlab_pool_id,
             OLD.oldlab_pool_generation,
+            OLD.oldlab_signing_key_sha256,
+            OLD.oldlab_local_authority_sha256,
+            OLD.oldlab_controller_authority_sha256,
             OLD.gb10_executor_id,
             OLD.gb10_executor_incarnation,
             OLD.gb10_pool_id,
             OLD.gb10_pool_generation,
+            OLD.gb10_signing_key_sha256,
+            OLD.gb10_local_authority_sha256,
+            OLD.gb10_controller_authority_sha256,
             OLD.environment_acknowledgements_sha256,
             OLD.legacy_writer_manifest_sha256,
             OLD.rollback_evidence_sha256,
@@ -459,7 +526,7 @@ def upgrade() -> None:
             END IF;
             IF (
               SELECT count(*)
-              FROM capacity_execution_executors executor
+              FROM public.capacity_execution_executors executor
               WHERE executor.execution_epoch = NEW.execution_epoch
                 AND executor.execution_manifest_sha256 = NEW.execution_manifest_sha256
                 AND (
@@ -468,12 +535,20 @@ def upgrade() -> None:
                     AND executor.executor_id = NEW.oldlab_executor_id
                     AND executor.executor_incarnation = NEW.oldlab_executor_incarnation
                     AND executor.pool_generation = NEW.oldlab_pool_generation
+                    AND executor.signing_key_sha256 = NEW.oldlab_signing_key_sha256
+                    AND executor.local_authority_sha256 = NEW.oldlab_local_authority_sha256
+                    AND executor.controller_authority_sha256 =
+                      NEW.oldlab_controller_authority_sha256
                   )
                   OR (
                     executor.pool_id = 'gb10'
                     AND executor.executor_id = NEW.gb10_executor_id
                     AND executor.executor_incarnation = NEW.gb10_executor_incarnation
                     AND executor.pool_generation = NEW.gb10_pool_generation
+                    AND executor.signing_key_sha256 = NEW.gb10_signing_key_sha256
+                    AND executor.local_authority_sha256 = NEW.gb10_local_authority_sha256
+                    AND executor.controller_authority_sha256 =
+                      NEW.gb10_controller_authority_sha256
                   )
                 )
             ) <> 2 THEN
@@ -559,6 +634,95 @@ def upgrade() -> None:
     )
     op.execute(
         """
+        CREATE FUNCTION capacity_authority_execution_transition_guard()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          IF OLD.execution_state = NEW.execution_state THEN
+            IF ROW(
+              NEW.execution_epoch,
+              NEW.execution_manifest_sha256,
+              NEW.executable_new_capacity_ceiling
+            ) IS DISTINCT FROM ROW(
+              OLD.execution_epoch,
+              OLD.execution_manifest_sha256,
+              OLD.executable_new_capacity_ceiling
+            ) THEN
+              RAISE EXCEPTION 'authority execution transition is not monotonic'
+                USING ERRCODE = '23514';
+            END IF;
+            IF OLD.execution_state IN ('prepared', 'active')
+               AND NEW.writer_epoch <> OLD.writer_epoch THEN
+              RAISE EXCEPTION 'authority execution writer changed without transition'
+                USING ERRCODE = '23514';
+            END IF;
+            IF OLD.execution_state = 'shadow'
+               AND NEW.writer_epoch < OLD.writer_epoch THEN
+              RAISE EXCEPTION 'authority execution writer did not advance monotonically'
+                USING ERRCODE = '23514';
+            END IF;
+            IF OLD.execution_state = 'drain-only'
+               AND NEW.writer_epoch NOT IN (OLD.writer_epoch, OLD.writer_epoch + 1) THEN
+              RAISE EXCEPTION 'authority execution writer did not advance monotonically'
+                USING ERRCODE = '23514';
+            END IF;
+            RETURN NEW;
+          END IF;
+
+          IF OLD.authority_incarnation <> NEW.authority_incarnation THEN
+            RAISE EXCEPTION 'authority incarnation changed during execution transition'
+              USING ERRCODE = '23514';
+          ELSIF OLD.execution_state = 'shadow' AND NEW.execution_state = 'prepared' THEN
+            IF NEW.writer_epoch <> OLD.writer_epoch
+               OR NEW.execution_epoch <= 0
+               OR NEW.execution_manifest_sha256 IS NULL
+               OR NEW.executable_new_capacity_ceiling <> 0 THEN
+              RAISE EXCEPTION 'authority execution preparation is invalid'
+                USING ERRCODE = '23514';
+            END IF;
+          ELSIF OLD.execution_state = 'prepared' AND NEW.execution_state = 'active' THEN
+            IF NEW.writer_epoch <> OLD.writer_epoch
+               OR NEW.execution_epoch <> OLD.execution_epoch
+               OR NEW.execution_manifest_sha256 <> OLD.execution_manifest_sha256
+               OR NEW.executable_new_capacity_ceiling <= 0 THEN
+              RAISE EXCEPTION 'authority execution activation is invalid'
+                USING ERRCODE = '23514';
+            END IF;
+          ELSIF OLD.execution_state = 'prepared' AND NEW.execution_state = 'shadow' THEN
+            IF NEW.writer_epoch <> OLD.writer_epoch + 1
+               OR NEW.execution_epoch <> 0
+               OR NEW.execution_manifest_sha256 IS NOT NULL
+               OR NEW.executable_new_capacity_ceiling <> 0 THEN
+              RAISE EXCEPTION 'authority prepared retirement is invalid'
+                USING ERRCODE = '23514';
+            END IF;
+          ELSIF OLD.execution_state = 'active' AND NEW.execution_state = 'drain-only' THEN
+            IF NEW.writer_epoch <> OLD.writer_epoch + 1
+               OR NEW.execution_epoch <> OLD.execution_epoch
+               OR NEW.execution_manifest_sha256 <> OLD.execution_manifest_sha256
+               OR NEW.executable_new_capacity_ceiling <> 0 THEN
+              RAISE EXCEPTION 'authority execution drain is invalid'
+                USING ERRCODE = '23514';
+            END IF;
+          ELSE
+            RAISE EXCEPTION 'authority execution transition is not monotonic'
+              USING ERRCODE = '23514';
+          END IF;
+          RETURN NEW;
+        END;
+        $$
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER capacity_authority_execution_transition_guard
+        BEFORE UPDATE ON capacity_authority_state
+        FOR EACH ROW EXECUTE FUNCTION capacity_authority_execution_transition_guard()
+        """
+    )
+    op.execute(
+        """
         CREATE FUNCTION capacity_execution_evidence_append_only_guard()
         RETURNS trigger
         LANGUAGE plpgsql
@@ -587,6 +751,33 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    connection = op.get_bind()
+    connection.execute(
+        sa.text("LOCK TABLE public.capacity_authority_state IN ACCESS EXCLUSIVE MODE")
+    )
+    connection.execute(
+        sa.text(
+            "LOCK TABLE public.capacity_execution_epochs, "
+            "public.capacity_execution_executors, public.capacity_candidates "
+            "IN ACCESS EXCLUSIVE MODE"
+        )
+    )
+    if connection.execute(
+        sa.text("SELECT EXISTS (SELECT 1 FROM public.capacity_execution_epochs)")
+    ).scalar_one():
+        raise RuntimeError("cannot downgrade capacity_0004 with executable epoch evidence")
+    if connection.execute(
+        sa.text(
+            "SELECT EXISTS (SELECT 1 FROM public.capacity_candidates "
+            "WHERE candidate_identity_algorithm <> 'source-sha256' "
+            "OR candidate_identity <> candidate_digest)"
+        )
+    ).scalar_one():
+        raise RuntimeError("cannot downgrade capacity_0004 without losing candidate identity")
+    op.execute(
+        "DROP TRIGGER capacity_authority_execution_transition_guard ON capacity_authority_state"
+    )
+    op.execute("DROP FUNCTION capacity_authority_execution_transition_guard()")
     op.execute(
         "DROP TRIGGER capacity_execution_executor_truncate_guard ON capacity_execution_executors"
     )
@@ -624,5 +815,7 @@ def downgrade() -> None:
         "capacity_candidates",
         type_="check",
     )
+    op.execute("DROP TRIGGER capacity_candidate_identity_compatibility_fill ON capacity_candidates")
+    op.execute("DROP FUNCTION capacity_candidate_identity_compatibility_fill()")
     op.drop_column("capacity_candidates", "candidate_identity")
     op.drop_column("capacity_candidates", "candidate_identity_algorithm")

@@ -20,7 +20,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
-from sqlalchemy import delete, update
+from sqlalchemy import delete, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom_capacity_manager.api import create_app
@@ -86,9 +86,7 @@ def _signed_certificate(
     if server:
         identities: list[x509.GeneralName] = [x509.DNSName("localhost")]
         if include_service_dns:
-            identities.append(
-                x509.DNSName("loom-capacity-manager.loom-dev.svc.cluster.local")
-            )
+            identities.append(x509.DNSName("loom-capacity-manager.loom-dev.svc.cluster.local"))
         if include_loopback_ip:
             identities.append(x509.IPAddress(ipaddress.ip_address("127.0.0.1")))
         builder = builder.add_extension(
@@ -110,6 +108,12 @@ async def _reset_capacity_database(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory() as session, session.begin():
+        await session.execute(
+            text(
+                "ALTER TABLE capacity_authority_state DISABLE TRIGGER "
+                "capacity_authority_execution_transition_guard"
+            )
+        )
         for table in reversed(Base.metadata.sorted_tables):
             if table.name != CapacityAuthorityState.__tablename__:
                 await session.execute(delete(table))
@@ -123,6 +127,12 @@ async def _reset_capacity_database(
                 increase_freeze=True,
                 increase_freeze_reason="initial_shadow_freeze",
                 executable_new_capacity_ceiling=0,
+            )
+        )
+        await session.execute(
+            text(
+                "ALTER TABLE capacity_authority_state ENABLE TRIGGER "
+                "capacity_authority_execution_transition_guard"
             )
         )
 

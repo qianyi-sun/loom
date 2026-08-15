@@ -63,12 +63,16 @@ class CapacityAuthorityState(Base):
         ),
         ForeignKeyConstraint(
             (
+                "authority_incarnation",
+                "writer_epoch",
                 "execution_epoch",
                 "execution_manifest_sha256",
                 "execution_state",
                 "executable_new_capacity_ceiling",
             ),
             (
+                "capacity_execution_epochs.authority_incarnation",
+                "capacity_execution_epochs.current_writer_epoch",
                 "capacity_execution_epochs.execution_epoch",
                 "capacity_execution_epochs.execution_manifest_sha256",
                 "capacity_execution_epochs.state",
@@ -209,6 +213,12 @@ class CapacityExecutionEpoch(Base):
             "fleet_digest ~ '^[0-9a-f]{64}$' "
             "AND execution_manifest_sha256 ~ '^[0-9a-f]{64}$' "
             "AND trusted_fleet_release_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND oldlab_signing_key_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND oldlab_local_authority_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND oldlab_controller_authority_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND gb10_signing_key_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND gb10_local_authority_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND gb10_controller_authority_sha256 ~ '^[0-9a-f]{64}$' "
             "AND environment_acknowledgements_sha256 ~ '^[0-9a-f]{64}$' "
             "AND legacy_writer_manifest_sha256 ~ '^[0-9a-f]{64}$' "
             "AND rollback_evidence_sha256 ~ '^[0-9a-f]{64}$' "
@@ -274,16 +284,23 @@ class CapacityExecutionEpoch(Base):
             ondelete="RESTRICT",
         ),
         UniqueConstraint(
+            "execution_epoch",
+            "execution_manifest_sha256",
+            name="capacity_execution_epoch_manifest_key",
+        ),
+        UniqueConstraint(
             "activation_idempotency_key",
             name="capacity_execution_epoch_activation_idempotency_key",
         ),
         UniqueConstraint("idempotency_key", name="capacity_execution_epoch_idempotency_key"),
         UniqueConstraint(
+            "authority_incarnation",
+            "current_writer_epoch",
             "execution_epoch",
             "execution_manifest_sha256",
             "state",
             "effective_ceiling",
-            name="capacity_execution_epoch_authority_binding_key",
+            name="capacity_execution_epoch_complete_authority_binding_key",
         ),
     )
 
@@ -305,10 +322,16 @@ class CapacityExecutionEpoch(Base):
     oldlab_executor_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
     oldlab_pool_id: Mapped[str] = mapped_column(Text, nullable=False)
     oldlab_pool_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    oldlab_signing_key_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    oldlab_local_authority_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    oldlab_controller_authority_sha256: Mapped[str] = mapped_column(Text, nullable=False)
     gb10_executor_id: Mapped[str] = mapped_column(Text, nullable=False)
     gb10_executor_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
     gb10_pool_id: Mapped[str] = mapped_column(Text, nullable=False)
     gb10_pool_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    gb10_signing_key_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    gb10_local_authority_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    gb10_controller_authority_sha256: Mapped[str] = mapped_column(Text, nullable=False)
     environment_acknowledgements_sha256: Mapped[str] = mapped_column(Text, nullable=False)
     legacy_writer_manifest_sha256: Mapped[str] = mapped_column(Text, nullable=False)
     rollback_evidence_sha256: Mapped[str] = mapped_column(Text, nullable=False)
@@ -346,6 +369,15 @@ class CapacityExecutionExecutor(Base):
             "AND registration_digest ~ '^[0-9a-f]{64}$'",
             name="capacity_execution_executor_digest_check",
         ),
+        ForeignKeyConstraint(
+            ("execution_epoch", "execution_manifest_sha256"),
+            (
+                "capacity_execution_epochs.execution_epoch",
+                "capacity_execution_epochs.execution_manifest_sha256",
+            ),
+            name="capacity_execution_executor_epoch_manifest_fkey",
+            ondelete="RESTRICT",
+        ),
         UniqueConstraint("execution_epoch", "pool_id", name="capacity_execution_executor_pool_key"),
         UniqueConstraint(
             "executor_incarnation", name="capacity_execution_executor_incarnation_key"
@@ -354,11 +386,7 @@ class CapacityExecutionExecutor(Base):
     )
 
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
-    execution_epoch: Mapped[int] = mapped_column(
-        BigInteger,
-        ForeignKey("capacity_execution_epochs.execution_epoch", ondelete="RESTRICT"),
-        nullable=False,
-    )
+    execution_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
     execution_manifest_sha256: Mapped[str] = mapped_column(Text, nullable=False)
     executor_id: Mapped[str] = mapped_column(Text, nullable=False)
     executor_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)

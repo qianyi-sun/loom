@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import importlib
 import os
+import time
 from collections.abc import Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from uuid import uuid4
 
@@ -11,6 +14,8 @@ import pytest
 import sqlalchemy
 from alembic import command
 from alembic.config import Config as AlembicConfig
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
 from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
@@ -106,6 +111,18 @@ def test_shadow_schema_has_execution_epoch_table_and_zero_execution_guard(
                 ("configuration_epoch", "oldlab_pool_id", "oldlab_pool_generation"),
                 ("configuration_epoch", "gb10_pool_id", "gb10_pool_generation"),
             } <= execution_pool_foreign_keys
+            authority_execution_foreign_keys = {
+                tuple(item["constrained_columns"])
+                for item in inspector.get_foreign_keys("capacity_authority_state")
+            }
+            assert (
+                "authority_incarnation",
+                "writer_epoch",
+                "execution_epoch",
+                "execution_manifest_sha256",
+                "execution_state",
+                "executable_new_capacity_ceiling",
+            ) in authority_execution_foreign_keys
             authority = (
                 connection.execute(
                     text(
@@ -136,6 +153,212 @@ def test_shadow_schema_has_execution_epoch_table_and_zero_execution_guard(
                 )
     finally:
         engine.dispose()
+
+
+def test_capacity_0004_accepts_candidate_insert_from_running_0003_writer(
+    capacity_postgres_url: str,
+) -> None:
+    """The expand migration must not break an old manager during rollout."""
+
+    candidate_id = uuid4()
+    engine = create_engine(capacity_postgres_url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO capacity_candidates "
+                    "(id, subject_id, subject_incarnation, candidate_generation, "
+                    "candidate_digest, source_payload, artifact_payload, "
+                    "architecture_payload, launcher_payload, attestation_payload, "
+                    "protocol_payload) VALUES "
+                    "(:id, :subject_id, :subject_incarnation, 1, repeat('1', 64), "
+                    "jsonb_build_object('publication_sha256', repeat('2', 64)), "
+                    "'{}'::jsonb, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb)"
+                ),
+                {
+                    "id": candidate_id,
+                    "subject_id": uuid4(),
+                    "subject_incarnation": uuid4(),
+                },
+            )
+        with engine.connect() as connection:
+            candidate = (
+                connection.execute(
+                    text(
+                        "SELECT candidate_identity_algorithm, candidate_identity "
+                        "FROM capacity_candidates WHERE id = :id"
+                    ),
+                    {"id": candidate_id},
+                )
+                .mappings()
+                .one()
+            )
+            assert candidate == {
+                "candidate_identity_algorithm": "source-sha256",
+                "candidate_identity": "1" * 64,
+            }
+    finally:
+        engine.dispose()
+
+
+def test_capacity_0004_refuses_lossy_git_candidate_downgrade(
+    isolated_capacity_migration_url: str,
+) -> None:
+    """A Git identity must never be silently relabeled by re-upgrade."""
+
+    cfg = _capacity_config(isolated_capacity_migration_url)
+    command.upgrade(cfg, "capacity_0004")
+    candidate_id = uuid4()
+    engine = create_engine(isolated_capacity_migration_url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO capacity_candidates "
+                    "(id, subject_id, subject_incarnation, candidate_generation, "
+                    "candidate_digest, candidate_identity_algorithm, candidate_identity, "
+                    "source_payload, artifact_payload, architecture_payload, launcher_payload, "
+                    "attestation_payload, protocol_payload) VALUES "
+                    "(:id, :subject_id, :subject_incarnation, 1, repeat('2', 64), "
+                    "'git-sha1', repeat('1', 40), "
+                    "jsonb_build_object('publication_sha256', repeat('2', 64)), "
+                    "'{}'::jsonb, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb)"
+                ),
+                {
+                    "id": candidate_id,
+                    "subject_id": uuid4(),
+                    "subject_incarnation": uuid4(),
+                },
+            )
+
+        with pytest.raises(RuntimeError, match=r"cannot downgrade.*candidate identity"):
+            command.downgrade(cfg, "capacity_0003")
+
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == ("capacity_0004")
+            identity = connection.execute(
+                text(
+                    "SELECT candidate_identity_algorithm, candidate_identity "
+                    "FROM capacity_candidates WHERE id = :id"
+                ),
+                {"id": candidate_id},
+            ).one()
+            assert identity == ("git-sha1", "1" * 40)
+    finally:
+        engine.dispose()
+
+
+def test_capacity_0004_downgrade_serializes_candidate_preflight_with_writers(
+    isolated_capacity_migration_url: str,
+) -> None:
+    """A concurrent Git candidate cannot arrive after downgrade's safety check."""
+
+    application_name = f"capacity-downgrade-race-{uuid4().hex}"
+    cfg = _capacity_config(isolated_capacity_migration_url)
+    command.upgrade(cfg, "capacity_0004")
+    observer_engine = create_engine(
+        isolated_capacity_migration_url,
+        isolation_level="AUTOCOMMIT",
+    )
+    writer_engine = create_engine(isolated_capacity_migration_url)
+    downgrade_engine = create_engine(
+        isolated_capacity_migration_url,
+        connect_args={"application_name": application_name},
+    )
+    migration = importlib.import_module(
+        "capacity_migrations.versions.capacity_0004_executable_bridge"
+    )
+
+    def run_downgrade() -> None:
+        with downgrade_engine.begin() as connection:
+            migration_context = MigrationContext.configure(connection)
+            with Operations.context(migration_context):
+                migration.downgrade()
+
+    def wait_until_downgrade_is_blocked(
+        connection: sqlalchemy.Connection,
+        downgrade: Future[None],
+    ) -> None:
+        deadline = time.monotonic() + 5
+        observed: list[dict[str, object]] = []
+        while time.monotonic() < deadline:
+            if downgrade.done():
+                downgrade.result()
+                raise AssertionError(
+                    "capacity downgrade exited before waiting for the candidate table lock"
+                )
+            connection.execute(text("SELECT pg_stat_clear_snapshot()"))
+            observed = [
+                dict(row)
+                for row in connection.execute(
+                    text(
+                        "SELECT application_name, state, wait_event_type, wait_event, query "
+                        "FROM pg_stat_activity WHERE datname = current_database() "
+                        "AND pid <> pg_backend_pid()"
+                    )
+                ).mappings()
+            ]
+            if any(row["wait_event_type"] == "Lock" for row in observed):
+                return
+            time.sleep(0.01)
+        raise AssertionError(
+            f"capacity downgrade did not wait for the candidate table lock: {observed!r}"
+        )
+
+    try:
+        with (
+            ThreadPoolExecutor(max_workers=1) as executor,
+            writer_engine.connect() as writer,
+            observer_engine.connect() as observer,
+        ):
+            writer_transaction = writer.begin()
+            try:
+                candidate_id = uuid4()
+                writer.execute(
+                    text(
+                        "INSERT INTO capacity_candidates "
+                        "(id, subject_id, subject_incarnation, candidate_generation, "
+                        "candidate_digest, candidate_identity_algorithm, candidate_identity, "
+                        "source_payload, artifact_payload, architecture_payload, "
+                        "launcher_payload, attestation_payload, protocol_payload) VALUES "
+                        "(:id, :subject_id, :subject_incarnation, 1, repeat('2', 64), "
+                        "'git-sha1', repeat('1', 40), "
+                        "jsonb_build_object('publication_sha256', repeat('2', 64)), "
+                        "'{}'::jsonb, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb)"
+                    ),
+                    {
+                        "id": candidate_id,
+                        "subject_id": uuid4(),
+                        "subject_incarnation": uuid4(),
+                    },
+                )
+                downgrade = executor.submit(run_downgrade)
+                wait_until_downgrade_is_blocked(observer, downgrade)
+                writer_transaction.commit()
+            finally:
+                if writer_transaction.is_active:
+                    writer_transaction.rollback()
+
+            with pytest.raises(RuntimeError, match=r"cannot downgrade.*candidate identity"):
+                downgrade.result(timeout=5)
+
+        with writer_engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == ("capacity_0004")
+            assert connection.execute(
+                text(
+                    "SELECT candidate_identity_algorithm, candidate_identity "
+                    "FROM capacity_candidates WHERE id = :id"
+                ),
+                {"id": candidate_id},
+            ).one() == ("git-sha1", "1" * 40)
+    finally:
+        observer_engine.dispose()
+        writer_engine.dispose()
+        downgrade_engine.dispose()
 
 
 def test_execution_epochs_reject_truncate(capacity_postgres_url: str) -> None:

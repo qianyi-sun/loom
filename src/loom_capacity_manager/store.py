@@ -1709,8 +1709,18 @@ class CapacityManagementStore:
                     raise IdempotencyConflictError(
                         "execution preparation idempotency key was reused"
                     )
-                if replay.state == "retired":
-                    raise ExecutionConflictError("retired execution preparation cannot be replayed")
+                if (
+                    replay.state != "prepared"
+                    or authority.execution_state != "prepared"
+                    or authority.execution_epoch != replay.execution_epoch
+                    or authority.execution_manifest_sha256 != replay.execution_manifest_sha256
+                    or authority.executable_new_capacity_ceiling != 0
+                    or replay.current_writer_epoch != authority.writer_epoch
+                ):
+                    raise ExecutionConflictError(
+                        "execution preparation can replay only while prepared"
+                    )
+                await self._validate_execution_preparation(session, authority, request)
                 return self._execution_context(authority, replay)
 
             if authority.execution_state != "shadow":
@@ -1736,10 +1746,18 @@ class CapacityManagementStore:
                 oldlab_executor_incarnation=executors["oldlab"].executor_incarnation,
                 oldlab_pool_id="oldlab",
                 oldlab_pool_generation=executors["oldlab"].pool_generation,
+                oldlab_signing_key_sha256=executors["oldlab"].signing_key_sha256,
+                oldlab_local_authority_sha256=executors["oldlab"].local_authority_sha256,
+                oldlab_controller_authority_sha256=(
+                    executors["oldlab"].controller_authority_sha256
+                ),
                 gb10_executor_id=executors["gb10"].executor_id,
                 gb10_executor_incarnation=executors["gb10"].executor_incarnation,
                 gb10_pool_id="gb10",
                 gb10_pool_generation=executors["gb10"].pool_generation,
+                gb10_signing_key_sha256=executors["gb10"].signing_key_sha256,
+                gb10_local_authority_sha256=executors["gb10"].local_authority_sha256,
+                gb10_controller_authority_sha256=(executors["gb10"].controller_authority_sha256),
                 environment_acknowledgements_sha256=_canonical_json_digest(
                     [
                         item.model_dump(mode="json", exclude_none=False)
@@ -1831,7 +1849,29 @@ class CapacityManagementStore:
                         )
                     )
                 ).scalar_one()
-                return self._execution_context(authority, replay_epoch)
+                if (
+                    replay_epoch.state != "prepared"
+                    or authority.execution_state != "prepared"
+                    or authority.execution_epoch != replay_epoch.execution_epoch
+                    or authority.execution_manifest_sha256 != replay_epoch.execution_manifest_sha256
+                    or authority.executable_new_capacity_ceiling != 0
+                    or replay_epoch.current_writer_epoch != authority.writer_epoch
+                ):
+                    raise ExecutionConflictError(
+                        "execution executor registration can replay only while prepared"
+                    )
+                context = self._execution_context(authority, replay_epoch)
+                if request.execution != context:
+                    raise ExecutionConflictError(
+                        "execution executor registration can replay only while prepared"
+                    )
+                preparation = self._execution_preparation_from_row(replay_epoch)
+                await self._validate_execution_preparation(
+                    session,
+                    authority,
+                    preparation,
+                )
+                return context
 
             if authority.execution_state != "prepared":
                 raise ExecutionConflictError(
@@ -1869,6 +1909,18 @@ class CapacityManagementStore:
                 or request.controller_authority_sha256 != expected.controller_authority_sha256
             ):
                 raise ExecutionConflictError("executable executor differs from owner policy")
+            existing_pool = (
+                await session.execute(
+                    select(CapacityExecutionExecutor.id).where(
+                        CapacityExecutionExecutor.execution_epoch == current_epoch.execution_epoch,
+                        CapacityExecutionExecutor.pool_id == request.pool_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing_pool is not None:
+                raise ExecutionConflictError(
+                    "execution executor pool is already registered with another key"
+                )
             session.add(
                 CapacityExecutionExecutor(
                     execution_epoch=current_epoch.execution_epoch,
@@ -1919,6 +1971,39 @@ class CapacityManagementStore:
                     raise IdempotencyConflictError(
                         "execution activation idempotency key was reused"
                     )
+                if (
+                    replay.state != "active"
+                    or authority.execution_state != "active"
+                    or authority.authority_incarnation != request.authority_incarnation
+                    or authority.writer_epoch != request.expected_writer_epoch
+                    or authority.execution_epoch != request.execution_epoch
+                    or authority.execution_manifest_sha256 != request.execution_manifest_sha256
+                    or replay.current_writer_epoch != request.expected_writer_epoch
+                    or replay.execution_epoch != request.execution_epoch
+                    or replay.execution_manifest_sha256 != request.execution_manifest_sha256
+                    or replay.effective_ceiling != request.executable_new_capacity_ceiling
+                    or replay.effective_rate_per_minute
+                    != request.executable_new_capacity_rate_per_minute
+                ):
+                    raise ExecutionConflictError(
+                        "execution activation replay requires the exact active fence"
+                    )
+                preparation = self._execution_preparation_from_row(replay)
+                try:
+                    await self._validate_execution_preparation(
+                        session,
+                        authority,
+                        preparation,
+                    )
+                except (ExecutionConflictError, ExecutionPreparationDisabledError) as exc:
+                    raise ExecutionConflictError(
+                        "execution activation replay owner policy changed"
+                    ) from exc
+                await self._validate_execution_executor_bindings(
+                    session,
+                    replay,
+                    preparation,
+                )
                 context = self._execution_context(authority, replay)
                 if not isinstance(context, ExecutionAuthorityV2):
                     raise ExecutionConflictError("execution activation replay is not authoritative")
@@ -1947,58 +2032,9 @@ class CapacityManagementStore:
             if not authority.increase_freeze:
                 raise ExecutionConflictError("execution activation requires increase freeze")
 
-            preparation = ExecutionPreparationV2.model_validate_json(
-                json.dumps(row.manifest_payload, sort_keys=True, separators=(",", ":"))
-            )
-            if (
-                canonical_executable_digest(preparation) != row.execution_manifest_sha256
-                or _canonical_json_digest(
-                    [
-                        item.model_dump(mode="json", exclude_none=False)
-                        for item in preparation.subject_acknowledgements
-                    ]
-                )
-                != row.environment_acknowledgements_sha256
-                or _canonical_json_digest(
-                    [
-                        item.model_dump(mode="json", exclude_none=False)
-                        for item in preparation.legacy_writer_fences
-                    ]
-                )
-                != row.legacy_writer_manifest_sha256
-                or preparation.rollback_evidence_sha256 != row.rollback_evidence_sha256
-            ):
-                raise ExecutionConflictError("prepared execution manifest digest changed")
+            preparation = self._execution_preparation_from_row(row)
             await self._validate_execution_preparation(session, authority, preparation)
-            executable_rows = (
-                (
-                    await session.execute(
-                        select(CapacityExecutionExecutor).where(
-                            CapacityExecutionExecutor.execution_epoch == row.execution_epoch,
-                            CapacityExecutionExecutor.execution_manifest_sha256
-                            == row.execution_manifest_sha256,
-                        )
-                    )
-                )
-                .scalars()
-                .all()
-            )
-            expected_executors = {item.pool_id: item for item in preparation.executors}
-            if {item.pool_id for item in executable_rows} != {"gb10", "oldlab"}:
-                raise ExecutionConflictError("both executable executor registrations are required")
-            for executable_row in executable_rows:
-                pool_id = cast(Literal["gb10", "oldlab"], executable_row.pool_id)
-                expected = expected_executors[pool_id]
-                if (
-                    executable_row.executor_id != expected.executor_id
-                    or executable_row.executor_incarnation != expected.executor_incarnation
-                    or executable_row.pool_generation != expected.pool_generation
-                    or executable_row.signing_key_sha256 != expected.signing_key_sha256
-                    or executable_row.local_authority_sha256 != expected.local_authority_sha256
-                    or executable_row.controller_authority_sha256
-                    != expected.controller_authority_sha256
-                ):
-                    raise ExecutionConflictError("executable executor registration changed")
+            await self._validate_execution_executor_bindings(session, row, preparation)
             now = await _db_now(session)
             row.state = "active"
             row.effective_ceiling = request.executable_new_capacity_ceiling
@@ -2059,37 +2095,132 @@ class CapacityManagementStore:
         ).scalar_one_or_none()
         if row is None:
             raise AuthorityRecoveryError("execution epoch row is missing")
-        if row.state in {"active", "drain-only"}:
-            if self._execution_policy is None:
-                raise AuthorityRecoveryError("active execution authority requires owner policy")
-            try:
-                preparation = ExecutionPreparationV2.model_validate_json(
-                    json.dumps(row.manifest_payload, sort_keys=True, separators=(",", ":"))
-                )
-                await self._validate_execution_preparation(
-                    session,
-                    authority,
-                    preparation,
-                    require_writer_binding=False,
-                )
-            except (ExecutionConflictError, ExecutionPreparationDisabledError) as exc:
-                raise AuthorityRecoveryError(
-                    "active execution authority owner policy changed"
-                ) from exc
-            executable_pools = set(
-                (
-                    await session.execute(
-                        select(CapacityExecutionExecutor.pool_id).where(
-                            CapacityExecutionExecutor.execution_epoch == row.execution_epoch,
-                            CapacityExecutionExecutor.execution_manifest_sha256
-                            == row.execution_manifest_sha256,
-                        )
-                    )
-                ).scalars()
+        if (
+            row.authority_incarnation != authority.authority_incarnation
+            or row.current_writer_epoch != authority.writer_epoch
+            or row.state != authority.execution_state
+            or row.execution_manifest_sha256 != authority.execution_manifest_sha256
+            or row.effective_ceiling != authority.executable_new_capacity_ceiling
+        ):
+            raise AuthorityRecoveryError("execution authority database binding changed")
+        try:
+            preparation = self._execution_preparation_from_row(row)
+            await self._validate_execution_preparation(
+                session,
+                authority,
+                preparation,
+                require_writer_binding=row.state != "drain-only",
             )
-            if executable_pools != {"gb10", "oldlab"}:
-                raise AuthorityRecoveryError("active execution authority executor binding changed")
+            if row.state in {"active", "drain-only"}:
+                await self._validate_execution_executor_bindings(
+                    session,
+                    row,
+                    preparation,
+                )
+        except (ExecutionConflictError, ExecutionPreparationDisabledError) as exc:
+            raise AuthorityRecoveryError(
+                "active execution authority executor binding or owner policy changed"
+            ) from exc
         return self._execution_context(authority, row)
+
+    @staticmethod
+    def _execution_preparation_from_row(
+        row: CapacityExecutionEpoch,
+    ) -> ExecutionPreparationV2:
+        try:
+            preparation = ExecutionPreparationV2.model_validate_json(
+                json.dumps(row.manifest_payload, sort_keys=True, separators=(",", ":"))
+            )
+        except ValueError as exc:
+            raise ExecutionConflictError("prepared execution manifest is invalid") from exc
+        if (
+            canonical_executable_digest(preparation) != row.execution_manifest_sha256
+            or _canonical_json_digest(
+                [
+                    item.model_dump(mode="json", exclude_none=False)
+                    for item in preparation.subject_acknowledgements
+                ]
+            )
+            != row.environment_acknowledgements_sha256
+            or _canonical_json_digest(
+                [
+                    item.model_dump(mode="json", exclude_none=False)
+                    for item in preparation.legacy_writer_fences
+                ]
+            )
+            != row.legacy_writer_manifest_sha256
+            or preparation.rollback_evidence_sha256 != row.rollback_evidence_sha256
+        ):
+            raise ExecutionConflictError("prepared execution manifest digest changed")
+        return preparation
+
+    @staticmethod
+    def _execution_epoch_executor_binding(
+        row: CapacityExecutionEpoch,
+        pool_id: Literal["gb10", "oldlab"],
+    ) -> tuple[str, UUID, int, str, str, str]:
+        if pool_id == "oldlab":
+            return (
+                row.oldlab_executor_id,
+                row.oldlab_executor_incarnation,
+                row.oldlab_pool_generation,
+                row.oldlab_signing_key_sha256,
+                row.oldlab_local_authority_sha256,
+                row.oldlab_controller_authority_sha256,
+            )
+        return (
+            row.gb10_executor_id,
+            row.gb10_executor_incarnation,
+            row.gb10_pool_generation,
+            row.gb10_signing_key_sha256,
+            row.gb10_local_authority_sha256,
+            row.gb10_controller_authority_sha256,
+        )
+
+    async def _validate_execution_executor_bindings(
+        self,
+        session: AsyncSession,
+        row: CapacityExecutionEpoch,
+        preparation: ExecutionPreparationV2,
+    ) -> None:
+        executable_rows = (
+            (
+                await session.execute(
+                    select(CapacityExecutionExecutor).where(
+                        CapacityExecutionExecutor.execution_epoch == row.execution_epoch,
+                        CapacityExecutionExecutor.execution_manifest_sha256
+                        == row.execution_manifest_sha256,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        expected_executors = {item.pool_id: item for item in preparation.executors}
+        if {item.pool_id for item in executable_rows} != {"gb10", "oldlab"}:
+            raise ExecutionConflictError("both executable executor registrations are required")
+        for executable_row in executable_rows:
+            pool_id = cast(Literal["gb10", "oldlab"], executable_row.pool_id)
+            expected = expected_executors[pool_id]
+            durable = self._execution_epoch_executor_binding(row, pool_id)
+            observed = (
+                executable_row.executor_id,
+                executable_row.executor_incarnation,
+                executable_row.pool_generation,
+                executable_row.signing_key_sha256,
+                executable_row.local_authority_sha256,
+                executable_row.controller_authority_sha256,
+            )
+            requested = (
+                expected.executor_id,
+                expected.executor_incarnation,
+                expected.pool_generation,
+                expected.signing_key_sha256,
+                expected.local_authority_sha256,
+                expected.controller_authority_sha256,
+            )
+            if observed != requested or durable != requested:
+                raise ExecutionConflictError("executable executor binding changed")
 
     async def _validate_execution_preparation(
         self,

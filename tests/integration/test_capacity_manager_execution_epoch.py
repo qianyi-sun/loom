@@ -8,7 +8,7 @@ from uuid import UUID
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -314,6 +314,42 @@ async def _register_execution_executors(
         )
 
 
+async def _activate_fixture(
+    capacity_session: AsyncSession,
+    *,
+    policy: ExecutionPreparationPolicyV2 | None = None,
+) -> tuple[
+    _PreparedFixture,
+    ExecutionContextV2,
+    ExecutionActivationV2,
+    ExecutionContextV2,
+]:
+    effective_policy = _policy() if policy is None else policy
+    fixture = await _setup(capacity_session, execution_policy=effective_policy)
+    prepared = await fixture.store.prepare_execution_epoch(
+        capacity_session,
+        fixture.request,
+        actor="activation-operator",
+        idempotency_key=UUID(int=780),
+    )
+    await _register_execution_executors(capacity_session, fixture, prepared)
+    activation = ExecutionActivationV2(
+        authority_incarnation=AUTHORITY_ID,
+        expected_writer_epoch=fixture.writer.writer_epoch,
+        execution_epoch=prepared.execution_epoch,
+        execution_manifest_sha256=prepared.execution_manifest_sha256,
+        executable_new_capacity_ceiling=1,
+        executable_new_capacity_rate_per_minute=1,
+    )
+    active = await fixture.store.activate_execution_epoch(
+        capacity_session,
+        activation,
+        actor="activation-operator",
+        idempotency_key=UUID(int=781),
+    )
+    return fixture, prepared, activation, active
+
+
 async def test_execution_preparation_is_disabled_without_owner_policy(
     capacity_session: AsyncSession,
 ) -> None:
@@ -405,10 +441,16 @@ async def test_prepare_is_exact_replay_and_keeps_the_ceiling_zero(
                     oldlab_executor_incarnation=row.oldlab_executor_incarnation,
                     oldlab_pool_id=row.oldlab_pool_id,
                     oldlab_pool_generation=row.oldlab_pool_generation,
+                    oldlab_signing_key_sha256=row.oldlab_signing_key_sha256,
+                    oldlab_local_authority_sha256=row.oldlab_local_authority_sha256,
+                    oldlab_controller_authority_sha256=(row.oldlab_controller_authority_sha256),
                     gb10_executor_id=row.gb10_executor_id,
                     gb10_executor_incarnation=row.gb10_executor_incarnation,
                     gb10_pool_id=row.gb10_pool_id,
                     gb10_pool_generation=row.gb10_pool_generation,
+                    gb10_signing_key_sha256=row.gb10_signing_key_sha256,
+                    gb10_local_authority_sha256=row.gb10_local_authority_sha256,
+                    gb10_controller_authority_sha256=row.gb10_controller_authority_sha256,
                     environment_acknowledgements_sha256=(row.environment_acknowledgements_sha256),
                     legacy_writer_manifest_sha256=row.legacy_writer_manifest_sha256,
                     rollback_evidence_sha256=row.rollback_evidence_sha256,
@@ -434,6 +476,64 @@ async def test_prepare_is_exact_replay_and_keeps_the_ceiling_zero(
             changed,
             actor="activation-operator",
             idempotency_key=UUID(int=721),
+        )
+
+
+async def test_prepare_replay_revalidates_current_candidate_provenance(
+    capacity_session: AsyncSession,
+) -> None:
+    """An idempotent replay cannot bypass candidate drift discovered later."""
+
+    fixture = await _setup(capacity_session, execution_policy=_policy())
+    await fixture.store.prepare_execution_epoch(
+        capacity_session,
+        fixture.request,
+        actor="activation-operator",
+        idempotency_key=UUID(int=782),
+    )
+    await capacity_session.execute(update(CapacityCandidate).values(candidate_identity="9" * 64))
+
+    with pytest.raises(ExecutionConflictError, match="candidate provenance"):
+        await fixture.store.prepare_execution_epoch(
+            capacity_session,
+            fixture.request,
+            actor="activation-operator",
+            idempotency_key=UUID(int=782),
+        )
+
+
+async def test_prepare_and_executor_registration_replays_stop_after_activation(
+    capacity_session: AsyncSession,
+) -> None:
+    """Prepared-only operations cannot replay into positive active authority."""
+
+    fixture, prepared, _, _ = await _activate_fixture(capacity_session)
+
+    with pytest.raises(ExecutionConflictError, match="only while prepared"):
+        await fixture.store.prepare_execution_epoch(
+            capacity_session,
+            fixture.request,
+            actor="activation-operator",
+            idempotency_key=UUID(int=780),
+        )
+
+    binding = fixture.request.executors[0]
+    with pytest.raises(ExecutionConflictError, match="only while prepared"):
+        await fixture.store.register_execution_executor(
+            capacity_session,
+            ExecutableExecutorRegistrationV2(
+                execution=prepared,
+                executor_id=binding.executor_id,
+                executor_incarnation=binding.executor_incarnation,
+                pool_id=binding.pool_id,
+                pool_generation=binding.pool_generation,
+                signing_key_id=f"{binding.pool_id}-key",
+                signing_key_sha256=binding.signing_key_sha256,
+                local_authority_sha256=binding.local_authority_sha256,
+                controller_authority_sha256=binding.controller_authority_sha256,
+            ),
+            actor="executor-installer",
+            idempotency_key=UUID(int=741),
         )
 
 
@@ -613,6 +713,7 @@ async def test_writer_restart_retires_a_stale_preparation(
         actor="activation-operator",
         idempotency_key=UUID(int=729),
     )
+    await _register_execution_executors(capacity_session, fixture, prepared)
 
     successor = await fixture.store.register_writer(
         capacity_session,
@@ -632,12 +733,31 @@ async def test_writer_restart_retires_a_stale_preparation(
     assert row.state == "retired"
     assert row.retired_at is not None
 
-    with pytest.raises(ExecutionConflictError, match="retired"):
+    with pytest.raises(ExecutionConflictError, match="only while prepared"):
         await fixture.store.prepare_execution_epoch(
             capacity_session,
             fixture.request,
             actor="activation-operator",
             idempotency_key=UUID(int=729),
+        )
+
+    binding = fixture.request.executors[0]
+    with pytest.raises(ExecutionConflictError, match="only while prepared"):
+        await fixture.store.register_execution_executor(
+            capacity_session,
+            ExecutableExecutorRegistrationV2(
+                execution=prepared,
+                executor_id=binding.executor_id,
+                executor_incarnation=binding.executor_incarnation,
+                pool_id=binding.pool_id,
+                pool_generation=binding.pool_generation,
+                signing_key_id=f"{binding.pool_id}-key",
+                signing_key_sha256=binding.signing_key_sha256,
+                local_authority_sha256=binding.local_authority_sha256,
+                controller_authority_sha256=binding.controller_authority_sha256,
+            ),
+            actor="executor-installer",
+            idempotency_key=UUID(int=741),
         )
 
 
@@ -812,3 +932,266 @@ async def test_activation_is_atomic_and_exact_replay(
 
     with pytest.raises(AuthorityRecoveryError, match="owner policy"):
         await CapacityManagementStore().execution_authority(capacity_session)
+
+
+async def test_activation_replay_revalidates_policy_and_current_writer_fence(
+    capacity_session: AsyncSession,
+) -> None:
+    """An old activation idempotency key cannot survive policy or writer drift."""
+
+    fixture, _, activation, _ = await _activate_fixture(capacity_session)
+    drifted_policy = _policy().model_copy(update={"rollback_evidence_sha256": "7" * 64})
+    drifted_store = CapacityManagementStore(execution_policy=drifted_policy)
+    with pytest.raises(ExecutionConflictError, match="owner policy"):
+        await drifted_store.activate_execution_epoch(
+            capacity_session,
+            activation,
+            actor="activation-operator",
+            idempotency_key=UUID(int=781),
+        )
+
+    await fixture.store.register_writer(
+        capacity_session,
+        AUTHORITY_ID,
+        expected_epoch=fixture.writer.writer_epoch,
+    )
+    with pytest.raises(ExecutionConflictError, match="exact active"):
+        await fixture.store.activate_execution_epoch(
+            capacity_session,
+            activation,
+            actor="activation-operator",
+            idempotency_key=UUID(int=781),
+        )
+
+
+async def test_database_activation_rejects_executor_authority_hash_drift(
+    capacity_session: AsyncSession,
+) -> None:
+    """Matching names cannot substitute for signed executor authority bindings."""
+
+    fixture = await _setup(capacity_session, execution_policy=_policy())
+    prepared = await fixture.store.prepare_execution_epoch(
+        capacity_session,
+        fixture.request,
+        actor="activation-operator",
+        idempotency_key=UUID(int=783),
+    )
+    for index, binding in enumerate(fixture.request.executors, start=1):
+        capacity_session.add(
+            CapacityExecutionExecutor(
+                execution_epoch=prepared.execution_epoch,
+                execution_manifest_sha256=prepared.execution_manifest_sha256,
+                executor_id=binding.executor_id,
+                executor_incarnation=binding.executor_incarnation,
+                pool_id=binding.pool_id,
+                pool_generation=binding.pool_generation,
+                signing_key_id=f"{binding.pool_id}-key",
+                signing_key_sha256=str(index) * 64,
+                local_authority_sha256=str(index + 2) * 64,
+                controller_authority_sha256=str(index + 4) * 64,
+                actor="forged-installer",
+                idempotency_key=UUID(int=783 + index),
+                registration_digest=str(index + 6) * 64,
+                registration_payload={},
+            )
+        )
+    await capacity_session.flush()
+
+    with pytest.raises(DBAPIError, match="executable executor evidence"):
+        async with capacity_session.begin_nested():
+            await capacity_session.execute(
+                update(CapacityExecutionEpoch).values(
+                    state="active",
+                    effective_ceiling=1,
+                    effective_rate_per_minute=1,
+                    activation_actor="forged-operator",
+                    activation_idempotency_key=UUID(int=786),
+                    activation_request_digest="9" * 64,
+                    activated_at=datetime.now(UTC),
+                )
+            )
+
+
+async def test_executor_registration_rejects_a_second_key_for_the_same_pool(
+    capacity_session: AsyncSession,
+) -> None:
+    """A duplicate pool registration must be a domain conflict, not a raw DB error."""
+
+    fixture = await _setup(capacity_session, execution_policy=_policy())
+    prepared = await fixture.store.prepare_execution_epoch(
+        capacity_session,
+        fixture.request,
+        actor="activation-operator",
+        idempotency_key=UUID(int=787),
+    )
+    await _register_execution_executors(capacity_session, fixture, prepared)
+    binding = fixture.request.executors[0]
+
+    with pytest.raises(ExecutionConflictError, match="already registered"):
+        await fixture.store.register_execution_executor(
+            capacity_session,
+            ExecutableExecutorRegistrationV2(
+                execution=prepared,
+                executor_id=binding.executor_id,
+                executor_incarnation=binding.executor_incarnation,
+                pool_id=binding.pool_id,
+                pool_generation=binding.pool_generation,
+                signing_key_id=f"{binding.pool_id}-key",
+                signing_key_sha256=binding.signing_key_sha256,
+                local_authority_sha256=binding.local_authority_sha256,
+                controller_authority_sha256=binding.controller_authority_sha256,
+            ),
+            actor="executor-installer",
+            idempotency_key=UUID(int=788),
+        )
+
+
+async def test_database_rejects_executor_bound_to_another_manifest(
+    capacity_session: AsyncSession,
+) -> None:
+    """A mismatched manifest cannot permanently occupy an epoch's pool slot."""
+
+    fixture = await _setup(capacity_session, execution_policy=_policy())
+    prepared = await fixture.store.prepare_execution_epoch(
+        capacity_session,
+        fixture.request,
+        actor="activation-operator",
+        idempotency_key=UUID(int=789),
+    )
+    binding = fixture.request.executors[0]
+
+    with pytest.raises(DBAPIError, match="epoch_manifest"):
+        async with capacity_session.begin_nested():
+            capacity_session.add(
+                CapacityExecutionExecutor(
+                    execution_epoch=prepared.execution_epoch,
+                    execution_manifest_sha256="9" * 64,
+                    executor_id=binding.executor_id,
+                    executor_incarnation=binding.executor_incarnation,
+                    pool_id=binding.pool_id,
+                    pool_generation=binding.pool_generation,
+                    signing_key_id=f"{binding.pool_id}-key",
+                    signing_key_sha256=binding.signing_key_sha256,
+                    local_authority_sha256=binding.local_authority_sha256,
+                    controller_authority_sha256=binding.controller_authority_sha256,
+                    actor="forged-installer",
+                    idempotency_key=UUID(int=790),
+                    registration_digest="8" * 64,
+                    registration_payload={},
+                )
+            )
+            await capacity_session.flush()
+
+
+async def test_database_activation_ignores_temporary_executor_table_shadow(
+    capacity_session: AsyncSession,
+) -> None:
+    """Session-local relations cannot replace durable executor evidence."""
+
+    fixture = await _setup(capacity_session, execution_policy=_policy())
+    prepared = await fixture.store.prepare_execution_epoch(
+        capacity_session,
+        fixture.request,
+        actor="activation-operator",
+        idempotency_key=UUID(int=791),
+    )
+    fake_rows = [
+        {
+            "execution_epoch": prepared.execution_epoch,
+            "execution_manifest_sha256": prepared.execution_manifest_sha256,
+            "pool_id": binding.pool_id,
+            "executor_id": binding.executor_id,
+            "executor_incarnation": binding.executor_incarnation,
+            "pool_generation": binding.pool_generation,
+            "signing_key_sha256": binding.signing_key_sha256,
+            "local_authority_sha256": binding.local_authority_sha256,
+            "controller_authority_sha256": binding.controller_authority_sha256,
+        }
+        for binding in fixture.request.executors
+    ]
+
+    with pytest.raises(DBAPIError, match="executable executor evidence"):
+        async with capacity_session.begin_nested():
+            await capacity_session.execute(
+                text(
+                    "CREATE TEMPORARY TABLE capacity_execution_executors ("
+                    "execution_epoch bigint NOT NULL, "
+                    "execution_manifest_sha256 text NOT NULL, "
+                    "pool_id text NOT NULL, executor_id text NOT NULL, "
+                    "executor_incarnation uuid NOT NULL, pool_generation bigint NOT NULL, "
+                    "signing_key_sha256 text NOT NULL, local_authority_sha256 text NOT NULL, "
+                    "controller_authority_sha256 text NOT NULL) ON COMMIT DROP"
+                )
+            )
+            await capacity_session.execute(
+                text(
+                    "INSERT INTO capacity_execution_executors ("
+                    "execution_epoch, execution_manifest_sha256, pool_id, executor_id, "
+                    "executor_incarnation, pool_generation, signing_key_sha256, "
+                    "local_authority_sha256, controller_authority_sha256) VALUES ("
+                    ":execution_epoch, :execution_manifest_sha256, :pool_id, :executor_id, "
+                    ":executor_incarnation, :pool_generation, :signing_key_sha256, "
+                    ":local_authority_sha256, :controller_authority_sha256)"
+                ),
+                fake_rows,
+            )
+            now = datetime.now(UTC)
+            await capacity_session.execute(
+                update(CapacityExecutionEpoch).values(
+                    state="active",
+                    effective_ceiling=1,
+                    effective_rate_per_minute=1,
+                    activation_actor="forged-operator",
+                    activation_idempotency_key=UUID(int=792),
+                    activation_request_digest="9" * 64,
+                    activated_at=now,
+                )
+            )
+            await capacity_session.execute(
+                update(CapacityAuthorityState).values(
+                    execution_state="active",
+                    executable_new_capacity_ceiling=1,
+                )
+            )
+
+
+async def test_recovery_rejects_corrupted_executor_authority_hashes(
+    capacity_session: AsyncSession,
+) -> None:
+    """Recovery must verify more than the presence of both pool names."""
+
+    fixture, _, _, _ = await _activate_fixture(capacity_session)
+    await capacity_session.execute(
+        text("ALTER TABLE capacity_execution_executors DISABLE TRIGGER USER")
+    )
+    try:
+        await capacity_session.execute(
+            update(CapacityExecutionExecutor)
+            .where(CapacityExecutionExecutor.pool_id == "gb10")
+            .values(controller_authority_sha256="9" * 64)
+        )
+    finally:
+        await capacity_session.execute(
+            text("ALTER TABLE capacity_execution_executors ENABLE TRIGGER USER")
+        )
+
+    with pytest.raises(AuthorityRecoveryError, match="executor binding"):
+        await fixture.store.execution_authority(capacity_session)
+
+
+async def test_database_rejects_detaching_an_active_authority_to_shadow(
+    capacity_session: AsyncSession,
+) -> None:
+    """Nullable shadow bindings cannot bypass the execution transition graph."""
+
+    await _activate_fixture(capacity_session)
+    with pytest.raises(DBAPIError, match="authority execution transition"):
+        async with capacity_session.begin_nested():
+            await capacity_session.execute(
+                update(CapacityAuthorityState).values(
+                    execution_epoch=0,
+                    execution_state="shadow",
+                    execution_manifest_sha256=None,
+                    executable_new_capacity_ceiling=0,
+                )
+            )

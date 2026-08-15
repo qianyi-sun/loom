@@ -8,7 +8,7 @@ from threading import Event
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -150,6 +150,12 @@ async def _reset_committed_capacity_state(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory() as session, session.begin():
+        await session.execute(
+            text(
+                "ALTER TABLE capacity_authority_state DISABLE TRIGGER "
+                "capacity_authority_execution_transition_guard"
+            )
+        )
         for table in reversed(Base.metadata.sorted_tables):
             if table.name != CapacityAuthorityState.__tablename__:
                 await session.execute(delete(table))
@@ -167,6 +173,12 @@ async def _reset_committed_capacity_state(
                 execution_manifest_sha256=None,
                 global_pending_slot_ceiling=0,
                 global_pending_job_ceiling=0,
+            )
+        )
+        await session.execute(
+            text(
+                "ALTER TABLE capacity_authority_state ENABLE TRIGGER "
+                "capacity_authority_execution_transition_guard"
             )
         )
 

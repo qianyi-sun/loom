@@ -123,6 +123,12 @@ def _reset_empty_shadow(database_url: str) -> None:
     engine = create_engine(database_url)
     try:
         with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "ALTER TABLE capacity_authority_state DISABLE TRIGGER "
+                    "capacity_authority_execution_transition_guard"
+                )
+            )
             for table in reversed(Base.metadata.sorted_tables):
                 if table.name != CapacityAuthorityState.__tablename__:
                     connection.execute(delete(table))
@@ -143,6 +149,12 @@ def _reset_empty_shadow(database_url: str) -> None:
             )
             connection.execute(
                 CapacityAuditEvent.__table__.insert().values(**_seed_marker(_MIGRATION_AUTHORITY))
+            )
+            connection.execute(
+                text(
+                    "ALTER TABLE capacity_authority_state ENABLE TRIGGER "
+                    "capacity_authority_execution_transition_guard"
+                )
             )
     finally:
         engine.dispose()

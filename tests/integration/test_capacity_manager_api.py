@@ -17,7 +17,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, update
+from sqlalchemy import delete, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom_capacity_manager.allocator import allocate_shadow
@@ -103,6 +103,12 @@ async def _reset_capacity_database(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory() as session, session.begin():
+        await session.execute(
+            text(
+                "ALTER TABLE capacity_authority_state DISABLE TRIGGER "
+                "capacity_authority_execution_transition_guard"
+            )
+        )
         for table in reversed(Base.metadata.sorted_tables):
             if table.name != CapacityAuthorityState.__tablename__:
                 await session.execute(delete(table))
@@ -122,6 +128,12 @@ async def _reset_capacity_database(
                 global_pending_slot_ceiling=0,
                 global_pending_job_ceiling=0,
                 global_submission_rate_ceiling=0,
+            )
+        )
+        await session.execute(
+            text(
+                "ALTER TABLE capacity_authority_state ENABLE TRIGGER "
+                "capacity_authority_execution_transition_guard"
             )
         )
 
