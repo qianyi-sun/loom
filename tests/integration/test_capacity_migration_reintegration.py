@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterator, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
@@ -13,6 +14,8 @@ from alembic.config import Config as AlembicConfig
 from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Connection, make_url
+
+from loom_capacity_manager.models import Base
 
 UPSTREAM_ALLOCATION_ROUTINES = (
     "capacity_allocation_binding_guard",
@@ -60,6 +63,16 @@ BRIDGE_COMPLETION_COLUMNS = {
         "executable_new_capacity_ceiling",
     },
 }
+
+
+@dataclass(frozen=True)
+class CapacitySchemaSurface:
+    routines: dict[str, str]
+    triggers: dict[tuple[str, str], str]
+    constraints: dict[tuple[str, str], str]
+    grants: set[tuple[str, str, str]]
+    database_columns: dict[str, dict[str, tuple[str, bool]]]
+    orm_columns: dict[str, dict[str, tuple[str, bool]]]
 
 
 def _capacity_config(url: str) -> AlembicConfig:
@@ -155,6 +168,135 @@ def _routine_grants(connection: Connection, names: Sequence[str]) -> set[tuple[s
     return {
         (str(row["grantee"]), str(row["routine_name"]), str(row["privilege_type"])) for row in rows
     }
+
+
+def _all_capacity_routine_definitions(connection: Connection) -> dict[str, str]:
+    rows = connection.execute(
+        text(
+            """
+            SELECT p.oid::regprocedure::text AS routine_identity,
+                   pg_get_functiondef(p.oid) AS definition
+            FROM pg_proc AS p
+            JOIN pg_namespace AS n ON n.oid = p.pronamespace
+            WHERE n.nspname = 'public'
+              AND p.proname LIKE 'capacity_%'
+            ORDER BY routine_identity
+            """
+        )
+    ).mappings()
+    return {str(row["routine_identity"]): _normalize_sql(str(row["definition"])) for row in rows}
+
+
+def _all_capacity_trigger_definitions(connection: Connection) -> dict[tuple[str, str], str]:
+    rows = connection.execute(
+        text(
+            """
+            SELECT rel.relname AS table_name,
+                   trg.tgname AS trigger_name,
+                   pg_get_triggerdef(trg.oid, true) AS definition
+            FROM pg_trigger AS trg
+            JOIN pg_class AS rel ON rel.oid = trg.tgrelid
+            JOIN pg_namespace AS nsp ON nsp.oid = rel.relnamespace
+            WHERE NOT trg.tgisinternal
+              AND nsp.nspname = 'public'
+              AND rel.relname LIKE 'capacity_%'
+            ORDER BY rel.relname, trg.tgname
+            """
+        )
+    ).mappings()
+    return {
+        (str(row["table_name"]), str(row["trigger_name"])): _normalize_sql(str(row["definition"]))
+        for row in rows
+    }
+
+
+def _all_capacity_constraint_definitions(connection: Connection) -> dict[tuple[str, str], str]:
+    rows = connection.execute(
+        text(
+            """
+            SELECT rel.relname AS table_name,
+                   con.conname AS constraint_name,
+                   pg_get_constraintdef(con.oid, true) AS definition
+            FROM pg_constraint AS con
+            JOIN pg_class AS rel ON rel.oid = con.conrelid
+            JOIN pg_namespace AS nsp ON nsp.oid = rel.relnamespace
+            WHERE nsp.nspname = 'public'
+              AND rel.relname LIKE 'capacity_%'
+            ORDER BY rel.relname, con.conname
+            """
+        )
+    ).mappings()
+    return {
+        (str(row["table_name"]), str(row["constraint_name"])): _normalize_sql(
+            str(row["definition"])
+        )
+        for row in rows
+    }
+
+
+def _all_capacity_routine_grants(connection: Connection) -> set[tuple[str, str, str]]:
+    rows = connection.execute(
+        text(
+            """
+            SELECT grantee, routine_name, privilege_type
+            FROM information_schema.role_routine_grants
+            WHERE routine_schema = 'public'
+              AND routine_name LIKE 'capacity_%'
+            ORDER BY grantee, routine_name, privilege_type
+            """
+        )
+    ).mappings()
+    return {
+        (str(row["grantee"]), str(row["routine_name"]), str(row["privilege_type"])) for row in rows
+    }
+
+
+def _column_signature(type_name: object, nullable: bool) -> tuple[str, bool]:
+    return (str(type_name).upper(), bool(nullable))
+
+
+def _database_columns(connection: Connection) -> dict[str, dict[str, tuple[str, bool]]]:
+    inspector = inspect(connection)
+    table_names = sorted(
+        table_name
+        for table_name in inspector.get_table_names()
+        if table_name.startswith("capacity_")
+    )
+    return {
+        table_name: {
+            str(column["name"]): _column_signature(column["type"], bool(column["nullable"]))
+            for column in inspector.get_columns(table_name)
+        }
+        for table_name in table_names
+    }
+
+
+def _project_orm_columns(
+    database_columns: dict[str, dict[str, tuple[str, bool]]],
+) -> dict[str, dict[str, tuple[str, bool]]]:
+    projected: dict[str, dict[str, tuple[str, bool]]] = {}
+    for table_name, columns in database_columns.items():
+        table = Base.metadata.tables.get(table_name)
+        assert table is not None, f"missing ORM table metadata for {table_name}"
+        projected[table_name] = {
+            column_name: _column_signature(
+                table.columns[column_name].type, table.columns[column_name].nullable
+            )
+            for column_name in columns
+        }
+    return projected
+
+
+def _schema_surface(connection: Connection) -> CapacitySchemaSurface:
+    database_columns = _database_columns(connection)
+    return CapacitySchemaSurface(
+        routines=_all_capacity_routine_definitions(connection),
+        triggers=_all_capacity_trigger_definitions(connection),
+        constraints=_all_capacity_constraint_definitions(connection),
+        grants=_all_capacity_routine_grants(connection),
+        database_columns=database_columns,
+        orm_columns=_project_orm_columns(database_columns),
+    )
 
 
 @pytest.fixture
@@ -253,51 +395,56 @@ def test_reintegrated_capacity_round_trip_restores_exact_upstream_capacity_0005_
     isolated_capacity_migration_url: str,
 ) -> None:
     cfg = _capacity_config(isolated_capacity_migration_url)
-    command.upgrade(cfg, "capacity_0005")
     engine = create_engine(isolated_capacity_migration_url)
     try:
+        command.upgrade(cfg, "capacity_0005")
         with engine.connect() as connection:
-            inspector = inspect(connection)
-            upstream_tables = set(inspector.get_table_names())
-            upstream_routines = _routine_definitions(connection, UPSTREAM_ALLOCATION_ROUTINES)
-            upstream_triggers = _trigger_definitions(
-                connection,
-                (*UPSTREAM_ALLOCATION_TRIGGERS, *UPSTREAM_ALLOCATION_EVENT_TRIGGERS),
-            )
-            upstream_constraints = _constraint_definitions(
-                connection,
-                ("capacity_allocation_epochs", "capacity_allocations"),
-            )
-            upstream_grants = _routine_grants(connection, UPSTREAM_ALLOCATION_ROUTINES)
+            surface_0005 = _schema_surface(connection)
+            assert surface_0005.database_columns == surface_0005.orm_columns
+
+        command.upgrade(cfg, "capacity_0006")
+        with engine.connect() as connection:
+            surface_0006 = _schema_surface(connection)
+            assert surface_0006 != surface_0005
+            assert surface_0006.database_columns == surface_0006.orm_columns
+            assert "capacity_execution_epoch_transition_guard()" in surface_0006.routines
+            assert "capacity_prepared_retirement_evidence_guard()" not in surface_0006.routines
+            assert "capacity_executable_executor_states" in surface_0006.database_columns
+            assert "capacity_executable_intent_observed_state_check" not in {
+                constraint_name for _, constraint_name in surface_0006.constraints
+            }
 
         command.upgrade(cfg, "capacity_0010")
+        with engine.connect() as connection:
+            surface_0010 = _schema_surface(connection)
+            assert surface_0010 != surface_0006
+            assert surface_0010.database_columns == surface_0010.orm_columns
+            assert "capacity_prepared_retirement_evidence_guard()" in surface_0010.routines
+            assert (
+                "inventory_confirmation_journal_digest"
+                in surface_0010.database_columns["capacity_executable_executor_states"]
+            )
+            assert (
+                "capacity_executable_intents",
+                "capacity_executable_intent_observed_state_check",
+            ) in (surface_0010.constraints)
+
         command.downgrade(cfg, "capacity_0005")
 
         with engine.connect() as connection:
-            inspector = inspect(connection)
-            assert set(inspector.get_table_names()) == upstream_tables
-            assert BRIDGE_COMPLETION_TABLES.isdisjoint(upstream_tables)
-            assert (
-                _routine_definitions(connection, UPSTREAM_ALLOCATION_ROUTINES) == upstream_routines
-            )
-            assert (
-                _trigger_definitions(
-                    connection,
-                    (*UPSTREAM_ALLOCATION_TRIGGERS, *UPSTREAM_ALLOCATION_EVENT_TRIGGERS),
-                )
-                == upstream_triggers
-            )
-            assert (
-                _constraint_definitions(
-                    connection,
-                    ("capacity_allocation_epochs", "capacity_allocations"),
-                )
-                == upstream_constraints
-            )
-            assert _routine_grants(connection, UPSTREAM_ALLOCATION_ROUTINES) == upstream_grants
+            roundtrip_0005 = _schema_surface(connection)
+            assert roundtrip_0005 == surface_0005
+
+        command.upgrade(cfg, "capacity_0006")
+        with engine.connect() as connection:
+            roundtrip_0006 = _schema_surface(connection)
+            assert roundtrip_0006 == surface_0006
 
         command.upgrade(cfg, "capacity_0010")
         with engine.connect() as connection:
+            roundtrip_0010 = _schema_surface(connection)
+            assert roundtrip_0010 == surface_0010
+            assert roundtrip_0010.database_columns == roundtrip_0010.orm_columns
             version = connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one()
