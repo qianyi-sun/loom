@@ -354,6 +354,85 @@ def test_final_gate_action_source_rejects_resume_plan_drift(tmp_path: Path) -> N
         source(resumed, attestation, 7, drifted_admission)
 
 
+def test_resumed_convergence_uses_the_protected_apply_plan(tmp_path: Path) -> None:
+    source, attestation, calls = _authority(tmp_path)
+    first = _envelope(attestation)
+    admission = _admission(attestation)
+    source(first, attestation, 7, admission)
+    first_store = FinalGatePlanStore(
+        tmp_path / "state",
+        request_id="req-alpha",
+        attempt_number=1,
+    )
+    first_plan = first_store.read()
+    FinalGateExecutionStore(
+        tmp_path / "state",
+        request_id="req-alpha",
+        attempt_number=1,
+    ).publish(_final_execution())
+    attempt2 = tmp_path / "state/requests/req-alpha/attempts/2"
+    attempt2.mkdir(mode=0o700)
+    resumed = replace(
+        first,
+        attempt_number=2,
+        attempt_operator="devansh",
+        attempt_uid=2003,
+        resume=True,
+    )
+
+    actions = source(resumed, attestation, 7, admission)
+    resumed_plan = FinalGatePlanStore(
+        tmp_path / "state",
+        request_id="req-alpha",
+        attempt_number=2,
+    ).read()
+    actions["final.convergence"](CheckOperation.VERIFY)
+    actions["final.smoke"](CheckOperation.APPLY)
+
+    convergence, smoke = calls[-2:]
+    assert convergence[convergence.index("--plan") + 1] == str(first_store.path)
+    assert convergence[convergence.index("--plan-sha256") + 1] == first_plan.plan_digest
+    assert smoke[smoke.index("--plan") + 1] == str(attempt2 / "final-gate-plan.json")
+    assert smoke[smoke.index("--plan-sha256") + 1] == resumed_plan.plan_digest
+
+
+def test_repeated_resume_convergence_uses_the_original_apply_plan(tmp_path: Path) -> None:
+    source, attestation, calls = _authority(tmp_path)
+    first = _envelope(attestation)
+    admission = _admission(attestation)
+    source(first, attestation, 7, admission)
+    FinalGateExecutionStore(
+        tmp_path / "state",
+        request_id="req-alpha",
+        attempt_number=1,
+    ).publish(_final_execution())
+    attempt2 = tmp_path / "state/requests/req-alpha/attempts/2"
+    attempt2.mkdir(mode=0o700)
+    second = replace(
+        first,
+        attempt_number=2,
+        attempt_operator="devansh",
+        attempt_uid=2003,
+        resume=True,
+    )
+    source(second, attestation, 7, admission)
+    FinalGateExecutionStore(
+        tmp_path / "state",
+        request_id="req-alpha",
+        attempt_number=2,
+    ).publish(_final_execution())
+    attempt3 = tmp_path / "state/requests/req-alpha/attempts/3"
+    attempt3.mkdir(mode=0o700)
+    third = replace(second, attempt_number=3)
+
+    source(third, attestation, 7, admission)["final.convergence"](CheckOperation.VERIFY)
+
+    convergence = calls[-1]
+    assert convergence[convergence.index("--plan") + 1] == str(
+        tmp_path / "state/requests/req-alpha/attempts/1/final-gate-plan.json"
+    )
+
+
 def test_final_gate_action_source_runs_post_apply_drift_in_process(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
