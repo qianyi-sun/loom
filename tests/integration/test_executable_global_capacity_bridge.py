@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 from pathlib import Path
@@ -270,21 +271,87 @@ async def test_protected_release_reporter_delay_keeps_pools_isolated(
     assert alice_drained.event_kind == "prepared-revoked"
     assert bob_drained.event_kind == "withdrawn"
 
+    bob_delayed = await executable_capacity_harness.protected_intent_snapshot(
+        "gb10",
+        bob_binding,
+    )
+    assert bob_delayed.owner_name == "bob"
+    assert bob_delayed.pool_id == "gb10"
+    assert bob_delayed.manager_state == "closing"
+    assert bob_delayed.protected_release_digest is None
+    assert bob_delayed.terminal_kind == "slurm-job"
+    assert not bob_delayed.worker_registered
+    assert bob_delayed.live_job_states == ()
+    assert bob_delayed.cancelled_job_ids == (bob_job_id,)
+
     alice_publication = (
-        await executable_capacity_harness.publish_next_protected_release_with_replay(alice)
+        await executable_capacity_harness.publish_next_protected_release_with_replay(
+            alice,
+            manager_outage_before_first_publish=True,
+            lose_response_after_manager_ack=True,
+        )
     )
     assert alice_publication.guard_publication_count == 1
+    assert alice_publication.publish_attempts == 3
+    assert alice_publication.manager_replayed_flags == (False, True)
+    assert (
+        await executable_capacity_harness.protected_intent_snapshot("gb10", bob_binding)
+        == bob_delayed
+    )
+    alice_published = await executable_capacity_harness.protected_intent_snapshot(
+        "oldlab",
+        alice_binding,
+    )
+    assert alice_published.owner_name == "alice"
+    assert alice_published.pool_id == "oldlab"
+    assert alice_published.manager_state == "closing"
+    assert alice_published.protected_release_digest == alice_publication.release_digest
+
+    alice_released = await executable_capacity_harness.release_retired_intent(
+        "oldlab",
+        alice_binding,
+    )
+    assert alice_released.status == "released"
+    alice_released_snapshot = await executable_capacity_harness.protected_intent_snapshot(
+        "oldlab",
+        alice_binding,
+    )
+    assert alice_released_snapshot.manager_state == "released"
+    assert alice_released_snapshot.protected_release_digest == alice_publication.release_digest
+    assert (
+        await executable_capacity_harness.protected_intent_snapshot("gb10", bob_binding)
+        == bob_delayed
+    )
+    assert {
+        (item.subject_id, item.pool_id, item.state)
+        for item in await executable_capacity_harness.manager_commitments()
+    } == {(bob.subject_id, "gb10", "closing")}
     assert await executable_capacity_harness.retirement_is_blocked()
     assert executable_capacity_harness.execution_state == "drain-only"
 
     bob_publication = await executable_capacity_harness.publish_next_protected_release_with_replay(
-        bob
+        bob,
+        manager_outage_before_first_publish=True,
+        lose_response_after_manager_ack=True,
     )
     assert bob_publication.event_kind == "withdrawn"
     assert bob_publication.guard_publication_count == 1
-    await executable_capacity_harness.release_retired_intent("oldlab", alice_binding)
-    await executable_capacity_harness.release_retired_intent("gb10", bob_binding)
+    assert bob_publication.publish_attempts == 3
+    assert bob_publication.manager_replayed_flags == (False, True)
+    bob_released = await executable_capacity_harness.release_retired_intent("gb10", bob_binding)
+    assert bob_released.status == "released"
+    bob_released_snapshot = await executable_capacity_harness.protected_intent_snapshot(
+        "gb10",
+        bob_binding,
+    )
+    assert bob_released_snapshot.manager_state == "released"
+    assert bob_released_snapshot.protected_release_digest == bob_publication.release_digest
+    assert (
+        await executable_capacity_harness.protected_intent_snapshot("oldlab", alice_binding)
+        == alice_released_snapshot
+    )
     assert executable_capacity_harness.execution_state == "shadow"
+    assert await executable_capacity_harness.manager_commitments() == ()
     assert executable_capacity_harness.cross_owner_bindings() == []
 
 
@@ -369,31 +436,35 @@ async def test_protected_release_canonical_digests_are_stable_across_fresh_runs(
     postgres_url: str,
     capacity_guard_template_database: dict[str, object],
 ) -> None:
-    del tmp_path
-    repeat_root = Path("/tmp/loom-task4-protected-release-repeat")
+    repeat_root = tmp_path / "protected-release-repeat"
+    pair_namespace = hashlib.sha256(str(tmp_path).encode("utf-8")).hexdigest()[:12]
+    prepared_suffix = f"task4_{pair_namespace}_prep"
+    withdrawn_suffix = f"task4_{pair_namespace}_withd"
+    assert repeat_root.is_relative_to(tmp_path)
+    assert prepared_suffix != withdrawn_suffix
     first_prepared = await _prepared_unused_release_digests(
         repeat_root / "prepared",
         postgres_url,
         capacity_guard_template_database,
-        database_suffix="task4_prepared_repeat",
+        database_suffix=prepared_suffix,
     )
     second_prepared = await _prepared_unused_release_digests(
         repeat_root / "prepared",
         postgres_url,
         capacity_guard_template_database,
-        database_suffix="task4_prepared_repeat",
+        database_suffix=prepared_suffix,
     )
     first_withdrawn = await _unregistered_withdrawn_release_digests(
         repeat_root / "withdrawn",
         postgres_url,
         capacity_guard_template_database,
-        database_suffix="task4_withdrawn_repeat",
+        database_suffix=withdrawn_suffix,
     )
     second_withdrawn = await _unregistered_withdrawn_release_digests(
         repeat_root / "withdrawn",
         postgres_url,
         capacity_guard_template_database,
-        database_suffix="task4_withdrawn_repeat",
+        database_suffix=withdrawn_suffix,
     )
 
     assert first_prepared == second_prepared

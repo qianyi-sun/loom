@@ -230,6 +230,21 @@ class ManagerIntentEvidence:
 
 
 @dataclass(frozen=True, slots=True)
+class ProtectedIntentSnapshot:
+    intent_id: UUID
+    subject_id: UUID
+    owner_name: str
+    pool_id: str
+    manager_state: str
+    observed_state: str | None
+    protected_release_digest: str | None
+    terminal_kind: str | None
+    worker_registered: bool
+    live_job_states: tuple[tuple[str, str], ...]
+    cancelled_job_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutorIdentity:
     registration: ExecutableExecutorRegistrationV2
     client: ExecutableCapacityExecutorClient
@@ -2982,6 +2997,30 @@ class ExecutableCapacityHarness:
             state=row.state,
             observed_state=row.observed_state,
             concurrency_slots=stored.concurrency_slots,
+        )
+
+    async def protected_intent_snapshot(
+        self,
+        pool_id: str,
+        binding: ExecutableIntentBindingV2,
+    ) -> ProtectedIntentSnapshot:
+        row = await self._manager_intent_row(binding.intent_id)
+        owner = self._owners_by_subject[binding.subject_id]
+        pool = self.pools[pool_id]
+        return ProtectedIntentSnapshot(
+            intent_id=binding.intent_id,
+            subject_id=binding.subject_id,
+            owner_name=owner.name,
+            pool_id=pool_id,
+            manager_state=row.state,
+            observed_state=row.observed_state,
+            protected_release_digest=row.protected_release_digest,
+            terminal_kind=row.terminal_kind,
+            worker_registered=self.worker_registered(binding.intent_id),
+            live_job_states=tuple(
+                (str(job["job_id"]), str(job["state"])) for job in pool.loom_job_snapshot()
+            ),
+            cancelled_job_ids=pool.cancelled_job_ids(),
         )
 
     def cross_owner_bindings(self) -> list[tuple[str, str]]:
