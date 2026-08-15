@@ -10,7 +10,7 @@ import re
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, cast
 from uuid import UUID, uuid5
@@ -31,6 +31,9 @@ from loom_capacity_agent.admission import (
     ExecutableReleaseRequestV2,
     ExecutableWorkerRegistrationV2,
     PhysicalJobBindingV2,
+    PreparedAdmissionPlanV1,
+    PreparedPlacementAllowanceV1,
+    PreparedWorkerShapeV1,
     PublishableExecutableProtectedReleaseV2,
 )
 from loom_capacity_agent.claim_guard import (
@@ -51,6 +54,7 @@ from loom_capacity_agent.executable_release_reporter import (
     ExecutableProtectedReleaseReporterRuntime,
 )
 from loom_capacity_agent.lifecycle_store import CapacityAttemptLifecycleStore
+from loom_capacity_agent.prepared_store import CapacityPreparedAdmissionStore
 from loom_capacity_agent.store import CapacityAgentStore, read_next_executable_protected_release
 from loom_capacity_executor.bootstrap_handoff import (
     BootstrapHandoffStore,
@@ -96,6 +100,7 @@ from loom_capacity_guard.contracts import (
     canonical_digest as canonical_guard_digest,
 )
 from loom_capacity_guard.store import CapacityGuardStore
+from loom_capacity_manager.allocator import ExecutableEpochV2
 from loom_capacity_manager.api import create_app
 from loom_capacity_manager.auth import CapacityPrincipalVerifier
 from loom_capacity_manager.config import CapacityManagerSettings
@@ -273,6 +278,17 @@ class _Worker:
 
 
 @dataclass(frozen=True, slots=True)
+class _AttemptAssignment:
+    allowance_id: UUID
+    plan_id: UUID
+    admission_incarnation: UUID
+    manager_allocation_epoch: int
+    pool_id: Literal["gb10", "oldlab"]
+    shape_instance_id: str
+    submission_intent_id: UUID
+
+
+@dataclass(frozen=True, slots=True)
 class _TrustedProcessEntry:
     process_argv: tuple[str, ...]
     submitted_launcher_argv: tuple[str, ...]
@@ -284,6 +300,7 @@ class _Claim:
     owner: OwnerHandle
     attempt: _Attempt
     worker: _Worker
+    assignment: _AttemptAssignment
     operation_id: UUID
     claim_high_water: int
     terminal: bool = False
@@ -1894,7 +1911,7 @@ class ExecutableCapacityHarness:
             environment_id=f"dev-{name}",
             subject_id=subject_id,
             subject_incarnation=subject_incarnation,
-            authority_incarnation=_AUTHORITY_ID,
+            authority_incarnation=_uuid(f"owner:{name}:guard-authority"),
             agent_incarnation=_uuid(f"owner:{name}:agent-incarnation:1"),
             reporter_incarnation=reporter,
             candidate_digest=publication,
@@ -1958,7 +1975,7 @@ class ExecutableCapacityHarness:
             environment_id=f"dev-{owner.name}",
             subject_id=owner.subject_id,
             subject_incarnation=owner.subject_incarnation,
-            authority_incarnation=_AUTHORITY_ID,
+            authority_incarnation=owner.registration.authority_incarnation,
             reporter_incarnation=owner.reporter_incarnation,
             deployment_generation=owner.deployment_generation,
             configuration_generation=owner.configuration_generation,
@@ -3390,6 +3407,188 @@ class ExecutableCapacityHarness:
             and state.last_inventory_digest == hashlib.sha256(stored).hexdigest()
         )
 
+    async def _prepare_claim_assignments(
+        self,
+        owner: OwnerHandle,
+        scheduled: tuple[tuple[_Attempt, _Worker, int], ...],
+    ) -> dict[UUID, _AttemptAssignment]:
+        if self._session_factory is None:
+            raise RuntimeError("manager session factory is unavailable")
+        by_pool: dict[str, list[tuple[_Attempt, _Worker, int]]] = {}
+        for attempt, worker, shape_slot_index in scheduled:
+            by_pool.setdefault(worker.binding.pool_id, []).append(
+                (attempt, worker, shape_slot_index)
+            )
+
+        assignments: dict[UUID, _AttemptAssignment] = {}
+        template = cast(
+            DevelopmentSubjectTemplateV1,
+            self.fleet.development_subject_template,
+        )
+        for raw_pool_id, items in by_pool.items():
+            if raw_pool_id not in _POOL_ORDER:
+                raise RuntimeError("claim assignment references an unknown pool")
+            pool_id = cast(Literal["gb10", "oldlab"], raw_pool_id)
+            binding = items[0][1].binding
+            profile = next(item for item in template.profiles if item.pool_id == pool_id)
+            prepared_shapes: list[PreparedWorkerShapeV1] = []
+            seen_intents: set[UUID] = set()
+            for _attempt, worker, _shape_slot_index in items:
+                item = worker.binding
+                if (
+                    item.execution != binding.execution
+                    or item.pool_id != binding.pool_id
+                    or item.pool_generation != binding.pool_generation
+                    or item.profile_id != binding.profile_id
+                    or item.profile_generation != binding.profile_generation
+                    or item.profile_digest != binding.profile_digest
+                ):
+                    raise RuntimeError("claim assignments do not share one manager plan")
+                if item.intent_id in seen_intents:
+                    continue
+                seen_intents.add(item.intent_id)
+                worker_shape = next(
+                    shape for shape in profile.worker_shapes if shape.shape_id == item.shape_id
+                )
+                if (
+                    worker_shape.concurrency_slots != item.concurrency_slots
+                    or worker_shape.total_resources != item.resources
+                ):
+                    raise RuntimeError("claim assignment differs from its manager worker shape")
+                prepared_shapes.append(
+                    PreparedWorkerShapeV1(
+                        shape_instance_id=item.shape_instance_id,
+                        submission_intent_id=item.intent_id,
+                        pool_id=pool_id,
+                        pool_generation=item.pool_generation,
+                        profile_id=item.profile_id,
+                        profile_generation=item.profile_generation,
+                        profile_digest=item.profile_digest,
+                        protocol_generation=profile.protocol_generation,
+                        protocol_digest=profile.protocol_digest,
+                        worker_shape=worker_shape,
+                        worker_shape_digest=canonical_digest(worker_shape),
+                        bootstrap_registration_epoch=(
+                            worker.registration.bootstrap_registration_epoch
+                        ),
+                    )
+                )
+
+            plan_id = _uuid(
+                f"claim-plan:{owner.subject_id}:{binding.execution.allocation_epoch}:{pool_id}"
+            )
+            admission_incarnation = _uuid(
+                f"claim-admission:{owner.subject_id}:{binding.execution.allocation_epoch}:{pool_id}"
+            )
+            allowances = tuple(
+                PreparedPlacementAllowanceV1(
+                    allowance_id=_uuid(
+                        "claim-allowance:"
+                        f"{binding.execution.allocation_epoch}:{attempt.protected_attempt_id}"
+                    ),
+                    protected_attempt_id=attempt.protected_attempt_id,
+                    execution_generation=attempt.execution_generation,
+                    requirements_digest=attempt.requirements_digest,
+                    pool_id=pool_id,
+                    shape_instance_id=worker.binding.shape_instance_id,
+                    shape_slot_index=shape_slot_index,
+                    submission_intent_id=worker.binding.intent_id,
+                )
+                for attempt, worker, shape_slot_index in items
+            )
+            async with self._session_factory() as session:
+                allocation_row = (
+                    await session.execute(
+                        select(CapacityAllocationEpoch).where(
+                            CapacityAllocationEpoch.allocation_epoch
+                            == binding.execution.allocation_epoch,
+                            CapacityAllocationEpoch.execution_epoch
+                            == binding.execution.execution_epoch,
+                            CapacityAllocationEpoch.execution_manifest_sha256
+                            == binding.execution.execution_manifest_sha256,
+                            CapacityAllocationEpoch.status == "executable",
+                        )
+                    )
+                ).scalar_one()
+            allocation = ExecutableEpochV2.model_validate_json(
+                json.dumps(allocation_row.complete_payload)
+            )
+            if (
+                allocation.execution != binding.execution
+                or allocation.input_digest != allocation_row.input_digest
+            ):
+                raise RuntimeError("claim assignment differs from its committed allocation")
+            plan = PreparedAdmissionPlanV1(
+                **owner.registration.model_dump(mode="python"),
+                plan_id=plan_id,
+                admission_incarnation=admission_incarnation,
+                manager_authority_incarnation=binding.execution.authority_incarnation,
+                manager_writer_epoch=binding.execution.writer_epoch,
+                manager_allocation_epoch=binding.execution.allocation_epoch,
+                manager_input_digest=allocation_row.input_digest,
+                manager_allocation_digest=canonical_executable_digest(allocation),
+                pool_id=pool_id,
+                pool_generation=binding.pool_generation,
+                profile_id=binding.profile_id,
+                profile_generation=binding.profile_generation,
+                profile_digest=binding.profile_digest,
+                protocol_generation=profile.protocol_generation,
+                protocol_digest=profile.protocol_digest,
+                lease_not_after=datetime.now(UTC) + timedelta(hours=1),
+                worker_shapes=tuple(prepared_shapes),
+                placement_allowances=allowances,
+            )
+            engine = create_async_engine(make_url(_database_value(owner.database, "agent_url")))
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            try:
+                async with factory() as session, session.begin():
+                    await CapacityPreparedAdmissionStore(
+                        session,
+                        registration=owner.registration,
+                    ).prepare_plan(plan)
+                    lifecycle = CapacityAttemptLifecycleStore(
+                        session,
+                        registration=owner.registration,
+                    )
+                    for allowance in allowances:
+                        await lifecycle.apply_transition(
+                            InertAttemptTransitionV1(
+                                **owner.registration.model_dump(mode="python"),
+                                transition_id=_uuid(
+                                    "claim-assignment:"
+                                    f"{binding.execution.allocation_epoch}:"
+                                    f"{allowance.protected_attempt_id}"
+                                ),
+                                protected_attempt_id=allowance.protected_attempt_id,
+                                execution_generation=allowance.execution_generation,
+                                requirements_digest=allowance.requirements_digest,
+                                expected_transition_sequence=0,
+                                operation="assign",
+                                expected_state="pending-unassigned",
+                                target_state="assigned",
+                                allowance_id=allowance.allowance_id,
+                                plan_id=plan.plan_id,
+                                admission_incarnation=plan.admission_incarnation,
+                                manager_allocation_epoch=plan.manager_allocation_epoch,
+                                pool_id=plan.pool_id,
+                                shape_instance_id=allowance.shape_instance_id,
+                                submission_intent_id=allowance.submission_intent_id,
+                                transition_reason="manager-placement",
+                            )
+                        )
+                        assignments[allowance.protected_attempt_id] = _AttemptAssignment(
+                            allowance_id=allowance.allowance_id,
+                            plan_id=plan.plan_id,
+                            admission_incarnation=plan.admission_incarnation,
+                            manager_allocation_epoch=plan.manager_allocation_epoch,
+                            pool_id=plan.pool_id,
+                            shape_instance_id=allowance.shape_instance_id,
+                            submission_intent_id=allowance.submission_intent_id,
+                        )
+            finally:
+                await engine.dispose()
+        return assignments
+
     async def claim_all(self) -> None:
         workers_by_owner: dict[UUID, list[_Worker]] = {}
         for worker in self._workers.values():
@@ -3398,33 +3597,45 @@ class ExecutableCapacityHarness:
             owner = self._owners_by_subject[subject_id]
             available = [attempt for attempt in owner.attempts if not attempt.claimed]
             attempt_index = 0
+            scheduled: list[tuple[_Attempt, _Worker, int]] = []
             for worker in workers:
                 for claim_high_water in range(worker.binding.concurrency_slots):
                     if attempt_index == len(available):
                         break
                     attempt = available[attempt_index]
                     attempt_index += 1
-                    operation_id = _uuid(
-                        f"claim:{worker.binding.intent_id}:{attempt.protected_attempt_id}"
-                    )
-                    proposal = ExecutableClaimProposalV2(
-                        operation_id=operation_id,
-                        protected_attempt_id=attempt.protected_attempt_id,
-                        execution_generation=attempt.execution_generation,
-                        requirements_digest=attempt.requirements_digest,
-                        worker_id=worker.registration.worker_id,
-                        worker_incarnation=worker.registration.worker_incarnation,
-                        expected_claim_high_water=claim_high_water,
-                    )
-                    receipt = await self._admission.admit_claim(worker.binding, proposal)
-                    if receipt is None:
-                        raise RuntimeError("protected claim was rejected")
-                    attempt.claimed = True
-                    self._claims.append(
-                        _Claim(owner, attempt, worker, operation_id, receipt.claim_high_water)
-                    )
+                    scheduled.append((attempt, worker, claim_high_water))
             if attempt_index != len(available):
                 raise RuntimeError("owner attempts exceed protected worker capacity")
+            assignments = await self._prepare_claim_assignments(owner, tuple(scheduled))
+            for attempt, worker, claim_high_water in scheduled:
+                assignment = assignments[attempt.protected_attempt_id]
+                operation_id = _uuid(
+                    f"claim:{worker.binding.intent_id}:{attempt.protected_attempt_id}"
+                )
+                proposal = ExecutableClaimProposalV2(
+                    operation_id=operation_id,
+                    protected_attempt_id=attempt.protected_attempt_id,
+                    execution_generation=attempt.execution_generation,
+                    requirements_digest=attempt.requirements_digest,
+                    worker_id=worker.registration.worker_id,
+                    worker_incarnation=worker.registration.worker_incarnation,
+                    expected_claim_high_water=claim_high_water,
+                )
+                receipt = await self._admission.admit_claim(worker.binding, proposal)
+                if receipt is None:
+                    raise RuntimeError("protected claim was rejected")
+                attempt.claimed = True
+                self._claims.append(
+                    _Claim(
+                        owner,
+                        attempt,
+                        worker,
+                        assignment,
+                        operation_id,
+                        receipt.claim_high_water,
+                    )
+                )
 
     async def complete_all_claims(self) -> None:
         for claim in self._claims:
@@ -3436,10 +3647,17 @@ class ExecutableCapacityHarness:
                 protected_attempt_id=claim.attempt.protected_attempt_id,
                 execution_generation=claim.attempt.execution_generation,
                 requirements_digest=claim.attempt.requirements_digest,
-                expected_transition_sequence=0,
+                expected_transition_sequence=1,
                 operation="cancel",
-                expected_state="pending-unassigned",
+                expected_state="assigned",
                 target_state="cancelled-terminal",
+                allowance_id=claim.assignment.allowance_id,
+                plan_id=claim.assignment.plan_id,
+                admission_incarnation=claim.assignment.admission_incarnation,
+                manager_allocation_epoch=claim.assignment.manager_allocation_epoch,
+                pool_id=claim.assignment.pool_id,
+                shape_instance_id=claim.assignment.shape_instance_id,
+                submission_intent_id=claim.assignment.submission_intent_id,
                 transition_reason="task-13-complete",
             )
             engine = create_async_engine(
@@ -3809,7 +4027,7 @@ class ExecutableCapacityHarness:
             environment_id=f"dev-{owner.name}",
             subject_id=owner.subject_id,
             subject_incarnation=owner.subject_incarnation,
-            authority_incarnation=_AUTHORITY_ID,
+            authority_incarnation=owner.registration.authority_incarnation,
             reporter_incarnation=reporter,
             deployment_generation=projected_subject.deployment_generation,
             configuration_generation=executable_subject.configuration_generation,
