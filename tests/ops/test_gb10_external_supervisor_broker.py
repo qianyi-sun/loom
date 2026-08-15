@@ -268,7 +268,9 @@ def test_candidate_tree_rejects_relative_symlink_escape_that_reenters_root(
     link_dir.mkdir(parents=True)
     root.chmod(0o755)
     link_dir.chmod(0o755)
-    (root / "safe").write_text("safe\n", encoding="utf-8")
+    safe = root / "safe"
+    safe.write_text("safe\n", encoding="utf-8")
+    safe.chmod(0o644)
     system_python = tmp_path / "system-python"
     system_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     system_python.chmod(0o755)
