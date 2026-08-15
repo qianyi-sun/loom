@@ -145,6 +145,26 @@ This queue is executable authority, not scheduler actuation. No checked-in
 daemon calls Slurm from these routes, and the Package 5A renderer still exposes
 no apply, activation, or ceiling-changing command.
 
+## Controller-local read-only Slurm inventory
+
+The separately packaged `loom_capacity_pool_executor` adapter can capture one
+controller-local Slurm 23.11 snapshot with exactly `scontrol show nodes --json`
+and `squeue --json`. It accepts the pair only when both documents carry the
+same finite positive `last_update`, contain no controller errors or warnings,
+and include every canonical pool node. The adapter maps OLDLAB's uppercase
+controller names back to canonical fleet IDs, keeps GB10 nodes 1 through 15 in
+scope, and ignores physical node 16 because it is outside Loom authority.
+
+One accepted snapshot produces both `PoolObservationV1` and
+`ExecutableExecutorInventoryV2`. Healthy busy nodes remain visible; current
+jobs, pending jobs for any partition shared by a canonical node, GPU/TRES use,
+and unavailable canonical nodes stay charged. Until signed ownership and
+terminal-release paths land, every foreign or ambiguous physical record is
+quarantined and therefore cannot authorize a capacity increase. The adapter is
+not imported by the dry-run executor package, has no scheduler-mutation
+command, is not installed as a daemon, and does not publish either report by
+itself.
+
 ## Dynamic personal subject projection
 
 After stable-route activation, the lifecycle service registers the personal
@@ -225,8 +245,9 @@ validating the protected data model and comparing current demand with shadow
 allocations.
 
 Implementation lives under `src/loom_capacity_manager/`,
-`src/loom_capacity_executor/`, and `src/loom_capacity_agent/`. The service,
-executor, and protected-store integration suites prove v1/v2 ledger isolation,
+`src/loom_capacity_executor/`, `src/loom_capacity_pool_executor/`, and
+`src/loom_capacity_agent/`. The service, executor, and protected-store
+integration suites prove v1/v2 ledger isolation,
 exact executable bindings, fail-closed ambiguity, and protected release before
 capacity is uncharged.
 

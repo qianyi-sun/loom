@@ -201,3 +201,11 @@ contains no scheduler mutation client or process-execution entry point, and the
 manager refuses a non-zero executable ceiling. Existing executable capacity
 controllers are separate authorities and cannot treat these receipts as
 permission to launch, cancel, signal, or release physical capacity.
+
+The controller-local read-only observer is packaged separately as
+`loom_capacity_pool_executor`. It may use only `scontrol show nodes --json` and
+`squeue --json`, requires matching controller update epochs, and emits paired
+shadow/executable inventory contracts. This observer does not change the
+rehearsal rule above: it is not a daemon, all foreign or ambiguous records stay
+quarantined, and its presence does not permit installing or activating a pool
+executor.
