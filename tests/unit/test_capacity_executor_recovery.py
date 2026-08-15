@@ -34,6 +34,7 @@ from tests.unit.test_capacity_executor_executable import (
     FakeManager,
     FakeSlurm,
     SimulatedCrash,
+    _release_work,
     executor_fixture,
     permit_fixture,
 )
@@ -1167,6 +1168,48 @@ async def test_unknown_submission_recovery_quarantines_changed_live_with_exact_t
     assert result.status == "quarantined"
     assert slurm.submit_count == 1
     assert admission.bound == {}
+    reopened.close()
+
+
+# Production break caught: replaying a durable central release request sent it
+# directly to the manager without rechecking protected terminal fences.
+async def test_release_replay_rechecks_protected_terminal_fence_before_central_send(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    executor, journal, manager, _admission, _slurm, launch = executor_fixture(
+        tmp_path,
+        work=launch.binding,
+    )
+    await executor.tick()
+    await executor.tick()
+    inventory = manager.inventories[-1]
+    release = _release_work(
+        launch.binding,
+        command_sequence=2,
+        inventory_sequence=inventory.inventory_sequence,
+        terminal_kind="unused",
+        terminal_identity="unused-101",
+        terminal_evidence_sha256=canonical_executable_digest(inventory),
+        protected_release_sha256="7" * 64,
+    )
+    payload = canonical_executable_bytes(release)
+    journal.append(
+        "reservation-release-requested",
+        canonical_executable_digest(release),
+        object_kind="tranche",
+        object_id=str(launch.binding.tranche_id),
+        payload=payload,
+    )
+    journal.close()
+
+    manager.reject_work_fetch = True
+    recovered, reopened = _restart(journal.path, manager, _admission, _slurm, launch)
+    result = await recovered.tick()
+
+    assert result.status == "quarantined"
+    assert result.detail == "protected terminal evidence is absent or ambiguous"
+    assert manager.releases == []
     reopened.close()
 
 

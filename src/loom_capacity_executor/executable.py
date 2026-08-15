@@ -72,6 +72,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableLaunchPermitV2,
     ExecutablePartialReleaseV2,
     ExecutablePermitConsumptionV2,
+    ExecutableReleasedShapeV2,
     ExecutableReservationAcceptanceV2,
     ExecutableReservationProposalV2,
     ExecutionFenceV2,
@@ -195,8 +196,58 @@ class _LaunchEnvelope:
     bootstrap_registration_epoch: int
 
 
+@dataclass(frozen=True, slots=True)
+class _ProtectedTerminalFence:
+    binding: ExecutableIntentBindingV2
+    protected_registration_epoch: int
+    digest: str
+
+
 def _physical_binding_object_id(intent_id: UUID) -> str:
     return f"physical-bind:{intent_id}"
+
+
+def _protected_terminal_digest(observation: ProtectedIntentObservationV2) -> str | None:
+    receipts = tuple(
+        digest
+        for digest in (
+            observation.release.protected_release_sha256 if observation.release else None,
+            observation.withdrawal.withdrawal_digest if observation.withdrawal else None,
+            observation.prepared_revocation.protected_release_sha256
+            if observation.prepared_revocation
+            else None,
+        )
+        if digest is not None
+    )
+    return receipts[0] if len(receipts) == 1 else None
+
+
+def _protected_terminal_fence(
+    observation: ProtectedIntentObservationV2,
+) -> _ProtectedTerminalFence | None:
+    if _protected_terminal_digest(observation) is None:
+        return None
+    if observation.release is not None:
+        return _ProtectedTerminalFence(
+            binding=observation.release.binding,
+            protected_registration_epoch=observation.release.protected_registration_epoch,
+            digest=observation.release.protected_release_sha256,
+        )
+    if observation.withdrawal is not None:
+        return _ProtectedTerminalFence(
+            binding=observation.binding,
+            protected_registration_epoch=observation.withdrawal.protected_registration_epoch,
+            digest=observation.withdrawal.withdrawal_digest,
+        )
+    if observation.prepared_revocation is not None:
+        return _ProtectedTerminalFence(
+            binding=observation.prepared_revocation.binding,
+            protected_registration_epoch=(
+                observation.prepared_revocation.protected_registration_epoch
+            ),
+            digest=observation.prepared_revocation.protected_release_sha256,
+        )
+    return None
 
 
 class ExecutablePoolExecutor:
@@ -699,12 +750,7 @@ class ExecutablePoolExecutor:
             return ExecutorTickResult("draining", close.binding.intent_id)
         release = ExecutablePartialReleaseV2.model_validate_json(payload)
         self._validate_central_replay(record, release, checkpoint)
-        await self._central_command(
-            release,
-            event="reservation-release",
-            operation=lambda: self.client.release_executable_shapes(release),
-        )
-        return ExecutorTickResult("released")
+        return await self._release(release)
 
     async def _replay_drain_only_central_request(
         self,
@@ -1537,38 +1583,89 @@ class ExecutablePoolExecutor:
         for item in release.releases:
             self._assert_binding(item.binding)
             protected = await self.admission.observe_intent(item.binding)
+            terminal_fence = _protected_terminal_fence(protected)
+            if terminal_fence is None:
+                return ExecutorTickResult(
+                    "quarantined",
+                    item.binding.intent_id,
+                    "protected terminal evidence is absent or ambiguous",
+                )
             if (
-                protected.release is None
-                or protected.release.protected_release_sha256 != item.protected_release_sha256
+                terminal_fence.binding != item.binding
+                or terminal_fence.protected_registration_epoch != item.protected_registration_epoch
+                or terminal_fence.digest != item.protected_release_sha256
             ):
                 return ExecutorTickResult(
                     "quarantined",
                     item.binding.intent_id,
-                    "protected release is absent or changed",
+                    "protected terminal evidence is absent or changed",
                 )
-            terminal = await self._terminal_for(item.terminal_identity)
-            if (
-                terminal is None
-                or hashlib.sha256(
-                    json.dumps(
-                        terminal.model_dump(mode="json"),
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ).encode("ascii")
-                ).hexdigest()
-                != item.terminal_evidence_sha256
-            ):
-                return ExecutorTickResult(
-                    "quarantined",
-                    item.binding.intent_id,
-                    "physical terminal evidence is absent or changed",
-                )
+            if item.terminal_kind == "unused":
+                unused_detail = self._unused_terminal_detail(item)
+                if unused_detail is not None:
+                    return ExecutorTickResult(
+                        "quarantined",
+                        item.binding.intent_id,
+                        unused_detail,
+                    )
+            else:
+                terminal = await self._terminal_for(item.terminal_identity)
+                if (
+                    terminal is None
+                    or self._slurm_evidence_digest(terminal) != item.terminal_evidence_sha256
+                ):
+                    return ExecutorTickResult(
+                        "quarantined",
+                        item.binding.intent_id,
+                        "physical terminal evidence is absent or changed",
+                    )
         await self._central_command(
             release,
             event="reservation-release",
             operation=lambda: self.client.release_executable_shapes(release),
         )
         return ExecutorTickResult("released")
+
+    def _unused_terminal_detail(self, item: ExecutableReleasedShapeV2) -> str | None:
+        inventory = self._confirmed_inventory_for_release(item)
+        if inventory is None:
+            return "unused terminal inventory is absent or changed"
+        for record in inventory.records:
+            proof = record.ownership_proof
+            if proof is not None and proof.metadata.binding.intent_id == item.binding.intent_id:
+                return "unused terminal inventory still owns the intent"
+        envelope = self._load_launch(item.binding.intent_id)
+        if envelope is not None:
+            return "unused terminal still has local physical ownership"
+        physical_record = self.journal.latest(
+            "intent",
+            _physical_binding_object_id(item.binding.intent_id),
+        )
+        if physical_record is not None:
+            return "unused terminal still has local physical ownership"
+        return None
+
+    def _confirmed_inventory_for_release(
+        self,
+        item: ExecutableReleasedShapeV2,
+    ) -> ExecutableExecutorInventoryV2 | None:
+        record = self.journal.latest("inventory", str(self.registration.executor_incarnation))
+        if record is None or record.event_kind != "inventory-publish-confirmed":
+            return None
+        payload = record.durable_payload()
+        if payload is None or record.payload_digest != item.terminal_evidence_sha256:
+            return None
+        try:
+            inventory = ExecutableExecutorInventoryV2.model_validate_json(payload)
+            self._assert_inventory_binding(inventory)
+        except (ValueError, JournalRegressionError):
+            return None
+        if (
+            inventory.inventory_sequence != item.inventory_sequence
+            or canonical_executable_digest(inventory) != item.terminal_evidence_sha256
+        ):
+            return None
+        return inventory
 
     async def _terminal_for(self, job_id: str) -> SlurmTerminalEvidenceV2 | None:
         high_water = await self.slurm.accounting_high_water(since=self._now() - _RECOVERY_LOOKBACK)

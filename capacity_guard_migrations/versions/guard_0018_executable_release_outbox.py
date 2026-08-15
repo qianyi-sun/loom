@@ -22,6 +22,7 @@ READ_FUNCTION = "read_next_executable_protected_release(uuid)"
 ACK_FUNCTION = (
     "acknowledge_executable_protected_release_publication(uuid,bigint,jsonb,bytea,text,text)"
 )
+OBSERVATION_FUNCTION = "observe_executable_intent(uuid,uuid,uuid)"
 
 
 def _role(attribute: str = "capacity_guard_agent_role") -> tuple[str, str]:
@@ -413,6 +414,147 @@ def _install_ack_function() -> None:
     )
 
 
+def _install_observe_executable_intent(*, include_withdrawal: bool) -> None:
+    _executor, quoted_executor = _role("capacity_guard_executor_role")
+    _observer, quoted_observer = _role("capacity_guard_observer_role")
+    withdrawal_declaration = (
+        f"          v_withdrawal {SCHEMA}.executable_admission_events%ROWTYPE;\n"
+        if include_withdrawal
+        else ""
+    )
+    withdrawal_query = (
+        f"""
+          SELECT * INTO v_withdrawal FROM {SCHEMA}.executable_admission_events
+           WHERE intent_id = p_intent_id
+             AND subject_id = p_subject_id
+             AND subject_incarnation = p_subject_incarnation
+             AND event_kind = 'withdrawn'
+           ORDER BY protected_registration_epoch DESC, event_id DESC
+           LIMIT 1 FOR KEY SHARE;
+        """
+        if include_withdrawal
+        else ""
+    )
+    withdrawal_field = (
+        "            'withdrawal', v_withdrawal.receipt,\n" if include_withdrawal else ""
+    )
+    op.execute(
+        f"""
+        CREATE OR REPLACE FUNCTION {SCHEMA}.observe_executable_intent(
+          p_subject_id uuid,
+          p_subject_incarnation uuid,
+          p_intent_id uuid
+        )
+        RETURNS jsonb
+        LANGUAGE plpgsql
+        SECURITY DEFINER
+        SET search_path = pg_catalog
+        AS $function$
+        DECLARE
+          v_executor_role text;
+          v_observer_role text;
+          v_prepared {SCHEMA}.executable_admission_events%ROWTYPE;
+          v_current {SCHEMA}.executable_admission_events%ROWTYPE;
+          v_drain {SCHEMA}.executable_admission_events%ROWTYPE;
+          v_release {SCHEMA}.executable_admission_events%ROWTYPE;
+{withdrawal_declaration.rstrip()}
+          v_prepared_revocation {SCHEMA}.executable_admission_events%ROWTYPE;
+          v_state {SCHEMA}.executable_claim_state%ROWTYPE;
+        BEGIN
+          IF current_setting('transaction_isolation') <> 'serializable' THEN
+            RAISE EXCEPTION 'executable intent observation requires a SERIALIZABLE transaction'
+              USING ERRCODE = '25000';
+          END IF;
+          SELECT executor_role_name INTO v_executor_role
+            FROM {SCHEMA}.executable_admission_authority
+           WHERE singleton_id = 1;
+          SELECT observer_role_name INTO v_observer_role
+            FROM {SCHEMA}.executable_observer_authority
+           WHERE singleton_id = 1;
+          IF session_user::text NOT IN (v_executor_role, v_observer_role) THEN
+            RAISE EXCEPTION 'executable intent observer is not bound'
+              USING ERRCODE = '42501';
+          END IF;
+          IF pg_has_role(session_user, current_user, 'MEMBER')
+             OR p_subject_id IS NULL
+             OR p_subject_incarnation IS NULL
+             OR p_intent_id IS NULL THEN
+            RAISE EXCEPTION 'executable intent observer identity is invalid'
+              USING ERRCODE = '42501';
+          END IF;
+
+          SELECT * INTO v_state FROM {SCHEMA}.executable_claim_state
+           WHERE intent_id = p_intent_id
+             AND subject_id = p_subject_id
+             AND subject_incarnation = p_subject_incarnation
+           FOR KEY SHARE;
+          SELECT * INTO v_prepared FROM {SCHEMA}.executable_admission_events
+           WHERE intent_id = p_intent_id
+             AND subject_id = p_subject_id
+             AND subject_incarnation = p_subject_incarnation
+             AND event_kind = 'prepared'
+           FOR KEY SHARE;
+          IF v_state.intent_id IS NULL
+             OR v_prepared.operation_id IS NULL
+             OR v_state.binding IS DISTINCT FROM v_prepared.binding THEN
+            RAISE EXCEPTION 'protected executable intent was not found at the exact subject binding'
+              USING ERRCODE = '55000';
+          END IF;
+          SELECT * INTO v_current FROM {SCHEMA}.executable_admission_events
+           WHERE intent_id = p_intent_id
+             AND subject_id = p_subject_id
+             AND subject_incarnation = p_subject_incarnation
+             AND event_kind = 'worker-registered'
+           ORDER BY protected_registration_epoch DESC, event_id DESC
+           LIMIT 1 FOR KEY SHARE;
+          SELECT * INTO v_drain FROM {SCHEMA}.executable_admission_events
+           WHERE intent_id = p_intent_id
+             AND subject_id = p_subject_id
+             AND subject_incarnation = p_subject_incarnation
+             AND event_kind = 'draining'
+           ORDER BY drain_epoch DESC, event_id DESC
+           LIMIT 1 FOR KEY SHARE;
+          SELECT * INTO v_release FROM {SCHEMA}.executable_admission_events
+           WHERE intent_id = p_intent_id
+             AND subject_id = p_subject_id
+             AND subject_incarnation = p_subject_incarnation
+             AND event_kind = 'released'
+           FOR KEY SHARE;
+{withdrawal_query.rstrip()}
+          SELECT * INTO v_prepared_revocation
+            FROM {SCHEMA}.executable_admission_events
+           WHERE intent_id = p_intent_id
+             AND subject_id = p_subject_id
+             AND subject_incarnation = p_subject_incarnation
+             AND event_kind = 'prepared-revoked'
+           FOR KEY SHARE;
+
+          RETURN jsonb_build_object(
+            'schema_version', 2,
+            'binding', v_state.binding,
+            'bootstrap_registration_epoch', v_prepared.bootstrap_registration_epoch,
+            'worker_id', v_current.worker_id,
+            'worker_incarnation', v_current.worker_incarnation,
+            'protected_registration_epoch',
+              COALESCE(v_current.protected_registration_epoch, 0),
+            'claim_high_water', v_state.claim_high_water,
+            'drain', v_drain.receipt,
+            'release', v_release.receipt,
+{withdrawal_field.rstrip()}
+            'prepared_revocation', v_prepared_revocation.receipt,
+            'executable', true
+          );
+        END
+        $function$
+        """
+    )
+    op.execute(f"REVOKE ALL PRIVILEGES ON FUNCTION {SCHEMA}.{OBSERVATION_FUNCTION} FROM PUBLIC")
+    op.execute(
+        f"GRANT EXECUTE ON FUNCTION {SCHEMA}.{OBSERVATION_FUNCTION} "
+        f"TO {quoted_executor}, {quoted_observer}"
+    )
+
+
 def upgrade() -> None:
     _agent, quoted_agent = _role()
     op.execute(
@@ -467,6 +609,7 @@ def upgrade() -> None:
     op.execute(f"REVOKE ALL PRIVILEGES ON FUNCTION {SCHEMA}.{ACK_FUNCTION} FROM PUBLIC")
     op.execute(f"GRANT EXECUTE ON FUNCTION {SCHEMA}.{READ_FUNCTION} TO {quoted_agent}")
     op.execute(f"GRANT EXECUTE ON FUNCTION {SCHEMA}.{ACK_FUNCTION} TO {quoted_agent}")
+    _install_observe_executable_intent(include_withdrawal=True)
 
 
 def downgrade() -> None:
@@ -488,6 +631,7 @@ def downgrade() -> None:
     op.execute(f"DROP FUNCTION {SCHEMA}.{ACK_FUNCTION}")
     op.execute(f"DROP FUNCTION {SCHEMA}.{CANONICAL_FUNCTION}")
     op.execute(f"DROP FUNCTION {SCHEMA}.{READ_FUNCTION}")
+    _install_observe_executable_intent(include_withdrawal=False)
     op.execute(
         f"DROP TRIGGER guard_executable_release_publication_events_truncate_guard "
         f"ON {SCHEMA}.executable_release_publication_events"

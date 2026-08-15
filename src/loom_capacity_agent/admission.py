@@ -605,11 +605,19 @@ class ProtectedIntentObservationV2(StrictV2Model):
     claim_high_water: NonNegativeSequence = 0
     drain: DrainedExecutableWorkerV2 | None = None
     release: ExecutableReleaseReceiptV2 | None = None
+    withdrawal: WithdrawnExecutableWorkerV2 | None = None
     prepared_revocation: RevokedExecutableBootstrapV2 | None = None
     executable: Literal[True] = True
 
     @model_validator(mode="after")
     def _coherent_worker_state(self) -> ProtectedIntentObservationV2:
+        terminal_receipts = tuple(
+            receipt
+            for receipt in (self.release, self.withdrawal, self.prepared_revocation)
+            if receipt is not None
+        )
+        if len(terminal_receipts) > 1:
+            raise ValueError("protected terminal evidence must be mutually exclusive")
         if (self.worker_id is None) != (self.worker_incarnation is None):
             raise ValueError("protected worker identities must be present together")
         if self.worker_id is None and (
@@ -618,6 +626,10 @@ class ProtectedIntentObservationV2(StrictV2Model):
             or self.release is not None
         ):
             raise ValueError("protected worker evidence requires a worker identity")
+        if self.worker_id is not None and (
+            self.withdrawal is not None or self.prepared_revocation is not None
+        ):
+            raise ValueError("unregistered terminal evidence forbids a worker identity")
         if self.drain is not None and (
             self.drain.intent_id != self.binding.intent_id
             or self.drain.worker_id != self.worker_id
@@ -630,6 +642,15 @@ class ProtectedIntentObservationV2(StrictV2Model):
             or self.release.claim_high_water != self.claim_high_water
         ):
             raise ValueError("protected release differs from current intent observation")
+        if self.withdrawal is not None and (
+            self.withdrawal.subject_id != self.binding.subject_id
+            or self.withdrawal.subject_incarnation != self.binding.subject_incarnation
+            or self.withdrawal.intent_id != self.binding.intent_id
+            or self.withdrawal.bootstrap_registration_epoch != self.bootstrap_registration_epoch
+            or self.withdrawal.claim_high_water != self.claim_high_water
+            or self.withdrawal.live_claim_count != 0
+        ):
+            raise ValueError("protected withdrawal differs from current intent observation")
         if self.prepared_revocation is not None and (
             self.worker_id is not None
             or self.prepared_revocation.binding != self.binding

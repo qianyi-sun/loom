@@ -15,8 +15,11 @@ import loom_capacity_executor.executable as executable_module
 from loom_capacity_agent.admission import (
     BoundExecutableWorkerV2,
     DrainedExecutableWorkerV2,
+    ExecutableReleaseReceiptV2,
     PhysicalJobBindingV2,
     PreparedExecutableAdmissionV2,
+    RevokedExecutableBootstrapV2,
+    WithdrawnExecutableWorkerV2,
 )
 from loom_capacity_executor.bootstrap_handoff import BootstrapHandoffStore
 from loom_capacity_executor.client import ExecutorRejectedError, ExecutorTransportError
@@ -294,7 +297,7 @@ class FakeAdmission:
 
     async def withdraw_unregistered_worker(self, request: Any) -> SimpleNamespace:
         self.withdraw_requests.append(request)
-        self.observations.setdefault(
+        current = self.observations.setdefault(
             request.binding.intent_id,
             ProtectedIntentObservationV2(
                 binding=request.binding,
@@ -302,7 +305,7 @@ class FakeAdmission:
                 claim_high_water=request.expected_claim_high_water,
             ),
         )
-        return SimpleNamespace(
+        receipt = WithdrawnExecutableWorkerV2(
             subject_id=request.binding.subject_id,
             subject_incarnation=request.binding.subject_incarnation,
             intent_id=request.binding.intent_id,
@@ -316,13 +319,15 @@ class FakeAdmission:
             request_digest=canonical_executable_digest(request),
             withdrawal_digest=canonical_executable_digest(request),
             protected_high_water=request.protected_registration_epoch,
-            withdrawal_state="withdrawn",
-            executable=True,
         )
+        self.observations[request.binding.intent_id] = current.model_copy(
+            update={"withdrawal": receipt}
+        )
+        return receipt
 
     async def revoke_prepared_bootstrap(self, request: Any) -> SimpleNamespace:
         self.prepared_revocation_requests.append(request)
-        receipt = SimpleNamespace(
+        receipt = RevokedExecutableBootstrapV2(
             binding=request.binding,
             reporter_incarnation=UUID(int=9),
             bootstrap_registration_epoch=request.bootstrap_registration_epoch,
@@ -333,11 +338,12 @@ class FakeAdmission:
             request_digest=canonical_executable_digest(request),
             protected_release_sha256=canonical_executable_digest(request),
             protected_high_water=request.protected_registration_epoch,
-            revocation_state="revoked",
-            executable=True,
         )
         if self.crash_after_prepared_revocation:
             raise SimulatedCrash("prepared revocation committed before response loss")
+        self.observations[request.binding.intent_id] = self.observations[
+            request.binding.intent_id
+        ].model_copy(update={"prepared_revocation": receipt})
         return receipt
 
 
@@ -418,6 +424,119 @@ def _receipt_digest(payload: dict[str, object]) -> str:
         default=str,
     ).encode("ascii")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _terminal_from_job(job: SlurmJobObservationV2) -> SlurmTerminalEvidenceV2:
+    return SlurmTerminalEvidenceV2(
+        cluster=job.cluster,
+        job_id=job.job_id,
+        state="COMPLETED",
+        submitter=job.submitter,
+        account=job.account,
+        partition=job.partition,
+        submitted_at=_NOW,
+        started_at=_NOW,
+        ended_at=_NOW,
+        elapsed_seconds=0,
+        exit_code="0:0",
+        cpus=job.cpus,
+        memory_bytes=job.memory_bytes,
+        gpus=job.gpus,
+        generic_tres=job.generic_tres,
+        nodes=job.nodes,
+        ownership_token=job.ownership_token,
+    )
+
+
+def _protected_release_receipt(
+    binding: ExecutableIntentBindingV2,
+    *,
+    digest: str,
+    protected_registration_epoch: int = 2,
+) -> ExecutableReleaseReceiptV2:
+    return ExecutableReleaseReceiptV2(
+        binding=binding,
+        reporter_incarnation=UUID(int=9),
+        bootstrap_registration_epoch=1,
+        claim_high_water=0,
+        protected_registration_epoch=protected_registration_epoch,
+        release_epoch=1,
+        request_digest=digest,
+        protected_release_sha256=digest,
+        protected_high_water=protected_registration_epoch,
+    )
+
+
+def _withdrawal_receipt(
+    binding: ExecutableIntentBindingV2,
+    *,
+    digest: str,
+    protected_registration_epoch: int = 2,
+    slurm_job_id: str = "101",
+) -> WithdrawnExecutableWorkerV2:
+    return WithdrawnExecutableWorkerV2(
+        subject_id=binding.subject_id,
+        subject_incarnation=binding.subject_incarnation,
+        intent_id=binding.intent_id,
+        bootstrap_registration_epoch=1,
+        protected_registration_epoch=protected_registration_epoch,
+        slurm_job_id=slurm_job_id,
+        ownership_evidence_sha256="e" * 64,
+        request_digest=digest,
+        withdrawal_digest=digest,
+        protected_high_water=protected_registration_epoch,
+    )
+
+
+def _prepared_revocation_receipt(
+    binding: ExecutableIntentBindingV2,
+    *,
+    digest: str,
+    protected_registration_epoch: int = 2,
+) -> RevokedExecutableBootstrapV2:
+    return RevokedExecutableBootstrapV2(
+        binding=binding,
+        reporter_incarnation=UUID(int=9),
+        bootstrap_registration_epoch=1,
+        protected_registration_epoch=protected_registration_epoch,
+        claim_high_water=0,
+        live_claim_count=0,
+        request_digest=digest,
+        protected_release_sha256=digest,
+        protected_high_water=protected_registration_epoch,
+    )
+
+
+def _release_work(
+    binding: ExecutableIntentBindingV2,
+    *,
+    command_sequence: int = 1,
+    inventory_sequence: int = 1,
+    terminal_kind: str = "slurm-job",
+    terminal_identity: str = "101",
+    terminal_evidence_sha256: str,
+    protected_release_sha256: str,
+    protected_registration_epoch: int = 2,
+) -> ExecutablePartialReleaseV2:
+    return ExecutablePartialReleaseV2(
+        execution=binding.execution,
+        tranche_id=binding.tranche_id,
+        executor_id=binding.executor_id,
+        executor_incarnation=binding.executor_incarnation,
+        command_sequence=command_sequence,
+        releases=(
+            ExecutableReleasedShapeV2(
+                binding=binding,
+                inventory_sequence=inventory_sequence,
+                terminal_kind=terminal_kind,  # type: ignore[arg-type]
+                terminal_identity=terminal_identity,
+                terminal_evidence_sha256=terminal_evidence_sha256,
+                protected_registration_epoch=protected_registration_epoch,
+                bootstrap_revoked=True,
+                protected_release_sha256=protected_release_sha256,
+            ),
+        ),
+    )
 
 
 def executor_fixture(
@@ -747,6 +866,38 @@ async def test_tick_replays_each_durable_central_request_before_fetching_work(
         event,
         launch.binding,
     )
+    if isinstance(request, ExecutablePartialReleaseV2):
+        terminal = _terminal_from_job(
+            SlurmJobObservationV2(
+                cluster="oldlab",
+                job_id="101",
+                state="RUNNING",
+                submitter="loom-oldlab",
+                account="loom-executor",
+                partition="batch",
+                cpus=launch.profile.cpus,
+                memory_bytes=launch.binding.resources.memory_bytes,
+                gpus=launch.binding.resources.gpu_count,
+                generic_tres=(),
+                nodes=launch.binding.node_ids,
+                ownership_token="a" * 43,
+            )
+        )
+        terminal_digest = executable_module.ExecutablePoolExecutor._slurm_evidence_digest(terminal)
+        release_item = request.releases[0].model_copy(
+            update={"terminal_evidence_sha256": terminal_digest}
+        )
+        request = request.model_copy(update={"releases": (release_item,)})
+        _admission.observations[launch.binding.intent_id] = ProtectedIntentObservationV2(
+            binding=launch.binding,
+            bootstrap_registration_epoch=1,
+            worker_id=UUID(int=801),
+            worker_incarnation=UUID(int=802),
+            protected_registration_epoch=2,
+            claim_high_water=0,
+            release=_protected_release_receipt(launch.binding, digest="1" * 64),
+        )
+        slurm.terminal_jobs = (terminal,)
     payload = canonical_executable_bytes(request)
     journal.append(
         f"{event}-requested",
@@ -1350,6 +1501,250 @@ async def test_release_requires_protected_and_physical_terminal_evidence(
     assert result.status == "quarantined"
     assert manager.releases == []
     assert admission.observations == {}
+    journal.close()
+
+
+# Production break caught: a live-worker protected release could be ignored even
+# when the exact protected receipt and exact Slurm terminal evidence both exist.
+async def test_protected_terminal_release_digest_allows_live_worker_release(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    executor, journal, manager, admission, slurm, _launch = executor_fixture(
+        tmp_path,
+        work=permit_fixture(launch.binding),
+    )
+    await executor.tick()
+    job = slurm.jobs.pop()
+    terminal = _terminal_from_job(job)
+    terminal_digest = executable_module.ExecutablePoolExecutor._slurm_evidence_digest(terminal)
+    protected_digest = "1" * 64
+    admission.observations[launch.binding.intent_id] = ProtectedIntentObservationV2(
+        binding=launch.binding,
+        bootstrap_registration_epoch=1,
+        worker_id=UUID(int=701),
+        worker_incarnation=UUID(int=702),
+        protected_registration_epoch=2,
+        claim_high_water=0,
+        release=_protected_release_receipt(launch.binding, digest=protected_digest),
+    )
+    slurm.terminal_jobs = (terminal,)
+    manager.work = _release_work(
+        launch.binding,
+        command_sequence=2,
+        terminal_evidence_sha256=terminal_digest,
+        protected_release_sha256=protected_digest,
+    )
+
+    result = await executor.tick()
+
+    assert result.status == "released"
+    assert manager.releases == [manager.work] or manager.work is None
+    assert len(manager.releases) == 1
+    journal.close()
+
+
+# Production break caught: unregistered physical withdrawals must release only
+# after their exact withdrawal digest and exact terminal Slurm evidence match.
+async def test_withdrawal_release_digest_requires_exact_terminal_slurm_evidence(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    executor, journal, manager, admission, slurm, _launch = executor_fixture(
+        tmp_path,
+        work=permit_fixture(launch.binding),
+    )
+    await executor.tick()
+    job = slurm.jobs.pop()
+    terminal = _terminal_from_job(job)
+    terminal_digest = executable_module.ExecutablePoolExecutor._slurm_evidence_digest(terminal)
+    protected_digest = "2" * 64
+    observation = ProtectedIntentObservationV2.model_construct(
+        binding=launch.binding,
+        bootstrap_registration_epoch=1,
+        protected_registration_epoch=2,
+        claim_high_water=0,
+        withdrawal=_withdrawal_receipt(launch.binding, digest=protected_digest),
+        executable=True,
+    )
+    admission.observations[launch.binding.intent_id] = observation
+    slurm.terminal_jobs = (terminal,)
+    manager.work = _release_work(
+        launch.binding,
+        command_sequence=2,
+        terminal_evidence_sha256=terminal_digest,
+        protected_release_sha256=protected_digest,
+    )
+
+    result = await executor.tick()
+
+    assert result.status == "released"
+    assert len(manager.releases) == 1
+    journal.close()
+
+
+# Production break caught: prepared revocation for an unused intent must be
+# proven from the exact confirmed inventory payload/digest/sequence, not Slurm
+# accounting absence or a protected digest alone.
+async def test_unused_release_uses_exact_confirmed_inventory_and_prepared_revocation(
+    tmp_path: Path,
+) -> None:
+    launch = launch_context_fixture()
+    executor, journal, manager, admission, slurm, _launch = executor_fixture(
+        tmp_path,
+        work=launch.binding,
+    )
+    await executor.tick()
+    await executor.tick()
+    inventory = manager.inventories[-1]
+    inventory_digest = canonical_executable_digest(inventory)
+    protected_digest = "3" * 64
+    admission.observations[launch.binding.intent_id] = ProtectedIntentObservationV2(
+        binding=launch.binding,
+        bootstrap_registration_epoch=1,
+        claim_high_water=0,
+        prepared_revocation=_prepared_revocation_receipt(
+            launch.binding,
+            digest=protected_digest,
+        ),
+    )
+    manager.work = _release_work(
+        launch.binding,
+        command_sequence=2,
+        inventory_sequence=inventory.inventory_sequence,
+        terminal_kind="unused",
+        terminal_identity="unused-101",
+        terminal_evidence_sha256=inventory_digest,
+        protected_release_sha256=protected_digest,
+    )
+
+    result = await executor.tick()
+
+    assert result.status == "released"
+    assert slurm.cancel_requests == []
+    assert len(manager.releases) == 1
+    journal.close()
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_detail"),
+    (
+        ("no-protected-evidence", "protected terminal evidence is absent or ambiguous"),
+        ("multiple-protected-evidence", "protected terminal evidence is absent or ambiguous"),
+        ("changed-protected-digest", "protected terminal evidence is absent or changed"),
+        ("changed-protected-epoch", "protected terminal evidence is absent or changed"),
+        ("changed-protected-binding", "protected terminal evidence is absent or changed"),
+        ("changed-inventory-sequence", "unused terminal inventory is absent or changed"),
+        ("changed-inventory-digest", "unused terminal inventory is absent or changed"),
+        ("nonempty-owned-inventory", "unused terminal inventory still owns the intent"),
+        ("retained-launch-envelope", "unused terminal still has local physical ownership"),
+        ("physical-binding", "unused terminal still has local physical ownership"),
+        ("matching-owned-slurm-work", "unused terminal still has local physical ownership"),
+    ),
+)
+async def test_protected_terminal_matrix_quarantines_ambiguous_or_changed_release(
+    tmp_path: Path,
+    case: str,
+    expected_detail: str,
+) -> None:
+    launch = launch_context_fixture()
+    work: object | None = launch.binding
+    if case in {"nonempty-owned-inventory", "physical-binding", "matching-owned-slurm-work"}:
+        work = permit_fixture(launch.binding)
+    executor, journal, manager, admission, slurm, _launch = executor_fixture(
+        tmp_path,
+        work=work,
+    )
+    protected_digest = "4" * 64
+    await executor.tick()
+    if case in {"nonempty-owned-inventory", "physical-binding", "matching-owned-slurm-work"}:
+        retained_job = slurm.jobs[0]
+        if case in {"physical-binding", "matching-owned-slurm-work"}:
+            slurm.jobs.clear()
+        await executor.tick()
+        if case == "matching-owned-slurm-work":
+            slurm.jobs.append(retained_job)
+    else:
+        await executor.tick()
+    inventory = manager.inventories[-1]
+    inventory_sequence = inventory.inventory_sequence
+    inventory_digest = canonical_executable_digest(inventory)
+    if case == "retained-launch-envelope":
+        rendered = executor.render_launch(launch.binding)
+        executor._remember_launch(
+            rendered,
+            bootstrap_registration_epoch=1,
+            event="slurm-submit-confirmed",
+        )
+    if case == "changed-inventory-sequence":
+        inventory_sequence += 1
+    if case == "changed-inventory-digest":
+        inventory_digest = "5" * 64
+
+    observation = ProtectedIntentObservationV2(
+        binding=launch.binding,
+        bootstrap_registration_epoch=1,
+        claim_high_water=0,
+        prepared_revocation=_prepared_revocation_receipt(
+            launch.binding,
+            digest=protected_digest,
+        ),
+    )
+    release_digest = protected_digest
+    release_epoch = 2
+    if case == "no-protected-evidence":
+        observation = ProtectedIntentObservationV2(
+            binding=launch.binding,
+            bootstrap_registration_epoch=1,
+            claim_high_water=0,
+        )
+    elif case == "multiple-protected-evidence":
+        observation = ProtectedIntentObservationV2.model_construct(
+            binding=launch.binding,
+            bootstrap_registration_epoch=1,
+            protected_registration_epoch=2,
+            claim_high_water=0,
+            release=_protected_release_receipt(launch.binding, digest=protected_digest),
+            prepared_revocation=_prepared_revocation_receipt(
+                launch.binding,
+                digest=protected_digest,
+            ),
+            executable=True,
+        )
+    elif case == "changed-protected-digest":
+        release_digest = "6" * 64
+    elif case == "changed-protected-epoch":
+        release_epoch = 3
+    elif case == "changed-protected-binding":
+        changed_binding = launch.binding.model_copy(update={"intent_id": UUID(int=999)})
+        observation = ProtectedIntentObservationV2.model_construct(
+            binding=launch.binding,
+            bootstrap_registration_epoch=1,
+            protected_registration_epoch=2,
+            claim_high_water=0,
+            prepared_revocation=_prepared_revocation_receipt(
+                changed_binding,
+                digest=protected_digest,
+            ),
+            executable=True,
+        )
+    admission.observations[launch.binding.intent_id] = observation
+    manager.work = _release_work(
+        launch.binding,
+        command_sequence=2,
+        inventory_sequence=inventory_sequence,
+        terminal_kind="unused",
+        terminal_identity="unused-101",
+        terminal_evidence_sha256=inventory_digest,
+        protected_release_sha256=release_digest,
+        protected_registration_epoch=release_epoch,
+    )
+
+    result = await executor.tick()
+
+    assert result.status == "quarantined"
+    assert result.detail == expected_detail
+    assert manager.releases == []
     journal.close()
 
 

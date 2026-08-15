@@ -1158,6 +1158,10 @@ async def test_withdraw_unregistered_physical_binding_revokes_bootstrap_and_fenc
         assert receipt.bootstrap_revoked is True
         assert receipt.request_digest == receipt.withdrawal_digest
         assert await store.withdraw_unregistered_worker(withdrawal) == receipt
+        observation = await store.observe_intent(request.binding)
+        assert observation.withdrawal == receipt
+        assert observation.release is None
+        assert observation.prepared_revocation is None
         with pytest.raises(DBAPIError, match="delayed registration"):
             await store.register_worker(worker, bootstrap_capability=capability)
 
