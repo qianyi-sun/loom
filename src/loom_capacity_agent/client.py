@@ -16,7 +16,10 @@ from uuid import UUID
 import httpx
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from loom_capacity_agent.admission import PreparedProtectedReleaseV1
+from loom_capacity_agent.admission import (
+    PreparedProtectedReleaseV1,
+    PublishableExecutableProtectedReleaseV2,
+)
 from loom_capacity_agent.contracts import ReporterConfigurationV1
 from loom_capacity_guard.contracts import canonical_digest as guard_canonical_digest
 from loom_capacity_manager.auth import MAX_BEARER_TOKEN_BYTES
@@ -27,6 +30,11 @@ from loom_capacity_manager.contracts import (
     PositiveQuantity,
     canonical_bytes,
     canonical_digest,
+)
+from loom_capacity_manager.executable_contracts import (
+    ExecutableProtectedReleaseV2,
+    canonical_executable_bytes,
+    canonical_executable_digest,
 )
 from loom_capacity_manager.grant_contracts import (
     DryRunProtectedReleaseAcknowledgementV1,
@@ -69,6 +77,18 @@ class ProtectedReleasePublishReceiptV1(BaseModel):
     acknowledgement_digest: Digest
     replayed: bool
     executable: Literal[False]
+
+
+class ExecutableProtectedReleasePublishReceiptV2(BaseModel):
+    """Exact bounded manager receipt for one executable protected release."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    intent_id: UUID
+    protected_release_sha256: Digest
+    receipt_digest: Digest
+    replayed: bool
+    executable: Literal[True]
 
 
 @dataclass(frozen=True, slots=True)
@@ -406,6 +426,102 @@ class DemandReporterClient:
             )
         return receipt
 
+    async def publish_executable_protected_release(
+        self,
+        publication: PublishableExecutableProtectedReleaseV2,
+        *,
+        idempotency_key: UUID,
+    ) -> ExecutableProtectedReleasePublishReceiptV2:
+        """Publish one strict executable protected-release outbox event."""
+
+        if not isinstance(publication, PublishableExecutableProtectedReleaseV2):
+            raise DemandPublishError(
+                "protected release publication is not a schema-v2 executable report"
+            )
+        if not isinstance(idempotency_key, UUID):
+            raise DemandPublishError("protected release idempotency key must be a UUID")
+        release = publication.release
+        if not isinstance(release, ExecutableProtectedReleaseV2):
+            raise DemandPublishError("protected release publication carries an invalid release")
+        if canonical_executable_digest(release) != publication.publication_digest:
+            raise DemandPublishError("protected release publication digest changed")
+        if release.binding.subject_id != self._configuration.subject_id:
+            raise DemandPublishError(
+                "protected release binding differs from trusted configuration: subject_id"
+            )
+        if release.binding.subject_incarnation != self._configuration.subject_incarnation:
+            raise DemandPublishError(
+                "protected release binding differs from trusted configuration: subject_incarnation"
+            )
+        if release.reporter_incarnation != self._configuration.reporter_incarnation:
+            raise DemandPublishError(
+                "protected release binding differs from trusted configuration: reporter_incarnation"
+            )
+        if release.binding.deployment_generation != self._configuration.deployment_generation:
+            raise DemandPublishError(
+                "protected release binding differs from trusted configuration: deployment_generation"
+            )
+        if (
+            release.binding.candidate.algorithm != self._configuration.candidate_identity_algorithm
+            or release.binding.candidate.identity != self._configuration.candidate_identity
+            or release.binding.candidate.publication_sha256
+            != self._configuration.candidate_publication_sha256
+        ):
+            raise DemandPublishError("protected release binding differs from trusted configuration")
+        try:
+            payload = canonical_executable_bytes(release)
+        except CapacityContractError as exc:
+            raise DemandPublishError(
+                "protected release exceeds its canonical contract bound"
+            ) from exc
+        endpoint = (
+            f"{self._manager_origin}/v2/reports/protected-releases/"
+            f"{release.binding.subject_id}/{release.binding.shape_instance_id}"
+        )
+        try:
+            response = await self._http.put(
+                endpoint,
+                content=payload,
+                headers={
+                    "Authorization": f"Bearer {self._bearer_token}",
+                    "Content-Type": "application/json",
+                    "Idempotency-Key": str(idempotency_key),
+                },
+            )
+        except httpx.HTTPError:
+            raise DemandPublishError(
+                "capacity manager executable protected release transport failed"
+            ) from None
+        if response.status_code != 200:
+            raise DemandPublishError(
+                "capacity manager rejected executable protected release "
+                f"with status {response.status_code}"
+            )
+        if len(response.content) > _MAX_RECEIPT_BYTES:
+            raise DemandPublishError(
+                "capacity manager executable protected release receipt exceeds its byte bound"
+            )
+        try:
+            receipt = ExecutableProtectedReleasePublishReceiptV2.model_validate_json(
+                response.content
+            )
+        except (ValidationError, ValueError) as exc:
+            raise DemandPublishError(
+                "capacity manager returned an invalid executable protected release receipt"
+            ) from exc
+        if (
+            receipt.intent_id != release.binding.intent_id
+            or receipt.protected_release_sha256 != release.protected_release_sha256
+        ):
+            raise DemandPublishError(
+                "capacity manager executable protected release receipt does not match the report"
+            )
+        if receipt.receipt_digest != publication.publication_digest:
+            raise DemandPublishError(
+                "capacity manager executable protected release receipt digest changed"
+            )
+        return receipt
+
     async def aclose(self) -> None:
         if self._owns_http:
             await self._http.aclose()
@@ -423,6 +539,7 @@ __all__ = [
     "DemandReporterClient",
     "DemandReporterConnection",
     "DemandReporterTLSFiles",
+    "ExecutableProtectedReleasePublishReceiptV2",
     "ProtectedReleasePublishReceiptV1",
     "build_reporter_tls_context",
     "canonical_manager_origin",

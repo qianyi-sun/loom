@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import errno
 import fcntl
 import hashlib
@@ -16,7 +18,18 @@ from types import TracebackType
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 _EVENT_RE = re.compile(r"[a-z][a-z0-9-]{0,62}")
 _OBJECT_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,254}")
-_OBJECT_KINDS = frozenset({"executor", "intent", "inventory", "job", "tranche"})
+_OBJECT_KINDS = frozenset(
+    {
+        "bootstrap",
+        "executor",
+        "heartbeat",
+        "intent",
+        "inventory",
+        "job",
+        "prepared-revocation",
+        "tranche",
+    }
+)
 _ZERO_DIGEST = "0" * 64
 _MAX_JOURNAL_BYTES = 64 * 1024 * 1024
 _MAX_RECORD_BYTES = 64 * 1024
@@ -55,9 +68,10 @@ class JournalRecord:
     object_id: str
     payload_digest: str
     record_digest: str
+    payload_base64: str | None = None
 
     def payload(self) -> dict[str, object]:
-        return {
+        value: dict[str, object] = {
             "schema_version": self.schema_version,
             "sequence": self.sequence,
             "previous_digest": self.previous_digest,
@@ -66,6 +80,16 @@ class JournalRecord:
             "object_id": self.object_id,
             "payload_digest": self.payload_digest,
         }
+        if self.schema_version == 2:
+            value["payload_base64"] = self.payload_base64
+        return value
+
+    def durable_payload(self) -> bytes | None:
+        """Return verified schema-v2 request bytes, or none for legacy records."""
+
+        if self.payload_base64 is None:
+            return None
+        return base64.b64decode(self.payload_base64, validate=True)
 
 
 def _canonical_bytes(payload: dict[str, object]) -> bytes:
@@ -136,6 +160,7 @@ class ExecutorJournal:
         self._journal_fd: int | None = None
         self._records: dict[int, str] = {0: _ZERO_DIGEST}
         self._latest: dict[tuple[str, str], JournalRecord] = {}
+        self._history: list[JournalRecord] = []
         self._head = JournalHead(0, _ZERO_DIGEST)
 
     @property
@@ -198,6 +223,7 @@ class ExecutorJournal:
             raise JournalCorruptionError("executor journal contains a torn record")
         self._records = {0: _ZERO_DIGEST}
         self._latest = {}
+        self._history = []
         prior = _ZERO_DIGEST
         for expected_sequence, encoded in enumerate(raw.splitlines(), start=1):
             if expected_sequence > _MAX_RECORDS or len(encoded) > _MAX_RECORD_BYTES:
@@ -211,6 +237,7 @@ class ExecutorJournal:
             record = self._validate_record(payload, expected_sequence, prior)
             self._records[record.sequence] = record.record_digest
             self._latest[(record.object_kind, record.object_id)] = record
+            self._history.append(record)
             prior = record.record_digest
         self._head = JournalHead(len(self._records) - 1, prior)
         os.lseek(self._journal_fd, 0, os.SEEK_END)
@@ -221,7 +248,7 @@ class ExecutorJournal:
         expected_sequence: int,
         expected_previous: str,
     ) -> JournalRecord:
-        fields = {
+        common_fields = {
             "schema_version",
             "sequence",
             "previous_digest",
@@ -231,11 +258,21 @@ class ExecutorJournal:
             "payload_digest",
             "record_digest",
         }
-        if not isinstance(value, dict) or set(value) != fields:
+        if not isinstance(value, dict):
+            raise JournalCorruptionError("executor journal record fields are invalid")
+        schema_version = value.get("schema_version")
+        fields = (
+            common_fields
+            if schema_version == 1
+            else common_fields | {"payload_base64"}
+            if schema_version == 2
+            else set()
+        )
+        if set(value) != fields:
             raise JournalCorruptionError("executor journal record fields are invalid")
         if (
-            type(value["schema_version"]) is not int
-            or value["schema_version"] != 1
+            type(schema_version) is not int
+            or schema_version not in {1, 2}
             or type(value["sequence"]) is not int
             or value["sequence"] != expected_sequence
             or value["previous_digest"] != expected_previous
@@ -251,10 +288,39 @@ class ExecutorJournal:
             or _DIGEST_RE.fullmatch(value["record_digest"]) is None
         ):
             raise JournalCorruptionError("executor journal record binding is invalid")
+        payload_base64: str | None = None
+        if schema_version == 2:
+            encoded_payload = value["payload_base64"]
+            if not isinstance(encoded_payload, str):
+                raise JournalCorruptionError("executor journal payload encoding is invalid")
+            try:
+                decoded_payload = base64.b64decode(encoded_payload, validate=True)
+            except (ValueError, binascii.Error) as exc:
+                raise JournalCorruptionError(
+                    "executor journal payload encoding is invalid"
+                ) from exc
+            if (
+                not decoded_payload
+                or len(decoded_payload) > _MAX_RECORD_BYTES
+                or base64.b64encode(decoded_payload).decode("ascii") != encoded_payload
+                or hashlib.sha256(decoded_payload).hexdigest() != value["payload_digest"]
+            ):
+                raise JournalCorruptionError("executor journal payload digest is invalid")
+            payload_base64 = encoded_payload
         payload = {key: value[key] for key in fields - {"record_digest"}}
         if _record_digest(payload) != value["record_digest"]:
             raise JournalCorruptionError("executor journal record digest is invalid")
-        return JournalRecord(**value)
+        return JournalRecord(
+            schema_version=schema_version,
+            sequence=value["sequence"],
+            previous_digest=value["previous_digest"],
+            event_kind=value["event_kind"],
+            object_kind=value["object_kind"],
+            object_id=value["object_id"],
+            payload_digest=value["payload_digest"],
+            record_digest=value["record_digest"],
+            payload_base64=payload_base64,
+        )
 
     def append(
         self,
@@ -263,6 +329,7 @@ class ExecutorJournal:
         *,
         object_kind: str,
         object_id: str,
+        payload: bytes | None = None,
     ) -> JournalRecord:
         if self._journal_fd is None:
             raise JournalLockError("executor journal is not open")
@@ -274,8 +341,15 @@ class ExecutorJournal:
             raise ValueError("journal object kind is invalid")
         if _OBJECT_ID_RE.fullmatch(object_id) is None:
             raise ValueError("journal object identity is invalid")
-        payload: dict[str, object] = {
-            "schema_version": 1,
+        if payload is not None and (
+            not isinstance(payload, bytes)
+            or not payload
+            or len(payload) > _MAX_RECORD_BYTES
+            or hashlib.sha256(payload).hexdigest() != payload_digest
+        ):
+            raise ValueError("journal durable payload does not match its digest")
+        record_payload: dict[str, object] = {
+            "schema_version": 2 if payload is not None else 1,
             "sequence": self._head.sequence + 1,
             "previous_digest": self._head.digest,
             "event_kind": event_kind,
@@ -283,8 +357,12 @@ class ExecutorJournal:
             "object_id": object_id,
             "payload_digest": payload_digest,
         }
-        digest = _record_digest(payload)
-        encoded = _canonical_bytes({**payload, "record_digest": digest}) + b"\n"
+        payload_base64 = None
+        if payload is not None:
+            payload_base64 = base64.b64encode(payload).decode("ascii")
+            record_payload["payload_base64"] = payload_base64
+        digest = _record_digest(record_payload)
+        encoded = _canonical_bytes({**record_payload, "record_digest": digest}) + b"\n"
         if len(encoded) > _MAX_RECORD_BYTES:
             raise ValueError("journal record exceeds its size bound")
         if self._head.sequence >= _MAX_RECORDS:
@@ -298,9 +376,20 @@ class ExecutorJournal:
                 raise JournalError("executor journal append made no progress")
             offset += written
         os.fsync(self._journal_fd)
-        record = JournalRecord(record_digest=digest, **payload)  # type: ignore[arg-type]
+        record = JournalRecord(
+            schema_version=2 if payload is not None else 1,
+            sequence=self._head.sequence + 1,
+            previous_digest=self._head.digest,
+            event_kind=event_kind,
+            object_kind=object_kind,
+            object_id=object_id,
+            payload_digest=payload_digest,
+            record_digest=digest,
+            payload_base64=payload_base64,
+        )
         self._records[record.sequence] = record.record_digest
         self._latest[(record.object_kind, record.object_id)] = record
+        self._history.append(record)
         self._head = JournalHead(record.sequence, record.record_digest)
         return record
 
@@ -308,6 +397,35 @@ class ExecutorJournal:
         """Return the durable latest event for an exact protocol object."""
 
         return self._latest.get((object_kind, object_id))
+
+    def latest_records(self, object_kind: str) -> tuple[JournalRecord, ...]:
+        """Return each durable latest object of one exact kind in sequence order."""
+
+        if object_kind not in _OBJECT_KINDS:
+            raise ValueError("journal object kind is invalid")
+        return tuple(
+            sorted(
+                (
+                    record
+                    for (kind, _object_id), record in self._latest.items()
+                    if kind == object_kind
+                ),
+                key=lambda record: record.sequence,
+            )
+        )
+
+    def records(self, object_kind: str, object_id: str) -> tuple[JournalRecord, ...]:
+        """Return durable records for one exact protocol object in sequence order."""
+
+        if object_kind not in _OBJECT_KINDS:
+            raise ValueError("journal object kind is invalid")
+        if _OBJECT_ID_RE.fullmatch(object_id) is None:
+            raise ValueError("journal object identity is invalid")
+        return tuple(
+            record
+            for record in self._history
+            if record.object_kind == object_kind and record.object_id == object_id
+        )
 
     def pending_requests(self) -> tuple[JournalRecord, ...]:
         """Return unresolved journal-first commands in durable sequence order."""

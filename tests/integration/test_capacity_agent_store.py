@@ -359,6 +359,8 @@ async def test_owner_reconfigures_disabled_agent_monotonically_without_resetting
         update={
             "reporter_incarnation": replacement_fence.reporter_incarnation,
             "candidate_digest": replacement_fence.candidate_digest,
+            "candidate_identity": replacement_fence.candidate_digest,
+            "candidate_publication_sha256": replacement_fence.candidate_digest,
             "deployment_generation": replacement_fence.deployment_generation,
             "configuration_generation": replacement_fence.configuration_generation,
         }

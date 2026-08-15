@@ -585,8 +585,13 @@ class DevInstance(Base):
             name="dev_instances_capacity_projection_check",
         ),
         CheckConstraint(
-            "status <> 'ready' OR candidate_id IS NULL "
-            "OR capacity_configuration_epoch IS NOT NULL",
+            "(candidate_id IS NULL AND capacity_namespace IS NULL AND capacity_database IS NULL) "
+            "OR (candidate_id IS NOT NULL AND capacity_namespace = 'loom-dev-' || name "
+            "AND capacity_database = 'loom_dev_' || replace(name, '-', '_'))",
+            name="dev_instances_personal_capacity_identity_check",
+        ),
+        CheckConstraint(
+            "status <> 'ready' OR candidate_id IS NULL OR capacity_configuration_epoch IS NOT NULL",
             name="dev_instances_personal_readiness_capacity_check",
         ),
         UniqueConstraint("subject_id", name="dev_instances_subject_id_uidx"),
@@ -629,6 +634,8 @@ class DevInstance(Base):
         nullable=True,
     )
     candidate_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    capacity_namespace: Mapped[str | None] = mapped_column(Text, nullable=True)
+    capacity_database: Mapped[str | None] = mapped_column(Text, nullable=True)
     operation_epoch: Mapped[int] = mapped_column(
         BigInteger,
         nullable=False,
@@ -1123,8 +1130,7 @@ class DevLifecycleOperation(Base):
             name="dev_lifecycle_operations_capacity_projection_check",
         ),
         CheckConstraint(
-            "state <> 'succeeded' OR kind = 'noop' "
-            "OR capacity_configuration_epoch IS NOT NULL",
+            "state <> 'succeeded' OR kind = 'noop' OR capacity_configuration_epoch IS NOT NULL",
             name="dev_lifecycle_operations_capacity_completion_check",
         ),
         CheckConstraint(
@@ -2224,8 +2230,7 @@ class Worker(Base):
             name="workers_input_cache_capacity_check",
         ),
         CheckConstraint(
-            "capability_snapshot_json IS NULL OR "
-            "jsonb_typeof(capability_snapshot_json) = 'object'",
+            "capability_snapshot_json IS NULL OR jsonb_typeof(capability_snapshot_json) = 'object'",
             name="workers_capability_snapshot_json_check",
         ),
         CheckConstraint(
@@ -3620,9 +3625,7 @@ class PipelineRunGpuBackendSelection(Base):
             "(variant_id = 'oldlab-rtx5080-2gpu' AND scope = 'oldlab_preflight'))))",
             name="pipeline_gpu_selection_scope_authority_check",
         ),
-        UniqueConstraint(
-            "pipeline_run_id", "scope", name="pipeline_gpu_selection_run_scope_uidx"
-        ),
+        UniqueConstraint("pipeline_run_id", "scope", name="pipeline_gpu_selection_run_scope_uidx"),
     )
 
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -4168,9 +4171,7 @@ class ExecutionAttempt(Base):
         UniqueConstraint(
             "stage_run_id", "attempt_number", name="execution_attempts_stage_number_uidx"
         ),
-        UniqueConstraint(
-            "id", "worker_id", name="execution_attempts_worker_identity_uidx"
-        ),
+        UniqueConstraint("id", "worker_id", name="execution_attempts_worker_identity_uidx"),
         Index(
             "execution_attempts_claim_uidx",
             "claim_id",
@@ -5005,7 +5006,9 @@ class PipelineInputImport(Base):
             "(state != 'aborted' AND aborted_at IS NULL AND abort_reason IS NULL)",
             name="pipeline_input_imports_aborted_group_check",
         ),
-        UniqueConstraint("team_id", "idempotency_key", name="pipeline_input_imports_idempotency_uidx"),
+        UniqueConstraint(
+            "team_id", "idempotency_key", name="pipeline_input_imports_idempotency_uidx"
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -5044,8 +5047,12 @@ class PipelineInputImport(Base):
     request_digest: Mapped[str] = mapped_column(Text)
     abort_reason: Mapped[str | None] = mapped_column(Text)
     expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now()
+    )
     committed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     aborted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     version: Mapped[int] = mapped_column(BigInteger, server_default=text("0"))
@@ -5122,8 +5129,12 @@ class PipelineInputMaterialization(Base):
     idempotency_key: Mapped[str] = mapped_column(Text)
     request_digest: Mapped[str] = mapped_column(Text)
     abort_reason: Mapped[str | None] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now()
+    )
     committed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     aborted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     version: Mapped[int] = mapped_column(BigInteger, server_default=text("0"))
@@ -5349,8 +5360,12 @@ class ArtifactUploadSession(Base):
     committed_marker_sha256: Mapped[str | None] = mapped_column(Text)
     upload_token_digest: Mapped[bytes | None] = mapped_column(LargeBinary)
     expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now()
+    )
     committed_ready_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     committed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     aborted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
@@ -5378,7 +5393,9 @@ class ArtifactUploadFile(Base):
     )
 
     session_id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("artifact_upload_sessions.id", ondelete="CASCADE"), primary_key=True
+        PgUUID(as_uuid=True),
+        ForeignKey("artifact_upload_sessions.id", ondelete="CASCADE"),
+        primary_key=True,
     )
     file_index: Mapped[int] = mapped_column(Integer, primary_key=True)
     preallocated_artifact_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True))

@@ -12,7 +12,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import CheckConstraint, create_engine, inspect, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from testcontainers.postgres import PostgresContainer
@@ -266,8 +266,7 @@ async def test_personal_dev_candidate_registration_and_build_lease(
         manifest_json={"schema_version": 1, "attestation_scope": "personal-dev-only"},
         object_bucket="artifacts",
         object_key=(
-            f"personal-dev/sources/{team_id}/{owner_id}/{'a' * 64}/"
-            f"{candidate_id}/{'c' * 64}.tar"
+            f"personal-dev/sources/{team_id}/{owner_id}/{'a' * 64}/{candidate_id}/{'c' * 64}.tar"
         ),
         source_generation_id=candidate_id,
         archive_size_bytes=10240,
@@ -299,10 +298,7 @@ async def test_personal_dev_candidate_registration_and_build_lease(
             assert retried.created is False
             assert retried.candidate.id == created.candidate.id
             assert retried.candidate.object_key == requested.object_key
-            assert (
-                retried.candidate.source_generation_id
-                == requested.source_generation_id
-            )
+            assert retried.candidate.source_generation_id == requested.source_generation_id
             assert retried.build_attempt is None
 
             subject_id = uuid4()
@@ -615,10 +611,7 @@ async def test_personal_dev_artifact_gc_is_grace_delayed_lease_fenced_and_rehydr
                 .all()
             )
             assert [item.collection_sequence for item in first_evidence] == [1]
-            assert (
-                first_evidence[0].manifest_sha256
-                == reclaimed.manifest.manifest_sha256
-            )
+            assert first_evidence[0].manifest_sha256 == reclaimed.manifest.manifest_sha256
 
         replacement_sha = "d" * 64
         replacement_archive = "e" * 64
@@ -669,8 +662,7 @@ async def test_personal_dev_artifact_gc_is_grace_delayed_lease_fenced_and_rehydr
                 (
                     await session.execute(
                         select(PersonalDevCandidateArtifactCollection).where(
-                            PersonalDevCandidateArtifactCollection.candidate_id
-                            == requested.id
+                            PersonalDevCandidateArtifactCollection.candidate_id == requested.id
                         )
                     )
                 )
@@ -679,9 +671,7 @@ async def test_personal_dev_artifact_gc_is_grace_delayed_lease_fenced_and_rehydr
             )
             assert [item.collection_sequence for item in preserved] == [1]
 
-            assert await store.mark_next_artifact_gc(
-                now=now + timedelta(minutes=4)
-            ) is True
+            assert await store.mark_next_artifact_gc(now=now + timedelta(minutes=4)) is True
             second_claim = await store.claim_next_artifact_gc(
                 collector_id="collector-b",
                 now=now + timedelta(minutes=4),
@@ -690,10 +680,7 @@ async def test_personal_dev_artifact_gc_is_grace_delayed_lease_fenced_and_rehydr
             )
             assert second_claim is not None
             assert second_claim.candidate_id == requested.id
-            assert (
-                second_claim.manifest.source_object_key
-                == rehydration_request.object_key
-            )
+            assert second_claim.manifest.source_object_key == rehydration_request.object_key
             await store.finish_artifact_gc(
                 candidate_id=second_claim.candidate_id,
                 collector_id="collector-b",
@@ -705,13 +692,8 @@ async def test_personal_dev_artifact_gc_is_grace_delayed_lease_fenced_and_rehydr
                 (
                     await session.execute(
                         select(PersonalDevCandidateArtifactCollection)
-                        .where(
-                            PersonalDevCandidateArtifactCollection.candidate_id
-                            == requested.id
-                        )
-                        .order_by(
-                            PersonalDevCandidateArtifactCollection.collection_sequence
-                        )
+                        .where(PersonalDevCandidateArtifactCollection.candidate_id == requested.id)
+                        .order_by(PersonalDevCandidateArtifactCollection.collection_sequence)
                     )
                 )
                 .scalars()
@@ -858,8 +840,7 @@ async def test_personal_dev_environment_apply_is_owner_bound_and_epoch_fenced(
         manifest_json={"schema_version": 1, "attestation_scope": "personal-dev-only"},
         object_bucket="artifacts",
         object_key=(
-            f"personal-dev/sources/{team_id}/{owner_id}/{'a' * 64}/"
-            f"{candidate_id}/{'c' * 64}.tar"
+            f"personal-dev/sources/{team_id}/{owner_id}/{'a' * 64}/{candidate_id}/{'c' * 64}.tar"
         ),
         source_generation_id=candidate_id,
         archive_size_bytes=10240,
@@ -1615,8 +1596,7 @@ async def test_personal_dev_destroy_is_manager_first_replayable_and_checkpointed
                     manifest_json={"schema_version": 1},
                     object_bucket="artifacts",
                     object_key=(
-                        f"personal-dev/sources/{team_id}/{owner_id}/{'a' * 64}/"
-                        f"{'c' * 64}.tar"
+                        f"personal-dev/sources/{team_id}/{owner_id}/{'a' * 64}/{'c' * 64}.tar"
                     ),
                     source_generation_id=candidate_id,
                     archive_size_bytes=10240,
@@ -1860,3 +1840,112 @@ def test_in_flight_count_trigger(postgres_url: str) -> None:
         conn.execute(text("UPDATE trials SET state='queued' WHERE id=:id"), {"id": trial_id})
         conn.execute(text("UPDATE trials SET state='claimed' WHERE id=:id"), {"id": trial_id})
     assert in_flight() == 1
+
+
+def test_dev_instance_capacity_coordinates_are_derived_from_personal_name(
+    postgres_url: str,
+) -> None:
+    """Direct SQL cannot bind syntactically valid coordinates to the wrong owner name."""
+
+    engine = create_engine(postgres_url)
+    user_id = uuid4()
+    team_id = uuid4()
+    candidate_id = uuid4()
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO users (id, username, username_normalized) "
+                    "VALUES (:id, 'coordinate-user', 'coordinate-user')"
+                ),
+                {"id": user_id},
+            )
+            connection.execute(
+                text("INSERT INTO teams (id, name) VALUES (:id, 'coordinate-team')"),
+                {"id": team_id},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO personal_dev_candidates "
+                    "(id, owner_user_id, owner_team_id, candidate_sha, source_sha256, "
+                    "archive_sha256, build_contract_sha256, source_commit, dirty, "
+                    "manifest_json, object_bucket, object_key, source_generation_id, "
+                    "archive_size_bytes) VALUES "
+                    "(:candidate_id, :user_id, :team_id, repeat('a', 64), repeat('b', 64), "
+                    "repeat('c', 64), repeat('d', 64), repeat('e', 40), false, "
+                    "'{}'::jsonb, 'personal-dev-sources', "
+                    "'personal-dev/sources/' || :team_text || '/' || :user_text || '/' || "
+                    "repeat('a', 64) || '/' || repeat('c', 64) || '.tar', "
+                    ":candidate_id, 1)"
+                ),
+                {
+                    "candidate_id": candidate_id,
+                    "user_id": user_id,
+                    "team_id": team_id,
+                    "user_text": str(user_id),
+                    "team_text": str(team_id),
+                },
+            )
+            with pytest.raises(DBAPIError):
+                connection.execute(
+                    text(
+                        "INSERT INTO dev_instances "
+                        "(name, owner_user_id, owner_team_id, max_slots, "
+                        "deployment_generation, candidate_id, candidate_sha, "
+                        "capacity_namespace, capacity_database, operation_id) "
+                        "VALUES ('alice', :user_id, :team_id, 1, 1, :candidate_id, "
+                        "repeat('a', 64), 'loom-dev-other', 'loom_dev_other', :operation_id)"
+                    ),
+                    {
+                        "user_id": user_id,
+                        "team_id": team_id,
+                        "candidate_id": candidate_id,
+                        "operation_id": uuid4(),
+                    },
+                )
+    finally:
+        engine.dispose()
+
+
+def test_dev_instance_capacity_coordinate_constraint_matches_model_and_migration(
+    postgres_url: str,
+) -> None:
+    """The 0097 derived-coordinate constraint must be present in ORM and database."""
+
+    expected_model_sql = (
+        "(candidate_id IS NULL AND capacity_namespace IS NULL AND capacity_database IS NULL) "
+        "OR (candidate_id IS NOT NULL AND capacity_namespace = 'loom-dev-' || name "
+        "AND capacity_database = 'loom_dev_' || replace(name, '-', '_'))"
+    )
+    model_checks = {
+        constraint.name: str(constraint.sqltext)
+        for constraint in DevInstance.__table__.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+
+    assert model_checks["dev_instances_personal_capacity_identity_check"] == expected_model_sql
+
+    engine = create_engine(postgres_url)
+    try:
+        with engine.connect() as connection:
+            database_checks = {
+                constraint["name"]: constraint["sqltext"]
+                for constraint in inspect(connection).get_check_constraints("dev_instances")
+            }
+    finally:
+        engine.dispose()
+
+    normalized_database_sql = (
+        " ".join(database_checks["dev_instances_personal_capacity_identity_check"].lower().split())
+        .replace("( ", "(")
+        .replace(" )", ")")
+    )
+    assert "candidate_id is null" in normalized_database_sql
+    assert "capacity_namespace is null" in normalized_database_sql
+    assert "capacity_database is null" in normalized_database_sql
+    assert "candidate_id is not null" in normalized_database_sql
+    assert "capacity_namespace = ('loom-dev-'::text || name)" in normalized_database_sql
+    assert (
+        "capacity_database = ('loom_dev_'::text || replace(name, '-'::text, '_'::text))"
+        in normalized_database_sql
+    )

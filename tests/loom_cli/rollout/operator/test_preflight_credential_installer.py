@@ -181,6 +181,7 @@ def _installer(tmp_path: Path) -> tuple[PreflightCredentialInstaller, Runner]:
     _public(paths.rehearsal_manifest, b"apiVersion: v1\nkind: Namespace\n")
     raw_application_token = b"loom_readonly_probe_token_fixture_0123456789\n"
     _private(paths.application_token_source, raw_application_token)
+    paths.application_token_source.parent.chmod(0o755)
     paths.credential_root.parent.mkdir(parents=True, exist_ok=True)
     runner = Runner(source)
     uid = os.getuid()

@@ -27,7 +27,113 @@ def _guard_config(database: dict[str, object]) -> AlembicConfig:
     os.environ["LOOM_CAPACITY_GUARD_DB_URL"] = _value(database, "migrator_url")
     os.environ["LOOM_CAPACITY_GUARD_OWNER_ROLE"] = _value(database, "owner_role")
     os.environ["LOOM_CAPACITY_GUARD_AGENT_ROLE"] = _value(database, "agent_role")
+    os.environ["LOOM_CAPACITY_GUARD_EXECUTOR_ROLE"] = _value(database, "executor_role")
+    os.environ["LOOM_CAPACITY_GUARD_OBSERVER_ROLE"] = _value(database, "observer_role")
     return cfg
+
+
+def test_executor_role_is_distinct_and_has_only_bounded_executable_procedures(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    engine = create_engine(_value(capacity_guard_database, "admin_url"))
+    executor = _value(capacity_guard_database, "executor_role")
+    try:
+        with engine.connect() as connection:
+            role = (
+                connection.execute(
+                    text(
+                        "SELECT rolcanlogin, rolinherit, rolsuper, rolcreatedb, "
+                        "rolcreaterole, rolreplication, rolbypassrls, "
+                        "pg_has_role(:executor, :owner, 'MEMBER') AS owner_member, "
+                        "pg_has_role(:executor, :agent, 'MEMBER') AS agent_member, "
+                        "(SELECT count(*) FROM pg_auth_members AS m "
+                        "JOIN pg_roles AS r ON r.oid = m.member "
+                        "WHERE r.rolname = :executor) AS role_memberships, "
+                        "has_schema_privilege(:executor, 'loom_capacity_guard', 'USAGE') "
+                        "AS schema_usage, "
+                        "has_table_privilege(:executor, "
+                        "'loom_capacity_guard.agent_registrations', 'SELECT') AS table_select, "
+                        "has_sequence_privilege(:executor, "
+                        "'loom_capacity_guard.demand_observations_observation_id_seq', "
+                        "'USAGE') AS sequence_usage "
+                        "FROM pg_roles WHERE rolname = :executor"
+                    ),
+                    {
+                        "executor": executor,
+                        "owner": _value(capacity_guard_database, "owner_role"),
+                        "agent": _value(capacity_guard_database, "agent_role"),
+                    },
+                )
+                .mappings()
+                .one()
+            )
+            routines = {
+                row[0]
+                for row in connection.execute(
+                    text(
+                        "SELECT routine_name FROM information_schema.role_routine_grants "
+                        "WHERE grantee = :executor AND routine_schema = 'loom_capacity_guard'"
+                    ),
+                    {"executor": executor},
+                ).all()
+            }
+            agent_executable_routines = {
+                row[0]
+                for row in connection.execute(
+                    text(
+                        "SELECT routine_name FROM information_schema.role_routine_grants "
+                        "WHERE grantee = :agent AND routine_schema = 'loom_capacity_guard' "
+                        "AND routine_name = ANY(:routines)"
+                    ),
+                    {
+                        "agent": _value(capacity_guard_database, "agent_role"),
+                        "routines": list(routines),
+                    },
+                ).all()
+            }
+        assert dict(role) == {
+            "rolcanlogin": True,
+            "rolinherit": False,
+            "rolsuper": False,
+            "rolcreatedb": False,
+            "rolcreaterole": False,
+            "rolreplication": False,
+            "rolbypassrls": False,
+            "owner_member": False,
+            "agent_member": False,
+            "role_memberships": 0,
+            "schema_usage": True,
+            "table_select": False,
+            "sequence_usage": False,
+        }
+        assert routines == {
+            "acknowledge_executable_release",
+            "admit_executable_claim",
+            "begin_executable_worker_drain",
+            "bind_executable_slurm_job",
+            "observe_executable_intent",
+            "prepare_executable_worker",
+            "revoke_prepared_executable_bootstrap",
+            "register_executable_worker",
+            "withdraw_unregistered_executable_worker",
+        }
+        assert agent_executable_routines == set()
+    finally:
+        engine.dispose()
+
+
+def test_guard_migration_requires_explicit_distinct_executor_role(
+    capacity_guard_database: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = _guard_config(capacity_guard_database)
+    monkeypatch.delenv("LOOM_CAPACITY_GUARD_EXECUTOR_ROLE")
+    with pytest.raises(RuntimeError, match="LOOM_CAPACITY_GUARD_EXECUTOR_ROLE"):
+        command.current(cfg)
+    monkeypatch.setenv(
+        "LOOM_CAPACITY_GUARD_EXECUTOR_ROLE", _value(capacity_guard_database, "agent_role")
+    )
+    with pytest.raises(RuntimeError, match="distinct canonical SQL role"):
+        command.current(cfg)
 
 
 def test_agent_role_is_least_privileged_and_not_an_owner_member(
@@ -160,7 +266,15 @@ def test_agent_can_execute_only_the_bounded_agent_functions(
                         "has_function_privilege(:agent, "
                         "'loom_capacity_guard.submit_inert_trial_projection"
                         "(uuid,jsonb,bytea,text,jsonb,bytea,text,bytea,text)', 'EXECUTE') "
-                        "AS atomic_submission_execute"
+                        "AS atomic_submission_execute, "
+                        "has_function_privilege(:agent, "
+                        "'loom_capacity_guard.read_next_executable_protected_release"
+                        "(uuid)', 'EXECUTE') AS release_outbox_read_execute, "
+                        "has_function_privilege(:agent, "
+                        "'loom_capacity_guard."
+                        "acknowledge_executable_protected_release_publication"
+                        "(uuid,bigint,jsonb,bytea,text,text)', 'EXECUTE') "
+                        "AS release_outbox_ack_execute"
                     ),
                     {"agent": agent_role},
                 )
@@ -194,6 +308,8 @@ def test_agent_can_execute_only_the_bounded_agent_functions(
             "cross_mode_guard_execute": False,
             "submission_execute": True,
             "atomic_submission_execute": True,
+            "release_outbox_read_execute": True,
+            "release_outbox_ack_execute": True,
         }
     finally:
         admin.dispose()
@@ -251,7 +367,9 @@ def test_agent_functions_have_fixed_search_paths_and_exact_definer_status(
                         "'freeze_inert_legacy_compatibility', "
                         "'reject_global_preparation_with_legacy', "
                         "'register_inert_trial_submission', "
-                        "'submit_inert_trial_projection')"
+                        "'submit_inert_trial_projection', "
+                        "'read_next_executable_protected_release', "
+                        "'acknowledge_executable_protected_release_publication')"
                     )
                 )
                 .mappings()
@@ -281,6 +399,8 @@ def test_agent_functions_have_fixed_search_paths_and_exact_definer_status(
             "reject_global_preparation_with_legacy",
             "register_inert_trial_submission",
             "submit_inert_trial_projection",
+            "read_next_executable_protected_release",
+            "acknowledge_executable_protected_release_publication",
         }
         for name, row in functions.items():
             assert row["proconfig"] == ["search_path=pg_catalog"]

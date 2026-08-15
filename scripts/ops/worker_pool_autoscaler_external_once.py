@@ -25,6 +25,7 @@ import tempfile
 import time
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,12 @@ from loom_control_plane.global_dev_fleet_autoscaler import (
     GlobalDevAutoscalerError,
     capacity_grants_from_report,
 )
+from loom_control_plane.global_execution_fence import (
+    GlobalExecutionFenceError,
+    assert_legacy_scale_up_allowed,
+    load_global_execution_witness,
+)
+from loom_control_plane.slurm_worker_jobs import slurm_cluster_for_pool
 from loom_control_plane.worker_pool_autoscaler import (
     reconcile_worker_pool_autoscaler_once,
 )
@@ -139,6 +146,16 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         help="Exact deployment generation bound to the capacity grant.",
     )
+    parser.add_argument(
+        "--global-execution-witness-json",
+        type=Path,
+        required=True,
+        help="Pinned-key manager witness required before local scale-up.",
+    )
+    parser.add_argument("--manager-public-key", type=Path, required=True)
+    manager_pin = parser.add_mutually_exclusive_group(required=True)
+    manager_pin.add_argument("--expected-manager-public-key-sha256")
+    manager_pin.add_argument("--expected-manager-public-key-sha256-file", type=Path)
     parser.add_argument(
         "--validate-only",
         action="store_true",
@@ -667,12 +684,42 @@ async def _main_async(args: argparse.Namespace) -> None:
                         )
                     finally:
                         await session.rollback()
+                try:
+                    global_execution_witness = load_global_execution_witness(
+                        args.global_execution_witness_json,
+                        manager_public_key_path=args.manager_public_key,
+                        expected_manager_public_key_sha256=(
+                            args.expected_manager_public_key_sha256
+                        ),
+                        expected_manager_public_key_sha256_file=(
+                            args.expected_manager_public_key_sha256_file
+                        ),
+                    )
+                except Exception:
+                    # Evidence failure is not allowed to skip the reciprocal
+                    # zero-capacity drain/release reconciliation below.
+                    global_execution_witness = None
+                    witness_failed = True
+                else:
+                    witness_failed = global_execution_witness is None
+                    if global_execution_witness is not None:
+                        try:
+                            for pool_name in pool_names:
+                                assert_legacy_scale_up_allowed(
+                                    global_execution_witness,
+                                    expected_authority="global-capacity-manager",
+                                    expected_pool_id=slurm_cluster_for_pool(pool_name),
+                                    now=datetime.now(UTC),
+                                )
+                        except GlobalExecutionFenceError:
+                            witness_failed = True
                 reconcile_kwargs: dict[str, Any] = {
                     "environment": environment,
                     "freshness_sec": args.freshness_sec,
                     "include_external_policies": True,
                     "external_only": True,
                     "pool_names": pool_names,
+                    "global_execution_witness": global_execution_witness,
                 }
                 if capacity_grants is not None:
                     reconcile_kwargs["capacity_grants"] = capacity_grants
@@ -685,6 +732,8 @@ async def _main_async(args: argparse.Namespace) -> None:
             print(json.dumps([decision.__dict__ for decision in decisions], default=str))
         finally:
             await engine.dispose()
+    if witness_failed:
+        raise ExternalAutoscalerError("global execution witness is unavailable")
 
 
 def main() -> None:

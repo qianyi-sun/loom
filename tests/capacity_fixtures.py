@@ -31,6 +31,7 @@ from loom_capacity_manager.contracts import (
     ProfileReferenceV1,
     ResourceVectorV1,
     ShadowEpochV1,
+    StaticCandidateProvenanceV1,
     SubjectAllocationInputV1,
     SubjectConfigurationV1,
     WorkerShapeV1,
@@ -401,7 +402,21 @@ def configuration_activation(
     fleet: Any,
     subjects: tuple[Any, ...],
     expected_configuration_epoch: int = 0,
+    static_candidate_provenance: tuple[StaticCandidateProvenanceV1, ...] | None = None,
 ) -> ConfigurationActivationV1:
+    provenance = static_candidate_provenance
+    if provenance is None:
+        provenance = tuple(
+            StaticCandidateProvenanceV1(
+                subject_id=subject.subject_id,
+                subject_incarnation=subject.subject_incarnation,
+                candidate_generation=subject.generation,
+                algorithm="source-sha256",
+                identity="1" * 64,
+                publication_sha256="2" * 64,
+            )
+            for subject in subjects
+        )
     return ConfigurationActivationV1(
         expected_configuration_epoch=expected_configuration_epoch,
         fleet=ConfigurationGenerationRefV1(
@@ -419,6 +434,7 @@ def configuration_activation(
             )
             for subject in subjects
         ),
+        static_candidate_provenance=provenance,
     )
 
 

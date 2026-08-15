@@ -15,9 +15,17 @@ from loom_capacity_agent.admission import (
     PreparedProtectedReleaseV1,
     PreparedWorkerBindingV1,
     PreparedWorkerShapeV1,
+    PublishableExecutableProtectedReleaseV2,
 )
 from loom_capacity_agent.contracts import AgentRegistrationV1
 from loom_capacity_manager.contracts import ResourceVectorV1, WorkerShapeV1, canonical_digest
+from loom_capacity_manager.executable_contracts import (
+    CandidateBindingV2,
+    ExecutableIntentBindingV2,
+    ExecutableProtectedReleaseV2,
+    ExecutionFenceV2,
+    canonical_executable_digest,
+)
 
 
 def _registration() -> AgentRegistrationV1:
@@ -31,6 +39,68 @@ def _registration() -> AgentRegistrationV1:
         candidate_digest="a" * 64,
         deployment_generation=7,
         configuration_generation=11,
+    )
+
+
+def publishable_release_fixture(
+    *, event_kind: str = "released"
+) -> PublishableExecutableProtectedReleaseV2:
+    release = ExecutableProtectedReleaseV2(
+        binding=ExecutableIntentBindingV2(
+            execution=ExecutionFenceV2(
+                authority_incarnation=uuid4(),
+                writer_epoch=3,
+                configuration_epoch=5,
+                execution_epoch=7,
+                execution_manifest_sha256="1" * 64,
+                execution_state="active",
+                executable_new_capacity_ceiling=1,
+                executable_new_capacity_rate_per_minute=1,
+                trusted_fleet_release_sha256="2" * 64,
+                allocation_epoch=11,
+            ),
+            tranche_id=uuid4(),
+            intent_id=uuid4(),
+            shape_instance_id="oldlab-shape-0001",
+            subject_id=uuid4(),
+            subject_incarnation=uuid4(),
+            account_id="owner-alice",
+            tier_id="development",
+            candidate=CandidateBindingV2(
+                algorithm="source-sha256",
+                identity="a" * 64,
+                publication_sha256="a" * 64,
+            ),
+            candidate_generation=7,
+            deployment_generation=7,
+            pool_id="oldlab",
+            pool_generation=13,
+            executor_id="oldlab-executor",
+            executor_incarnation=uuid4(),
+            shape_id="oldlab-cpu-small",
+            profile_id="oldlab-default",
+            profile_generation=17,
+            profile_digest="3" * 64,
+            concurrency_slots=1,
+            resources=ResourceVectorV1(
+                slots=1,
+                cpu_millicores=1000,
+                memory_bytes=1024,
+            ),
+            node_ids=("oldlab-node-01",),
+        ),
+        reporter_incarnation=uuid4(),
+        bootstrap_registration_epoch=1,
+        protected_registration_epoch=2,
+        bootstrap_revoked=True,
+        protected_release_sha256="4" * 64,
+        executable=True,
+    )
+    return PublishableExecutableProtectedReleaseV2(
+        event_id=1,
+        event_kind=event_kind,
+        release=release,
+        publication_digest=canonical_executable_digest(release),
     )
 
 
@@ -110,6 +180,18 @@ def _plan() -> PreparedAdmissionPlanV1:
         worker_shapes=(shape,),
         placement_allowances=(_allowance(shape),),
     )
+
+
+def test_publishable_release_binds_event_and_manager_payload() -> None:
+    value = publishable_release_fixture(event_kind="prepared-revoked")
+    assert value.publication_digest == canonical_executable_digest(value.release)
+
+
+def test_publishable_release_rejects_changed_digest() -> None:
+    payload = publishable_release_fixture().model_dump(mode="python")
+    payload["publication_digest"] = "0" * 64
+    with pytest.raises(ValidationError):
+        PublishableExecutableProtectedReleaseV2.model_validate(payload)
 
 
 def test_prepared_plan_is_disabled_nonexecutable_and_exactly_bound() -> None:

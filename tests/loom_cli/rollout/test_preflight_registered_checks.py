@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -104,6 +105,23 @@ from loom_cli.rollout.runtime_readiness import REQUIRED_EXECUTABLES, REQUIRED_IM
 from loom_cli.rollout.staging_baseline_readiness import BaselineProbeResult
 
 BOOT_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+
+
+def _secure_static_candidate(tmp_path: Path) -> Path:
+    repo_root = Path(__file__).resolve().parents[3]
+    sources = {
+        "deploy/environment-state/staging.toml": 0o644,
+        "scripts/ops/worker_pool_autoscaler_external_once.py": 0o755,
+        "deploy/worker-pools/gb10/loom-gb10-node-agent.service": 0o644,
+        "deploy/worker-pools/gb10/loom-gb10-node-agent.timer": 0o644,
+        "deploy/worker-pools/gb10/loom-gb10-worker.service": 0o644,
+    }
+    for relative, mode in sources.items():
+        destination = tmp_path / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(repo_root / relative, destination)
+        destination.chmod(mode)
+    return tmp_path
 
 
 def _candidate_config(tmp_path: Path) -> OperatorConfig:
@@ -1790,8 +1808,8 @@ def test_registered_migration_plan_binds_exact_candidate_graph_and_policy() -> N
     )
 
     assert result.passed
-    assert result.evidence["head"] == "0095"
-    assert result.evidence["revision-count"] == 96
+    assert result.evidence["head"] == "0097"
+    assert result.evidence["revision-count"] == 98
     assert result.evidence["linear"] is True
     assert result.evidence["policy-digest"] == policy_digest
 
@@ -1827,14 +1845,14 @@ def test_registered_migration_plan_rejects_candidate_drift_before_graph_read(
     assert calls == []
 
 
-def test_registered_systemd_render_uses_exact_static_unit_verifier() -> None:
-    repo_root = Path(__file__).resolve().parents[3]
+def test_registered_systemd_render_uses_exact_static_unit_verifier(tmp_path: Path) -> None:
+    candidate_root = _secure_static_candidate(tmp_path)
     candidate_sha = "1" * 40
     candidate_tree = "2" * 40
     image_tag = "staging-1111111"
     check = build_systemd_render_check(
         lambda argv: subprocess.CompletedProcess(argv, 0, "", ""),
-        candidate_root=repo_root,
+        candidate_root=candidate_root,
         expected_candidate_sha=candidate_sha,
         expected_candidate_tree=candidate_tree,
         expected_image_tag=image_tag,
@@ -1942,8 +1960,11 @@ def test_registered_systemd_render_rejects_candidate_drift_without_verifier(
     assert calls == []
 
 
-def test_registered_gb10_candidate_source_binds_exact_shared_checkout(monkeypatch) -> None:
-    repo_root = Path(__file__).resolve().parents[3]
+def test_registered_gb10_candidate_source_binds_exact_shared_checkout(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    candidate_root = _secure_static_candidate(tmp_path)
     target = GB10ProbeTarget("trt-gb10-1", "loom-gb10-node-agent.service")
     observed: list[dict[str, object]] = []
 
@@ -1966,7 +1987,7 @@ def test_registered_gb10_candidate_source_binds_exact_shared_checkout(monkeypatc
         targets=(target,),
         ssh_config=Path("/fixed/ssh-config"),
         identity=Path("/fixed/identity"),
-        candidate_root=repo_root,
+        candidate_root=candidate_root,
         expected_candidate_sha="1" * 40,
         expected_candidate_tree="2" * 40,
         image_tag="staging-1111111",

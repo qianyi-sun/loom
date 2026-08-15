@@ -26,10 +26,13 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from loom.dev_instance import DevInstanceIdentity, derive_identity
 from loom.dev_instance_runtime import KubectlClient, fixture_database_url
 from loom.personal_dev_capacity import (
+    CapacityManagerPersonalDevProjector,
+    PersonalDevCapacityAvailability,
     PersonalDevCapacityInstallation,
     PersonalDevCapacityInstaller,
 )
 from loom.personal_dev_environment import PersonalDevReconciliationClaim
+from loom_capacity_agent.admission import ProtectedIntentObservationV2
 from loom_capacity_agent.client import (
     DemandReporterTLSFiles,
     canonical_manager_origin,
@@ -44,7 +47,17 @@ from loom_capacity_agent.store import CapacityAgentStore, CapacityAgentStoreErro
 from loom_capacity_guard.contracts import GuardFenceV1, canonical_bytes, canonical_digest
 from loom_capacity_guard.schema_startup import capacity_guard_schema_head
 from loom_capacity_guard.store import CapacityGuardStore, GuardNotInitializedError
+from loom_capacity_manager.executable_contracts import canonical_executable_bytes
 
+_EXECUTABLE_ADMISSION_FUNCTIONS = (
+    "prepare_executable_worker(uuid,uuid,jsonb,bytea,text,text)",
+    "bind_executable_slurm_job(uuid,uuid,jsonb,bytea,text)",
+    "observe_executable_intent(uuid,uuid,uuid)",
+    "register_executable_worker(uuid,uuid,jsonb,bytea,text,text,text)",
+    "begin_executable_worker_drain(uuid,uuid,jsonb,bytea,text)",
+    "acknowledge_executable_release(uuid,uuid,jsonb,bytea,text,text)",
+    "admit_executable_claim(uuid,uuid,jsonb,bytea,text)",
+)
 _SECRET_NAME = "loom-capacity-agent"
 _CREDENTIALS_SECRET_NAME = "loom-capacity-agent-credentials"
 _DEPLOYMENT_NAME = "loom-capacity-agent"
@@ -72,7 +85,7 @@ def _sha256_json(value: object) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _role_names(identity: DevInstanceIdentity) -> tuple[str, str, str]:
+def _role_names(identity: DevInstanceIdentity) -> tuple[str, str, str, str, str]:
     slug = identity.name
     for old, new in _ROLE_REPLACEMENTS.items():
         slug = slug.replace(old, new)
@@ -80,6 +93,8 @@ def _role_names(identity: DevInstanceIdentity) -> tuple[str, str, str]:
         f"loom_cap_{slug}_owner",
         f"loom_cap_{slug}_migrator",
         f"loom_cap_{slug}_agent",
+        f"loom_cap_{slug}_executor",
+        f"loom_cap_{slug}_observer",
     )
 
 
@@ -170,6 +185,7 @@ class _CapacityCredentials:
     reporter_token: str
     migrator_password: str
     agent_password: str
+    observer_password: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,8 +224,8 @@ class PsycopgPersonalDevCapacityDatabase:
         self,
         identity: DevInstanceIdentity,
         credentials: _CapacityCredentials,
-    ) -> tuple[str, str, str, str, str]:
-        owner, migrator, agent = _role_names(identity)
+    ) -> tuple[str, str, str, str, str, str, str]:
+        owner, migrator, agent, executor, observer = _role_names(identity)
         migrator_url = _retarget_database_url(
             self._admin_url,
             database=identity.database,
@@ -228,9 +244,9 @@ class PsycopgPersonalDevCapacityDatabase:
                 autocommit=True,
             ) as connection:
                 protected_roles = sql.SQL(", ").join(
-                    sql.Identifier(role) for role in (owner, migrator, agent)
+                    sql.Identifier(role) for role in (owner, migrator, agent, executor, observer)
                 )
-                for role in (owner, migrator, agent):
+                for role in (owner, migrator, agent, executor, observer):
                     await connection.execute(
                         sql.SQL(
                             "DO $loom$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles "
@@ -246,9 +262,16 @@ class PsycopgPersonalDevCapacityDatabase:
                         "NOINHERIT NOREPLICATION NOBYPASSRLS"
                     ).format(sql.Identifier(owner))
                 )
+                await connection.execute(
+                    sql.SQL(
+                        "ALTER ROLE {} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
+                        "NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD NULL"
+                    ).format(sql.Identifier(executor))
+                )
                 for role, password, inherit in (
                     (migrator, credentials.migrator_password, "INHERIT"),
                     (agent, credentials.agent_password, "NOINHERIT"),
+                    (observer, credentials.observer_password, "NOINHERIT"),
                 ):
                     await connection.execute(
                         sql.SQL(
@@ -273,10 +296,11 @@ class PsycopgPersonalDevCapacityDatabase:
                     )
                 )
                 await connection.execute(
-                    sql.SQL("GRANT CONNECT ON DATABASE {} TO {}, {}").format(
+                    sql.SQL("GRANT CONNECT ON DATABASE {} TO {}, {}, {}").format(
                         sql.Identifier(identity.database),
                         sql.Identifier(migrator),
                         sql.Identifier(agent),
+                        sql.Identifier(observer),
                     )
                 )
                 await connection.execute(
@@ -291,7 +315,10 @@ class PsycopgPersonalDevCapacityDatabase:
                     "JOIN pg_roles granted ON granted.oid = m.roleid "
                     "WHERE member.rolname = ANY(%s) OR granted.rolname = ANY(%s) "
                     "ORDER BY member.rolname, granted.rolname",
-                    ([owner, migrator, agent], [owner, migrator, agent]),
+                    (
+                        [owner, migrator, agent, executor, observer],
+                        [owner, migrator, agent, executor, observer],
+                    ),
                 )
                 observed = {(row[0], row[1]) for row in await memberships.fetchall()}
                 if observed != {(migrator, owner)}:
@@ -312,7 +339,8 @@ class PsycopgPersonalDevCapacityDatabase:
             ) as connection:
                 async with connection.transaction():
                     protected_roles = sql.SQL(", ").join(
-                        sql.Identifier(role) for role in (owner, migrator, agent)
+                        sql.Identifier(role)
+                        for role in (owner, migrator, agent, executor, observer)
                     )
                     for object_kind in (
                         "SCHEMA public",
@@ -326,6 +354,60 @@ class PsycopgPersonalDevCapacityDatabase:
                                 protected_roles,
                             )
                         )
+                    application_role_result = await connection.execute(
+                        "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = %s)",
+                        (identity.db_role,),
+                    )
+                    application_role_row = await application_role_result.fetchone()
+                    if application_role_row is None:
+                        raise PersonalDevCapacityInstallationError(
+                            "application database role lookup failed"
+                        )
+                    application_role_exists = bool(application_role_row[0])
+                    schemas_result = await connection.execute(
+                        "SELECT namespace.nspname, EXISTS ("
+                        "SELECT 1 FROM aclexplode(COALESCE("
+                        "namespace.nspacl, acldefault('n', namespace.nspowner)"
+                        ")) AS privilege WHERE privilege.grantee = 0 "
+                        "AND privilege.privilege_type = 'USAGE'"
+                        ") AS public_usage FROM pg_namespace AS namespace "
+                        "WHERE nspname <> 'information_schema' "
+                        "AND nspname NOT LIKE 'pg\\_%' ESCAPE '\\' "
+                        "ORDER BY nspname"
+                    )
+                    for schema_name, public_usage in await schemas_result.fetchall():
+                        for object_kind in (
+                            "SCHEMA {}",
+                            "ALL TABLES IN SCHEMA {}",
+                            "ALL SEQUENCES IN SCHEMA {}",
+                            "ALL FUNCTIONS IN SCHEMA {}",
+                        ):
+                            await connection.execute(
+                                sql.SQL(
+                                    "REVOKE ALL PRIVILEGES ON " + object_kind + " FROM {}"
+                                ).format(
+                                    sql.Identifier(schema_name),
+                                    sql.Identifier(executor),
+                                )
+                            )
+                            await connection.execute(
+                                sql.SQL(
+                                    "REVOKE ALL PRIVILEGES ON " + object_kind + " FROM {}"
+                                ).format(sql.Identifier(schema_name), sql.Identifier(observer))
+                            )
+                        if public_usage:
+                            await connection.execute(
+                                sql.SQL("REVOKE USAGE ON SCHEMA {} FROM PUBLIC").format(
+                                    sql.Identifier(schema_name)
+                                )
+                            )
+                            if application_role_exists and schema_name != "loom_capacity_guard":
+                                await connection.execute(
+                                    sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(
+                                        sql.Identifier(schema_name),
+                                        sql.Identifier(identity.db_role),
+                                    )
+                                )
                     await connection.execute(
                         sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(sql.Identifier(owner))
                     )
@@ -384,7 +466,7 @@ class PsycopgPersonalDevCapacityDatabase:
             raise PersonalDevCapacityInstallationError(
                 "protected capacity database role convergence failed"
             ) from None
-        return owner, migrator, agent, migrator_url, agent_url
+        return owner, migrator, agent, executor, observer, migrator_url, agent_url
 
     async def _seal_migrator(
         self,
@@ -429,8 +511,8 @@ class PsycopgPersonalDevCapacityDatabase:
     async def seal(self, identity: DevInstanceIdentity) -> None:
         """Disable every protected login before retained data can outlive its pod."""
 
-        owner, migrator, agent = _role_names(identity)
-        protected = (owner, migrator, agent, identity.db_role)
+        owner, migrator, agent, executor, observer = _role_names(identity)
+        protected = (owner, migrator, agent, executor, observer, identity.db_role)
         try:
             async with await psycopg.AsyncConnection.connect(
                 self._connect_url,
@@ -441,11 +523,6 @@ class PsycopgPersonalDevCapacityDatabase:
                     (list(protected),),
                 )
                 existing = {row[0] for row in await roles_result.fetchall()}
-                await connection.execute(
-                    "SELECT pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity "
-                    "WHERE usename = ANY(%s) AND pid <> pg_backend_pid()",
-                    (list(protected),),
-                )
                 if owner in existing and migrator in existing:
                     await connection.execute(
                         sql.SQL("REVOKE {} FROM {}").format(
@@ -460,6 +537,11 @@ class PsycopgPersonalDevCapacityDatabase:
                                 sql.Identifier(role)
                             )
                         )
+                await connection.execute(
+                    "SELECT pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity "
+                    "WHERE usename = ANY(%s) AND pid <> pg_backend_pid()",
+                    (list(protected),),
+                )
                 database_exists = await connection.execute(
                     "SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = %s)",
                     (identity.database,),
@@ -487,8 +569,8 @@ class PsycopgPersonalDevCapacityDatabase:
         """Drop the isolated database and every role after namespace termination."""
 
         await self.seal(identity)
-        owner, migrator, agent = _role_names(identity)
-        roles = (agent, migrator, owner, identity.db_role)
+        owner, migrator, agent, executor, observer = _role_names(identity)
+        roles = (observer, executor, agent, migrator, owner, identity.db_role)
         try:
             async with await psycopg.AsyncConnection.connect(
                 self._connect_url,
@@ -517,7 +599,15 @@ class PsycopgPersonalDevCapacityDatabase:
                 "personal-dev protected database cleanup failed"
             ) from None
 
-    async def _migrate(self, *, migrator_url: str, owner: str, agent: str) -> None:
+    async def _migrate(
+        self,
+        *,
+        migrator_url: str,
+        owner: str,
+        agent: str,
+        executor: str,
+        observer: str,
+    ) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         config_path = repo_root / "capacity_guard_migrations" / "alembic.ini"
         if not config_path.is_file():
@@ -530,6 +620,8 @@ class PsycopgPersonalDevCapacityDatabase:
                 "LOOM_CAPACITY_GUARD_DB_URL": migrator_url,
                 "LOOM_CAPACITY_GUARD_OWNER_ROLE": owner,
                 "LOOM_CAPACITY_GUARD_AGENT_ROLE": agent,
+                "LOOM_CAPACITY_GUARD_EXECUTOR_ROLE": executor,
+                "LOOM_CAPACITY_GUARD_OBSERVER_ROLE": observer,
             }
         )
         process = await asyncio.create_subprocess_exec(
@@ -562,6 +654,70 @@ class PsycopgPersonalDevCapacityDatabase:
         if process.returncode != 0:
             raise PersonalDevCapacityInstallationError("protected capacity migration failed")
 
+    async def _converge_executor_surface(
+        self,
+        *,
+        migrator_url: str,
+        owner: str,
+        executor: str,
+        observer: str,
+    ) -> None:
+        engine = create_async_engine(migrator_url, isolation_level="SERIALIZABLE")
+        quoted_owner = engine.sync_engine.dialect.identifier_preparer.quote(owner)
+        quoted_executor = engine.sync_engine.dialect.identifier_preparer.quote(executor)
+        quoted_observer = engine.sync_engine.dialect.identifier_preparer.quote(observer)
+        try:
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            async with factory() as session, session.begin():
+                await session.execute(text(f"SET LOCAL ROLE {quoted_owner}"))
+                await session.execute(
+                    text(
+                        "REVOKE ALL PRIVILEGES ON SCHEMA loom_capacity_guard "
+                        f"FROM {quoted_executor}"
+                    )
+                )
+                await session.execute(
+                    text(
+                        "REVOKE ALL PRIVILEGES ON SCHEMA loom_capacity_guard "
+                        f"FROM {quoted_observer}"
+                    )
+                )
+                for object_kind in ("TABLES", "SEQUENCES", "FUNCTIONS"):
+                    await session.execute(
+                        text(
+                            f"REVOKE ALL PRIVILEGES ON ALL {object_kind} IN SCHEMA "
+                            f"loom_capacity_guard FROM {quoted_executor}"
+                        )
+                    )
+                    await session.execute(
+                        text(
+                            f"REVOKE ALL PRIVILEGES ON ALL {object_kind} IN SCHEMA "
+                            f"loom_capacity_guard FROM {quoted_observer}"
+                        )
+                    )
+                await session.execute(
+                    text(f"GRANT USAGE ON SCHEMA loom_capacity_guard TO {quoted_executor}")
+                )
+                await session.execute(
+                    text(f"GRANT USAGE ON SCHEMA loom_capacity_guard TO {quoted_observer}")
+                )
+                for function in _EXECUTABLE_ADMISSION_FUNCTIONS:
+                    await session.execute(
+                        text(
+                            "GRANT EXECUTE ON FUNCTION loom_capacity_guard."
+                            f"{function} TO {quoted_executor}"
+                        )
+                    )
+                await session.execute(
+                    text(
+                        "GRANT EXECUTE ON FUNCTION loom_capacity_guard."
+                        "observe_executable_intent(uuid,uuid,uuid) "
+                        f"TO {quoted_observer}"
+                    )
+                )
+        finally:
+            await engine.dispose()
+
     async def converge(
         self,
         *,
@@ -570,12 +726,29 @@ class PsycopgPersonalDevCapacityDatabase:
         credentials: _CapacityCredentials,
         configuration: ReporterConfigurationV1,
     ) -> CapacityDatabaseInstallation:
-        owner, migrator, agent, migrator_url, agent_url = await self._converge_roles(
-            identity,
-            credentials,
-        )
+        (
+            owner,
+            migrator,
+            agent,
+            executor,
+            observer,
+            migrator_url,
+            agent_url,
+        ) = await self._converge_roles(identity, credentials)
         try:
-            await self._migrate(migrator_url=migrator_url, owner=owner, agent=agent)
+            await self._migrate(
+                migrator_url=migrator_url,
+                owner=owner,
+                agent=agent,
+                executor=executor,
+                observer=observer,
+            )
+            await self._converge_executor_surface(
+                migrator_url=migrator_url,
+                owner=owner,
+                executor=executor,
+                observer=observer,
+            )
             fence = GuardFenceV1(
                 environment_id=configuration.environment_id,
                 subject_id=configuration.subject_id,
@@ -642,7 +815,7 @@ class PsycopgPersonalDevCapacityDatabase:
             "environment_id": fence.environment_id,
             "guard_schema_generation": capacity_guard_schema_head()[1],
             "reporter_incarnation": str(fence.reporter_incarnation),
-            "roles": {"agent": agent, "owner": owner},
+            "roles": {"agent": agent, "executor": executor, "observer": observer, "owner": owner},
             "schema_version": 1,
             "subject_id": str(fence.subject_id),
             "subject_incarnation": str(fence.subject_incarnation),
@@ -659,6 +832,7 @@ def _new_credentials(*, reporter_incarnation: UUID | None = None) -> _CapacityCr
         reporter_token=secrets.token_urlsafe(48),
         migrator_password=secrets.token_urlsafe(48),
         agent_password=secrets.token_urlsafe(48),
+        observer_password=secrets.token_urlsafe(48),
     )
 
 
@@ -760,6 +934,14 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
                 if persisted_seed
                 else _agent_password_from_secret(existing)
             ),
+            observer_password=(
+                _opaque_credential(
+                    _decode_secret_text(existing, "observer-password"),
+                    label="observer database",
+                )
+                if persisted_seed and "observer-password" in existing
+                else secrets.token_urlsafe(48)
+            ),
         )
         if operation_id == claim.operation.id or claim.operation.kind == "capacity":
             return base
@@ -768,6 +950,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
             reporter_token=secrets.token_urlsafe(48),
             migrator_password=base.migrator_password,
             agent_password=base.agent_password,
+            observer_password=base.observer_password,
         )
 
     def _credential_seed_manifest(
@@ -784,6 +967,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
         }
         data = {
             "agent-password": credentials.agent_password.encode("ascii"),
+            "observer-password": credentials.observer_password.encode("ascii"),
             "operation-id": str(claim.operation.id).encode("ascii"),
             "reporter-incarnation": str(credentials.reporter_incarnation).encode("ascii"),
             "reporter-token": credentials.reporter_token.encode("ascii"),
@@ -819,6 +1003,7 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
         )
         expected = {
             "agent-password": credentials.agent_password.encode("ascii"),
+            "observer-password": credentials.observer_password.encode("ascii"),
             "operation-id": str(claim.operation.id).encode("ascii"),
             "reporter-incarnation": str(credentials.reporter_incarnation).encode("ascii"),
             "reporter-token": credentials.reporter_token.encode("ascii"),
@@ -866,6 +1051,10 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
                 _decode_secret_text(seed, "agent-password"),
                 label="agent database",
             )
+            _opaque_credential(
+                _decode_secret_text(seed, "observer-password"),
+                label="observer database",
+            )
             runtime_agent_password = _agent_password_from_secret(runtime)
         except (UnicodeEncodeError, ValueError):
             raise PersonalDevCapacityInstallationError(
@@ -892,6 +1081,11 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
         credentials: _CapacityCredentials,
     ) -> ReporterConfigurationV1:
         operation = claim.operation
+        publication_sha256 = claim.candidate.publication_sha256
+        if publication_sha256 is None:
+            raise PersonalDevCapacityInstallationError(
+                "protected capacity candidate publication digest is unavailable"
+            )
         authority_incarnation = uuid5(
             NAMESPACE_URL,
             f"loom:{operation.subject_incarnation}:capacity-authority",
@@ -908,6 +1102,8 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
             agent_incarnation=agent_incarnation,
             reporter_incarnation=credentials.reporter_incarnation,
             candidate_digest=operation.candidate_sha,
+            candidate_identity=operation.candidate_sha,
+            candidate_publication_sha256=publication_sha256,
             deployment_generation=operation.deployment_generation,
             configuration_generation=operation.operation_epoch,
             pool_capabilities=self._config.pool_capabilities,
@@ -1305,6 +1501,96 @@ class KubectlPersonalDevCapacityInstaller(PersonalDevCapacityInstaller):
         await self._database.destroy(derive_identity(claim.operation.environment_name))
 
 
+class PersonalDevCapacityStatusReader:
+    """Read manager and protected observer evidence without mutation authority."""
+
+    def __init__(
+        self,
+        *,
+        kubectl: KubectlClient,
+        database_admin_url: str,
+        projector: CapacityManagerPersonalDevProjector,
+    ) -> None:
+        self._kubectl = kubectl
+        self._database_admin_url = database_admin_url
+        self._projector = projector
+
+    async def read(
+        self,
+        *,
+        namespace: str,
+        database: str,
+        subject_id: UUID,
+        subject_incarnation: UUID,
+        deployment_generation: int,
+    ) -> PersonalDevCapacityAvailability:
+        """Fail closed: only matching active manager+guard evidence is available."""
+
+        try:
+            manager = await self._projector.subject_status(
+                subject_id=subject_id,
+                subject_incarnation=subject_incarnation,
+                deployment_generation=deployment_generation,
+            )
+        except Exception:
+            return PersonalDevCapacityAvailability("waiting", False, False)
+        if manager.checkpoint.execution_state != "active":
+            return PersonalDevCapacityAvailability(
+                manager.capacity_status, manager.capacity_prepared, False
+            )
+        if not manager.active_bindings:
+            return PersonalDevCapacityAvailability("waiting", True, False)
+        try:
+            seed = await self._kubectl.read_secret_optional(namespace, _CREDENTIALS_SECRET_NAME)
+            if seed is None:
+                raise ValueError("observer credential seed is missing")
+            if UUID(_decode_secret_text(seed, "subject-incarnation")) != subject_incarnation:
+                raise ValueError("observer credential identity changed")
+            password = _opaque_credential(
+                _decode_secret_text(seed, "observer-password"), label="observer database"
+            )
+            # Role naming is bound to the immutable namespace stem, rather
+            # than an API display name. The provisioner stores that namespace.
+            observer = (
+                "loom_cap_" + namespace.removeprefix("loom-dev-").replace("-", "_") + "_observer"
+            )
+            url = _retarget_database_url(
+                self._database_admin_url,
+                database=database,
+                username=observer,
+                password=password,
+            ).replace("postgresql+psycopg://", "postgresql://", 1)
+            async with await psycopg.AsyncConnection.connect(url) as connection:
+                await connection.execute("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE READ ONLY")
+                for binding in manager.active_bindings:
+                    row = await connection.execute(
+                        "SELECT loom_capacity_guard.observe_executable_intent(%s, %s, %s)",
+                        (subject_id, subject_incarnation, binding.intent_id),
+                    )
+                    value = await row.fetchone()
+                    if value is None:
+                        raise ValueError("protected observer did not return an intent")
+                    observation = ProtectedIntentObservationV2.model_validate_json(
+                        json.dumps(value[0], sort_keys=True, separators=(",", ":"))
+                    )
+                    if canonical_executable_bytes(
+                        observation.binding
+                    ) != canonical_executable_bytes(binding):
+                        raise ValueError("protected observer binding changed")
+                    if (
+                        observation.worker_id is None
+                        or observation.worker_incarnation is None
+                        or observation.protected_registration_epoch <= 0
+                        or observation.drain is not None
+                        or observation.release is not None
+                    ):
+                        raise ValueError("protected worker registration is not available")
+                await connection.rollback()
+            return PersonalDevCapacityAvailability("available", True, True)
+        except Exception:
+            return PersonalDevCapacityAvailability("waiting", True, False)
+
+
 def parse_pool_capabilities(raw: str) -> tuple[AgentPoolCapabilityV1, ...]:
     try:
         payload = json.loads(raw)
@@ -1325,6 +1611,8 @@ def parse_pool_capabilities(raw: str) -> tuple[AgentPoolCapabilityV1, ...]:
             agent_incarnation=uuid4(),
             reporter_incarnation=marker,
             candidate_digest="0" * 64,
+            candidate_identity="0" * 64,
+            candidate_publication_sha256="0" * 64,
             deployment_generation=1,
             configuration_generation=1,
             pool_capabilities=values,

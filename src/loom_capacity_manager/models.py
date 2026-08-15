@@ -203,7 +203,7 @@ class CapacityExecutionEpoch(Base):
             "AND current_writer_epoch > 0 "
             "AND configuration_epoch > 0 AND fleet_generation > 0 "
             "AND oldlab_pool_generation > 0 AND gb10_pool_generation > 0 "
-            "AND requested_ceiling = 1 AND effective_ceiling >= 0 "
+            "AND requested_ceiling > 0 AND effective_ceiling >= 0 "
             "AND effective_ceiling <= requested_ceiling "
             "AND requested_rate_per_minute > 0 AND effective_rate_per_minute >= 0 "
             "AND effective_rate_per_minute <= requested_rate_per_minute",
@@ -224,7 +224,11 @@ class CapacityExecutionEpoch(Base):
             "AND rollback_evidence_sha256 ~ '^[0-9a-f]{64}$' "
             "AND request_digest ~ '^[0-9a-f]{64}$' "
             "AND (activation_request_digest IS NULL OR "
-            "activation_request_digest ~ '^[0-9a-f]{64}$')",
+            "activation_request_digest ~ '^[0-9a-f]{64}$') "
+            "AND (drain_request_digest IS NULL OR "
+            "drain_request_digest ~ '^[0-9a-f]{64}$') "
+            "AND (retirement_request_digest IS NULL OR "
+            "retirement_request_digest ~ '^[0-9a-f]{64}$')",
             name="capacity_execution_epoch_digest_check",
         ),
         CheckConstraint(
@@ -239,6 +243,22 @@ class CapacityExecutionEpoch(Base):
             name="capacity_execution_epoch_manifest_check",
         ),
         CheckConstraint(
+            "(drain_actor IS NULL OR "
+            "octet_length(drain_actor) BETWEEN 1 AND 256) "
+            "AND (retirement_actor IS NULL OR "
+            "octet_length(retirement_actor) BETWEEN 1 AND 256)",
+            name="capacity_execution_epoch_lifecycle_actor_check",
+        ),
+        CheckConstraint(
+            "(drain_request_payload IS NULL OR "
+            "(jsonb_typeof(drain_request_payload) = 'object' "
+            "AND octet_length(drain_request_payload::text) <= 8388608)) "
+            "AND (retirement_request_payload IS NULL OR "
+            "(jsonb_typeof(retirement_request_payload) = 'object' "
+            "AND octet_length(retirement_request_payload::text) <= 8388608))",
+            name="capacity_execution_epoch_lifecycle_payload_check",
+        ),
+        CheckConstraint(
             "state IN ('prepared','active','drain-only','retired')",
             name="capacity_execution_epoch_state_check",
         ),
@@ -247,20 +267,50 @@ class CapacityExecutionEpoch(Base):
             "AND effective_rate_per_minute = 0 "
             "AND activation_actor IS NULL AND activation_idempotency_key IS NULL "
             "AND activation_request_digest IS NULL AND activated_at IS NULL "
+            "AND drain_actor IS NULL AND drain_idempotency_key IS NULL "
+            "AND drain_request_digest IS NULL AND drain_request_payload IS NULL "
+            "AND retirement_actor IS NULL AND retirement_idempotency_key IS NULL "
+            "AND retirement_request_digest IS NULL "
+            "AND retirement_request_payload IS NULL "
             "AND drain_only_at IS NULL AND retired_at IS NULL) OR "
             "(state = 'active' AND effective_ceiling > 0 "
             "AND effective_rate_per_minute > 0 "
             "AND activation_actor IS NOT NULL AND activation_idempotency_key IS NOT NULL "
             "AND activation_request_digest IS NOT NULL AND activated_at IS NOT NULL "
+            "AND drain_actor IS NULL AND drain_idempotency_key IS NULL "
+            "AND drain_request_digest IS NULL AND drain_request_payload IS NULL "
+            "AND retirement_actor IS NULL AND retirement_idempotency_key IS NULL "
+            "AND retirement_request_digest IS NULL "
+            "AND retirement_request_payload IS NULL "
             "AND drain_only_at IS NULL AND retired_at IS NULL) OR "
             "(state = 'drain-only' AND effective_ceiling = 0 "
             "AND effective_rate_per_minute = 0 "
             "AND activation_actor IS NOT NULL AND activation_idempotency_key IS NOT NULL "
             "AND activation_request_digest IS NOT NULL AND activated_at IS NOT NULL "
+            "AND drain_actor IS NOT NULL AND drain_idempotency_key IS NOT NULL "
+            "AND drain_request_digest IS NOT NULL AND drain_request_payload IS NOT NULL "
+            "AND retirement_actor IS NULL AND retirement_idempotency_key IS NULL "
+            "AND retirement_request_digest IS NULL "
+            "AND retirement_request_payload IS NULL "
             "AND drain_only_at IS NOT NULL "
             "AND retired_at IS NULL) OR "
             "(state = 'retired' AND effective_ceiling = 0 "
-            "AND effective_rate_per_minute = 0 AND retired_at IS NOT NULL)",
+            "AND effective_rate_per_minute = 0 "
+            "AND retirement_actor IS NOT NULL "
+            "AND retirement_idempotency_key IS NOT NULL "
+            "AND retirement_request_digest IS NOT NULL "
+            "AND retirement_request_payload IS NOT NULL "
+            "AND retired_at IS NOT NULL AND ((activation_actor IS NULL "
+            "AND activation_idempotency_key IS NULL "
+            "AND activation_request_digest IS NULL AND activated_at IS NULL "
+            "AND drain_actor IS NULL AND drain_idempotency_key IS NULL "
+            "AND drain_request_digest IS NULL AND drain_request_payload IS NULL "
+            "AND drain_only_at IS NULL) OR (activation_actor IS NOT NULL "
+            "AND activation_idempotency_key IS NOT NULL "
+            "AND activation_request_digest IS NOT NULL AND activated_at IS NOT NULL "
+            "AND drain_actor IS NOT NULL AND drain_idempotency_key IS NOT NULL "
+            "AND drain_request_digest IS NOT NULL AND drain_request_payload IS NOT NULL "
+            "AND drain_only_at IS NOT NULL)))",
             name="capacity_execution_epoch_state_time_check",
         ),
         ForeignKeyConstraint(
@@ -291,6 +341,14 @@ class CapacityExecutionEpoch(Base):
         UniqueConstraint(
             "activation_idempotency_key",
             name="capacity_execution_epoch_activation_idempotency_key",
+        ),
+        UniqueConstraint(
+            "drain_idempotency_key",
+            name="capacity_execution_epoch_drain_idempotency_key",
+        ),
+        UniqueConstraint(
+            "retirement_idempotency_key",
+            name="capacity_execution_epoch_retirement_idempotency_key",
         ),
         UniqueConstraint("idempotency_key", name="capacity_execution_epoch_idempotency_key"),
         UniqueConstraint(
@@ -346,6 +404,14 @@ class CapacityExecutionEpoch(Base):
     activation_actor: Mapped[str | None] = mapped_column(Text)
     activation_idempotency_key: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
     activation_request_digest: Mapped[str | None] = mapped_column(Text)
+    drain_actor: Mapped[str | None] = mapped_column(Text)
+    drain_idempotency_key: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    drain_request_digest: Mapped[str | None] = mapped_column(Text)
+    drain_request_payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    retirement_actor: Mapped[str | None] = mapped_column(Text)
+    retirement_idempotency_key: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    retirement_request_digest: Mapped[str | None] = mapped_column(Text)
+    retirement_request_payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     prepared_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
     )
@@ -381,6 +447,15 @@ class CapacityExecutionExecutor(Base):
         UniqueConstraint("execution_epoch", "pool_id", name="capacity_execution_executor_pool_key"),
         UniqueConstraint(
             "executor_incarnation", name="capacity_execution_executor_incarnation_key"
+        ),
+        UniqueConstraint(
+            "execution_epoch",
+            "execution_manifest_sha256",
+            "executor_id",
+            "executor_incarnation",
+            "pool_id",
+            "pool_generation",
+            name="capacity_execution_executor_exact_binding_key",
         ),
         UniqueConstraint("idempotency_key", name="capacity_execution_executor_idempotency_key"),
     )
@@ -1735,6 +1810,374 @@ class CapacityProtectedReleaseAcknowledgement(Base):
     )
 
 
+class CapacityExecutableExecutorState(Base):
+    """Mutable lease and journal checkpoint for immutable v2 executor evidence."""
+
+    __tablename__ = "capacity_executable_executor_states"
+    __table_args__ = (
+        CheckConstraint(
+            "execution_epoch > 0 AND pool_generation > 0 "
+            "AND pool_id IN ('gb10','oldlab') AND heartbeat_high_water >= 0 "
+            "AND command_high_water >= 0 AND journal_high_water >= 0 "
+            "AND inventory_high_water >= 0",
+            name="capacity_executable_executor_state_quantity_check",
+        ),
+        CheckConstraint(
+            "execution_manifest_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND ((heartbeat_high_water = 0 AND last_heartbeat_digest IS NULL) "
+            "OR (heartbeat_high_water > 0 AND last_heartbeat_digest ~ '^[0-9a-f]{64}$')) "
+            "AND ((command_high_water = 0 AND last_command_digest IS NULL) "
+            "OR (command_high_water > 0 AND last_command_digest ~ '^[0-9a-f]{64}$')) "
+            "AND ((journal_high_water = 0 AND journal_digest = repeat('0', 64)) "
+            "OR (journal_high_water > 0 AND journal_digest ~ '^[0-9a-f]{64}$' "
+            "AND journal_digest <> repeat('0', 64))) "
+            "AND ((inventory_high_water = 0 AND last_inventory_digest IS NULL) "
+            "OR (inventory_high_water > 0 AND last_inventory_digest ~ '^[0-9a-f]{64}$')) "
+            "AND (inventory_confirmation_journal_digest IS NULL OR "
+            "inventory_confirmation_journal_digest ~ '^[0-9a-f]{64}$')",
+            name="capacity_executable_executor_state_digest_check",
+        ),
+        CheckConstraint(
+            "state IN ('current','fenced','equivocal')",
+            name="capacity_executable_executor_state_check",
+        ),
+        CheckConstraint(
+            "((retirement_safe AND retirement_inventory_digest IS NOT NULL "
+            "AND retirement_inventory_digest ~ '^[0-9a-f]{64}$' "
+            "AND retirement_inventory_digest = last_inventory_digest "
+            "AND inventory_high_water > 0 AND inventory_payload IS NOT NULL "
+            "AND jsonb_typeof(inventory_payload) = 'object' "
+            "AND last_inventory_at IS NOT NULL "
+            "AND last_heartbeat_at > last_inventory_at "
+            "AND inventory_payload -> 'schema_version' = '2'::jsonb "
+            "AND inventory_payload -> 'inventory_sequence' "
+            "= to_jsonb(inventory_high_water) "
+            "AND inventory_payload ->> 'executor_id' = executor_id "
+            "AND inventory_payload ->> 'executor_incarnation' "
+            "= executor_incarnation::text "
+            "AND inventory_payload ->> 'pool_id' = pool_id "
+            "AND inventory_payload -> 'pool_generation' = to_jsonb(pool_generation) "
+            "AND inventory_confirmation_journal_digest ~ '^[0-9a-f]{64}$' "
+            "AND ((inventory_payload -> 'journal_sequence' = to_jsonb(journal_high_water) "
+            "AND inventory_payload ->> 'journal_digest' = journal_digest) OR "
+            "(inventory_payload -> 'journal_sequence' = to_jsonb(journal_high_water - 2) "
+            "AND inventory_confirmation_journal_digest = journal_digest)) "
+            "AND inventory_payload -> 'execution' -> 'execution_epoch' "
+            "= to_jsonb(execution_epoch) "
+            "AND inventory_payload -> 'execution' ->> 'execution_manifest_sha256' "
+            "= execution_manifest_sha256) IS TRUE) OR "
+            "(NOT retirement_safe AND retirement_inventory_digest IS NULL)",
+            name="capacity_executable_executor_retirement_check",
+        ),
+        ForeignKeyConstraint(
+            (
+                "execution_epoch",
+                "execution_manifest_sha256",
+                "executor_id",
+                "executor_incarnation",
+                "pool_id",
+                "pool_generation",
+            ),
+            (
+                "capacity_execution_executors.execution_epoch",
+                "capacity_execution_executors.execution_manifest_sha256",
+                "capacity_execution_executors.executor_id",
+                "capacity_execution_executors.executor_incarnation",
+                "capacity_execution_executors.pool_id",
+                "capacity_execution_executors.pool_generation",
+            ),
+            name="capacity_executable_executor_registration_fkey",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "execution_epoch",
+            "pool_id",
+            name="capacity_executable_executor_state_pool_key",
+        ),
+        UniqueConstraint(
+            "executor_incarnation",
+            name="capacity_executable_executor_state_incarnation_key",
+        ),
+        UniqueConstraint(
+            "execution_epoch",
+            "executor_incarnation",
+            name="capacity_executable_executor_state_epoch_incarnation_key",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    execution_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    execution_manifest_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    executor_id: Mapped[str] = mapped_column(Text, nullable=False)
+    executor_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    pool_id: Mapped[str] = mapped_column(Text, nullable=False)
+    pool_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    state: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'current'"))
+    heartbeat_high_water: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    last_heartbeat_digest: Mapped[str | None] = mapped_column(Text)
+    command_high_water: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    last_command_digest: Mapped[str | None] = mapped_column(Text)
+    journal_high_water: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    journal_digest: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("repeat('0', 64)")
+    )
+    inventory_high_water: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    last_inventory_digest: Mapped[str | None] = mapped_column(Text)
+    inventory_payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    inventory_confirmation_journal_digest: Mapped[str | None] = mapped_column(Text)
+    last_inventory_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    retirement_safe: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    retirement_inventory_digest: Mapped[str | None] = mapped_column(Text)
+    lease_expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    last_heartbeat_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class CapacityExecutableIntent(Base):
+    """One exact executable shape and every monotonic transition it acquires."""
+
+    __tablename__ = "capacity_executable_intents"
+    __table_args__ = (
+        CheckConstraint(
+            "execution_epoch > 0 AND allocation_epoch > 0 AND configuration_epoch > 0 "
+            "AND pool_generation > 0 AND launch_rank > 0",
+            name="capacity_executable_intent_quantity_check",
+        ),
+        CheckConstraint(
+            "execution_manifest_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND proposal_digest ~ '^[0-9a-f]{64}$' "
+            "AND binding_digest ~ '^[0-9a-f]{64}$' "
+            "AND (bootstrap_evidence_sha256 IS NULL OR "
+            "bootstrap_evidence_sha256 ~ '^[0-9a-f]{64}$') "
+            "AND (permit_digest IS NULL OR permit_digest ~ '^[0-9a-f]{64}$') "
+            "AND (protected_release_digest IS NULL OR "
+            "protected_release_digest ~ '^[0-9a-f]{64}$') "
+            "AND (protected_release_sha256 IS NULL OR "
+            "protected_release_sha256 ~ '^[0-9a-f]{64}$') "
+            "AND (terminal_evidence_sha256 IS NULL OR "
+            "terminal_evidence_sha256 ~ '^[0-9a-f]{64}$')",
+            name="capacity_executable_intent_digest_check",
+        ),
+        CheckConstraint(
+            "state IN ('proposed','accepted','launch-ready','permitted',"
+            "'submitting-unknown','bound','observed','terminal','closing','released',"
+            "'quarantined')",
+            name="capacity_executable_intent_state_check",
+        ),
+        CheckConstraint(
+            "observed_state IS NULL OR observed_state IN "
+            "('pending','active','draining','terminal','unknown')",
+            name="capacity_executable_intent_observed_state_check",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(binding_payload) = 'object' "
+            "AND jsonb_typeof(proposal_payload) = 'object'",
+            name="capacity_executable_intent_payload_check",
+        ),
+        UniqueConstraint("intent_id", name="capacity_executable_intent_identity_key"),
+        UniqueConstraint("shape_instance_id", name="capacity_executable_shape_identity_key"),
+        UniqueConstraint("tranche_id", name="capacity_executable_tranche_identity_key"),
+        UniqueConstraint("permit_id", name="capacity_executable_permit_identity_key"),
+        UniqueConstraint(
+            "protected_release_idempotency_key",
+            name="capacity_executable_protected_release_idempotency_key",
+        ),
+        UniqueConstraint(
+            "execution_epoch",
+            "allocation_epoch",
+            "launch_rank",
+            name="capacity_executable_launch_rank_key",
+        ),
+        ForeignKeyConstraint(
+            ("execution_epoch", "execution_manifest_sha256"),
+            (
+                "capacity_execution_epochs.execution_epoch",
+                "capacity_execution_epochs.execution_manifest_sha256",
+            ),
+            name="capacity_executable_intent_execution_fkey",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ("allocation_epoch", "execution_epoch", "execution_manifest_sha256"),
+            (
+                "capacity_allocation_epochs.allocation_epoch",
+                "capacity_allocation_epochs.execution_epoch",
+                "capacity_allocation_epochs.execution_manifest_sha256",
+            ),
+            name="capacity_executable_intent_allocation_fkey",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            (
+                "execution_epoch",
+                "execution_manifest_sha256",
+                "executor_id",
+                "executor_incarnation",
+                "pool_id",
+                "pool_generation",
+            ),
+            (
+                "capacity_execution_executors.execution_epoch",
+                "capacity_execution_executors.execution_manifest_sha256",
+                "capacity_execution_executors.executor_id",
+                "capacity_execution_executors.executor_incarnation",
+                "capacity_execution_executors.pool_id",
+                "capacity_execution_executors.pool_generation",
+            ),
+            name="capacity_executable_intent_executor_fkey",
+            ondelete="RESTRICT",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    intent_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    tranche_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    shape_instance_id: Mapped[str] = mapped_column(Text, nullable=False)
+    execution_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    execution_manifest_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    configuration_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    allocation_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    executor_id: Mapped[str] = mapped_column(Text, nullable=False)
+    executor_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    pool_id: Mapped[str] = mapped_column(Text, nullable=False)
+    pool_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    subject_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    subject_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    launch_rank: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    proposal_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    proposal_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    binding_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    binding_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    state: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'proposed'"))
+    accepted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    bootstrap_registration_epoch: Mapped[int | None] = mapped_column(BigInteger)
+    bootstrap_evidence_sha256: Mapped[str | None] = mapped_column(Text)
+    launch_ready_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    permit_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    permit_epoch: Mapped[int | None] = mapped_column(BigInteger)
+    permit_digest: Mapped[str | None] = mapped_column(Text)
+    permit_payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    permit_expires_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    permit_consumed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    protected_registration_epoch: Mapped[int | None] = mapped_column(BigInteger)
+    protected_release_idempotency_key: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    protected_release_digest: Mapped[str | None] = mapped_column(Text)
+    protected_release_actor: Mapped[str | None] = mapped_column(Text)
+    protected_release_sha256: Mapped[str | None] = mapped_column(Text)
+    protected_release_payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    inventory_sequence: Mapped[int | None] = mapped_column(BigInteger)
+    observed_state: Mapped[str | None] = mapped_column(Text)
+    terminal_kind: Mapped[str | None] = mapped_column(Text)
+    terminal_identity: Mapped[str | None] = mapped_column(Text)
+    terminal_evidence_sha256: Mapped[str | None] = mapped_column(Text)
+    released_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class CapacityExecutableCommandReceipt(Base):
+    """Exact replay evidence for one executor command high-water transition."""
+
+    __tablename__ = "capacity_executable_command_receipts"
+    __table_args__ = (
+        CheckConstraint(
+            "execution_epoch > 0 AND command_sequence > 0",
+            name="capacity_executable_command_receipt_quantity_check",
+        ),
+        CheckConstraint(
+            "request_digest ~ '^[0-9a-f]{64}$' AND result_digest ~ '^[0-9a-f]{64}$'",
+            name="capacity_executable_command_receipt_digest_check",
+        ),
+        UniqueConstraint(
+            "executor_incarnation",
+            "command_sequence",
+            name="capacity_executable_command_receipt_sequence_key",
+        ),
+        ForeignKeyConstraint(
+            ("execution_epoch", "executor_incarnation"),
+            (
+                "capacity_executable_executor_states.execution_epoch",
+                "capacity_executable_executor_states.executor_incarnation",
+            ),
+            name="capacity_executable_command_receipt_executor_fkey",
+            ondelete="RESTRICT",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    execution_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    executor_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    command_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    operation_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    request_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    result_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    result_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class CapacityExecutableLaunchRateBucket(Base):
+    """Executable-v2 token bucket, isolated from the permanent dry-run ledger."""
+
+    __tablename__ = "capacity_executable_launch_rate_buckets"
+    __table_args__ = (
+        CheckConstraint(
+            "scope IN ('global','account','subject','pool')",
+            name="capacity_executable_launch_rate_bucket_scope_check",
+        ),
+        CheckConstraint(
+            "configuration_epoch > 0 AND execution_epoch > 0 "
+            "AND rate_per_minute BETWEEN 0 AND 9223372036854 "
+            "AND capacity_microtokens = rate_per_minute * 1000000 "
+            "AND available_microtokens >= 0 "
+            "AND available_microtokens <= capacity_microtokens "
+            "AND refill_remainder >= 0 AND refill_remainder < 60000000",
+            name="capacity_executable_launch_rate_bucket_quantity_check",
+        ),
+        UniqueConstraint(
+            "execution_epoch",
+            "scope",
+            "scope_identity",
+            name="capacity_executable_launch_rate_bucket_scope_key",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    execution_epoch: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("capacity_execution_epochs.execution_epoch", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    configuration_epoch: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("capacity_configuration_epochs.configuration_epoch", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    scope: Mapped[str] = mapped_column(Text, nullable=False)
+    scope_identity: Mapped[str] = mapped_column(Text, nullable=False)
+    rate_per_minute: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    capacity_microtokens: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    available_microtokens: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    refill_remainder: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    last_refill_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+
+
 class CapacityAuditEvent(Base):
     __tablename__ = "capacity_audit_events"
     __table_args__ = (
@@ -1766,6 +2209,10 @@ __all__ = [
     "CapacityDemandReporter",
     "CapacityDemandSnapshot",
     "CapacityDeploymentGeneration",
+    "CapacityExecutableCommandReceipt",
+    "CapacityExecutableExecutorState",
+    "CapacityExecutableIntent",
+    "CapacityExecutableLaunchRateBucket",
     "CapacityExecutionEpoch",
     "CapacityExecutionExecutor",
     "CapacityExecutor",

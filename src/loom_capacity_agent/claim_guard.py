@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Literal, Protocol
 from uuid import UUID
 
@@ -15,6 +16,7 @@ from loom_capacity_guard.contracts import (
     PositiveGeneration,
     StrictGuardModel,
 )
+from loom_capacity_manager.executable_contracts import StrictV2Model
 
 UnclaimedAttemptState = Literal[
     "pending-unassigned",
@@ -185,10 +187,66 @@ class DisabledClaimGuard:
         )
 
 
+class ExecutableClaimProposalV2(StrictV2Model):
+    """Minimal protected claim identity checked before any claim mutation."""
+
+    operation_id: UUID
+    protected_attempt_id: UUID
+    execution_generation: PositiveGeneration
+    requirements_digest: Digest
+    worker_id: UUID
+    worker_incarnation: UUID
+    expected_claim_high_water: NonNegativeSequence
+    executable: Literal[True] = True
+
+
+class ExecutableClaimReceiptV2(StrictV2Model):
+    """Append-only receipt for one protected executable claim lease."""
+
+    operation_id: UUID
+    protected_attempt_id: UUID
+    execution_generation: PositiveGeneration
+    requirements_digest: Digest
+    intent_id: UUID
+    worker_id: UUID
+    worker_incarnation: UUID
+    claim_high_water: PositiveGeneration
+    request_digest: Digest
+    lease_state: Literal["live"] = "live"
+    admitted: Literal[True] = True
+    executable: Literal[True] = True
+
+
+AdmitExecutableClaim = Callable[
+    [ExecutableClaimProposalV2],
+    Awaitable[ExecutableClaimReceiptV2 | None],
+]
+
+
+class ExecutableClaimGate:
+    """Stop a draining or revoked worker before a candidate claim transition."""
+
+    def __init__(self, *, admit_claim: AdmitExecutableClaim) -> None:
+        if not callable(admit_claim):
+            raise TypeError("executable claim gate requires a protected transaction")
+        self._admit_claim = admit_claim
+
+    async def evaluate(
+        self,
+        proposal: ExecutableClaimProposalV2,
+    ) -> ExecutableClaimReceiptV2 | None:
+        if not isinstance(proposal, ExecutableClaimProposalV2):
+            raise TypeError("executable claim proposal is invalid")
+        return await self._admit_claim(proposal)
+
+
 __all__ = [
     "ClaimGuard",
     "ClaimGuardDecisionV1",
     "ClaimProposalV1",
     "DisabledClaimGuard",
+    "ExecutableClaimGate",
+    "ExecutableClaimProposalV2",
+    "ExecutableClaimReceiptV2",
     "InertAttemptTransitionV1",
 ]

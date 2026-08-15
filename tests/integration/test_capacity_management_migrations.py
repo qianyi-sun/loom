@@ -9,7 +9,7 @@ import time
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy
@@ -18,7 +18,7 @@ from alembic.config import Config as AlembicConfig
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy import create_engine, inspect, select, text
-from sqlalchemy.engine import make_url
+from sqlalchemy.engine import Connection, make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -45,6 +45,10 @@ EXPECTED_TABLES = {
     "capacity_executor_observations",
     "capacity_execution_epochs",
     "capacity_execution_executors",
+    "capacity_executable_command_receipts",
+    "capacity_executable_executor_states",
+    "capacity_executable_intents",
+    "capacity_executable_launch_rate_buckets",
     "capacity_fairness_state",
     "capacity_launch_permits",
     "capacity_launch_rate_buckets",
@@ -71,6 +75,29 @@ def _capacity_config(url: str) -> AlembicConfig:
     return cfg
 
 
+def _seed_execution_pools(connection: Connection, *, configuration_epoch: int) -> None:
+    for pool_id in ("gb10", "oldlab"):
+        connection.execute(
+            text(
+                "INSERT INTO capacity_pools "
+                "(id, configuration_epoch, pool_id, pool_generation, pool_digest, "
+                "controller, partition, association, protocol_generation, "
+                "protocol_digest, topology, envelope, health, max_slots, "
+                "max_pending_slots, max_pending_jobs, submission_rate_per_minute) "
+                "VALUES (:id, :configuration_epoch, :pool_id, 1, repeat('a', 64), "
+                ":controller, 'migration-test', :association, 1, repeat('b', 64), "
+                "'{}'::jsonb, '{}'::jsonb, 'eligible', 1, 1, 1, 1)"
+            ),
+            {
+                "id": uuid4(),
+                "configuration_epoch": configuration_epoch,
+                "pool_id": pool_id,
+                "controller": f"{pool_id}-controller",
+                "association": f"{pool_id}-association",
+            },
+        )
+
+
 def _seed_executable_allocation_history(
     connection: sqlalchemy.Connection,
     *,
@@ -81,10 +108,7 @@ def _seed_executable_allocation_history(
     seal: bool = True,
 ) -> int:
     authority = connection.execute(
-        text(
-            "SELECT authority_incarnation FROM capacity_authority_state "
-            "WHERE singleton_id = 1"
-        )
+        text("SELECT authority_incarnation FROM capacity_authority_state WHERE singleton_id = 1")
     ).scalar_one()
     connection.execute(
         text(
@@ -189,10 +213,7 @@ def _seed_executable_allocation_history(
                 },
             )
         connection.execute(
-            text(
-                "UPDATE capacity_authority_state SET writer_epoch = 1 "
-                "WHERE singleton_id = 1"
-            )
+            text("UPDATE capacity_authority_state SET writer_epoch = 1 WHERE singleton_id = 1")
         )
         connection.execute(
             text(
@@ -224,9 +245,7 @@ def _seed_executable_allocation_history(
                 "WHERE singleton_id = 1"
             )
         )
-    resolved_allocation_count = (
-        int(include_child) if allocation_count is None else allocation_count
-    )
+    resolved_allocation_count = int(include_child) if allocation_count is None else allocation_count
     allocation_epoch = connection.execute(
         text(
             "INSERT INTO capacity_allocation_epochs "
@@ -299,6 +318,176 @@ def isolated_capacity_migration_url(postgres_url: str) -> Iterator[str]:
             )
             connection.exec_driver_sql(f"DROP DATABASE IF EXISTS {quoted}")
         admin_engine.dispose()
+
+
+def test_forward_migration_replaces_existing_0006_retirement_constraint(
+    isolated_capacity_migration_url: str,
+) -> None:
+    """An installation already upgraded through 0006 must receive the new binding."""
+
+    cfg = _capacity_config(isolated_capacity_migration_url)
+    command.upgrade(cfg, "capacity_0006")
+    engine = create_engine(isolated_capacity_migration_url)
+    try:
+        with engine.connect() as connection:
+            old_columns = {
+                item["name"]
+                for item in inspect(connection).get_columns("capacity_executable_executor_states")
+            }
+        assert "inventory_confirmation_journal_digest" not in old_columns
+
+        execution_epoch = 1_300_001
+        configuration_epoch = 1_300_001
+        executor_incarnation = UUID(int=13001)
+        with engine.begin() as connection:
+            authority = connection.execute(
+                text("SELECT authority_incarnation FROM capacity_authority_state")
+            ).scalar_one()
+            connection.execute(
+                text(
+                    "INSERT INTO capacity_configuration_epochs "
+                    "(configuration_epoch, fleet_generation, fleet_digest, "
+                    "subject_generation_manifest, canonical_digest, "
+                    "activation_idempotency_key, activation_actor, "
+                    "activation_request_digest) VALUES "
+                    "(:configuration_epoch, 1, repeat('1', 64), '[]'::jsonb, "
+                    "repeat('2', 64), :configuration_key, 'migration-test', "
+                    "repeat('3', 64))"
+                ),
+                {
+                    "configuration_epoch": configuration_epoch,
+                    "configuration_key": uuid4(),
+                },
+            )
+            _seed_execution_pools(connection, configuration_epoch=configuration_epoch)
+            connection.execute(
+                text(
+                    "INSERT INTO capacity_execution_epochs "
+                    "(execution_epoch, authority_incarnation, prepared_writer_epoch, "
+                    "current_writer_epoch, configuration_epoch, fleet_generation, "
+                    "fleet_digest, execution_manifest_sha256, manifest_payload, "
+                    "trusted_fleet_release_sha256, oldlab_executor_id, "
+                    "oldlab_executor_incarnation, oldlab_pool_id, oldlab_pool_generation, "
+                    "oldlab_signing_key_sha256, oldlab_local_authority_sha256, "
+                    "oldlab_controller_authority_sha256, "
+                    "gb10_executor_id, gb10_executor_incarnation, gb10_pool_id, "
+                    "gb10_pool_generation, gb10_signing_key_sha256, "
+                    "gb10_local_authority_sha256, gb10_controller_authority_sha256, "
+                    "environment_acknowledgements_sha256, "
+                    "legacy_writer_manifest_sha256, rollback_evidence_sha256, "
+                    "requested_ceiling, effective_ceiling, requested_rate_per_minute, "
+                    "effective_rate_per_minute, state, actor, idempotency_key, "
+                    "request_digest) VALUES "
+                    "(:execution_epoch, :authority, 1, 1, :configuration_epoch, 1, "
+                    "repeat('1', 64), repeat('4', 64), '{}'::jsonb, repeat('5', 64), "
+                    "'oldlab-executor', :oldlab_incarnation, 'oldlab', 1, "
+                    "repeat('a', 64), repeat('b', 64), repeat('c', 64), "
+                    "'gb10-executor', :gb10_incarnation, 'gb10', 1, "
+                    "repeat('a', 64), repeat('b', 64), repeat('c', 64), repeat('6', 64), "
+                    "repeat('7', 64), repeat('8', 64), 2, 0, 2, 0, 'prepared', "
+                    "'migration-test', :execution_key, repeat('9', 64))"
+                ),
+                {
+                    "execution_epoch": execution_epoch,
+                    "authority": authority,
+                    "configuration_epoch": configuration_epoch,
+                    "oldlab_incarnation": UUID(int=13002),
+                    "gb10_incarnation": executor_incarnation,
+                    "execution_key": uuid4(),
+                },
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO capacity_execution_executors "
+                    "(id, execution_epoch, execution_manifest_sha256, executor_id, "
+                    "executor_incarnation, pool_id, pool_generation, signing_key_id, "
+                    "signing_key_sha256, local_authority_sha256, "
+                    "controller_authority_sha256, actor, idempotency_key, "
+                    "registration_digest, registration_payload) VALUES "
+                    "(:id, :execution_epoch, repeat('4', 64), 'gb10-executor', "
+                    ":executor_incarnation, 'gb10', 1, 'gb10-key', repeat('a', 64), "
+                    "repeat('b', 64), repeat('c', 64), 'migration-test', "
+                    ":idempotency_key, repeat('d', 64), '{}'::jsonb)"
+                ),
+                {
+                    "id": uuid4(),
+                    "execution_epoch": execution_epoch,
+                    "executor_incarnation": executor_incarnation,
+                    "idempotency_key": uuid4(),
+                },
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO capacity_executable_executor_states "
+                    "(id, execution_epoch, execution_manifest_sha256, executor_id, "
+                    "executor_incarnation, pool_id, pool_generation, state, "
+                    "journal_high_water, journal_digest, inventory_high_water, "
+                    "last_inventory_digest, inventory_payload, last_inventory_at, "
+                    "retirement_safe, retirement_inventory_digest, lease_expires_at, "
+                    "last_heartbeat_at) VALUES "
+                    "(:id, :execution_epoch, repeat('4', 64), 'gb10-executor', "
+                    ":executor_incarnation, 'gb10', 1, 'current', 1, repeat('a', 64), "
+                    "1, repeat('f', 64), jsonb_build_object("
+                    "'schema_version', 2, 'execution', jsonb_build_object("
+                    "'execution_epoch', :execution_epoch, "
+                    "'execution_manifest_sha256', repeat('4', 64)), "
+                    "'executor_id', 'gb10-executor', "
+                    "'executor_incarnation', CAST(:executor_incarnation AS text), "
+                    "'pool_id', 'gb10', 'pool_generation', 1, "
+                    "'inventory_sequence', 1, 'journal_sequence', 1, "
+                    "'journal_digest', repeat('a', 64)), now(), true, "
+                    "repeat('f', 64), now() + interval '1 minute', now())"
+                ),
+                {
+                    "id": uuid4(),
+                    "execution_epoch": execution_epoch,
+                    "executor_incarnation": executor_incarnation,
+                },
+            )
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT retirement_safe FROM capacity_executable_executor_states "
+                        "WHERE execution_epoch = :execution_epoch"
+                    ),
+                    {"execution_epoch": execution_epoch},
+                ).scalar_one()
+                is True
+            )
+
+        command.upgrade(cfg, "head")
+        with engine.connect() as connection:
+            columns = {
+                item["name"]
+                for item in inspect(connection).get_columns("capacity_executable_executor_states")
+            }
+            checks = {
+                item["name"]: item["sqltext"]
+                for item in inspect(connection).get_check_constraints(
+                    "capacity_executable_executor_states"
+                )
+            }
+            invalidated = connection.execute(
+                text(
+                    "SELECT retirement_safe, retirement_inventory_digest, "
+                    "inventory_confirmation_journal_digest "
+                    "FROM capacity_executable_executor_states "
+                    "WHERE execution_epoch = :execution_epoch"
+                ),
+                {"execution_epoch": execution_epoch},
+            ).one()
+        assert "inventory_confirmation_journal_digest" in columns
+        assert invalidated == (False, None, None)
+        assert (
+            "inventory_confirmation_journal_digest"
+            in checks["capacity_executable_executor_retirement_check"]
+        )
+        assert (
+            "last_heartbeat_at > last_inventory_at"
+            in checks["capacity_executable_executor_retirement_check"]
+        )
+    finally:
+        engine.dispose()
 
 
 def test_shadow_schema_has_execution_epoch_table_and_zero_execution_guard(
@@ -581,6 +770,55 @@ def test_execution_epochs_reject_truncate(capacity_postgres_url: str) -> None:
         engine.dispose()
 
 
+def test_executable_runtime_rows_bind_exact_registered_executor(
+    capacity_postgres_url: str,
+) -> None:
+    engine = create_engine(capacity_postgres_url)
+    expected_executor_columns = [
+        "execution_epoch",
+        "execution_manifest_sha256",
+        "executor_id",
+        "executor_incarnation",
+        "pool_id",
+        "pool_generation",
+    ]
+    try:
+        with engine.connect() as connection:
+            schema = inspect(connection)
+            executor_uniques = {
+                item["name"]: item["column_names"]
+                for item in schema.get_unique_constraints("capacity_execution_executors")
+            }
+            assert executor_uniques["capacity_execution_executor_exact_binding_key"] == (
+                expected_executor_columns
+            )
+
+            for table_name, constraint_name in (
+                (
+                    "capacity_executable_executor_states",
+                    "capacity_executable_executor_registration_fkey",
+                ),
+                (
+                    "capacity_executable_intents",
+                    "capacity_executable_intent_executor_fkey",
+                ),
+            ):
+                foreign_keys = {item["name"]: item for item in schema.get_foreign_keys(table_name)}
+                assert foreign_keys[constraint_name]["constrained_columns"] == (
+                    expected_executor_columns
+                )
+
+            receipt_foreign_keys = {
+                item["name"]: item
+                for item in schema.get_foreign_keys("capacity_executable_command_receipts")
+            }
+            assert receipt_foreign_keys["capacity_executable_command_receipt_executor_fkey"][
+                "constrained_columns"
+            ] == ["execution_epoch", "executor_incarnation"]
+    finally:
+        engine.dispose()
+
+
 def test_capacity_0004_preserves_populated_writer_and_journal_across_downgrade(
     isolated_capacity_migration_url: str,
 ) -> None:
@@ -774,6 +1012,98 @@ def test_capacity_0004_preserves_populated_writer_and_journal_across_downgrade(
         engine.dispose()
 
 
+def test_existing_executable_intents_upgrade_to_observed_state_database_check(
+    isolated_capacity_migration_url: str,
+) -> None:
+    """An already-0009 database must reject raw impossible observed states after 0010."""
+
+    cfg = _capacity_config(isolated_capacity_migration_url)
+    command.upgrade(cfg, "capacity_0009")
+    engine = create_engine(isolated_capacity_migration_url)
+    try:
+        with engine.begin() as connection:
+            allocation_epoch = _seed_executable_allocation_history(
+                connection,
+                include_child=False,
+                allocation_count=0,
+                complete_payload={"allocations": []},
+            )
+            execution = (
+                connection.execute(
+                    text(
+                        "SELECT execution_epoch, execution_manifest_sha256, "
+                        "configuration_epoch, gb10_executor_id, gb10_executor_incarnation, "
+                        "gb10_pool_id, gb10_pool_generation "
+                        "FROM capacity_execution_epochs WHERE execution_epoch = 1"
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            subject_id = UUID(int=17002)
+            subject_incarnation = UUID(int=17003)
+            for launch_rank, observed_state in enumerate(("pending", None), start=1):
+                connection.execute(
+                    text(
+                        "INSERT INTO capacity_executable_intents "
+                        "(id, intent_id, tranche_id, shape_instance_id, execution_epoch, "
+                        "execution_manifest_sha256, configuration_epoch, allocation_epoch, "
+                        "executor_id, executor_incarnation, pool_id, pool_generation, "
+                        "subject_id, subject_incarnation, launch_rank, proposal_digest, "
+                        "proposal_payload, binding_digest, binding_payload, observed_state) "
+                        "VALUES "
+                        "(:id, :intent_id, :tranche_id, :shape_instance_id, :execution_epoch, "
+                        ":execution_manifest, :configuration_epoch, :allocation_epoch, "
+                        ":executor_id, :executor_incarnation, :pool_id, :pool_generation, "
+                        ":subject_id, :subject_incarnation, :launch_rank, repeat('e', 64), "
+                        "'{}'::jsonb, repeat('f', 64), '{}'::jsonb, :observed_state)"
+                    ),
+                    {
+                        "id": uuid4(),
+                        "intent_id": uuid4(),
+                        "tranche_id": uuid4(),
+                        "shape_instance_id": f"shape-{launch_rank}",
+                        "execution_epoch": execution["execution_epoch"],
+                        "execution_manifest": execution["execution_manifest_sha256"],
+                        "configuration_epoch": execution["configuration_epoch"],
+                        "allocation_epoch": allocation_epoch,
+                        "executor_id": execution["gb10_executor_id"],
+                        "executor_incarnation": execution["gb10_executor_incarnation"],
+                        "pool_id": execution["gb10_pool_id"],
+                        "pool_generation": execution["gb10_pool_generation"],
+                        "subject_id": subject_id,
+                        "subject_incarnation": subject_incarnation,
+                        "launch_rank": launch_rank,
+                        "observed_state": observed_state,
+                    },
+                )
+
+        command.upgrade(cfg, "head")
+
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE capacity_executable_intents "
+                    "SET observed_state = 'active' WHERE shape_instance_id = 'shape-1'"
+                )
+            )
+            connection.execute(
+                text(
+                    "UPDATE capacity_executable_intents "
+                    "SET observed_state = NULL WHERE shape_instance_id = 'shape-2'"
+                )
+            )
+            with pytest.raises(IntegrityError):
+                connection.execute(
+                    text(
+                        "UPDATE capacity_executable_intents "
+                        "SET observed_state = 'impossible' WHERE shape_instance_id = 'shape-1'"
+                    )
+                )
+    finally:
+        engine.dispose()
+
+
 def test_fleet_configuration_generation_is_unique_despite_null_subject_binding(
     capacity_postgres_url: str,
 ) -> None:
@@ -829,12 +1159,15 @@ def test_capacity_0005_refuses_downgrade_with_executable_allocation_history(
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one() == ("capacity_0005")
-            assert connection.execute(
-                text(
-                    "SELECT count(*) FROM capacity_allocation_epochs "
-                    "WHERE status = 'executable'"
-                )
-            ).scalar_one() == 1
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT count(*) FROM capacity_allocation_epochs "
+                        "WHERE status = 'executable'"
+                    )
+                ).scalar_one()
+                == 1
+            )
     finally:
         engine.dispose()
 
@@ -873,10 +1206,7 @@ def test_capacity_0005_requires_executable_allocation_seal_before_commit(
             with engine.begin() as connection:
                 _seed_executable_allocation_history(connection, seal=False)
                 connection.execute(
-                    text(
-                        "SET CONSTRAINTS "
-                        "capacity_executable_allocation_seal_guard IMMEDIATE"
-                    )
+                    text("SET CONSTRAINTS capacity_executable_allocation_seal_guard IMMEDIATE")
                 )
     finally:
         engine.dispose()
@@ -916,10 +1246,7 @@ def test_capacity_0005_requires_sealed_executable_child_count(
                     allocation_count=1,
                 )
                 connection.execute(
-                    text(
-                        "SET CONSTRAINTS "
-                        "capacity_executable_allocation_seal_guard IMMEDIATE"
-                    )
+                    text("SET CONSTRAINTS capacity_executable_allocation_seal_guard IMMEDIATE")
                 )
     finally:
         engine.dispose()
@@ -980,21 +1307,22 @@ def test_capacity_0005_accepts_shadow_rows_from_running_0004_writer(
                 )
             ).one()
             child = connection.execute(
-                text(
-                    "SELECT execution_epoch, execution_manifest_sha256 "
-                    "FROM capacity_allocations"
-                )
+                text("SELECT execution_epoch, execution_manifest_sha256 FROM capacity_allocations")
             ).one()
             assert parent == (None, None)
             assert child == (None, None)
         with engine.begin() as connection:
             connection.execute(text("TRUNCATE TABLE capacity_allocations"))
-            assert connection.execute(
-                text("SELECT count(*) FROM capacity_allocations")
-            ).scalar_one() == 0
-            assert connection.execute(
-                text("SELECT count(*) FROM capacity_allocation_epochs")
-            ).scalar_one() == 1
+            assert (
+                connection.execute(text("SELECT count(*) FROM capacity_allocations")).scalar_one()
+                == 0
+            )
+            assert (
+                connection.execute(
+                    text("SELECT count(*) FROM capacity_allocation_epochs")
+                ).scalar_one()
+                == 1
+            )
     finally:
         engine.dispose()
 
@@ -1015,9 +1343,7 @@ def test_capacity_0005_rejects_truncating_executable_allocation_history(
                 match="executable allocation epochs are append-only",
             ):
                 with connection.begin_nested():
-                    connection.execute(
-                        text("TRUNCATE TABLE capacity_allocation_epochs CASCADE")
-                    )
+                    connection.execute(text("TRUNCATE TABLE capacity_allocation_epochs CASCADE"))
             with pytest.raises(
                 sqlalchemy.exc.DBAPIError,
                 match="executable allocations are append-only",
@@ -1025,12 +1351,16 @@ def test_capacity_0005_rejects_truncating_executable_allocation_history(
                 with connection.begin_nested():
                     connection.execute(text("TRUNCATE TABLE capacity_allocations"))
 
-            assert connection.execute(
-                text("SELECT count(*) FROM capacity_allocation_epochs")
-            ).scalar_one() == 1
-            assert connection.execute(
-                text("SELECT count(*) FROM capacity_allocations")
-            ).scalar_one() == 1
+            assert (
+                connection.execute(
+                    text("SELECT count(*) FROM capacity_allocation_epochs")
+                ).scalar_one()
+                == 1
+            )
+            assert (
+                connection.execute(text("SELECT count(*) FROM capacity_allocations")).scalar_one()
+                == 1
+            )
     finally:
         engine.dispose()
 
@@ -1117,12 +1447,15 @@ def test_capacity_0005_downgrade_serializes_executable_history_preflight(
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one() == ("capacity_0005")
-            assert connection.execute(
-                text(
-                    "SELECT count(*) FROM capacity_allocation_epochs "
-                    "WHERE status = 'executable'"
-                )
-            ).scalar_one() == 1
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT count(*) FROM capacity_allocation_epochs "
+                        "WHERE status = 'executable'"
+                    )
+                ).scalar_one()
+                == 1
+            )
     finally:
         observer_engine.dispose()
         writer_engine.dispose()
@@ -1160,9 +1493,7 @@ def test_capacity_0005_downgrade_refuses_snapshot_isolation(
                 "execution_manifest_sha256",
             } <= {
                 column["name"]
-                for column in inspect(connection).get_columns(
-                    "capacity_allocation_epochs"
-                )
+                for column in inspect(connection).get_columns("capacity_allocation_epochs")
             }
     finally:
         engine.dispose()
@@ -1254,12 +1585,12 @@ def test_capacity_schema_has_independent_revision_table(
         with capacity_engine.connect() as connection:
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == ("capacity_0005")
+            ).scalar_one() == ("capacity_0010")
         with environment_engine.connect() as connection:
             environment_revision = connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one()
-            assert environment_revision != "capacity_0005"
+            assert environment_revision != "capacity_0010"
             assert not (EXPECTED_TABLES & set(inspect(connection).get_table_names()))
     finally:
         capacity_engine.dispose()
@@ -1281,7 +1612,7 @@ async def test_capacity_schema_error_uses_installed_capacity_migration_command(
 async def test_capacity_schema_startup_returns_numeric_head(
     capacity_engine: AsyncEngine,
 ) -> None:
-    assert await assert_capacity_schema_at_head(capacity_engine) == 5
+    assert await assert_capacity_schema_at_head(capacity_engine) == 10
 
 
 def test_package3_tables_are_database_constrained_to_dry_run(

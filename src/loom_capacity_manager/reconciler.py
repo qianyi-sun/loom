@@ -116,13 +116,8 @@ async def _commit_reconciled_epoch(
 
         now = (await session.execute(select(func.clock_timestamp()))).scalar_one()
         valid_until = store.allocation_input_valid_until(current_input)
-        if (
-            valid_until is not None
-            and now + _EXECUTABLE_COMMIT_SAFETY_MARGIN >= valid_until
-        ):
-            raise StaleAllocationInputError(
-                "allocation input freshness expired before commit"
-            )
+        if valid_until is not None and now + _EXECUTABLE_COMMIT_SAFETY_MARGIN >= valid_until:
+            raise StaleAllocationInputError("allocation input freshness expired before commit")
         allocation_epoch = (
             await session.execute(
                 text(
@@ -153,7 +148,6 @@ async def _commit_reconciled_epoch(
         )
         session.add(row)
         await session.flush()
-
         for allocation in shadow.allocations:
             session.add(
                 CapacityAllocation(
@@ -229,10 +223,7 @@ async def _commit_reconciled_epoch(
         )
         await session.flush()
         await session.execute(
-            text(
-                "SET CONSTRAINTS "
-                "public.capacity_executable_allocation_seal_guard IMMEDIATE"
-            )
+            text("SET CONSTRAINTS public.capacity_executable_allocation_seal_guard IMMEDIATE")
         )
         final_now = (await session.execute(select(func.clock_timestamp()))).scalar_one()
         final_valid_until = store.allocation_input_valid_until(current_input)
@@ -240,10 +231,7 @@ async def _commit_reconciled_epoch(
             valid_until = final_valid_until
         elif final_valid_until is not None:
             valid_until = min(valid_until, final_valid_until)
-        if (
-            valid_until is not None
-            and final_now + _EXECUTABLE_COMMIT_SAFETY_MARGIN >= valid_until
-        ):
+        if valid_until is not None and final_now + _EXECUTABLE_COMMIT_SAFETY_MARGIN >= valid_until:
             raise StaleAllocationInputError(
                 "allocation input freshness expired before durable commit"
             )

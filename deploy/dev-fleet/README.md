@@ -18,9 +18,16 @@ checkpoint. A ready lifecycle operation includes an initial non-executable
 capacity publication, but it does not activate the fixture or global autoscaler
 templates in this directory and does not grant physical worker capacity.
 
-The global manager's fenced pool-executor protocol is also separate from these
-legacy assets. Its reservation, permit, inventory, and release receipts are
-`executable: false`; this directory contains no scheduler-facing executor
+The already-configured capacity-agent service now runs two independent trusted
+reporter loops with the same owner-only agent database URL, guard URL, and
+reporter bearer token: demand publication and executable protected-release
+publication. This adds no credential, install, start, enable, apply, or
+activation action, and the executable new-capacity ceiling remains exactly `0`.
+
+The global manager's permanent v1 dry-run pool-executor protocol is also
+separate from these legacy assets. Its reservation, permit, inventory, and
+release receipts remain `executable: false`. The distinct v2 contracts are
+`executable: true`, but this directory activates no scheduler-facing executor
 service for them. Use the
 [pool-executor dry-run runbook](../../docs/runbooks/global-fleet-pool-executor-dry-run.md)
 for the implemented rehearsal and recovery procedure.
@@ -30,6 +37,14 @@ independently keyed stable-route activation agent. Replace its image and Secret
 placeholders with reviewed immutable values before an authorized apply. The
 template does not enable the service-side controller, restricted builder, or
 physical worker capacity.
+
+`capacity-pool-executor.toml.example` and
+`loom-capacity-pool-executor.service` package the later two-pool executable
+bridge inertly. They bind distinct GB10 and OLDLAB controller-local identities,
+credentials, journals, and state directories, but the checked-in ceiling is
+exactly zero and the systemd unit only validates configuration. It has no
+install target and must never be started or enabled from this package. See the
+[executable bridge rehearsal](../../docs/runbooks/executable-global-capacity-bridge-rehearsal.md).
 
 ## Capacity authority package
 

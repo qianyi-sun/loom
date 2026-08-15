@@ -9,6 +9,7 @@ from scripts.ops.global_dev_fleet_autoscaler_external_once import (
     GlobalDevExternalError,
     InstanceSnapshot,
     _atomic_write,
+    _parser,
     _prune_worker_env_files,
     _read_secret_file,
     _safe_env_value,
@@ -133,3 +134,40 @@ def test_worker_env_cleanup_is_registry_driven_and_narrow(tmp_path: Path) -> Non
     assert active.exists()
     assert not stale.exists()
     assert unrelated.exists()
+
+
+def test_parser_accepts_the_manager_execution_witness(tmp_path: Path) -> None:
+    witness = tmp_path / "manager-witness.json"
+    args = _parser().parse_args(
+        [
+            "--management-db-url-file",
+            "/run/loom/management-db-url",
+            "--fixture-admin-db-url-file",
+            "/run/loom/fixture-admin-db-url",
+            "--state-db",
+            "/var/lib/loom/global-capacity.sqlite3",
+            "--output-json",
+            "/var/lib/loom/global-capacity.json",
+            "--global-budget",
+            "0",
+            "--worker-env-dir",
+            "/run/loom/worker-env",
+            "--worker-minio-endpoint",
+            "https://minio.example",
+            "--image-tag",
+            "dev-aaaaaaaa",
+            "--global-execution-witness-json",
+            str(witness),
+            "--manager-public-key",
+            "/run/loom/global-execution-manager.pub",
+            "--expected-manager-public-key-sha256",
+            "a" * 64,
+        ]
+    )
+
+    assert args.global_execution_witness_json == witness
+
+
+def test_external_parser_requires_independent_manager_trust_inputs() -> None:
+    with pytest.raises(SystemExit):
+        _parser().parse_args([])

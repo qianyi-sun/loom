@@ -5,15 +5,17 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections import Counter, defaultdict
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 from typing import Any, TypeVar, cast
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.encoders import jsonable_encoder
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -33,6 +35,7 @@ from loom_capacity_manager.auth import (
 from loom_capacity_manager.config import CapacityManagerSettings, read_owner_only_secret
 from loom_capacity_manager.contracts import (
     MAX_CONTRACT_BYTES,
+    MAX_FIXED_CLAIMS_PER_REPORT,
     MAX_POOLS,
     ConfigurationActivationV1,
     DemandSnapshotV1,
@@ -40,10 +43,23 @@ from loom_capacity_manager.contracts import (
     FleetManifestV1,
     PoolObservationV1,
     ShadowEpochV1,
-    StrictV1Model,
     SubjectConfigurationV1,
     canonical_digest,
 )
+from loom_capacity_manager.executable_contracts import (
+    ExecutableBootstrapRegistrationV2,
+    ExecutableExecutorHeartbeatV2,
+    ExecutableExecutorInventoryV2,
+    ExecutableIntentBindingV2,
+    ExecutableIntentCloseV2,
+    ExecutablePartialReleaseV2,
+    ExecutablePermitConsumptionV2,
+    ExecutableProtectedReleaseV2,
+    ExecutableReservationAcceptanceV2,
+    PreparedExecutorBindingV2,
+    canonical_executable_digest,
+)
+from loom_capacity_manager.execution_store import CapacityExecutionStore
 from loom_capacity_manager.grant_contracts import (
     DryRunBootstrapRegistrationV1,
     DryRunExecutorHeartbeatV1,
@@ -81,6 +97,8 @@ from loom_capacity_manager.models import (
     CapacityAllocationEpoch,
     CapacityAuditEvent,
     CapacityAuthorityState,
+    CapacityExecutableExecutorState,
+    CapacityExecutableIntent,
     CapacityExecutor,
     CapacityPool,
     CapacityReservationShape,
@@ -99,6 +117,7 @@ from loom_capacity_manager.store import (
     CapacityManagementStore,
     CapacityStoreError,
     ConfigurationConflictError,
+    ExecutionConflictError,
     IdempotencyConflictError,
     ReportEquivocationError,
     StaleAllocationInputError,
@@ -108,7 +127,7 @@ from loom_capacity_manager.store import (
     WriterFence,
 )
 
-_ContractT = TypeVar("_ContractT", bound=StrictV1Model)
+_ContractT = TypeVar("_ContractT", bound=BaseModel)
 
 
 class RequestBodyLimitMiddleware:
@@ -193,6 +212,7 @@ def _store_error(exc: CapacityStoreError) -> HTTPException:
         exc,
         (
             ConfigurationConflictError,
+            ExecutionConflictError,
             IdempotencyConflictError,
             ReportEquivocationError,
             StaleReportError,
@@ -239,32 +259,156 @@ def _run_reason(result: ShadowRunResult) -> str:
     return "unexpected"
 
 
+def _writer_matches_authority(writer: WriterFence, authority: CapacityAuthorityState) -> bool:
+    return (
+        authority.authority_incarnation == writer.authority_incarnation
+        and authority.writer_epoch == writer.writer_epoch
+    )
+
+
+def _health_payload(*, ready: bool, executable_new_capacity_ceiling: int) -> bytes:
+    return json.dumps(
+        {
+            "status": "ready" if ready else "not-ready",
+            "executable_new_capacity_ceiling": executable_new_capacity_ceiling,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+
+
+def _manager_execution_blockers(authority: CapacityAuthorityState) -> list[str]:
+    if authority.execution_state == "shadow":
+        return ["manager-shadow"]
+    if authority.execution_state == "prepared":
+        return ["manager-prepared", "zero-executable-ceiling"]
+    if authority.execution_state == "drain-only":
+        return ["manager-drain-only", "zero-executable-ceiling"]
+    return []
+
+
+def _validated_executable_inventory(
+    row: CapacityExecutableExecutorState,
+) -> ExecutableExecutorInventoryV2 | None:
+    payload = row.inventory_payload
+    if payload is None or row.last_inventory_digest is None:
+        return None
+    try:
+        # JSONB returns UUID values as strings; validate through the wire form
+        # so the strict executable contracts restore their exact UUID types.
+        inventory = ExecutableExecutorInventoryV2.model_validate_json(json.dumps(payload))
+    except ValidationError:
+        return None
+    if (
+        inventory.execution.execution_epoch != row.execution_epoch
+        or inventory.execution.execution_manifest_sha256 != row.execution_manifest_sha256
+        or inventory.executor_id != row.executor_id
+        or inventory.executor_incarnation != row.executor_incarnation
+        or inventory.pool_id != row.pool_id
+        or inventory.pool_generation != row.pool_generation
+        or inventory.inventory_sequence != row.inventory_high_water
+        or canonical_executable_digest(inventory) != row.last_inventory_digest
+    ):
+        return None
+    return inventory
+
+
+def _executor_status_item(
+    row: CapacityExecutableExecutorState,
+    *,
+    now: datetime,
+    freshness_seconds: int,
+) -> tuple[dict[str, Any], ExecutableExecutorInventoryV2 | None]:
+    inventory = _validated_executable_inventory(row)
+    blockers: list[str] = []
+    if row.state != "current":
+        blockers.append(f"executor-{row.state}")
+    if row.lease_expires_at <= now:
+        blockers.append("executor-lease-expired")
+    if inventory is None:
+        blockers.append(
+            "executor-inventory-missing"
+            if row.inventory_high_water == 0
+            else "executor-inventory-invalid"
+        )
+    elif (
+        row.last_inventory_at is None
+        or row.last_inventory_at + timedelta(seconds=freshness_seconds) <= now
+    ):
+        blockers.append("executor-inventory-stale")
+    counts: Counter[str] = Counter()
+    quarantine_count = 0
+    if inventory is not None:
+        for record in inventory.records:
+            counts[f"{record.physical_kind}:{record.state}"] += 1
+            if (
+                record.state == "unknown"
+                or record.authority_scope == "foreign"
+                or record.ownership_proof is None
+            ):
+                quarantine_count += 1
+    if quarantine_count:
+        blockers.append("executor-inventory-quarantine")
+    item = {
+        "executor_id": row.executor_id,
+        "executor_incarnation": row.executor_incarnation,
+        "pool_id": row.pool_id,
+        "pool_generation": row.pool_generation,
+        "state": row.state,
+        "lease_expires_at": row.lease_expires_at,
+        "last_heartbeat_at": row.last_heartbeat_at,
+        "heartbeat_sequence": row.heartbeat_high_water,
+        "command_sequence": row.command_high_water,
+        "journal_sequence": row.journal_high_water,
+        "journal_digest": row.journal_digest,
+        "inventory_sequence": row.inventory_high_water,
+        "inventory_digest": row.last_inventory_digest,
+        "inventory_observed_at": row.last_inventory_at,
+        "inventory_record_counts": dict(sorted(counts.items())),
+        "quarantine_count": quarantine_count,
+        "retirement_safe": row.retirement_safe,
+        "blockers": sorted(set(blockers)),
+    }
+    return item, inventory
+
+
 def create_app(
     settings: CapacityManagerSettings,
     *,
     verifier: CapacityPrincipalVerifier | None = None,
     allocator: ShadowAllocator = allocate_shadow,
+    management_store: CapacityManagementStore | None = None,
     grant_store: CapacityGrantStore | None = None,
+    execution_store: CapacityExecutionStore | None = None,
 ) -> FastAPI:
     """Build one process-local API; DB fencing remains the cross-process boundary."""
 
     resolved_verifier = verifier or CapacityPrincipalVerifier.from_file(settings.principals_file)
     metrics = CapacityMetrics()
-    if grant_store is None:
-        ownership_keyring = OwnershipKeyring()
-        if settings.ownership_public_keys_file is not None:
-            ownership_keyring = OwnershipKeyring.from_json(
-                read_owner_only_secret(
-                    settings.ownership_public_keys_file,
-                    max_bytes=1024 * 1024,
-                )
+    resolved_management_store = (
+        CapacityManagementStore(freshness_seconds=settings.freshness_seconds)
+        if management_store is None
+        else management_store
+    )
+    ownership_keyring = OwnershipKeyring()
+    if settings.ownership_public_keys_file is not None:
+        ownership_keyring = OwnershipKeyring.from_json(
+            read_owner_only_secret(
+                settings.ownership_public_keys_file,
+                max_bytes=1024 * 1024,
             )
+        )
+    if grant_store is None:
         resolved_grant_store = CapacityGrantStore(
             ownership_keyring=ownership_keyring,
             pool_observation_freshness_seconds=settings.freshness_seconds,
         )
     else:
         resolved_grant_store = grant_store
+    resolved_execution_store = execution_store or CapacityExecutionStore(
+        inventory_freshness_seconds=settings.freshness_seconds,
+        ownership_keyring=ownership_keyring,
+    )
     reconciliation_lock = asyncio.Lock()
 
     @asynccontextmanager
@@ -277,7 +421,6 @@ def create_app(
             engine = create_async_engine(database_url, isolation_level="SERIALIZABLE")
             app.state.engine = engine
             session_factory = async_sessionmaker(engine, expire_on_commit=False)
-            store = CapacityManagementStore(freshness_seconds=settings.freshness_seconds)
             async with session_factory() as session:
                 await assert_capacity_schema_at_head(engine)
                 authority = (
@@ -289,7 +432,7 @@ def create_app(
                 ).scalar_one()
                 if authority.authority_incarnation != settings.expected_authority_incarnation:
                     raise RuntimeError("capacity authority incarnation mismatch")
-                writer = await store.register_writer(
+                writer = await resolved_management_store.register_writer(
                     session,
                     settings.expected_authority_incarnation,
                     expected_epoch=authority.writer_epoch,
@@ -297,8 +440,9 @@ def create_app(
                 await session.commit()
             app.state.engine = engine
             app.state.session_factory = session_factory
-            app.state.store = store
+            app.state.store = resolved_management_store
             app.state.grant_store = resolved_grant_store
+            app.state.execution_store = resolved_execution_store
             app.state.writer = writer
             app.state.ready = True
             app.state.initialization_error = False
@@ -370,6 +514,14 @@ def create_app(
     intent_close_body = contract_body(DryRunIntentCloseV1)
     partial_release_body = contract_body(DryRunPartialReleaseV1)
     protected_release_acknowledgement_body = contract_body(DryRunProtectedReleaseAcknowledgementV1)
+    executable_heartbeat_body = contract_body(ExecutableExecutorHeartbeatV2)
+    executable_inventory_body = contract_body(ExecutableExecutorInventoryV2)
+    executable_acceptance_body = contract_body(ExecutableReservationAcceptanceV2)
+    executable_bootstrap_body = contract_body(ExecutableBootstrapRegistrationV2)
+    executable_consumption_body = contract_body(ExecutablePermitConsumptionV2)
+    executable_close_body = contract_body(ExecutableIntentCloseV2)
+    executable_release_body = contract_body(ExecutablePartialReleaseV2)
+    executable_protected_release_body = contract_body(ExecutableProtectedReleaseV2)
 
     def runtime(
         request: Request,
@@ -397,9 +549,16 @@ def create_app(
             request.app.state.writer,
         )
 
-    async def writer_is_current(request: Request) -> bool:
+    def execution_runtime(
+        request: Request,
+    ) -> tuple[async_sessionmaker[AsyncSession], CapacityExecutionStore]:
         if not getattr(request.app.state, "ready", False):
-            return False
+            raise HTTPException(status_code=503, detail="capacity manager not ready")
+        return request.app.state.session_factory, request.app.state.execution_store
+
+    async def current_writer_ceiling(request: Request) -> int | None:
+        if not getattr(request.app.state, "ready", False):
+            return None
         session_factory = cast(
             async_sessionmaker[AsyncSession],
             request.app.state.session_factory,
@@ -414,26 +573,23 @@ def create_app(
                         )
                     )
                 ).scalar_one()
-            current = (
-                authority.authority_incarnation == writer.authority_incarnation
-                and authority.writer_epoch == writer.writer_epoch
-                and authority.executable_new_capacity_ceiling == 0
-            )
+            current = _writer_matches_authority(writer, authority)
         except Exception:
             current = False
         if not current:
             request.app.state.ready = False
             metrics.ready.set(0)
-        return current
+            return None
+        return authority.executable_new_capacity_ceiling
 
     @app.get("/healthz")
     async def health(request: Request) -> Response:
-        ready = await writer_is_current(request)
+        current_ceiling = await current_writer_ceiling(request)
+        ready = current_ceiling is not None
         return Response(
-            content=(
-                b'{"status":"ready","executable_new_capacity_ceiling":0}'
-                if ready
-                else b'{"status":"not-ready","executable_new_capacity_ceiling":0}'
+            content=_health_payload(
+                ready=ready,
+                executable_new_capacity_ceiling=current_ceiling or 0,
             ),
             media_type="application/json",
             status_code=200 if ready else 503,
@@ -641,13 +797,33 @@ def create_app(
         pool_id: str,
         executor_id: str,
         executor_incarnation: UUID,
+        pool_generation: int | None = None,
     ) -> None:
-        if (
-            actor.pool_id != pool_id
-            or actor.executor_id != executor_id
-            or actor.executor_incarnation != executor_incarnation
+        if not actor.matches_executor(
+            pool_id=pool_id,
+            executor_id=executor_id,
+            executor_incarnation=executor_incarnation,
+            pool_generation=pool_generation,
         ):
             raise HTTPException(status_code=403, detail="forbidden")
+
+    def executor_binding(actor: CapacityPrincipal, *, pool_id: str) -> PreparedExecutorBindingV2:
+        if (
+            actor.pool_id != pool_id
+            or actor.executor_id is None
+            or actor.executor_incarnation is None
+            or actor.executor_pool_generation is None
+        ):
+            raise HTTPException(status_code=403, detail="forbidden")
+        return PreparedExecutorBindingV2(
+            pool_id=cast(Any, pool_id),
+            pool_generation=actor.executor_pool_generation,
+            executor_id=actor.executor_id,
+            executor_incarnation=actor.executor_incarnation,
+            signing_key_sha256="0" * 64,
+            local_authority_sha256="0" * 64,
+            controller_authority_sha256="0" * 64,
+        )
 
     @app.put("/v1/executors/{pool_id}/registration")
     async def register_executor(
@@ -735,6 +911,7 @@ def create_app(
             pool_id=pool_id,
             executor_id=value.executor_id,
             executor_incarnation=value.executor_incarnation,
+            pool_generation=value.pool_generation,
         )
         if value.pool_id != pool_id:
             raise HTTPException(status_code=403, detail="forbidden")
@@ -782,6 +959,7 @@ def create_app(
             pool_id=pool_id,
             executor_id=value.executor_id,
             executor_incarnation=value.executor_incarnation,
+            pool_generation=actor.executor_pool_generation,
         )
         if value.tranche_id != tranche_id:
             raise HTTPException(status_code=403, detail="forbidden")
@@ -908,6 +1086,263 @@ def create_app(
         try:
             async with session_factory() as session:
                 result = await grants.release_shapes(session, value)
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.put("/v2/executors/{pool_id}/heartbeat")
+    async def heartbeat_executable_executor(
+        pool_id: str,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:execute:pool")),
+        value: ExecutableExecutorHeartbeatV2 = Depends(executable_heartbeat_body),
+    ) -> Any:
+        assert_executor_actor(
+            actor,
+            pool_id=pool_id,
+            executor_id=value.executor_id,
+            executor_incarnation=value.executor_incarnation,
+            pool_generation=value.pool_generation,
+        )
+        if value.pool_id != pool_id:
+            raise HTTPException(status_code=403, detail="forbidden")
+        session_factory, executions = execution_runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await executions.heartbeat_executor(session, value)
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.get("/v2/executors/{pool_id}/checkpoint")
+    async def executable_executor_checkpoint(
+        pool_id: str,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:execute:pool")),
+    ) -> Any:
+        binding = executor_binding(actor, pool_id=pool_id)
+        session_factory, executions = execution_runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await executions.executor_checkpoint(session, binding)
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.get("/v2/executors/{pool_id}/context")
+    async def executable_executor_current_context(
+        pool_id: str,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:execute:pool")),
+    ) -> Any:
+        binding = executor_binding(actor, pool_id=pool_id)
+        session_factory, executions = execution_runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await executions.executor_current_context(session, binding)
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.get("/v2/executors/{pool_id}/work")
+    async def next_executable_pool_work(
+        pool_id: str,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:execute:pool")),
+    ) -> Any:
+        binding = executor_binding(actor, pool_id=pool_id)
+        session_factory, executions = execution_runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await executions.next_pool_work(session, binding)
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.put("/v2/executors/{pool_id}/inventory")
+    async def ingest_executable_inventory(
+        pool_id: str,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:execute:pool")),
+        value: ExecutableExecutorInventoryV2 = Depends(executable_inventory_body),
+    ) -> Any:
+        assert_executor_actor(
+            actor,
+            pool_id=pool_id,
+            executor_id=value.executor_id,
+            executor_incarnation=value.executor_incarnation,
+            pool_generation=value.pool_generation,
+        )
+        if value.pool_id != pool_id:
+            raise HTTPException(status_code=403, detail="forbidden")
+        session_factory, executions = execution_runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await executions.ingest_executor_inventory(session, value)
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.post("/v2/executors/{pool_id}/reservations/{tranche_id}/accept")
+    async def accept_executable_reservation(
+        pool_id: str,
+        tranche_id: UUID,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:execute:pool")),
+        value: ExecutableReservationAcceptanceV2 = Depends(executable_acceptance_body),
+    ) -> Any:
+        assert_executor_actor(
+            actor,
+            pool_id=pool_id,
+            executor_id=value.executor_id,
+            executor_incarnation=value.executor_incarnation,
+            pool_generation=value.pool_generation,
+        )
+        if value.tranche_id != tranche_id:
+            raise HTTPException(status_code=403, detail="forbidden")
+        session_factory, executions = execution_runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await executions.accept_reservation(session, value)
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.post("/v2/executors/{pool_id}/intents/{intent_id}/bootstrap")
+    async def register_executable_bootstrap(
+        pool_id: str,
+        intent_id: UUID,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:execute:pool")),
+        value: ExecutableBootstrapRegistrationV2 = Depends(executable_bootstrap_body),
+    ) -> Any:
+        binding = value.binding
+        assert_executor_actor(
+            actor,
+            pool_id=pool_id,
+            executor_id=binding.executor_id,
+            executor_incarnation=binding.executor_incarnation,
+            pool_generation=binding.pool_generation,
+        )
+        if binding.pool_id != pool_id or binding.intent_id != intent_id:
+            raise HTTPException(status_code=403, detail="forbidden")
+        session_factory, executions = execution_runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await executions.register_bootstrap(session, value)
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.post("/v2/executors/{pool_id}/permits/{permit_id}/consume")
+    async def consume_executable_permit(
+        pool_id: str,
+        permit_id: UUID,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:execute:pool")),
+        value: ExecutablePermitConsumptionV2 = Depends(executable_consumption_body),
+    ) -> Any:
+        binding = value.binding
+        assert_executor_actor(
+            actor,
+            pool_id=pool_id,
+            executor_id=binding.executor_id,
+            executor_incarnation=binding.executor_incarnation,
+            pool_generation=binding.pool_generation,
+        )
+        if binding.pool_id != pool_id or value.permit_id != permit_id:
+            raise HTTPException(status_code=403, detail="forbidden")
+        session_factory, executions = execution_runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await executions.consume_launch_permit(session, value)
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.post("/v2/executors/{pool_id}/intents/{intent_id}/close")
+    async def close_executable_intent(
+        pool_id: str,
+        intent_id: UUID,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:execute:pool")),
+        value: ExecutableIntentCloseV2 = Depends(executable_close_body),
+    ) -> Any:
+        binding = value.binding
+        assert_executor_actor(
+            actor,
+            pool_id=pool_id,
+            executor_id=binding.executor_id,
+            executor_incarnation=binding.executor_incarnation,
+            pool_generation=binding.pool_generation,
+        )
+        if binding.pool_id != pool_id or binding.intent_id != intent_id:
+            raise HTTPException(status_code=403, detail="forbidden")
+        session_factory, executions = execution_runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await executions.begin_intent_close(session, value)
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.post("/v2/executors/{pool_id}/reservations/{tranche_id}/release")
+    async def release_executable_shapes(
+        pool_id: str,
+        tranche_id: UUID,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:execute:pool")),
+        value: ExecutablePartialReleaseV2 = Depends(executable_release_body),
+    ) -> Any:
+        first_binding = value.releases[0].binding
+        assert_executor_actor(
+            actor,
+            pool_id=pool_id,
+            executor_id=value.executor_id,
+            executor_incarnation=value.executor_incarnation,
+            pool_generation=first_binding.pool_generation,
+        )
+        if value.tranche_id != tranche_id or any(
+            item.binding.pool_id != pool_id
+            or item.binding.pool_generation != first_binding.pool_generation
+            for item in value.releases
+        ):
+            raise HTTPException(status_code=403, detail="forbidden")
+        session_factory, executions = execution_runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await executions.release_shapes(session, value)
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.put("/v2/reports/protected-releases/{subject_id}/{shape_instance_id}")
+    async def acknowledge_executable_protected_release(
+        subject_id: UUID,
+        shape_instance_id: str,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:report:demand")),
+        value: ExecutableProtectedReleaseV2 = Depends(executable_protected_release_body),
+        idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    ) -> Any:
+        binding = value.binding
+        if (
+            binding.subject_id != subject_id
+            or binding.shape_instance_id != shape_instance_id
+            or actor.subject_id != subject_id
+            or actor.subject_incarnation != binding.subject_incarnation
+            or actor.demand_reporter_incarnation != value.reporter_incarnation
+        ):
+            raise HTTPException(status_code=403, detail="forbidden")
+        session_factory, executions = execution_runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await executions.acknowledge_protected_release(
+                    session,
+                    value,
+                    actor=actor.principal_id,
+                    idempotency_key=idempotency_key,
+                )
             return jsonable_encoder(result)
         except CapacityStoreError as exc:
             raise _store_error(exc) from exc
@@ -1128,6 +1563,221 @@ def create_app(
             ]
         }
 
+    @app.get("/v2/status/executors")
+    async def executable_executor_status(
+        request: Request,
+        _actor: CapacityPrincipal = Depends(require("capacity:read")),
+    ) -> Any:
+        session_factory, _store, _writer = runtime(request)
+        async with session_factory() as session:
+            authority = (await session.execute(select(CapacityAuthorityState))).scalar_one()
+            now = (await session.execute(select(func.now()))).scalar_one()
+            rows = (
+                (
+                    await session.execute(
+                        select(CapacityExecutableExecutorState)
+                        .where(
+                            CapacityExecutableExecutorState.execution_epoch
+                            == authority.execution_epoch
+                        )
+                        .order_by(CapacityExecutableExecutorState.pool_id)
+                        .limit(MAX_POOLS + 1)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        if len(rows) > MAX_POOLS:
+            raise HTTPException(status_code=503, detail="executable executor status is unbounded")
+        items = [
+            _executor_status_item(
+                row,
+                now=now,
+                freshness_seconds=settings.freshness_seconds,
+            )[0]
+            for row in rows
+        ]
+        blockers = _manager_execution_blockers(authority)
+        if authority.execution_epoch > 0:
+            observed_pools = {row.pool_id for row in rows}
+            blockers.extend(
+                f"executor-missing:{pool_id}"
+                for pool_id in ("gb10", "oldlab")
+                if pool_id not in observed_pools
+            )
+        return jsonable_encoder(
+            {
+                "schema_version": 2,
+                "execution_epoch": authority.execution_epoch,
+                "execution_state": authority.execution_state,
+                "executable_new_capacity_ceiling": (authority.executable_new_capacity_ceiling),
+                "items": items,
+                "blockers": sorted(set(blockers)),
+            }
+        )
+
+    @app.get("/v2/status/subjects/{subject_id}")
+    async def executable_subject_status(
+        subject_id: UUID,
+        request: Request,
+        _actor: CapacityPrincipal = Depends(require("capacity:read")),
+    ) -> Any:
+        session_factory, _store, _writer = runtime(request)
+        async with session_factory() as session:
+            authority = (await session.execute(select(CapacityAuthorityState))).scalar_one()
+            configuration_epoch = (
+                await session.execute(select(func.max(CapacitySubject.configuration_epoch)))
+            ).scalar_one()
+            subject = (
+                await session.execute(
+                    select(CapacitySubject).where(
+                        CapacitySubject.configuration_epoch == configuration_epoch,
+                        CapacitySubject.subject_id == subject_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if subject is None:
+                raise HTTPException(status_code=404, detail="capacity subject not found")
+            intents = (
+                (
+                    await session.execute(
+                        select(CapacityExecutableIntent)
+                        .where(
+                            CapacityExecutableIntent.execution_epoch == authority.execution_epoch,
+                            CapacityExecutableIntent.subject_id == subject.subject_id,
+                            CapacityExecutableIntent.subject_incarnation
+                            == subject.subject_incarnation,
+                        )
+                        .order_by(CapacityExecutableIntent.launch_rank)
+                        .limit(MAX_FIXED_CLAIMS_PER_REPORT + 1)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            executor_rows = (
+                (
+                    await session.execute(
+                        select(CapacityExecutableExecutorState)
+                        .where(
+                            CapacityExecutableExecutorState.execution_epoch
+                            == authority.execution_epoch
+                        )
+                        .order_by(CapacityExecutableExecutorState.pool_id)
+                        .limit(MAX_POOLS + 1)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            now = (await session.execute(select(func.now()))).scalar_one()
+        if len(intents) > MAX_FIXED_CLAIMS_PER_REPORT or len(executor_rows) > MAX_POOLS:
+            raise HTTPException(status_code=503, detail="capacity subject status is unbounded")
+
+        intent_state_counts = Counter(intent.state for intent in intents)
+        quarantined = sum(intent.state == "quarantined" for intent in intents)
+        intents_by_id = {intent.intent_id: intent for intent in intents}
+        active_capacity: dict[UUID, int] = {}
+        active_bindings: dict[UUID, ExecutableIntentBindingV2] = {}
+        executor_blockers: list[str] = []
+        for executor_row in executor_rows:
+            item, inventory = _executor_status_item(
+                executor_row,
+                now=now,
+                freshness_seconds=settings.freshness_seconds,
+            )
+            row_blockers = cast(list[str], item["blockers"])
+            executor_blockers.extend(
+                f"{executor_row.pool_id}:{blocker}" for blocker in row_blockers
+            )
+            critical = set(row_blockers) - {"executor-inventory-quarantine"}
+            if inventory is None or critical:
+                continue
+            for record in inventory.records:
+                proof = record.ownership_proof
+                if (
+                    record.physical_kind != "slurm-job"
+                    or record.state != "active"
+                    or record.authority_scope != "dedicated-loom-association"
+                    or proof is None
+                ):
+                    continue
+                binding = proof.metadata.binding
+                intent = intents_by_id.get(binding.intent_id)
+                if intent is None:
+                    continue
+                try:
+                    stored_binding = ExecutableIntentBindingV2.model_validate_json(
+                        json.dumps(intent.binding_payload)
+                    )
+                except ValidationError:
+                    continue
+                if (
+                    binding != stored_binding
+                    or binding.subject_id != subject.subject_id
+                    or binding.subject_incarnation != subject.subject_incarnation
+                    or binding.deployment_generation != subject.deployment_generation
+                    or intent.inventory_sequence != inventory.inventory_sequence
+                    or intent.observed_state != "active"
+                    or intent.state != "observed"
+                ):
+                    continue
+                active_capacity[binding.intent_id] = binding.concurrency_slots
+                active_bindings[binding.intent_id] = binding
+
+        # Scheduler evidence establishes active physical intent only.  A
+        # protected personal guard registration is deliberately not readable
+        # by this global manager, so it can never turn scheduler evidence into
+        # worker availability on its own.
+        worker_available = False
+        if authority.execution_state == "active":
+            capacity_status = "waiting"
+        elif authority.execution_state == "shadow":
+            capacity_status = "shadow"
+        else:
+            capacity_status = "prepared"
+        blockers = _manager_execution_blockers(authority)
+        if not worker_available and authority.execution_state == "active":
+            if quarantined:
+                blockers.append("quarantined-intent")
+            elif active_capacity:
+                blockers.append("worker-registration-pending")
+            elif not intents:
+                blockers.append("allocation-pending")
+            else:
+                blockers.extend(
+                    f"intent-{state_name}" for state_name in sorted(intent_state_counts)
+                )
+            blockers.extend(executor_blockers)
+        return jsonable_encoder(
+            {
+                "schema_version": 2,
+                "subject_id": subject.subject_id,
+                "subject_incarnation": subject.subject_incarnation,
+                "deployment_generation": subject.deployment_generation,
+                "configuration_epoch": subject.configuration_epoch,
+                "execution_epoch": authority.execution_epoch,
+                "execution_state": authority.execution_state,
+                "executable_new_capacity_ceiling": (authority.executable_new_capacity_ceiling),
+                "capacity_prepared": True,
+                "capacity_status": capacity_status,
+                "worker_available": worker_available,
+                # This is deliberately the exact canonical binding accepted by
+                # the fresh manager inventory, not a reconstructed summary.
+                # The personal status observer compares it byte-for-byte with
+                # its protected local observation before reporting availability.
+                "active_capacity_intents": [
+                    active_bindings[intent_id].model_dump(mode="json")
+                    for intent_id in sorted(active_bindings, key=str)
+                ],
+                "active_capacity_intent_count": len(active_capacity),
+                "active_capacity_slots": sum(active_capacity.values()),
+                "quarantined_intent_count": quarantined,
+                "intent_state_counts": dict(sorted(intent_state_counts.items())),
+                "blockers": sorted(set(blockers)),
+            }
+        )
+
     @app.get("/v1/status/reservations")
     async def reservation_status(
         request: Request,
@@ -1214,7 +1864,13 @@ def create_app(
         session_factory, _store, _writer = runtime(request)
         async with session_factory() as session:
             row = await session.get(CapacityAllocationEpoch, allocation_epoch)
-        if row is None or row.executable:
+        if (
+            row is None
+            or row.status != "shadow"
+            or row.executable
+            or row.execution_epoch is not None
+            or row.execution_manifest_sha256 is not None
+        ):
             raise HTTPException(status_code=404, detail="shadow epoch not found")
         return {
             "allocation_epoch": row.allocation_epoch,
@@ -1237,10 +1893,20 @@ def create_app(
         session_factory, _store, _writer = runtime(request)
         async with session_factory() as session:
             epoch = await session.get(CapacityAllocationEpoch, allocation_epoch)
-            if epoch is None or epoch.executable:
+            if (
+                epoch is None
+                or epoch.status != "shadow"
+                or epoch.executable
+                or epoch.execution_epoch is not None
+                or epoch.execution_manifest_sha256 is not None
+            ):
                 raise HTTPException(status_code=404, detail="shadow epoch not found")
             query = select(CapacityAllocation).where(
-                CapacityAllocation.allocation_epoch == allocation_epoch
+                CapacityAllocation.allocation_epoch == allocation_epoch,
+                CapacityAllocation.mode == "shadow",
+                CapacityAllocation.executable.is_(False),
+                CapacityAllocation.execution_epoch.is_(None),
+                CapacityAllocation.execution_manifest_sha256.is_(None),
             )
             if cursor is not None:
                 query = query.where(CapacityAllocation.id > cursor)

@@ -157,12 +157,8 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
     personal_dev_candidate_limits: PersonalDevCandidateLimits | None = None
     if settings.dev_instances_enabled:
         personal_dev_candidate_limits = PersonalDevCandidateLimits(
-            per_owner_retained_candidates=(
-                settings.personal_dev_candidate_retained_count_limit
-            ),
-            per_owner_retained_archive_bytes=(
-                settings.personal_dev_candidate_retained_bytes_limit
-            ),
+            per_owner_retained_candidates=(settings.personal_dev_candidate_retained_count_limit),
+            per_owner_retained_archive_bytes=(settings.personal_dev_candidate_retained_bytes_limit),
             global_active_builds=settings.personal_dev_builder_global_concurrency,
             per_owner_active_builds=(settings.personal_dev_builder_per_owner_concurrency),
         )
@@ -287,10 +283,11 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         app.state.personal_dev_candidate_limits = personal_dev_candidate_limits
         app.state.personal_dev_builder_available = personal_dev_builder_runtime is not None
         install_behavior_pipeline_public_adapter(app=app, settings=settings)
-        if (
-            personal_dev_builder_runtime is not None
-            and personal_dev_candidate_limits is not None
-        ):
+        if personal_dev_capacity_runtime is not None:
+            app.state.personal_dev_capacity_status_reader = (
+                personal_dev_capacity_runtime.status_reader
+            )
+        if personal_dev_builder_runtime is not None and personal_dev_candidate_limits is not None:
             personal_dev_builder_task = asyncio.create_task(
                 personal_dev_builder_run_loop(
                     session_factory=session_factory,
@@ -317,9 +314,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
                     collector_id=f"loom-service:{socket.gethostname()}:{os.getpid()}",
                     retention_seconds=settings.personal_dev_candidate_gc_retention_sec,
                     lease_seconds=settings.personal_dev_candidate_gc_lease_sec,
-                    poll_interval_seconds=(
-                        settings.personal_dev_candidate_gc_poll_interval_sec
-                    ),
+                    poll_interval_seconds=(settings.personal_dev_candidate_gc_poll_interval_sec),
                 ),
                 name="loom-svc-personal-dev-artifact-gc",
             )

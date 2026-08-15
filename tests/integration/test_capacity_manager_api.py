@@ -15,16 +15,24 @@ from threading import Event, Thread
 from uuid import UUID, uuid4
 
 import pytest
+from alembic import command
+from alembic.config import Config as AlembicConfig
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, event, select, text, update
+from sqlalchemy import create_engine, delete, event, select, text, update
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from loom_capacity_manager.allocator import ShadowAllocatorError, allocate_shadow
-from loom_capacity_manager.api import RequestBodyLimitMiddleware, create_app
+from loom_capacity_manager.api import (
+    RequestBodyLimitMiddleware,
+    _health_payload,
+    _writer_matches_authority,
+    create_app,
+)
 from loom_capacity_manager.auth import CapacityPrincipalVerifier
 from loom_capacity_manager.config import CapacityManagerSettings, build_uvicorn_kwargs
 from loom_capacity_manager.contracts import MAX_CONTRACT_BYTES, canonical_digest
@@ -37,8 +45,16 @@ from loom_capacity_manager.models import (
     CapacityAuthorityState,
 )
 from loom_capacity_manager.ownership import public_key_fingerprint
-from loom_capacity_manager.reconciler import reconcile_shadow_once
-from loom_capacity_manager.store import CapacityManagementStore, StaleWriterError
+from loom_capacity_manager.reconciler import (
+    ReconciliationFailurePersistenceError,
+    reconcile_shadow_once,
+)
+from loom_capacity_manager.store import (
+    CapacityManagementStore,
+    ExecutionPreparationDisabledError,
+    StaleWriterError,
+    WriterFence,
+)
 from tests.capacity_execution_fixtures import (
     execution_policy,
     register_execution_executors,
@@ -88,6 +104,7 @@ def _principal(
     pool_reporter_incarnation: UUID | None = None,
     executor_id: str | None = None,
     executor_incarnation: UUID | None = None,
+    executor_pool_generation: int | None = None,
 ) -> dict[str, object]:
     return {
         "principal_id": principal_id,
@@ -106,6 +123,7 @@ def _principal(
         "executor_incarnation": (
             None if executor_incarnation is None else str(executor_incarnation)
         ),
+        "executor_pool_generation": executor_pool_generation,
     }
 
 
@@ -119,59 +137,52 @@ async def _reset_capacity_database(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory() as session, session.begin():
-        for table_name in (
-            "capacity_allocations",
-            "capacity_allocation_epochs",
-            "capacity_execution_executors",
-            "capacity_execution_epochs",
-        ):
-            await session.execute(
-                text(f"ALTER TABLE {table_name} DISABLE TRIGGER USER")
-            )
+        authority_transition_trigger_disabled = False
         await session.execute(
             text(
                 "ALTER TABLE capacity_authority_state DISABLE TRIGGER "
                 "capacity_authority_execution_transition_guard"
             )
         )
-        await session.execute(
-            update(CapacityAuthorityState)
-            .where(CapacityAuthorityState.singleton_id == 1)
-            .values(
-                authority_incarnation=AUTHORITY_ID,
-                writer_epoch=0,
-                recovery_state="shadow",
-                increase_freeze=True,
-                increase_freeze_reason="initial_shadow_freeze",
-                executable_new_capacity_ceiling=0,
-                execution_epoch=0,
-                execution_state="shadow",
-                execution_manifest_sha256=None,
-                global_pending_slot_ceiling=0,
-                global_pending_job_ceiling=0,
-                global_submission_rate_ceiling=0,
-            )
-        )
-        for table in reversed(Base.metadata.sorted_tables):
-            if table.name != CapacityAuthorityState.__tablename__:
-                await session.execute(delete(table))
-        await session.execute(
-            text(
-                "ALTER TABLE capacity_authority_state ENABLE TRIGGER "
-                "capacity_authority_execution_transition_guard"
-            )
-        )
-        for table_name in reversed(
-            (
-                "capacity_allocations",
-                "capacity_allocation_epochs",
-                "capacity_execution_executors",
-                "capacity_execution_epochs",
-            )
-        ):
+        authority_transition_trigger_disabled = True
+        try:
             await session.execute(
-                text(f"ALTER TABLE {table_name} ENABLE TRIGGER USER")
+                update(CapacityAuthorityState)
+                .where(CapacityAuthorityState.singleton_id == 1)
+                .values(
+                    authority_incarnation=AUTHORITY_ID,
+                    writer_epoch=0,
+                    recovery_state="shadow",
+                    increase_freeze=True,
+                    increase_freeze_reason="initial_shadow_freeze",
+                    executable_new_capacity_ceiling=0,
+                    execution_epoch=0,
+                    execution_state="shadow",
+                    execution_manifest_sha256=None,
+                    global_pending_slot_ceiling=0,
+                    global_pending_job_ceiling=0,
+                    global_submission_rate_ceiling=0,
+                )
             )
+            for table in reversed(Base.metadata.sorted_tables):
+                if table.name == CapacityAuthorityState.__tablename__:
+                    continue
+                user_triggers_disabled = False
+                await session.execute(text(f"ALTER TABLE {table.name} DISABLE TRIGGER USER"))
+                user_triggers_disabled = True
+                try:
+                    await session.execute(delete(table))
+                finally:
+                    if user_triggers_disabled:
+                        await session.execute(text(f"ALTER TABLE {table.name} ENABLE TRIGGER USER"))
+        finally:
+            if authority_transition_trigger_disabled:
+                await session.execute(
+                    text(
+                        "ALTER TABLE capacity_authority_state ENABLE TRIGGER "
+                        "capacity_authority_execution_transition_guard"
+                    )
+                )
 
 
 class BlockingAllocator:
@@ -372,6 +383,7 @@ async def api_context(
                         pool_id="oldlab",
                         executor_id="oldlab-executor",
                         executor_incarnation=OLDLAB_EXECUTOR_INCARNATION,
+                        executor_pool_generation=1,
                     ),
                 ],
             }
@@ -461,6 +473,17 @@ async def api_context(
                     "subject_incarnation": str(SUBJECT_INCARNATION),
                 }
             ],
+            "static_candidate_provenance": [
+                {
+                    "schema_version": 1,
+                    "subject_id": str(SUBJECT_ID),
+                    "subject_incarnation": str(SUBJECT_INCARNATION),
+                    "candidate_generation": subject.candidate_generation,
+                    "algorithm": "source-sha256",
+                    "identity": "1" * 64,
+                    "publication_sha256": "2" * 64,
+                }
+            ],
         }
         activation_response = client.post(
             "/v1/config-activations",
@@ -522,10 +545,7 @@ def hold_reconciliation_open(
         assert responses and responses[0].status_code == 200  # type: ignore[union-attr]
 
 
-def test_shadow_api_exposes_exactly_the_approved_routes(
-    api_context: tuple[TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator],
-) -> None:
-    _client, app, _settings, _allocator = api_context
+def _assert_exact_approved_routes(app: FastAPI) -> None:
     routes = {(route.path, tuple(sorted(route.methods or ()))) for route in app.routes}
     assert routes == {
         ("/healthz", ("GET",)),
@@ -556,17 +576,245 @@ def test_shadow_api_exposes_exactly_the_approved_routes(
             "/v1/executors/{pool_id}/reservations/{tranche_id}/release",
             ("POST",),
         ),
+        ("/v2/executors/{pool_id}/heartbeat", ("PUT",)),
+        ("/v2/executors/{pool_id}/checkpoint", ("GET",)),
+        ("/v2/executors/{pool_id}/context", ("GET",)),
+        ("/v2/executors/{pool_id}/work", ("GET",)),
+        ("/v2/executors/{pool_id}/inventory", ("PUT",)),
+        (
+            "/v2/executors/{pool_id}/reservations/{tranche_id}/accept",
+            ("POST",),
+        ),
+        ("/v2/executors/{pool_id}/intents/{intent_id}/bootstrap", ("POST",)),
+        ("/v2/executors/{pool_id}/permits/{permit_id}/consume", ("POST",)),
+        ("/v2/executors/{pool_id}/intents/{intent_id}/close", ("POST",)),
+        (
+            "/v2/executors/{pool_id}/reservations/{tranche_id}/release",
+            ("POST",),
+        ),
+        (
+            "/v2/reports/protected-releases/{subject_id}/{shape_instance_id}",
+            ("PUT",),
+        ),
         ("/v1/shadow-reconciliations", ("POST",)),
         ("/v1/status", ("GET",)),
         ("/v1/status/subjects", ("GET",)),
         ("/v1/status/pools", ("GET",)),
         ("/v1/status/executors", ("GET",)),
         ("/v1/status/reservations", ("GET",)),
+        ("/v2/status/executors", ("GET",)),
+        ("/v2/status/subjects/{subject_id}", ("GET",)),
         ("/v1/shadow-epochs/{allocation_epoch}", ("GET",)),
         ("/v1/shadow-epochs/{allocation_epoch}/allocations", ("GET",)),
         ("/v1/audit-events", ("GET",)),
         ("/metrics", ("GET",)),
     }
+
+
+def test_shadow_api_exposes_exactly_the_approved_routes(
+    api_context: tuple[TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator],
+) -> None:
+    _client, app, _settings, _allocator = api_context
+    _assert_exact_approved_routes(app)
+
+
+def test_executable_status_is_read_only_and_shadow_is_never_worker_available(
+    api_context: tuple[TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator],
+    operator_headers: dict[str, str],
+) -> None:
+    client, _app, _settings, _allocator = api_context
+
+    executors = client.get("/v2/status/executors", headers=operator_headers)
+    subject = client.get(f"/v2/status/subjects/{SUBJECT_ID}", headers=operator_headers)
+
+    assert executors.status_code == 200
+    assert executors.json() == {
+        "schema_version": 2,
+        "execution_epoch": 0,
+        "execution_state": "shadow",
+        "executable_new_capacity_ceiling": 0,
+        "items": [],
+        "blockers": ["manager-shadow"],
+    }
+    assert subject.status_code == 200
+    assert subject.json() == {
+        "schema_version": 2,
+        "subject_id": str(SUBJECT_ID),
+        "subject_incarnation": str(SUBJECT_INCARNATION),
+        "deployment_generation": 1,
+        "configuration_epoch": 1,
+        "execution_epoch": 0,
+        "execution_state": "shadow",
+        "executable_new_capacity_ceiling": 0,
+        "capacity_prepared": True,
+        "capacity_status": "shadow",
+        "worker_available": False,
+        "active_capacity_intents": [],
+        "active_capacity_intent_count": 0,
+        "active_capacity_slots": 0,
+        "quarantined_intent_count": 0,
+        "intent_state_counts": {},
+        "blockers": ["manager-shadow"],
+    }
+
+
+@pytest.fixture
+def isolated_capacity_api_url(postgres_url: str) -> Iterator[str]:
+    source_url = make_url(postgres_url)
+    database_name = f"loom_capacity_api_{uuid4().hex}"
+    admin_engine = create_engine(
+        source_url.set(database="postgres"),
+        isolation_level="AUTOCOMMIT",
+    )
+    quoted_database = admin_engine.dialect.identifier_preparer.quote(database_name)
+    database_url = source_url.set(database=database_name).render_as_string(hide_password=False)
+    migration_engine = create_engine(database_url)
+    try:
+        with admin_engine.connect() as connection:
+            connection.exec_driver_sql(f"CREATE DATABASE {quoted_database} TEMPLATE template0")
+        root = Path(__file__).resolve().parents[2]
+        config = AlembicConfig(str(root / "capacity_migrations" / "alembic.ini"))
+        config.set_main_option("script_location", str(root / "capacity_migrations"))
+        with migration_engine.begin() as connection:
+            config.attributes["connection"] = connection
+            command.upgrade(config, "head")
+        yield database_url
+    finally:
+        migration_engine.dispose()
+        with admin_engine.connect() as connection:
+            connection.execute(
+                text(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                    "WHERE datname = :database_name AND pid <> pg_backend_pid()"
+                ),
+                {"database_name": database_name},
+            )
+            connection.exec_driver_sql(f"DROP DATABASE IF EXISTS {quoted_database}")
+        admin_engine.dispose()
+
+
+async def test_injected_management_store_is_exact_and_default_remains_disabled(
+    tmp_path: Path,
+    isolated_capacity_api_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Startup must use the exact owner-policy store without exposing mutation routes."""
+
+    registry_path = _owner_file(
+        tmp_path / "injected-principals.json",
+        json.dumps(
+            {
+                "schema_version": 1,
+                "principals": [
+                    _principal(
+                        "fleet-operator",
+                        OPERATOR_TOKEN,
+                        ["capacity:read", "capacity:reconcile"],
+                    )
+                ],
+            }
+        ),
+    )
+    settings = CapacityManagerSettings(
+        principals_file=registry_path,
+        db_url_file=_owner_file(tmp_path / "injected-database-url", isolated_capacity_api_url),
+        expected_authority_incarnation=AUTHORITY_ID,
+        tls_cert_file=_owner_file(tmp_path / "injected-server.crt", "test"),
+        tls_key_file=_owner_file(tmp_path / "injected-server.key", "test"),
+        tls_client_ca_file=_owner_file(tmp_path / "injected-client-ca.crt", "test"),
+    )
+    engine = create_async_engine(isolated_capacity_api_url, isolation_level="SERIALIZABLE")
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as capacity_session:
+            policy = execution_policy()
+            fixture = await setup_execution(capacity_session, execution_policy=policy)
+            await capacity_session.commit()
+            injected_store = fixture.store
+
+            default_app = create_app(
+                settings,
+                verifier=CapacityPrincipalVerifier.from_file(registry_path),
+            )
+            with TestClient(default_app) as client:
+                assert client.get("/healthz").status_code == 200
+                assert default_app.state.store is not injected_store
+                with pytest.raises(ExecutionPreparationDisabledError):
+                    await default_app.state.store.prepare_execution_epoch(
+                        capacity_session,
+                        fixture.request.model_copy(
+                            update={"expected_writer_epoch": default_app.state.writer.writer_epoch}
+                        ),
+                        actor="activation-operator",
+                        idempotency_key=UUID(int=12303),
+                    )
+
+            register_calls = 0
+            register_writer = injected_store.register_writer
+
+            async def tracked_register_writer(*args, **kwargs):  # type: ignore[no-untyped-def]
+                nonlocal register_calls
+                register_calls += 1
+                return await register_writer(*args, **kwargs)
+
+            monkeypatch.setattr(injected_store, "register_writer", tracked_register_writer)
+            app = create_app(
+                settings,
+                verifier=CapacityPrincipalVerifier.from_file(registry_path),
+                management_store=injected_store,
+            )
+            with TestClient(app) as client:
+                assert client.get("/healthz").status_code == 200
+                assert app.state.store is injected_store
+                assert register_calls == 1
+                assert await injected_store.execution_authority(capacity_session) is None
+                prepared = await injected_store.prepare_execution_epoch(
+                    capacity_session,
+                    fixture.request.model_copy(
+                        update={"expected_writer_epoch": app.state.writer.writer_epoch}
+                    ),
+                    actor="activation-operator",
+                    idempotency_key=UUID(int=12301),
+                )
+                await register_execution_executors(capacity_session, fixture, prepared)
+                active = await injected_store.activate_execution_epoch(
+                    capacity_session,
+                    ExecutionActivationV2(
+                        authority_incarnation=prepared.authority_incarnation,
+                        expected_writer_epoch=prepared.writer_epoch,
+                        execution_epoch=prepared.execution_epoch,
+                        execution_manifest_sha256=prepared.execution_manifest_sha256,
+                        executable_new_capacity_ceiling=1,
+                        executable_new_capacity_rate_per_minute=1,
+                    ),
+                    actor="activation-operator",
+                    idempotency_key=UUID(int=12302),
+                )
+                await capacity_session.commit()
+
+                assert active.execution_state == "active"
+                assert active.executable_new_capacity_ceiling == 1
+                _assert_exact_approved_routes(app)
+    finally:
+        await engine.dispose()
+
+
+def test_v2_executor_work_route_is_exactly_pool_bound(
+    api_context: tuple[TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator],
+) -> None:
+    client, _app, _settings, _allocator = api_context
+    headers = {"Authorization": f"Bearer {OLDLAB_EXECUTOR_TOKEN}"}
+
+    own_pool = client.get("/v2/executors/oldlab/work", headers=headers)
+    crossed_pool = client.get("/v2/executors/gb10/work", headers=headers)
+    own_context = client.get("/v2/executors/oldlab/context", headers=headers)
+    crossed_context = client.get("/v2/executors/gb10/context", headers=headers)
+
+    assert own_pool.status_code == 200
+    assert own_pool.json() is None
+    assert crossed_pool.status_code == 403
+    assert own_context.status_code == 409
+    assert crossed_context.status_code == 403
 
 
 def test_lifecycle_can_project_and_authenticate_a_personal_demand_reporter(
@@ -1141,9 +1389,7 @@ async def test_executable_allocation_evidence_is_immutable_and_not_reparentable(
     )
     assert result.status == "committed"
     parent = (await capacity_session.execute(select(CapacityAllocationEpoch))).scalar_one()
-    child = (
-        (await capacity_session.execute(select(CapacityAllocation))).scalars().first()
-    )
+    child = (await capacity_session.execute(select(CapacityAllocation))).scalars().first()
     assert child is not None
     second_parent = CapacityAllocationEpoch(
         writer_epoch=fixture.writer.writer_epoch,
@@ -1192,8 +1438,7 @@ async def test_executable_allocation_evidence_is_immutable_and_not_reparentable(
         async with capacity_session.begin_nested():
             await capacity_session.execute(
                 delete(CapacityAllocationEpoch).where(
-                    CapacityAllocationEpoch.allocation_epoch
-                    == second_parent.allocation_epoch
+                    CapacityAllocationEpoch.allocation_epoch == second_parent.allocation_epoch
                 )
             )
     with pytest.raises(DBAPIError, match="executable allocation epoch is sealed"):
@@ -1378,7 +1623,10 @@ async def test_allocation_commit_and_failure_recorder_errors_propagate_hard_fail
         join_transaction_mode="create_savepoint",
     )
 
-    with pytest.raises(RuntimeError, match="failed to persist reconciliation failure") as caught:
+    with pytest.raises(
+        ReconciliationFailurePersistenceError,
+        match="failed to persist reconciliation failure",
+    ) as caught:
         await reconcile_shadow_once(
             session_factory,
             fixture.writer,
@@ -1533,9 +1781,7 @@ async def test_allocation_commit_schema_qualifies_seal_guard_under_hostile_searc
     )
 
     assert result.status == "failed"
-    failed_epoch = (
-        await capacity_session.execute(select(CapacityAllocationEpoch))
-    ).scalar_one()
+    failed_epoch = (await capacity_session.execute(select(CapacityAllocationEpoch))).scalar_one()
     assert failed_epoch.status == "failed"
     assert failed_epoch.executable is False
     authority = (await capacity_session.execute(select(CapacityAuthorityState))).scalar_one()
@@ -1739,4 +1985,19 @@ async def test_health_fails_closed_after_another_process_takes_writer_fence(
     assert response.json() == {
         "status": "not-ready",
         "executable_new_capacity_ceiling": 0,
+    }
+
+
+def test_active_execution_ceiling_does_not_fence_current_writer_health() -> None:
+    writer = WriterFence(authority_incarnation=AUTHORITY_ID, writer_epoch=3)
+    authority = CapacityAuthorityState(
+        authority_incarnation=AUTHORITY_ID,
+        writer_epoch=3,
+        executable_new_capacity_ceiling=1,
+    )
+
+    assert _writer_matches_authority(writer, authority)
+    assert json.loads(_health_payload(ready=True, executable_new_capacity_ceiling=1)) == {
+        "status": "ready",
+        "executable_new_capacity_ceiling": 1,
     }

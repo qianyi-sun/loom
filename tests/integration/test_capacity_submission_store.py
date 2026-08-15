@@ -564,6 +564,14 @@ async def test_atomic_submission_blocks_guard_downgrade_without_data_loss(
     monkeypatch.setenv(
         "LOOM_CAPACITY_GUARD_AGENT_ROLE", _value(capacity_guard_database, "agent_role")
     )
+    monkeypatch.setenv(
+        "LOOM_CAPACITY_GUARD_EXECUTOR_ROLE",
+        _value(capacity_guard_database, "executor_role"),
+    )
+    monkeypatch.setenv(
+        "LOOM_CAPACITY_GUARD_OBSERVER_ROLE",
+        _value(capacity_guard_database, "observer_role"),
+    )
     with pytest.raises(DBAPIError, match="atomic trial submissions exist"):
         command.downgrade(config, "guard_0010")
 
@@ -591,7 +599,7 @@ async def test_atomic_submission_blocks_guard_downgrade_without_data_loss(
     finally:
         admin.dispose()
     assert dict(row) == {
-        "version_num": "guard_0011",
+        "version_num": "guard_0018",
         "state": "protected-pending",
         "lifecycle_authority_id": receipt.lifecycle_authority_id,
         "protected_attempt_id": submission.protected_attempt_id,
@@ -634,6 +642,14 @@ async def test_concurrent_guard_downgrade_observes_committing_atomic_submission(
     monkeypatch.setenv(
         "LOOM_CAPACITY_GUARD_AGENT_ROLE", _value(capacity_guard_database, "agent_role")
     )
+    monkeypatch.setenv(
+        "LOOM_CAPACITY_GUARD_EXECUTOR_ROLE",
+        _value(capacity_guard_database, "executor_role"),
+    )
+    monkeypatch.setenv(
+        "LOOM_CAPACITY_GUARD_OBSERVER_ROLE",
+        _value(capacity_guard_database, "observer_role"),
+    )
 
     agent_engine = create_async_engine(
         make_url(_value(capacity_guard_database, "agent_url")),
@@ -657,7 +673,7 @@ async def test_concurrent_guard_downgrade_observes_committing_atomic_submission(
                 async with asyncio.timeout(10):
                     while True:
                         with admin.connect() as connection:
-                            waiting_on_submission_table = connection.execute(
+                            waiting_on_protected_guard_table = connection.execute(
                                 text(
                                     "SELECT EXISTS ("
                                     "SELECT 1 FROM pg_locks AS lock "
@@ -667,12 +683,14 @@ async def test_concurrent_guard_downgrade_observes_committing_atomic_submission(
                                     "ON namespace.oid = relation.relnamespace "
                                     "WHERE activity.application_name = :application_name "
                                     "AND namespace.nspname = 'loom_capacity_guard' "
-                                    "AND relation.relname = 'atomic_trial_submissions' "
+                                    "AND relation.relname IN ("
+                                    "'agent_registrations', 'atomic_trial_submissions'"
+                                    ") "
                                     "AND lock.granted IS FALSE)"
                                 ),
                                 {"application_name": application_name},
                             ).scalar_one()
-                        if waiting_on_submission_table:
+                        if waiting_on_protected_guard_table:
                             break
                         if downgrade_task.done():
                             pytest.fail(
@@ -718,7 +736,7 @@ async def test_concurrent_guard_downgrade_observes_committing_atomic_submission(
         await agent_engine.dispose()
 
     assert dict(row) == {
-        "version_num": "guard_0011",
+        "version_num": "guard_0018",
         "state": "protected-pending",
         "lifecycle_authority_id": receipt.lifecycle_authority_id,
         "protected_attempt_id": submission.protected_attempt_id,

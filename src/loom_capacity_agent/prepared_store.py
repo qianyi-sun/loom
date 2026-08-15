@@ -6,7 +6,7 @@ import json
 from collections.abc import Mapping
 from typing import TypeVar
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,10 +28,37 @@ _PreparedT = TypeVar(
     PreparedProtectedReleaseV1,
     PreparedWorkerBindingV1,
 )
+_ResponseT = TypeVar("_ResponseT", bound=BaseModel)
 
 
 class CapacityPreparedAdmissionError(RuntimeError):
     """Prepared admission state is not exactly bound or canonical."""
+
+
+def parse_protected_response(
+    returned: object,
+    model_type: type[_ResponseT],
+    *,
+    label: str,
+) -> _ResponseT:
+    """Parse one bounded protected procedure response without type coercion."""
+
+    if not isinstance(returned, Mapping):
+        raise CapacityPreparedAdmissionError(f"protected {label} returned a non-object")
+    try:
+        return model_type.model_validate_json(
+            json.dumps(
+                returned,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            ).encode("ascii")
+        )
+    except (ValidationError, ValueError) as exc:
+        raise CapacityPreparedAdmissionError(
+            f"protected {label} returned an invalid contract"
+        ) from exc
 
 
 class CapacityPreparedAdmissionStore:
@@ -84,24 +111,11 @@ class CapacityPreparedAdmissionStore:
                     },
                 )
             ).scalar_one()
-            if not isinstance(returned, Mapping):
-                raise CapacityPreparedAdmissionError(
-                    "protected prepared-admission procedure returned a non-object"
-                )
-            try:
-                parsed = model_type.model_validate_json(
-                    json.dumps(
-                        returned,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                        ensure_ascii=True,
-                        allow_nan=False,
-                    ).encode("ascii")
-                )
-            except (ValidationError, ValueError) as exc:
-                raise CapacityPreparedAdmissionError(
-                    "protected prepared-admission procedure returned an invalid contract"
-                ) from exc
+            parsed = parse_protected_response(
+                returned,
+                model_type,
+                label="prepared-admission procedure",
+            )
             if parsed != value or canonical_bytes(parsed) != payload_bytes:
                 raise CapacityPreparedAdmissionError(
                     "protected prepared-admission replay differs from its exact contract"
@@ -146,4 +160,8 @@ class CapacityPreparedAdmissionStore:
         )
 
 
-__all__ = ["CapacityPreparedAdmissionError", "CapacityPreparedAdmissionStore"]
+__all__ = [
+    "CapacityPreparedAdmissionError",
+    "CapacityPreparedAdmissionStore",
+    "parse_protected_response",
+]

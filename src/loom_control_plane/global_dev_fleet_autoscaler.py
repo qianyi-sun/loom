@@ -15,6 +15,11 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
+from loom_control_plane.global_execution_fence import (
+    GlobalExecutionFenceError,
+    GlobalExecutionWitness,
+    assert_legacy_scale_up_allowed,
+)
 from loom_control_plane.shared_capacity_broker import (
     AutoscalerGrantHandoff,
     BrokerBudgets,
@@ -23,6 +28,7 @@ from loom_control_plane.shared_capacity_broker import (
     RequestState,
     SharedCapacityBroker,
 )
+from loom_control_plane.slurm_worker_jobs import slurm_cluster_for_pool
 
 _ENVIRONMENT_RE = re.compile(r"[a-z][a-z0-9-]{0,62}")
 _POOL_RE = re.compile(r"[a-z][a-z0-9-]{0,31}")
@@ -112,8 +118,10 @@ def capacity_grants_from_report(
     document: Mapping[str, object],
 ) -> dict[tuple[str, str], AutoscalerGrantHandoff]:
     """Parse the versioned global report into exact local handoffs."""
-    if document.get("schema_version") != 1 or document.get("authority") != (
-        "global-dev-fleet-autoscaler"
+    if (
+        document.get("schema_version") != 1
+        or document.get("authority") != "global-dev-fleet-autoscaler"
+        or document.get("status") != "ok"
     ):
         raise GlobalDevAutoscalerError("capacity grant report authority is invalid")
     raw_grants = document.get("grants")
@@ -179,11 +187,39 @@ class GlobalDevFleetAutoscaler:
         budgets: BrokerBudgets,
         *,
         observations: Sequence[LeaseObservation] = (),
+        execution_witness: GlobalExecutionWitness | None = None,
     ) -> dict[str, object]:
         """Converge the complete dynamic cohort and return environment grants."""
         now = _utc(self._clock())
         normalized = tuple(demands)
+        # A single witness is bound to one physical pool. The read-only broker
+        # status supplies the scope for final cancellation/drain work after a
+        # demand disappears; no empty request invents an OLDLAB scope.
         status = self.broker.status()
+        pool_ids = {slurm_cluster_for_pool(item.pool_name) for item in normalized}
+        for raw_record in cast(list[dict[str, object]], status["requests"]):
+            request, _lease = _record_parts(raw_record)
+            if request["state"] != RequestState.TERMINAL.value:
+                pool_ids.add(slurm_cluster_for_pool(str(request["pool"])))
+        try:
+            for pool_id in pool_ids:
+                assert_legacy_scale_up_allowed(
+                    execution_witness,
+                    expected_authority="global-capacity-manager",
+                    expected_pool_id=pool_id,
+                    now=now,
+                )
+        except GlobalExecutionFenceError as exc:
+            return {
+                "schema_version": 1,
+                "authority": "global-dev-fleet-autoscaler",
+                "status": "fenced",
+                "reason": str(exc),
+                "generated_at": _timestamp(now),
+                "demands": [demand.public_dict() for demand in normalized],
+                "grants": [],
+                "aggregate": {"legacy_scale_up_fenced": True},
+            }
         self._prevalidate(normalized, observations, budgets, status=status, now=now)
 
         # Apply observations against their current epochs before lifecycle
@@ -242,6 +278,7 @@ class GlobalDevFleetAutoscaler:
         return {
             "schema_version": 1,
             "authority": "global-dev-fleet-autoscaler",
+            "status": "ok",
             "generated_at": _timestamp(now),
             "demands": [demand.public_dict() for demand in normalized],
             "budgets": ledger["budgets"],

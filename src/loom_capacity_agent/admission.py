@@ -26,6 +26,12 @@ from loom_capacity_manager.contracts import (
     WorkerShapeV1,
     canonical_digest,
 )
+from loom_capacity_manager.executable_contracts import (
+    ExecutableIntentBindingV2,
+    ExecutableProtectedReleaseV2,
+    StrictV2Model,
+    canonical_executable_digest,
+)
 
 PhysicalPool = Literal["oldlab", "gb10"]
 
@@ -332,11 +338,351 @@ class PreparedProtectedReleaseV1(AgentRegistrationV1):
         return self
 
 
+class PhysicalJobBindingV2(StrictV2Model):
+    """Bind one prepared executable intent to its exact scheduler identity."""
+
+    operation_id: UUID
+    binding: ExecutableIntentBindingV2
+    bootstrap_registration_epoch: PositiveGeneration
+    slurm_job_id: Identifier
+    ownership_evidence_sha256: Digest
+    executable: Literal[True] = True
+
+
+class ExecutableWorkerRegistrationV2(StrictV2Model):
+    """Exchange or requeue one worker identity after physical binding."""
+
+    operation_id: UUID
+    binding: ExecutableIntentBindingV2
+    bootstrap_registration_epoch: PositiveGeneration
+    protected_registration_epoch: PositiveGeneration
+    slurm_job_id: Identifier
+    worker_id: UUID
+    worker_incarnation: UUID
+    worker_credential_sha256: Digest
+    predecessor_worker_incarnation: UUID | None = None
+    executable: Literal[True] = True
+
+    @model_validator(mode="after")
+    def _registration_epoch(self) -> ExecutableWorkerRegistrationV2:
+        if self.protected_registration_epoch <= self.bootstrap_registration_epoch:
+            raise ValueError("worker registration epoch must advance past bootstrap")
+        identities = {
+            self.operation_id,
+            self.binding.intent_id,
+            self.binding.tranche_id,
+            self.worker_id,
+            self.worker_incarnation,
+        }
+        if self.predecessor_worker_incarnation is not None:
+            identities.add(self.predecessor_worker_incarnation)
+        if len(identities) != 5 + (self.predecessor_worker_incarnation is not None):
+            raise ValueError("worker registration identities must be distinct")
+        return self
+
+
+class ExecutableDrainRequestV2(StrictV2Model):
+    """Monotonically stop claims for one exact live worker incarnation."""
+
+    operation_id: UUID
+    binding: ExecutableIntentBindingV2
+    worker_id: UUID
+    worker_incarnation: UUID
+    expected_claim_high_water: NonNegativeSequence
+    drain_epoch: PositiveGeneration
+    executable: Literal[True] = True
+
+
+class ExecutableWorkerWithdrawalRequestV2(StrictV2Model):
+    """Fence delayed registration for one bound scheduler job with no worker."""
+
+    operation_id: UUID
+    binding: ExecutableIntentBindingV2
+    bootstrap_registration_epoch: PositiveGeneration
+    protected_registration_epoch: PositiveGeneration
+    slurm_job_id: Identifier
+    ownership_evidence_sha256: Digest
+    expected_claim_high_water: Literal[0] = 0
+    executable: Literal[True] = True
+
+    @model_validator(mode="after")
+    def _withdrawal_epoch(self) -> ExecutableWorkerWithdrawalRequestV2:
+        if self.protected_registration_epoch <= self.bootstrap_registration_epoch:
+            raise ValueError("withdrawal registration epoch must advance past bootstrap")
+        return self
+
+
+class ExecutablePreparedBootstrapRevocationV2(StrictV2Model):
+    """Fence one prepared bootstrap before any physical scheduler binding."""
+
+    operation_id: UUID
+    binding: ExecutableIntentBindingV2
+    bootstrap_registration_epoch: PositiveGeneration
+    protected_registration_epoch: PositiveGeneration
+    expected_claim_high_water: Literal[0] = 0
+    executable: Literal[True] = True
+
+    @model_validator(mode="after")
+    def _revocation_epoch(self) -> ExecutablePreparedBootstrapRevocationV2:
+        if self.protected_registration_epoch <= self.bootstrap_registration_epoch:
+            raise ValueError("prepared revocation epoch must advance past bootstrap")
+        return self
+
+
+class ExecutableReleaseRequestV2(StrictV2Model):
+    """Fence delayed registration after protected claims and credentials close."""
+
+    operation_id: UUID
+    binding: ExecutableIntentBindingV2
+    reporter_incarnation: UUID
+    bootstrap_registration_epoch: PositiveGeneration
+    expected_claim_high_water: NonNegativeSequence
+    protected_registration_epoch: PositiveGeneration
+    release_epoch: PositiveGeneration
+    executable: Literal[True] = True
+
+
+class PreparedExecutableAdmissionV2(StrictV2Model):
+    """Exact protected receipt for one sealed executable bootstrap digest."""
+
+    subject_id: UUID
+    subject_incarnation: UUID
+    intent_id: UUID
+    bootstrap_registration_epoch: PositiveGeneration
+    bootstrap_sha256: Digest
+    request_digest: Digest
+    admission_digest: Digest
+    protected_high_water: PositiveGeneration
+    admission_state: Literal["prepared"] = "prepared"
+    executable: Literal[True] = True
+
+
+class BoundExecutableWorkerV2(StrictV2Model):
+    """Exact protected receipt for a physical scheduler binding."""
+
+    subject_id: UUID
+    subject_incarnation: UUID
+    intent_id: UUID
+    bootstrap_registration_epoch: PositiveGeneration
+    slurm_job_id: Identifier
+    ownership_evidence_sha256: Digest
+    request_digest: Digest
+    binding_digest: Digest
+    protected_high_water: PositiveGeneration
+    binding_state: Literal["bound"] = "bound"
+    executable: Literal[True] = True
+
+
+class RegisteredExecutableWorkerV2(StrictV2Model):
+    """Exact receipt for one live worker and any revoked predecessor."""
+
+    subject_id: UUID
+    subject_incarnation: UUID
+    intent_id: UUID
+    worker_id: UUID
+    worker_incarnation: UUID
+    predecessor_worker_incarnation: UUID | None = None
+    protected_registration_epoch: PositiveGeneration
+    request_digest: Digest
+    registration_digest: Digest
+    protected_high_water: PositiveGeneration
+    registration_state: Literal["registered"] = "registered"
+    executable: Literal[True] = True
+
+
+class DrainedExecutableWorkerV2(StrictV2Model):
+    """Exact receipt proving new claims are fenced without closing live claims."""
+
+    subject_id: UUID
+    subject_incarnation: UUID
+    intent_id: UUID
+    worker_id: UUID
+    worker_incarnation: UUID
+    claim_high_water: NonNegativeSequence
+    live_claim_count: NonNegativeSequence
+    drain_epoch: PositiveGeneration
+    request_digest: Digest
+    drain_digest: Digest
+    protected_high_water: PositiveGeneration
+    worker_state: Literal["draining"] = "draining"
+    executable: Literal[True] = True
+
+
+class WithdrawnExecutableWorkerV2(StrictV2Model):
+    """Exact receipt proving bootstrap was revoked before worker registration."""
+
+    subject_id: UUID
+    subject_incarnation: UUID
+    intent_id: UUID
+    bootstrap_registration_epoch: PositiveGeneration
+    protected_registration_epoch: PositiveGeneration
+    slurm_job_id: Identifier
+    ownership_evidence_sha256: Digest
+    claim_high_water: Literal[0] = 0
+    live_claim_count: Literal[0] = 0
+    bootstrap_revoked: Literal[True] = True
+    request_digest: Digest
+    withdrawal_digest: Digest
+    protected_high_water: PositiveGeneration
+    withdrawal_state: Literal["withdrawn"] = "withdrawn"
+    executable: Literal[True] = True
+
+
+class RevokedExecutableBootstrapV2(StrictV2Model):
+    """Append-only protected proof that an unbound bootstrap was revoked."""
+
+    binding: ExecutableIntentBindingV2
+    reporter_incarnation: UUID
+    bootstrap_registration_epoch: PositiveGeneration
+    protected_registration_epoch: PositiveGeneration
+    claim_high_water: Literal[0] = 0
+    live_claim_count: Literal[0] = 0
+    bootstrap_revoked: Literal[True] = True
+    request_digest: Digest
+    protected_release_sha256: Digest
+    protected_high_water: PositiveGeneration
+    revocation_state: Literal["revoked"] = "revoked"
+    executable: Literal[True] = True
+
+    @model_validator(mode="after")
+    def _revocation_epoch(self) -> RevokedExecutableBootstrapV2:
+        if self.protected_registration_epoch <= self.bootstrap_registration_epoch:
+            raise ValueError("prepared revocation epoch must advance past bootstrap")
+        return self
+
+
+class PublishableExecutableProtectedReleaseV2(StrictV2Model):
+    """One guard outbox event normalized to the manager protected-release contract."""
+
+    event_id: PositiveGeneration
+    event_kind: Literal["released", "withdrawn", "prepared-revoked"]
+    release: ExecutableProtectedReleaseV2
+    publication_digest: Digest
+
+    @model_validator(mode="after")
+    def _publication_digest(self) -> PublishableExecutableProtectedReleaseV2:
+        if canonical_executable_digest(self.release) != self.publication_digest:
+            raise ValueError("publication digest does not match manager release contract")
+        return self
+
+
+class ProtectedReleasePublicationCheckpointV2(StrictV2Model):
+    """Append-only receipt that the manager acknowledged one outbox publication."""
+
+    event_id: PositiveGeneration
+    event_kind: Literal["released", "withdrawn", "prepared-revoked"]
+    publication_digest: Digest
+    manager_acknowledgement_digest: Digest
+
+
+class ExecutableReleaseReceiptV2(StrictV2Model):
+    """Append-only protected release proof consumed by the manager."""
+
+    binding: ExecutableIntentBindingV2
+    reporter_incarnation: UUID
+    bootstrap_registration_epoch: PositiveGeneration
+    protected_registration_epoch: PositiveGeneration
+    claim_high_water: NonNegativeSequence
+    live_claim_count: Literal[0] = 0
+    release_epoch: PositiveGeneration
+    bootstrap_revoked: Literal[True] = True
+    worker_credentials_revoked: Literal[True] = True
+    request_digest: Digest
+    protected_release_sha256: Digest
+    protected_high_water: PositiveGeneration
+    release_state: Literal["acknowledged"] = "acknowledged"
+    executable: Literal[True] = True
+
+
+class ProtectedIntentObservationV2(StrictV2Model):
+    """Read-only exact protected state for one pool-managed intent."""
+
+    binding: ExecutableIntentBindingV2
+    bootstrap_registration_epoch: NonNegativeSequence = 0
+    worker_id: UUID | None = None
+    worker_incarnation: UUID | None = None
+    protected_registration_epoch: NonNegativeSequence = 0
+    claim_high_water: NonNegativeSequence = 0
+    drain: DrainedExecutableWorkerV2 | None = None
+    release: ExecutableReleaseReceiptV2 | None = None
+    withdrawal: WithdrawnExecutableWorkerV2 | None = None
+    prepared_revocation: RevokedExecutableBootstrapV2 | None = None
+    executable: Literal[True] = True
+
+    @model_validator(mode="after")
+    def _coherent_worker_state(self) -> ProtectedIntentObservationV2:
+        terminal_receipts = tuple(
+            receipt
+            for receipt in (self.release, self.withdrawal, self.prepared_revocation)
+            if receipt is not None
+        )
+        if len(terminal_receipts) > 1:
+            raise ValueError("protected terminal evidence must be mutually exclusive")
+        if (self.worker_id is None) != (self.worker_incarnation is None):
+            raise ValueError("protected worker identities must be present together")
+        if self.worker_id is None and (
+            self.protected_registration_epoch != 0
+            or self.drain is not None
+            or self.release is not None
+        ):
+            raise ValueError("protected worker evidence requires a worker identity")
+        if self.worker_id is not None and (
+            self.withdrawal is not None or self.prepared_revocation is not None
+        ):
+            raise ValueError("unregistered terminal evidence forbids a worker identity")
+        if self.drain is not None and (
+            self.drain.intent_id != self.binding.intent_id
+            or self.drain.worker_id != self.worker_id
+            or self.drain.worker_incarnation != self.worker_incarnation
+            or self.drain.claim_high_water != self.claim_high_water
+        ):
+            raise ValueError("protected drain differs from current intent observation")
+        if self.release is not None and (
+            self.release.binding != self.binding
+            or self.release.claim_high_water != self.claim_high_water
+        ):
+            raise ValueError("protected release differs from current intent observation")
+        if self.withdrawal is not None and (
+            self.withdrawal.subject_id != self.binding.subject_id
+            or self.withdrawal.subject_incarnation != self.binding.subject_incarnation
+            or self.withdrawal.intent_id != self.binding.intent_id
+            or self.withdrawal.bootstrap_registration_epoch != self.bootstrap_registration_epoch
+            or self.withdrawal.claim_high_water != self.claim_high_water
+            or self.withdrawal.live_claim_count != 0
+        ):
+            raise ValueError("protected withdrawal differs from current intent observation")
+        if self.prepared_revocation is not None and (
+            self.worker_id is not None
+            or self.prepared_revocation.binding != self.binding
+            or self.prepared_revocation.bootstrap_registration_epoch
+            != self.bootstrap_registration_epoch
+            or self.prepared_revocation.claim_high_water != self.claim_high_water
+        ):
+            raise ValueError("prepared revocation differs from current intent observation")
+        return self
+
+
 __all__ = [
+    "BoundExecutableWorkerV2",
+    "DrainedExecutableWorkerV2",
+    "ExecutableDrainRequestV2",
+    "ExecutablePreparedBootstrapRevocationV2",
+    "ExecutableReleaseReceiptV2",
+    "ExecutableReleaseRequestV2",
+    "ExecutableWorkerRegistrationV2",
+    "ExecutableWorkerWithdrawalRequestV2",
+    "PhysicalJobBindingV2",
     "PreparedAdmissionPlanV1",
     "PreparedBootstrapBindingV1",
+    "PreparedExecutableAdmissionV2",
     "PreparedPlacementAllowanceV1",
     "PreparedProtectedReleaseV1",
     "PreparedWorkerBindingV1",
     "PreparedWorkerShapeV1",
+    "ProtectedIntentObservationV2",
+    "ProtectedReleasePublicationCheckpointV2",
+    "PublishableExecutableProtectedReleaseV2",
+    "RegisteredExecutableWorkerV2",
+    "RevokedExecutableBootstrapV2",
+    "WithdrawnExecutableWorkerV2",
 ]

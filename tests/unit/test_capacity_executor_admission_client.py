@@ -1,0 +1,364 @@
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+from uuid import UUID
+
+import pytest
+from sqlalchemy.sql.elements import TextClause
+
+import loom_capacity_executor.admission_client as admission_client_module
+from loom_capacity_agent.admission import (
+    ExecutablePreparedBootstrapRevocationV2,
+    ProtectedIntentObservationV2,
+    RevokedExecutableBootstrapV2,
+)
+from loom_capacity_agent.claim_guard import ExecutableClaimProposalV2
+from loom_capacity_executor.admission_client import (
+    DatabaseExecutableAdmissionClient,
+    ExecutableAdmissionClientError,
+)
+from loom_capacity_manager.executable_contracts import canonical_executable_digest
+from tests.unit.test_capacity_executor_launch_renderer import launch_context_fixture
+
+
+def _owner_file(path: Path, value: str) -> Path:
+    path.write_text(value)
+    path.chmod(0o600)
+    return path
+
+
+def test_database_client_loads_only_bounded_owner_only_tls_urls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    class Engine:
+        def dispose(self) -> None:  # pragma: no cover - constructor test only
+            return None
+
+    def engine_factory(url: str, **kwargs: object) -> Engine:
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        return Engine()
+
+    monkeypatch.setattr(
+        "loom_capacity_executor.admission_client.create_async_engine", engine_factory
+    )
+    path = _owner_file(
+        tmp_path / "database-url",
+        "postgresql+psycopg://admission:secret@db.internal/loom_dev_alice?sslmode=verify-full",
+    )
+    client = DatabaseExecutableAdmissionClient.from_database_url_file(
+        path,
+        subject_id=UUID(int=1),
+        subject_incarnation=UUID(int=2),
+        timeout_seconds=7,
+    )
+    assert client.subject_id == UUID(int=1)
+    assert captured["url"] == path.read_text()
+    assert captured["kwargs"] == {
+        "connect_args": {"connect_timeout": 7},
+        "isolation_level": "SERIALIZABLE",
+        "pool_timeout": 7,
+        "pool_pre_ping": True,
+    }
+
+    path.chmod(0o644)
+    with pytest.raises(ExecutableAdmissionClientError, match="0600"):
+        DatabaseExecutableAdmissionClient.from_database_url_file(
+            path,
+            subject_id=UUID(int=1),
+            subject_incarnation=UUID(int=2),
+        )
+
+
+# Production break caught: routed admission resolution already has exact pinned
+# URL bytes, so the database client must be constructible without reopening a
+# mutable pathname after validation.
+def test_database_client_constructs_from_pinned_url_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class Engine:
+        def dispose(self) -> None:  # pragma: no cover - constructor test only
+            return None
+
+    def engine_factory(url: str, **kwargs: object) -> Engine:
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        return Engine()
+
+    monkeypatch.setattr(
+        "loom_capacity_executor.admission_client.create_async_engine", engine_factory
+    )
+
+    client = DatabaseExecutableAdmissionClient.from_database_url_bytes(
+        b"postgresql+psycopg://admission:secret@db.internal/loom_dev_alice?sslmode=verify-full\n",
+        subject_id=UUID(int=1),
+        subject_incarnation=UUID(int=2),
+        timeout_seconds=9,
+    )
+
+    assert client.subject_id == UUID(int=1)
+    assert (
+        captured["url"]
+        == "postgresql+psycopg://admission:secret@db.internal/loom_dev_alice?sslmode=verify-full"
+    )
+    assert captured["kwargs"] == {
+        "connect_args": {"connect_timeout": 9},
+        "isolation_level": "SERIALIZABLE",
+        "pool_timeout": 9,
+        "pool_pre_ping": True,
+    }
+
+
+def test_database_client_configures_pool_and_transaction_timeouts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    class Engine:
+        def dispose(self) -> None:  # pragma: no cover - constructor test only
+            return None
+
+    def engine_factory(url: str, **kwargs: object) -> Engine:
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        return Engine()
+
+    monkeypatch.setattr(
+        "loom_capacity_executor.admission_client.create_async_engine", engine_factory
+    )
+    path = _owner_file(
+        tmp_path / "database-url",
+        "postgresql+psycopg://admission:secret@db.internal/loom_dev_alice?sslmode=verify-full",
+    )
+
+    client = DatabaseExecutableAdmissionClient.from_database_url_file(
+        path,
+        subject_id=UUID(int=1),
+        subject_incarnation=UUID(int=2),
+        timeout_seconds=7,
+        pool_timeout_seconds=3,
+        statement_timeout_ms=1200,
+        lock_timeout_ms=800,
+        operation_timeout_seconds=4,
+    )
+
+    assert client.subject_id == UUID(int=1)
+    assert captured["kwargs"] == {
+        "connect_args": {"connect_timeout": 7},
+        "isolation_level": "SERIALIZABLE",
+        "pool_timeout": 3,
+        "pool_pre_ping": True,
+    }
+    assert client._statement_timeout_ms == 1200
+    assert client._lock_timeout_ms == 800
+    assert client._operation_timeout_seconds == 4
+
+
+@pytest.mark.asyncio
+async def test_database_store_call_sets_local_timeouts_and_rolls_back_on_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    statements: list[str] = []
+    exited_with: list[type[BaseException] | None] = []
+
+    class Transaction:
+        async def __aenter__(self) -> None:
+            return None
+
+        async def __aexit__(
+            self,
+            exc_type: type[BaseException] | None,
+            _exc: BaseException | None,
+            _tb: object,
+        ) -> None:
+            exited_with.append(exc_type)
+
+    class Session:
+        async def __aenter__(self) -> Session:
+            return self
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+        def begin(self) -> Transaction:
+            return Transaction()
+
+        async def execute(self, statement: object) -> None:
+            assert isinstance(statement, TextClause)
+            statements.append(str(statement))
+
+    class Store:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        async def observe_intent(self, _binding: object) -> None:
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(admission_client_module, "ExecutableAdmissionStore", Store)
+    client = object.__new__(DatabaseExecutableAdmissionClient)
+    client._factory = lambda: Session()  # type: ignore[assignment]
+    client._operation_timeout_seconds = 0.01
+    client._statement_timeout_ms = 1200
+    client._lock_timeout_ms = 800
+    client.subject_id = UUID(int=1)
+    client.subject_incarnation = UUID(int=2)
+
+    with pytest.raises(ExecutableAdmissionClientError, match="timed out"):
+        await asyncio.wait_for(client._store_call("observe_intent", object()), timeout=0.5)
+
+    assert statements == [
+        "SET LOCAL lock_timeout = '800ms'",
+        "SET LOCAL statement_timeout = '1200ms'",
+    ]
+    assert exited_with == [asyncio.CancelledError]
+
+
+@pytest.mark.parametrize(
+    "url",
+    (
+        "postgresql+psycopg://admission:secret@db.internal/loom_dev_alice",
+        "postgresql+psycopg://admission:secret@db.internal/loom_dev_alice?sslmode=require",
+        "postgresql+psycopg://db.internal/loom_dev_alice?sslmode=verify-full",
+        "sqlite:///loom.db?sslmode=verify-full",
+        "postgresql+psycopg://admission:secret@db.internal/loom_dev_alice"
+        "?sslmode=verify-full&connect_timeout=99",
+    ),
+)
+def test_database_client_rejects_unscoped_or_weakened_database_urls(
+    tmp_path: Path, url: str
+) -> None:
+    path = _owner_file(tmp_path / "database-url", url)
+    with pytest.raises(ExecutableAdmissionClientError):
+        DatabaseExecutableAdmissionClient.from_database_url_file(
+            path,
+            subject_id=UUID(int=1),
+            subject_incarnation=UUID(int=2),
+        )
+
+
+def test_database_client_rejects_symlink_oversize_and_invalid_timeout(tmp_path: Path) -> None:
+    target = _owner_file(
+        tmp_path / "target",
+        "postgresql+psycopg://admission:secret@db.internal/loom_dev_alice?sslmode=verify-full",
+    )
+    link = tmp_path / "database-url"
+    link.symlink_to(target)
+    with pytest.raises(ExecutableAdmissionClientError, match="nonsymlink"):
+        DatabaseExecutableAdmissionClient.from_database_url_file(
+            link,
+            subject_id=UUID(int=1),
+            subject_incarnation=UUID(int=2),
+        )
+    oversized = _owner_file(tmp_path / "oversized", "x" * 16_385)
+    with pytest.raises(ExecutableAdmissionClientError, match="maximum"):
+        DatabaseExecutableAdmissionClient.from_database_url_file(
+            oversized,
+            subject_id=UUID(int=1),
+            subject_incarnation=UUID(int=2),
+        )
+    with pytest.raises(ExecutableAdmissionClientError, match="timeout"):
+        DatabaseExecutableAdmissionClient.from_database_url_file(
+            target,
+            subject_id=UUID(int=1),
+            subject_incarnation=UUID(int=2),
+            timeout_seconds=0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_database_client_sends_complete_claim_to_protected_transaction() -> None:
+    proposal = ExecutableClaimProposalV2(
+        operation_id=UUID(int=10),
+        protected_attempt_id=UUID(int=11),
+        execution_generation=7,
+        requirements_digest="b" * 64,
+        worker_id=UUID(int=12),
+        worker_incarnation=UUID(int=13),
+        expected_claim_high_water=3,
+    )
+    client = object.__new__(DatabaseExecutableAdmissionClient)
+
+    async def store_call(method: str, value: object) -> None:
+        assert method == "admit_claim"
+        assert value is proposal
+
+    client._store_call = store_call  # type: ignore[assignment]
+
+    assert await client.admit_claim(proposal) is None
+
+
+# Production break caught: the production database client could not obtain the
+# exact protected worker/drain high-water needed before conditional cancellation.
+@pytest.mark.asyncio
+async def test_database_client_observes_exact_protected_intent() -> None:
+    binding = launch_context_fixture().binding
+    expected = ProtectedIntentObservationV2(binding=binding)
+    client = object.__new__(DatabaseExecutableAdmissionClient)
+
+    async def store_call(method: str, value: object) -> object:
+        assert method == "observe_intent"
+        assert value is binding
+        return expected
+
+    client._store_call = store_call  # type: ignore[assignment]
+
+    assert await client.observe_intent(binding) == expected
+
+
+# Production break caught: the routed database client must forward the exact
+# prepared-revocation request object and return only the exact V2 receipt type.
+@pytest.mark.asyncio
+async def test_database_client_sends_exact_prepared_revocation_to_protected_transaction() -> None:
+    binding = launch_context_fixture().binding
+    request = ExecutablePreparedBootstrapRevocationV2(
+        operation_id=UUID(int=301),
+        binding=binding,
+        bootstrap_registration_epoch=1,
+        protected_registration_epoch=2,
+    )
+    expected = RevokedExecutableBootstrapV2(
+        binding=binding,
+        reporter_incarnation=UUID(int=302),
+        bootstrap_registration_epoch=1,
+        protected_registration_epoch=2,
+        request_digest=canonical_executable_digest(request),
+        protected_release_sha256=canonical_executable_digest(request),
+        protected_high_water=3,
+    )
+    client = object.__new__(DatabaseExecutableAdmissionClient)
+
+    async def store_call(method: str, value: object) -> object:
+        assert method == "revoke_prepared_bootstrap"
+        assert value is request
+        return expected
+
+    client._store_call = store_call  # type: ignore[assignment]
+
+    assert await client.revoke_prepared_bootstrap(request) == expected
+
+
+# Production break caught: a mismatched protected-store method result must not be
+# treated as a valid prepared-revocation receipt by the executor admission client.
+@pytest.mark.asyncio
+async def test_database_client_rejects_prepared_revocation_receipt_type_mismatch() -> None:
+    binding = launch_context_fixture().binding
+    request = ExecutablePreparedBootstrapRevocationV2(
+        operation_id=UUID(int=303),
+        binding=binding,
+        bootstrap_registration_epoch=1,
+        protected_registration_epoch=2,
+    )
+    client = object.__new__(DatabaseExecutableAdmissionClient)
+
+    async def store_call(_method: str, _value: object) -> object:
+        return ProtectedIntentObservationV2(binding=binding)
+
+    client._store_call = store_call  # type: ignore[assignment]
+
+    with pytest.raises(AssertionError):
+        await client.revoke_prepared_bootstrap(request)

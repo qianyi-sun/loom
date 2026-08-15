@@ -13,6 +13,7 @@ from uuid import UUID
 import yaml  # type: ignore[import-untyped]
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from loom_capacity_executor.config import ImmutablePoolManifest
 from loom_capacity_manager.schema_startup import _capacity_head
 
 _DNS_LABEL_RE = re.compile(r"[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?")
@@ -34,9 +35,7 @@ class _StrictModel(BaseModel):
 
 
 def _is_immutable_oci_reference(value: str) -> bool:
-    if _OCI_DIGEST_RE.fullmatch(value) is None or value.endswith(
-        "@sha256:" + "0" * 64
-    ):
+    if _OCI_DIGEST_RE.fullmatch(value) is None or value.endswith("@sha256:" + "0" * 64):
         return False
     name = value.rsplit("@sha256:", 1)[0]
     return len(name) <= 255 and ("/" in name or name.count(":") <= 1)
@@ -181,11 +180,300 @@ class CapacityControlPlaneProfile(_StrictModel):
         return value
 
 
+class CapacityPoolSlurmExecutables(_StrictModel):
+    scontrol: str = Field(min_length=1, max_length=4096)
+    sacctmgr: str = Field(min_length=1, max_length=4096)
+    squeue: str = Field(min_length=1, max_length=4096)
+    sbatch: str = Field(min_length=1, max_length=4096)
+    scancel: str = Field(min_length=1, max_length=4096)
+    sacct: str = Field(min_length=1, max_length=4096)
+
+    @model_validator(mode="after")
+    def _absolute_distinct_paths(self) -> CapacityPoolSlurmExecutables:
+        values = tuple(self.model_dump().values())
+        if len(set(values)) != len(values):
+            raise ValueError("Slurm executable paths must be distinct")
+        for value in values:
+            path = Path(value)
+            if not path.is_absolute() or ".." in path.parts:
+                raise ValueError("Slurm executables must use absolute paths")
+        return self
+
+
+class CapacityPoolExecutorBinding(_StrictModel):
+    pool_id: Literal["gb10", "oldlab"]
+    pool_generation: int = Field(gt=0)
+    executor_id: str = Field(min_length=1, max_length=128, pattern=r"^[a-z0-9._-]+$")
+    executor_incarnation: str = Field(min_length=36, max_length=36)
+    controller_authority_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    local_authority_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    signing_key_id: str = Field(min_length=1, max_length=128, pattern=r"^[a-z0-9._-]+$")
+    signing_key_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    local_uid: int = Field(ge=0)
+    slurm_cluster: str = Field(min_length=1, max_length=128, pattern=r"^[a-z0-9._-]+$")
+    controller_host: str = Field(min_length=1, max_length=253)
+    partition: str = Field(min_length=1, max_length=128, pattern=r"^[a-z0-9._-]+$")
+    association: str = Field(min_length=1, max_length=128, pattern=r"^[a-z0-9._-]+$")
+    submitter: str = Field(min_length=1, max_length=128, pattern=r"^[a-z0-9._-]+$")
+    qos: str = Field(min_length=1, max_length=128, pattern=r"^[a-z0-9._-]+$")
+    profile_id: str = Field(min_length=1, max_length=128, pattern=r"^[a-z0-9._-]+$")
+    profile_generation: int = Field(gt=0)
+    profile_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    slurm_executables: CapacityPoolSlurmExecutables
+    config_file: str = Field(min_length=1, max_length=4096)
+    state_directory: str = Field(min_length=1, max_length=4096)
+    journal_file: str = Field(min_length=1, max_length=4096)
+    bearer_token_file: str = Field(min_length=1, max_length=4096)
+    tls_ca_file: str = Field(min_length=1, max_length=4096)
+    tls_certificate_file: str = Field(min_length=1, max_length=4096)
+    tls_private_key_file: str = Field(min_length=1, max_length=4096)
+    ownership_key_file: str = Field(min_length=1, max_length=4096)
+
+    @model_validator(mode="after")
+    def _exact_binding(self) -> CapacityPoolExecutorBinding:
+        if not self.executor_id.startswith(f"{self.pool_id}-"):
+            raise ValueError("executor id differs from its pool binding")
+        if not self.signing_key_id.startswith(f"{self.pool_id}-"):
+            raise ValueError("signing key differs from its pool binding")
+        try:
+            incarnation = UUID(self.executor_incarnation)
+        except ValueError as exc:
+            raise ValueError("executor incarnation must be a canonical UUID") from exc
+        if incarnation.int == 0 or str(incarnation) != self.executor_incarnation:
+            raise ValueError("executor incarnation must be a canonical non-nil UUID")
+        for label, value in (
+            ("configuration", self.config_file),
+            ("state directory", self.state_directory),
+            ("journal", self.journal_file),
+            ("bearer credential", self.bearer_token_file),
+            ("TLS CA", self.tls_ca_file),
+            ("TLS certificate", self.tls_certificate_file),
+            ("TLS private-key credential", self.tls_private_key_file),
+            ("ownership-key credential", self.ownership_key_file),
+        ):
+            path = Path(value)
+            if not path.is_absolute() or ".." in path.parts:
+                raise ValueError(f"pool executor {label} must be an absolute path")
+        if Path(self.config_file).suffix != ".json":
+            raise ValueError("pool executor configuration must be controller-local JSON")
+        if Path(self.journal_file).parent != Path(self.state_directory):
+            raise ValueError("pool executor journal must be directly inside its state directory")
+        return self
+
+
+class CapacityPoolExecutorProfile(_StrictModel):
+    schema_version: Literal[1]
+    namespace: Literal["loom-dev"]
+    executable_new_capacity_ceiling: Literal[0]
+    executor_image: str
+    service_user: str = Field(pattern=r"^[a-z_][a-z0-9_-]{0,31}$")
+    authority_incarnation: str = Field(min_length=36, max_length=36)
+    writer_epoch: int = Field(gt=0)
+    configuration_epoch: int = Field(gt=0)
+    execution_epoch: int = Field(gt=0)
+    execution_manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    trusted_fleet_release_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    manager_origin: Literal["https://loom-capacity-manager.loom-dev.svc.cluster.local:8443"]
+    pools: tuple[CapacityPoolExecutorBinding, CapacityPoolExecutorBinding]
+
+    @field_validator("pools", mode="before")
+    @classmethod
+    def _pool_tuple(cls, value: object) -> object:
+        if isinstance(value, list):
+            return tuple(value)
+        return value
+
+    @field_validator("executor_image")
+    @classmethod
+    def _immutable_executor_image(cls, value: str) -> str:
+        if not _is_immutable_oci_reference(value):
+            raise ValueError("pool executor image must be an immutable OCI reference")
+        return value
+
+    @field_validator("authority_incarnation")
+    @classmethod
+    def _authority_uuid(cls, value: str) -> str:
+        try:
+            authority = UUID(value)
+        except ValueError as exc:
+            raise ValueError("capacity authority must be a canonical UUID") from exc
+        if authority.int == 0 or str(authority) != value:
+            raise ValueError("capacity authority must be a canonical non-nil UUID")
+        return value
+
+    @model_validator(mode="after")
+    def _two_independent_pools(self) -> CapacityPoolExecutorProfile:
+        if tuple(pool.pool_id for pool in self.pools) != ("gb10", "oldlab"):
+            raise ValueError("pool bindings must contain canonical gb10 and oldlab entries")
+        unique_fields = {
+            "executor": tuple(pool.executor_id for pool in self.pools),
+            "executor incarnation": tuple(pool.executor_incarnation for pool in self.pools),
+            "controller authority": tuple(pool.controller_authority_sha256 for pool in self.pools),
+            "local authority": tuple(pool.local_authority_sha256 for pool in self.pools),
+            "signing key": tuple(pool.signing_key_sha256 for pool in self.pools),
+            "configuration": tuple(pool.config_file for pool in self.pools),
+            "state": tuple(pool.state_directory for pool in self.pools),
+            "bearer credential": tuple(pool.bearer_token_file for pool in self.pools),
+            "TLS certificate credential": tuple(pool.tls_certificate_file for pool in self.pools),
+            "TLS private-key credential": tuple(pool.tls_private_key_file for pool in self.pools),
+            "ownership-key credential": tuple(pool.ownership_key_file for pool in self.pools),
+        }
+        for label, values in unique_fields.items():
+            if len(set(values)) != len(values):
+                raise ValueError(f"pool {label} bindings must use distinct credentials/state")
+        return self
+
+
+def _pool_binding(
+    profile: CapacityPoolExecutorProfile,
+    pool_id: Literal["gb10", "oldlab"] | str,
+) -> CapacityPoolExecutorBinding:
+    if pool_id not in {"gb10", "oldlab"}:
+        raise ValueError("pool executor rendering requires gb10 or oldlab")
+    return next(pool for pool in profile.pools if pool.pool_id == pool_id)
+
+
+def _pool_executor_config(
+    profile: CapacityPoolExecutorProfile,
+    pool: CapacityPoolExecutorBinding,
+) -> dict[str, object]:
+    return {
+        "association": pool.association,
+        "authority_incarnation": profile.authority_incarnation,
+        "bearer_token_file": pool.bearer_token_file,
+        "approved_profiles_sha256": "0" * 64,
+        "configuration_epoch": profile.configuration_epoch,
+        "controller_authority_sha256": pool.controller_authority_sha256,
+        "controller_host": pool.controller_host,
+        "execution_epoch": profile.execution_epoch,
+        "execution_manifest_sha256": profile.execution_manifest_sha256,
+        "executor_image": profile.executor_image,
+        "executor_id": pool.executor_id,
+        "executor_incarnation": pool.executor_incarnation,
+        "journal_file": pool.journal_file,
+        "local_authority_sha256": pool.local_authority_sha256,
+        "local_uid": pool.local_uid,
+        "manager_origin": profile.manager_origin,
+        "ownership_key_file": pool.ownership_key_file,
+        "partition": pool.partition,
+        "pool_generation": pool.pool_generation,
+        "pool_id": pool.pool_id,
+        "profile_digest": pool.profile_digest,
+        "profile_generation": pool.profile_generation,
+        "profile_id": pool.profile_id,
+        "qos": pool.qos,
+        "signing_key_id": pool.signing_key_id,
+        "signing_key_sha256": pool.signing_key_sha256,
+        "slurm_cluster": pool.slurm_cluster,
+        "slurm_executables": pool.slurm_executables.model_dump(),
+        "state_directory": pool.state_directory,
+        "service_user": profile.service_user,
+        "submitter": pool.submitter,
+        "tls_ca_file": pool.tls_ca_file,
+        "tls_certificate_file": pool.tls_certificate_file,
+        "tls_private_key_file": pool.tls_private_key_file,
+        "trusted_fleet_release_sha256": profile.trusted_fleet_release_sha256,
+        "writer_epoch": profile.writer_epoch,
+    }
+
+
+def capacity_pool_executor_manifest_sha256(
+    profile: CapacityPoolExecutorProfile,
+    pool_id: Literal["gb10", "oldlab"] | str,
+) -> str:
+    """Derive the exact production-loader manifest pin without reading secrets."""
+
+    if not isinstance(profile, CapacityPoolExecutorProfile):
+        raise TypeError("capacity pool-executor profile is invalid")
+    pool = _pool_binding(profile, pool_id)
+    return ImmutablePoolManifest(
+        pool_id=pool.pool_id,
+        pool_generation=pool.pool_generation,
+        controller_authority_sha256=pool.controller_authority_sha256,
+        approved_profiles_sha256="0" * 64,
+        executor_id=pool.executor_id,
+        executor_incarnation=UUID(pool.executor_incarnation),
+        local_authority_sha256=pool.local_authority_sha256,
+        signing_key_id=pool.signing_key_id,
+        signing_key_sha256=pool.signing_key_sha256,
+        ownership_key_file=Path(pool.ownership_key_file),
+        manager_origin=profile.manager_origin,
+        bearer_token_file=Path(pool.bearer_token_file),
+        tls_ca_file=Path(pool.tls_ca_file),
+        tls_certificate_file=Path(pool.tls_certificate_file),
+        tls_private_key_file=Path(pool.tls_private_key_file),
+        state_directory=Path(pool.state_directory),
+        journal_file=Path(pool.journal_file),
+        local_uid=pool.local_uid,
+        slurm_cluster=pool.slurm_cluster,
+        controller_host=pool.controller_host,
+        partition=pool.partition,
+        association=pool.association,
+        submitter=pool.submitter,
+        qos=pool.qos,
+        profile_id=pool.profile_id,
+        profile_generation=pool.profile_generation,
+        profile_digest=pool.profile_digest,
+        slurm_executables=tuple(
+            sorted(
+                (name, Path(value)) for name, value in pool.slurm_executables.model_dump().items()
+            )
+        ),
+        executor_image=profile.executor_image,
+        service_user=profile.service_user,
+    ).sha256()
+
+
 def load_capacity_control_plane_profile(path: Path) -> CapacityControlPlaneProfile:
     """Load one strict non-secret infrastructure profile."""
 
     return CapacityControlPlaneProfile.model_validate(
         tomllib.loads(path.read_text(encoding="utf-8"))
+    )
+
+
+def load_capacity_pool_executor_profile(path: Path) -> CapacityPoolExecutorProfile:
+    """Load one strict, non-secret, permanently inert pool-executor profile."""
+
+    return CapacityPoolExecutorProfile.model_validate(
+        tomllib.loads(path.read_text(encoding="utf-8"))
+    )
+
+
+def render_capacity_pool_executor_configs(
+    profile: CapacityPoolExecutorProfile,
+) -> dict[str, str]:
+    """Render complete deterministic controller-local production configurations."""
+
+    if not isinstance(profile, CapacityPoolExecutorProfile):
+        raise TypeError("capacity pool-executor profile is invalid")
+    return {
+        pool.pool_id: json.dumps(
+            _pool_executor_config(profile, pool),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        + "\n"
+        for pool in profile.pools
+    }
+
+
+def render_capacity_pool_executor_service_environment(
+    profile: CapacityPoolExecutorProfile,
+    pool_id: Literal["gb10", "oldlab"] | str,
+) -> str:
+    """Render the non-secret environment consumed by the checked-in systemd unit."""
+
+    if not isinstance(profile, CapacityPoolExecutorProfile):
+        raise TypeError("capacity pool-executor profile is invalid")
+    pool = _pool_binding(profile, pool_id)
+    return (
+        f"LOOM_CAPACITY_EXECUTOR_CONFIG={pool.config_file}\n"
+        "LOOM_CAPACITY_EXECUTOR_EXECUTABLE_CEILING=0\n"
+        "LOOM_CAPACITY_EXECUTOR_EXPECTED_MANIFEST_SHA256="
+        f"{capacity_pool_executor_manifest_sha256(profile, pool.pool_id)}\n"
+        f"LOOM_CAPACITY_EXECUTOR_POOL={pool.pool_id}\n"
     )
 
 
@@ -325,9 +613,7 @@ def _postgres_statefulset(profile: CapacityControlPlaneProfile) -> dict[str, Any
     secret_env = [
         {
             "name": environment,
-            "valueFrom": {
-                "secretKeyRef": {"name": profile.secret_name, "key": secret_key}
-            },
+            "valueFrom": {"secretKeyRef": {"name": profile.secret_name, "key": secret_key}},
         }
         for environment, secret_key in (
             ("POSTGRES_USER", "postgres-user"),
@@ -422,9 +708,7 @@ def _postgres_statefulset(profile: CapacityControlPlaneProfile) -> dict[str, Any
                     ],
                 },
             },
-            "volumeClaimTemplates": [
-                {"metadata": {"name": "data"}, "spec": claim_spec}
-            ],
+            "volumeClaimTemplates": [{"metadata": {"name": "data"}, "spec": claim_spec}],
         },
     }
 
@@ -488,10 +772,7 @@ def _migration_job(
         migration_head.lower().replace("_", "-"),
     ).strip("-")
     head_prefix = head_slug[:19].rstrip("-") or "migration"
-    name = (
-        f"loom-capacity-migrate-{head_prefix}-"
-        f"{image_digest[:10]}-{template_identity[:10]}"
-    )
+    name = f"loom-capacity-migrate-{head_prefix}-{image_digest[:10]}-{template_identity[:10]}"
     return {
         "apiVersion": "batch/v1",
         "kind": "Job",
@@ -633,9 +914,7 @@ def _component_selector(*components: str) -> dict[str, Any]:
 
 def _network_policies(profile: CapacityControlPlaneProfile) -> list[dict[str, Any]]:
     namespace = {
-        "namespaceSelector": {
-            "matchLabels": {"kubernetes.io/metadata.name": profile.namespace}
-        }
+        "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": profile.namespace}}
     }
     return [
         {
@@ -644,9 +923,7 @@ def _network_policies(profile: CapacityControlPlaneProfile) -> list[dict[str, An
             "metadata": _metadata("capacity-default-deny"),
             "spec": {
                 "podSelector": {
-                    "matchExpressions": [
-                        {"key": _COMPONENT_LABEL, "operator": "Exists"}
-                    ]
+                    "matchExpressions": [{"key": _COMPONENT_LABEL, "operator": "Exists"}]
                 },
                 "policyTypes": ["Ingress", "Egress"],
             },
@@ -667,9 +944,7 @@ def _network_policies(profile: CapacityControlPlaneProfile) -> list[dict[str, An
                                         "kubernetes.io/metadata.name": profile.dns.namespace
                                     }
                                 },
-                                "podSelector": {
-                                    "matchLabels": profile.dns.match_labels()
-                                },
+                                "podSelector": {"matchLabels": profile.dns.match_labels()},
                             }
                         ],
                         "ports": [
@@ -710,16 +985,12 @@ def _network_policies(profile: CapacityControlPlaneProfile) -> list[dict[str, An
             "metadata": _metadata("capacity-postgres-ingress"),
             "spec": {
                 "podSelector": {
-                    "matchLabels": {
-                        "app.kubernetes.io/name": "loom-capacity-postgres"
-                    }
+                    "matchLabels": {"app.kubernetes.io/name": "loom-capacity-postgres"}
                 },
                 "policyTypes": ["Ingress"],
                 "ingress": [
                     {
-                        "from": [
-                            {"podSelector": _component_selector("manager", "migration")}
-                        ],
+                        "from": [{"podSelector": _component_selector("manager", "migration")}],
                         "ports": [{"protocol": "TCP", "port": 5432}],
                     }
                 ],
@@ -730,9 +1001,7 @@ def _network_policies(profile: CapacityControlPlaneProfile) -> list[dict[str, An
             "kind": "NetworkPolicy",
             "metadata": _metadata("capacity-manager-ingress"),
             "spec": {
-                "podSelector": {
-                    "matchLabels": {"app.kubernetes.io/name": "loom-capacity-manager"}
-                },
+                "podSelector": {"matchLabels": {"app.kubernetes.io/name": "loom-capacity-manager"}},
                 "policyTypes": ["Ingress"],
                 "ingress": [
                     {
@@ -818,9 +1087,16 @@ def render_capacity_control_plane_manifests(
 
 __all__ = [
     "CapacityControlPlaneProfile",
+    "CapacityPoolExecutorBinding",
+    "CapacityPoolExecutorProfile",
+    "CapacityPoolSlurmExecutables",
     "KubernetesEndpointSelector",
     "PodSelector",
     "ResourceEnvelope",
+    "capacity_pool_executor_manifest_sha256",
     "load_capacity_control_plane_profile",
+    "load_capacity_pool_executor_profile",
     "render_capacity_control_plane_manifests",
+    "render_capacity_pool_executor_configs",
+    "render_capacity_pool_executor_service_environment",
 ]

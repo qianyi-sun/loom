@@ -182,9 +182,9 @@ def isolated_capacity_migration_url(postgres_url: str) -> Iterator[str]:
 
 def test_reintegrated_capacity_history_has_one_exact_head() -> None:
     script = ScriptDirectory.from_config(_capacity_config_without_database())
-    assert script.get_heads() == ("capacity_0010",)
+    assert tuple(script.get_heads()) == ("capacity_0010",)
     assert tuple(
-        revision.revision for revision in script.walk_revisions("capacity_0010", "capacity_0003")
+        revision.revision for revision in script.walk_revisions("capacity_0004", "capacity_0010")
     ) == (
         "capacity_0010",
         "capacity_0009",

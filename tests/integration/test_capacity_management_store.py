@@ -8,7 +8,7 @@ from threading import Event
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import delete, event, func, select, text, update
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -20,8 +20,10 @@ from loom_capacity_manager.contracts import (
     ConfigurationActivationV1,
     ConfigurationGenerationRefV1,
     ObservedCommitmentV1,
+    StaticCandidateProvenanceV1,
     canonical_digest_excluding,
 )
+from loom_capacity_manager.execution_store import CapacityExecutionStore
 from loom_capacity_manager.models import (
     Base,
     CapacityAccountPolicy,
@@ -35,6 +37,7 @@ from loom_capacity_manager.models import (
     CapacityDemandReporter,
     CapacityDeploymentGeneration,
     CapacityDevelopmentProjection,
+    CapacityFairnessState,
     CapacityObservedCommitment,
     CapacitySubject,
     CapacityWorkerProfile,
@@ -371,6 +374,104 @@ async def test_activation_materializes_exact_worker_profile_bindings(
     assert all(len(item.shape_catalog) == 1 for item in profiles)
 
 
+async def test_activation_seeds_static_candidate_provenance_for_executable_lookup(
+    capacity_session: AsyncSession,
+) -> None:
+    store = CapacityManagementStore()
+    fleet_proposal = await store.propose_fleet_configuration(
+        capacity_session,
+        fleet_manifest(),
+        actor="fleet-operator",
+        idempotency_key=uuid4(),
+    )
+    subject = subject_configuration()
+    subject_proposal = await store.propose_subject_configuration(
+        capacity_session,
+        subject,
+        actor="environment-state",
+        idempotency_key=uuid4(),
+    )
+    provenance = StaticCandidateProvenanceV1(
+        subject_id=subject.subject_id,
+        subject_incarnation=subject.subject_incarnation,
+        candidate_generation=subject.candidate_generation,
+        algorithm="source-sha256",
+        identity="1" * 64,
+        publication_sha256="2" * 64,
+    )
+
+    await store.activate_configuration(
+        capacity_session,
+        configuration_activation(
+            fleet=fleet_proposal,
+            subjects=(subject_proposal,),
+            static_candidate_provenance=(provenance,),
+        ),
+        actor="fleet-operator",
+        idempotency_key=uuid4(),
+    )
+
+    subject_row = (await capacity_session.execute(select(CapacitySubject))).scalar_one()
+    candidate = await CapacityExecutionStore._current_candidate(capacity_session, subject_row)
+
+    assert candidate.algorithm == provenance.algorithm
+    assert candidate.identity == provenance.identity
+    assert candidate.publication_sha256 == provenance.publication_sha256
+
+
+async def test_activation_rejects_unmatched_static_candidate_provenance(
+    capacity_session: AsyncSession,
+) -> None:
+    """Extra static provenance must not be silently ignored during activation."""
+
+    store = CapacityManagementStore()
+    fleet_proposal = await store.propose_fleet_configuration(
+        capacity_session,
+        fleet_manifest(),
+        actor="fleet-operator",
+        idempotency_key=uuid4(),
+    )
+    subject = subject_configuration()
+    subject_proposal = await store.propose_subject_configuration(
+        capacity_session,
+        subject,
+        actor="environment-state",
+        idempotency_key=uuid4(),
+    )
+    matched = StaticCandidateProvenanceV1(
+        subject_id=subject.subject_id,
+        subject_incarnation=subject.subject_incarnation,
+        candidate_generation=subject.candidate_generation,
+        algorithm="source-sha256",
+        identity="1" * 64,
+        publication_sha256="2" * 64,
+    )
+    unmatched = StaticCandidateProvenanceV1(
+        subject_id=UUID("00000000-0000-4000-8000-00000000f001"),
+        subject_incarnation=subject.subject_incarnation,
+        candidate_generation=subject.candidate_generation,
+        algorithm="source-sha256",
+        identity="3" * 64,
+        publication_sha256="4" * 64,
+    )
+
+    with pytest.raises(ConfigurationConflictError, match="static candidate provenance"):
+        await store.activate_configuration(
+            capacity_session,
+            configuration_activation(
+                fleet=fleet_proposal,
+                subjects=(subject_proposal,),
+                static_candidate_provenance=(matched, unmatched),
+            ),
+            actor="fleet-operator",
+            idempotency_key=uuid4(),
+        )
+
+    assert (
+        await capacity_session.execute(select(func.count()).select_from(CapacityCandidate))
+    ).scalar_one() == 0
+
+
 async def test_dynamic_development_projection_is_atomic_idempotent_and_shadow_only(
     capacity_session: AsyncSession,
 ) -> None:
@@ -405,9 +506,17 @@ async def test_dynamic_development_projection_is_atomic_idempotent_and_shadow_on
     assert replay.replayed
     assert replay.configuration_digest == result.configuration_digest
     assert (
-        await capacity_session.execute(select(func.count()).select_from(CapacityCandidate))
+        await capacity_session.execute(
+            select(func.count())
+            .select_from(CapacityCandidate)
+            .where(CapacityCandidate.subject_id == request.subject_id)
+        )
     ).scalar_one() == 1
-    candidate = (await capacity_session.execute(select(CapacityCandidate))).scalar_one()
+    candidate = (
+        await capacity_session.execute(
+            select(CapacityCandidate).where(CapacityCandidate.subject_id == request.subject_id)
+        )
+    ).scalar_one()
     assert candidate.candidate_digest == request.candidate_sha256
     assert candidate.candidate_identity_algorithm == "source-sha256"
     assert candidate.candidate_identity == request.candidate_sha256
@@ -494,7 +603,11 @@ async def test_dynamic_projection_accepts_consumed_local_generations_and_capacit
     assert resized.subject.min_slots == 1
     assert resized.subject.max_slots == 3
     assert (
-        await capacity_session.execute(select(func.count()).select_from(CapacityCandidate))
+        await capacity_session.execute(
+            select(func.count())
+            .select_from(CapacityCandidate)
+            .where(CapacityCandidate.subject_id == created_request.subject_id)
+        )
     ).scalar_one() == 1
     assert (
         await capacity_session.execute(
@@ -1237,6 +1350,62 @@ async def test_epoch_commit_failure_leaves_no_partial_allocations(
     assert await committed_shadow_epoch_count(capacity_session_factory) == 0
     assert await allocation_row_count(capacity_session_factory) == 0
     assert await latest_audit_kind(capacity_session_factory) == "shadow_allocation_failure"
+
+
+async def test_shadow_epoch_post_flush_failure_rolls_back_all_commit_state(
+    capacity_session: AsyncSession,
+) -> None:
+    store, _ = await _activate_default(capacity_session)
+    authority = await _authority_uuid(capacity_session)
+    writer = await store.register_writer(capacity_session, authority, expected_epoch=0)
+    allocation_input = await store.load_allocation_input(capacity_session, writer)
+    fairness_before = tuple(
+        (
+            await capacity_session.execute(
+                select(CapacityFairnessState).order_by(CapacityFairnessState.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    failed = False
+
+    def fail_after_flush(*_args: object) -> None:
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise RuntimeError("synthetic post-flush failure")
+
+    event.listen(capacity_session.sync_session, "after_flush_postexec", fail_after_flush)
+    try:
+        with pytest.raises(RuntimeError, match="synthetic post-flush failure"):
+            await store.commit_shadow_epoch(
+                capacity_session,
+                writer,
+                allocate_shadow(allocation_input),
+            )
+    finally:
+        event.remove(capacity_session.sync_session, "after_flush_postexec", fail_after_flush)
+
+    assert failed is True
+    assert (
+        await capacity_session.execute(select(func.count()).select_from(CapacityAllocationEpoch))
+    ).scalar_one() == 0
+    assert (
+        await capacity_session.execute(select(func.count()).select_from(CapacityAllocation))
+    ).scalar_one() == 0
+    assert (
+        tuple(
+            (
+                await capacity_session.execute(
+                    select(CapacityFairnessState).order_by(CapacityFairnessState.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        == fairness_before
+    )
 
 
 async def test_writer_change_during_allocation_fences_old_result(

@@ -1,4 +1,4 @@
-"""Ed25519 ownership proofs for dry-run executor inventory classification."""
+"""Ed25519 ownership proofs for executor inventory classification."""
 
 from __future__ import annotations
 
@@ -18,6 +18,11 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 
 from loom_capacity_manager.contracts import canonical_bytes
+from loom_capacity_manager.executable_contracts import (
+    ExecutableOwnershipMetadataV2,
+    SignedExecutableOwnershipProofV2,
+    canonical_executable_bytes,
+)
 from loom_capacity_manager.grant_contracts import (
     OwnershipMetadataV1,
     SignedOwnershipProofV1,
@@ -63,6 +68,22 @@ def sign_ownership(
 
     signature = private_key.sign(canonical_bytes(metadata))
     return SignedOwnershipProofV1(
+        metadata=metadata,
+        signing_key_id=signing_key_id,
+        signature_base64=base64.b64encode(signature).decode("ascii"),
+    )
+
+
+def sign_executable_ownership(
+    private_key: Ed25519PrivateKey,
+    *,
+    signing_key_id: str,
+    metadata: ExecutableOwnershipMetadataV2,
+) -> SignedExecutableOwnershipProofV2:
+    """Sign the complete canonical executable-v2 ownership metadata."""
+
+    signature = private_key.sign(canonical_executable_bytes(metadata))
+    return SignedExecutableOwnershipProofV2(
         metadata=metadata,
         signing_key_id=signing_key_id,
         signature_base64=base64.b64encode(signature).decode("ascii"),
@@ -164,10 +185,49 @@ class OwnershipKeyring:
             return False
         return True
 
+    def verify_executable(
+        self,
+        proof: SignedExecutableOwnershipProofV2,
+        *,
+        expected_public_key_sha256: str,
+    ) -> bool:
+        """Verify an executable-v2 proof against the same configured trust roots."""
+
+        public_key = self._keys.get(proof.signing_key_id)
+        if public_key is None or not self.matches(
+            proof.signing_key_id,
+            expected_public_key_sha256,
+        ):
+            return False
+        try:
+            signature = base64.b64decode(proof.signature_base64, validate=True)
+            public_key.verify(signature, canonical_executable_bytes(proof.metadata))
+        except (InvalidSignature, ValueError, binascii.Error):
+            return False
+        return True
+
+
+def verify_executable_ownership(
+    proof: SignedExecutableOwnershipProofV2,
+    *,
+    keyring: OwnershipKeyring,
+    expected_public_key_sha256: str,
+) -> bool:
+    """Verify one v2 proof only against its exact registered controller key."""
+
+    if not isinstance(keyring, OwnershipKeyring):
+        return False
+    return keyring.verify_executable(
+        proof,
+        expected_public_key_sha256=expected_public_key_sha256,
+    )
+
 
 __all__ = [
     "OwnershipKeyring",
     "OwnershipKeyringError",
     "public_key_fingerprint",
+    "sign_executable_ownership",
     "sign_ownership",
+    "verify_executable_ownership",
 ]
