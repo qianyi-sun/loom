@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom_capacity_manager.contracts import (
     MICROTOKENS_PER_LAUNCH,
+    ObservedCommitmentV1,
     PackingRequestV1,
     PackingShapeRequestV1,
     PoolObservationV1,
@@ -50,6 +51,7 @@ from loom_capacity_manager.executable_contracts import (
     PreparedExecutorBindingV2,
     StrictV2Model,
     canonical_executable_digest,
+    canonical_inventory_confirmation_journal_head,
 )
 from loom_capacity_manager.grant_contracts import ReservationShapeV1
 from loom_capacity_manager.models import (
@@ -359,6 +361,169 @@ class CapacityExecutionStore:
             lease_expires_at=state.lease_expires_at,
         )
 
+    async def _stored_inventory_is_retirement_safe(
+        self,
+        session: AsyncSession,
+        registration: CapacityExecutionExecutor,
+        epoch: CapacityExecutionEpoch,
+        state: CapacityExecutableExecutorState,
+    ) -> bool:
+        if state.inventory_payload is None or state.last_inventory_digest is None:
+            return False
+        try:
+            inventory = ExecutableExecutorInventoryV2.model_validate_json(
+                json.dumps(state.inventory_payload)
+            )
+        except ValueError:
+            return False
+        if (
+            inventory.inventory_sequence != state.inventory_high_water
+            or canonical_executable_digest(inventory) != state.last_inventory_digest
+            or inventory.journal_sequence != state.journal_high_water
+            or inventory.journal_digest != state.journal_digest
+        ):
+            return False
+        pool = (
+            await session.execute(
+                select(CapacityPool).where(
+                    CapacityPool.configuration_epoch == epoch.configuration_epoch,
+                    CapacityPool.pool_id == inventory.pool_id,
+                    CapacityPool.pool_generation == inventory.pool_generation,
+                )
+            )
+        ).scalar_one_or_none()
+        if pool is None:
+            return False
+        pool_intents = (
+            (
+                await session.execute(
+                    select(CapacityExecutableIntent)
+                    .where(
+                        CapacityExecutableIntent.execution_epoch == epoch.execution_epoch,
+                        CapacityExecutableIntent.pool_id == inventory.pool_id,
+                    )
+                    .order_by(CapacityExecutableIntent.launch_rank)
+                    .with_for_update()
+                )
+            )
+            .scalars()
+            .all()
+        )
+        intents_by_id = {intent.intent_id: intent for intent in pool_intents}
+        observed_intent_ids: set[UUID] = set()
+        for record in inventory.records:
+            if record.authority_scope == "foreign":
+                continue
+            proof = record.ownership_proof
+            if proof is None:
+                return False
+            binding = proof.metadata.binding
+            intent = intents_by_id.get(binding.intent_id)
+            try:
+                stored_binding = (
+                    None
+                    if intent is None
+                    else ExecutableIntentBindingV2.model_validate_json(
+                        json.dumps(intent.binding_payload)
+                    )
+                )
+            except ValueError:
+                return False
+            if (
+                intent is None
+                or intent.executor_incarnation != inventory.executor_incarnation
+                or intent.pool_id != inventory.pool_id
+                or binding != stored_binding
+                or binding.intent_id in observed_intent_ids
+            ):
+                return False
+            observed_intent_ids.add(binding.intent_id)
+            if (
+                not self._ownership_keyring.verify_executable(
+                    proof,
+                    expected_public_key_sha256=registration.signing_key_sha256,
+                )
+                or proof.signing_key_id != registration.signing_key_id
+                or proof.metadata.controller_authority_sha256
+                != registration.controller_authority_sha256
+                or proof.metadata.trusted_launcher_sha256 != epoch.trusted_fleet_release_sha256
+                or record.authority_scope != "dedicated-loom-association"
+                or proof.metadata.slurm_cluster != pool.controller
+                or proof.metadata.association != pool.association
+                or proof.metadata.submitter_identity != "loom"
+                or record.resources != binding.resources
+                or record.node_ids != binding.node_ids
+                or record.state != "terminal"
+                or intent.state != "released"
+            ):
+                return False
+        unobserved_intent_ids = set(intents_by_id) - observed_intent_ids
+        return all(intent.state == "released" for intent in pool_intents) and all(
+            (
+                intent.terminal_kind == "unused"
+                and intent.terminal_identity == intent.shape_instance_id
+                and intent.inventory_sequence is not None
+                and intent.inventory_sequence <= inventory.inventory_sequence
+                and intent.terminal_evidence_sha256 is not None
+            )
+            for intent_id in unobserved_intent_ids
+            for intent in (intents_by_id[intent_id],)
+        )
+
+    @staticmethod
+    def _heartbeat_confirms_final_inventory(
+        *,
+        authority: CapacityAuthorityState,
+        epoch: CapacityExecutionEpoch,
+        state: CapacityExecutableExecutorState,
+        heartbeat: ExecutableExecutorHeartbeatV2,
+    ) -> bool:
+        witnessed_inventory = state.inventory_payload
+        if witnessed_inventory is None:
+            return False
+        witnessed_journal_sequence = witnessed_inventory.get("journal_sequence")
+        witnessed_journal_digest = witnessed_inventory.get("journal_digest")
+        if not (
+            type(witnessed_journal_sequence) is int and isinstance(witnessed_journal_digest, str)
+        ):
+            return False
+        inventory_sequence = witnessed_journal_sequence
+        inventory_digest = witnessed_journal_digest
+        try:
+            witnessed_contract = ExecutableExecutorInventoryV2.model_validate_json(
+                json.dumps(witnessed_inventory)
+            )
+            confirmation_sequence, confirmation_digest = (
+                canonical_inventory_confirmation_journal_head(witnessed_contract)
+            )
+        except ValueError:
+            return False
+        confirmation_bound = state.inventory_confirmation_journal_digest == confirmation_digest
+        before_confirmation = bool(
+            state.journal_high_water == inventory_sequence
+            and state.journal_digest == inventory_digest
+        )
+        after_confirmation = bool(
+            confirmation_bound
+            and state.journal_high_water == confirmation_sequence
+            and state.journal_digest == confirmation_digest
+            and state.journal_high_water == heartbeat.journal_sequence
+            and state.journal_digest == heartbeat.journal_digest
+        )
+        return bool(
+            authority.execution_state == "drain-only"
+            and authority.executable_new_capacity_ceiling == 0
+            and epoch.state == "drain-only"
+            and epoch.effective_ceiling == 0
+            and epoch.effective_rate_per_minute == 0
+            and heartbeat.journal_checkpoint_sequence == state.journal_high_water
+            and heartbeat.journal_checkpoint_digest == state.journal_digest
+            and confirmation_bound
+            and heartbeat.journal_sequence == confirmation_sequence
+            and heartbeat.journal_digest == confirmation_digest
+            and (before_confirmation or after_confirmation)
+        )
+
     async def heartbeat_executor(
         self,
         session: AsyncSession,
@@ -366,7 +531,7 @@ class CapacityExecutionStore:
     ) -> HeartbeatedExecutableExecutor:
         digest = canonical_executable_digest(heartbeat)
         async with _write_transaction(session):
-            _authority, epoch, registration = await self._locked_epoch_and_registration(
+            authority, epoch, registration = await self._locked_epoch_and_registration(
                 session,
                 heartbeat.execution,
                 executor_id=heartbeat.executor_id,
@@ -412,6 +577,29 @@ class CapacityExecutionStore:
                     "fenced",
                     "executor journal checkpoint diverged",
                 )
+            confirms_final_inventory = False
+            if state.retirement_safe:
+                confirms_final_inventory = self._heartbeat_confirms_final_inventory(
+                    authority=authority,
+                    epoch=epoch,
+                    state=state,
+                    heartbeat=heartbeat,
+                )
+                if not confirms_final_inventory:
+                    state.retirement_safe = False
+                    state.retirement_inventory_digest = None
+            elif state.inventory_payload is not None:
+                confirms_final_inventory = self._heartbeat_confirms_final_inventory(
+                    authority=authority,
+                    epoch=epoch,
+                    state=state,
+                    heartbeat=heartbeat,
+                ) and await self._stored_inventory_is_retirement_safe(
+                    session,
+                    registration,
+                    epoch,
+                    state,
+                )
             if (
                 heartbeat.journal_sequence == state.journal_high_water
                 and heartbeat.journal_digest != state.journal_digest
@@ -427,6 +615,9 @@ class CapacityExecutionStore:
             state.journal_high_water = heartbeat.journal_sequence
             state.journal_digest = heartbeat.journal_digest
             state.last_heartbeat_at = now
+            if confirms_final_inventory:
+                state.retirement_safe = True
+                state.retirement_inventory_digest = state.last_inventory_digest
             state.lease_expires_at = now + self._executor_lease
             return HeartbeatedExecutableExecutor(
                 state.heartbeat_high_water,
@@ -495,7 +686,12 @@ class CapacityExecutionStore:
             state.inventory_high_water = inventory.inventory_sequence
             state.last_inventory_digest = digest
             state.inventory_payload = inventory.model_dump(mode="json", exclude_none=False)
+            _, state.inventory_confirmation_journal_digest = (
+                canonical_inventory_confirmation_journal_head(inventory)
+            )
             state.last_inventory_at = now
+            state.retirement_safe = False
+            state.retirement_inventory_digest = None
             intents_by_id = await self._locked_inventory_intents(session, inventory)
             claimed_intent_ids: list[UUID] = []
             for record in inventory.records:
@@ -615,17 +811,18 @@ class CapacityExecutionStore:
                 )
                 if current is None:
                     break
-                if latest_epoch is not None and current.allocation_epoch != latest_epoch.allocation_epoch:
+                if (
+                    latest_epoch is not None
+                    and current.allocation_epoch != latest_epoch.allocation_epoch
+                ):
                     if current.state == "proposed":
                         current.state = "released"
                         current.released_at = now
                         continue
-                    if current.state in {"accepted", "launch-ready", "permitted"}:
-                        binding = ExecutableIntentBindingV2.model_validate_json(
-                            json.dumps(current.binding_payload)
-                        )
-                        return ExecutableIntentCloseV2(
-                            binding=binding,
+                    if current.state in {"launch-ready", "permitted"}:
+                        return await self._new_close(
+                            session,
+                            current,
                             command_sequence=context.executor.command_high_water + 1,
                         )
                 increase_allowed = (
@@ -644,11 +841,9 @@ class CapacityExecutionStore:
                     )
                 if current.state == "accepted":
                     if not increase_allowed:
-                        binding = ExecutableIntentBindingV2.model_validate_json(
-                            json.dumps(current.binding_payload)
-                        )
-                        return ExecutableIntentCloseV2(
-                            binding=binding,
+                        return await self._new_close(
+                            session,
+                            current,
                             command_sequence=context.executor.command_high_water + 1,
                         )
                     bootstrap = await self._latest_bootstrap_proposal(
@@ -661,11 +856,9 @@ class CapacityExecutionStore:
                     return None
                 if current.state in {"launch-ready", "permitted"}:
                     if not increase_allowed:
-                        binding = ExecutableIntentBindingV2.model_validate_json(
-                            json.dumps(current.binding_payload)
-                        )
-                        return ExecutableIntentCloseV2(
-                            binding=binding,
+                        return await self._new_close(
+                            session,
+                            current,
                             command_sequence=context.executor.command_high_water + 1,
                         )
                     if (
@@ -674,7 +867,7 @@ class CapacityExecutionStore:
                         or current.permit_expires_at <= now
                     ):
                         await self._assert_increase_eligible(session, context, current=current)
-                        permit = self._new_permit(current, now)
+                        permit = await self._new_permit(session, current, now)
                         current.permit_id = permit.permit_id
                         current.permit_epoch = permit.permit_epoch
                         current.permit_digest = canonical_executable_digest(permit)
@@ -686,19 +879,15 @@ class CapacityExecutionStore:
                         json.dumps(current.permit_payload)
                     )
                 if current.state == "terminal":
-                    binding = ExecutableIntentBindingV2.model_validate_json(
-                        json.dumps(current.binding_payload)
-                    )
-                    return ExecutableIntentCloseV2(
-                        binding=binding,
+                    return await self._new_close(
+                        session,
+                        current,
                         command_sequence=context.executor.command_high_water + 1,
                     )
                 if current.state == "observed" and not increase_allowed:
-                    binding = ExecutableIntentBindingV2.model_validate_json(
-                        json.dumps(current.binding_payload)
-                    )
-                    return ExecutableIntentCloseV2(
-                        binding=binding,
+                    return await self._new_close(
+                        session,
+                        current,
                         command_sequence=context.executor.command_high_water + 1,
                     )
                 protected_release = (
@@ -816,6 +1005,7 @@ class CapacityExecutionStore:
                 session,
                 proposal.binding.execution,
                 self._executor_binding_from_contract(proposal.binding),
+                require_active=False,
             )
             row = await self._locked_intent(session, proposal.binding.intent_id)
             if proposal.binding != ExecutableIntentBindingV2.model_validate_json(
@@ -840,9 +1030,7 @@ class CapacityExecutionStore:
                 if row.state != "accepted":
                     raise ExecutionConflictError("bootstrap proposal intent is not accepted")
                 now = await _database_now(session)
-                latest = await self._latest_bootstrap_proposal(
-                    session, row.intent_id, lock=True
-                )
+                latest = await self._latest_bootstrap_proposal(session, row.intent_id, lock=True)
                 expected_epoch = 1 if latest is None else latest.proposal_epoch + 1
                 if proposal.proposal_epoch != expected_epoch:
                     raise ExecutionConflictError("bootstrap proposal epoch changed")
@@ -965,6 +1153,7 @@ class CapacityExecutionStore:
                 session,
                 acknowledgement.binding.execution,
                 self._executor_binding_from_contract(acknowledgement.binding),
+                require_active=False,
             )
             row = await self._locked_intent(session, acknowledgement.binding.intent_id)
             if acknowledgement.binding != ExecutableIntentBindingV2.model_validate_json(
@@ -1056,15 +1245,9 @@ class CapacityExecutionStore:
                     proposal_epoch=acknowledgement.proposal_epoch,
                     proposal_digest=acknowledgement.proposal_digest,
                     reporter_incarnation=acknowledgement.reporter_incarnation,
-                    bootstrap_registration_epoch=(
-                        acknowledgement.bootstrap_registration_epoch
-                    ),
-                    bootstrap_evidence_sha256=(
-                        acknowledgement.bootstrap_evidence_sha256
-                    ),
-                    protected_admission_sha256=(
-                        acknowledgement.protected_admission_sha256
-                    ),
+                    bootstrap_registration_epoch=(acknowledgement.bootstrap_registration_epoch),
+                    bootstrap_evidence_sha256=(acknowledgement.bootstrap_evidence_sha256),
+                    protected_admission_sha256=(acknowledgement.protected_admission_sha256),
                     acknowledgement_digest=digest,
                     actor_id=actor,
                     acknowledgement_payload=stored_payload,
@@ -1105,7 +1288,11 @@ class CapacityExecutionStore:
             )
             locked_intents = await self._locked_allocation_intents(session, consumption.binding)
             row = next(
-                (item for item in locked_intents if item.intent_id == consumption.binding.intent_id),
+                (
+                    item
+                    for item in locked_intents
+                    if item.intent_id == consumption.binding.intent_id
+                ),
                 None,
             )
             if row is None:
@@ -1239,12 +1426,7 @@ class CapacityExecutionStore:
                     for record in inventory.records
                 ):
                     raise ExecutionConflictError("submission recovery found physical work")
-                row.inventory_sequence = recovery.inventory_sequence
-                row.observed_state = "terminal"
-                row.terminal_kind = "unused"
-                row.terminal_identity = row.shape_instance_id
-                row.terminal_evidence_sha256 = digest
-                row.state = "closing"
+                row.state = "quarantined"
                 await self._record_command(
                     session,
                     row,
@@ -1361,8 +1543,7 @@ class CapacityExecutionStore:
                 await session.execute(
                     select(CapacityExecutableProtectedReleaseReceipt)
                     .where(
-                        CapacityExecutableProtectedReleaseReceipt.idempotency_key
-                        == idempotency_key
+                        CapacityExecutableProtectedReleaseReceipt.idempotency_key == idempotency_key
                     )
                     .with_for_update()
                 )
@@ -1388,9 +1569,7 @@ class CapacityExecutionStore:
                 prior is not None
                 and release.protected_registration_epoch <= prior.protected_registration_epoch
             ):
-                raise ExecutionConflictError(
-                    "protected release registration epoch must advance"
-                )
+                raise ExecutionConflictError("protected release registration epoch must advance")
             reporter = (
                 await session.execute(
                     select(CapacityDemandReporter).where(
@@ -1447,17 +1626,17 @@ class CapacityExecutionStore:
             ordered_intent_ids = tuple(
                 (
                     await session.execute(
-                    select(CapacityExecutableIntent.intent_id)
-                    .where(CapacityExecutableIntent.intent_id.in_(intent_ids))
-                    .order_by(
-                        CapacityExecutableIntent.allocation_epoch,
-                        CapacityExecutableIntent.launch_rank,
-                        CapacityExecutableIntent.intent_id,
+                        select(CapacityExecutableIntent.intent_id)
+                        .where(CapacityExecutableIntent.intent_id.in_(intent_ids))
+                        .order_by(
+                            CapacityExecutableIntent.allocation_epoch,
+                            CapacityExecutableIntent.launch_rank,
+                            CapacityExecutableIntent.intent_id,
+                        )
                     )
                 )
-            )
-            .scalars()
-            .all()
+                .scalars()
+                .all()
             )
             if set(ordered_intent_ids) != set(intent_ids):
                 raise ExecutionConflictError("executable intent is unknown")
@@ -1957,7 +2136,9 @@ class CapacityExecutionStore:
         )
         if context.executor.last_inventory_at is None:
             raise ExecutionConflictError("fresh complete executor inventory is required")
-        executor_inventory_fresh_until = context.executor.last_inventory_at + self._inventory_freshness
+        executor_inventory_fresh_until = (
+            context.executor.last_inventory_at + self._inventory_freshness
+        )
         if (
             inventory.inventory_sequence != context.executor.inventory_high_water
             or executor_inventory_fresh_until <= now
@@ -2000,7 +2181,6 @@ class CapacityExecutionStore:
             raise ExecutionConflictError("latest sealed executable allocation changed")
         if latest_epoch.input_valid_until is None or latest_epoch.input_valid_until <= now:
             raise ExecutionConflictError("allocation input expired")
-        committed = checked_sum_vectors(tuple(item.resources for item in observation.commitments))
         allocation = (
             await session.execute(
                 select(CapacityAllocation).where(
@@ -2039,12 +2219,16 @@ class CapacityExecutionStore:
             .scalars()
             .all()
         )
-        charged_slots = sum(
-            ExecutableIntentBindingV2.model_validate_json(
-                json.dumps(charged.binding_payload)
-            ).concurrency_slots
+        charged_bindings = tuple(
+            (
+                charged,
+                ExecutableIntentBindingV2.model_validate_json(json.dumps(charged.binding_payload)),
+            )
             for charged in charged_rows
             if current is None or charged.id != current.id
+        )
+        charged_slots = sum(
+            charged_binding.concurrency_slots for _row, charged_binding in charged_bindings
         )
         if charged_slots + binding.concurrency_slots > context.epoch.effective_ceiling:
             raise ExecutionConflictError("executable capacity ceiling exhausted")
@@ -2060,6 +2244,16 @@ class CapacityExecutionStore:
         ).scalar_one_or_none()
         if pool is None:
             raise ExecutionConflictError("pool profile is not eligible")
+        charged_commitments = tuple(
+            self._charged_intent_commitment(charged_row, charged_binding)
+            for charged_row, charged_binding in charged_bindings
+            if charged_binding.pool_id == binding.pool_id
+        )
+        fixed_commitments = self._fixed_commitments_with_charged_intents(
+            observation.commitments,
+            charged_commitments,
+        )
+        committed = checked_sum_vectors(tuple(item.resources for item in fixed_commitments))
         total = checked_sum_vectors(
             tuple(
                 ResourceVectorV1.model_validate(node["allocatable"])
@@ -2093,7 +2287,7 @@ class CapacityExecutionStore:
             raise ExecutionConflictError("selected node headroom changed")
         overlapping = tuple(
             item
-            for item in observation.commitments
+            for item in fixed_commitments
             if not item.node_ids or selected.intersection(item.node_ids)
         )
         try:
@@ -2140,6 +2334,97 @@ class CapacityExecutionStore:
             executor_inventory_fresh_until=executor_inventory_fresh_until,
             pool_inventory_fresh_until=pool_inventory_fresh_until,
             allocation_input_valid_until=latest_epoch.input_valid_until,
+        )
+
+    @staticmethod
+    def _charged_intent_commitment(
+        row: CapacityExecutableIntent,
+        binding: ExecutableIntentBindingV2,
+    ) -> ObservedCommitmentV1:
+        state = (
+            "quarantined"
+            if row.state == "quarantined"
+            else "submitting-unknown"
+            if row.state == "submitting-unknown"
+            else "observed"
+            if row.state in {"observed", "terminal", "closing"}
+            else "accepted"
+        )
+        return ObservedCommitmentV1(
+            kind="reserve",
+            commitment_id=str(binding.intent_id),
+            physical_identity=binding.shape_instance_id,
+            reservation_identity=str(binding.intent_id),
+            subject_id=binding.subject_id,
+            subject_incarnation=binding.subject_incarnation,
+            deployment_generation=binding.deployment_generation,
+            pool_id=binding.pool_id,
+            pool_generation=binding.pool_generation,
+            profile_id=binding.profile_id,
+            profile_generation=binding.profile_generation,
+            profile_digest=binding.profile_digest,
+            shape_id=binding.shape_id,
+            resources=binding.resources,
+            state=cast(
+                Literal[
+                    "accepted",
+                    "submitting-unknown",
+                    "observed",
+                    "quarantined",
+                ],
+                state,
+            ),
+            node_ids=binding.node_ids,
+        )
+
+    @staticmethod
+    def _fixed_commitments_with_charged_intents(
+        observed: tuple[ObservedCommitmentV1, ...],
+        charged: tuple[ObservedCommitmentV1, ...],
+    ) -> tuple[ObservedCommitmentV1, ...]:
+        authenticated = tuple(
+            item
+            for item in observed
+            if item.kind == "physical"
+            and item.ownership_state == "authenticated"
+            and item.reservation_identity is not None
+        )
+        deduplicated_charged = tuple(
+            item
+            for item in charged
+            if len(
+                tuple(
+                    candidate
+                    for candidate in authenticated
+                    if CapacityExecutionStore._authenticated_physical_matches_charged_intent(
+                        candidate,
+                        item,
+                    )
+                )
+            )
+            != 1
+        )
+        return (*observed, *deduplicated_charged)
+
+    @staticmethod
+    def _authenticated_physical_matches_charged_intent(
+        observed: ObservedCommitmentV1,
+        charged: ObservedCommitmentV1,
+    ) -> bool:
+        return (
+            observed.reservation_identity == charged.reservation_identity
+            and observed.physical_identity == charged.physical_identity
+            and observed.subject_id == charged.subject_id
+            and observed.subject_incarnation == charged.subject_incarnation
+            and observed.deployment_generation == charged.deployment_generation
+            and observed.pool_id == charged.pool_id
+            and observed.pool_generation == charged.pool_generation
+            and observed.profile_id == charged.profile_id
+            and observed.profile_generation == charged.profile_generation
+            and observed.profile_digest == charged.profile_digest
+            and observed.shape_id == charged.shape_id
+            and observed.resources == charged.resources
+            and observed.node_ids == charged.node_ids
         )
 
     async def _consume_rate_tokens(
@@ -2386,6 +2671,7 @@ class CapacityExecutionStore:
                         CapacityExecutableIntent.id != target.id,
                         (
                             (CapacityExecutableIntent.state == "submitting-unknown")
+                            | (CapacityExecutableIntent.state == "quarantined")
                             | (CapacityExecutableIntent.observed_state == "pending")
                         ),
                     )
@@ -2422,19 +2708,19 @@ class CapacityExecutionStore:
                     totals[scope][0] += slots
                     totals[scope][1] += 1
 
-        counted_reservation_identities: set[str] = set()
+        charged_commitments: list[tuple[ObservedCommitmentV1, str | None, str | None]] = []
         for pending_row in pending:
             pending_binding = ExecutableIntentBindingV2.model_validate_json(
                 json.dumps(pending_row.binding_payload)
             )
-            counted_reservation_identities.add(str(pending_binding.intent_id))
-            add(
-                subject_id=pending_binding.subject_id,
-                account_id=pending_binding.account_id,
-                tier_id=pending_binding.tier_id,
-                pool_id=pending_binding.pool_id,
-                slots=pending_binding.concurrency_slots,
+            charged_commitments.append(
+                (
+                    self._charged_intent_commitment(pending_row, pending_binding),
+                    pending_binding.account_id,
+                    pending_binding.tier_id,
+                )
             )
+        observed_pending: list[ObservedCommitmentV1] = []
         for observation in observations.values():
             for commitment in observation.commitments:
                 if commitment.state not in {
@@ -2444,12 +2730,7 @@ class CapacityExecutionStore:
                     "submitting-unknown",
                 }:
                     continue
-                if (
-                    commitment.kind == "physical"
-                    and commitment.ownership_state == "authenticated"
-                    and commitment.reservation_identity in counted_reservation_identities
-                ):
-                    continue
+                observed_pending.append(commitment)
                 account_id: str | None = None
                 tier_id: str | None = None
                 if commitment.subject_id is not None and commitment.subject_incarnation is not None:
@@ -2465,6 +2746,28 @@ class CapacityExecutionStore:
                     pool_id=commitment.pool_id,
                     slots=commitment.resources.slots,
                 )
+        authenticated = tuple(
+            item
+            for item in observed_pending
+            if item.kind == "physical"
+            and item.ownership_state == "authenticated"
+            and item.reservation_identity is not None
+        )
+        for commitment, account_id, tier_id in charged_commitments:
+            matches = tuple(
+                candidate
+                for candidate in authenticated
+                if self._authenticated_physical_matches_charged_intent(candidate, commitment)
+            )
+            if len(matches) == 1:
+                continue
+            add(
+                subject_id=commitment.subject_id,
+                account_id=account_id,
+                tier_id=tier_id,
+                pool_id=commitment.pool_id,
+                slots=commitment.resources.slots,
+            )
         add(
             subject_id=binding.subject_id,
             account_id=binding.account_id,
@@ -2566,12 +2869,19 @@ class CapacityExecutionStore:
             raise ExecutionConflictError("worker profile changed")
         return row
 
-    def _new_permit(
+    async def _new_permit(
         self,
+        session: AsyncSession,
         row: CapacityExecutableIntent,
         now: datetime,
     ) -> ExecutableLaunchPermitV2:
         binding = ExecutableIntentBindingV2.model_validate_json(json.dumps(row.binding_payload))
+        bootstrap_epoch, bootstrap_evidence = await self._bootstrap_evidence(
+            session,
+            row,
+            required=True,
+        )
+        assert bootstrap_epoch is not None and bootstrap_evidence is not None
         permit_epoch = (row.permit_epoch or 0) + 1
         return ExecutableLaunchPermitV2(
             permit_id=uuid5(_EXECUTION_NAMESPACE, f"permit:{row.intent_id}:{permit_epoch}"),
@@ -2579,6 +2889,74 @@ class CapacityExecutionStore:
             permit_epoch=permit_epoch,
             launch_rank=row.launch_rank,
             expires_at=now + self._permit_ttl,
+            bootstrap_registration_epoch=bootstrap_epoch,
+            bootstrap_evidence_sha256=bootstrap_evidence,
+        )
+
+    async def _new_close(
+        self,
+        session: AsyncSession,
+        row: CapacityExecutableIntent,
+        *,
+        command_sequence: int,
+    ) -> ExecutableIntentCloseV2:
+        binding = ExecutableIntentBindingV2.model_validate_json(json.dumps(row.binding_payload))
+        bootstrap_epoch, bootstrap_evidence = await self._bootstrap_evidence(
+            session,
+            row,
+            required=False,
+        )
+        return ExecutableIntentCloseV2(
+            binding=binding,
+            command_sequence=command_sequence,
+            bootstrap_registration_epoch=bootstrap_epoch,
+            bootstrap_evidence_sha256=bootstrap_evidence,
+        )
+
+    @staticmethod
+    async def _bootstrap_evidence(
+        session: AsyncSession,
+        row: CapacityExecutableIntent,
+        *,
+        required: bool,
+    ) -> tuple[int | None, str | None]:
+        acknowledgement = (
+            await session.execute(
+                select(CapacityExecutableBootstrapAcknowledgement)
+                .where(CapacityExecutableBootstrapAcknowledgement.intent_id == row.intent_id)
+                .with_for_update(read=True)
+            )
+        ).scalar_one_or_none()
+        if acknowledgement is None:
+            if required:
+                raise ExecutionConflictError("protected bootstrap acknowledgement is required")
+            return None, None
+        try:
+            contract = ExecutableBootstrapAcknowledgementV2.model_validate_json(
+                json.dumps(acknowledgement.acknowledgement_payload)
+            )
+        except ValueError as exc:
+            raise ExecutionConflictError(
+                "protected bootstrap acknowledgement payload is invalid"
+            ) from exc
+        if (
+            contract.binding.intent_id != row.intent_id
+            or contract.binding
+            != ExecutableIntentBindingV2.model_validate_json(json.dumps(row.binding_payload))
+            or contract.proposal_epoch != acknowledgement.proposal_epoch
+            or contract.proposal_digest != acknowledgement.proposal_digest
+            or contract.reporter_incarnation != acknowledgement.reporter_incarnation
+            or contract.bootstrap_registration_epoch != acknowledgement.bootstrap_registration_epoch
+            or contract.bootstrap_evidence_sha256 != acknowledgement.bootstrap_evidence_sha256
+            or contract.protected_admission_sha256 != acknowledgement.protected_admission_sha256
+            or canonical_executable_digest(contract) != acknowledgement.acknowledgement_digest
+            or row.bootstrap_registration_epoch != acknowledgement.bootstrap_registration_epoch
+            or row.bootstrap_evidence_sha256 != acknowledgement.bootstrap_evidence_sha256
+        ):
+            raise ExecutionConflictError("protected bootstrap acknowledgement evidence changed")
+        return (
+            acknowledgement.bootstrap_registration_epoch,
+            acknowledgement.bootstrap_evidence_sha256,
         )
 
     @staticmethod
@@ -2623,8 +3001,10 @@ class CapacityExecutionStore:
                 await session.execute(
                     select(CapacityExecutableIntent)
                     .where(
-                        CapacityExecutableIntent.execution_epoch == target.execution.execution_epoch,
-                        CapacityExecutableIntent.allocation_epoch == target.execution.allocation_epoch,
+                        CapacityExecutableIntent.execution_epoch
+                        == target.execution.execution_epoch,
+                        CapacityExecutableIntent.allocation_epoch
+                        == target.execution.allocation_epoch,
                     )
                     .order_by(
                         CapacityExecutableIntent.allocation_epoch,
@@ -2649,9 +3029,7 @@ class CapacityExecutionStore:
             (
                 await session.execute(
                     select(CapacityExecutableProtectedReleaseReceipt)
-                    .where(
-                        CapacityExecutableProtectedReleaseReceipt.intent_id.in_(intent_ids)
-                    )
+                    .where(CapacityExecutableProtectedReleaseReceipt.intent_id.in_(intent_ids))
                     .order_by(
                         CapacityExecutableProtectedReleaseReceipt.intent_id,
                         CapacityExecutableProtectedReleaseReceipt.protected_registration_epoch,
@@ -2761,7 +3139,10 @@ class CapacityExecutionStore:
             return False
         if intent.state in {"closing", "terminal"}:
             return False
-        if intent.terminal_identity is not None and intent.terminal_identity != record.physical_identity:
+        if (
+            intent.terminal_identity is not None
+            and intent.terminal_identity != record.physical_identity
+        ):
             intent.state = "quarantined"
             return False
         if intent.state in {"proposed", "accepted", "launch-ready", "permitted", "bound"}:

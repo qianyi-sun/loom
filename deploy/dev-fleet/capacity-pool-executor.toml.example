@@ -1,0 +1,84 @@
+schema_version = 1
+namespace = "loom-dev"
+executable_new_capacity_ceiling = 0
+executor_image = "ghcr.io/qianyi-sun/loom-capacity-executor@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+service_user = "loom_capacity_executor"
+manager_origin = "https://loom-capacity-manager.loom-dev.svc.cluster.local:8443"
+authority_incarnation = "11111111-1111-4111-8111-111111111111"
+writer_epoch = 1
+configuration_epoch = 1
+execution_epoch = 1
+execution_manifest_sha256 = "3333333333333333333333333333333333333333333333333333333333333333"
+trusted_fleet_release_sha256 = "4444444444444444444444444444444444444444444444444444444444444444"
+
+[[pools]]
+pool_id = "gb10"
+pool_generation = 1
+executor_id = "gb10-executor"
+executor_incarnation = "22222222-2222-4222-8222-222222222221"
+controller_authority_sha256 = "5555555555555555555555555555555555555555555555555555555555555555"
+local_authority_sha256 = "6666666666666666666666666666666666666666666666666666666666666666"
+signing_key_id = "gb10-key-1"
+signing_key_sha256 = "7777777777777777777777777777777777777777777777777777777777777777"
+local_uid = 1001
+slurm_cluster = "gb10"
+controller_host = "gb10-controller.loom.invalid"
+partition = "gb10-workers"
+association = "loom-gb10"
+submitter = "loom"
+qos = "loom"
+profile_id = "gb10-profile"
+profile_generation = 1
+profile_digest = "8888888888888888888888888888888888888888888888888888888888888888"
+config_file = "/etc/loom-capacity-executor/gb10.json"
+state_directory = "/var/lib/loom-capacity-executor/gb10"
+journal_file = "/var/lib/loom-capacity-executor/gb10/executor.journal"
+bearer_token_file = "/run/loom-capacity-executor/gb10/bearer-token"
+tls_ca_file = "/run/loom-capacity-executor/gb10/manager-ca.pem"
+tls_certificate_file = "/run/loom-capacity-executor/gb10/client-certificate.pem"
+tls_private_key_file = "/run/loom-capacity-executor/gb10/client-private-key.pem"
+ownership_key_file = "/run/loom-capacity-executor/gb10/ownership-private-key"
+
+[pools.slurm_executables]
+scontrol = "/usr/bin/scontrol"
+sacctmgr = "/usr/bin/sacctmgr"
+squeue = "/usr/bin/squeue"
+sbatch = "/usr/bin/sbatch"
+scancel = "/usr/bin/scancel"
+sacct = "/usr/bin/sacct"
+
+[[pools]]
+pool_id = "oldlab"
+pool_generation = 1
+executor_id = "oldlab-executor"
+executor_incarnation = "22222222-2222-4222-8222-222222222222"
+controller_authority_sha256 = "9999999999999999999999999999999999999999999999999999999999999999"
+local_authority_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+signing_key_id = "oldlab-key-1"
+signing_key_sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+local_uid = 1001
+slurm_cluster = "oldlab"
+controller_host = "oldlab-controller.loom.invalid"
+partition = "oldlab-workers"
+association = "loom-oldlab"
+submitter = "loom"
+qos = "loom"
+profile_id = "oldlab-profile"
+profile_generation = 1
+profile_digest = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+config_file = "/etc/loom-capacity-executor/oldlab.json"
+state_directory = "/var/lib/loom-capacity-executor/oldlab"
+journal_file = "/var/lib/loom-capacity-executor/oldlab/executor.journal"
+bearer_token_file = "/run/loom-capacity-executor/oldlab/bearer-token"
+tls_ca_file = "/run/loom-capacity-executor/oldlab/manager-ca.pem"
+tls_certificate_file = "/run/loom-capacity-executor/oldlab/client-certificate.pem"
+tls_private_key_file = "/run/loom-capacity-executor/oldlab/client-private-key.pem"
+ownership_key_file = "/run/loom-capacity-executor/oldlab/ownership-private-key"
+
+[pools.slurm_executables]
+scontrol = "/usr/bin/scontrol"
+sacctmgr = "/usr/bin/sacctmgr"
+squeue = "/usr/bin/squeue"
+sbatch = "/usr/bin/sbatch"
+scancel = "/usr/bin/scancel"
+sacct = "/usr/bin/sacct"

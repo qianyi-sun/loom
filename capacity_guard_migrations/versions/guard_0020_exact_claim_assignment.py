@@ -1,7 +1,7 @@
 """Require every executable claim to consume its exact assigned intent.
 
-Revision ID: guard_0014
-Revises: guard_0013
+Revision ID: guard_0020
+Revises: guard_0019
 Create Date: 2026-08-15
 """
 
@@ -12,8 +12,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "guard_0014"
-down_revision: str | Sequence[str] | None = "guard_0013"
+revision: str = "guard_0020"
+down_revision: str | Sequence[str] | None = "guard_0019"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -110,7 +110,7 @@ def upgrade() -> None:
               FROM {SCHEMA}.executable_claim_leases
           ) THEN
             RAISE EXCEPTION
-              'pre-0014 executable claim cannot prove its exact assigned executable intent'
+              'pre-exact-assignment executable claim cannot prove its exact assigned executable intent'
               USING ERRCODE = '55000';
           END IF;
         END
@@ -140,7 +140,7 @@ def downgrade() -> None:
             f"UNION ALL SELECT 1 FROM {SCHEMA}.executable_claim_leases)"
         )
     ).scalar_one():
-        raise RuntimeError("cannot downgrade guard_0014 while protected executable evidence exists")
+        raise RuntimeError("cannot downgrade guard_0020 while protected executable evidence exists")
     op.execute(
         f"DROP TRIGGER executable_claim_leases_exact_assignment ON {SCHEMA}.executable_claim_leases"
     )

@@ -99,6 +99,8 @@ class DevInstanceRecord:
     subject_id: UUID | None = None
     subject_incarnation: UUID | None = None
     candidate_id: UUID | None = None
+    capacity_namespace: str | None = None
+    capacity_database: str | None = None
 
 
 @dataclass(frozen=True)

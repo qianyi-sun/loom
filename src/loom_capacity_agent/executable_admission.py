@@ -15,12 +15,17 @@ from loom_capacity_agent.admission import (
     BoundExecutableWorkerV2,
     DrainedExecutableWorkerV2,
     ExecutableDrainRequestV2,
+    ExecutablePreparedBootstrapRevocationV2,
     ExecutableReleaseReceiptV2,
     ExecutableReleaseRequestV2,
     ExecutableWorkerRegistrationV2,
+    ExecutableWorkerWithdrawalRequestV2,
     PhysicalJobBindingV2,
     PreparedExecutableAdmissionV2,
+    ProtectedIntentObservationV2,
     RegisteredExecutableWorkerV2,
+    RevokedExecutableBootstrapV2,
+    WithdrawnExecutableWorkerV2,
 )
 from loom_capacity_agent.claim_guard import (
     ExecutableClaimProposalV2,
@@ -33,6 +38,7 @@ from loom_capacity_agent.prepared_store import (
 )
 from loom_capacity_manager.executable_contracts import (
     ExecutableBootstrapRegistrationV2,
+    ExecutableIntentBindingV2,
     StrictV2Model,
     canonical_executable_bytes,
     canonical_executable_digest,
@@ -101,9 +107,16 @@ class ExecutableAdmissionStore:
             or getattr(value, "executable", None) is not True
         ):
             raise ExecutableAdmissionError("executable admission subject binding changed")
-        if self._registration is not None and not allow_historical_candidate and (
-            binding.deployment_generation != self._registration.deployment_generation
-            or binding.candidate.publication_sha256 != self._registration.candidate_digest
+        if (
+            self._registration is not None
+            and not allow_historical_candidate
+            and (
+                binding.deployment_generation != self._registration.deployment_generation
+                or binding.candidate.algorithm != self._registration.candidate_identity_algorithm
+                or binding.candidate.identity != self._registration.candidate_identity
+                or binding.candidate.publication_sha256
+                != self._registration.candidate_publication_sha256
+            )
         ):
             raise ExecutableAdmissionError("executable admission candidate binding changed")
 
@@ -286,6 +299,54 @@ class ExecutableAdmissionStore:
             raise ExecutableAdmissionError("protected drain receipt changed")
         return receipt
 
+    async def withdraw_unregistered_worker(
+        self,
+        request: ExecutableWorkerWithdrawalRequestV2,
+    ) -> WithdrawnExecutableWorkerV2:
+        if not isinstance(request, ExecutableWorkerWithdrawalRequestV2):
+            raise TypeError("worker withdrawal requires its schema-v2 contract")
+        receipt = await self._invoke(
+            "withdraw_unregistered_executable_worker",
+            request,
+            WithdrawnExecutableWorkerV2,
+        )
+        if (
+            receipt.intent_id != request.binding.intent_id
+            or receipt.bootstrap_registration_epoch != request.bootstrap_registration_epoch
+            or receipt.protected_registration_epoch != request.protected_registration_epoch
+            or receipt.slurm_job_id != request.slurm_job_id
+            or receipt.ownership_evidence_sha256 != request.ownership_evidence_sha256
+            or receipt.claim_high_water != request.expected_claim_high_water
+            or receipt.live_claim_count != 0
+            or receipt.bootstrap_revoked is not True
+            or receipt.withdrawal_digest != receipt.request_digest
+        ):
+            raise ExecutableAdmissionError("protected worker withdrawal receipt changed")
+        return receipt
+
+    async def revoke_prepared_bootstrap(
+        self,
+        request: ExecutablePreparedBootstrapRevocationV2,
+    ) -> RevokedExecutableBootstrapV2:
+        if not isinstance(request, ExecutablePreparedBootstrapRevocationV2):
+            raise TypeError("prepared bootstrap revocation requires its schema-v2 contract")
+        receipt = await self._invoke(
+            "revoke_prepared_executable_bootstrap",
+            request,
+            RevokedExecutableBootstrapV2,
+        )
+        if (
+            receipt.binding != request.binding
+            or receipt.bootstrap_registration_epoch != request.bootstrap_registration_epoch
+            or receipt.protected_registration_epoch != request.protected_registration_epoch
+            or receipt.claim_high_water != request.expected_claim_high_water
+            or receipt.live_claim_count != 0
+            or receipt.bootstrap_revoked is not True
+            or receipt.protected_release_sha256 != receipt.request_digest
+        ):
+            raise ExecutableAdmissionError("protected prepared revocation receipt changed")
+        return receipt
+
     async def acknowledge_release(
         self,
         request: ExecutableReleaseRequestV2,
@@ -319,6 +380,45 @@ class ExecutableAdmissionStore:
         ):
             raise ExecutableAdmissionError("protected release receipt changed")
         return receipt
+
+    async def observe_intent(
+        self,
+        binding: ExecutableIntentBindingV2,
+    ) -> ProtectedIntentObservationV2:
+        """Read one exact protected intent without granting table access."""
+
+        if not isinstance(binding, ExecutableIntentBindingV2):
+            raise TypeError("executable intent observation requires its schema-v2 binding")
+        if (
+            binding.subject_id != self.subject_id
+            or binding.subject_incarnation != self.subject_incarnation
+        ):
+            raise ExecutableAdmissionError("executable intent observation subject binding changed")
+        async with self._session.begin_nested():
+            returned = (
+                await self._session.execute(
+                    text(
+                        f"SELECT {_SCHEMA}.observe_executable_intent("
+                        ":subject_id, :subject_incarnation, :intent_id)"
+                    ),
+                    {
+                        "subject_id": self.subject_id,
+                        "subject_incarnation": self.subject_incarnation,
+                        "intent_id": binding.intent_id,
+                    },
+                )
+            ).scalar_one()
+            try:
+                observation = parse_protected_response(
+                    returned,
+                    ProtectedIntentObservationV2,
+                    label="executable intent observation procedure",
+                )
+            except CapacityPreparedAdmissionError as exc:
+                raise ExecutableAdmissionError(str(exc)) from exc
+            if observation.binding != binding:
+                raise ExecutableAdmissionError("protected executable intent binding changed")
+        return observation
 
     async def admit_claim(
         self,

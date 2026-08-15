@@ -63,9 +63,7 @@ def _read_existing_destination(destination: Path) -> dict[str, bytes]:
         for filename in _FILENAMES:
             descriptor = os.open(
                 filename,
-                os.O_RDONLY
-                | getattr(os, "O_CLOEXEC", 0)
-                | getattr(os, "O_NOFOLLOW", 0),
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
                 dir_fd=directory,
             )
             try:
@@ -95,11 +93,7 @@ def copy_projected_credentials(source: Path, destination: Path) -> None:
     if not source_root.is_dir():
         raise ValueError("projected credential source must be a directory")
     destination_parent = destination.parent.resolve(strict=True)
-    if (
-        not destination_parent.is_dir()
-        or not destination.name
-        or destination.is_symlink()
-    ):
+    if not destination_parent.is_dir() or not destination.name or destination.is_symlink():
         raise ValueError("owner-only credential destination is invalid")
     source_payloads: dict[str, bytes] = {}
     for filename in _FILENAMES:
@@ -114,9 +108,7 @@ def copy_projected_credentials(source: Path, destination: Path) -> None:
             raise ValueError("projected credential is not a bounded regular file")
         source_descriptor = os.open(
             resolved,
-            os.O_RDONLY
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0),
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
         )
         try:
             opened = os.fstat(source_descriptor)

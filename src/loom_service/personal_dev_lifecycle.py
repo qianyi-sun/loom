@@ -24,6 +24,7 @@ from loom.personal_dev_capacity import (
 from loom.personal_dev_capacity_runtime import (
     KubectlPersonalDevCapacityInstaller,
     PersonalDevCapacityRuntimeConfig,
+    PersonalDevCapacityStatusReader,
     PsycopgPersonalDevCapacityDatabase,
     parse_pool_capabilities,
 )
@@ -51,6 +52,7 @@ logger = logging.getLogger(__name__)
 class PersonalDevCapacityRuntime:
     installer: PersonalDevCapacityInstaller
     projector: CapacityManagerPersonalDevProjector
+    status_reader: PersonalDevCapacityStatusReader
 
 
 def build_personal_dev_capacity_runtime(
@@ -114,21 +116,12 @@ def build_personal_dev_capacity_runtime(
         build_reporter_tls_context(agent_tls_files)
         agent_certificate = read_owner_only_bytes(agent_tls_files.certificate_file)
         agent_private_key = read_owner_only_bytes(agent_tls_files.private_key_file)
-        lifecycle_certificate = read_owner_only_bytes(
-            lifecycle_tls_files.certificate_file
-        )
-        lifecycle_private_key = read_owner_only_bytes(
-            lifecycle_tls_files.private_key_file
-        )
+        lifecycle_certificate = read_owner_only_bytes(lifecycle_tls_files.certificate_file)
+        lifecycle_private_key = read_owner_only_bytes(lifecycle_tls_files.private_key_file)
     except (OSError, ssl.SSLError, TypeError, ValueError) as exc:
         raise RuntimeError("personal-dev capacity runtime credentials are invalid") from exc
-    if (
-        agent_certificate == lifecycle_certificate
-        or agent_private_key == lifecycle_private_key
-    ):
-        raise RuntimeError(
-            "personal-dev lifecycle and reporter agent must use distinct identities"
-        )
+    if agent_certificate == lifecycle_certificate or agent_private_key == lifecycle_private_key:
+        raise RuntimeError("personal-dev lifecycle and reporter agent must use distinct identities")
     try:
         projector = CapacityManagerPersonalDevProjector.from_files(connection)
     except (OSError, ssl.SSLError, TypeError, ValueError) as exc:
@@ -140,12 +133,18 @@ def build_personal_dev_capacity_runtime(
     )
     installer = KubectlPersonalDevCapacityInstaller(
         kubectl=kubectl,
-        database=PsycopgPersonalDevCapacityDatabase(
-            str(settings.dev_instance_database_admin_url)
-        ),
+        database=PsycopgPersonalDevCapacityDatabase(str(settings.dev_instance_database_admin_url)),
         config=config,
     )
-    return PersonalDevCapacityRuntime(installer=installer, projector=projector)
+    return PersonalDevCapacityRuntime(
+        installer=installer,
+        projector=projector,
+        status_reader=PersonalDevCapacityStatusReader(
+            kubectl=kubectl,
+            database_admin_url=str(settings.dev_instance_database_admin_url),
+            projector=projector,
+        ),
+    )
 
 
 class SessionPersonalDevReconciliationAuthority:

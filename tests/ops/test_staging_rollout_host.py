@@ -4579,6 +4579,7 @@ def test_owned_tree_allows_only_an_exact_dangling_external_target(tmp_path: Path
     root = tmp_path / "venv"
     bindir = root / "bin"
     bindir.mkdir(parents=True, mode=0o755)
+    root.chmod(0o755)
     python = bindir / "python"
     target = Path("/usr/bin/python3.99")
     python.symlink_to(target)
@@ -6351,7 +6352,9 @@ def test_git_checkout_authority_rejects_external_worktree_pointer(tmp_path: Path
     uid, gid = os.geteuid(), os.getegid()
     root = tmp_path / "checkout"
     root.mkdir(mode=0o700)
-    (root / ".git").write_text("gitdir: /outside/repository\n", encoding="utf-8")
+    git_pointer = root / ".git"
+    git_pointer.write_text("gitdir: /outside/repository\n", encoding="utf-8")
+    git_pointer.chmod(0o644)
 
     with pytest.raises(host.InstallError, match="Git authority directory is unsafe"):
         host._validate_git_checkout_tree(root, expected_uid=uid, expected_gid=gid)

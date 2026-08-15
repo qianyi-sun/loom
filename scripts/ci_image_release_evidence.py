@@ -260,7 +260,7 @@ def _scan_policy_parameters(platforms: Sequence[str]) -> dict[str, object]:
         "ignore_sha256": TRIVY_IGNORE_SHA256,
         "scan_type": "image",
         "vuln_type": ["os", "library"],
-        "timeout": "10m0s",
+        "timeout": "20m0s",
         "severity": ["CRITICAL"],
         "exit_code": 1,
         "ignore_unfixed": False,
@@ -365,9 +365,7 @@ def architecture_predicate(
                 "build": build,
                 "scan": scan,
             },
-            "internalParameters": {
-                "github": _internal_github(common)
-            },
+            "internalParameters": {"github": _internal_github(common)},
             "resolvedDependencies": [
                 {
                     "uri": (
@@ -471,9 +469,7 @@ def manifest_predicate(
                     "report_sha256": scan_report_digests,
                 },
             },
-            "internalParameters": {
-                "github": _internal_github(common)
-            },
+            "internalParameters": {"github": _internal_github(common)},
             "resolvedDependencies": [
                 {
                     "uri": (

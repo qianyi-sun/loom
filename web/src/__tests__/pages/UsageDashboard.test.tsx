@@ -19,6 +19,7 @@ describe("UsageDashboard", () => {
   });
 
   function mockUsageDashboard({
+    authGate,
     platformAdmin = false,
     usageBody = {
       degraded: false,
@@ -39,6 +40,7 @@ describe("UsageDashboard", () => {
       ],
     },
   }: {
+    authGate?: Promise<void>;
     platformAdmin?: boolean;
     usageBody?: Record<string, unknown>;
   } = {}): FetchMock {
@@ -46,6 +48,7 @@ describe("UsageDashboard", () => {
       async (input: RequestInfo | URL) => {
         const url = String(input);
         if (url.includes("/api/v1/auth/me")) {
+          if (authGate) await authGate;
           return jsonResponse({
             user: {
               id: "user-1",
@@ -127,6 +130,35 @@ describe("UsageDashboard", () => {
     expect(screen.getByText(/loom eval usage --start/)).toHaveTextContent(
       "--team-id team-b",
     );
+  });
+
+  it("waits for session authority before requesting authorization-dependent usage", async () => {
+    let releaseAuth!: () => void;
+    const authGate = new Promise<void>((resolve) => {
+      releaseAuth = resolve;
+    });
+    const fetchMock = mockUsageDashboard({ platformAdmin: true, authGate });
+
+    renderWithProviders(<UsageDashboard />, { route: "/usage" });
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([input]) =>
+        String(input).includes("/api/v1/auth/me"),
+      )).toBe(true);
+    });
+    expect(fetchMock.mock.calls.some(([input]) =>
+      String(input).includes("/api/v1/usage"),
+    )).toBe(false);
+
+    releaseAuth();
+
+    expect(await screen.findByText("Estimated LLM cost")).toBeInTheDocument();
+    const usageRequests = fetchMock.mock.calls.filter(([input]) =>
+      String(input).includes("/api/v1/usage"),
+    );
+    expect(usageRequests).toHaveLength(1);
+    const usageUrl = new URL(String(usageRequests[0]![0]), "http://localhost");
+    expect(usageUrl.searchParams.get("include_batches")).toBe("true");
   });
 
   it("shows token-only cost as not applicable and includes admin batch drilldown", async () => {

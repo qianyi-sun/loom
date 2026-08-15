@@ -266,7 +266,7 @@ project an admitted claim's terminal evidence, and acknowledge terminal worker
 release. Claim admission requires the attempt's current protected assignment to
 name the same intent, allocation epoch, pool, and shape as the exact registered
 worker; an unassigned or cross-intent attempt fails before a lease can persist.
-Guard 0014 activation is fail-closed: it requires zero pre-0014
+Guard 0020 activation is fail-closed: it requires zero pre-exact-assignment
 `executable_claim_leases` rows because guard 0013 stored no immutable
 claim-to-assignment transition reference, so a later lifecycle head cannot
 prove the claim's exact assigned intent at admission time.
@@ -425,3 +425,20 @@ prove v1 isolation, exact current-allocation fencing, crash recovery,
 authority-first release replay, hostile-search-path safety, direct-SQL guards,
 and upgrade/downgrade/re-upgrade parity. Deployment tests separately prove the
 checked-in Package 5A remains at a zero executable ceiling.
+
+## Inert executable bridge package
+
+The executable-v2 package has one global manager spanning production, staging,
+shared development, and personal-development subjects, and exactly one
+controller-local executor for OLDLAB and GB10. Users do not configure pool
+weights, QoS, shapes, profiles, or priorities: `min_slots` defaults to zero,
+architecture-specific demand constrains eligibility, and neutral placement is
+manager-owned. `loom-dev` is shared infrastructure; personal namespaces are
+`loom-dev-<owner>`, never `loom-dev-shared`.
+
+The checked-in executor profile has immutable images and an exact zero
+executable ceiling. Rendering and systemd validation are read-only; no merge
+authorizes activation or live infrastructure mutation. The manager's v2 status
+may report exact active physical Slurm-job intent, but only a matching fresh
+protected personal guard registration, with no later release/drain, can make a
+worker available. Scheduler evidence and pod readiness alone are insufficient.

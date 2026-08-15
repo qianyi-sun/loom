@@ -11,7 +11,7 @@ from typing import Literal, Protocol, cast
 from uuid import UUID
 
 import httpx
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 from loom.personal_dev_environment import PersonalDevReconciliationClaim
 from loom_capacity_agent.client import (
@@ -27,9 +27,25 @@ from loom_capacity_manager.contracts import (
     canonical_bytes,
     canonical_digest,
 )
+from loom_capacity_manager.executable_contracts import ExecutableIntentBindingV2
 
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 _MAX_RESPONSE_BYTES = 64 * 1024
+_EXECUTABLE_INTENT_STATES = frozenset(
+    {
+        "proposed",
+        "accepted",
+        "launch-ready",
+        "permitted",
+        "submitting-unknown",
+        "bound",
+        "observed",
+        "terminal",
+        "closing",
+        "released",
+        "quarantined",
+    }
+)
 
 
 class PersonalDevCapacityProjectionError(RuntimeError):
@@ -38,6 +54,83 @@ class PersonalDevCapacityProjectionError(RuntimeError):
 
 class PersonalDevCapacityProjectionConflictError(PersonalDevCapacityProjectionError):
     """The global configuration epoch changed before projection."""
+
+
+@dataclass(frozen=True, slots=True)
+class PersonalDevCapacityManagerCheckpoint:
+    """Exact manager execution checkpoint used separately from application readiness."""
+
+    configuration_epoch: int
+    execution_state: Literal["shadow", "prepared", "active", "drain-only"]
+    execution_epoch: int
+    executable_new_capacity_ceiling: int
+
+    def __post_init__(self) -> None:
+        if self.execution_state not in {"shadow", "prepared", "active", "drain-only"}:
+            raise ValueError("capacity manager checkpoint execution state is invalid")
+        if type(self.configuration_epoch) is not int or self.configuration_epoch <= 0:
+            raise ValueError("capacity manager checkpoint configuration epoch is invalid")
+        if type(self.execution_epoch) is not int or self.execution_epoch < 0:
+            raise ValueError("capacity manager checkpoint execution epoch is invalid")
+        if (
+            type(self.executable_new_capacity_ceiling) is not int
+            or self.executable_new_capacity_ceiling < 0
+        ):
+            raise ValueError("capacity manager checkpoint ceiling is invalid")
+        if self.execution_state == "shadow":
+            coherent = self.execution_epoch == 0 and self.executable_new_capacity_ceiling == 0
+        elif self.execution_state in {"prepared", "drain-only"}:
+            coherent = self.execution_epoch > 0 and self.executable_new_capacity_ceiling == 0
+        else:
+            coherent = self.execution_epoch > 0 and self.executable_new_capacity_ceiling > 0
+        if not coherent:
+            raise ValueError("capacity manager checkpoint is internally inconsistent")
+
+
+@dataclass(frozen=True, slots=True)
+class PersonalDevCapacitySubjectStatus:
+    """Fresh manager-owned physical intent evidence for one personal subject."""
+
+    subject_id: UUID
+    subject_incarnation: UUID
+    deployment_generation: int
+    checkpoint: PersonalDevCapacityManagerCheckpoint
+    capacity_prepared: bool
+    capacity_status: Literal["shadow", "prepared", "waiting", "available"]
+    active_bindings: tuple[ExecutableIntentBindingV2, ...]
+
+    def __post_init__(self) -> None:
+        if not self.capacity_prepared:
+            raise ValueError("manager subject status is not capacity prepared")
+        if len({binding.intent_id for binding in self.active_bindings}) != len(
+            self.active_bindings
+        ):
+            raise ValueError("manager subject status has duplicate active bindings")
+        for binding in self.active_bindings:
+            if (
+                binding.subject_id != self.subject_id
+                or binding.subject_incarnation != self.subject_incarnation
+                or binding.deployment_generation != self.deployment_generation
+                or binding.execution.execution_epoch != self.checkpoint.execution_epoch
+            ):
+                raise ValueError("manager active binding differs from subject status")
+
+
+@dataclass(frozen=True, slots=True)
+class PersonalDevCapacityAvailability:
+    """Non-authoritative presentation of fresh manager and guard evidence."""
+
+    capacity_status: Literal["shadow", "prepared", "waiting", "available"]
+    capacity_prepared: bool
+    worker_available: bool
+
+    def __post_init__(self) -> None:
+        if self.capacity_status == "available" and not (
+            self.capacity_prepared and self.worker_available
+        ):
+            raise ValueError("available capacity requires protected worker evidence")
+        if self.worker_available != (self.capacity_status == "available"):
+            raise ValueError("worker availability must match available capacity status")
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,8 +181,7 @@ class PersonalDevCapacityInstallation:
             not self.supported_pool_ids
             or self.supported_pool_ids != tuple(sorted(set(self.supported_pool_ids)))
             or not self.supported_architectures
-            or self.supported_architectures
-            != tuple(sorted(set(self.supported_architectures)))
+            or self.supported_architectures != tuple(sorted(set(self.supported_architectures)))
         ):
             raise ValueError("capacity installation capabilities must be nonempty and canonical")
 
@@ -145,7 +237,7 @@ class PersonalDevCapacityInstaller(Protocol):
 
 
 class PersonalDevCapacityProjector(Protocol):
-    async def current_configuration_epoch(self) -> int: ...
+    async def current_manager_checkpoint(self) -> PersonalDevCapacityManagerCheckpoint: ...
 
     async def project(
         self,
@@ -163,6 +255,69 @@ class _ProjectionResponseV1(BaseModel):
     subject: SubjectConfigurationV1
     account: AccountPolicyV1
     replayed: bool
+
+
+class _SubjectStatusResponseV2(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schema_version: Literal[2]
+    subject_id: UUID
+    subject_incarnation: UUID
+    deployment_generation: int
+    configuration_epoch: int
+    execution_epoch: int
+    execution_state: Literal["shadow", "prepared", "active", "drain-only"]
+    executable_new_capacity_ceiling: int
+    capacity_prepared: bool
+    capacity_status: Literal["shadow", "prepared", "waiting", "available"]
+    worker_available: bool
+    active_capacity_intents: tuple[ExecutableIntentBindingV2, ...]
+    active_capacity_intent_count: int
+    active_capacity_slots: int
+    quarantined_intent_count: int
+    intent_state_counts: dict[str, int]
+    blockers: tuple[str, ...]
+
+    @model_validator(mode="after")
+    def _coherent_status(self) -> _SubjectStatusResponseV2:
+        state_counts = self.intent_state_counts
+        if not set(state_counts) <= _EXECUTABLE_INTENT_STATES or any(
+            type(value) is not int or value < 0 for value in state_counts.values()
+        ):
+            raise ValueError("capacity manager intent state counts are invalid")
+        if self.quarantined_intent_count != state_counts.get("quarantined", 0):
+            raise ValueError("capacity manager quarantine count is inconsistent")
+        if self.active_capacity_intent_count != len(self.active_capacity_intents):
+            raise ValueError("capacity manager active binding count is inconsistent")
+        if self.active_capacity_slots != sum(
+            binding.concurrency_slots for binding in self.active_capacity_intents
+        ):
+            raise ValueError("capacity manager active binding slots are inconsistent")
+        if len({binding.intent_id for binding in self.active_capacity_intents}) != len(
+            self.active_capacity_intents
+        ):
+            raise ValueError("capacity manager active bindings are duplicated")
+        if self.execution_state == "shadow" and (
+            self.execution_epoch != 0
+            or self.executable_new_capacity_ceiling != 0
+            or self.capacity_status != "shadow"
+            or self.active_capacity_intents
+        ):
+            raise ValueError("capacity manager shadow status is inconsistent")
+        if self.execution_state in {"prepared", "drain-only"} and (
+            self.execution_epoch <= 0
+            or self.executable_new_capacity_ceiling != 0
+            or self.capacity_status != "prepared"
+            or self.active_capacity_intents
+        ):
+            raise ValueError("capacity manager prepared status is inconsistent")
+        if self.execution_state == "active" and (
+            self.execution_epoch <= 0
+            or self.executable_new_capacity_ceiling <= 0
+            or self.capacity_status != "waiting"
+        ):
+            raise ValueError("capacity manager active status is inconsistent")
+        return self
 
 
 class CapacityManagerPersonalDevProjector:
@@ -235,7 +390,7 @@ class CapacityManagerPersonalDevProjector:
                 "capacity manager returned invalid JSON"
             ) from exc
 
-    async def current_configuration_epoch(self) -> int:
+    async def current_manager_checkpoint(self) -> PersonalDevCapacityManagerCheckpoint:
         try:
             response = await self._http.get(f"{self._origin}/v1/status", headers=self._headers)
         except httpx.HTTPError as exc:
@@ -249,16 +404,100 @@ class CapacityManagerPersonalDevProjector:
         payload = self._bounded_json(response)
         if not isinstance(payload, dict):
             raise PersonalDevCapacityProjectionError("capacity manager status is invalid")
-        epoch = payload.get("configuration_epoch")
-        if type(epoch) is not int or epoch <= 0:
-            raise PersonalDevCapacityProjectionError(
-                "capacity manager has no active configuration epoch"
+        try:
+            return PersonalDevCapacityManagerCheckpoint(
+                configuration_epoch=cast(int, payload.get("configuration_epoch")),
+                execution_state=cast(
+                    Literal["shadow", "prepared", "active", "drain-only"],
+                    payload.get("execution_state"),
+                ),
+                execution_epoch=cast(int, payload.get("execution_epoch")),
+                executable_new_capacity_ceiling=cast(
+                    int, payload.get("executable_new_capacity_ceiling")
+                ),
             )
-        if payload.get("executable_new_capacity_ceiling") != 0:
+        except (TypeError, ValueError) as exc:
             raise PersonalDevCapacityProjectionError(
-                "capacity manager crossed the zero-execution lifecycle boundary"
+                "capacity manager checkpoint is invalid"
+            ) from exc
+
+    async def subject_status(
+        self,
+        *,
+        subject_id: UUID,
+        subject_incarnation: UUID,
+        deployment_generation: int,
+    ) -> PersonalDevCapacitySubjectStatus:
+        """Read the bounded exact manager inventory for one stored identity."""
+
+        if not isinstance(subject_id, UUID) or not isinstance(subject_incarnation, UUID):
+            raise TypeError("capacity subject status requires exact UUID identity")
+        if type(deployment_generation) is not int or deployment_generation <= 0:
+            raise ValueError("capacity subject status deployment generation is invalid")
+        try:
+            response = await self._http.get(
+                f"{self._origin}/v2/status/subjects/{subject_id}", headers=self._headers
             )
-        return epoch
+        except httpx.HTTPError as exc:
+            raise PersonalDevCapacityProjectionError(
+                "capacity manager subject status request failed"
+            ) from exc
+        if response.status_code != 200:
+            raise PersonalDevCapacityProjectionError(
+                f"capacity manager subject status returned {response.status_code}"
+            )
+        try:
+            self._bounded_json(response)
+            parsed = _SubjectStatusResponseV2.model_validate_json(response.content)
+            checkpoint = PersonalDevCapacityManagerCheckpoint(
+                configuration_epoch=parsed.configuration_epoch,
+                execution_state=parsed.execution_state,
+                execution_epoch=parsed.execution_epoch,
+                executable_new_capacity_ceiling=parsed.executable_new_capacity_ceiling,
+            )
+            result = PersonalDevCapacitySubjectStatus(
+                subject_id=parsed.subject_id,
+                subject_incarnation=parsed.subject_incarnation,
+                deployment_generation=parsed.deployment_generation,
+                checkpoint=checkpoint,
+                capacity_prepared=parsed.capacity_prepared,
+                capacity_status=parsed.capacity_status,
+                active_bindings=parsed.active_capacity_intents,
+            )
+        except (TypeError, ValidationError, ValueError) as exc:
+            raise PersonalDevCapacityProjectionError(
+                "capacity manager subject status is invalid"
+            ) from exc
+        if (
+            result.subject_id != subject_id
+            or result.subject_incarnation != subject_incarnation
+            or result.deployment_generation != deployment_generation
+            or parsed.worker_available
+            or parsed.active_capacity_intent_count != len(result.active_bindings)
+            or parsed.active_capacity_slots
+            != sum(binding.concurrency_slots for binding in result.active_bindings)
+            or parsed.quarantined_intent_count < 0
+            or any(
+                type(value) is not int or value < 0 for value in parsed.intent_state_counts.values()
+            )
+            or tuple(sorted(set(parsed.blockers))) != parsed.blockers
+        ):
+            raise PersonalDevCapacityProjectionError(
+                "capacity manager subject status differs from the exact stored identity"
+            )
+        if checkpoint.execution_state == "shadow" and (
+            result.capacity_status != "shadow" or result.active_bindings
+        ):
+            raise PersonalDevCapacityProjectionError("capacity manager shadow status is incoherent")
+        if checkpoint.execution_state in {"prepared", "drain-only"} and (
+            result.capacity_status != "prepared" or result.active_bindings
+        ):
+            raise PersonalDevCapacityProjectionError(
+                "capacity manager prepared status is incoherent"
+            )
+        if checkpoint.execution_state == "active" and result.capacity_status != "waiting":
+            raise PersonalDevCapacityProjectionError("capacity manager active status is incoherent")
+        return result
 
     async def project(
         self,
@@ -368,9 +607,7 @@ def personal_dev_capacity_projection(
         raise ValueError("expected global capacity configuration epoch must be positive")
     request = DynamicDevelopmentSubjectProjectionV1(
         expected_configuration_epoch=expected_configuration_epoch,
-        operation_kind=cast(
-            Literal["create", "update", "capacity", "destroy"], operation.kind
-        ),
+        operation_kind=cast(Literal["create", "update", "capacity", "destroy"], operation.kind),
         operation_id=operation.id,
         operation_epoch=operation.operation_epoch,
         environment_name=operation.environment_name,
@@ -451,8 +688,7 @@ def personal_dev_capacity_retirement_projection(
         raise ValueError("expected global capacity configuration epoch must be positive")
     protocols = candidate.publication_json.get("protocol_versions")
     if not isinstance(protocols, dict) or any(
-        not isinstance(key, str) or not isinstance(value, str)
-        for key, value in protocols.items()
+        not isinstance(key, str) or not isinstance(value, str) for key, value in protocols.items()
     ):
         raise ValueError("personal-dev candidate protocol publication is invalid")
     supported_pool_ids = operation.capacity_supported_pool_ids
@@ -481,9 +717,7 @@ def personal_dev_capacity_retirement_projection(
         demand_reporter_token_sha256=cast(str, operation.capacity_reporter_token_sha256),
         local_activation_sha256=cast(str, operation.local_activation_sha256),
         protected_admission_sha256=cast(str, operation.protected_admission_sha256),
-        capacity_agent_installation_sha256=cast(
-            str, operation.capacity_agent_installation_sha256
-        ),
+        capacity_agent_installation_sha256=cast(str, operation.capacity_agent_installation_sha256),
         supported_pool_ids=supported_pool_ids,
         supported_architectures=supported_architectures,
         protocol_versions=protocols,
@@ -500,13 +734,16 @@ def personal_dev_capacity_retirement_projection(
 
 __all__ = [
     "CapacityManagerPersonalDevProjector",
+    "PersonalDevCapacityAvailability",
     "PersonalDevCapacityInstallation",
     "PersonalDevCapacityInstaller",
+    "PersonalDevCapacityManagerCheckpoint",
     "PersonalDevCapacityManagerConnection",
     "PersonalDevCapacityProjectionConflictError",
     "PersonalDevCapacityProjectionError",
     "PersonalDevCapacityProjectionResult",
     "PersonalDevCapacityProjector",
+    "PersonalDevCapacitySubjectStatus",
     "personal_dev_capacity_projection",
     "personal_dev_capacity_retirement_projection",
 ]

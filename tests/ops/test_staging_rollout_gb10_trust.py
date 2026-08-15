@@ -92,6 +92,7 @@ def _lock_path(tmp_path: Path) -> Path:
 def _known_hosts_path(tmp_path: Path) -> Path:
     path = tmp_path / "etc" / "loom" / "staging-rollout-gb10-known-hosts"
     path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.chmod(0o755)
     entries = []
     for number in range(1, 16):
         target = (

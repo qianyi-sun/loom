@@ -32,6 +32,12 @@ def _args(module: Any, *extra: str) -> Any:
             "loom-rehearsal-abc123",
             "--kubeconfig",
             "/var/lib/loom-staging-rollout/credentials/rehearsal-kubeconfig",
+            "--global-execution-witness-json",
+            "/etc/loom/credentials/global-execution/gb10-witness.json",
+            "--manager-public-key",
+            "/etc/loom/credentials/global-execution/manager-ed25519.pub",
+            "--expected-manager-public-key-sha256-file",
+            "/etc/loom/credentials/global-execution/manager-ed25519.pub.sha256",
             "--validate-only",
             *extra,
         ]

@@ -6,10 +6,18 @@ from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.auth import AuthContext
-from loom.db.schema import ProviderConnection, Team, User
+from loom.db.schema import (
+    ApiIdempotencyRecord,
+    JudgeExecutionProfile,
+    ProviderConnection,
+    RecipeProviderBinding,
+    Team,
+    User,
+)
 from loom.pipeline.control_bindings import (
     JudgeExecutionProfileApplyV1,
     RecipeProviderBindingApplyV1,
@@ -198,10 +206,46 @@ async def test_admin_apply_is_versioned_idempotent_and_public_list_is_redacted(
             expected_version=None,
         )
         assert not replay and replay_again and first == again
-    resolver = SqlPipelineRecipeBindingResolver(sessions)
-    public = await resolver.list(
-        team_id=team_id, recipe_name="behavior-recovery", recipe_version=1
-    )
-    assert [item["profile_name"] for item in public] == ["alternate_profile", "codex_profile"]
-    assert all("provider_connection_id" not in item for item in public)
-    await engine.dispose()
+    try:
+        resolver = SqlPipelineRecipeBindingResolver(sessions)
+        public = await resolver.list(
+            team_id=team_id, recipe_name="behavior-recovery", recipe_version=1
+        )
+        assert [item["profile_name"] for item in public] == [
+            "alternate_profile",
+            "codex_profile",
+        ]
+        assert all("provider_connection_id" not in item for item in public)
+    finally:
+        try:
+            async with sessions() as session, session.begin():
+                await session.execute(
+                    delete(JudgeExecutionProfile).where(
+                        JudgeExecutionProfile.provider_connection_id.in_((openai_id, anthropic_id))
+                    )
+                )
+                await session.execute(
+                    delete(RecipeProviderBinding).where(
+                        RecipeProviderBinding.provider_connection_id.in_((openai_id, anthropic_id))
+                    )
+                )
+                await session.execute(
+                    delete(ApiIdempotencyRecord).where(
+                        ApiIdempotencyRecord.team_id.is_(None),
+                        ApiIdempotencyRecord.endpoint.in_(
+                            ("judge_profile_apply", "provider_binding_apply")
+                        ),
+                        ApiIdempotencyRecord.idempotency_key.in_(
+                            ("create-codex_profile", "create-alternate_profile", "create-primitive")
+                        ),
+                    )
+                )
+                await session.execute(
+                    delete(ProviderConnection).where(
+                        ProviderConnection.id.in_((openai_id, anthropic_id))
+                    )
+                )
+                await session.execute(delete(User).where(User.id == actor_id))
+                await session.execute(delete(Team).where(Team.id == team_id))
+        finally:
+            await engine.dispose()

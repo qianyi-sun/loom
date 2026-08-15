@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Annotated, Any, Literal
@@ -22,6 +23,8 @@ from loom_capacity_guard.contracts import (
     canonical_digest,
 )
 from loom_capacity_manager.contracts import MAX_FIXED_CLAIMS_PER_REPORT, MAX_POOLS
+
+_LOWER_HEX = re.compile(r"^[0-9a-f]+$")
 
 
 def _utc(value: datetime) -> datetime:
@@ -43,8 +46,23 @@ class AgentRegistrationV1(StrictGuardModel):
     allocation_epoch: Literal[0] = 0
     reporter_high_water: Literal[0] = 0
     candidate_digest: Digest
+    candidate_identity_algorithm: Literal["git-sha1", "source-sha256"] = "source-sha256"
+    candidate_identity: Annotated[str, Field(min_length=40, max_length=64)]
+    candidate_publication_sha256: Digest
     deployment_generation: PositiveGeneration
     configuration_generation: PositiveGeneration
+
+    @model_validator(mode="before")
+    @classmethod
+    def _default_candidate_identity(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        digest = normalized.get("candidate_digest")
+        if isinstance(digest, str):
+            normalized.setdefault("candidate_identity", digest)
+            normalized.setdefault("candidate_publication_sha256", digest)
+        return normalized
 
     @model_validator(mode="after")
     def _distinct_incarnations(self) -> AgentRegistrationV1:
@@ -58,6 +76,12 @@ class AgentRegistrationV1(StrictGuardModel):
             raise ValueError(
                 "subject, authority, agent, and reporter incarnations must be distinct"
             )
+        expected = 40 if self.candidate_identity_algorithm == "git-sha1" else 64
+        if (
+            len(self.candidate_identity) != expected
+            or _LOWER_HEX.fullmatch(self.candidate_identity) is None
+        ):
+            raise ValueError("candidate identity does not match its algorithm")
         return self
 
 

@@ -28,10 +28,11 @@ def _guard_config(database: dict[str, object]) -> AlembicConfig:
     os.environ["LOOM_CAPACITY_GUARD_OWNER_ROLE"] = _value(database, "owner_role")
     os.environ["LOOM_CAPACITY_GUARD_AGENT_ROLE"] = _value(database, "agent_role")
     os.environ["LOOM_CAPACITY_GUARD_EXECUTOR_ROLE"] = _value(database, "executor_role")
+    os.environ["LOOM_CAPACITY_GUARD_OBSERVER_ROLE"] = _value(database, "observer_role")
     return cfg
 
 
-def test_executor_role_is_distinct_and_has_only_guard_0013_procedures(
+def test_executor_role_is_distinct_and_has_only_bounded_guard_procedures(
     capacity_guard_database: dict[str, object],
 ) -> None:
     engine = create_engine(_value(capacity_guard_database, "admin_url"))
@@ -110,8 +111,11 @@ def test_executor_role_is_distinct_and_has_only_guard_0013_procedures(
             "admit_executable_claim",
             "begin_executable_worker_drain",
             "bind_executable_slurm_job",
+            "observe_executable_intent",
             "prepare_executable_worker",
             "register_executable_worker",
+            "revoke_prepared_executable_bootstrap",
+            "withdraw_unregistered_executable_worker",
         }
         assert agent_executable_routines == set()
     finally:
@@ -127,13 +131,13 @@ def test_guard_0013_downgrade_revokes_executor_schema_usage(
     try:
         command.downgrade(cfg, "guard_0012")
         with engine.connect() as connection:
-            assert connection.execute(
-                text(
-                    "SELECT has_schema_privilege("
-                    ":executor, 'loom_capacity_guard', 'USAGE')"
-                ),
-                {"executor": executor},
-            ).scalar_one() is False
+            assert (
+                connection.execute(
+                    text("SELECT has_schema_privilege(:executor, 'loom_capacity_guard', 'USAGE')"),
+                    {"executor": executor},
+                ).scalar_one()
+                is False
+            )
     finally:
         command.upgrade(cfg, "head")
         engine.dispose()
@@ -157,13 +161,13 @@ def test_guard_0013_downgrade_revokes_persisted_executor_after_role_drift(
         monkeypatch.setenv("LOOM_CAPACITY_GUARD_EXECUTOR_ROLE", drifted_executor)
         command.downgrade(cfg, "guard_0012")
         with engine.connect() as connection:
-            assert connection.execute(
-                text(
-                    "SELECT has_schema_privilege("
-                    ":executor, 'loom_capacity_guard', 'USAGE')"
-                ),
-                {"executor": persisted_executor},
-            ).scalar_one() is False
+            assert (
+                connection.execute(
+                    text("SELECT has_schema_privilege(:executor, 'loom_capacity_guard', 'USAGE')"),
+                    {"executor": persisted_executor},
+                ).scalar_one()
+                is False
+            )
     finally:
         monkeypatch.setenv("LOOM_CAPACITY_GUARD_EXECUTOR_ROLE", persisted_executor)
         command.upgrade(cfg, "head")

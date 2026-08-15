@@ -24,11 +24,11 @@ CONFIG_BYTES = (
     b"    - vuln\n"
     b"severity:\n"
     b"  - CRITICAL\n"
-    b"timeout: 10m0s\n"
+    b"timeout: 20m0s\n"
     b"vulnerability:\n"
     b"  ignore-unfixed: false\n"
 )
-CONFIG_SHA256 = "35492da1d08b142bd1489ac54ecdedab62634b7b3095a37cebbe10b61df1adac"
+CONFIG_SHA256 = "bd8896276b5d8d00d8bb3c3d7a51d359b4931ea2811c21cb8ed692766a7eb8cf"
 IGNORE_BYTES = (
     b"vulnerabilities:\n"
     b"  - id: CVE-2023-45853\n"
@@ -114,9 +114,7 @@ def test_temporary_exceptions_cover_only_required_unfixed_packages() -> None:
     ):
         assert exceptions[vulnerability_id].purls == expected_perl_purls
 
-    assert exceptions["CVE-2026-43185"].purls == (
-        "pkg:deb/debian/linux-libc-dev",
-    )
+    assert exceptions["CVE-2026-43185"].purls == ("pkg:deb/debian/linux-libc-dev",)
     assert exceptions["CVE-2025-7458"].purls == ("pkg:deb/debian/libsqlite3-0",)
     assert exceptions["CVE-2026-6653"].purls == ("pkg:deb/debian/libxml2",)
     assert exceptions["CVE-2023-45853"].purls == ("pkg:deb/debian/zlib1g",)
@@ -262,8 +260,6 @@ def test_workflow_validates_complete_reports_before_hashing_or_recording() -> No
         "Record trusted scan digest"
     )
     digest_step = next(
-        step
-        for step in publish_steps
-        if step.get("name") == "Record trusted scan digest"
+        step for step in publish_steps if step.get("name") == "Record trusted scan digest"
     )
     assert 'sha256sum "$report"' in digest_step["run"]

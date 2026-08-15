@@ -15,13 +15,16 @@ from threading import Event, Thread
 from uuid import UUID, uuid4
 
 import pytest
+from alembic import command
+from alembic.config import Config as AlembicConfig
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, event, select, text, update
+from sqlalchemy import create_engine, delete, event, select, text, update
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from loom_capacity_manager.allocator import ShadowAllocatorError, allocate_shadow
 from loom_capacity_manager.api import (
@@ -30,7 +33,7 @@ from loom_capacity_manager.api import (
     _writer_matches_authority,
     create_app,
 )
-from loom_capacity_manager.auth import CapacityPrincipalVerifier
+from loom_capacity_manager.auth import CapacityPrincipal, CapacityPrincipalVerifier
 from loom_capacity_manager.config import CapacityManagerSettings, build_uvicorn_kwargs
 from loom_capacity_manager.contracts import (
     MAX_CONTRACT_BYTES,
@@ -42,7 +45,10 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableBootstrapAcknowledgementV2,
     ExecutableBootstrapProposalV2,
     ExecutableIntentBindingV2,
+    ExecutableReservationAcceptanceV2,
+    ExecutableSubmissionRecoveryV2,
     ExecutionActivationV2,
+    ExecutionContextV2,
     ExecutionFenceV2,
 )
 from loom_capacity_manager.execution_store import (
@@ -57,8 +63,16 @@ from loom_capacity_manager.models import (
     CapacityAuthorityState,
 )
 from loom_capacity_manager.ownership import public_key_fingerprint
-from loom_capacity_manager.reconciler import reconcile_shadow_once
-from loom_capacity_manager.store import CapacityManagementStore, StaleWriterError, WriterFence
+from loom_capacity_manager.reconciler import (
+    ReconciliationFailurePersistenceError,
+    reconcile_shadow_once,
+)
+from loom_capacity_manager.store import (
+    CapacityManagementStore,
+    ExecutionPreparationDisabledError,
+    StaleWriterError,
+    WriterFence,
+)
 from tests.capacity_execution_fixtures import (
     execution_policy,
     register_execution_executors,
@@ -91,6 +105,10 @@ OLDLAB_EXECUTOR_TOKEN = "oldlab-executor-secret"
 OLDLAB_V2_EXECUTOR_TOKEN = "oldlab-v2-executor-secret"
 OLDLAB_EXECUTOR_INCARNATION = UUID("00000000-0000-4000-8000-000000000601")
 OLDLAB_OWNERSHIP_PRIVATE_KEY = Ed25519PrivateKey.from_private_bytes(b"\x03" * 32)
+V2_TRANCHE_ID = UUID(int=41)
+V2_INTENT_ID = UUID(int=42)
+V2_PERMIT_ID = UUID(int=43)
+V2_ACCEPTED_INTENT_ID = UUID(int=44)
 
 
 def _v2_intent_binding() -> ExecutableIntentBindingV2:
@@ -178,6 +196,143 @@ def _principal(
     }
 
 
+def _execution_fence() -> ExecutionFenceV2:
+    return ExecutionFenceV2(
+        authority_incarnation=AUTHORITY_ID,
+        writer_epoch=1,
+        configuration_epoch=1,
+        execution_epoch=2,
+        execution_manifest_sha256="c" * 64,
+        execution_state="active",
+        executable_new_capacity_ceiling=1,
+        executable_new_capacity_rate_per_minute=1,
+        trusted_fleet_release_sha256="d" * 64,
+        allocation_epoch=3,
+    )
+
+
+def _intent_binding_v2(
+    *,
+    pool_id: str = "oldlab",
+    pool_generation: int = 1,
+    executor_id: str = "oldlab-executor",
+    executor_incarnation: UUID = OLDLAB_EXECUTOR_INCARNATION,
+) -> ExecutableIntentBindingV2:
+    return ExecutableIntentBindingV2(
+        execution=_execution_fence(),
+        tranche_id=V2_TRANCHE_ID,
+        intent_id=V2_INTENT_ID,
+        shape_instance_id="shape-1",
+        subject_id=SUBJECT_ID,
+        subject_incarnation=SUBJECT_INCARNATION,
+        account_id="owner-1",
+        tier_id="development",
+        candidate=CandidateBindingV2(
+            algorithm="source-sha256",
+            identity="1" * 64,
+            publication_sha256="2" * 64,
+        ),
+        candidate_generation=1,
+        deployment_generation=1,
+        pool_id=pool_id,
+        pool_generation=pool_generation,
+        executor_id=executor_id,
+        executor_incarnation=executor_incarnation,
+        shape_id="shape-a",
+        profile_id="profile-a",
+        profile_generation=1,
+        profile_digest="3" * 64,
+        concurrency_slots=1,
+        resources=ResourceVectorV1(
+            slots=1,
+            cpu_millicores=1000,
+            memory_bytes=1_073_741_824,
+        ),
+        node_ids=("node-1",),
+    )
+
+
+def _v2_acceptance_payload(
+    *,
+    pool_id: str = "oldlab",
+    pool_generation: int = 1,
+    executor_id: str = "oldlab-executor",
+    executor_incarnation: UUID = OLDLAB_EXECUTOR_INCARNATION,
+    tranche_id: UUID = V2_TRANCHE_ID,
+) -> dict[str, object]:
+    return ExecutableReservationAcceptanceV2(
+        execution=_execution_fence(),
+        tranche_id=tranche_id,
+        proposal_digest="4" * 64,
+        pool_id=pool_id,
+        pool_generation=pool_generation,
+        executor_id=executor_id,
+        executor_incarnation=executor_incarnation,
+        command_sequence=5,
+    ).model_dump(mode="json")
+
+
+def _v2_submission_recovery_payload(
+    *,
+    binding: ExecutableIntentBindingV2 | None = None,
+    permit_id: UUID = V2_PERMIT_ID,
+) -> dict[str, object]:
+    resolved_binding = _intent_binding_v2() if binding is None else binding
+    return ExecutableSubmissionRecoveryV2(
+        binding=resolved_binding,
+        permit_id=permit_id,
+        permit_digest="5" * 64,
+        command_sequence=6,
+        inventory_sequence=2,
+        inventory_digest="6" * 64,
+        controller_query_completed_at=datetime(2026, 8, 12, 12, 0, tzinfo=UTC),
+        submit_process_absent=True,
+        scheduler_submission_absent=True,
+        controller_evidence_sha256="7" * 64,
+    ).model_dump(mode="json")
+
+
+class RecordingExecutionStore:
+    def __init__(self) -> None:
+        self.accept_calls = 0
+        self.recovery_calls = 0
+        self.last_acceptance: ExecutableReservationAcceptanceV2 | None = None
+        self.last_recovery: ExecutableSubmissionRecoveryV2 | None = None
+
+    async def accept_reservation(self, _session, acceptance: ExecutableReservationAcceptanceV2):  # type: ignore[no-untyped-def]
+        self.accept_calls += 1
+        self.last_acceptance = acceptance
+        return {
+            "tranche_id": str(acceptance.tranche_id),
+            "intent_ids": [str(V2_ACCEPTED_INTENT_ID)],
+            "receipt_digest": "8" * 64,
+            "replayed": False,
+            "executable": True,
+        }
+
+    async def recover_unsubmitted_permit(
+        self,
+        _session,  # type: ignore[no-untyped-def]
+        recovery: ExecutableSubmissionRecoveryV2,
+    ) -> dict[str, object]:
+        self.recovery_calls += 1
+        self.last_recovery = recovery
+        return {
+            "intent_id": str(recovery.binding.intent_id),
+            "receipt_digest": "9" * 64,
+            "replayed": False,
+            "executable": True,
+        }
+
+
+class StaticPrincipalVerifier:
+    def __init__(self, principal: CapacityPrincipal) -> None:
+        self._principal = principal
+
+    def verify_bearer(self, _header: str | None) -> CapacityPrincipal:
+        return self._principal
+
+
 def _owner_file(path: Path, value: str) -> Path:
     path.write_text(value, encoding="utf-8")
     path.chmod(0o600)
@@ -188,59 +343,52 @@ async def _reset_capacity_database(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory() as session, session.begin():
-        for table_name in (
-            "capacity_allocations",
-            "capacity_allocation_epochs",
-            "capacity_execution_executors",
-            "capacity_execution_epochs",
-        ):
-            await session.execute(
-                text(f"ALTER TABLE {table_name} DISABLE TRIGGER USER")
-            )
+        authority_transition_trigger_disabled = False
         await session.execute(
             text(
                 "ALTER TABLE capacity_authority_state DISABLE TRIGGER "
                 "capacity_authority_execution_transition_guard"
             )
         )
-        await session.execute(
-            update(CapacityAuthorityState)
-            .where(CapacityAuthorityState.singleton_id == 1)
-            .values(
-                authority_incarnation=AUTHORITY_ID,
-                writer_epoch=0,
-                recovery_state="shadow",
-                increase_freeze=True,
-                increase_freeze_reason="initial_shadow_freeze",
-                executable_new_capacity_ceiling=0,
-                execution_epoch=0,
-                execution_state="shadow",
-                execution_manifest_sha256=None,
-                global_pending_slot_ceiling=0,
-                global_pending_job_ceiling=0,
-                global_submission_rate_ceiling=0,
-            )
-        )
-        for table in reversed(Base.metadata.sorted_tables):
-            if table.name != CapacityAuthorityState.__tablename__:
-                await session.execute(delete(table))
-        await session.execute(
-            text(
-                "ALTER TABLE capacity_authority_state ENABLE TRIGGER "
-                "capacity_authority_execution_transition_guard"
-            )
-        )
-        for table_name in reversed(
-            (
-                "capacity_allocations",
-                "capacity_allocation_epochs",
-                "capacity_execution_executors",
-                "capacity_execution_epochs",
-            )
-        ):
+        authority_transition_trigger_disabled = True
+        try:
             await session.execute(
-                text(f"ALTER TABLE {table_name} ENABLE TRIGGER USER")
+                update(CapacityAuthorityState)
+                .where(CapacityAuthorityState.singleton_id == 1)
+                .values(
+                    authority_incarnation=AUTHORITY_ID,
+                    writer_epoch=0,
+                    recovery_state="shadow",
+                    increase_freeze=True,
+                    increase_freeze_reason="initial_shadow_freeze",
+                    executable_new_capacity_ceiling=0,
+                    execution_epoch=0,
+                    execution_state="shadow",
+                    execution_manifest_sha256=None,
+                    global_pending_slot_ceiling=0,
+                    global_pending_job_ceiling=0,
+                    global_submission_rate_ceiling=0,
+                )
             )
+            for table in reversed(Base.metadata.sorted_tables):
+                if table.name == CapacityAuthorityState.__tablename__:
+                    continue
+                user_triggers_disabled = False
+                await session.execute(text(f"ALTER TABLE {table.name} DISABLE TRIGGER USER"))
+                user_triggers_disabled = True
+                try:
+                    await session.execute(delete(table))
+                finally:
+                    if user_triggers_disabled:
+                        await session.execute(text(f"ALTER TABLE {table.name} ENABLE TRIGGER USER"))
+        finally:
+            if authority_transition_trigger_disabled:
+                await session.execute(
+                    text(
+                        "ALTER TABLE capacity_authority_state ENABLE TRIGGER "
+                        "capacity_authority_execution_transition_guard"
+                    )
+                )
 
 
 class BlockingAllocator:
@@ -458,6 +606,7 @@ async def api_context(
                         pool_id="oldlab",
                         executor_id="oldlab-executor",
                         executor_incarnation=OLDLAB_EXECUTOR_INCARNATION,
+                        executor_pool_generation=1,
                     ),
                 ],
             }
@@ -545,6 +694,17 @@ async def api_context(
                     "digest": subject_proposal["digest"],
                     "subject_id": str(SUBJECT_ID),
                     "subject_incarnation": str(SUBJECT_INCARNATION),
+                }
+            ],
+            "static_candidate_provenance": [
+                {
+                    "schema_version": 1,
+                    "subject_id": str(SUBJECT_ID),
+                    "subject_incarnation": str(SUBJECT_INCARNATION),
+                    "candidate_generation": subject.candidate_generation,
+                    "algorithm": "source-sha256",
+                    "identity": "1" * 64,
+                    "publication_sha256": "2" * 64,
                 }
             ],
         }
@@ -730,6 +890,17 @@ async def api_context_v2_executor_generation(
                     "subject_incarnation": str(SUBJECT_INCARNATION),
                 }
             ],
+            "static_candidate_provenance": [
+                {
+                    "schema_version": 1,
+                    "subject_id": str(SUBJECT_ID),
+                    "subject_incarnation": str(SUBJECT_INCARNATION),
+                    "candidate_generation": subject.candidate_generation,
+                    "algorithm": "source-sha256",
+                    "identity": "1" * 64,
+                    "publication_sha256": "2" * 64,
+                }
+            ],
         }
         activation_response = client.post(
             "/v1/config-activations",
@@ -791,10 +962,7 @@ def hold_reconciliation_open(
         assert responses and responses[0].status_code == 200  # type: ignore[union-attr]
 
 
-def test_shadow_api_exposes_exactly_the_approved_routes(
-    api_context: tuple[TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator],
-) -> None:
-    _client, app, _settings, _allocator = api_context
+def _assert_exact_approved_routes(app: FastAPI) -> None:
     routes = {(route.path, tuple(sorted(route.methods or ()))) for route in app.routes}
     assert routes == {
         ("/healthz", ("GET",)),
@@ -827,6 +995,7 @@ def test_shadow_api_exposes_exactly_the_approved_routes(
         ),
         ("/v2/executors/{pool_id}/heartbeat", ("PUT",)),
         ("/v2/executors/{pool_id}/checkpoint", ("GET",)),
+        ("/v2/executors/{pool_id}/context", ("GET",)),
         ("/v2/executors/{pool_id}/work", ("GET",)),
         ("/v2/executors/{pool_id}/inventory", ("PUT",)),
         (
@@ -859,6 +1028,8 @@ def test_shadow_api_exposes_exactly_the_approved_routes(
         ("/v1/status/pools", ("GET",)),
         ("/v1/status/executors", ("GET",)),
         ("/v1/status/reservations", ("GET",)),
+        ("/v2/status/executors", ("GET",)),
+        ("/v2/status/subjects/{subject_id}", ("GET",)),
         ("/v1/shadow-epochs/{allocation_epoch}", ("GET",)),
         ("/v1/shadow-epochs/{allocation_epoch}/allocations", ("GET",)),
         ("/v1/audit-events", ("GET",)),
@@ -866,7 +1037,195 @@ def test_shadow_api_exposes_exactly_the_approved_routes(
     }
 
 
-def test_v2_executor_work_route_rejects_legacy_v1_principal_without_generation(
+def test_shadow_api_exposes_exactly_the_approved_routes(
+    api_context: tuple[TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator],
+) -> None:
+    _client, app, _settings, _allocator = api_context
+    _assert_exact_approved_routes(app)
+
+
+def test_executable_status_is_read_only_and_shadow_is_never_worker_available(
+    api_context: tuple[TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator],
+    operator_headers: dict[str, str],
+) -> None:
+    client, _app, _settings, _allocator = api_context
+
+    executors = client.get("/v2/status/executors", headers=operator_headers)
+    subject = client.get(f"/v2/status/subjects/{SUBJECT_ID}", headers=operator_headers)
+
+    assert executors.status_code == 200
+    assert executors.json() == {
+        "schema_version": 2,
+        "execution_epoch": 0,
+        "execution_state": "shadow",
+        "executable_new_capacity_ceiling": 0,
+        "items": [],
+        "blockers": ["manager-shadow"],
+    }
+    assert subject.status_code == 200
+    assert subject.json() == {
+        "schema_version": 2,
+        "subject_id": str(SUBJECT_ID),
+        "subject_incarnation": str(SUBJECT_INCARNATION),
+        "deployment_generation": 1,
+        "configuration_epoch": 1,
+        "execution_epoch": 0,
+        "execution_state": "shadow",
+        "executable_new_capacity_ceiling": 0,
+        "capacity_prepared": True,
+        "capacity_status": "shadow",
+        "worker_available": False,
+        "active_capacity_intents": [],
+        "active_capacity_intent_count": 0,
+        "active_capacity_slots": 0,
+        "quarantined_intent_count": 0,
+        "intent_state_counts": {},
+        "blockers": ["manager-shadow"],
+    }
+
+
+@pytest.fixture
+def isolated_capacity_api_url(postgres_url: str) -> Iterator[str]:
+    source_url = make_url(postgres_url)
+    database_name = f"loom_capacity_api_{uuid4().hex}"
+    admin_engine = create_engine(
+        source_url.set(database="postgres"),
+        isolation_level="AUTOCOMMIT",
+    )
+    quoted_database = admin_engine.dialect.identifier_preparer.quote(database_name)
+    database_url = source_url.set(database=database_name).render_as_string(hide_password=False)
+    migration_engine = create_engine(database_url)
+    try:
+        with admin_engine.connect() as connection:
+            connection.exec_driver_sql(f"CREATE DATABASE {quoted_database} TEMPLATE template0")
+        root = Path(__file__).resolve().parents[2]
+        config = AlembicConfig(str(root / "capacity_migrations" / "alembic.ini"))
+        config.set_main_option("script_location", str(root / "capacity_migrations"))
+        with migration_engine.begin() as connection:
+            config.attributes["connection"] = connection
+            command.upgrade(config, "head")
+        yield database_url
+    finally:
+        migration_engine.dispose()
+        with admin_engine.connect() as connection:
+            connection.execute(
+                text(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                    "WHERE datname = :database_name AND pid <> pg_backend_pid()"
+                ),
+                {"database_name": database_name},
+            )
+            connection.exec_driver_sql(f"DROP DATABASE IF EXISTS {quoted_database}")
+        admin_engine.dispose()
+
+
+async def test_injected_management_store_is_exact_and_default_remains_disabled(
+    tmp_path: Path,
+    isolated_capacity_api_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Startup must use the exact owner-policy store without exposing mutation routes."""
+
+    registry_path = _owner_file(
+        tmp_path / "injected-principals.json",
+        json.dumps(
+            {
+                "schema_version": 1,
+                "principals": [
+                    _principal(
+                        "fleet-operator",
+                        OPERATOR_TOKEN,
+                        ["capacity:read", "capacity:reconcile"],
+                    )
+                ],
+            }
+        ),
+    )
+    settings = CapacityManagerSettings(
+        principals_file=registry_path,
+        db_url_file=_owner_file(tmp_path / "injected-database-url", isolated_capacity_api_url),
+        expected_authority_incarnation=AUTHORITY_ID,
+        tls_cert_file=_owner_file(tmp_path / "injected-server.crt", "test"),
+        tls_key_file=_owner_file(tmp_path / "injected-server.key", "test"),
+        tls_client_ca_file=_owner_file(tmp_path / "injected-client-ca.crt", "test"),
+    )
+    engine = create_async_engine(isolated_capacity_api_url, isolation_level="SERIALIZABLE")
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as capacity_session:
+            policy = execution_policy()
+            fixture = await setup_execution(capacity_session, execution_policy=policy)
+            await capacity_session.commit()
+            injected_store = fixture.store
+
+            default_app = create_app(
+                settings,
+                verifier=CapacityPrincipalVerifier.from_file(registry_path),
+            )
+            with TestClient(default_app) as client:
+                assert client.get("/healthz").status_code == 200
+                assert default_app.state.store is not injected_store
+                with pytest.raises(ExecutionPreparationDisabledError):
+                    await default_app.state.store.prepare_execution_epoch(
+                        capacity_session,
+                        fixture.request.model_copy(
+                            update={"expected_writer_epoch": default_app.state.writer.writer_epoch}
+                        ),
+                        actor="activation-operator",
+                        idempotency_key=UUID(int=12303),
+                    )
+
+            register_calls = 0
+            register_writer = injected_store.register_writer
+
+            async def tracked_register_writer(*args, **kwargs):  # type: ignore[no-untyped-def]
+                nonlocal register_calls
+                register_calls += 1
+                return await register_writer(*args, **kwargs)
+
+            monkeypatch.setattr(injected_store, "register_writer", tracked_register_writer)
+            app = create_app(
+                settings,
+                verifier=CapacityPrincipalVerifier.from_file(registry_path),
+                management_store=injected_store,
+            )
+            with TestClient(app) as client:
+                assert client.get("/healthz").status_code == 200
+                assert app.state.store is injected_store
+                assert register_calls == 1
+                assert await injected_store.execution_authority(capacity_session) is None
+                prepared = await injected_store.prepare_execution_epoch(
+                    capacity_session,
+                    fixture.request.model_copy(
+                        update={"expected_writer_epoch": app.state.writer.writer_epoch}
+                    ),
+                    actor="activation-operator",
+                    idempotency_key=UUID(int=12301),
+                )
+                await register_execution_executors(capacity_session, fixture, prepared)
+                active = await injected_store.activate_execution_epoch(
+                    capacity_session,
+                    ExecutionActivationV2(
+                        authority_incarnation=prepared.authority_incarnation,
+                        expected_writer_epoch=prepared.writer_epoch,
+                        execution_epoch=prepared.execution_epoch,
+                        execution_manifest_sha256=prepared.execution_manifest_sha256,
+                        executable_new_capacity_ceiling=1,
+                        executable_new_capacity_rate_per_minute=1,
+                    ),
+                    actor="activation-operator",
+                    idempotency_key=UUID(int=12302),
+                )
+                await capacity_session.commit()
+
+                assert active.execution_state == "active"
+                assert active.executable_new_capacity_ceiling == 1
+                _assert_exact_approved_routes(app)
+    finally:
+        await engine.dispose()
+
+
+def test_v2_executor_work_route_is_exactly_pool_bound(
     api_context: tuple[TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator],
 ) -> None:
     client, _app, _settings, _allocator = api_context
@@ -874,53 +1233,314 @@ def test_v2_executor_work_route_rejects_legacy_v1_principal_without_generation(
 
     own_pool = client.get("/v2/executors/oldlab/work", headers=headers)
     crossed_pool = client.get("/v2/executors/gb10/work", headers=headers)
+    own_context = client.get("/v2/executors/oldlab/context", headers=headers)
+    crossed_context = client.get("/v2/executors/gb10/context", headers=headers)
 
-    assert own_pool.status_code == 403
+    assert own_pool.status_code == 200
+    assert own_pool.json() is None
     assert crossed_pool.status_code == 403
+    assert own_context.status_code == 409
+    assert crossed_context.status_code == 403
 
 
-def test_v2_executor_routes_require_exact_positive_generation(
-    api_context_v2_executor_generation: tuple[
-        TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator
-    ],
+async def test_v2_executor_context_returns_public_execution_context_exactly(
+    tmp_path: Path,
+    isolated_capacity_api_url: str,
 ) -> None:
-    client, app, _settings, _allocator = api_context_v2_executor_generation
-    headers = {"Authorization": f"Bearer {OLDLAB_V2_EXECUTOR_TOKEN}"}
-
-    work = client.get("/v2/executors/oldlab/work", headers=headers)
-    assert work.status_code == 200
-    assert work.json() is None
-
-    wrong_generation = client.put(
-        "/v2/executors/oldlab/heartbeat",
-        headers=headers,
-        json={
-            "schema_version": 2,
-            "execution": {
-                "schema_version": 2,
-                "authority_incarnation": str(AUTHORITY_ID),
-                "writer_epoch": app.state.writer.writer_epoch,
-                "configuration_epoch": 1,
-                "execution_epoch": 1,
-                "execution_manifest_sha256": "0" * 64,
-                "execution_state": "active",
-                "executable_new_capacity_ceiling": 1,
-                "executable_new_capacity_rate_per_minute": 1,
-                "trusted_fleet_release_sha256": "1" * 64,
-            },
-            "executor_id": "oldlab-executor",
-            "executor_incarnation": str(OLDLAB_EXECUTOR_INCARNATION),
-            "pool_id": "oldlab",
-            "pool_generation": 2,
-            "heartbeat_sequence": 1,
-            "journal_sequence": 0,
-            "journal_digest": "0" * 64,
-            "journal_checkpoint_sequence": 0,
-            "journal_checkpoint_digest": "0" * 64,
-            "executable": True,
-        },
+    registry_path = _owner_file(
+        tmp_path / "context-principals.json",
+        json.dumps(
+            {
+                "schema_version": 1,
+                "principals": [
+                    _principal(
+                        "fleet-operator",
+                        OPERATOR_TOKEN,
+                        ["capacity:reconcile"],
+                    ),
+                    _principal(
+                        "oldlab-executor-v2",
+                        OLDLAB_V2_EXECUTOR_TOKEN,
+                        ["capacity:execute:pool"],
+                        pool_id="oldlab",
+                        executor_id="oldlab-executor",
+                        executor_incarnation=OLDLAB_EXECUTOR_INCARNATION,
+                        executor_pool_generation=1,
+                    ),
+                ],
+            }
+        ),
     )
-    assert wrong_generation.status_code == 403, wrong_generation.text
+    settings = CapacityManagerSettings(
+        principals_file=registry_path,
+        db_url_file=_owner_file(tmp_path / "context-database-url", isolated_capacity_api_url),
+        expected_authority_incarnation=AUTHORITY_ID,
+        tls_cert_file=_owner_file(tmp_path / "context-server.crt", "test"),
+        tls_key_file=_owner_file(tmp_path / "context-server.key", "test"),
+        tls_client_ca_file=_owner_file(tmp_path / "context-client-ca.crt", "test"),
+    )
+    engine = create_async_engine(isolated_capacity_api_url, isolation_level="SERIALIZABLE")
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as capacity_session:
+            fixture = await setup_execution(capacity_session, execution_policy=execution_policy())
+            await capacity_session.commit()
+            injected_store = fixture.store
+            app = create_app(
+                settings,
+                verifier=CapacityPrincipalVerifier.from_file(registry_path),
+                management_store=injected_store,
+            )
+            with TestClient(app) as client:
+                assert client.get("/healthz").status_code == 200
+                prepared = await injected_store.prepare_execution_epoch(
+                    capacity_session,
+                    fixture.request.model_copy(
+                        update={"expected_writer_epoch": app.state.writer.writer_epoch}
+                    ),
+                    actor="activation-operator",
+                    idempotency_key=UUID(int=12321),
+                )
+                await register_execution_executors(capacity_session, fixture, prepared)
+                active = await injected_store.activate_execution_epoch(
+                    capacity_session,
+                    ExecutionActivationV2(
+                        authority_incarnation=prepared.authority_incarnation,
+                        expected_writer_epoch=prepared.writer_epoch,
+                        execution_epoch=prepared.execution_epoch,
+                        execution_manifest_sha256=prepared.execution_manifest_sha256,
+                        executable_new_capacity_ceiling=1,
+                        executable_new_capacity_rate_per_minute=1,
+                    ),
+                    actor="activation-operator",
+                    idempotency_key=UUID(int=12322),
+                )
+                await capacity_session.commit()
+
+                response = client.get(
+                    "/v2/executors/oldlab/context",
+                    headers={"Authorization": f"Bearer {OLDLAB_V2_EXECUTOR_TOKEN}"},
+                )
+
+            assert response.status_code == 200
+            active_json = active.model_dump(mode="json")
+            expected = {
+                "schema_version": 2,
+                "authority_incarnation": active_json["authority_incarnation"],
+                "writer_epoch": active_json["writer_epoch"],
+                "configuration_epoch": active_json["configuration_epoch"],
+                "execution_epoch": active_json["execution_epoch"],
+                "execution_manifest_sha256": active_json["execution_manifest_sha256"],
+                "execution_state": active_json["execution_state"],
+                "executable_new_capacity_ceiling": active_json["executable_new_capacity_ceiling"],
+                "executable_new_capacity_rate_per_minute": active_json[
+                    "executable_new_capacity_rate_per_minute"
+                ],
+                "trusted_fleet_release_sha256": active_json["trusted_fleet_release_sha256"],
+            }
+            assert response.json() == expected
+            assert "executable" not in response.json()
+            assert (
+                ExecutionContextV2.model_validate_json(response.content).model_dump(mode="json")
+                == expected
+            )
+    finally:
+        await engine.dispose()
+
+
+def test_v2_work_rejects_legacy_executor_without_positive_pool_generation(
+    api_context: tuple[TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator],
+) -> None:
+    _client, _app, settings, _allocator = api_context
+    verifier = StaticPrincipalVerifier(
+        CapacityPrincipal(
+            principal_id="legacy-oldlab-executor",
+            scopes=frozenset({"capacity:execute:pool"}),
+            subject_id=None,
+            subject_incarnation=None,
+            demand_reporter_incarnation=None,
+            pool_id="oldlab",
+            pool_reporter_incarnation=None,
+            executor_id="oldlab-executor",
+            executor_incarnation=OLDLAB_EXECUTOR_INCARNATION,
+            executor_pool_generation=None,
+        )
+    )
+    app = create_app(settings, verifier=verifier)
+    with TestClient(app) as client:
+        response = client.get(
+            "/v2/executors/oldlab/work",
+            headers={"Authorization": "Bearer legacy-oldlab-executor"},
+        )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "forbidden"}
+
+
+def test_v2_acceptance_rejects_cross_pool_rbac_and_pool_binding_mismatch(
+    api_context: tuple[TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator],
+) -> None:
+    _client, _app, settings, _allocator = api_context
+    store = RecordingExecutionStore()
+    app = create_app(
+        settings,
+        verifier=CapacityPrincipalVerifier.from_file(settings.principals_file),
+        execution_store=store,
+    )
+    tranche_id = UUID(int=41)
+    path = f"/v2/executors/oldlab/reservations/{tranche_id}/accept"
+    headers = {"Authorization": f"Bearer {OLDLAB_EXECUTOR_TOKEN}"}
+    with TestClient(app) as client:
+        accepted = client.post(
+            path,
+            headers=headers,
+            json=_v2_acceptance_payload(tranche_id=tranche_id),
+        )
+        crossed_pool = client.post(
+            f"/v2/executors/gb10/reservations/{tranche_id}/accept",
+            headers=headers,
+            json=_v2_acceptance_payload(tranche_id=tranche_id),
+        )
+        mismatched_pool = client.post(
+            path,
+            headers=headers,
+            json=_v2_acceptance_payload(pool_id="gb10", tranche_id=tranche_id),
+        )
+        mismatched_executor = client.post(
+            path,
+            headers=headers,
+            json=_v2_acceptance_payload(
+                executor_id="other-executor",
+                tranche_id=tranche_id,
+            ),
+        )
+        mismatched_generation = client.post(
+            path,
+            headers=headers,
+            json=_v2_acceptance_payload(pool_generation=2, tranche_id=tranche_id),
+        )
+
+    assert accepted.status_code == 200
+    assert accepted.json() == {
+        "tranche_id": str(tranche_id),
+        "intent_ids": [str(UUID(int=44))],
+        "receipt_digest": "8" * 64,
+        "replayed": False,
+        "executable": True,
+    }
+    assert store.accept_calls == 1
+    assert store.last_acceptance is not None
+    assert store.last_acceptance.pool_id == "oldlab"
+    assert crossed_pool.status_code == 403
+    assert mismatched_pool.status_code == 403
+    assert mismatched_executor.status_code == 403
+    assert mismatched_generation.status_code == 403
+
+
+def test_submission_recovery_response_is_explicitly_quarantined(
+    api_context: tuple[TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator],
+) -> None:
+    _client, _app, settings, _allocator = api_context
+    store = RecordingExecutionStore()
+    app = create_app(
+        settings,
+        verifier=CapacityPrincipalVerifier.from_file(settings.principals_file),
+        execution_store=store,
+    )
+    permit_id = UUID(int=43)
+    with TestClient(app) as client:
+        response = client.post(
+            f"/v2/executors/oldlab/permits/{permit_id}/recover",
+            headers={"Authorization": f"Bearer {OLDLAB_EXECUTOR_TOKEN}"},
+            json=_v2_submission_recovery_payload(permit_id=permit_id),
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "intent_id": str(UUID(int=42)),
+        "receipt_digest": "9" * 64,
+        "replayed": False,
+        "state": "quarantined",
+        "executable": True,
+    }
+    assert store.recovery_calls == 1
+    assert store.last_recovery is not None
+    assert store.last_recovery.binding.pool_generation == 1
+
+
+def test_submission_recovery_rejects_store_returned_unused_state(
+    api_context: tuple[TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator],
+) -> None:
+    class ForbiddenRecoveryStateStore(RecordingExecutionStore):
+        async def recover_unsubmitted_permit(
+            self,
+            _session,  # type: ignore[no-untyped-def]
+            recovery: ExecutableSubmissionRecoveryV2,
+        ) -> dict[str, object]:
+            self.recovery_calls += 1
+            self.last_recovery = recovery
+            return {
+                "intent_id": str(recovery.binding.intent_id),
+                "receipt_digest": "9" * 64,
+                "replayed": False,
+                "state": "unused",
+                "executable": True,
+            }
+
+    _client, _app, settings, _allocator = api_context
+    store = ForbiddenRecoveryStateStore()
+    app = create_app(
+        settings,
+        verifier=CapacityPrincipalVerifier.from_file(settings.principals_file),
+        execution_store=store,
+    )
+    permit_id = UUID(int=43)
+    with TestClient(app) as client:
+        response = client.post(
+            f"/v2/executors/oldlab/permits/{permit_id}/recover",
+            headers={"Authorization": f"Bearer {OLDLAB_EXECUTOR_TOKEN}"},
+            json=_v2_submission_recovery_payload(permit_id=permit_id),
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "capacity state conflict"}
+    assert store.recovery_calls == 1
+    assert store.last_recovery is not None
+
+
+def test_v2_submission_recovery_rejects_path_or_executor_drift(
+    api_context: tuple[TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator],
+) -> None:
+    _client, _app, settings, _allocator = api_context
+    store = RecordingExecutionStore()
+    app = create_app(
+        settings,
+        verifier=CapacityPrincipalVerifier.from_file(settings.principals_file),
+        execution_store=store,
+    )
+    permit_id = UUID(int=43)
+    payload = _v2_submission_recovery_payload(permit_id=permit_id)
+    with TestClient(app) as client:
+        wrong_path = client.post(
+            f"/v2/executors/oldlab/permits/{UUID(int=99)}/recover",
+            headers={"Authorization": f"Bearer {OLDLAB_EXECUTOR_TOKEN}"},
+            json=payload,
+        )
+        wrong_executor = client.post(
+            f"/v2/executors/oldlab/permits/{permit_id}/recover",
+            headers={"Authorization": f"Bearer {OLDLAB_EXECUTOR_TOKEN}"},
+            json=payload | {"binding": payload["binding"] | {"executor_id": "other-executor"}},
+        )
+        wrong_generation = client.post(
+            f"/v2/executors/oldlab/permits/{permit_id}/recover",
+            headers={"Authorization": f"Bearer {OLDLAB_EXECUTOR_TOKEN}"},
+            json=payload | {"binding": payload["binding"] | {"pool_generation": 2}},
+        )
+
+    assert wrong_path.status_code == 403
+    assert wrong_executor.status_code == 403
+    assert wrong_generation.status_code == 403
+    assert store.recovery_calls == 0
 
 
 def test_v2_bootstrap_routes_separate_executor_proposal_from_subject_acknowledgement(
@@ -1041,8 +1661,7 @@ def test_v2_bootstrap_routes_separate_executor_proposal_from_subject_acknowledge
 
     idempotency_key = uuid4()
     acknowledged = client.put(
-        f"/v2/subjects/{SUBJECT_ID}/intents/{binding.intent_id}/"
-        "bootstrap-acknowledgements",
+        f"/v2/subjects/{SUBJECT_ID}/intents/{binding.intent_id}/bootstrap-acknowledgements",
         headers=reporter_headers | {"Idempotency-Key": str(idempotency_key)},
         json=acknowledgement.model_dump(mode="json"),
     )
@@ -1050,8 +1669,7 @@ def test_v2_bootstrap_routes_separate_executor_proposal_from_subject_acknowledge
     assert acknowledged.json()["bootstrap_registration_epoch"] == 1
     assert (
         client.put(
-            f"/v2/subjects/{UUID(int=999)}/intents/{binding.intent_id}/"
-            "bootstrap-acknowledgements",
+            f"/v2/subjects/{UUID(int=999)}/intents/{binding.intent_id}/bootstrap-acknowledgements",
             headers=reporter_headers | {"Idempotency-Key": str(uuid4())},
             json=acknowledgement.model_dump(mode="json"),
         ).status_code
@@ -1667,9 +2285,7 @@ async def test_executable_allocation_evidence_is_immutable_and_not_reparentable(
     )
     assert result.status == "committed"
     parent = (await capacity_session.execute(select(CapacityAllocationEpoch))).scalar_one()
-    child = (
-        (await capacity_session.execute(select(CapacityAllocation))).scalars().first()
-    )
+    child = (await capacity_session.execute(select(CapacityAllocation))).scalars().first()
     assert child is not None
     second_parent = CapacityAllocationEpoch(
         writer_epoch=fixture.writer.writer_epoch,
@@ -1719,8 +2335,7 @@ async def test_executable_allocation_evidence_is_immutable_and_not_reparentable(
         async with capacity_session.begin_nested():
             await capacity_session.execute(
                 delete(CapacityAllocationEpoch).where(
-                    CapacityAllocationEpoch.allocation_epoch
-                    == second_parent.allocation_epoch
+                    CapacityAllocationEpoch.allocation_epoch == second_parent.allocation_epoch
                 )
             )
     with pytest.raises(DBAPIError, match="executable allocation epoch is sealed"):
@@ -1906,7 +2521,10 @@ async def test_allocation_commit_and_failure_recorder_errors_propagate_hard_fail
         join_transaction_mode="create_savepoint",
     )
 
-    with pytest.raises(RuntimeError, match="failed to persist reconciliation failure") as caught:
+    with pytest.raises(
+        ReconciliationFailurePersistenceError,
+        match="failed to persist reconciliation failure",
+    ) as caught:
         await reconcile_shadow_once(
             session_factory,
             fixture.writer,
@@ -2061,9 +2679,7 @@ async def test_allocation_commit_schema_qualifies_seal_guard_under_hostile_searc
     )
 
     assert result.status == "failed"
-    failed_epoch = (
-        await capacity_session.execute(select(CapacityAllocationEpoch))
-    ).scalar_one()
+    failed_epoch = (await capacity_session.execute(select(CapacityAllocationEpoch))).scalar_one()
     assert failed_epoch.status == "failed"
     assert failed_epoch.executable is False
     authority = (await capacity_session.execute(select(CapacityAuthorityState))).scalar_one()

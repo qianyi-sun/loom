@@ -666,6 +666,8 @@ def test_executable_operation_family_is_v2_true_and_exactly_bound() -> None:
         permit_epoch=1,
         launch_rank=1,
         expires_at=datetime.now(UTC) + timedelta(minutes=1),
+        bootstrap_registration_epoch=1,
+        bootstrap_evidence_sha256="5" * 64,
     )
     consumption = contracts.ExecutablePermitConsumptionV2(
         permit_id=permit.permit_id,
@@ -762,6 +764,61 @@ def test_executable_bootstrap_separates_executor_proposal_from_subject_acknowled
     assert proposal.executable is acknowledgement.executable is True
 
 
+def test_permit_carries_exact_subject_agent_bootstrap_evidence() -> None:
+    """Dropping acknowledgement evidence from launch work must fail this test."""
+
+    contracts = _contracts()
+    permit = contracts.ExecutableLaunchPermitV2(
+        permit_id=UUID(int=30),
+        binding=_intent_binding(),
+        permit_epoch=1,
+        launch_rank=1,
+        expires_at=datetime.now(UTC) + timedelta(minutes=1),
+        bootstrap_registration_epoch=2,
+        bootstrap_evidence_sha256="6" * 64,
+    )
+
+    assert permit.bootstrap_registration_epoch == 2
+    assert permit.bootstrap_evidence_sha256 == "6" * 64
+    for missing in ("bootstrap_registration_epoch", "bootstrap_evidence_sha256"):
+        payload = permit.model_dump(mode="python")
+        del payload[missing]
+        with pytest.raises(ValidationError, match=missing):
+            contracts.ExecutableLaunchPermitV2.model_validate(payload)
+
+
+def test_close_bootstrap_evidence_is_all_or_none() -> None:
+    """A close with only half of its protected-bootstrap proof must fail."""
+
+    contracts = _contracts()
+    binding = _intent_binding()
+    without_bootstrap = contracts.ExecutableIntentCloseV2(
+        binding=binding,
+        command_sequence=5,
+    )
+    with_bootstrap = contracts.ExecutableIntentCloseV2(
+        binding=binding,
+        command_sequence=5,
+        bootstrap_registration_epoch=2,
+        bootstrap_evidence_sha256="6" * 64,
+    )
+
+    assert without_bootstrap.bootstrap_registration_epoch is None
+    assert without_bootstrap.bootstrap_evidence_sha256 is None
+    assert with_bootstrap.bootstrap_registration_epoch == 2
+    assert with_bootstrap.bootstrap_evidence_sha256 == "6" * 64
+    for partial in (
+        {"bootstrap_registration_epoch": 2},
+        {"bootstrap_evidence_sha256": "6" * 64},
+    ):
+        with pytest.raises(ValidationError, match="together"):
+            contracts.ExecutableIntentCloseV2(
+                binding=binding,
+                command_sequence=5,
+                **partial,
+            )
+
+
 def test_journal_permit_and_release_boundaries_fail_closed() -> None:
     """Weakening ordering, UTC, or release epochs must fail this test."""
 
@@ -785,6 +842,8 @@ def test_journal_permit_and_release_boundaries_fail_closed() -> None:
             permit_epoch=1,
             launch_rank=1,
             expires_at=datetime(2026, 8, 12, 12, 0),
+            bootstrap_registration_epoch=1,
+            bootstrap_evidence_sha256="5" * 64,
         )
     with pytest.raises(ValidationError, match="timezone-aware"):
         contracts.ExecutableSubmissionRecoveryV2(
@@ -807,6 +866,84 @@ def test_journal_permit_and_release_boundaries_fail_closed() -> None:
             protected_registration_epoch=2,
             bootstrap_revoked=True,
             protected_release_sha256="7" * 64,
+        )
+
+
+def test_executable_reservation_acceptance_requires_pool_id_in_canonical_payload() -> None:
+    """Removing the acceptance pool binding must fail this executable contract."""
+
+    contracts = _contracts()
+    binding = _intent_binding()
+    acceptance = contracts.ExecutableReservationAcceptanceV2(
+        execution=binding.execution,
+        tranche_id=binding.tranche_id,
+        proposal_digest="4" * 64,
+        pool_id=binding.pool_id,
+        pool_generation=binding.pool_generation,
+        executor_id=binding.executor_id,
+        executor_incarnation=binding.executor_incarnation,
+        command_sequence=1,
+    )
+
+    assert acceptance.model_dump(mode="json") == {
+        "schema_version": 2,
+        "execution": binding.execution.model_dump(mode="json"),
+        "tranche_id": str(binding.tranche_id),
+        "proposal_digest": "4" * 64,
+        "pool_id": binding.pool_id,
+        "pool_generation": binding.pool_generation,
+        "executor_id": binding.executor_id,
+        "executor_incarnation": str(binding.executor_incarnation),
+        "command_sequence": 1,
+        "executable": True,
+    }
+    payload = acceptance.model_dump(mode="json")
+    del payload["pool_id"]
+    with pytest.raises(ValidationError, match="pool_id"):
+        contracts.ExecutableReservationAcceptanceV2.model_validate(payload)
+
+
+def test_submission_recovery_requires_exact_absence_evidence() -> None:
+    """Weakening recovery absence proof must fail this executable contract."""
+
+    contracts = _contracts()
+    binding = _intent_binding()
+    completed_at = datetime(2026, 8, 12, 12, 0, tzinfo=UTC)
+    recovery = contracts.ExecutableSubmissionRecoveryV2(
+        binding=binding,
+        permit_id=UUID(int=30),
+        permit_digest="6" * 64,
+        command_sequence=4,
+        inventory_sequence=2,
+        inventory_digest="7" * 64,
+        controller_query_completed_at=completed_at,
+        submit_process_absent=True,
+        scheduler_submission_absent=True,
+        controller_evidence_sha256="8" * 64,
+    )
+
+    assert recovery.permit_id == UUID(int=30)
+    assert recovery.permit_digest == "6" * 64
+    assert recovery.inventory_sequence == 2
+    assert recovery.inventory_digest == "7" * 64
+    assert recovery.controller_query_completed_at == completed_at
+    assert recovery.submit_process_absent is True
+    assert recovery.scheduler_submission_absent is True
+    assert recovery.controller_evidence_sha256 == "8" * 64
+    assert recovery.executable is True
+
+    missing_submit_process = recovery.model_dump(mode="json")
+    del missing_submit_process["submit_process_absent"]
+    with pytest.raises(ValidationError, match="submit_process_absent"):
+        contracts.ExecutableSubmissionRecoveryV2.model_validate(missing_submit_process)
+
+    with pytest.raises(ValidationError, match="scheduler_submission_absent"):
+        contracts.ExecutableSubmissionRecoveryV2.model_validate(
+            recovery.model_dump(mode="python") | {"scheduler_submission_absent": False}
+        )
+    with pytest.raises(ValidationError, match="executable"):
+        contracts.ExecutableSubmissionRecoveryV2.model_validate(
+            recovery.model_dump(mode="python") | {"executable": False}
         )
 
 

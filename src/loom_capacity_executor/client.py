@@ -298,6 +298,40 @@ def _read_bearer(path: Path) -> str:
     return _validate_bearer(value)
 
 
+async def _stream_response_bounded(
+    http_client: httpx.AsyncClient,
+    method: str,
+    url: str,
+    *,
+    headers: dict[str, str],
+    content: bytes | None = None,
+    body_label: str,
+) -> tuple[int, bytes]:
+    try:
+        async with http_client.stream(
+            method,
+            url,
+            content=content,
+            headers=headers,
+        ) as response:
+            if response.status_code != 200:
+                return response.status_code, b""
+            chunks: list[bytes] = []
+            observed = 0
+            async for chunk in response.aiter_bytes():
+                observed += len(chunk)
+                if observed > _MAX_RECEIPT_BYTES:
+                    raise ExecutorTransportError(
+                        f"capacity manager {body_label} exceeds its byte bound"
+                    )
+                chunks.append(chunk)
+            return response.status_code, b"".join(chunks)
+    except ExecutorTransportError:
+        raise
+    except httpx.HTTPError:
+        raise ExecutorTransportError("capacity manager transport failed") from None
+
+
 class CapacityExecutorClient:
     """Send only exact pool-bound, zero-executable contracts to the manager."""
 
@@ -380,30 +414,27 @@ class CapacityExecutorClient:
         if contract is not None:
             self._assert_binding(contract)
             content = canonical_bytes(contract)
-        try:
-            response = await self._http.request(
-                method,
-                f"{self._manager_origin}{path}",
-                content=content,
-                headers={
-                    "Authorization": f"Bearer {self._bearer_token}",
-                    **({"Content-Type": "application/json"} if content is not None else {}),
-                },
-            )
-        except httpx.HTTPError:
-            raise ExecutorTransportError("capacity manager transport failed") from None
-        if 400 <= response.status_code < 500:
+        status_code, response_content = await _stream_response_bounded(
+            self._http,
+            method,
+            f"{self._manager_origin}{path}",
+            content=content,
+            headers={
+                "Authorization": f"Bearer {self._bearer_token}",
+                **({"Content-Type": "application/json"} if content is not None else {}),
+            },
+            body_label="receipt",
+        )
+        if 400 <= status_code < 500:
             raise ExecutorRejectedError(
-                f"capacity manager rejected executor request with status {response.status_code}"
+                f"capacity manager rejected executor request with status {status_code}"
             )
-        if response.status_code != 200:
+        if status_code != 200:
             raise ExecutorTransportError(
-                f"capacity manager rejected executor request with status {response.status_code}"
+                f"capacity manager rejected executor request with status {status_code}"
             )
-        if len(response.content) > _MAX_RECEIPT_BYTES:
-            raise ExecutorTransportError("capacity manager receipt exceeds its byte bound")
         try:
-            return receipt_model.model_validate_json(response.content)
+            return receipt_model.model_validate_json(response_content)
         except (ValidationError, ValueError) as exc:
             raise ExecutorTransportError("capacity manager receipt is invalid") from exc
 
@@ -545,20 +576,19 @@ class CapacityExecutorClient:
         await self.aclose()
 
 
-def _executable_receipt_digest(payload: object) -> str:
-    return hashlib.sha256(
-        json.dumps(
-            payload,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=True,
-            default=str,
-        ).encode("ascii")
-    ).hexdigest()
+def _receipt_digest(payload: dict[str, object]) -> str:
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        default=str,
+    ).encode("ascii")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 class ExecutableCapacityExecutorClient:
-    """Send exact executable-v2 commands for one registered pool executor."""
+    """Send only exact executable-v2 contracts for one registered pool executor."""
 
     def __init__(
         self,
@@ -579,37 +609,7 @@ class ExecutableCapacityExecutorClient:
         self._http = http_client
         self._owns_http = owns_http_client
 
-    @classmethod
-    def from_files(
-        cls,
-        registration: ExecutableExecutorRegistrationV2,
-        connection: ExecutorConnection,
-    ) -> ExecutableCapacityExecutorClient:
-        tls = build_reporter_tls_context(
-            DemandReporterTLSFiles(
-                ca_file=connection.tls_files.ca_file,
-                certificate_file=connection.tls_files.certificate_file,
-                private_key_file=connection.tls_files.private_key_file,
-            )
-        )
-        if not isinstance(tls, ssl.SSLContext):
-            raise ValueError("executor TLS context is unavailable")
-        client = httpx.AsyncClient(
-            verify=tls,
-            timeout=httpx.Timeout(connection.timeout_seconds),
-            follow_redirects=False,
-            trust_env=False,
-        )
-        return cls(
-            registration,
-            manager_origin=connection.manager_origin,
-            bearer_token=_read_bearer(connection.bearer_token_file),
-            http_client=client,
-            owns_http_client=True,
-        )
-
-    @staticmethod
-    def _binding(value: object) -> ExecutableIntentBindingV2 | None:
+    def _binding(self, value: object) -> ExecutableIntentBindingV2 | None:
         if isinstance(value, ExecutableIntentBindingV2):
             return value
         binding = getattr(value, "binding", None)
@@ -637,24 +637,28 @@ class ExecutableCapacityExecutorClient:
         if epoch_context:
             if not isinstance(execution, ExecutionContextV2):
                 raise ExecutorTransportError("executable executor contract binding changed")
-            actual_execution = execution.model_dump(exclude={"executable"})
-        else:
-            if not isinstance(execution, ExecutionFenceV2):
-                raise ExecutorTransportError("executable executor contract binding changed")
-            actual_execution = execution.model_dump(
-                exclude={"allocation_epoch", "executable"}
-            )
-        target = binding if binding is not None else value
-        if (
-            getattr(target, "executor_id", None) != self.registration.executor_id
-            or getattr(target, "executor_incarnation", None)
-            != self.registration.executor_incarnation
-            or getattr(target, "pool_id", None) != self.registration.pool_id
-            or getattr(target, "pool_generation", None) != self.registration.pool_generation
-            or actual_execution
-            != self.registration.execution.model_dump(exclude={"executable"})
-        ):
+        elif not isinstance(execution, ExecutionFenceV2):
             raise ExecutorTransportError("executable executor contract binding changed")
+        checks = (
+            ("executor_id", self.registration.executor_id),
+            ("executor_incarnation", self.registration.executor_incarnation),
+            ("pool_generation", self.registration.pool_generation),
+            *(
+                ()
+                if isinstance(value, ExecutableReservationAcceptanceV2)
+                else (("pool_id", self.registration.pool_id),)
+            ),
+        )
+        target = binding if binding is not None else value
+        if any(getattr(target, field, None) != expected for field, expected in checks):
+            raise ExecutorTransportError("executable executor contract binding changed")
+        execution_exclusions = (
+            {"executable"} if epoch_context else {"allocation_epoch", "executable"}
+        )
+        actual_execution = execution.model_dump(exclude=execution_exclusions)
+        expected_execution = self.registration.execution.model_dump(exclude={"executable"})
+        if actual_execution != expected_execution:
+            raise ExecutorTransportError("executable execution binding changed")
 
     async def _request(
         self,
@@ -668,32 +672,34 @@ class ExecutableCapacityExecutorClient:
         if contract is not None:
             self._assert_contract_binding(contract)
             content = canonical_executable_bytes(contract)
-        try:
-            response = await self._http.request(
-                method,
-                f"{self._manager_origin}{path}",
-                content=content,
-                headers={
-                    "Authorization": f"Bearer {self._bearer_token}",
-                    **({"Content-Type": "application/json"} if content is not None else {}),
-                },
-            )
-        except httpx.HTTPError:
-            raise ExecutorTransportError("capacity manager transport failed") from None
-        if 400 <= response.status_code < 500:
+        status_code, response_content = await _stream_response_bounded(
+            self._http,
+            method,
+            f"{self._manager_origin}{path}",
+            content=content,
+            headers={
+                "Authorization": f"Bearer {self._bearer_token}",
+                **({"Content-Type": "application/json"} if content is not None else {}),
+            },
+            body_label="receipt",
+        )
+        if 400 <= status_code < 500:
             raise ExecutorRejectedError(
-                f"capacity manager rejected executor request with status {response.status_code}"
+                f"capacity manager rejected executor request with status {status_code}"
             )
-        if response.status_code != 200:
+        if status_code != 200:
             raise ExecutorTransportError(
-                f"capacity manager rejected executor request with status {response.status_code}"
+                f"capacity manager rejected executor request with status {status_code}"
             )
-        if len(response.content) > _MAX_RECEIPT_BYTES:
-            raise ExecutorTransportError("capacity manager receipt exceeds its byte bound")
         try:
-            return receipt_model.model_validate_json(response.content)
+            return receipt_model.model_validate_json(response_content)
         except (ValidationError, ValueError) as exc:
             raise ExecutorTransportError("capacity manager receipt is invalid") from exc
+
+    @staticmethod
+    def _assert_receipt_digest(receipt_digest: str, payload: dict[str, object]) -> None:
+        if receipt_digest != _receipt_digest(payload):
+            raise ExecutorTransportError("capacity manager receipt digest changed")
 
     async def executable_checkpoint(self) -> ExecutableCheckpointReceiptV2:
         receipt = await self._request(
@@ -709,11 +715,16 @@ class ExecutableCapacityExecutorClient:
             or receipt.executor_incarnation != self.registration.executor_incarnation
             or receipt.pool_id != self.registration.pool_id
             or receipt.pool_generation != self.registration.pool_generation
-            or receipt.lease_expires_at.tzinfo is None
-            or receipt.lease_expires_at.utcoffset() is None
         ):
             raise ExecutorTransportError("capacity manager checkpoint binding changed")
         return receipt
+
+    async def current_execution_context(self) -> ExecutionContextV2:
+        return await self._request(
+            "GET",
+            f"/v2/executors/{self.registration.pool_id}/context",
+            ExecutionContextV2,
+        )
 
     async def heartbeat_executable_executor(
         self,
@@ -733,6 +744,124 @@ class ExecutableCapacityExecutorClient:
             raise ExecutorTransportError("capacity manager heartbeat receipt changed")
         return receipt
 
+    async def next_executable_work(
+        self,
+        command_sequence: int,
+    ) -> ExecutablePoolWorkV2 | None:
+        if type(command_sequence) is not int or command_sequence < 0:
+            raise ValueError("executable command high-water is invalid")
+        status_code, response_content = await _stream_response_bounded(
+            self._http,
+            "GET",
+            f"{self._manager_origin}/v2/executors/{self.registration.pool_id}/work",
+            headers={"Authorization": f"Bearer {self._bearer_token}"},
+            body_label="work",
+        )
+        if 400 <= status_code < 500:
+            raise ExecutorRejectedError(
+                f"capacity manager rejected executor request with status {status_code}"
+            )
+        if status_code != 200:
+            raise ExecutorTransportError(
+                f"capacity manager rejected executor request with status {status_code}"
+            )
+        if response_content == b"null":
+            return None
+        try:
+            work = _EXECUTABLE_WORK.validate_json(response_content)
+        except (ValidationError, ValueError) as exc:
+            raise ExecutorTransportError("capacity manager work is invalid") from exc
+        self._assert_contract_binding(work)
+        work_sequence = getattr(work, "command_sequence", None)
+        if work_sequence is not None and work_sequence != command_sequence + 1:
+            raise ExecutorTransportError("capacity manager work command sequence changed")
+        return work
+
+    async def accept_executable_reservation(
+        self,
+        value: ExecutableReservationAcceptanceV2,
+    ) -> AcceptedExecutableReservationReceiptV2:
+        receipt = await self._request(
+            "POST",
+            f"/v2/executors/{self.registration.pool_id}/reservations/{value.tranche_id}/accept",
+            AcceptedExecutableReservationReceiptV2,
+            contract=value,
+        )
+        payload: dict[str, object] = {
+            "tranche_id": str(value.tranche_id),
+            "intent_ids": [str(item) for item in receipt.intent_ids],
+            "executable": True,
+        }
+        if receipt.tranche_id != value.tranche_id:
+            raise ExecutorTransportError("capacity manager acceptance receipt changed")
+        self._assert_receipt_digest(receipt.receipt_digest, payload)
+        return receipt
+
+    async def propose_executable_bootstrap(
+        self,
+        value: ExecutableBootstrapProposalV2,
+    ) -> ProposedExecutableBootstrapReceiptV2:
+        receipt = await self._request(
+            "POST",
+            f"/v2/executors/{self.registration.pool_id}/intents/"
+            f"{value.binding.intent_id}/bootstrap-proposals",
+            ProposedExecutableBootstrapReceiptV2,
+            contract=value,
+        )
+        payload: dict[str, object] = {
+            "intent_id": str(value.binding.intent_id),
+            "proposal_epoch": value.proposal_epoch,
+            "proposal_digest": canonical_executable_digest(value),
+            "executable": True,
+        }
+        if (
+            receipt.intent_id != value.binding.intent_id
+            or receipt.proposal_epoch != value.proposal_epoch
+        ):
+            raise ExecutorTransportError("capacity manager bootstrap proposal receipt changed")
+        self._assert_receipt_digest(receipt.receipt_digest, payload)
+        return receipt
+
+    async def consume_executable_permit(
+        self,
+        value: ExecutablePermitConsumptionV2,
+    ) -> ConsumedExecutablePermitReceiptV2:
+        receipt = await self._request(
+            "POST",
+            f"/v2/executors/{self.registration.pool_id}/permits/{value.permit_id}/consume",
+            ConsumedExecutablePermitReceiptV2,
+            contract=value,
+        )
+        payload: dict[str, object] = {
+            "permit_id": str(value.permit_id),
+            "intent_id": str(value.binding.intent_id),
+            "executable": True,
+        }
+        if receipt.permit_id != value.permit_id or receipt.intent_id != value.binding.intent_id:
+            raise ExecutorTransportError("capacity manager permit receipt changed")
+        self._assert_receipt_digest(receipt.receipt_digest, payload)
+        return receipt
+
+    async def recover_executable_submission(
+        self,
+        value: ExecutableSubmissionRecoveryV2,
+    ) -> RecoveredExecutableSubmissionReceiptV2:
+        receipt = await self._request(
+            "POST",
+            f"/v2/executors/{self.registration.pool_id}/permits/{value.permit_id}/recover",
+            RecoveredExecutableSubmissionReceiptV2,
+            contract=value,
+        )
+        payload: dict[str, object] = {
+            "intent_id": str(value.binding.intent_id),
+            "recovery": value.model_dump(mode="json", exclude_none=False),
+            "executable": True,
+        }
+        if receipt.intent_id != value.binding.intent_id:
+            raise ExecutorTransportError("capacity manager recovery receipt changed")
+        self._assert_receipt_digest(receipt.receipt_digest, payload)
+        return receipt
+
     async def ingest_executable_inventory(
         self,
         value: ExecutableExecutorInventoryV2,
@@ -750,151 +879,23 @@ class ExecutableCapacityExecutorClient:
             raise ExecutorTransportError("capacity manager inventory receipt changed")
         return receipt
 
-    async def next_executable_work(
-        self,
-        command_sequence: int,
-    ) -> ExecutablePoolWorkV2 | None:
-        if type(command_sequence) is not int or command_sequence < 0:
-            raise ValueError("executable command high-water is invalid")
-        try:
-            response = await self._http.get(
-                f"{self._manager_origin}/v2/executors/{self.registration.pool_id}/work",
-                headers={"Authorization": f"Bearer {self._bearer_token}"},
-            )
-        except httpx.HTTPError:
-            raise ExecutorTransportError("capacity manager transport failed") from None
-        if 400 <= response.status_code < 500:
-            raise ExecutorRejectedError(
-                f"capacity manager rejected executor request with status {response.status_code}"
-            )
-        if response.status_code != 200:
-            raise ExecutorTransportError(
-                f"capacity manager rejected executor request with status {response.status_code}"
-            )
-        if len(response.content) > _MAX_RECEIPT_BYTES:
-            raise ExecutorTransportError("capacity manager work exceeds its byte bound")
-        if response.content == b"null":
-            return None
-        try:
-            work = _EXECUTABLE_WORK.validate_json(response.content)
-        except (ValidationError, ValueError) as exc:
-            raise ExecutorTransportError("capacity manager work is invalid") from exc
-        self._assert_contract_binding(work)
-        work_sequence = getattr(work, "command_sequence", None)
-        if work_sequence is not None and work_sequence != command_sequence + 1:
-            raise ExecutorTransportError("capacity manager work command sequence changed")
-        return work
-
-    async def accept_executable_reservation(
-        self,
-        value: ExecutableReservationAcceptanceV2,
-    ) -> AcceptedExecutableReservationReceiptV2:
-        receipt = await self._request(
-            "POST",
-            f"/v2/executors/{self.registration.pool_id}/reservations/"
-            f"{value.tranche_id}/accept",
-            AcceptedExecutableReservationReceiptV2,
-            contract=value,
-        )
-        payload = {
-            "tranche_id": str(value.tranche_id),
-            "intent_ids": [str(item) for item in receipt.intent_ids],
-            "executable": True,
-        }
-        if (
-            receipt.tranche_id != value.tranche_id
-            or receipt.receipt_digest != _executable_receipt_digest(payload)
-        ):
-            raise ExecutorTransportError("capacity manager acceptance receipt changed")
-        return receipt
-
-    async def propose_executable_bootstrap(
-        self,
-        value: ExecutableBootstrapProposalV2,
-    ) -> ProposedExecutableBootstrapReceiptV2:
-        receipt = await self._request(
-            "POST",
-            f"/v2/executors/{self.registration.pool_id}/intents/"
-            f"{value.binding.intent_id}/bootstrap-proposals",
-            ProposedExecutableBootstrapReceiptV2,
-            contract=value,
-        )
-        payload = {
-            "intent_id": str(value.binding.intent_id),
-            "proposal_epoch": value.proposal_epoch,
-            "proposal_digest": canonical_executable_digest(value),
-            "executable": True,
-        }
-        if (
-            receipt.intent_id != value.binding.intent_id
-            or receipt.proposal_epoch != value.proposal_epoch
-            or receipt.receipt_digest != _executable_receipt_digest(payload)
-        ):
-            raise ExecutorTransportError("capacity manager bootstrap proposal receipt changed")
-        return receipt
-
-    async def consume_executable_permit(
-        self,
-        value: ExecutablePermitConsumptionV2,
-    ) -> ConsumedExecutablePermitReceiptV2:
-        receipt = await self._request(
-            "POST",
-            f"/v2/executors/{self.registration.pool_id}/permits/{value.permit_id}/consume",
-            ConsumedExecutablePermitReceiptV2,
-            contract=value,
-        )
-        payload = {
-            "permit_id": str(value.permit_id),
-            "intent_id": str(value.binding.intent_id),
-            "executable": True,
-        }
-        if (
-            receipt.permit_id != value.permit_id
-            or receipt.intent_id != value.binding.intent_id
-            or receipt.receipt_digest != _executable_receipt_digest(payload)
-        ):
-            raise ExecutorTransportError("capacity manager permit receipt changed")
-        return receipt
-
-    async def recover_executable_submission(
-        self,
-        value: ExecutableSubmissionRecoveryV2,
-    ) -> RecoveredExecutableSubmissionReceiptV2:
-        receipt = await self._request(
-            "POST",
-            f"/v2/executors/{self.registration.pool_id}/permits/{value.permit_id}/recover",
-            RecoveredExecutableSubmissionReceiptV2,
-            contract=value,
-        )
-        payload = {
-            "intent_id": str(value.binding.intent_id),
-            "recovery": value.model_dump(mode="json", exclude_none=False),
-            "executable": True,
-        }
-        if (
-            receipt.intent_id != value.binding.intent_id
-            or receipt.receipt_digest != _executable_receipt_digest(payload)
-        ):
-            raise ExecutorTransportError("capacity manager recovery receipt changed")
-        return receipt
-
     async def close_executable_intent(
         self,
         value: ExecutableIntentCloseV2,
     ) -> ClosingExecutableIntentReceiptV2:
         receipt = await self._request(
             "POST",
-            f"/v2/executors/{self.registration.pool_id}/intents/"
-            f"{value.binding.intent_id}/close",
+            f"/v2/executors/{self.registration.pool_id}/intents/{value.binding.intent_id}/close",
             ClosingExecutableIntentReceiptV2,
             contract=value,
         )
-        payload = {"intent_id": str(value.binding.intent_id), "executable": True}
-        if (
-            receipt.intent_id != value.binding.intent_id
-            or receipt.receipt_digest != _executable_receipt_digest(payload)
-        ):
+        payload: dict[str, object] = {
+            "intent_id": str(value.binding.intent_id),
+            "executable": True,
+        }
+        if receipt.intent_id != value.binding.intent_id:
             raise ExecutorTransportError("capacity manager close receipt changed")
+        self._assert_receipt_digest(receipt.receipt_digest, payload)
         return receipt
 
     async def release_executable_shapes(
@@ -903,23 +904,19 @@ class ExecutableCapacityExecutorClient:
     ) -> ReleasedExecutableShapesReceiptV2:
         receipt = await self._request(
             "POST",
-            f"/v2/executors/{self.registration.pool_id}/reservations/"
-            f"{value.tranche_id}/release",
+            f"/v2/executors/{self.registration.pool_id}/reservations/{value.tranche_id}/release",
             ReleasedExecutableShapesReceiptV2,
             contract=value,
         )
-        released = tuple(sorted(item.binding.shape_instance_id for item in value.releases))
-        payload = {
+        released = tuple(item.binding.shape_instance_id for item in value.releases)
+        payload: dict[str, object] = {
             "tranche_id": str(value.tranche_id),
             "released_shape_ids": list(released),
             "executable": True,
         }
-        if (
-            receipt.tranche_id != value.tranche_id
-            or receipt.released_shape_ids != released
-            or receipt.receipt_digest != _executable_receipt_digest(payload)
-        ):
+        if receipt.tranche_id != value.tranche_id or receipt.released_shape_ids != released:
             raise ExecutorTransportError("capacity manager release receipt changed")
+        self._assert_receipt_digest(receipt.receipt_digest, payload)
         return receipt
 
     async def aclose(self) -> None:

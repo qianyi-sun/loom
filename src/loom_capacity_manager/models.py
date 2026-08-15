@@ -203,7 +203,7 @@ class CapacityExecutionEpoch(Base):
             "AND current_writer_epoch > 0 "
             "AND configuration_epoch > 0 AND fleet_generation > 0 "
             "AND oldlab_pool_generation > 0 AND gb10_pool_generation > 0 "
-            "AND requested_ceiling = 1 AND effective_ceiling >= 0 "
+            "AND requested_ceiling > 0 AND effective_ceiling >= 0 "
             "AND effective_ceiling <= requested_ceiling "
             "AND requested_rate_per_minute > 0 AND effective_rate_per_minute >= 0 "
             "AND effective_rate_per_minute <= requested_rate_per_minute",
@@ -224,7 +224,11 @@ class CapacityExecutionEpoch(Base):
             "AND rollback_evidence_sha256 ~ '^[0-9a-f]{64}$' "
             "AND request_digest ~ '^[0-9a-f]{64}$' "
             "AND (activation_request_digest IS NULL OR "
-            "activation_request_digest ~ '^[0-9a-f]{64}$')",
+            "activation_request_digest ~ '^[0-9a-f]{64}$') "
+            "AND (drain_request_digest IS NULL OR "
+            "drain_request_digest ~ '^[0-9a-f]{64}$') "
+            "AND (retirement_request_digest IS NULL OR "
+            "retirement_request_digest ~ '^[0-9a-f]{64}$')",
             name="capacity_execution_epoch_digest_check",
         ),
         CheckConstraint(
@@ -239,6 +243,22 @@ class CapacityExecutionEpoch(Base):
             name="capacity_execution_epoch_manifest_check",
         ),
         CheckConstraint(
+            "(drain_actor IS NULL OR "
+            "octet_length(drain_actor) BETWEEN 1 AND 256) "
+            "AND (retirement_actor IS NULL OR "
+            "octet_length(retirement_actor) BETWEEN 1 AND 256)",
+            name="capacity_execution_epoch_lifecycle_actor_check",
+        ),
+        CheckConstraint(
+            "(drain_request_payload IS NULL OR "
+            "(jsonb_typeof(drain_request_payload) = 'object' "
+            "AND octet_length(drain_request_payload::text) <= 8388608)) "
+            "AND (retirement_request_payload IS NULL OR "
+            "(jsonb_typeof(retirement_request_payload) = 'object' "
+            "AND octet_length(retirement_request_payload::text) <= 8388608))",
+            name="capacity_execution_epoch_lifecycle_payload_check",
+        ),
+        CheckConstraint(
             "state IN ('prepared','active','drain-only','retired')",
             name="capacity_execution_epoch_state_check",
         ),
@@ -247,20 +267,50 @@ class CapacityExecutionEpoch(Base):
             "AND effective_rate_per_minute = 0 "
             "AND activation_actor IS NULL AND activation_idempotency_key IS NULL "
             "AND activation_request_digest IS NULL AND activated_at IS NULL "
+            "AND drain_actor IS NULL AND drain_idempotency_key IS NULL "
+            "AND drain_request_digest IS NULL AND drain_request_payload IS NULL "
+            "AND retirement_actor IS NULL AND retirement_idempotency_key IS NULL "
+            "AND retirement_request_digest IS NULL "
+            "AND retirement_request_payload IS NULL "
             "AND drain_only_at IS NULL AND retired_at IS NULL) OR "
             "(state = 'active' AND effective_ceiling > 0 "
             "AND effective_rate_per_minute > 0 "
             "AND activation_actor IS NOT NULL AND activation_idempotency_key IS NOT NULL "
             "AND activation_request_digest IS NOT NULL AND activated_at IS NOT NULL "
+            "AND drain_actor IS NULL AND drain_idempotency_key IS NULL "
+            "AND drain_request_digest IS NULL AND drain_request_payload IS NULL "
+            "AND retirement_actor IS NULL AND retirement_idempotency_key IS NULL "
+            "AND retirement_request_digest IS NULL "
+            "AND retirement_request_payload IS NULL "
             "AND drain_only_at IS NULL AND retired_at IS NULL) OR "
             "(state = 'drain-only' AND effective_ceiling = 0 "
             "AND effective_rate_per_minute = 0 "
             "AND activation_actor IS NOT NULL AND activation_idempotency_key IS NOT NULL "
             "AND activation_request_digest IS NOT NULL AND activated_at IS NOT NULL "
+            "AND drain_actor IS NOT NULL AND drain_idempotency_key IS NOT NULL "
+            "AND drain_request_digest IS NOT NULL AND drain_request_payload IS NOT NULL "
+            "AND retirement_actor IS NULL AND retirement_idempotency_key IS NULL "
+            "AND retirement_request_digest IS NULL "
+            "AND retirement_request_payload IS NULL "
             "AND drain_only_at IS NOT NULL "
             "AND retired_at IS NULL) OR "
             "(state = 'retired' AND effective_ceiling = 0 "
-            "AND effective_rate_per_minute = 0 AND retired_at IS NOT NULL)",
+            "AND effective_rate_per_minute = 0 "
+            "AND retirement_actor IS NOT NULL "
+            "AND retirement_idempotency_key IS NOT NULL "
+            "AND retirement_request_digest IS NOT NULL "
+            "AND retirement_request_payload IS NOT NULL "
+            "AND retired_at IS NOT NULL AND ((activation_actor IS NULL "
+            "AND activation_idempotency_key IS NULL "
+            "AND activation_request_digest IS NULL AND activated_at IS NULL "
+            "AND drain_actor IS NULL AND drain_idempotency_key IS NULL "
+            "AND drain_request_digest IS NULL AND drain_request_payload IS NULL "
+            "AND drain_only_at IS NULL) OR (activation_actor IS NOT NULL "
+            "AND activation_idempotency_key IS NOT NULL "
+            "AND activation_request_digest IS NOT NULL AND activated_at IS NOT NULL "
+            "AND drain_actor IS NOT NULL AND drain_idempotency_key IS NOT NULL "
+            "AND drain_request_digest IS NOT NULL AND drain_request_payload IS NOT NULL "
+            "AND drain_only_at IS NOT NULL)))",
             name="capacity_execution_epoch_state_time_check",
         ),
         ForeignKeyConstraint(
@@ -291,6 +341,14 @@ class CapacityExecutionEpoch(Base):
         UniqueConstraint(
             "activation_idempotency_key",
             name="capacity_execution_epoch_activation_idempotency_key",
+        ),
+        UniqueConstraint(
+            "drain_idempotency_key",
+            name="capacity_execution_epoch_drain_idempotency_key",
+        ),
+        UniqueConstraint(
+            "retirement_idempotency_key",
+            name="capacity_execution_epoch_retirement_idempotency_key",
         ),
         UniqueConstraint("idempotency_key", name="capacity_execution_epoch_idempotency_key"),
         UniqueConstraint(
@@ -346,6 +404,14 @@ class CapacityExecutionEpoch(Base):
     activation_actor: Mapped[str | None] = mapped_column(Text)
     activation_idempotency_key: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
     activation_request_digest: Mapped[str | None] = mapped_column(Text)
+    drain_actor: Mapped[str | None] = mapped_column(Text)
+    drain_idempotency_key: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    drain_request_digest: Mapped[str | None] = mapped_column(Text)
+    drain_request_payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    retirement_actor: Mapped[str | None] = mapped_column(Text)
+    retirement_idempotency_key: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    retirement_request_digest: Mapped[str | None] = mapped_column(Text)
+    retirement_request_payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     prepared_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
     )
@@ -1769,12 +1835,42 @@ class CapacityExecutableExecutorState(Base):
             "OR (journal_high_water > 0 AND journal_digest ~ '^[0-9a-f]{64}$' "
             "AND journal_digest <> repeat('0', 64))) "
             "AND ((inventory_high_water = 0 AND last_inventory_digest IS NULL) "
-            "OR (inventory_high_water > 0 AND last_inventory_digest ~ '^[0-9a-f]{64}$'))",
+            "OR (inventory_high_water > 0 AND last_inventory_digest ~ '^[0-9a-f]{64}$')) "
+            "AND (inventory_confirmation_journal_digest IS NULL OR "
+            "inventory_confirmation_journal_digest ~ '^[0-9a-f]{64}$')",
             name="capacity_executable_executor_state_digest_check",
         ),
         CheckConstraint(
             "state IN ('current','fenced','equivocal')",
             name="capacity_executable_executor_state_check",
+        ),
+        CheckConstraint(
+            "((retirement_safe AND retirement_inventory_digest IS NOT NULL "
+            "AND retirement_inventory_digest ~ '^[0-9a-f]{64}$' "
+            "AND retirement_inventory_digest = last_inventory_digest "
+            "AND inventory_high_water > 0 AND inventory_payload IS NOT NULL "
+            "AND jsonb_typeof(inventory_payload) = 'object' "
+            "AND last_inventory_at IS NOT NULL "
+            "AND last_heartbeat_at > last_inventory_at "
+            "AND inventory_payload -> 'schema_version' = '2'::jsonb "
+            "AND inventory_payload -> 'inventory_sequence' "
+            "= to_jsonb(inventory_high_water) "
+            "AND inventory_payload ->> 'executor_id' = executor_id "
+            "AND inventory_payload ->> 'executor_incarnation' "
+            "= executor_incarnation::text "
+            "AND inventory_payload ->> 'pool_id' = pool_id "
+            "AND inventory_payload -> 'pool_generation' = to_jsonb(pool_generation) "
+            "AND inventory_confirmation_journal_digest ~ '^[0-9a-f]{64}$' "
+            "AND ((inventory_payload -> 'journal_sequence' = to_jsonb(journal_high_water) "
+            "AND inventory_payload ->> 'journal_digest' = journal_digest) OR "
+            "(inventory_payload -> 'journal_sequence' = to_jsonb(journal_high_water - 2) "
+            "AND inventory_confirmation_journal_digest = journal_digest)) "
+            "AND inventory_payload -> 'execution' -> 'execution_epoch' "
+            "= to_jsonb(execution_epoch) "
+            "AND inventory_payload -> 'execution' ->> 'execution_manifest_sha256' "
+            "= execution_manifest_sha256) IS TRUE) OR "
+            "(NOT retirement_safe AND retirement_inventory_digest IS NULL)",
+            name="capacity_executable_executor_retirement_check",
         ),
         ForeignKeyConstraint(
             (
@@ -1839,7 +1935,12 @@ class CapacityExecutableExecutorState(Base):
     )
     last_inventory_digest: Mapped[str | None] = mapped_column(Text)
     inventory_payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    inventory_confirmation_journal_digest: Mapped[str | None] = mapped_column(Text)
     last_inventory_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    retirement_safe: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    retirement_inventory_digest: Mapped[str | None] = mapped_column(Text)
     lease_expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     last_heartbeat_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -1873,6 +1974,11 @@ class CapacityExecutableIntent(Base):
             "'submitting-unknown','bound','observed','terminal','closing','released',"
             "'quarantined')",
             name="capacity_executable_intent_state_check",
+        ),
+        CheckConstraint(
+            "observed_state IS NULL OR observed_state IN "
+            "('pending','active','draining','terminal','unknown')",
+            name="capacity_executable_intent_observed_state_check",
         ),
         CheckConstraint(
             "jsonb_typeof(binding_payload) = 'object' "
@@ -2037,8 +2143,7 @@ class CapacityExecutableBootstrapAcknowledgement(Base):
     __tablename__ = "capacity_executable_bootstrap_acknowledgements"
     __table_args__ = (
         CheckConstraint(
-            "execution_epoch > 0 AND proposal_epoch > 0 "
-            "AND bootstrap_registration_epoch > 0",
+            "execution_epoch > 0 AND proposal_epoch > 0 AND bootstrap_registration_epoch > 0",
             name="capacity_executable_bootstrap_ack_quantity_check",
         ),
         CheckConstraint(
@@ -2241,7 +2346,6 @@ class CapacityExecutableLaunchRateBucket(Base):
         BigInteger, nullable=False, server_default=text("0")
     )
     last_refill_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
-
 
 
 class CapacityAuditEvent(Base):

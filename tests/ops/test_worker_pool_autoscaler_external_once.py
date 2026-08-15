@@ -3,17 +3,26 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import hashlib
 import importlib.util
 import json
 import socket
 import subprocess
 import sys
 import tempfile
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+from loom_control_plane.global_execution_fence import (
+    GlobalExecutionWitness,
+    canonical_global_execution_witness_bytes,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "ops" / "worker_pool_autoscaler_external_once.py"
@@ -49,6 +58,12 @@ def _args(module: Any, *extra: str):
             "loom-staging",
             "--kubeconfig",
             "/etc/loom/kubeconfig/staging.yaml",
+            "--global-execution-witness-json",
+            "/run/loom/global-execution-witness.json",
+            "--manager-public-key",
+            "/run/loom/global-execution-manager.pub",
+            "--expected-manager-public-key-sha256",
+            "a" * 64,
             *extra,
         ]
     )
@@ -59,6 +74,30 @@ def _authority(module: Any) -> Any:
         cluster_name="trt-gb10",
         controller_host="gx10-01c7",
         local_hostname="gx10-01c7",
+    )
+
+
+def _parsed_witness(*, state: str = "shadow", pool_id: str = "gb10") -> GlobalExecutionWitness:
+    private_key = Ed25519PrivateKey.from_private_bytes(bytes([12]) * 32)
+    public_key = private_key.public_key()
+    payload: dict[str, object] = {
+        "authority": "global-capacity-manager",
+        "pool_id": pool_id,
+        "execution_epoch": 0,
+        "execution_state": state,
+        "executable_new_capacity_ceiling": 0,
+        "expires_at": (datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
+        "signing_key_id": "test-manager",
+    }
+    canonical = canonical_global_execution_witness_bytes(payload)
+    payload["canonical_digest"] = hashlib.sha256(canonical).hexdigest()
+    payload["signature_base64"] = base64.b64encode(private_key.sign(canonical)).decode("ascii")
+    return GlobalExecutionWitness.from_mapping(
+        payload,
+        public_key=public_key,
+        expected_public_key_sha256=hashlib.sha256(
+            public_key.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+        ).hexdigest(),
     )
 
 
@@ -108,6 +147,12 @@ def test_parser_defaults_follow_service_home_and_concrete_database_service(
             "trt-oldlab",
             "--expected-slurm-controller-host",
             "TRT-EAI-OLDLAB-1",
+            "--global-execution-witness-json",
+            "/run/loom/global-execution-witness.json",
+            "--manager-public-key",
+            "/run/loom/global-execution-manager.pub",
+            "--expected-manager-public-key-sha256",
+            "a" * 64,
         ]
     )
 
@@ -173,8 +218,7 @@ def test_slurm_authority_probe_rejects_foreign_or_non_controller_host(
         lambda *_args, **_kwargs: SimpleNamespace(
             returncode=0,
             stdout=(
-                f"ClusterName = {cluster_name}\n"
-                f"SlurmctldHost[0] = {controller_host}(192.0.2.10)\n"
+                f"ClusterName = {cluster_name}\nSlurmctldHost[0] = {controller_host}(192.0.2.10)\n"
             ),
         ),
     )
@@ -601,6 +645,7 @@ def test_normal_reconcile_validates_db_before_actuation_and_owns_tunnel(
             "include_external_policies": True,
             "external_only": True,
             "pool_names": ("gb10",),
+            "global_execution_witness": None,
         }
         events.append("reconcile")
         return [SimpleNamespace(action="noop")]
@@ -623,8 +668,10 @@ def test_normal_reconcile_validates_db_before_actuation_and_owns_tunnel(
         lambda _engine, *, expire_on_commit: lambda: _Session(),
     )
     monkeypatch.setattr(module, "reconcile_worker_pool_autoscaler_once", _reconcile)
+    monkeypatch.setattr(module, "load_global_execution_witness", lambda *_args, **_kwargs: None)
 
-    asyncio.run(module._main_async(_args(module, "--db-local-port", "15451")))
+    with pytest.raises(module.ExternalAutoscalerError, match="witness is unavailable"):
+        asyncio.run(module._main_async(_args(module, "--db-local-port", "15451")))
 
     assert json.loads(capsys.readouterr().out) == [{"action": "noop"}]
     assert events == [
@@ -639,6 +686,75 @@ def test_normal_reconcile_validates_db_before_actuation_and_owns_tunnel(
         "dispose",
         "tunnel-stop",
     ]
+
+
+@pytest.mark.parametrize(
+    ("state", "pool_id"),
+    [("active", "gb10"), ("shadow", "oldlab")],
+)
+def test_denied_parsed_witness_commits_drain_safe_reconcile_before_failure(
+    module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    state: str,
+    pool_id: str,
+) -> None:
+    events: list[str] = []
+
+    class _Session:
+        async def __aenter__(self) -> _Session:
+            events.append("session-enter")
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            events.append("session-exit")
+
+        async def rollback(self) -> None:
+            events.append("rollback")
+
+        async def commit(self) -> None:
+            events.append("commit")
+
+    class _Engine:
+        async def dispose(self) -> None:
+            events.append("dispose")
+
+    @contextlib.contextmanager
+    def _tunnel(_config: Any):
+        events.append("tunnel-start")
+        try:
+            yield
+        finally:
+            events.append("tunnel-stop")
+
+    async def _validate(*_args: object, **_kwargs: object) -> list[object]:
+        events.append("validate")
+        return []
+
+    async def _reconcile(_session: Any, **kwargs: object) -> list[Any]:
+        assert kwargs["global_execution_witness"] is witness
+        events.append("reconcile")
+        return [SimpleNamespace(action="drain_capacity")]
+
+    witness = _parsed_witness(state=state, pool_id=pool_id)
+    monkeypatch.setattr(module, "_load_cp_db_url", lambda *_args, **_kwargs: "postgresql://x")
+    monkeypatch.setattr(module, "_database_port_forward", _tunnel)
+    monkeypatch.setattr(module, "_validate_local_slurm_authority", lambda _args: _authority(module))
+    monkeypatch.setattr(module, "_validate_requested_external_policies", _validate)
+    monkeypatch.setattr(module, "create_async_engine", lambda *_args, **_kwargs: _Engine())
+    monkeypatch.setattr(
+        module,
+        "async_sessionmaker",
+        lambda _engine, *, expire_on_commit: lambda: _Session(),
+    )
+    monkeypatch.setattr(module, "reconcile_worker_pool_autoscaler_once", _reconcile)
+    monkeypatch.setattr(module, "load_global_execution_witness", lambda *_args, **_kwargs: witness)
+
+    with pytest.raises(module.ExternalAutoscalerError, match="witness is unavailable"):
+        asyncio.run(module._main_async(_args(module, "--db-local-port", "15451")))
+
+    assert json.loads(capsys.readouterr().out) == [{"action": "drain_capacity"}]
+    assert events.index("reconcile") < events.index("commit") < events.index("dispose")
 
 
 def test_validate_only_uses_exact_tunnel_and_read_only_policy_query(
@@ -734,6 +850,7 @@ def test_validate_only_uses_exact_tunnel_and_read_only_policy_query(
         lambda _engine, *, expire_on_commit: lambda: _Session(),
     )
     monkeypatch.setattr(module, "reconcile_worker_pool_autoscaler_once", _unexpected_reconcile)
+    monkeypatch.setattr(module, "load_global_execution_witness", lambda *_args, **_kwargs: None)
 
     asyncio.run(module._main_async(_args(module, "--db-local-port", "15451", "--validate-only")))
 

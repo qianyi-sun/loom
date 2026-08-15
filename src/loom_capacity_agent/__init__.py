@@ -7,6 +7,8 @@ from loom_capacity_agent.admission import (
     PreparedProtectedReleaseV1,
     PreparedWorkerBindingV1,
     PreparedWorkerShapeV1,
+    ProtectedReleasePublicationCheckpointV2,
+    PublishableExecutableProtectedReleaseV2,
 )
 from loom_capacity_agent.claim_guard import (
     ClaimGuard,
@@ -22,6 +24,7 @@ from loom_capacity_agent.client import (
     DemandReporterClient,
     DemandReporterConnection,
     DemandReporterTLSFiles,
+    ExecutableProtectedReleasePublishReceiptV2,
     ProtectedReleasePublishReceiptV1,
 )
 from loom_capacity_agent.contracts import (
@@ -37,6 +40,10 @@ from loom_capacity_agent.executable_bootstrap import (
     ProtectedExecutableBootstrapCoordinator,
     ProtectedExecutableBootstrapError,
     ProtectedExecutableBootstrapWork,
+)
+from loom_capacity_agent.executable_release_reporter import (
+    ExecutableProtectedReleaseReporterRuntime,
+    stable_release_publication_key,
 )
 from loom_capacity_agent.legacy_fence import (
     LEGACY_MUTATION_INVENTORY_DIGEST,
@@ -67,10 +74,12 @@ from loom_capacity_agent.reporter import (
 from loom_capacity_agent.store import (
     CapacityAgentStore,
     CapacityAgentStoreError,
+    acknowledge_executable_protected_release_publication,
     capture_demand_observation,
     capture_lifecycle_demand_observation,
     read_agent_lifecycle_demand_observation,
     read_agent_reporter_high_water,
+    read_next_executable_protected_release,
 )
 
 __all__ = [
@@ -97,6 +106,8 @@ __all__ = [
     "DemandReporterConnection",
     "DemandReporterTLSFiles",
     "DisabledClaimGuard",
+    "ExecutableProtectedReleasePublishReceiptV2",
+    "ExecutableProtectedReleaseReporterRuntime",
     "GuardDemandAttemptV1",
     "GuardDemandObservationV1",
     "GuardLifecycleDemandAttemptV2",
@@ -117,12 +128,17 @@ __all__ = [
     "ProtectedExecutableBootstrapCoordinator",
     "ProtectedExecutableBootstrapError",
     "ProtectedExecutableBootstrapWork",
+    "ProtectedReleasePublicationCheckpointV2",
     "ProtectedReleasePublishReceiptV1",
+    "PublishableExecutableProtectedReleaseV2",
     "ReporterConfigurationV1",
+    "acknowledge_executable_protected_release_publication",
     "build_demand_snapshot",
     "build_lifecycle_demand_snapshot",
     "capture_demand_observation",
     "capture_lifecycle_demand_observation",
     "read_agent_lifecycle_demand_observation",
     "read_agent_reporter_high_water",
+    "read_next_executable_protected_release",
+    "stable_release_publication_key",
 ]

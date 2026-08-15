@@ -13,7 +13,10 @@ from pydantic import ValidationError
 
 from loom_cli.capacity_control_plane import (
     load_capacity_control_plane_profile,
+    load_capacity_pool_executor_profile,
     render_capacity_control_plane_manifests,
+    render_capacity_pool_executor_configs,
+    render_capacity_pool_executor_service_environment,
 )
 
 _NAMESPACE = "loom-dev"
@@ -28,9 +31,7 @@ def _non_nil_uuid_argument(value: str) -> UUID:
             "capacity authority incarnation must be a non-nil UUID"
         ) from exc
     if authority.int == 0:
-        raise argparse.ArgumentTypeError(
-            "capacity authority incarnation must be a non-nil UUID"
-        )
+        raise argparse.ArgumentTypeError("capacity authority incarnation must be a non-nil UUID")
     return authority
 
 
@@ -47,6 +48,23 @@ def _render(args: argparse.Namespace) -> int:
         return 2
     except (OSError, ValueError) as exc:
         sys.stderr.write(f"error: capacity control-plane render failed: {exc}\n")
+        return 2
+    sys.stdout.write(rendered)
+    return 0
+
+
+def _render_executor(args: argparse.Namespace) -> int:
+    try:
+        profile = load_capacity_pool_executor_profile(Path(args.file).resolve())
+        if args.output == "config":
+            rendered = render_capacity_pool_executor_configs(profile)[args.pool]
+        else:
+            rendered = render_capacity_pool_executor_service_environment(profile, args.pool)
+    except ValidationError:
+        sys.stderr.write("error: capacity pool-executor render inputs are invalid\n")
+        return 2
+    except (OSError, ValueError) as exc:
+        sys.stderr.write(f"error: capacity pool-executor render failed: {exc}\n")
         return 2
     sys.stdout.write(rendered)
     return 0
@@ -129,6 +147,30 @@ def add_capacity_control_plane_subparser(subparsers: Any) -> None:
         help="Reviewed non-nil UUID of the independent capacity authority.",
     )
     render.set_defaults(handler=_render)
+
+    render_executor = operations.add_parser(
+        "render-executor",
+        help="Render one exact zero-ceiling pool configuration without installing it.",
+    )
+    render_executor.add_argument(
+        "--file",
+        type=Path,
+        required=True,
+        help="Strict non-secret two-pool executor TOML profile.",
+    )
+    render_executor.add_argument(
+        "--pool",
+        choices=("gb10", "oldlab"),
+        required=True,
+        help="Controller-local pool whose artifact is rendered.",
+    )
+    render_executor.add_argument(
+        "--output",
+        choices=("config", "service-environment"),
+        default="config",
+        help="Render production JSON or the non-secret systemd environment.",
+    )
+    render_executor.set_defaults(handler=_render_executor)
 
     status = operations.add_parser(
         "status",
