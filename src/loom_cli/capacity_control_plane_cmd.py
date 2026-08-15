@@ -11,6 +11,7 @@ from uuid import UUID
 
 from pydantic import ValidationError
 
+from loom_capacity_manager.execution_policy import load_execution_preparation_policy
 from loom_cli.capacity_control_plane import (
     load_capacity_control_plane_profile,
     load_capacity_pool_executor_profile,
@@ -37,12 +38,24 @@ def _non_nil_uuid_argument(value: str) -> UUID:
 
 
 def _render(args: argparse.Namespace) -> int:
+    policy_path = args.execution_policy_file
+    policy_sha256 = args.execution_policy_sha256
+    if (policy_path is None) != (policy_sha256 is None):
+        sys.stderr.write("error: execution policy path and digest must be supplied together\n")
+        return 2
     try:
         profile = load_capacity_control_plane_profile(Path(args.file).resolve())
+        execution_policy = (
+            None
+            if policy_path is None
+            else load_execution_preparation_policy(policy_path, policy_sha256)
+        )
         rendered = render_capacity_control_plane_manifests(
             profile,
             manager_image=args.manager_image,
             authority_incarnation=args.authority_incarnation,
+            execution_policy=execution_policy,
+            execution_policy_sha256=policy_sha256,
         )
     except ValidationError:
         sys.stderr.write("error: capacity control-plane render inputs are invalid\n")
@@ -150,6 +163,15 @@ def add_capacity_control_plane_subparser(subparsers: Any) -> None:
         type=_non_nil_uuid_argument,
         required=True,
         help="Reviewed non-nil UUID of the independent capacity authority.",
+    )
+    render.add_argument(
+        "--execution-policy-file",
+        type=Path,
+        help="Optional owner-only exact execution preparation policy JSON.",
+    )
+    render.add_argument(
+        "--execution-policy-sha256",
+        help="Required exact SHA-256 when an execution policy file is supplied.",
     )
     render.set_defaults(handler=_render)
 

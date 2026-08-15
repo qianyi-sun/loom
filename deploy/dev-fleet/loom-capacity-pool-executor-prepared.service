@@ -1,0 +1,39 @@
+[Unit]
+Description=Loom prepared global capacity pool inventory
+Documentation=https://github.com/qianyi-sun/loom/blob/dev/docs/runbooks/executable-global-capacity-bridge-rehearsal.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=loom_capacity_executor
+Group=loom_capacity_executor
+UMask=0077
+Environment=PYTHONNOUSERSITE=1
+EnvironmentFile=/etc/loom-capacity-executor/service.env
+ExecCondition=/usr/bin/test -f /etc/loom-capacity-executor/service.env
+ExecCondition=/usr/bin/test ! -L /etc/loom-capacity-executor/service.env
+ExecCondition=/usr/bin/test ${LOOM_CAPACITY_EXECUTOR_EXECUTABLE_CEILING} = 0
+ExecStart=/opt/loom-capacity-executor/venv/bin/python -I -B -m loom_capacity_executor --config ${LOOM_CAPACITY_EXECUTOR_CONFIG} --expected-manifest-sha256 ${LOOM_CAPACITY_EXECUTOR_EXPECTED_MANIFEST_SHA256} --pool ${LOOM_CAPACITY_EXECUTOR_POOL} --prepared-only --inventory-policy ${LOOM_CAPACITY_EXECUTOR_INVENTORY_POLICY} --expected-inventory-policy-sha256 ${LOOM_CAPACITY_EXECUTOR_EXPECTED_INVENTORY_POLICY_SHA256}
+TimeoutStartSec=240
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+ReadOnlyPaths=/etc/loom-capacity-executor /run/loom-capacity-executor
+ReadWritePaths=/var/lib/loom-capacity-executor
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+
+# Deliberately no [Install] section: only the timer may be enabled after approval.

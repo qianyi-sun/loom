@@ -15,6 +15,10 @@ from pydantic import ValidationError
 
 import loom_cli.capacity_control_plane as capacity_control_plane
 from loom_capacity_executor.config import PoolExecutorConfig
+from loom_capacity_manager.executable_contracts import (
+    canonical_executable_bytes,
+    canonical_executable_digest,
+)
 from loom_capacity_manager.ownership import public_key_fingerprint
 from loom_capacity_pool_executor.config import (
     SlurmInventoryPolicyDocument,
@@ -31,6 +35,7 @@ from loom_cli.capacity_control_plane import (
     render_capacity_pool_executor_service_environment,
     render_capacity_pool_inventory_policies,
 )
+from tests.capacity_execution_fixtures import execution_policy
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PROFILE = _REPO_ROOT / "deploy/dev-fleet/capacity-control-plane.toml"
@@ -96,11 +101,19 @@ def test_checked_in_executor_profile_is_inert_and_pool_complete() -> None:
         }
         assert payload["approved_profiles_sha256"] == "0" * 64
         environment = render_capacity_pool_executor_service_environment(profile, pool.pool_id)
+        inventory_policy = render_capacity_pool_inventory_policies(profile)[pool.pool_id]
+        inventory_policy_sha256 = hashlib.sha256(inventory_policy.encode("ascii")).hexdigest()
+        inventory_policy_file = Path(pool.config_file).with_name(
+            f"{pool.pool_id}-inventory-policy.json"
+        )
         assert environment == (
             f"LOOM_CAPACITY_EXECUTOR_CONFIG={pool.config_file}\n"
             "LOOM_CAPACITY_EXECUTOR_EXECUTABLE_CEILING=0\n"
+            f"LOOM_CAPACITY_EXECUTOR_EXPECTED_INVENTORY_POLICY_SHA256="
+            f"{inventory_policy_sha256}\n"
             f"LOOM_CAPACITY_EXECUTOR_EXPECTED_MANIFEST_SHA256="
             f"{capacity_pool_executor_manifest_sha256(profile, pool.pool_id)}\n"
+            f"LOOM_CAPACITY_EXECUTOR_INVENTORY_POLICY={inventory_policy_file}\n"
             f"LOOM_CAPACITY_EXECUTOR_POOL={pool.pool_id}\n"
         )
 
@@ -288,6 +301,14 @@ def test_rendered_executor_config_is_accepted_by_the_production_loader(
         (lambda value: value.update(namespace="loom-dev-shared"), "namespace"),
         (lambda value: value.update(executor_image="ghcr.io/example/executor:latest"), "immutable"),
         (
+            lambda value: value["pools"][0].update(
+                config_file=(
+                    "/etc/loom-capacity-executor\nLOOM_CAPACITY_EXECUTOR_POOL=oldlab/gb10.json"
+                )
+            ),
+            "configuration path",
+        ),
+        (
             lambda value: value["pools"][1].update(
                 bearer_token_file=value["pools"][0]["bearer_token_file"]
             ),
@@ -374,6 +395,205 @@ def _documents() -> list[dict[str, Any]]:
         authority_incarnation=_AUTHORITY,
     )
     return [document for document in yaml.safe_load_all(rendered) if document]
+
+
+def test_renderer_policy_disabled_output_is_unchanged_by_explicit_none_pair() -> None:
+    profile = load_capacity_control_plane_profile(_PROFILE)
+    implicit = render_capacity_control_plane_manifests(
+        profile,
+        manager_image=_MANAGER_IMAGE,
+        authority_incarnation=_AUTHORITY,
+    )
+    explicit = render_capacity_control_plane_manifests(
+        profile,
+        manager_image=_MANAGER_IMAGE,
+        authority_incarnation=_AUTHORITY,
+        execution_policy=None,
+        execution_policy_sha256=None,
+    )
+
+    assert explicit == implicit
+    assert not any(
+        document and document["kind"] == "ConfigMap" for document in yaml.safe_load_all(explicit)
+    )
+
+
+@pytest.mark.parametrize(
+    ("policy_present", "digest_present"),
+    ((True, False), (False, True)),
+)
+def test_renderer_requires_execution_policy_and_digest_together(
+    policy_present: bool,
+    digest_present: bool,
+) -> None:
+    policy = execution_policy()
+
+    with pytest.raises(ValueError, match="together"):
+        render_capacity_control_plane_manifests(
+            load_capacity_control_plane_profile(_PROFILE),
+            manager_image=_MANAGER_IMAGE,
+            authority_incarnation=_AUTHORITY,
+            execution_policy=policy if policy_present else None,
+            execution_policy_sha256=(
+                canonical_executable_digest(policy) if digest_present else None
+            ),
+        )
+
+
+def _policy_enabled_documents(policy=None) -> list[dict[str, Any]]:
+    resolved = execution_policy() if policy is None else policy
+    rendered = render_capacity_control_plane_manifests(
+        load_capacity_control_plane_profile(_PROFILE),
+        manager_image=_MANAGER_IMAGE,
+        authority_incarnation=_AUTHORITY,
+        execution_policy=resolved,
+        execution_policy_sha256=canonical_executable_digest(resolved),
+    )
+    return [document for document in yaml.safe_load_all(rendered) if document]
+
+
+def test_renderer_mounts_one_immutable_digest_addressed_execution_policy() -> None:
+    policy = execution_policy()
+    payload = canonical_executable_bytes(policy)
+    digest = canonical_executable_digest(policy)
+    documents = _policy_enabled_documents(policy)
+    config_maps = [document for document in documents if document["kind"] == "ConfigMap"]
+
+    assert len(config_maps) == 1
+    config_map = config_maps[0]
+    assert config_map == {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {
+            "name": f"loom-capacity-execution-policy-{digest[:32]}",
+            "namespace": "loom-dev",
+            "labels": {
+                "app.kubernetes.io/managed-by": "loom-capacity-control-plane",
+                "app.kubernetes.io/part-of": "loom",
+            },
+            "annotations": {"loom.yylx.dev/execution-policy-sha256": digest},
+        },
+        "immutable": True,
+        "data": {"execution-policy.json": payload.decode("ascii")},
+    }
+    manager = next(document for document in documents if document["kind"] == "Deployment")
+    pod = manager["spec"]["template"]["spec"]
+    container = pod["containers"][0]
+    assert pod["initContainers"][-1] == {
+        "name": "execution-policy-init",
+        "image": _MANAGER_IMAGE,
+        "imagePullPolicy": "IfNotPresent",
+        "command": ["python", "-m", "loom_capacity_manager.secret_init"],
+        "args": [
+            "--profile",
+            "execution-policy",
+            "--source",
+            "/var/run/loom-capacity-manager/projected-policy",
+            "--destination",
+            "/var/run/loom-capacity-manager/runtime-policy/execution-policy",
+        ],
+        "securityContext": {
+            "allowPrivilegeEscalation": False,
+            "capabilities": {"drop": ["ALL"]},
+            "readOnlyRootFilesystem": True,
+        },
+        "resources": load_capacity_control_plane_profile(_PROFILE).manager_resources.kubernetes(),
+        "volumeMounts": [
+            {
+                "name": "execution-policy-projected",
+                "mountPath": "/var/run/loom-capacity-manager/projected-policy",
+                "readOnly": True,
+            },
+            {
+                "name": "execution-policy-runtime",
+                "mountPath": "/var/run/loom-capacity-manager/runtime-policy",
+            },
+        ],
+    }
+    assert container["volumeMounts"][-1] == {
+        "name": "execution-policy-runtime",
+        "mountPath": "/etc/loom-capacity-manager/execution-policy",
+        "subPath": "execution-policy",
+        "readOnly": True,
+    }
+    assert pod["volumes"][-2] == {
+        "name": "execution-policy-projected",
+        "configMap": {
+            "name": config_map["metadata"]["name"],
+            "defaultMode": 0o444,
+            "items": [{"key": "execution-policy.json", "path": "execution-policy.json"}],
+        },
+    }
+    assert pod["volumes"][-1] == {
+        "name": "execution-policy-runtime",
+        "emptyDir": {"medium": "Memory", "sizeLimit": "2Mi"},
+    }
+    environment = {item["name"]: item["value"] for item in container["env"]}
+    assert environment["LOOM_CAPACITY_EXECUTION_POLICY_FILE"] == (
+        "/etc/loom-capacity-manager/execution-policy/execution-policy.json"
+    )
+    assert environment["LOOM_CAPACITY_EXECUTION_POLICY_SHA256"] == digest
+    serialized = yaml.safe_dump(config_map)
+    for forbidden in ("bearer", "private-key", "database-url", "principals.json"):
+        assert forbidden not in serialized
+
+
+def test_execution_policy_change_updates_config_map_and_deployment_template() -> None:
+    original = execution_policy()
+    changed = original.model_copy(update={"rollback_evidence_sha256": "f" * 64})
+
+    original_documents = _policy_enabled_documents(original)
+    changed_documents = _policy_enabled_documents(changed)
+    original_config_map = next(
+        document for document in original_documents if document["kind"] == "ConfigMap"
+    )
+    changed_config_map = next(
+        document for document in changed_documents if document["kind"] == "ConfigMap"
+    )
+    original_deployment = next(
+        document for document in original_documents if document["kind"] == "Deployment"
+    )
+    changed_deployment = next(
+        document for document in changed_documents if document["kind"] == "Deployment"
+    )
+
+    assert original_config_map["metadata"]["name"] != changed_config_map["metadata"]["name"]
+    assert original_config_map["data"] != changed_config_map["data"]
+    assert original_deployment["spec"]["template"] != changed_deployment["spec"]["template"]
+
+
+def test_renderer_rejects_execution_policy_digest_drift() -> None:
+    with pytest.raises(ValueError, match="digest"):
+        render_capacity_control_plane_manifests(
+            load_capacity_control_plane_profile(_PROFILE),
+            manager_image=_MANAGER_IMAGE,
+            authority_incarnation=_AUTHORITY,
+            execution_policy=execution_policy(),
+            execution_policy_sha256="f" * 64,
+        )
+
+
+def test_renderer_rejects_execution_policy_larger_than_config_map_data_limit() -> None:
+    policy = execution_policy()
+    fence = policy.legacy_writer_fences[0]
+    oversized = policy.model_copy(
+        update={
+            "legacy_writer_fences": tuple(
+                fence.model_copy(update={"writer_id": f"writer-{index}"}) for index in range(10_000)
+            )
+        }
+    )
+    payload = canonical_executable_bytes(oversized)
+    assert len(payload) > 1024 * 1024
+
+    with pytest.raises(ValueError, match="ConfigMap byte bound"):
+        render_capacity_control_plane_manifests(
+            load_capacity_control_plane_profile(_PROFILE),
+            manager_image=_MANAGER_IMAGE,
+            authority_incarnation=_AUTHORITY,
+            execution_policy=oversized,
+            execution_policy_sha256=hashlib.sha256(payload).hexdigest(),
+        )
 
 
 def test_renderer_emits_one_inert_control_plane_in_dependency_order() -> None:

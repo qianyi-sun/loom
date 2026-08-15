@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh Loom prepared global capacity pool inventory
+
+[Timer]
+OnBootSec=15
+OnUnitInactiveSec=30
+AccuracySec=5
+Persistent=false
+Unit=loom-capacity-pool-executor-prepared.service
+
+[Install]
+WantedBy=timers.target
