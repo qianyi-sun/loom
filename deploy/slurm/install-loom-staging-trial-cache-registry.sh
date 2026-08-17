@@ -121,6 +121,19 @@ systemctl restart loom-staging-trial-cache-registry.service
 systemctl is-active --quiet loom-staging-trial-cache-registry.service
 
 registry_url="https://${LISTEN_IP}:5443"
+registry_ready=false
+for _attempt in $(seq 1 30); do
+  if curl --fail --silent --output /dev/null --cacert "$TLS_ROOT/ca.crt" \
+    "$registry_url/v2/"; then
+    registry_ready=true
+    break
+  fi
+  sleep 1
+done
+if [[ "$registry_ready" != true ]]; then
+  echo "error: authenticated registry proxy did not become ready" >&2
+  exit 1
+fi
 anonymous_get_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
   --cacert "$TLS_ROOT/ca.crt" "$registry_url/v2/")"
 anonymous_push_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \

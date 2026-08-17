@@ -170,6 +170,13 @@ def test_registry_assets_are_parseable_and_pin_the_live_public_ca() -> None:
     assert "DELETE /run/loom-registry-auth/gc.htpasswd;" in proxy_config
     assert "limit_except GET HEAD" in proxy_config
     assert "auth_basic_user_file $registry_auth_file;" in proxy_config
+    assert "user root;" in proxy_config
+    assert "--cap-drop=ALL --security-opt no-new-privileges" in unit
+    assert "--read-only --tmpfs /var/cache/nginx --tmpfs /var/run" in unit
+    assert "docker network create loom-staging-trial-cache-registry" in unit
+    assert "docker network create --internal" not in unit
+    assert "registry_ready=false" in installer_source
+    assert 'if [[ "$registry_ready" != true ]]' in installer_source
 
     for installer in (REGISTRY_INSTALLER, CA_INSTALLER, STORAGE_GC_SCRIPT):
         parsed = subprocess.run(
