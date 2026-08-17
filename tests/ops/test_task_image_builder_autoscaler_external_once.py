@@ -59,6 +59,18 @@ def _args(module: Any, tmp_path: Path, *extra: str):
     )
 
 
+def _registry_config(tmp_path: Path, *, registry: str = "registry.example") -> Path:
+    directory = tmp_path / f"docker-{registry.replace('.', '-')}"
+    directory.mkdir(mode=0o700)
+    config = directory / "config.json"
+    config.write_text(
+        '{"auths": {"' + registry + '": {"auth": "dGVzdA=="}}}\n',
+        encoding="utf-8",
+    )
+    config.chmod(0o600)
+    return directory
+
+
 def test_committed_disabled_policy_cannot_reconcile(
     module: Any,
     tmp_path: Path,
@@ -76,6 +88,11 @@ def test_enabled_policy_maps_to_exclusive_runtime_config(
     env_file.write_text("LOOM_WORKER_TOKEN=builder-token\n", encoding="utf-8")
     repo_dir = tmp_path / "repo"
     repo_dir.mkdir()
+    registry_docker_config_dir = tmp_path / "registry-docker"
+    registry_docker_config_dir.mkdir(mode=0o700)
+    registry_config = registry_docker_config_dir / "config.json"
+    registry_config.write_text('{"auths": {"registry.example": {}}}\n', encoding="utf-8")
+    registry_config.chmod(0o600)
     policy = {
         "environment": "staging",
         "pool_name": "task-image-builder-gb10",
@@ -86,6 +103,7 @@ def test_enabled_policy_maps_to_exclusive_runtime_config(
         "allowed_nodes": ["trt-gb10-1"],
         "env_file": str(env_file),
         "repo_dir": str(repo_dir),
+        "registry_docker_config_dir": str(registry_docker_config_dir),
         "partition": "gb10",
         "time_limit": "04:00:00",
         "requested_cpus": 20,
@@ -102,7 +120,7 @@ def test_enabled_policy_maps_to_exclusive_runtime_config(
         "command_timeout_seconds": 20.0,
         "slurm_account": "loom-staging",
         "slurm_qos": "loom-task-image-builder",
-        "slurm_reservation": "",
+        "slurm_reservation": "loom-builder-exclusive",
         "job_output_dir": str(tmp_path / "output"),
     }
     monkeypatch.setattr(
@@ -120,29 +138,14 @@ def test_enabled_policy_maps_to_exclusive_runtime_config(
     assert config.env_file == str(env_file)
 
 
-async def test_reconcile_requires_global_execution_witness_before_capacity_access(
+def test_invalid_global_execution_witness_enters_drain_only_mode(
     module: Any,
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(
-        module,
-        "_load_enabled_builder_config",
-        lambda _args: SimpleNamespace(slurm_cluster_id="gb10"),
-    )
-    monkeypatch.setattr(
-        module.transport,
-        "_validate_local_slurm_authority",
-        lambda _args: SimpleNamespace(cluster_name="trt-gb10"),
-    )
-    monkeypatch.setattr(
-        module.transport,
-        "_database_port_forward_config",
-        lambda _args: pytest.fail("capacity access preceded global execution fencing"),
-    )
-
-    with pytest.raises(module.TaskImageBuilderPolicyError, match="global execution witness"):
-        await module._main_async(_args(module, tmp_path))
+    assert module._global_execution_scale_up_allowed(
+        _args(module, tmp_path),
+        slurm_cluster_id="gb10",
+    ) is False
 
 
 async def test_builder_token_validation_requires_dedicated_scope(
@@ -164,6 +167,7 @@ async def test_builder_token_validation_requires_dedicated_scope(
         await module._validate_builder_credentials(
             _Session(),
             env_file=str(env_file),
+            registry_docker_config_dir=str(_registry_config(tmp_path)),
         )
 
 
@@ -193,6 +197,34 @@ async def test_builder_token_validation_rejects_additional_scopes(
         await module._validate_builder_credentials(
             _Session(),
             env_file=str(env_file),
+            registry_docker_config_dir=str(_registry_config(tmp_path)),
+        )
+
+
+async def test_builder_credentials_require_expected_registry_auth_entry(
+    module: Any,
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / "builder.env"
+    env_file.write_text(
+        "LOOM_WORKER_TOKEN=builder-token\n"
+        "LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO=registry.example/loom\n",
+        encoding="utf-8",
+    )
+
+    class _Session:
+        async def execute(self, _query: object) -> Any:
+            return SimpleNamespace(
+                one_or_none=lambda: ("worker", ["task-image:build"], None, None)
+            )
+
+    with pytest.raises(module.TaskImageBuilderPolicyError, match="registry credentials"):
+        await module._validate_builder_credentials(
+            _Session(),
+            env_file=str(env_file),
+            registry_docker_config_dir=str(
+                _registry_config(tmp_path, registry="other-registry.example")
+            ),
         )
 
 
@@ -229,8 +261,12 @@ async def test_reconcile_validates_credentials_inside_single_transaction(
 
     result = await module._reconcile_with_credentials(
         _Session(),
-        config=SimpleNamespace(env_file="/secure/builder.env"),
+        config=SimpleNamespace(
+            env_file="/secure/builder.env",
+            registry_docker_config_dir="/secure/registry-docker",
+        ),
         runner=object(),
+        scale_up_allowed=False,
     )
 
     assert result == "result"

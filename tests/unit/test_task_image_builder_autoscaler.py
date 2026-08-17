@@ -38,7 +38,9 @@ def _config() -> TaskImageBuilderPoolConfig:
         exclusive=True,
         slurm_account="loom-staging",
         slurm_qos="loom-builder",
+        slurm_reservation="loom-builder-exclusive",
         job_output_dir="/shared/loom/job-output",
+        registry_docker_config_dir="/secure/loom/task-image-builder-docker",
     )
 
 
@@ -83,14 +85,23 @@ def test_builder_sbatch_is_exclusive_and_runs_only_builder_entrypoint() -> None:
     assert "--qos=loom-builder" in request.args
     assert "LOOM_WORKER_MAX_CONCURRENT=1" in request.args[-1]
     assert "LOOM_WORKER_TASK_IMAGE_BUILDER_IDLE_EXIT_SECONDS=120" in request.args[-1]
+    assert (
+        "LOOM_TASK_IMAGE_BUILDER_DOCKER_CONFIG_DIR=/secure/loom/task-image-builder-docker"
+        in request.args[-1]
+    )
     assert "LOOM_WORKER_IDLE_EXIT_AFTER_SECONDS" not in request.args[-1]
     assert "docker compose" in request.stdin
     assert "export HOME=" not in request.stdin
-    assert "run --rm --no-deps worker python -m loom_worker.task_image_builder" in request.stdin
+    assert "worker python -m loom_worker.task_image_builder" in request.stdin
+    assert (
+        '--volume "$LOOM_TASK_IMAGE_BUILDER_DOCKER_CONFIG_DIR:'
+        '/run/loom/task-image-builder-docker:ro"' in request.stdin
+    )
+    assert "--env DOCKER_CONFIG=/run/loom/task-image-builder-docker" in request.stdin
     assert (
         "docker compose"
         not in request.stdin.split(
-            "run --rm --no-deps worker python -m loom_worker.task_image_builder"
+            "worker python -m loom_worker.task_image_builder"
         )[1]
     )
 
@@ -134,3 +145,23 @@ async def test_builder_job_query_keeps_controller_errors_fail_closed(
 
     with pytest.raises(RuntimeError, match="Unable to contact"):
         await runner.query_jobs(("31619",))
+
+
+async def test_builder_running_job_cancellation_is_not_pending_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[tuple[str, ...]] = []
+
+    async def run_command(
+        args: tuple[str, ...],
+        **_kwargs: object,
+    ) -> SimpleNamespace:
+        commands.append(args)
+        return SimpleNamespace(stdout="", stderr="")
+
+    monkeypatch.setattr(autoscaler, "_run_command", run_command)
+    runner = SubprocessTaskImageBuilderSlurmRunner(_config())
+
+    await runner.cancel_job("31619")
+
+    assert commands == [("scancel", "31619")]

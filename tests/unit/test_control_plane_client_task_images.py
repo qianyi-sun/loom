@@ -24,7 +24,10 @@ def _claim_payload() -> dict[str, object]:
         "lease_epoch": 7,
         "lease_expires_at": "2026-08-14T12:00:00+00:00",
         "next_attempt_at": None,
-        "registry_images": {},
+        "registry_images": {
+            "task": "registry.example/task@sha256:" + "c" * 64,
+        },
+        "registry_image_history": [],
         "failure_reason": None,
         "failure_message": None,
     }
@@ -67,6 +70,9 @@ async def test_claim_task_image_materialization_is_typed_and_architecture_specif
         max_attempts=3,
         lease_epoch=7,
         lease_expires_at="2026-08-14T12:00:00+00:00",
+        registry_images={
+            "task": "registry.example/task@sha256:" + "c" * 64,
+        },
     )
     assert observed[0].url.path.endswith("/task-image-materializations/claim")
     assert json.loads(observed[0].content) == {
@@ -129,6 +135,13 @@ async def test_task_image_mutations_serialize_fence_and_surface_conflict() -> No
             builder_id="builder-a",
             lease_epoch=4,
         )
+        assert await client.record_task_image_publication(
+            materialization_id=materialization_id,
+            builder_id="builder-a",
+            lease_epoch=4,
+            component="task",
+            registry_image="registry.example/task@sha256:" + "c" * 64,
+        )
         assert await client.complete_task_image_materialization(
             materialization_id=materialization_id,
             builder_id="builder-a",
@@ -160,6 +173,14 @@ async def test_task_image_mutations_serialize_fence_and_surface_conflict() -> No
         (
             f"/api/v1/internal/task-image-materializations/{materialization_id}/heartbeat",
             common,
+        ),
+        (
+            f"/api/v1/internal/task-image-materializations/{materialization_id}/publication",
+            {
+                **common,
+                "component": "task",
+                "registry_image": "registry.example/task@sha256:" + "c" * 64,
+            },
         ),
         (
             f"/api/v1/internal/task-image-materializations/{materialization_id}/complete",

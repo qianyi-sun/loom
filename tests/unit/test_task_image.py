@@ -155,6 +155,7 @@ async def test_resolve_task_image_builds_and_caches_dockerfile_image(
         "rm": True,
         "forcerm": True,
         "pull": False,
+        "platform": "linux/amd64",
     }
     assert build["labels"] == {
         "loom.task-image": "true",

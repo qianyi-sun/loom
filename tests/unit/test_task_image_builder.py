@@ -157,6 +157,24 @@ async def test_materialization_rejects_non_native_builder_architecture(
         )
 
 
+async def test_published_image_architecture_must_match_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = SimpleNamespace(attrs={"Architecture": "amd64"})
+    client = SimpleNamespace(
+        images=SimpleNamespace(get=lambda _tag: image),
+        close=lambda: None,
+    )
+    monkeypatch.setattr(task_image_builder.docker, "from_env", lambda **_kwargs: client)
+
+    with pytest.raises(task_image_builder.TaskImageBuildError, match="architecture mismatch"):
+        await task_image_builder.verify_local_image_architecture(
+            tag="loom-task:arm64",
+            expected_cpu_arch="arm64",
+            docker_api_timeout_sec=30,
+        )
+
+
 async def test_materialization_builds_and_publishes_every_dockerfile_component(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -187,11 +205,19 @@ async def test_materialization_builds_and_publishes_every_dockerfile_component(
         digest = "1" * 64 if tag.startswith("loom-task") else "2" * 64
         return f"{registry_repo}@sha256:{digest}"
 
+    async def record_publication(component: str, registry_image: str) -> bool:
+        observed.setdefault("recorded", []).append((component, registry_image))
+        return True
+
+    async def verify_architecture(**kwargs: Any) -> None:
+        observed.setdefault("verified", []).append(kwargs)
+
     monkeypatch.setattr(task_image_builder, "_materialize_task_dir", materialize)
     monkeypatch.setattr(task_image_builder, "sha256_of_dir", lambda _path: claim.task_checksum)
     monkeypatch.setattr(task_image_builder, "resolve_task_image", resolve)
     monkeypatch.setattr(task_image_builder, "build_task_sidecar_images", sidecars)
     monkeypatch.setattr(task_image_builder, "publish_local_image_to_registry", publish)
+    monkeypatch.setattr(task_image_builder, "verify_local_image_architecture", verify_architecture)
     monkeypatch.setattr(
         task_image_builder.shutil,
         "rmtree",
@@ -201,6 +227,7 @@ async def test_materialization_builds_and_publishes_every_dockerfile_component(
     registry_images = await task_image_builder.materialize_and_publish_task_images(
         claim,
         _settings(),  # type: ignore[arg-type]
+        publication_recorder=record_publication,
     )
 
     assert registry_images == {
@@ -212,6 +239,18 @@ async def test_materialization_builds_and_publishes_every_dockerfile_component(
     assert observed["publish"] == [
         ("loom-task:base", "registry.example/loom-task"),
         ("loom-sidecar:database", "registry.example/loom-task"),
+    ]
+    assert observed["recorded"] == [
+        ("task", "registry.example/loom-task@sha256:" + "1" * 64),
+        ("sidecar:database", "registry.example/loom-task@sha256:" + "2" * 64),
+    ]
+    assert observed["verified"] == [
+        {"tag": "loom-task:base", "expected_cpu_arch": "arm64", "docker_api_timeout_sec": 120},
+        {
+            "tag": "loom-sidecar:database",
+            "expected_cpu_arch": "arm64",
+            "docker_api_timeout_sec": 120,
+        },
     ]
     assert observed["removed"] == task_dir
 
@@ -263,6 +302,7 @@ class _FakeControlPlane:
         self.completed: dict[str, str] | None = None
         self.failed = False
         self.failed_registry_images: dict[str, str] = {}
+        self.recorded_publications: list[tuple[str, str]] = []
 
     async def start_task_image_materialization(self, **_kwargs: Any) -> bool:
         return True
@@ -285,13 +325,21 @@ class _FakeControlPlane:
         self.failed_registry_images = dict(kwargs["registry_images"])
         return True
 
+    async def record_task_image_publication(self, **kwargs: Any) -> bool:
+        self.recorded_publications.append(
+            (str(kwargs["component"]), str(kwargs["registry_image"]))
+        )
+        return True
+
 
 async def test_process_claim_heartbeats_and_completes_fenced_lease(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     control_plane = _FakeControlPlane()
 
-    async def materialize(_claim: Any, _settings: Any) -> dict[str, str]:
+    async def materialize(
+        _claim: Any, _settings: Any, **_kwargs: Any
+    ) -> dict[str, str]:
         await asyncio.sleep(0.04)
         return {"task": "registry.example/task@sha256:" + "d" * 64}
 
@@ -321,7 +369,9 @@ async def test_process_claim_reports_partial_registry_publication(
     control_plane = _FakeControlPlane()
     published = {"task": "registry.example/task@sha256:" + "e" * 64}
 
-    async def materialize(_claim: Any, _settings: Any) -> dict[str, str]:
+    async def materialize(
+        _claim: Any, _settings: Any, **_kwargs: Any
+    ) -> dict[str, str]:
         raise task_image_builder.TaskImagePublicationError(
             "sidecar publication failed",
             registry_images=published,
@@ -355,7 +405,9 @@ async def test_process_claim_preserves_publication_evidence_when_completion_fail
 
     control_plane = _CompletionFailsControlPlane()
 
-    async def materialize(_claim: Any, _settings: Any) -> dict[str, str]:
+    async def materialize(
+        _claim: Any, _settings: Any, **_kwargs: Any
+    ) -> dict[str, str]:
         return published
 
     monkeypatch.setattr(
@@ -372,3 +424,30 @@ async def test_process_claim_preserves_publication_evidence_when_completion_fail
     )
 
     assert control_plane.failed_registry_images == published
+
+
+async def test_build_timeout_reports_failure_and_terminates_builder_allocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control_plane = _FakeControlPlane()
+
+    async def materialize(
+        _claim: Any, _settings: Any, **_kwargs: Any
+    ) -> dict[str, str]:
+        raise task_image_builder.TaskImageBuildTimeoutError("build timed out")
+
+    monkeypatch.setattr(
+        task_image_builder,
+        "materialize_and_publish_task_images",
+        materialize,
+    )
+
+    with pytest.raises(task_image_builder.TaskImageBuilderFatalError, match="timed out"):
+        await task_image_builder.process_task_image_claim(
+            control_plane,  # type: ignore[arg-type]
+            claim=_claim(),
+            builder_id="builder-a",
+            settings=_settings(),  # type: ignore[arg-type]
+        )
+
+    assert control_plane.failed is True

@@ -17,12 +17,15 @@ import platform
 import shutil
 import socket
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Protocol
 from uuid import UUID
 
+import docker
+
 from loom.driver.task_image import (
     TaskImageBuildError,
+    TaskImageBuildTimeoutError,
     publish_local_image_to_registry,
     resolve_task_image,
 )
@@ -75,9 +78,23 @@ class TaskImageBuilderControlPlane(Protocol):
         registry_images: Mapping[str, str],
     ) -> bool: ...
 
+    async def record_task_image_publication(
+        self,
+        *,
+        materialization_id: UUID,
+        builder_id: str,
+        lease_epoch: int,
+        component: str,
+        registry_image: str,
+    ) -> bool: ...
+
 
 class TaskImageLeaseLostError(RuntimeError):
     pass
+
+
+class TaskImageBuilderFatalError(RuntimeError):
+    """Stop this exclusive allocation before it can accept another claim."""
 
 
 class TaskImagePublicationError(TaskImageBuildError):
@@ -120,9 +137,41 @@ def host_cpu_arch() -> str:
     raise RuntimeError(f"unsupported builder CPU architecture {machine!r}")
 
 
+async def verify_local_image_architecture(
+    *,
+    tag: str,
+    expected_cpu_arch: str,
+    docker_api_timeout_sec: int | None,
+) -> None:
+    def inspect() -> None:
+        client: Any = (
+            docker.from_env()
+            if docker_api_timeout_sec is None
+            else docker.from_env(timeout=docker_api_timeout_sec)
+        )
+        try:
+            attrs = getattr(client.images.get(tag), "attrs", {})
+            observed = str(attrs.get("Architecture", "")).lower()
+            normalized = {"amd64": "x86_64", "x86_64": "x86_64", "arm64": "arm64"}.get(
+                observed
+            )
+            if normalized != expected_cpu_arch:
+                raise TaskImageBuildError(
+                    f"built image {tag!r} architecture mismatch "
+                    f"expected={expected_cpu_arch} observed={observed or 'unknown'}"
+                )
+        finally:
+            with contextlib.suppress(Exception):
+                client.close()
+
+    await asyncio.to_thread(inspect)
+
+
 async def materialize_and_publish_task_images(
     claim: TaskImageBuildClaim,
     settings: WorkerSettings,
+    *,
+    publication_recorder: Callable[[str, str], Awaitable[bool]] | None = None,
 ) -> dict[str, str]:
     native_arch = host_cpu_arch()
     if claim.cpu_arch != native_arch:
@@ -186,16 +235,34 @@ async def materialize_and_publish_task_images(
         local_images.update({f"sidecar:{name}": image for name, image in sidecars.items()})
         if not local_images:
             raise RuntimeError("task image claim contains no Dockerfile-backed components")
+        for tag in local_images.values():
+            await verify_local_image_architecture(
+                tag=tag,
+                expected_cpu_arch=claim.cpu_arch,
+                docker_api_timeout_sec=settings.docker_api_timeout_sec,
+            )
 
-        published: dict[str, str] = {}
+        published: dict[str, str] = dict(claim.registry_images)
         for component, tag in local_images.items():
+            if component in published:
+                continue
             try:
-                published[component] = await publish_local_image_to_registry(
+                registry_image = await publish_local_image_to_registry(
                     tag=tag,
                     registry_repo=registry_repo,
                     docker_api_timeout_sec=settings.docker_api_timeout_sec,
                 )
+                if publication_recorder is not None and not await publication_recorder(
+                    component,
+                    registry_image,
+                ):
+                    raise TaskImageLeaseLostError(
+                        "task image lease was lost while recording publication evidence"
+                    )
+                published[component] = registry_image
             except Exception as exc:
+                if isinstance(exc, TaskImageLeaseLostError):
+                    raise
                 raise TaskImagePublicationError(
                     f"registry publication failed for component {component!r}: {exc}",
                     registry_images=published,
@@ -273,7 +340,20 @@ async def process_task_image_claim(
     )
     registry_images: dict[str, str] = {}
     try:
-        registry_images = await materialize_and_publish_task_images(claim, settings)
+        async def record_publication(component: str, registry_image: str) -> bool:
+            return await control_plane.record_task_image_publication(
+                materialization_id=claim.id,
+                builder_id=builder_id,
+                lease_epoch=claim.lease_epoch,
+                component=component,
+                registry_image=registry_image,
+            )
+
+        registry_images = await materialize_and_publish_task_images(
+            claim,
+            settings,
+            publication_recorder=record_publication,
+        )
         if lease_lost.is_set():
             raise TaskImageLeaseLostError("task image lease was lost during build")
         completed = await control_plane.complete_task_image_materialization(
@@ -306,6 +386,10 @@ async def process_task_image_claim(
                 "task image lease was lost while reporting failure"
             ) from exc
         logger.exception("task image materialization failed id=%s", claim.id)
+        if isinstance(exc, TaskImageBuildTimeoutError):
+            raise TaskImageBuilderFatalError(
+                "task image build timed out; terminating the exclusive builder allocation"
+            ) from exc
     finally:
         stop.set()
         heartbeat.cancel()

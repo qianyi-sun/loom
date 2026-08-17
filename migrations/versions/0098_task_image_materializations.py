@@ -4,12 +4,47 @@ Revision ID: 0098
 Revises: 0097
 """
 
+import hashlib
+from uuid import uuid4
+
+import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects.postgresql import JSONB
 
 revision = "0098"
 down_revision = "0097"
 branch_labels = None
 depends_on = None
+
+_KEY_DOMAIN = "task-image-materialization-v1"
+
+
+def _has_dockerfile(task_config: dict[str, object]) -> bool:
+    environment = task_config.get("environment")
+    if not isinstance(environment, dict):
+        return False
+    if environment.get("dockerfile") is not None:
+        return True
+    sidecars = environment.get("sidecars", [])
+    return isinstance(sidecars, list) and any(
+        isinstance(sidecar, dict) and sidecar.get("dockerfile") is not None
+        for sidecar in sidecars
+    )
+
+
+def _architectures(task_config: dict[str, object]) -> tuple[str, ...]:
+    environment = task_config.get("environment")
+    cpu_arch = environment.get("cpu_arch", "x86_64") if isinstance(environment, dict) else None
+    if cpu_arch == "any":
+        return ("x86_64", "arm64")
+    if cpu_arch in {"x86_64", "arm64"}:
+        return (str(cpu_arch),)
+    return ()
+
+
+def _materialization_key(*, task_id: str, task_checksum: str, cpu_arch: str) -> str:
+    material = "\0".join((_KEY_DOMAIN, task_id, task_checksum, cpu_arch))
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def upgrade() -> None:
@@ -32,6 +67,7 @@ def upgrade() -> None:
           lease_epoch BIGINT NOT NULL DEFAULT 0,
           lease_expires_at TIMESTAMPTZ,
           registry_images JSONB NOT NULL DEFAULT '{}'::jsonb,
+          registry_image_history JSONB NOT NULL DEFAULT '[]'::jsonb,
           failure_reason TEXT,
           failure_message TEXT,
           created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -80,6 +116,66 @@ def upgrade() -> None:
 
         CREATE INDEX trial_task_image_materializations_materialization_idx
           ON trial_task_image_materializations (materialization_id);
+        """
+    )
+    connection = op.get_bind()
+    insert_materialization = sa.text(
+        """
+        INSERT INTO task_image_materializations (
+          id, materialization_key, task_id, task_checksum, cpu_arch,
+          task_config, task_source, task_source_provenance, state
+        ) VALUES (
+          :id, :materialization_key, :task_id, :task_checksum, :cpu_arch,
+          :task_config, :task_source, :task_source_provenance, 'queued'
+        )
+        ON CONFLICT (materialization_key) DO NOTHING
+        """
+    ).bindparams(
+        sa.bindparam("task_config", type_=JSONB),
+        sa.bindparam("task_source_provenance", type_=JSONB),
+    )
+    tasks = connection.execute(
+        sa.text(
+            "SELECT id, checksum, config, source, source_provenance FROM tasks ORDER BY id"
+        )
+    ).mappings()
+    for task in tasks:
+        task_config = task["config"]
+        if not isinstance(task_config, dict) or not _has_dockerfile(task_config):
+            continue
+        task_checksum = str(task["checksum"]).removeprefix("sha256:")
+        if len(task_checksum) != 64:
+            continue
+        for cpu_arch in _architectures(task_config):
+            connection.execute(
+                insert_materialization,
+                {
+                    "id": uuid4(),
+                    "materialization_key": _materialization_key(
+                        task_id=str(task["id"]),
+                        task_checksum=task_checksum,
+                        cpu_arch=cpu_arch,
+                    ),
+                    "task_id": task["id"],
+                    "task_checksum": task_checksum,
+                    "cpu_arch": cpu_arch,
+                    "task_config": task_config,
+                    "task_source": task["source"],
+                    "task_source_provenance": task["source_provenance"] or {},
+                },
+            )
+    op.execute(
+        """
+        INSERT INTO trial_task_image_materializations (trial_id, materialization_id)
+        SELECT trial.id, materialization.id
+          FROM trials trial
+          JOIN tasks task ON task.id = trial.task_id
+          JOIN task_image_materializations materialization
+            ON materialization.task_id = task.id
+           AND materialization.task_checksum =
+               regexp_replace(task.checksum, '^sha256:', '')
+         WHERE trial.state NOT IN ('succeeded', 'failed', 'cancelled')
+        ON CONFLICT (trial_id, materialization_id) DO NOTHING
         """
     )
 

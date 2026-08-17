@@ -191,6 +191,67 @@ def test_submit_enqueues_and_links_each_required_task_image(
         engine.dispose()
 
 
+def test_idempotent_resubmission_repairs_missing_task_image_links(
+    app,
+    seed_team,
+    postgres_url: str,
+):  # type: ignore[no-untyped-def]
+    _, raw = seed_team
+    idempotency_key = f"task-image-repair-{uuid4()}"
+    request_json = {
+        "task_id": "dockerfile-any",
+        "idempotency_key": idempotency_key,
+        "config": {"agent_name": "oracle", "agent_model": None},
+    }
+    with TestClient(app) as client:
+        first = client.post(
+            "/trials",
+            headers={"Authorization": f"Bearer {raw}"},
+            json=request_json,
+        )
+    assert first.status_code == 201, first.text
+    trial_id = UUID(first.json()["trial_id"])
+
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            session.execute(
+                delete(TrialTaskImageMaterialization).where(
+                    TrialTaskImageMaterialization.trial_id == trial_id
+                )
+            )
+            session.execute(
+                delete(TaskImageMaterialization).where(
+                    TaskImageMaterialization.task_id == "dockerfile-any"
+                )
+            )
+            session.commit()
+
+        with TestClient(app) as client:
+            second = client.post(
+                "/trials",
+                headers={"Authorization": f"Bearer {raw}"},
+                json=request_json,
+            )
+        assert second.status_code == 201, second.text
+        assert UUID(second.json()["trial_id"]) == trial_id
+
+        with sessionmaker(engine)() as session:
+            repaired_architectures = session.scalars(
+                select(TaskImageMaterialization.cpu_arch)
+                .join(
+                    TrialTaskImageMaterialization,
+                    TrialTaskImageMaterialization.materialization_id
+                    == TaskImageMaterialization.id,
+                )
+                .where(TrialTaskImageMaterialization.trial_id == trial_id)
+                .order_by(TaskImageMaterialization.cpu_arch)
+            ).all()
+        assert repaired_architectures == ["arm64", "x86_64"]
+    finally:
+        engine.dispose()
+
+
 def test_submit_prebuilt_task_creates_no_task_image_links(
     app,
     seed_team,

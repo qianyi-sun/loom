@@ -380,6 +380,142 @@ def test_complete_requires_every_dockerfile_component(
     )
 
 
+def test_builder_routes_reject_malformed_or_unexpected_publication_evidence(
+    client: TestClient,
+    builder_token: str,
+    create_materialization: Callable[..., UUID],
+) -> None:
+    materialization_id = create_materialization()
+    claim = _claim(client, builder_token, builder_id="builder-a").json()
+    started = _mutation(
+        client,
+        builder_token,
+        str(materialization_id),
+        "start",
+        builder_id="builder-a",
+        lease_epoch=claim["lease_epoch"],
+    )
+    assert started.status_code == 200, started.text
+
+    malformed = _mutation(
+        client,
+        builder_token,
+        str(materialization_id),
+        "complete",
+        builder_id="builder-a",
+        lease_epoch=claim["lease_epoch"],
+        extra={
+            "registry_images": {
+                "task": "registry.example/loom/task @sha256:" + "b" * 64,
+            }
+        },
+    )
+    assert malformed.status_code == 400, malformed.text
+
+    unexpected = _mutation(
+        client,
+        builder_token,
+        str(materialization_id),
+        "fail",
+        builder_id="builder-a",
+        lease_epoch=claim["lease_epoch"],
+        extra={
+            "retryable": False,
+            "failure_reason": "publication_failed",
+            "failure_message": "failed after publishing an unknown component",
+            "registry_images": {
+                "unknown": "registry.example/loom/unknown@sha256:" + "c" * 64,
+            },
+        },
+    )
+    assert unexpected.status_code == 400, unexpected.text
+
+
+def test_publication_evidence_is_append_only_across_retries(
+    client: TestClient,
+    builder_token: str,
+    create_materialization: Callable[..., UUID],
+    postgres_url: str,
+) -> None:
+    materialization_id = create_materialization()
+    first_claim = _claim(client, builder_token, builder_id="builder-a").json()
+    first_image = "registry.example/loom/task@sha256:" + "4" * 64
+    recorded = _mutation(
+        client,
+        builder_token,
+        str(materialization_id),
+        "publication",
+        builder_id="builder-a",
+        lease_epoch=first_claim["lease_epoch"],
+        extra={"component": "task", "registry_image": first_image},
+    )
+    assert recorded.status_code == 200, recorded.text
+    failed = _mutation(
+        client,
+        builder_token,
+        str(materialization_id),
+        "fail",
+        builder_id="builder-a",
+        lease_epoch=first_claim["lease_epoch"],
+        extra={
+            "retryable": True,
+            "failure_reason": "temporary_failure",
+            "failure_message": "retry",
+            "registry_images": {"task": first_image},
+        },
+    )
+    assert failed.status_code == 200, failed.text
+
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            session.execute(
+                update(TaskImageMaterialization)
+                .where(TaskImageMaterialization.id == materialization_id)
+                .values(next_attempt_at=datetime.now(UTC) - timedelta(seconds=1))
+            )
+            session.commit()
+    finally:
+        engine.dispose()
+
+    second_claim = _claim(client, builder_token, builder_id="builder-b").json()
+    assert second_claim["registry_images"] == {"task": first_image}
+    second_image = "registry.example/loom/task@sha256:" + "5" * 64
+    recorded_again = _mutation(
+        client,
+        builder_token,
+        str(materialization_id),
+        "publication",
+        builder_id="builder-b",
+        lease_epoch=second_claim["lease_epoch"],
+        extra={"component": "task", "registry_image": second_image},
+    )
+    assert recorded_again.status_code == 200, recorded_again.text
+    started = _mutation(
+        client,
+        builder_token,
+        str(materialization_id),
+        "start",
+        builder_id="builder-b",
+        lease_epoch=second_claim["lease_epoch"],
+    )
+    assert started.status_code == 200, started.text
+    completed = _mutation(
+        client,
+        builder_token,
+        str(materialization_id),
+        "complete",
+        builder_id="builder-b",
+        lease_epoch=second_claim["lease_epoch"],
+        extra={"registry_images": {"task": second_image}},
+    )
+    assert completed.status_code == 200, completed.text
+    assert {entry["registry_image"] for entry in completed.json()["registry_image_history"]} == {
+        first_image,
+        second_image,
+    }
+
+
 def test_retryable_failure_requeues_and_reclaim_advances_epoch(
     client: TestClient,
     builder_token: str,

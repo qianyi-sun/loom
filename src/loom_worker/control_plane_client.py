@@ -13,7 +13,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 from urllib.parse import quote
 from uuid import UUID
@@ -100,6 +100,7 @@ class TaskImageBuildClaim:
     max_attempts: int
     lease_epoch: int
     lease_expires_at: str
+    registry_images: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> TaskImageBuildClaim:
@@ -124,6 +125,10 @@ class TaskImageBuildClaim:
             max_attempts=int(payload["max_attempts"]),
             lease_epoch=lease_epoch,
             lease_expires_at=str(payload["lease_expires_at"]),
+            registry_images={
+                str(component): str(image)
+                for component, image in dict(payload.get("registry_images") or {}).items()
+            },
         )
 
 
@@ -1441,6 +1446,26 @@ class HttpControlPlaneClient:
             materialization_id=materialization_id,
             operation="heartbeat",
             payload={"builder_id": builder_id, "lease_epoch": lease_epoch},
+        )
+
+    async def record_task_image_publication(
+        self,
+        *,
+        materialization_id: UUID,
+        builder_id: str,
+        lease_epoch: int,
+        component: str,
+        registry_image: str,
+    ) -> bool:
+        return await self._mutate_task_image_materialization(
+            materialization_id=materialization_id,
+            operation="publication",
+            payload={
+                "builder_id": builder_id,
+                "lease_epoch": lease_epoch,
+                "component": component,
+                "registry_image": registry_image,
+            },
         )
 
     async def complete_task_image_materialization(

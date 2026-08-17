@@ -101,6 +101,23 @@ def test_enabled_builder_policy_requires_complete_slurm_authority() -> None:
         _normalize_task_image_builder_policy(base, environment="staging", index=0)
 
 
+def test_enabled_builder_policy_requires_exclusive_capacity_reservation() -> None:
+    profile = load_environment_state_profile(
+        Path("deploy/environment-state/staging.toml"),
+        variables=_VARIABLES,
+        expected_environment="staging",
+    )
+    base = {
+        **profile.task_image_builder_policies[0],
+        "enabled": True,
+        "activation_blockers": [],
+        "slurm_reservation": "",
+    }
+
+    with pytest.raises(EnvironmentStateProfileError, match="slurm_reservation"):
+        _normalize_task_image_builder_policy(base, environment="staging", index=0)
+
+
 def test_builder_policy_bounds_jobs_to_declared_nodes() -> None:
     profile = load_environment_state_profile(
         Path("deploy/environment-state/staging.toml"),

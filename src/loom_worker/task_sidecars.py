@@ -344,6 +344,11 @@ class DockerTaskSidecarRuntime:
             rm=True,
             forcerm=True,
             pull=False,
+            platform=(
+                "linux/amd64"
+                if (self.cpu_arch or self.task_config.environment.cpu_arch) == "x86_64"
+                else "linux/arm64"
+            ),
             labels={
                 "loom.setup-build": "true",
                 "loom.setup-kind": "task-sidecar",

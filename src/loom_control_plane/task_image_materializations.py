@@ -17,7 +17,10 @@ from loom.db.schema import (
     TrialTaskImageMaterialization,
 )
 from loom.models.task import TaskConfig
-from loom.task_image_materialization import required_task_image_components
+from loom.task_image_materialization import (
+    required_task_image_components,
+    validate_task_image_registry_images,
+)
 
 DEFAULT_TASK_IMAGE_LEASE_SECONDS = 300.0
 _MAX_RETRY_BACKOFF_SECONDS = 600.0
@@ -41,6 +44,80 @@ def _expected_registry_image_components(task_config: dict[str, Any]) -> set[str]
     return required_task_image_components(task)
 
 
+def _record_registry_image_history(
+    row: TaskImageMaterialization,
+    *,
+    builder_id: str,
+    lease_epoch: int,
+    registry_images: dict[str, str],
+    now: datetime,
+) -> None:
+    history = list(row.registry_image_history or [])
+    observed = {
+        (str(entry.get("component")), str(entry.get("registry_image")))
+        for entry in history
+        if isinstance(entry, dict)
+    }
+    for component, registry_image in registry_images.items():
+        if (component, registry_image) in observed:
+            continue
+        history.append(
+            {
+                "component": component,
+                "registry_image": registry_image,
+                "builder_id": builder_id,
+                "lease_epoch": lease_epoch,
+                "recorded_at": now.isoformat(),
+            }
+        )
+    row.registry_image_history = history
+
+
+async def record_task_image_publication(
+    session: AsyncSession,
+    *,
+    materialization_id: UUID,
+    builder_id: str,
+    lease_epoch: int,
+    component: str,
+    registry_image: str,
+) -> TaskImageMaterialization:
+    """Append cleanup evidence without granting stale builders readiness authority."""
+    now = datetime.now(UTC)
+    row = await session.scalar(
+        select(TaskImageMaterialization)
+        .where(TaskImageMaterialization.id == materialization_id)
+        .with_for_update()
+    )
+    if row is None:
+        raise TaskImageLeaseConflictError("task image materialization does not exist")
+    try:
+        images = validate_task_image_registry_images(
+            {component: registry_image},
+            expected_components=_expected_registry_image_components(row.task_config),
+        )
+    except ValueError as exc:
+        raise TaskImageCompletionError(str(exc)) from exc
+    _record_registry_image_history(
+        row,
+        builder_id=builder_id,
+        lease_epoch=lease_epoch,
+        registry_images=images,
+        now=now,
+    )
+    if (
+        row.state in {"claimed", "running"}
+        and row.claimed_by == builder_id
+        and row.lease_epoch == lease_epoch
+        and row.lease_expires_at is not None
+        and row.lease_expires_at > now
+    ):
+        row.registry_images = {**row.registry_images, **images}
+    row.updated_at = now
+    await session.flush()
+    return row
+
+
 def _durable_reference_exists(row: Any) -> ColumnElement[bool]:
     current_task = exists().where(
         Task.id == row.task_id,
@@ -55,6 +132,10 @@ def _durable_reference_exists(row: Any) -> ColumnElement[bool]:
         Trial.state.not_in(_TERMINAL_TRIAL_STATES),
     )
     return or_(current_task, live_trial)
+
+
+def _registry_publication_exists(row: Any) -> ColumnElement[bool]:
+    return or_(row.registry_images != {}, row.registry_image_history != [])
 
 
 def _lease_deadline(*, now: datetime, lease_seconds: float) -> datetime:
@@ -221,15 +302,21 @@ async def complete_task_image_materialization(
         allowed_states=("running",),
         now=now,
     )
-    expected_components = _expected_registry_image_components(row.task_config)
-    actual_components = set(registry_images)
-    if actual_components != expected_components:
-        missing = ",".join(sorted(expected_components - actual_components)) or "none"
-        unexpected = ",".join(sorted(actual_components - expected_components)) or "none"
-        raise TaskImageCompletionError(
-            "registry_images do not match the task snapshot "
-            f"(missing={missing}; unexpected={unexpected})"
+    try:
+        registry_images = validate_task_image_registry_images(
+            registry_images,
+            expected_components=_expected_registry_image_components(row.task_config),
+            require_complete=True,
         )
+    except ValueError as exc:
+        raise TaskImageCompletionError(str(exc)) from exc
+    _record_registry_image_history(
+        row,
+        builder_id=builder_id,
+        lease_epoch=lease_epoch,
+        registry_images=registry_images,
+        now=now,
+    )
     row.state = "ready"
     row.registry_images = dict(registry_images)
     row.claimed_by = None
@@ -259,6 +346,21 @@ async def fail_task_image_materialization(
         builder_id=builder_id,
         lease_epoch=lease_epoch,
         allowed_states=("claimed", "running"),
+        now=now,
+    )
+    try:
+        registry_images = validate_task_image_registry_images(
+            registry_images,
+            expected_components=_expected_registry_image_components(row.task_config),
+            require_nonempty=False,
+        )
+    except ValueError as exc:
+        raise TaskImageCompletionError(str(exc)) from exc
+    _record_registry_image_history(
+        row,
+        builder_id=builder_id,
+        lease_epoch=lease_epoch,
+        registry_images=registry_images,
         now=now,
     )
     row.claimed_by = None
@@ -313,6 +415,7 @@ async def retry_task_image_materialization(
     row.started_at = None
     row.ready_at = None
     row.finished_at = None
+    row.registry_images = {}
     row.last_referenced_at = now
     row.unreferenced_at = None
     row.updated_at = now
@@ -336,7 +439,7 @@ async def claim_task_image_registry_gc(
         update(TaskImageMaterialization)
         .where(
             TaskImageMaterialization.state.in_(("ready", "failed")),
-            TaskImageMaterialization.registry_images != {},
+            _registry_publication_exists(TaskImageMaterialization),
             _durable_reference_exists(TaskImageMaterialization),
         )
         .values(
@@ -349,7 +452,7 @@ async def claim_task_image_registry_gc(
         update(TaskImageMaterialization)
         .where(
             TaskImageMaterialization.state.in_(("ready", "failed")),
-            TaskImageMaterialization.registry_images != {},
+            _registry_publication_exists(TaskImageMaterialization),
             TaskImageMaterialization.unreferenced_at.is_(None),
             ~_durable_reference_exists(TaskImageMaterialization),
         )
@@ -384,7 +487,7 @@ async def claim_task_image_registry_gc(
             or_(
                 and_(
                     TaskImageMaterialization.state.in_(("ready", "failed")),
-                    TaskImageMaterialization.registry_images != {},
+                    _registry_publication_exists(TaskImageMaterialization),
                     TaskImageMaterialization.unreferenced_at <= cutoff,
                 ),
                 and_(
@@ -432,6 +535,7 @@ async def complete_task_image_registry_gc(
     )
     referenced = bool(await session.scalar(select(_durable_reference_exists(row))))
     row.registry_images = {}
+    row.registry_image_history = []
     row.claimed_by = None
     row.lease_expires_at = None
     row.updated_at = now
@@ -471,6 +575,7 @@ def task_image_materialization_payload(
         "lease_expires_at": (row.lease_expires_at.isoformat() if row.lease_expires_at else None),
         "next_attempt_at": row.next_attempt_at.isoformat() if row.next_attempt_at else None,
         "registry_images": row.registry_images,
+        "registry_image_history": row.registry_image_history,
         "failure_reason": row.failure_reason,
         "failure_message": row.failure_message,
     }

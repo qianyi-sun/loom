@@ -497,6 +497,7 @@ def _normalize_task_image_builder_policy(
         "allowed_nodes",
         "env_file",
         "repo_dir",
+        "registry_docker_config_dir",
         "partition",
         "time_limit",
         "requested_cpus",
@@ -554,6 +555,7 @@ def _normalize_task_image_builder_policy(
     for name in (
         "env_file",
         "repo_dir",
+        "registry_docker_config_dir",
         "partition",
         "time_limit",
         "sbatch_path",
@@ -565,7 +567,12 @@ def _normalize_task_image_builder_policy(
     for name in ("slurm_account", "slurm_qos", "slurm_reservation", "job_output_dir"):
         payload[name] = str(payload[name]).strip()
     if payload["enabled"]:
-        for name in ("slurm_account", "slurm_qos", "job_output_dir"):
+        for name in (
+            "slurm_account",
+            "slurm_qos",
+            "slurm_reservation",
+            "job_output_dir",
+        ):
             if not payload[name]:
                 raise EnvironmentStateProfileError(
                     f"{field}.{name} must be non-empty when enabled",

@@ -164,6 +164,7 @@ allowed_nodes = [
 ]
 env_file = "/shared_work2/loom-staging-rollout/worker-envs/staging-task-image-builder-gb10-${IMAGE_TAG}.env"
 repo_dir = "/shared_work2/loom-staging-rollout/worker-repos/loom-remote-worker-${IMAGE_TAG}"
+registry_docker_config_dir = "/shared_work2/loom-staging-rollout/credentials/task-image-builder-docker"
 partition = "gb10"
 time_limit = "04:00:00"
 requested_cpus = 20
@@ -175,12 +176,14 @@ idle_exit_after_seconds = 120
 exclusive = true
 slurm_account = "loom-staging"
 slurm_qos = "loom-task-image-builder"
+slurm_reservation = "loom-task-image-builder"
 job_output_dir = "/shared_work2/loom-staging-rollout/job-output"
 activation_blockers = [
   "builder_token_not_provisioned",
   "registry_push_credentials_not_provisioned",
   "registry_retention_not_provisioned",
   "slurm_builder_qos_not_provisioned",
+  "slurm_builder_reservation_not_provisioned",
   "exclusive_gb10_nodes_not_provisioned",
 ]
 
@@ -196,6 +199,7 @@ allowed_nodes = [
 ]
 env_file = "/shared_work/loom/staging-rollout/worker-envs/staging-task-image-builder-oldlab-${IMAGE_TAG}.env"
 repo_dir = "/shared_work/loom/staging-rollout/worker-repos/loom-remote-worker-${IMAGE_TAG}"
+registry_docker_config_dir = "/shared_work/loom/staging-rollout/credentials/task-image-builder-docker"
 partition = "all"
 time_limit = "04:00:00"
 requested_cpus = 12
@@ -207,12 +211,14 @@ idle_exit_after_seconds = 120
 exclusive = true
 slurm_account = "loom-staging"
 slurm_qos = "loom-task-image-builder"
+slurm_reservation = "loom-task-image-builder"
 job_output_dir = "/shared_work/loom/staging-rollout/job-output"
 activation_blockers = [
   "builder_token_not_provisioned",
   "registry_push_credentials_not_provisioned",
   "registry_retention_not_provisioned",
   "slurm_builder_qos_not_provisioned",
+  "slurm_builder_reservation_not_provisioned",
   "exclusive_oldlab_nodes_not_provisioned",
 ]
 

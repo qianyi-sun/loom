@@ -122,6 +122,10 @@ class TaskImageBuildError(RuntimeError):
         self.diagnostic_detail = diagnostic_detail
 
 
+class TaskImageBuildTimeoutError(TaskImageBuildError):
+    """A daemon build outlived its awaiter and must keep the allocation exclusive."""
+
+
 def _native_cpu_arch(task_config: TaskConfig, cpu_arch: str | None) -> str:
     selected = cpu_arch or task_config.environment.cpu_arch
     if selected == "any":
@@ -133,6 +137,10 @@ def _native_cpu_arch(task_config: TaskConfig, cpu_arch: str | None) -> str:
     if selected not in {"x86_64", "arm64"}:
         raise ValueError("cpu_arch must resolve to x86_64 or arm64")
     return selected
+
+
+def _docker_platform(cpu_arch: str) -> str:
+    return "linux/amd64" if cpu_arch == "x86_64" else "linux/arm64"
 
 
 def task_image_tag(
@@ -236,6 +244,7 @@ async def resolve_task_image(
         task_checksum=task_checksum,
         cpu_arch=cpu_arch,
     )
+    native_cpu_arch = _native_cpu_arch(task_config, cpu_arch)
 
     # Fast path: image already present locally, no build needed and no
     # slot claim required. Keeps steady-state trial dispatch free of the
@@ -288,11 +297,12 @@ async def resolve_task_image(
                     docker_api_timeout_sec=docker_api_timeout_sec,
                     require_containment=require_containment,
                     registry_repo=registry_repo,
+                    cpu_arch=native_cpu_arch,
                 ),
                 timeout=timeout,
             )
     except TimeoutError as exc:
-        raise TaskImageBuildError(
+        raise TaskImageBuildTimeoutError(
             f"building Docker image {tag!r} from "
             f"{task_config.environment.dockerfile.as_posix()!r} exceeded "
             f"{timeout:g}s",
@@ -514,6 +524,7 @@ def _ensure_dockerfile_image(
     docker_api_timeout_sec: int | None = None,
     require_containment: bool = False,
     registry_repo: str | None = None,
+    cpu_arch: str,
 ) -> None:
     configured_dockerfile = task_config.environment.dockerfile
     assert configured_dockerfile is not None
@@ -547,6 +558,7 @@ def _ensure_dockerfile_image(
             rm=True,
             forcerm=True,
             pull=False,
+            platform=_docker_platform(cpu_arch),
             labels={
                 "loom.task-image": "true",
                 "loom.task_id": task_config.task.id,

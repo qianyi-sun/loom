@@ -9,6 +9,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import ValidationError
 from sqlalchemy import insert, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.auth import is_admin, verify_bearer_token
 from loom.benchmark_profiles import reject_non_runnable_benchmark_profiles
@@ -31,6 +32,33 @@ from loom_control_plane.scheduler.requires_caps import derive_requires_caps
 from loom_service.submission_compat import validate_submission_agent_task_compatibility
 
 router = APIRouter()
+
+
+async def _ensure_trial_task_image_links(
+    session: AsyncSession,
+    *,
+    trial_id: UUID,
+    task_row: TaskRow,
+) -> None:
+    materializations = await ensure_task_image_materializations(
+        session,
+        task_row=task_row,
+    )
+    if not materializations:
+        return
+    await session.execute(
+        pg_insert(TrialTaskImageMaterialization)
+        .values(
+            [
+                {
+                    "trial_id": trial_id,
+                    "materialization_id": materialization.id,
+                }
+                for materialization in materializations
+            ]
+        )
+        .on_conflict_do_nothing(index_elements=["trial_id", "materialization_id"])
+    )
 
 
 def _required_worker_pool(payload: dict[str, Any]) -> str | None:
@@ -132,20 +160,29 @@ async def submit_trial(
     # common "runner re-submits an already-emitted trial" path.
     if idempotency_key is not None:
         async with request.app.state.session_factory() as session:
-            existing = (
+            existing_row = (
                 await session.execute(
-                    select(TrialRow).where(
+                    select(TrialRow, TaskRow)
+                    .join(TaskRow, TaskRow.id == TrialRow.task_id)
+                    .where(
                         TrialRow.idempotency_key == idempotency_key,
                         TrialRow.team_id == submit_team_id,
                     ),
                 )
-            ).scalar_one_or_none()
-        if existing is not None:
-            return {
-                "trial_id": str(existing.id),
-                "state": existing.state,
-                "submitted_at": existing.submitted_at.isoformat(),
-            }
+            ).one_or_none()
+            if existing_row is not None:
+                existing, existing_task = existing_row
+                await _ensure_trial_task_image_links(
+                    session,
+                    trial_id=existing.id,
+                    task_row=existing_task,
+                )
+                await session.commit()
+                return {
+                    "trial_id": str(existing.id),
+                    "state": existing.state,
+                    "submitted_at": existing.submitted_at.isoformat(),
+                }
 
     async with request.app.state.session_factory() as session:
         task_row = (
@@ -321,12 +358,22 @@ async def submit_trial(
                         ),
                     )
                 ).scalar_one()
-                await session.commit()
                 if existing.team_id != submit_team_id:
                     raise HTTPException(
                         status_code=409,
                         detail=("idempotency_key collision with another team's trial"),
                     )
+                existing_task = (
+                    await session.execute(
+                        select(TaskRow).where(TaskRow.id == existing.task_id),
+                    )
+                ).scalar_one()
+                await _ensure_trial_task_image_links(
+                    session,
+                    trial_id=existing.id,
+                    task_row=existing_task,
+                )
+                await session.commit()
                 return {
                     "trial_id": str(existing.id),
                     "state": existing.state,
@@ -355,24 +402,11 @@ async def submit_trial(
         )
         if lifecycle_result.rowcount != 1:
             raise RuntimeError("trial lifecycle authority binding is stale")
-        materializations = await ensure_task_image_materializations(
+        await _ensure_trial_task_image_links(
             session,
+            trial_id=trial_id,
             task_row=task_row,
         )
-        if materializations:
-            await session.execute(
-                pg_insert(TrialTaskImageMaterialization)
-                .values(
-                    [
-                        {
-                            "trial_id": trial_id,
-                            "materialization_id": materialization.id,
-                        }
-                        for materialization in materializations
-                    ]
-                )
-                .on_conflict_do_nothing(index_elements=["trial_id", "materialization_id"])
-            )
         await session.commit()
 
     return {

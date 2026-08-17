@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -45,11 +46,11 @@ class TaskImageBuilderPolicyError(transport.ExternalAutoscalerError, ValueError)
     """The dedicated builder policy is absent, disabled, or unsafe."""
 
 
-def _require_global_execution_scale_up(
+def _global_execution_scale_up_allowed(
     args: argparse.Namespace,
     *,
     slurm_cluster_id: str,
-) -> None:
+) -> bool:
     try:
         witness = load_global_execution_witness(
             args.global_execution_witness_json,
@@ -65,10 +66,9 @@ def _require_global_execution_scale_up(
             expected_pool_id=slurm_cluster_id,
             now=datetime.now(UTC),
         )
-    except GlobalExecutionFenceError as exc:
-        raise TaskImageBuilderPolicyError(
-            "global execution witness is unavailable or forbids builder scale-up",
-        ) from exc
+    except GlobalExecutionFenceError:
+        return False
+    return True
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -134,6 +134,7 @@ def _load_enabled_builder_config(args: argparse.Namespace) -> TaskImageBuilderPo
             allowed_nodes=tuple(str(node) for node in policy["allowed_nodes"]),
             env_file=str(policy["env_file"]),
             repo_dir=str(policy["repo_dir"]),
+            registry_docker_config_dir=str(policy["registry_docker_config_dir"]),
             partition=str(policy["partition"]),
             time_limit=str(policy["time_limit"]),
             requested_cpus=int(policy["requested_cpus"]),
@@ -161,10 +162,35 @@ def _load_enabled_builder_config(args: argparse.Namespace) -> TaskImageBuilderPo
         raise TaskImageBuilderPolicyError("task-image builder env file is unavailable")
     if not Path(config.repo_dir).is_dir():
         raise TaskImageBuilderPolicyError("task-image builder repository is unavailable")
+    docker_config_dir = Path(config.registry_docker_config_dir)
+    docker_config_file = docker_config_dir / "config.json"
+    try:
+        directory_stat = docker_config_dir.stat()
+        config_stat = docker_config_file.stat()
+    except OSError as exc:
+        raise TaskImageBuilderPolicyError(
+            "task-image builder registry credentials are unavailable"
+        ) from exc
+    if (
+        not docker_config_dir.is_dir()
+        or not docker_config_file.is_file()
+        or directory_stat.st_uid != os.geteuid()
+        or config_stat.st_uid != os.geteuid()
+        or directory_stat.st_mode & 0o077
+        or config_stat.st_mode & 0o077
+    ):
+        raise TaskImageBuilderPolicyError(
+            "task-image builder registry credential metadata is unsafe"
+        )
     return config
 
 
-async def _validate_builder_credentials(session: Any, *, env_file: str) -> None:
+async def _validate_builder_credentials(
+    session: Any,
+    *,
+    env_file: str,
+    registry_docker_config_dir: str,
+) -> None:
     path = Path(env_file)
     try:
         raw_token = read_env_file_value(path, DEFAULT_WORKER_TOKEN_ENV_KEY)
@@ -177,6 +203,43 @@ async def _validate_builder_credentials(session: Any, *, env_file: str) -> None:
         raise TaskImageBuilderPolicyError("task-image builder token is missing")
     if not registry_repo:
         raise TaskImageBuilderPolicyError("task-image builder registry is missing")
+    registry_host = registry_repo.split("/", 1)[0]
+    docker_config_file = Path(registry_docker_config_dir) / "config.json"
+    try:
+        if docker_config_file.stat().st_size > 64 * 1024:
+            raise TaskImageBuilderPolicyError(
+                "task-image builder registry credentials are invalid"
+            )
+        docker_config = json.loads(docker_config_file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise TaskImageBuilderPolicyError(
+            "task-image builder registry credentials are unavailable"
+        ) from exc
+    auths = docker_config.get("auths") if isinstance(docker_config, dict) else None
+    if not isinstance(auths, dict):
+        raise TaskImageBuilderPolicyError(
+            "task-image builder registry credentials are invalid"
+        )
+
+    def normalized_registry(value: str) -> str:
+        normalized = value.removeprefix("https://").removeprefix("http://").rstrip("/")
+        return normalized.removesuffix("/v1")
+
+    matching_auth = next(
+        (
+            value
+            for key, value in auths.items()
+            if isinstance(key, str) and normalized_registry(key) == registry_host
+        ),
+        None,
+    )
+    if not isinstance(matching_auth, dict) or not any(
+        isinstance(matching_auth.get(key), str) and matching_auth[key]
+        for key in ("auth", "identitytoken", "username")
+    ):
+        raise TaskImageBuilderPolicyError(
+            "task-image builder registry credentials do not authorize the configured registry"
+        )
     token_hash = hashlib.sha256(raw_token.encode("utf-8")).digest()
     result = await session.execute(
         select(Token.type, Token.scopes, Token.expires_at, Token.revoked_at).where(
@@ -201,15 +264,21 @@ async def _reconcile_with_credentials(
     *,
     config: TaskImageBuilderPoolConfig,
     runner: Any | None,
+    scale_up_allowed: bool,
 ) -> Any | None:
     async with session.begin():
-        await _validate_builder_credentials(session, env_file=config.env_file)
+        await _validate_builder_credentials(
+            session,
+            env_file=config.env_file,
+            registry_docker_config_dir=config.registry_docker_config_dir,
+        )
         if runner is None:
             return None
         return await reconcile_task_image_builder_autoscaler_once(
             session,
             config=config,
             runner=runner,
+            scale_up_allowed=scale_up_allowed,
         )
 
 
@@ -221,11 +290,10 @@ async def _main_async(args: argparse.Namespace) -> None:
         raise TaskImageBuilderPolicyError(
             "local Slurm authority does not match the builder policy",
         )
-    if not args.validate_only:
-        _require_global_execution_scale_up(
-            args,
-            slurm_cluster_id=config.slurm_cluster_id,
-        )
+    scale_up_allowed = args.validate_only or _global_execution_scale_up_allowed(
+        args,
+        slurm_cluster_id=config.slurm_cluster_id,
+    )
     port_forward = transport._database_port_forward_config(args)
     db_connect_timeout_sec = transport._validated_timeout(
         args.db_connect_timeout_sec,
@@ -245,6 +313,7 @@ async def _main_async(args: argparse.Namespace) -> None:
                             session,
                             config=config,
                             runner=None,
+                            scale_up_allowed=True,
                         )
                     print(
                         json.dumps(
@@ -264,6 +333,7 @@ async def _main_async(args: argparse.Namespace) -> None:
                     session,
                     config=config,
                     runner=runner,
+                    scale_up_allowed=scale_up_allowed,
                 )
                 if result is None:
                     raise RuntimeError(
@@ -272,6 +342,10 @@ async def _main_async(args: argparse.Namespace) -> None:
                 print(json.dumps(result.__dict__, sort_keys=True))
         finally:
             await engine.dispose()
+    if not scale_up_allowed:
+        raise TaskImageBuilderPolicyError(
+            "global execution witness is unavailable; builder capacity was drained",
+        )
 
 
 def main() -> None:

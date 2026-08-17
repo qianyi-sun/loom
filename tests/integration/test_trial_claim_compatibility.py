@@ -88,7 +88,24 @@ async def test_claim_waits_for_matching_architecture_task_image(
         async with sessions() as session, session.begin():
             await session.execute(insert(Team).values(id=team_id, name=f"image-{team_id}"))
             await session.execute(insert(TeamQuota).values(team_id=team_id))
-            await session.execute(insert(Task).values(id=task_id, checksum="a" * 64, config={}))
+            await session.execute(
+                insert(Task).values(
+                    id=task_id,
+                    checksum="a" * 64,
+                    config={
+                        "schema_version": "1",
+                        "task": {"id": task_id, "name": task_id},
+                        "environment": {
+                            "os": "linux",
+                            "cpu_arch": "any",
+                            "dockerfile": "environment/Dockerfile",
+                        },
+                        "agent": {"name": "oracle"},
+                        "verifier": {"name": "pytest"},
+                        "steps": [{"name": "main"}],
+                    },
+                )
+            )
             await session.execute(
                 insert(Worker).values(
                     id=worker_id,
@@ -143,10 +160,25 @@ async def test_claim_waits_for_matching_architecture_task_image(
                         state=state,
                     )
                 )
+
+        async with sessions() as session:
+            assert (
+                await _claim_trial(
+                    session,
+                    unified=unified,
+                    worker_id=worker_id,
+                    capability_digest=capability_digest,
+                    token_hash=token_hash,
+                )
+                is None
+            )
+
+        async with sessions() as session, session.begin():
+            for materialization_id in materialization_ids.values():
                 await session.execute(
                     insert(TrialTaskImageMaterialization).values(
                         trial_id=trial_id,
-                        materialization_id=materialization_ids[cpu_arch],
+                        materialization_id=materialization_id,
                     )
                 )
 

@@ -29,8 +29,9 @@ pull-only.
 
 Both builder policies and their external supervisors are committed disabled.
 Activation requires a least-privilege token carrying `task-image:build`, a
-dedicated builder env file with registry push access, the declared Slurm
-account/QoS, native exclusive nodes, and a registry-retention controller. The
+dedicated builder env file, an owner-only Docker `config.json` mounted only into
+the builder container, the declared Slurm account/QoS/exclusive reservation,
+native exclusive capacity, and a registry-retention controller. The
 builder token's scope must be exactly `task-image:build`; mint it with
 `loom admin tokens worker mint --kind task-image-builder`. The registry
 retention controller uses a different token whose scope must be exactly
@@ -38,9 +39,11 @@ retention controller uses a different token whose scope must be exactly
 `loom admin tokens worker mint --kind task-image-registry-gc`. Never share
 either credential with the other controller or with trial workers.
 
-Both native capacity classes remain blocked until safe exclusive nodes are
-provisioned: GB10 for ARM64 and OLDLAB for x86_64. The selected nodes must not
-host shared services or packed trial workloads. Do not remove activation
+Both native capacity classes remain blocked until safe exclusive capacity is
+provisioned: GB10 for ARM64 and OLDLAB for x86_64. Nodes may remain in shared
+Slurm inventory, but the named builder reservation and `--exclusive` allocation
+must prevent overlap with packed trial jobs; nodes hosting services outside
+Slurm must be removed from the builder inventory. Do not remove activation
 blockers or reuse ordinary trial-worker credentials to make either policy
 start.
 
@@ -48,8 +51,9 @@ Registry retention must use Loom's fenced protocol; do not apply an independent
 age-only registry lifecycle rule to task-image repositories. The deployment-
 owned controller repeatedly calls
 `POST /api/v1/internal/task-image-materializations/registry-gc/claim` with its
-stable `gc_id`, deletes every immutable digest in the returned
-`registry_images` map (an already-absent manifest is success), and calls
+stable `gc_id`, deletes every unique immutable digest in the returned
+`registry_images` map and `registry_image_history` list (an already-absent
+manifest is success), and calls
 `POST /api/v1/internal/task-image-materializations/registry-gc/{id}/complete`
 with that same `gc_id` and `lease_epoch` only after every deletion is confirmed.
 A 204 claim response ends the pass. The controller must finish within the

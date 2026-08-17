@@ -1945,6 +1945,12 @@ class TaskImageMaterialization(Base):
         server_default=text("'{}'::jsonb"),
         default=dict,
     )
+    registry_image_history: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
+        default=list,
+    )
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     failure_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(

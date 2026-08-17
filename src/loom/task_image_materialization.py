@@ -30,10 +30,13 @@ NativeCPUArch = Literal["x86_64", "arm64"]
 _CHECKSUM_RE = re.compile(r"[0-9a-f]{64}")
 _KEY_DOMAIN = "task-image-materialization-v1"
 _BareSHA256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
-_ImmutableRegistryImage = Annotated[
+ImmutableRegistryImage = Annotated[
     str,
     StringConstraints(pattern=r"^[^\s@]+@sha256:[0-9a-f]{64}$"),
 ]
+_IMMUTABLE_REGISTRY_IMAGE_RE = re.compile(r"[^\s@]+@sha256:[0-9a-f]{64}")
+_TASK_IMAGE_COMPONENT_RE = re.compile(r"[^\s]{1,256}")
+MAX_TASK_IMAGE_COMPONENTS = 128
 
 
 class TaskImageExecutionGrantV1(BaseModel):
@@ -49,7 +52,7 @@ class TaskImageExecutionGrantV1(BaseModel):
     task_config: dict[str, Any]
     task_source: str | None
     task_source_provenance: dict[str, Any]
-    registry_images: dict[str, _ImmutableRegistryImage]
+    registry_images: dict[str, ImmutableRegistryImage]
 
     @field_validator("registry_images")
     @classmethod
@@ -97,6 +100,40 @@ def required_task_image_components(task: TaskConfig) -> set[str]:
         if sidecar.dockerfile is not None
     )
     return components
+
+
+def validate_task_image_registry_images(
+    registry_images: dict[str, str],
+    *,
+    expected_components: set[str] | None = None,
+    require_complete: bool = False,
+    require_nonempty: bool = True,
+) -> dict[str, str]:
+    if require_nonempty and not registry_images:
+        raise ValueError("registry_images must not be empty")
+    if len(registry_images) > MAX_TASK_IMAGE_COMPONENTS:
+        raise ValueError("registry_images contains too many components")
+    if any(
+        _TASK_IMAGE_COMPONENT_RE.fullmatch(component) is None
+        or len(image) > 2048
+        or _IMMUTABLE_REGISTRY_IMAGE_RE.fullmatch(image) is None
+        for component, image in registry_images.items()
+    ):
+        raise ValueError(
+            "registry_images must map bounded component names to immutable digest references"
+        )
+    if expected_components is not None:
+        actual_components = set(registry_images)
+        unexpected = actual_components - expected_components
+        missing = expected_components - actual_components if require_complete else set()
+        if unexpected or missing:
+            missing_label = ",".join(sorted(missing)) or "none"
+            unexpected_label = ",".join(sorted(unexpected)) or "none"
+            raise ValueError(
+                "registry_images do not match the task snapshot "
+                f"(missing={missing_label}; unexpected={unexpected_label})"
+            )
+    return dict(registry_images)
 
 
 def task_image_materialization_key(

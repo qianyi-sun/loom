@@ -48,18 +48,26 @@ Materializations move through `queued`, `claimed`, `running`, `ready`, `failed`,
 `queued`. Retryable
 failures use bounded backoff and a maximum attempt count; deterministic build
 failures become `failed` and keep dependent trials queued with an explicit
-image-materialization reason. Re-registration or an operator retry can enqueue
-a new attempt without changing the content key.
+image-materialization reason. An operator retry can enqueue a new attempt
+without changing the content key; registering a new task checksum creates a
+new immutable materialization identity rather than resetting bounded attempts.
 
 Registry publication cannot be atomic across multiple component manifests.
-When a later component push fails, Loom records the already-published immutable
-digests on the failed materialization so they remain visible to retry and fenced
-retention rather than becoming untracked registry leaks.
+When a component is pushed, Loom records the immutable digest immediately in an
+append-only publication history before readiness can be committed. Automatic
+retries reuse current verified component publications. Stale builders may add
+cleanup evidence but cannot publish readiness, so lease loss and later retries
+cannot turn earlier manifests into untracked registry leaks.
 
 The builder autoscaler scales from zero using queued build demand. It dispatches
 only exclusive Slurm jobs and never converts the existing non-exclusive GB10
 trial pool into builders. One allocation may process several jobs sequentially
 before exiting after an idle grace period, amortizing image and worker startup.
+Each enabled builder policy requires an explicit Slurm reservation; the nodes
+may remain part of shared inventory, but a builder receives the whole selected
+node temporarily and never overlaps packed trial work. A missing global
+execution witness disables scale-up and drains both pending and running builder
+allocations.
 
 ## Retention
 
@@ -73,10 +81,14 @@ the components, and records fresh immutable digest evidence before scheduling.
 
 ## Rollout safety
 
-The schema, queue, and builder endpoints are inert until the builder policy and
-registry are configured. Registration may enqueue while the policy is disabled,
-but trials requiring an unbuilt image remain queued rather than failing after
-claim. Existing prebuilt-image tasks are unaffected. The old worker-side build
+The schema migration backfills materializations and links for existing
+nonterminal Dockerfile-backed trials. Claim SQL also treats an unlinked trial as
+claimable only when its current task definition contains no Dockerfile, closing
+mixed-version rollout races. The queue and builder endpoints remain inert until
+the builder policy and registry are configured. Registration may enqueue while
+the policy is disabled, but trials requiring an unbuilt image remain queued
+rather than failing after claim. Existing prebuilt-image tasks are unaffected.
+The old worker-side build
 fallback remains available to explicit local/CLI workflows; service trial
 workers are pull-only once builder readiness gating is active.
 

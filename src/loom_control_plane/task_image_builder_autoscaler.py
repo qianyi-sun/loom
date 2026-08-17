@@ -46,6 +46,7 @@ class TaskImageBuilderPoolConfig:
     sacct_path: str
     scancel_path: str
     command_timeout_seconds: float
+    registry_docker_config_dir: str
     exclusive: bool = True
     slurm_account: str = ""
     slurm_qos: str = ""
@@ -73,13 +74,18 @@ class TaskImageBuilderPoolConfig:
             ("partition", self.partition),
             ("slurm_account", self.slurm_account),
             ("slurm_qos", self.slurm_qos),
+            ("slurm_reservation", self.slurm_reservation),
         ):
             if not string_value or _SAFE_NAME_RE.fullmatch(string_value) is None:
                 raise ValueError(f"task image builder {name} is invalid")
         for node in self.allowed_nodes:
             if _SAFE_NAME_RE.fullmatch(node) is None:
                 raise ValueError("task image builder node name is invalid")
-        for name, value in (("env_file", self.env_file), ("repo_dir", self.repo_dir)):
+        for name, value in (
+            ("env_file", self.env_file),
+            ("repo_dir", self.repo_dir),
+            ("registry_docker_config_dir", self.registry_docker_config_dir),
+        ):
             if _SAFE_ABSOLUTE_PATH_RE.fullmatch(value) is None:
                 raise ValueError(f"task image builder {name} must be a safe absolute path")
         if _SAFE_ABSOLUTE_PATH_RE.fullmatch(self.job_output_dir) is None:
@@ -114,6 +120,8 @@ class TaskImageBuilderSlurmRunner(Protocol):
 
     async def cancel_pending_job(self, job_id: str) -> None: ...
 
+    async def cancel_job(self, job_id: str) -> None: ...
+
 
 def build_task_image_builder_sbatch_request(
     config: TaskImageBuilderPoolConfig,
@@ -129,6 +137,7 @@ def build_task_image_builder_sbatch_request(
         f"LOOM_WORKER_HOSTNAME={node}",
         f"LOOM_REMOTE_WORKER_ENV_FILE={config.env_file}",
         f"LOOM_REMOTE_WORKER_REPO_DIR={config.repo_dir}",
+        f"LOOM_TASK_IMAGE_BUILDER_DOCKER_CONFIG_DIR={config.registry_docker_config_dir}",
         f"LOOM_WORKER_TASK_IMAGE_BUILDER_IDLE_EXIT_SECONDS={config.idle_exit_after_seconds}",
         "LOOM_WORKER_REQUIRE_CGROUP_PARENT=0",
         "LOOM_WORKER_RESTART_POLICY=no",
@@ -165,6 +174,7 @@ set -euo pipefail
 : "${SLURM_JOB_ID:?SLURM_JOB_ID is required}"
 : "${LOOM_REMOTE_WORKER_ENV_FILE:?builder env file is required}"
 : "${LOOM_REMOTE_WORKER_REPO_DIR:?builder repository is required}"
+: "${LOOM_TASK_IMAGE_BUILDER_DOCKER_CONFIG_DIR:?builder registry credentials are required}"
 
 runtime_parent="${SLURM_TMPDIR:-${TMPDIR:-/tmp}}"
 job_runtime_dir="$(/usr/bin/mktemp -d "${runtime_parent%/}/loom-task-builder-${SLURM_JOB_ID}.XXXXXX")"
@@ -184,7 +194,10 @@ cd "$LOOM_REMOTE_WORKER_REPO_DIR"
 docker compose --project-name "$LOOM_WORKER_COMPOSE_PROJECT" \
   --env-file "$LOOM_REMOTE_WORKER_ENV_FILE" \
   -f deploy/docker-compose.remote-worker.yml \
-  run --rm --no-deps worker python -m loom_worker.task_image_builder
+  run --rm --no-deps \
+  --volume "$LOOM_TASK_IMAGE_BUILDER_DOCKER_CONFIG_DIR:/run/loom/task-image-builder-docker:ro" \
+  --env DOCKER_CONFIG=/run/loom/task-image-builder-docker \
+  worker python -m loom_worker.task_image_builder
 """
     return SbatchRequest(args=tuple(args), stdin=stdin)
 
@@ -213,6 +226,12 @@ class SubprocessTaskImageBuilderSlurmRunner:
     async def cancel_pending_job(self, job_id: str) -> None:
         await _run_command(
             (self.config.scancel_path, "--state=PENDING", job_id),
+            timeout=self.config.command_timeout_seconds,
+        )
+
+    async def cancel_job(self, job_id: str) -> None:
+        await _run_command(
+            (self.config.scancel_path, job_id),
             timeout=self.config.command_timeout_seconds,
         )
 
@@ -297,6 +316,7 @@ async def reconcile_task_image_builder_autoscaler_once(
     *,
     config: TaskImageBuilderPoolConfig,
     runner: TaskImageBuilderSlurmRunner,
+    scale_up_allowed: bool = True,
 ) -> TaskImageBuilderAutoscalerResult:
     await session.execute(
         text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
@@ -340,16 +360,25 @@ async def reconcile_task_image_builder_autoscaler_once(
         )
         or 0
     )
-    target_jobs = min(config.max_jobs, queued)
+    target_jobs = min(config.max_jobs, queued) if scale_up_allowed else 0
     pending = [job for job in active_jobs if job.state == "pending" and job.job_id]
     cancelled: list[str] = []
-    excess = max(0, len(active_jobs) - target_jobs)
-    for job in reversed(pending[-excess:] if excess else []):
+    if scale_up_allowed:
+        excess = max(0, len(active_jobs) - target_jobs)
+        cancellation_candidates = pending[-excess:] if excess else []
+    else:
+        cancellation_candidates = active_jobs
+    for job in reversed(cancellation_candidates):
         assert job.job_id is not None
-        await runner.cancel_pending_job(job.job_id)
+        if scale_up_allowed:
+            await runner.cancel_pending_job(job.job_id)
+            cancellation_reason = "cancelled after task image backlog drained"
+        else:
+            await runner.cancel_job(job.job_id)
+            cancellation_reason = "cancelled because global execution witness forbids builder capacity"
         job.state = "cancelled"
         job.slurm_state = "CANCELLED"
-        job.pending_reason = "cancelled after task image backlog drained"
+        job.pending_reason = cancellation_reason
         job.finished_at = now
         job.updated_at = now
         cancelled.append(job.job_id)

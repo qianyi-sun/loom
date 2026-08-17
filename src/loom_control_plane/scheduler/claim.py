@@ -40,6 +40,7 @@ _CLAIM_SQL = text("""
 WITH next AS (
   SELECT t.id, t.family_key, t.batch_id
     FROM trials t
+    JOIN tasks task_definition ON task_definition.id = t.task_id
     JOIN team_quotas q ON q.team_id = t.team_id
    WHERE t.state = 'queued'
      AND t.attempt_count < q.max_attempts_ceiling
@@ -50,12 +51,7 @@ WITH next AS (
        OR COALESCE(t.requires_caps->>'cpu_arch', 'x86_64') = ANY(:worker_cpu_arches)
      )
      AND (
-       NOT EXISTS (
-         SELECT 1
-           FROM trial_task_image_materializations task_image_link
-          WHERE task_image_link.trial_id = t.id
-       )
-       OR EXISTS (
+       EXISTS (
          SELECT 1
            FROM trial_task_image_materializations task_image_link
            JOIN task_image_materializations task_image
@@ -63,6 +59,27 @@ WITH next AS (
           WHERE task_image_link.trial_id = t.id
             AND task_image.cpu_arch = ANY(:worker_cpu_arches)
             AND task_image.state = 'ready'
+       )
+       OR (
+         NOT EXISTS (
+           SELECT 1
+             FROM trial_task_image_materializations task_image_link
+            WHERE task_image_link.trial_id = t.id
+         )
+         AND task_definition.config #>> '{environment,dockerfile}' IS NULL
+         AND NOT EXISTS (
+           SELECT 1
+             FROM jsonb_array_elements(
+               CASE
+                 WHEN jsonb_typeof(
+                   task_definition.config #> '{environment,sidecars}'
+                 ) = 'array'
+                 THEN task_definition.config #> '{environment,sidecars}'
+                 ELSE '[]'::jsonb
+               END
+             ) AS task_sidecar
+            WHERE task_sidecar->>'dockerfile' IS NOT NULL
+         )
        )
      )
      AND t.requires_caps->>'gpu_vendor' = ANY(:worker_gpu_vendors)
@@ -237,6 +254,7 @@ WITH candidates AS (
          t.family_key,
          t.batch_id
     FROM trials t
+    JOIN tasks task_definition ON task_definition.id = t.task_id
     JOIN team_quotas q ON q.team_id = t.team_id
     JOIN workers w ON w.id = (:worker_id)::uuid
    WHERE 'trial' = ANY((:supported_work_kinds)::text[])
@@ -247,12 +265,7 @@ WITH candidates AS (
      AND (COALESCE(t.requires_caps->>'cpu_arch', 'x86_64') = 'any'
           OR COALESCE(t.requires_caps->>'cpu_arch', 'x86_64') = ANY(:worker_cpu_arches))
      AND (
-       NOT EXISTS (
-         SELECT 1
-           FROM trial_task_image_materializations task_image_link
-          WHERE task_image_link.trial_id = t.id
-       )
-       OR EXISTS (
+       EXISTS (
          SELECT 1
            FROM trial_task_image_materializations task_image_link
            JOIN task_image_materializations task_image
@@ -260,6 +273,27 @@ WITH candidates AS (
           WHERE task_image_link.trial_id = t.id
             AND task_image.cpu_arch = ANY(:worker_cpu_arches)
             AND task_image.state = 'ready'
+       )
+       OR (
+         NOT EXISTS (
+           SELECT 1
+             FROM trial_task_image_materializations task_image_link
+            WHERE task_image_link.trial_id = t.id
+         )
+         AND task_definition.config #>> '{environment,dockerfile}' IS NULL
+         AND NOT EXISTS (
+           SELECT 1
+             FROM jsonb_array_elements(
+               CASE
+                 WHEN jsonb_typeof(
+                   task_definition.config #> '{environment,sidecars}'
+                 ) = 'array'
+                 THEN task_definition.config #> '{environment,sidecars}'
+                 ELSE '[]'::jsonb
+               END
+             ) AS task_sidecar
+            WHERE task_sidecar->>'dockerfile' IS NOT NULL
+         )
        )
      )
      AND t.requires_caps->>'gpu_vendor' = ANY(:worker_gpu_vendors)

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Awaitable, Callable
 from typing import Annotated, Any, Literal
 from uuid import UUID
@@ -13,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.auth import verify_bearer_token
 from loom.db.schema import TaskImageMaterialization
+from loom.task_image_materialization import validate_task_image_registry_images
 from loom_control_plane.task_image_materializations import (
     TaskImageCompletionError,
     TaskImageLeaseConflictError,
@@ -22,12 +22,12 @@ from loom_control_plane.task_image_materializations import (
     complete_task_image_registry_gc,
     fail_task_image_materialization,
     heartbeat_task_image_materialization,
+    record_task_image_publication,
     start_task_image_materialization,
     task_image_materialization_payload,
 )
 
 router = APIRouter(prefix="/api/v1/internal/task-image-materializations")
-_IMMUTABLE_IMAGE_RE = re.compile(r".+@sha256:[0-9a-f]{64}$")
 BuilderID = Annotated[str, Field(min_length=1, max_length=128)]
 LeaseEpoch = Annotated[int, Field(gt=0)]
 
@@ -57,6 +57,11 @@ class FailRequest(LeaseRequest):
     registry_images: dict[str, str] = Field(default_factory=dict)
 
 
+class PublicationRequest(LeaseRequest):
+    component: Annotated[str, Field(min_length=1, max_length=256)]
+    registry_image: Annotated[str, Field(min_length=1, max_length=2048)]
+
+
 class RegistryGCClaimRequest(_StrictModel):
     gc_id: BuilderID
 
@@ -81,16 +86,13 @@ async def _verify_scoped_request(
 def _validate_registry_images(
     registry_images: dict[str, str], *, require_nonempty: bool = True
 ) -> None:
-    if require_nonempty and not registry_images:
-        raise HTTPException(status_code=400, detail="registry_images must not be empty")
-    if any(
-        not component or _IMMUTABLE_IMAGE_RE.fullmatch(image) is None
-        for component, image in registry_images.items()
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail="registry_images must map component names to immutable digest references",
+    try:
+        validate_task_image_registry_images(
+            registry_images,
+            require_nonempty=require_nonempty,
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/claim", response_model=None)
@@ -247,6 +249,30 @@ async def complete_route(
             builder_id=payload.builder_id,
             lease_epoch=payload.lease_epoch,
             registry_images=payload.registry_images,
+        ),
+        required_scope="task-image:build",
+        credential_name="task image builder",
+    )
+
+
+@router.post("/{materialization_id}/publication")
+async def publication_route(
+    materialization_id: UUID,
+    request: Request,
+    payload: PublicationRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _validate_registry_images({payload.component: payload.registry_image})
+    return await _run_lease_mutation(
+        request,
+        authorization,
+        lambda session: record_task_image_publication(
+            session,
+            materialization_id=materialization_id,
+            builder_id=payload.builder_id,
+            lease_epoch=payload.lease_epoch,
+            component=payload.component,
+            registry_image=payload.registry_image,
         ),
         required_scope="task-image:build",
         credential_name="task image builder",
