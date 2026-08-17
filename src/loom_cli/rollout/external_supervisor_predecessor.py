@@ -12,7 +12,10 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import cast
 
-from loom_cli.rollout.external_supervisor_readiness import ExternalSupervisorArtifact
+from loom_cli.rollout.external_supervisor_readiness import (
+    PROTECTED_EXTERNAL_SUPERVISOR_UNIT_RE,
+    ExternalSupervisorArtifact,
+)
 
 DEFAULT_PREDECESSOR_MANIFEST = resources.files("loom_cli.data").joinpath(
     "staging-external-supervisor-predecessor.json"
@@ -24,7 +27,6 @@ OLDLAB_PREDECESSOR_MANIFEST = resources.files("loom_cli.data").joinpath(
 _SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _TRANSITION_GROUP_RE = re.compile(r"^[0-9a-f]{32}$")
-_UNIT_RE = re.compile(r"^loom-autoscaler-[a-z0-9][a-z0-9-]{1,95}\.(?:service|timer)$")
 _MAX_BYTES = 4 * 1024 * 1024
 ABSENT_PREDECESSOR_DIGEST = hashlib.sha256(b"loom-external-supervisor-absent-v1").hexdigest()
 NO_TRANSITION_GROUP_ID = hashlib.sha256(b"loom-external-supervisor-no-transition-v1").hexdigest()[
@@ -102,7 +104,11 @@ def external_supervisor_unit_set_digest(unit_sha256: Mapping[str, str]) -> str:
     if (
         not names
         or services != timers
-        or any(type(name) is not str or _UNIT_RE.fullmatch(name) is None for name in names)
+        or any(
+            type(name) is not str
+            or PROTECTED_EXTERNAL_SUPERVISOR_UNIT_RE.fullmatch(name) is None
+            for name in names
+        )
         or any(
             type(value) is not str or _SHA256_RE.fullmatch(value) is None
             for value in unit_sha256.values()
@@ -158,7 +164,11 @@ def _canonical_maps(
         not names
         or names != set(raw_digests)
         or services != timers
-        or any(type(name) is not str or _UNIT_RE.fullmatch(name) is None for name in names)
+        or any(
+            type(name) is not str
+            or PROTECTED_EXTERNAL_SUPERVISOR_UNIT_RE.fullmatch(name) is None
+            for name in names
+        )
         or any(
             not isinstance(payload, str)
             or not payload.endswith("\n")
@@ -636,7 +646,7 @@ class ExternalSupervisorPredecessorAuthority:
             or (self.kind == "absent") != (not digests)
             or any(
                 type(name) is not str
-                or _UNIT_RE.fullmatch(name) is None
+                or PROTECTED_EXTERNAL_SUPERVISOR_UNIT_RE.fullmatch(name) is None
                 or type(digest) is not str
                 or _SHA256_RE.fullmatch(digest) is None
                 for name, digest in digests.items()

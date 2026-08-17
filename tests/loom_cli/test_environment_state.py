@@ -2378,7 +2378,7 @@ def test_committed_development_profile_ships_fail_closed_supervisors() -> None:
     )
 
 
-def test_committed_staging_profile_activates_both_slurm_supervisors() -> None:
+def test_committed_staging_profile_activates_trial_and_proven_builder_supervisors() -> None:
     profile = load_environment_state_profile(
         Path("deploy/environment-state/staging.toml"),
         variables={
@@ -2394,7 +2394,7 @@ def test_committed_staging_profile_activates_both_slurm_supervisors() -> None:
         for row in profile.external_slurm_autoscaler_supervisors
         if row["enabled"] and row["active"]
     ]
-    assert len(supervisors) == 2
+    assert len(supervisors) == 3
     by_name = {supervisor["name"]: supervisor for supervisor in supervisors}
     gb10 = by_name["gb10-staging"]
     assert gb10["pool_name"] == "gb10"
@@ -2416,6 +2416,13 @@ def test_committed_staging_profile_activates_both_slurm_supervisors() -> None:
     assert "service/loom-postgres-rw" in oldlab["args"]
     assert oldlab["working_directory"].startswith("/opt/loom-staging-runner/candidates/")
     _assert_manager_trust_arguments(oldlab, pool_name="oldlab")
+
+    builder = by_name["task-image-builder-oldlab-staging"]
+    assert builder["pool_name"] == "task-image-builder-oldlab"
+    assert builder["service_name"] == "loom-task-image-builder-oldlab-staging.service"
+    assert builder["timer_name"] == "loom-task-image-builder-oldlab-staging.timer"
+    assert "15453" in builder["args"]
+    _assert_manager_trust_arguments(builder, pool_name="oldlab")
 
 
 def test_committed_production_supervisor_has_independently_pinned_manager_trust() -> None:

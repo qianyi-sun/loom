@@ -27,11 +27,14 @@ builder allocation per architecture; the allocation can process several images
 and exits after 120 idle seconds. Trial workers remain non-exclusive and
 pull-only.
 
-Both builder policies and their external supervisors are committed disabled.
-Activation requires a least-privilege token carrying `task-image:build`, a
-dedicated builder env file, an owner-only Docker `config.json` mounted only into
-the builder container, the declared Slurm account/QoS/exclusive reservation,
-native exclusive capacity, and a registry-retention controller. The
+The x86_64 OLDLAB builder and its supervisor are active on the dedicated
+`trt-eai-oldlab-6` reservation. The ARM64 GB10 builder remains disabled until
+the GB10 Slurm administrator applies the committed builder QoS/reservation
+converger for `trt-gb10-2`. Activation requires a least-privilege token carrying
+`task-image:build`, a dedicated builder env file, an owner-only Docker
+`config.json` mounted only into the builder container, the declared Slurm
+account/QoS/exclusive reservation, native exclusive capacity, and a
+registry-retention controller. The
 builder token's scope must be exactly `task-image:build`; mint it with
 `loom admin tokens worker mint --kind task-image-builder`. The registry
 retention controller uses a different token whose scope must be exactly
@@ -39,8 +42,8 @@ retention controller uses a different token whose scope must be exactly
 `loom admin tokens worker mint --kind task-image-registry-gc`. Never share
 either credential with the other controller or with trial workers.
 
-Both native capacity classes remain blocked until safe exclusive capacity is
-provisioned: GB10 for ARM64 and OLDLAB for x86_64. Nodes may remain in shared
+Each native capacity class remains blocked until safe exclusive capacity is
+provisioned. Nodes may remain in shared
 Slurm inventory, but the named builder reservation and `--exclusive` allocation
 must prevent overlap with packed trial jobs; nodes hosting services outside
 Slurm must be removed from the builder inventory. Do not remove activation

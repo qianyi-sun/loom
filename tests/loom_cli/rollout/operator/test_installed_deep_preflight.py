@@ -658,6 +658,7 @@ def secure_candidate_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
     )
     (candidate / "deploy/environment-state/staging.toml").chmod(0o644)
     (candidate / "scripts/ops/worker_pool_autoscaler_external_once.py").chmod(0o755)
+    (candidate / "scripts/ops/task_image_builder_autoscaler_external_once.py").chmod(0o755)
     return candidate
 
 

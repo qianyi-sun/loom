@@ -10,7 +10,7 @@ import os
 import re
 import stat
 import tempfile
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
@@ -26,6 +26,19 @@ from loom_cli.rollout.credential_authority import TrustedFileRead, read_trusted_
 
 PROFILE_PATH = "deploy/environment-state/staging.toml"
 SCRIPT_PATH = "scripts/ops/worker_pool_autoscaler_external_once.py"
+TASK_IMAGE_BUILDER_SCRIPT_PATH = "scripts/ops/task_image_builder_autoscaler_external_once.py"
+_PROTECTED_EXTERNAL_SUPERVISOR_SCRIPT_BY_UNIT_PREFIX = MappingProxyType(
+    {
+        "loom-autoscaler-": SCRIPT_PATH,
+        "loom-task-image-builder-": TASK_IMAGE_BUILDER_SCRIPT_PATH,
+    }
+)
+PROTECTED_EXTERNAL_SUPERVISOR_UNIT_PREFIXES = tuple(
+    _PROTECTED_EXTERNAL_SUPERVISOR_SCRIPT_BY_UNIT_PREFIX
+)
+SUPERVISOR_SCRIPT_PATHS = frozenset(
+    _PROTECTED_EXTERNAL_SUPERVISOR_SCRIPT_BY_UNIT_PREFIX.values()
+)
 STAGING_RUNNER_ROOT = "/opt/loom-staging-runner"
 STAGING_CANDIDATE_RUNTIME_ROOT = f"{STAGING_RUNNER_ROOT}/candidates"
 STAGING_NAMESPACE = "loom-staging"
@@ -45,22 +58,35 @@ _RUNTIME_ROOT_RE = re.compile(
 _IMAGE_TAG_RE = re.compile(r"^staging-[a-z0-9][a-z0-9-]{5,63}$")
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _SYSTEMD_UNIT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,127}$")
-_PROTECTED_SYSTEMD_UNIT_RE = re.compile(
-    r"^loom-autoscaler-[a-z0-9][a-z0-9-]{1,95}\.(?:service|timer)$"
+PROTECTED_EXTERNAL_SUPERVISOR_UNIT_RE = re.compile(
+    r"^loom-(?:autoscaler|task-image-builder)-[a-z0-9][a-z0-9-]{1,95}"
+    r"\.(?:service|timer)$"
 )
 _KUBERNETES_NAME_RE = re.compile(r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$")
 _INTEGER_DURATION_RE = re.compile(r"^[1-9][0-9]{0,4}$")
 _STAGING_SLURM_AUTHORITIES = {
     "gb10": ("trt-gb10", STAGING_GB10_CONTROLLER_EXECUTION_HOST),
     "oldlab": ("trt-oldlab", "TRT-EAI-OLDLAB-1"),
+    "task-image-builder-gb10": ("trt-gb10", STAGING_GB10_CONTROLLER_EXECUTION_HOST),
+    "task-image-builder-oldlab": ("trt-oldlab", "TRT-EAI-OLDLAB-1"),
 }
 _STAGING_DATABASE_SECRETS = {
     "gb10": "loom-external-slurm-autoscaler-db",
     "oldlab": "loom-secrets",
+    "task-image-builder-gb10": "loom-external-slurm-autoscaler-db",
+    "task-image-builder-oldlab": "loom-secrets",
 }
 _STAGING_GLOBAL_EXECUTION_WITNESSES = {
     "gb10": "/etc/loom/credentials/global-execution/gb10-witness.json",
     "oldlab": "/etc/loom/credentials/global-execution/oldlab-witness.json",
+    "task-image-builder-gb10": "/etc/loom/credentials/global-execution/gb10-witness.json",
+    "task-image-builder-oldlab": "/etc/loom/credentials/global-execution/oldlab-witness.json",
+}
+_STAGING_SUPERVISOR_SCRIPTS = {
+    "gb10": SCRIPT_PATH,
+    "oldlab": SCRIPT_PATH,
+    "task-image-builder-gb10": TASK_IMAGE_BUILDER_SCRIPT_PATH,
+    "task-image-builder-oldlab": TASK_IMAGE_BUILDER_SCRIPT_PATH,
 }
 _STAGING_MANAGER_PUBLIC_KEY = "/etc/loom/credentials/global-execution/manager-ed25519.pub"
 _STAGING_MANAGER_PUBLIC_KEY_PIN = (
@@ -73,7 +99,24 @@ _MAX_ARTIFACT_BYTES = 2 * 1024 * 1024
 _MAX_SUPERVISORS = 16
 _MAX_STRING_LENGTH = 4096
 
-_REQUIRED_ARGUMENTS = frozenset(
+
+def protected_external_supervisor_script_paths_for_units(
+    unit_names: Iterable[str],
+) -> frozenset[str]:
+    names = tuple(unit_names)
+    if not names or any(
+        type(name) is not str or PROTECTED_EXTERNAL_SUPERVISOR_UNIT_RE.fullmatch(name) is None
+        for name in names
+    ):
+        raise ValueError("protected external supervisor unit name is invalid")
+    return frozenset(
+        script_path
+        for prefix, script_path in _PROTECTED_EXTERNAL_SUPERVISOR_SCRIPT_BY_UNIT_PREFIX.items()
+        if any(name.startswith(prefix) for name in names)
+    )
+
+
+_COMMON_REQUIRED_ARGUMENTS = frozenset(
     {
         "--environment",
         "--pool-name",
@@ -94,6 +137,14 @@ _REQUIRED_ARGUMENTS = frozenset(
         "--expected-manager-public-key-sha256-file",
     }
 )
+_TASK_IMAGE_BUILDER_ARGUMENTS = frozenset(
+    {
+        "--profile",
+        "--image-tag",
+        "--env-config-version",
+        "--git-sha",
+    }
+)
 _OPTIONAL_ARGUMENTS = frozenset(
     {
         "--kubectl",
@@ -102,7 +153,14 @@ _OPTIONAL_ARGUMENTS = frozenset(
         "--scontrol",
     }
 )
-_ALLOWED_ARGUMENTS = _REQUIRED_ARGUMENTS | _OPTIONAL_ARGUMENTS
+_REQUIRED_ARGUMENTS_BY_POOL = {
+    pool_name: (
+        _COMMON_REQUIRED_ARGUMENTS | _TASK_IMAGE_BUILDER_ARGUMENTS
+        if pool_name.startswith("task-image-builder-")
+        else _COMMON_REQUIRED_ARGUMENTS
+    )
+    for pool_name in _STAGING_SLURM_AUTHORITIES
+}
 
 
 class CommandResult(Protocol):
@@ -238,7 +296,11 @@ def _bounded_decimal(value: str, field: str, *, maximum: float) -> str:
     return format(parsed, ".15g")
 
 
-def _argument_map(args: tuple[str, ...]) -> dict[str, str]:
+def _argument_map(args: tuple[str, ...], *, pool_name: str) -> dict[str, str]:
+    required = _REQUIRED_ARGUMENTS_BY_POOL.get(pool_name)
+    if required is None:
+        raise ValueError("external supervisor pool is unauthorized")
+    allowed = required | _OPTIONAL_ARGUMENTS
     if not args or len(args) > 64:
         raise ValueError("external supervisor args are invalid")
     if "--validate-only" in args or any(token.startswith("--validate-only=") for token in args):
@@ -256,10 +318,10 @@ def _argument_map(args: tuple[str, ...]) -> dict[str, str]:
                 raise ValueError(f"external supervisor argument {flag!r} has no value")
             value = _clean_text(args[index + 1], "argument value", maximum=512)
             index += 2
-        if flag not in _ALLOWED_ARGUMENTS or flag in parsed or not value:
+        if flag not in allowed or flag in parsed or not value:
             raise ValueError(f"external supervisor argument {flag!r} is unauthorized")
         parsed[flag] = value
-    missing = _REQUIRED_ARGUMENTS - set(parsed)
+    missing = required - set(parsed)
     if missing:
         raise ValueError(
             "external supervisor bounded tunnel arguments are missing: "
@@ -289,7 +351,10 @@ def _unit_name(value: str, field: str, suffix: str) -> str:
 
 def _protected_unit_name(value: str, field: str, suffix: str) -> str:
     cleaned = _clean_text(value, field, maximum=128)
-    if _PROTECTED_SYSTEMD_UNIT_RE.fullmatch(cleaned) is None or not cleaned.endswith(suffix):
+    if (
+        PROTECTED_EXTERNAL_SUPERVISOR_UNIT_RE.fullmatch(cleaned) is None
+        or not cleaned.endswith(suffix)
+    ):
         raise ValueError(f"external supervisor {field} is not a protected unit name")
     return cleaned
 
@@ -357,6 +422,15 @@ class ExternalSupervisorIdentity:
             "timer_name",
             ".timer",
         )
+        expected_unit_prefix = (
+            "loom-task-image-builder-"
+            if self.pool_name.startswith("task-image-builder-")
+            else "loom-autoscaler-"
+        )
+        if not service_name.startswith(expected_unit_prefix) or not timer_name.startswith(
+            expected_unit_prefix
+        ):
+            raise ValueError("external supervisor protected unit kind drifted")
         if service_name.removesuffix(".service") != timer_name.removesuffix(".timer"):
             raise ValueError("external supervisor service/timer unit pair is invalid")
         runtime_root = _safe_absolute_path(self.runtime_root, "runtime_root")
@@ -370,11 +444,15 @@ class ExternalSupervisorIdentity:
             raise ValueError("external supervisor working directory is not canonical")
         if _safe_absolute_path(self.python_path, "python_path") != staging_python_path(runtime_sha):
             raise ValueError("external supervisor Python path is not canonical")
-        if _safe_absolute_path(self.script_path, "script_path") != staging_script_path(runtime_sha):
+        expected_script_path = _STAGING_SUPERVISOR_SCRIPTS[self.pool_name]
+        if _safe_absolute_path(
+            self.script_path,
+            "script_path",
+        ) != f"{staging_working_directory(runtime_sha)}/{expected_script_path}":
             raise ValueError("external supervisor script path is not canonical")
         if not self.args or any(not isinstance(item, str) for item in self.args):
             raise ValueError("external supervisor args are invalid")
-        arguments = _argument_map(self.args)
+        arguments = _argument_map(self.args, pool_name=self.pool_name)
         if (
             _clean_text(
                 self.control_plane_environment,
@@ -387,6 +465,15 @@ class ExternalSupervisorIdentity:
             raise ValueError("external supervisor environment argument drifted")
         if arguments["--pool-name"] != self.pool_name:
             raise ValueError("external supervisor pool argument drifted")
+        if self.pool_name.startswith("task-image-builder-"):
+            if (
+                arguments["--profile"]
+                != f"{staging_working_directory(runtime_sha)}/{PROFILE_PATH}"
+                or arguments["--git-sha"] != runtime_sha
+                or _IMAGE_TAG_RE.fullmatch(arguments["--image-tag"]) is None
+                or arguments["--env-config-version"] != arguments["--image-tag"]
+            ):
+                raise ValueError("external task-image builder release identity drifted")
         if (
             arguments["--expected-slurm-cluster-name"],
             arguments["--expected-slurm-controller-host"],
@@ -548,7 +635,7 @@ class ExternalSupervisorIdentity:
             raise ValueError("external supervisor rehearsal namespace is not isolated")
         if kubeconfig != REHEARSAL_KUBECONFIG:
             raise ValueError("external supervisor rehearsal kubeconfig is not canonical")
-        _argument_map(self.args)
+        _argument_map(self.args, pool_name=self.pool_name)
 
         rewritten: list[str] = []
         index = 0
@@ -686,6 +773,10 @@ class ExternalSupervisorArtifact:
         ]
         ports = [supervisor.db_local_port for supervisor in self.supervisors]
         rehearsal_ports = [_rehearsal_db_local_port(port) for port in ports]
+        expected_scripts = {
+            _STAGING_SUPERVISOR_SCRIPTS[supervisor.pool_name]
+            for supervisor in self.supervisors
+        }
         if (
             self.schema_version != 3
             or _SHA_RE.fullmatch(self.candidate_sha) is None
@@ -695,7 +786,7 @@ class ExternalSupervisorArtifact:
             or self.runtime_root != staging_runtime_root(self.candidate_sha)
             or self.profile_path != PROFILE_PATH
             or _SHA256_RE.fullmatch(self.profile_sha256) is None
-            or set(scripts) != {SCRIPT_PATH}
+            or set(scripts) != expected_scripts
             or any(_SHA256_RE.fullmatch(value) is None for value in scripts.values())
             or not 1 <= len(self.supervisors) <= _MAX_SUPERVISORS
             or tuple(sorted(self.supervisors, key=lambda item: item.name)) != self.supervisors
@@ -706,6 +797,12 @@ class ExternalSupervisorArtifact:
             or not set(ports).isdisjoint(rehearsal_ports)
             or any(item.environment != self.environment for item in self.supervisors)
             or any(item.runtime_root != self.runtime_root for item in self.supervisors)
+            or any(
+                item.pool_name.startswith("task-image-builder-")
+                and _argument_map(item.args, pool_name=item.pool_name)["--image-tag"]
+                != self.image_tag
+                for item in self.supervisors
+            )
             or _SHA256_RE.fullmatch(self.artifact_digest) is None
         ):
             raise ValueError("external supervisor artifact identity is invalid")
@@ -756,6 +853,15 @@ class ExternalSupervisorArtifact:
         )
         if not supervisors:
             raise ValueError("external supervisor execution host is not present")
+        selected_script_paths = {
+            _STAGING_SUPERVISOR_SCRIPTS[supervisor.pool_name]
+            for supervisor in supervisors
+        }
+        selected_script_sha256 = {
+            path: digest
+            for path, digest in self.script_sha256.items()
+            if path in selected_script_paths
+        }
         payload = {
             "schema_version": self.schema_version,
             "candidate_sha": self.candidate_sha,
@@ -765,7 +871,7 @@ class ExternalSupervisorArtifact:
             "runtime_root": self.runtime_root,
             "profile_path": self.profile_path,
             "profile_sha256": self.profile_sha256,
-            "script_sha256": dict(self.script_sha256),
+            "script_sha256": selected_script_sha256,
             "supervisors": [supervisor.to_dict() for supervisor in supervisors],
         }
         return ExternalSupervisorArtifact(
@@ -777,7 +883,7 @@ class ExternalSupervisorArtifact:
             runtime_root=self.runtime_root,
             profile_path=self.profile_path,
             profile_sha256=self.profile_sha256,
-            script_sha256=self.script_sha256,
+            script_sha256=selected_script_sha256,
             supervisors=supervisors,
             artifact_digest=_hash_json(payload),
         )
@@ -963,7 +1069,8 @@ def _normalize_supervisor(raw: Mapping[str, object]) -> ExternalSupervisorIdenti
     ):
         raise ValueError("external supervisor normalized lists are invalid")
     args = tuple(args_value)
-    arguments = _argument_map(args)
+    pool_name = str(raw.get("pool_name", ""))
+    arguments = _argument_map(args, pool_name=pool_name)
     try:
         local_address = ipaddress.ip_address(arguments["--db-local-host"])
     except ValueError as exc:
@@ -979,7 +1086,7 @@ def _normalize_supervisor(raw: Mapping[str, object]) -> ExternalSupervisorIdenti
         environment=str(raw.get("environment", "")),
         control_plane_environment=str(raw.get("control_plane_environment", "")),
         name=str(raw.get("name", "")),
-        pool_name=str(raw.get("pool_name", "")),
+        pool_name=pool_name,
         execution_host=str(raw.get("execution_host", "")),
         service_name=str(raw.get("service_name", "")),
         timer_name=str(raw.get("timer_name", "")),
@@ -1053,11 +1160,7 @@ def build_external_supervisor_artifact(
         raise ValueError("external supervisor candidate root is unsafe")
 
     profile_path = _candidate_source(root, PROFILE_PATH)
-    script_path = _candidate_source(root, SCRIPT_PATH)
     profile_first = _trusted_source(profile_path, maximum=_MAX_PROFILE_BYTES)
-    script_first = _trusted_source(script_path, maximum=_MAX_SCRIPT_BYTES)
-    if not stat.S_IMODE(script_first.metadata.st_mode) & stat.S_IXUSR:
-        raise ValueError("external supervisor script is not owner-executable")
 
     profile = _load_profile_snapshot(
         profile_first.payload,
@@ -1101,11 +1204,36 @@ def build_external_supervisor_artifact(
     if not supervisors:
         raise ValueError("external supervisor execution host has no managed supervisors")
 
+    script_paths = {
+        relative_path: _candidate_source(root, relative_path)
+        for relative_path in sorted(
+            {
+                _STAGING_SUPERVISOR_SCRIPTS[supervisor.pool_name]
+                for supervisor in supervisors
+            }
+        )
+    }
+    scripts_first = {
+        relative_path: _trusted_source(path, maximum=_MAX_SCRIPT_BYTES)
+        for relative_path, path in script_paths.items()
+    }
+    if any(
+        not stat.S_IMODE(source.metadata.st_mode) & stat.S_IXUSR
+        for source in scripts_first.values()
+    ):
+        raise ValueError("external supervisor script is not owner-executable")
+
     profile_second = _trusted_source(profile_path, maximum=_MAX_PROFILE_BYTES)
-    script_second = _trusted_source(script_path, maximum=_MAX_SCRIPT_BYTES)
+    scripts_second = {
+        relative_path: _trusted_source(path, maximum=_MAX_SCRIPT_BYTES)
+        for relative_path, path in script_paths.items()
+    }
     if not _same_trusted_source(profile_first, profile_second):
         raise ValueError("external supervisor profile changed while artifact was built")
-    if not _same_trusted_source(script_first, script_second):
+    if any(
+        not _same_trusted_source(scripts_first[relative_path], scripts_second[relative_path])
+        for relative_path in script_paths
+    ):
         raise ValueError("external supervisor script changed while artifact was built")
 
     payload = {
@@ -1117,7 +1245,10 @@ def build_external_supervisor_artifact(
         "runtime_root": staging_runtime_root(candidate_sha),
         "profile_path": PROFILE_PATH,
         "profile_sha256": hashlib.sha256(profile_first.payload).hexdigest(),
-        "script_sha256": {SCRIPT_PATH: hashlib.sha256(script_first.payload).hexdigest()},
+        "script_sha256": {
+            relative_path: hashlib.sha256(source.payload).hexdigest()
+            for relative_path, source in scripts_first.items()
+        },
         "supervisors": [supervisor.to_dict() for supervisor in supervisors],
     }
     return ExternalSupervisorArtifact(
@@ -1198,6 +1329,8 @@ def verify_external_supervisor_artifact(
 
 __all__ = [
     "PROFILE_PATH",
+    "PROTECTED_EXTERNAL_SUPERVISOR_UNIT_PREFIXES",
+    "PROTECTED_EXTERNAL_SUPERVISOR_UNIT_RE",
     "REHEARSAL_KUBECONFIG",
     "REHEARSAL_POLICY_VALIDATION_MODULE",
     "SCRIPT_PATH",
@@ -1207,11 +1340,14 @@ __all__ = [
     "STAGING_NAMESPACE",
     "STAGING_ROLLOUT_EXECUTION_HOST",
     "STAGING_RUNNER_ROOT",
+    "SUPERVISOR_SCRIPT_PATHS",
+    "TASK_IMAGE_BUILDER_SCRIPT_PATH",
     "ExternalSupervisorArtifact",
     "ExternalSupervisorIdentity",
     "ExternalSupervisorVerification",
     "SystemdAnalyzeRunner",
     "build_external_supervisor_artifact",
+    "protected_external_supervisor_script_paths_for_units",
     "staging_python_path",
     "staging_runtime_root",
     "staging_script_path",

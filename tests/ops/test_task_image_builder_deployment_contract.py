@@ -20,7 +20,7 @@ _VARIABLES = {
 }
 
 
-def test_staging_declares_separate_inert_exclusive_builder_pools() -> None:
+def test_staging_activates_only_the_provisioned_native_builder_pool() -> None:
     profile = load_environment_state_profile(
         Path("deploy/environment-state/staging.toml"),
         variables=_VARIABLES,
@@ -34,13 +34,22 @@ def test_staging_declares_separate_inert_exclusive_builder_pools() -> None:
         "task-image-builder-gb10",
     }
     for row in builders.values():
-        assert row["enabled"] is False
         assert row["exclusive"] is True
         assert row["requested_concurrency"] == 1
         assert row["max_jobs"] > 0
-        assert "registry_retention_not_provisioned" in row["activation_blockers"]
-        cluster = row["slurm_cluster_id"]
-        assert f"exclusive_{cluster}_nodes_not_provisioned" in row["activation_blockers"]
+        assert "builder_token_not_provisioned" not in row["activation_blockers"]
+        assert "registry_push_credentials_not_provisioned" not in row["activation_blockers"]
+        assert "registry_retention_not_provisioned" not in row["activation_blockers"]
+    assert builders["x86_64"]["enabled"] is True
+    assert builders["x86_64"]["activation_blockers"] == []
+    assert builders["x86_64"]["allowed_nodes"] == ["trt-eai-oldlab-6"]
+    assert builders["arm64"]["enabled"] is False
+    assert builders["arm64"]["allowed_nodes"] == ["trt-gb10-2"]
+    assert set(builders["arm64"]["activation_blockers"]) == {
+        "slurm_builder_qos_not_provisioned",
+        "slurm_builder_reservation_not_provisioned",
+        "exclusive_gb10_nodes_not_provisioned",
+    }
 
     trial_pools = {
         row["pool_name"]: row
@@ -56,7 +65,7 @@ def test_staging_declares_separate_inert_exclusive_builder_pools() -> None:
     assert all(row["env_file"] not in trial_env_files for row in builders.values())
 
 
-def test_staging_builder_supervisors_are_present_but_disabled() -> None:
+def test_staging_builder_supervisors_match_proven_native_activation() -> None:
     profile = load_environment_state_profile(
         Path("deploy/environment-state/staging.toml"),
         variables=_VARIABLES,
@@ -71,8 +80,6 @@ def test_staging_builder_supervisors_are_present_but_disabled() -> None:
 
     assert set(supervisors) == builder_pool_names
     for row in supervisors.values():
-        assert row["enabled"] is False
-        assert row["active"] is False
         assert row["script_path"].endswith(
             "/scripts/ops/task_image_builder_autoscaler_external_once.py"
         )
@@ -82,6 +89,10 @@ def test_staging_builder_supervisors_are_present_but_disabled() -> None:
         assert args.expected_manager_public_key_sha256_file.name == (
             "manager-ed25519.pub.sha256"
         )
+    assert supervisors["task-image-builder-oldlab"]["enabled"] is True
+    assert supervisors["task-image-builder-oldlab"]["active"] is True
+    assert supervisors["task-image-builder-gb10"]["enabled"] is False
+    assert supervisors["task-image-builder-gb10"]["active"] is False
 
 
 def test_enabled_builder_policy_requires_complete_slurm_authority() -> None:
@@ -155,7 +166,7 @@ def test_remote_worker_compose_forwards_builder_lifecycle_settings() -> None:
     )
 
 
-def test_release_manifest_preserves_inert_builder_policy_evidence() -> None:
+def test_release_manifest_preserves_partial_builder_activation_evidence() -> None:
     summary = _external_worker_summary(
         environment_state_path=Path("deploy/environment-state/staging.toml"),
         image_tag=_VARIABLES["IMAGE_TAG"],
@@ -168,5 +179,8 @@ def test_release_manifest_preserves_inert_builder_policy_evidence() -> None:
         "task-image-builder-gb10",
         "task-image-builder-oldlab",
     }
-    assert all(row["enabled"] is False for row in builders)
+    by_arch = {row["cpu_arch"]: row for row in builders}
+    assert by_arch["x86_64"]["enabled"] is True
+    assert by_arch["x86_64"]["activation_blockers"] == []
+    assert by_arch["arm64"]["enabled"] is False
     assert all(row["exclusive"] is True for row in builders)

@@ -10,6 +10,10 @@ from loom_cli.rollout.external_supervisor_predecessor import (
     GB10_CANONICAL_UNIT_DIR,
     PROTECTED_CANONICAL_UNIT_DIR,
 )
+from loom_cli.rollout.external_supervisor_readiness import (
+    SCRIPT_PATH,
+    TASK_IMAGE_BUILDER_SCRIPT_PATH,
+)
 from loom_cli.rollout.operator.backup_lease import BackupLease, component_set_digest
 from loom_cli.rollout.preflight_bindings import derive_attestation_bindings
 from loom_cli.rollout.preflight_contract import (
@@ -61,7 +65,10 @@ def _executions() -> tuple[CheckExecution, ...]:
     oldlab_target_units = {
         "loom-autoscaler-oldlab-staging.service": "3" * 64,
         "loom-autoscaler-oldlab-staging.timer": "4" * 64,
+        "loom-task-image-builder-oldlab-staging.service": "5" * 64,
+        "loom-task-image-builder-oldlab-staging.timer": "6" * 64,
     }
+    all_target_units = {**target_units, **oldlab_target_units}
     return (
         _execution(
             "candidate.identity",
@@ -88,10 +95,13 @@ def _executions() -> tuple[CheckExecution, ...]:
                 "supervisor-artifact-digest": "5" * 64,
                 "supervisor-profile-sha256": "6" * 64,
                 "supervisor-script-digests": {
-                    "scripts/ops/worker_pool_autoscaler_external_once.py": "7" * 64
+                    SCRIPT_PATH: "7" * 64,
+                    TASK_IMAGE_BUILDER_SCRIPT_PATH: "8" * 64,
                 },
-                "supervisor-unit-digests": target_units,
-                "supervisor-unit-set-digest": external_supervisor_unit_set_digest(target_units),
+                "supervisor-unit-digests": all_target_units,
+                "supervisor-unit-set-digest": external_supervisor_unit_set_digest(
+                    all_target_units
+                ),
                 "supervisor-controller-artifact-digests": {
                     "gx10-01c7": "5" * 64,
                     "TRT-EAI-OLDLAB-1": "8" * 64,
@@ -242,6 +252,36 @@ def test_derives_complete_bindings_only_from_exact_evidence() -> None:
     )
     assert controller_bindings["gx10-01c7/unit-directory"] == GB10_CANONICAL_UNIT_DIR
     assert controller_bindings["TRT-EAI-OLDLAB-1/unit-directory"] == PROTECTED_CANONICAL_UNIT_DIR
+    gb10_transition = external_supervisor_transition_digest(
+        unit_directory=GB10_CANONICAL_UNIT_DIR,
+        candidate_sha=bindings.candidate_sha,
+        candidate_tree=bindings.candidate_tree,
+        environment=bindings.environment,
+        predecessor_kind="legacy-manifest",
+        predecessor_digest="8" * 64,
+        predecessor_pointer_digest=EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
+        predecessor_unit_sha256={
+            "loom-autoscaler-gb10-staging.service": "a" * 64,
+            "loom-autoscaler-gb10-staging.timer": "b" * 64,
+        },
+        predecessor_unit_set_digest=controller_bindings["gx10-01c7/unit-set-digest"],
+        predecessor_live_evidence_digest="9" * 64,
+        predecessor_pending_transition_digest="0" * 64,
+        target_artifact_digest="5" * 64,
+        target_profile_sha256="6" * 64,
+        target_script_sha256={SCRIPT_PATH: "7" * 64},
+        target_unit_sha256={
+            "loom-autoscaler-gb10-staging.service": "c" * 64,
+            "loom-autoscaler-gb10-staging.timer": "d" * 64,
+        },
+        target_unit_set_digest=external_supervisor_unit_set_digest(
+            {
+                "loom-autoscaler-gb10-staging.service": "c" * 64,
+                "loom-autoscaler-gb10-staging.timer": "d" * 64,
+            }
+        ),
+    )
+    assert controller_bindings["gx10-01c7/transition-digest"] == gb10_transition
 
 
 def test_binding_derivation_rejects_incomplete_supervisor_controller_evidence() -> None:

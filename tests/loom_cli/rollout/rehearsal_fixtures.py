@@ -4,6 +4,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from loom_cli.rollout.external_supervisor_readiness import (
+    SCRIPT_PATH,
+    TASK_IMAGE_BUILDER_SCRIPT_PATH,
     ExternalSupervisorArtifact,
     build_external_supervisor_artifact,
 )
@@ -25,7 +27,8 @@ def active_external_supervisor_artifact(
     with tempfile.TemporaryDirectory(prefix="loom-test-supervisor-") as raw_dir:
         candidate = Path(raw_dir)
         profile = candidate / "deploy/environment-state/staging.toml"
-        script = candidate / "scripts/ops/worker_pool_autoscaler_external_once.py"
+        script = candidate / SCRIPT_PATH
+        task_image_builder_script = candidate / TASK_IMAGE_BUILDER_SCRIPT_PATH
         profile.parent.mkdir(parents=True)
         script.parent.mkdir(parents=True)
         profile_text = (REPO_ROOT / "deploy/environment-state/staging.toml").read_text(
@@ -34,11 +37,16 @@ def active_external_supervisor_artifact(
         profile_text = profile_text.replace("materialize = false", "materialize = true", 1)
         profile.write_text(profile_text, encoding="utf-8")
         shutil.copyfile(
-            REPO_ROOT / "scripts/ops/worker_pool_autoscaler_external_once.py",
+            REPO_ROOT / SCRIPT_PATH,
             script,
+        )
+        shutil.copyfile(
+            REPO_ROOT / TASK_IMAGE_BUILDER_SCRIPT_PATH,
+            task_image_builder_script,
         )
         profile.chmod(0o600)
         script.chmod(0o700)
+        task_image_builder_script.chmod(0o700)
         with patch(
             "loom_cli.environment_state.staging_gb10_external_activation_blockers",
             return_value=(),

@@ -22,6 +22,7 @@ from loom_cli.rollout.external_supervisor_predecessor import (
 from loom_cli.rollout.external_supervisor_readiness import (
     ExternalSupervisorArtifact,
     build_external_supervisor_artifact,
+    protected_external_supervisor_script_paths_for_units,
 )
 from loom_cli.rollout.preflight_contract import external_supervisor_transition_digest
 
@@ -38,7 +39,11 @@ from .protected_external_supervisor_transport import (
     classify_external_supervisor_live_state,
 )
 
-_IMPLEMENTATION_DIGEST = hashlib.sha256(b"loom-protected-external-supervisor-v1").hexdigest()
+_IMPLEMENTATION_DIGEST = hashlib.sha256(b"loom-protected-external-supervisor-v2").hexdigest()
+_COMPONENT_ID_BY_EXECUTION_HOST = {
+    "gx10-01c7": "external-supervisors-gb10",
+    "TRT-EAI-OLDLAB-1": "external-supervisors-oldlab",
+}
 
 EpochGuard = Callable[[FinalGatePlan], ComponentObservation]
 
@@ -67,10 +72,12 @@ class ProtectedExternalSupervisorComponent:
     def component(self, plan: FinalGatePlan) -> ProtectedApplyComponent:
         artifact = self._artifact(plan)
         controller = self._controller_binding(plan, artifact)
-        if len(artifact.supervisors) != 1:
-            raise ValueError("protected external supervisor component must own one pool")
+        try:
+            component_id = _COMPONENT_ID_BY_EXECUTION_HOST[controller.execution_host]
+        except KeyError as exc:
+            raise ValueError("protected external supervisor controller is unauthorized") from exc
         return ProtectedApplyComponent(
-            component_id=f"external-supervisors-{artifact.supervisors[0].pool_name}",
+            component_id=component_id,
             implementation_digest=_IMPLEMENTATION_DIGEST,
             input_fingerprint=_hash_json(
                 {
@@ -342,6 +349,12 @@ class ProtectedExternalSupervisorComponent:
             for key, digest in plan.supervisor_controller_unit_digests.items()
             if key.startswith(unit_prefix)
         }
+        expected_script_digests = {
+            path: plan.supervisor_script_digests[path]
+            for path in protected_external_supervisor_script_paths_for_units(
+                expected_dynamic_units
+            )
+        }
         calculated_set_digest = _hash_json({"failed": {}, "units": dict(plan.systemd_unit_digests)})
         if (
             artifact.candidate_sha != plan.candidate_sha
@@ -351,7 +364,7 @@ class ProtectedExternalSupervisorComponent:
             or artifact.artifact_digest
             != plan.supervisor_controller_artifact_digests.get(execution_host)
             or artifact.profile_sha256 != plan.supervisor_profile_sha256
-            or dict(artifact.script_sha256) != dict(plan.supervisor_script_digests)
+            or dict(artifact.script_sha256) != expected_script_digests
             or dict(artifact.unit_sha256) != expected_dynamic_units
             or calculated_set_digest != plan.systemd_unit_set_digest
         ):

@@ -21,7 +21,9 @@ from loom_cli.rollout.external_supervisor_predecessor import (
     EXTERNAL_SUPERVISOR_CONTROLLER_HOSTS,
     GB10_CANONICAL_UNIT_DIR,
 )
-from loom_cli.rollout.external_supervisor_readiness import SCRIPT_PATH
+from loom_cli.rollout.external_supervisor_readiness import (
+    protected_external_supervisor_script_paths_for_units,
+)
 from loom_cli.rollout.preflight_artifact_store import PreflightArtifactPublication
 from loom_cli.rollout.preflight_contract import (
     EXTERNAL_SUPERVISOR_ABSENT_DIGEST,
@@ -327,6 +329,12 @@ class FinalGatePlan:
             for name, digest in self.systemd_unit_digests.items()
             if name not in UNIT_PATHS
         }
+        try:
+            expected_script_paths = protected_external_supervisor_script_paths_for_units(
+                target_unit_sha256
+            )
+        except ValueError as exc:
+            raise ValueError("final gate systemd supervisor coverage is invalid") from exc
         if (
             not set(UNIT_PATHS).issubset(unit_names)
             or not dynamic_services
@@ -334,7 +342,7 @@ class FinalGatePlan:
             or {name.removesuffix(".service") for name in dynamic_services}
             != {name.removesuffix(".timer") for name in dynamic_timers}
             or any("/" in name or "\\" in name for name in dynamic_services | dynamic_timers)
-            or set(self.supervisor_script_digests) != {SCRIPT_PATH}
+            or set(self.supervisor_script_digests) != expected_script_paths
             or self.systemd_unit_set_digest
             != _hash_json({"failed": {}, "units": dict(self.systemd_unit_digests)})
         ):
@@ -411,6 +419,12 @@ class FinalGatePlan:
             raise ValueError("final gate supervisor controller coverage drifted")
         for host, binding in controller_bindings.items():
             host_units = controller_units[host]
+            controller_script_paths = protected_external_supervisor_script_paths_for_units(
+                host_units
+            )
+            controller_script_digests = {
+                path: self.supervisor_script_digests[path] for path in controller_script_paths
+            }
             if (
                 external_supervisor_unit_set_digest(host_units)
                 != self.supervisor_controller_unit_set_digests[host]
@@ -430,7 +444,7 @@ class FinalGatePlan:
                     ),
                     target_artifact_digest=self.supervisor_controller_artifact_digests[host],
                     target_profile_sha256=self.supervisor_profile_sha256,
-                    target_script_sha256=self.supervisor_script_digests,
+                    target_script_sha256=controller_script_digests,
                     target_unit_sha256=host_units,
                     target_unit_set_digest=self.supervisor_controller_unit_set_digests[host],
                 )

@@ -96,6 +96,8 @@ def test_enabled_policy_maps_to_exclusive_runtime_config(
         "cpu_arch": "arm64",
         "allowed_nodes": ["trt-gb10-1"],
         "env_file": str(env_file),
+        "env_template_file": str(tmp_path / "trial-worker.env"),
+        "builder_token_file": str(tmp_path / "builder-token"),
         "repo_dir": str(repo_dir),
         "registry_docker_config_dir": str(registry_docker_config_dir),
         "partition": "gb10",
@@ -130,6 +132,8 @@ def test_enabled_policy_maps_to_exclusive_runtime_config(
     assert config.exclusive is True
     assert config.requested_concurrency == 1
     assert config.env_file == str(env_file)
+    assert config.env_template_file == str(tmp_path / "trial-worker.env")
+    assert config.builder_token_file == str(tmp_path / "builder-token")
     assert config.repo_dir == str(repo_dir)
     assert config.registry_docker_config_dir == str(registry_docker_config_dir)
 
@@ -333,6 +337,9 @@ async def test_scale_up_reconcile_validates_credentials_inside_transaction(
     def validate_runtime(_config: object) -> None:
         events.append("runtime")
 
+    def materialize(_config: object) -> None:
+        events.append("materialize")
+
     async def reconcile(*_args: Any, **_kwargs: Any) -> str:
         events.append("reconcile")
         return "result"
@@ -344,6 +351,7 @@ async def test_scale_up_reconcile_validates_credentials_inside_transaction(
         validate_runtime,
         raising=False,
     )
+    monkeypatch.setattr(module, "_materialize_builder_env", materialize)
     monkeypatch.setattr(
         module,
         "reconcile_task_image_builder_autoscaler_once",
@@ -361,4 +369,89 @@ async def test_scale_up_reconcile_validates_credentials_inside_transaction(
     )
 
     assert result == "result"
-    assert events == ["begin", "runtime", "validate", "reconcile", "commit"]
+    assert events == [
+        "begin",
+        "materialize",
+        "runtime",
+        "validate",
+        "reconcile",
+        "commit",
+    ]
+
+
+def test_builder_env_is_atomically_derived_from_candidate_trial_env(
+    module: Any,
+    tmp_path: Path,
+) -> None:
+    template = tmp_path / "staging-gb10-worker.env"
+    template.write_text(
+        "LOOM_WORKER_CONTROL_PLANE_URL=http://control.example\n"
+        "LOOM_WORKER_TOKEN=ordinary-worker-token\n"
+        "LOOM_WORKER_POOL_NAME=gb10\n"
+        "LOOM_WORKER_MAX_CONCURRENT=10\n"
+        "LOOM_WORKER_MINIO_ACCESS_KEY=access\n"
+        "LOOM_WORKER_MINIO_SECRET_KEY=secret\n"
+        "LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO=registry.example/loom\n",
+        encoding="utf-8",
+    )
+    template.chmod(0o600)
+    token_file = tmp_path / "task-image-builder-token"
+    token_file.write_text("dedicated-builder-token\n", encoding="ascii")
+    token_file.chmod(0o600)
+    target = tmp_path / "staging-task-image-builder-gb10.env"
+
+    record = module._materialize_builder_env(
+        SimpleNamespace(
+            env_file=str(target),
+            env_template_file=str(template),
+            builder_token_file=str(token_file),
+            pool_name="task-image-builder-gb10",
+            requested_concurrency=1,
+        )
+    )
+
+    rendered = target.read_text(encoding="utf-8")
+    assert "LOOM_WORKER_TOKEN=dedicated-builder-token\n" in rendered
+    assert "LOOM_WORKER_POOL_NAME=task-image-builder-gb10\n" in rendered
+    assert "LOOM_WORKER_MAX_CONCURRENT=1\n" in rendered
+    assert "ordinary-worker-token" not in rendered
+    assert template.read_text(encoding="utf-8").startswith(
+        "LOOM_WORKER_CONTROL_PLANE_URL=http://control.example\n"
+    )
+    assert target.stat().st_mode & 0o777 == 0o600
+    assert record["env_sha256"] == module.hashlib.sha256(target.read_bytes()).hexdigest()
+
+
+def test_builder_env_refuses_hardlinked_token_without_replacing_target(
+    module: Any,
+    tmp_path: Path,
+) -> None:
+    template = tmp_path / "trial-worker.env"
+    template.write_text(
+        "LOOM_WORKER_TOKEN=ordinary\n"
+        "LOOM_WORKER_POOL_NAME=oldlab\n"
+        "LOOM_WORKER_MAX_CONCURRENT=6\n",
+        encoding="utf-8",
+    )
+    template.chmod(0o600)
+    token_source = tmp_path / "token-source"
+    token_source.write_text("dedicated\n", encoding="ascii")
+    token_source.chmod(0o600)
+    token_file = tmp_path / "builder-token"
+    token_file.hardlink_to(token_source)
+    target = tmp_path / "builder.env"
+    target.write_text("preserve-me\n", encoding="utf-8")
+    target.chmod(0o600)
+
+    with pytest.raises(module.TaskImageBuilderPolicyError, match="metadata is unsafe"):
+        module._materialize_builder_env(
+            SimpleNamespace(
+                env_file=str(target),
+                env_template_file=str(template),
+                builder_token_file=str(token_file),
+                pool_name="task-image-builder-oldlab",
+                requested_concurrency=1,
+            )
+        )
+
+    assert target.read_text(encoding="utf-8") == "preserve-me\n"

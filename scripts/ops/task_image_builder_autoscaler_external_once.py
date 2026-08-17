@@ -8,6 +8,8 @@ import asyncio
 import hashlib
 import json
 import os
+import secrets
+import stat
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -133,6 +135,8 @@ def _load_enabled_builder_config(args: argparse.Namespace) -> TaskImageBuilderPo
             cpu_arch=str(policy["cpu_arch"]),  # type: ignore[arg-type]
             allowed_nodes=tuple(str(node) for node in policy["allowed_nodes"]),
             env_file=str(policy["env_file"]),
+            env_template_file=str(policy["env_template_file"]),
+            builder_token_file=str(policy["builder_token_file"]),
             repo_dir=str(policy["repo_dir"]),
             registry_docker_config_dir=str(policy["registry_docker_config_dir"]),
             partition=str(policy["partition"]),
@@ -159,6 +163,157 @@ def _load_enabled_builder_config(args: argparse.Namespace) -> TaskImageBuilderPo
             "task-image builder runtime configuration is invalid",
         ) from exc
     return config
+
+
+def _read_private_builder_input(path: Path, *, label: str, max_bytes: int) -> bytes:
+    try:
+        metadata = path.lstat()
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) & 0o077
+            or metadata.st_size <= 0
+            or metadata.st_size > max_bytes
+        ):
+            raise TaskImageBuilderPolicyError(
+                f"task-image builder {label} metadata is unsafe"
+            )
+        with path.open("rb") as handle:
+            payload = handle.read(max_bytes + 1)
+            opened = os.fstat(handle.fileno())
+        if (
+            len(payload) > max_bytes
+            or (opened.st_dev, opened.st_ino, opened.st_size)
+            != (metadata.st_dev, metadata.st_ino, metadata.st_size)
+        ):
+            raise TaskImageBuilderPolicyError(
+                f"task-image builder {label} changed while being read"
+            )
+        return payload
+    except TaskImageBuilderPolicyError:
+        raise
+    except OSError as exc:
+        raise TaskImageBuilderPolicyError(
+            f"task-image builder {label} is unavailable"
+        ) from exc
+
+
+def _replace_env_values(existing: str, updates: dict[str, str]) -> str:
+    output: list[str] = []
+    seen: set[str] = set()
+    for line in existing.splitlines():
+        if "=" not in line or line.lstrip().startswith("#"):
+            output.append(line)
+            continue
+        key = line.split("=", 1)[0].strip()
+        if key in updates:
+            if key not in seen:
+                output.append(f"{key}={updates[key]}")
+                seen.add(key)
+            continue
+        output.append(line)
+    for key, value in updates.items():
+        if key not in seen:
+            output.append(f"{key}={value}")
+    return "\n".join(output).rstrip() + "\n"
+
+
+def _materialize_builder_env(config: Any) -> dict[str, str]:
+    """Derive a candidate builder env from the protected trial-worker env.
+
+    The only secret substitution is the stable, least-privilege builder token;
+    endpoint and object-store settings stay release-owned by the ordinary
+    candidate env materialization path.
+    """
+    template_path = Path(config.env_template_file)
+    token_path = Path(config.builder_token_file)
+    target = Path(config.env_file)
+    template_payload = _read_private_builder_input(
+        template_path,
+        label="env template",
+        max_bytes=1 << 20,
+    )
+    token_payload = _read_private_builder_input(
+        token_path,
+        label="token file",
+        max_bytes=64 * 1024,
+    )
+    try:
+        template_text = template_payload.decode("utf-8")
+        builder_token = token_payload.strip().decode("ascii")
+    except UnicodeError as exc:
+        raise TaskImageBuilderPolicyError(
+            "task-image builder lifecycle input encoding is invalid"
+        ) from exc
+    if not builder_token or any(character.isspace() for character in builder_token):
+        raise TaskImageBuilderPolicyError("task-image builder token file is invalid")
+    try:
+        parent_metadata = target.parent.lstat()
+    except OSError as exc:
+        raise TaskImageBuilderPolicyError(
+            "task-image builder env destination is unavailable"
+        ) from exc
+    if (
+        not stat.S_ISDIR(parent_metadata.st_mode)
+        or stat.S_ISLNK(parent_metadata.st_mode)
+        or parent_metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(parent_metadata.st_mode) & 0o022
+    ):
+        raise TaskImageBuilderPolicyError(
+            "task-image builder env destination metadata is unsafe"
+        )
+    if target.exists() or target.is_symlink():
+        _read_private_builder_input(target, label="env destination", max_bytes=1 << 20)
+    rendered = _replace_env_values(
+        template_text,
+        {
+            DEFAULT_WORKER_TOKEN_ENV_KEY: builder_token,
+            "LOOM_WORKER_POOL_NAME": str(config.pool_name),
+            "LOOM_WORKER_MAX_CONCURRENT": str(config.requested_concurrency),
+        },
+    ).encode("utf-8")
+    temporary = target.parent / f".{target.name}.{secrets.token_hex(12)}.tmp"
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = -1
+            handle.write(rendered)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+        directory_descriptor = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    except OSError as exc:
+        raise TaskImageBuilderPolicyError(
+            "task-image builder env could not be materialized safely"
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+    target_payload = _read_private_builder_input(
+        target,
+        label="env destination",
+        max_bytes=1 << 20,
+    )
+    if target_payload != rendered:
+        raise TaskImageBuilderPolicyError(
+            "task-image builder env changed after materialization"
+        )
+    return {"env_sha256": hashlib.sha256(rendered).hexdigest()}
 
 
 def _validate_builder_runtime_files(config: TaskImageBuilderPoolConfig) -> None:
@@ -272,6 +427,7 @@ async def _reconcile_with_credentials(
 ) -> Any | None:
     async with session.begin():
         if scale_up_allowed:
+            _materialize_builder_env(config)
             _validate_builder_runtime_files(config)
             await _validate_builder_credentials(
                 session,

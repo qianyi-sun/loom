@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Loom staging registry offline blob garbage collection weekly
+
+[Timer]
+OnCalendar=Sun *-*-* 03:37:00 America/Toronto
+RandomizedDelaySec=30min
+Persistent=true
+Unit=loom-staging-trial-cache-storage-gc.service
+
+[Install]
+WantedBy=timers.target

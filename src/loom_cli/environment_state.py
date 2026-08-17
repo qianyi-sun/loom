@@ -496,6 +496,8 @@ def _normalize_task_image_builder_policy(
         "cpu_arch",
         "allowed_nodes",
         "env_file",
+        "env_template_file",
+        "builder_token_file",
         "repo_dir",
         "registry_docker_config_dir",
         "partition",
@@ -554,6 +556,8 @@ def _normalize_task_image_builder_policy(
         )
     for name in (
         "env_file",
+        "env_template_file",
+        "builder_token_file",
         "repo_dir",
         "registry_docker_config_dir",
         "partition",

@@ -15,7 +15,10 @@ import pytest
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
 from loom_cli.rollout.browser_runtime_readiness import browser_report_schema_digest
 from loom_cli.rollout.credential_authority import read_trusted_file, safe_content_fingerprint
-from loom_cli.rollout.external_supervisor_readiness import SCRIPT_PATH
+from loom_cli.rollout.external_supervisor_readiness import (
+    SCRIPT_PATH,
+    TASK_IMAGE_BUILDER_SCRIPT_PATH,
+)
 from loom_cli.rollout.final_gate_readiness import (
     FINAL_CHECK_IDS,
     PROTECTED_MUTATION_CHECK_IDS,
@@ -112,6 +115,7 @@ def _secure_static_candidate(tmp_path: Path) -> Path:
     sources = {
         "deploy/environment-state/staging.toml": 0o644,
         "scripts/ops/worker_pool_autoscaler_external_once.py": 0o755,
+        "scripts/ops/task_image_builder_autoscaler_external_once.py": 0o755,
         "deploy/worker-pools/gb10/loom-gb10-node-agent.service": 0o644,
         "deploy/worker-pools/gb10/loom-gb10-node-agent.timer": 0o644,
         "deploy/worker-pools/gb10/loom-gb10-worker.service": 0o644,
@@ -1888,6 +1892,8 @@ def test_registered_systemd_render_uses_exact_static_unit_verifier(tmp_path: Pat
         "loom-autoscaler-gb10-staging.timer",
         "loom-autoscaler-oldlab-staging.service",
         "loom-autoscaler-oldlab-staging.timer",
+        "loom-task-image-builder-oldlab-staging.service",
+        "loom-task-image-builder-oldlab-staging.timer",
     }
     assert set(result.evidence["supervisor-controller-artifact-digests"]) == {
         "gx10-01c7",
@@ -1902,9 +1908,14 @@ def test_registered_systemd_render_uses_exact_static_unit_verifier(tmp_path: Pat
         "gx10-01c7/loom-autoscaler-gb10-staging.timer",
         "TRT-EAI-OLDLAB-1/loom-autoscaler-oldlab-staging.service",
         "TRT-EAI-OLDLAB-1/loom-autoscaler-oldlab-staging.timer",
+        "TRT-EAI-OLDLAB-1/loom-task-image-builder-oldlab-staging.service",
+        "TRT-EAI-OLDLAB-1/loom-task-image-builder-oldlab-staging.timer",
     }
-    assert result.evidence["unit-count"] == 7
-    assert set(result.evidence["supervisor-script-digests"]) == {SCRIPT_PATH}
+    assert result.evidence["unit-count"] == 9
+    assert set(result.evidence["supervisor-script-digests"]) == {
+        SCRIPT_PATH,
+        TASK_IMAGE_BUILDER_SCRIPT_PATH,
+    }
 
 
 @pytest.mark.parametrize(

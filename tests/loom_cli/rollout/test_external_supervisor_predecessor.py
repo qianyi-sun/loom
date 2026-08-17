@@ -163,6 +163,15 @@ def test_unit_set_digest_rejects_empty_unpaired_or_untyped_input() -> None:
         )
 
 
+def test_unit_set_digest_accepts_paired_task_image_builder_units() -> None:
+    assert external_supervisor_unit_set_digest(
+        {
+            "loom-task-image-builder-oldlab-staging.service": "a" * 64,
+            "loom-task-image-builder-oldlab-staging.timer": "b" * 64,
+        }
+    ) == "8246f5b894b7f61bc6522dfc0da16bb901492146d7fba6de90d39619c4f9e53e"
+
+
 def test_pool_identity_binds_legacy_only_through_schema_0066() -> None:
     _pool_identity("0065", legacy_count=1, target_count=0).require_predecessor_kind(
         "legacy-manifest"
