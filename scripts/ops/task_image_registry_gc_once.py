@@ -190,11 +190,27 @@ def run_gc_once(
         materialization_id = str(UUID(str(payload["id"])))
         lease_epoch = payload["lease_epoch"]
         images = payload["registry_images"]
+        history = payload["registry_image_history"]
     except (KeyError, TypeError, ValueError) as exc:
         raise RegistryGcError("registry GC claim shape is invalid") from exc
-    if type(lease_epoch) is not int or lease_epoch <= 0 or not isinstance(images, dict) or not images:
+    if (
+        type(lease_epoch) is not int
+        or lease_epoch <= 0
+        or not isinstance(images, dict)
+        or not isinstance(history, list)
+    ):
         raise RegistryGcError("registry GC claim shape is invalid")
-    delete_urls = sorted({_manifest_delete_url(config, image) for image in images.values()})
+    history_images: list[object] = []
+    for entry in history:
+        if not isinstance(entry, dict) or "registry_image" not in entry:
+            raise RegistryGcError("registry GC claim history shape is invalid")
+        history_images.append(entry["registry_image"])
+    image_references = [*images.values(), *history_images]
+    if not image_references:
+        raise RegistryGcError("registry GC claim contains no image references")
+    delete_urls = sorted(
+        {_manifest_delete_url(config, image) for image in image_references}
+    )
     registry_headers = {
         "Accept": "application/vnd.docker.distribution.manifest.v2+json",
         "Authorization": config.registry_authorization,
@@ -226,6 +242,34 @@ def run_gc_once(
         raise RegistryGcError(f"registry GC completion failed with HTTP {completed.status}")
     _parse_json_response(completed, label="registry GC completion")
     return {"claimed": True, "deleted_manifests": len(delete_urls)}
+
+
+def run_gc_pass(
+    config: GcConfig,
+    *,
+    transport: Transport,
+    gc_id: str,
+    max_claims: int,
+) -> dict[str, int | bool]:
+    if type(max_claims) is not int or not 1 <= max_claims <= 1000:
+        raise ValueError("registry GC max claims is invalid")
+    claims = 0
+    deleted_manifests = 0
+    while claims < max_claims:
+        result = run_gc_once(config, transport=transport, gc_id=gc_id)
+        deleted_manifests += int(result["deleted_manifests"])
+        if result["claimed"] is False:
+            return {
+                "claims": claims,
+                "deleted_manifests": deleted_manifests,
+                "drained": True,
+            }
+        claims += 1
+    return {
+        "claims": claims,
+        "deleted_manifests": deleted_manifests,
+        "drained": False,
+    }
 
 
 def _read_private_file(path: Path, *, label: str, max_bytes: int) -> bytes:
@@ -293,6 +337,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--registry-docker-config-dir", type=Path, required=True)
     parser.add_argument("--ca-file", type=Path, required=True)
     parser.add_argument("--timeout-seconds", type=float, default=20.0)
+    parser.add_argument("--max-claims", type=int, default=100)
     return parser
 
 
@@ -317,10 +362,11 @@ def main() -> None:
             ca_file=args.ca_file,
         )
         gc_id = f"{socket.gethostname()}:{os.getpid()}:{uuid4().hex}"
-        result = run_gc_once(
+        result = run_gc_pass(
             config,
             transport=UrllibTransport(timeout_seconds=args.timeout_seconds),
             gc_id=gc_id,
+            max_claims=args.max_claims,
         )
     except (OSError, UnicodeError, ValueError, RegistryGcError) as exc:
         sys.stderr.write(f"error: {exc}\n")

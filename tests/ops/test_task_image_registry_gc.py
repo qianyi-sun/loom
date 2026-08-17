@@ -75,10 +75,26 @@ def test_gc_deletes_every_claimed_manifest_before_completing(
             "task": f"192.168.50.103:5443/loom-trial-cache@{digest_a}",
             "sidecar:db": f"192.168.50.103:5443/loom-trial-cache@{digest_b}",
         },
+        "registry_image_history": [
+            {
+                "component": "task",
+                "registry_image": f"192.168.50.103:5443/loom-trial-cache@{digest_a}",
+            },
+            {
+                "component": "task",
+                "registry_image": "192.168.50.103:5443/loom-trial-cache@sha256:" + "c" * 64,
+            },
+        ],
     }
     transport = _Transport(
         module,
-        [(200, claim), (202, b""), (404, b""), (200, {"state": "retired"})],
+        [
+            (200, claim),
+            (202, b""),
+            (404, b""),
+            (202, b""),
+            (200, {"state": "retired"}),
+        ],
     )
 
     result = module.run_gc_once(
@@ -87,7 +103,7 @@ def test_gc_deletes_every_claimed_manifest_before_completing(
         gc_id="registry-gc-test",
     )
 
-    assert result == {"claimed": True, "deleted_manifests": 2}
+    assert result == {"claimed": True, "deleted_manifests": 3}
     assert [request[:2] for request in transport.requests] == [
         (
             "POST",
@@ -103,6 +119,10 @@ def test_gc_deletes_every_claimed_manifest_before_completing(
             "https://192.168.50.103:5443/v2/loom-trial-cache/manifests/" + digest_b,
         ),
         (
+            "DELETE",
+            "https://192.168.50.103:5443/v2/loom-trial-cache/manifests/sha256:" + "c" * 64,
+        ),
+        (
             "POST",
             "http://127.0.0.1:18081/api/v1/internal/task-image-materializations/"
             "registry-gc/e1852682-a565-42a8-983f-80dc210dad5a/complete",
@@ -111,6 +131,42 @@ def test_gc_deletes_every_claimed_manifest_before_completing(
     assert transport.requests[0][2]["Authorization"] == "Bearer gc-control-plane-token"
     assert transport.requests[1][2]["Authorization"] == "Basic Z2M6c2VjcmV0"
     assert transport.requests[-1][2]["Authorization"] == "Bearer gc-control-plane-token"
+
+
+def test_gc_pass_repeats_claims_until_control_plane_is_empty(
+    module: Any,
+    tmp_path: Path,
+) -> None:
+    claim = {
+        "id": "e1852682-a565-42a8-983f-80dc210dad5a",
+        "lease_epoch": 1,
+        "registry_images": {},
+        "registry_image_history": [
+            {
+                "registry_image": "192.168.50.103:5443/loom-trial-cache@sha256:"
+                + "e" * 64,
+            }
+        ],
+    }
+    transport = _Transport(
+        module,
+        [(200, claim), (202, b""), (200, {"state": "retired"}), (204, b"")],
+    )
+
+    result = module.run_gc_pass(
+        _config(module, tmp_path),
+        transport=transport,
+        gc_id="registry-gc-pass",
+        max_claims=10,
+    )
+
+    assert result == {"claims": 1, "deleted_manifests": 1, "drained": True}
+    assert [request[0] for request in transport.requests] == [
+        "POST",
+        "DELETE",
+        "POST",
+        "POST",
+    ]
 
 
 def test_gc_no_claim_is_a_successful_noop(module: Any, tmp_path: Path) -> None:
@@ -136,6 +192,7 @@ def test_gc_rejects_foreign_registry_reference_before_delete_or_complete(
         "registry_images": {
             "task": "foreign.example/loom-trial-cache@sha256:" + "c" * 64,
         },
+        "registry_image_history": [],
     }
     transport = _Transport(module, [(200, claim)])
 
@@ -159,6 +216,7 @@ def test_gc_does_not_complete_when_registry_delete_fails(
         "registry_images": {
             "task": "192.168.50.103:5443/loom-trial-cache@sha256:" + "d" * 64,
         },
+        "registry_image_history": [],
     }
     transport = _Transport(module, [(200, claim), (503, {"errors": []})])
 
