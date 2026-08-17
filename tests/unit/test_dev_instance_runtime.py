@@ -286,10 +286,9 @@ async def test_candidate_generation_prepares_exact_images_without_switching_rout
         kubectl=KubectlClient("kubectl", runner=runner),
     )
 
-    observation = await provisioner.prepare(
-        derive_identity("alice"),
-        _personal_manifest_config(),
-    )
+    identity = derive_identity("alice")
+    await provisioner.bootstrap(identity, _personal_manifest_config())
+    observation = await provisioner.prepare(identity, _personal_manifest_config())
 
     applied = "\n".join(stdin or "" for _argv, stdin in runner.calls)
     assert "kind: Ingress" not in applied
@@ -307,7 +306,9 @@ async def test_candidate_generation_binds_manager_before_waiting_for_migration()
         kubectl=KubectlClient("kubectl", runner=runner),
     )
 
-    await provisioner.prepare(derive_identity("alice"), _personal_manifest_config())
+    identity = derive_identity("alice")
+    await provisioner.bootstrap(identity, _personal_manifest_config())
+    await provisioner.prepare(identity, _personal_manifest_config())
 
     events: list[str] = []
     for argv, stdin in runner.calls:
@@ -320,7 +321,7 @@ async def test_candidate_generation_binds_manager_before_waiting_for_migration()
                     events.append("migration-apply")
         elif "wait" in argv:
             events.append("migration-wait")
-    assert events[:3] == [
+    assert events == [
         "management-binding",
         "migration-apply",
         "migration-wait",

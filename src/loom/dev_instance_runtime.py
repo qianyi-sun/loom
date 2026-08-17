@@ -1009,7 +1009,6 @@ class KubectlCandidateGenerationProvisioner:
             )
         )
         runtime = documents[migration_index + 1 :]
-        await self.bootstrap(identity, config)
         await self.kubectl.apply(
             yaml.safe_dump_all(bootstrap, sort_keys=False, explicit_start=True),
         )
