@@ -72,6 +72,8 @@ export interface AgentModelPickerProps {
   specificAgentToggle?: boolean;
   /** Internal default runner used when `specificAgentToggle` is false. */
   defaultAgentName?: string;
+  /** Team whose owned/shared provider connections are valid for submission. */
+  teamId?: string | null;
 }
 
 interface AgentEntry extends AgentReadinessLike {
@@ -142,6 +144,7 @@ export function AgentModelPicker({
   disabled,
   specificAgentToggle = false,
   defaultAgentName = "direct-completion",
+  teamId,
 }: AgentModelPickerProps): JSX.Element {
   const [showRaw, setShowRaw] = useState(false);
   const [modelSearch, setModelSearch] = useState("");
@@ -156,8 +159,9 @@ export function AgentModelPicker({
     staleTime: 5 * 60 * 1000,
   });
   const providerConnections = useQuery({
-    queryKey: ["provider-connections"],
-    queryFn: () => api.listProviderConnections(),
+    queryKey: ["provider-connections", teamId],
+    queryFn: () => api.listProviderConnections(teamId ?? undefined),
+    enabled: teamId !== null,
     staleTime: 5 * 60 * 1000,
   });
   const localServers = useQuery({
@@ -391,6 +395,22 @@ export function AgentModelPicker({
       };
     }
   }, [customMode, value.modelProvider, value.modelName]);
+  const previousTeamIdRef = useRef(teamId);
+  useEffect(() => {
+    const previousTeamId = previousTeamIdRef.current;
+    previousTeamIdRef.current = teamId;
+    if (previousTeamId === teamId || !value.providerConnectionId) return;
+    setCustomMode(false);
+    customCacheRef.current = { provider: "", name: "" };
+    onChange({
+      ...value,
+      modelProvider: "",
+      modelName: "",
+      providerConnectionId: undefined,
+      providerConnectionName: undefined,
+      manualModel: false,
+    });
+  }, [onChange, teamId, value]);
   useEffect(() => {
     if (
       needsModel &&

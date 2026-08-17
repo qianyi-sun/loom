@@ -471,6 +471,21 @@ describe("provider connection management endpoints", () => {
 
   afterEach(() => vi.restoreAllMocks());
 
+  it("listProviderConnections scopes the request to the selected team", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response(JSON.stringify({ items: [] }), { status: 200 }),
+    );
+    const { api } = await import("../api/client");
+
+    const result = await api.listProviderConnections("team-a");
+
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      "/api/v1/provider-connections?team_id=team-a",
+      expect.objectContaining({}),
+    );
+    expect(result).toEqual({ items: [] });
+  });
+
   it("getProviderConnection GETs /api/v1/provider-connections/:id", async () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(JSON.stringify({ id: "abc", name: "x" }), { status: 200 }),

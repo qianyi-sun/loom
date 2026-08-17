@@ -1393,9 +1393,9 @@ export const api = {
     apiFetch<{ items: ModelEntry[] }>(
       `/api/v1/models${qs({ view })}`,
     ),
-  listProviderConnections: () =>
+  listProviderConnections: (teamId?: string) =>
     apiFetch<{ items: ProviderConnectionEntry[] }>(
-      "/api/v1/provider-connections",
+      `/api/v1/provider-connections${qs({ team_id: teamId })}`,
     ),
   getProviderConnection: (id: string) =>
     apiFetch<ProviderConnectionDetail>(`/api/v1/provider-connections/${id}`),
