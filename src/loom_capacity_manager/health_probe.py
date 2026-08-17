@@ -20,10 +20,36 @@ _MAX_SERVER_CERTIFICATE_BYTES = 64 * 1024
 _HEALTH_FIELDS = {"status", "executable_new_capacity_ceiling"}
 _MANAGER_SERVICE_DNS = "loom-capacity-manager.loom-dev.svc.cluster.local"
 _LOOPBACK_IP = ipaddress.ip_address("127.0.0.1")
+_DEFAULT_CREDENTIALS = "/var/run/loom-capacity-manager/runtime/credentials"
 
 
 class CapacityHealthProbeError(RuntimeError):
     """The manager did not prove ready at the zero-execution boundary."""
+
+
+def capacity_health_probe_argv(
+    credentials_directory: str = _DEFAULT_CREDENTIALS,
+    *,
+    observe: bool = False,
+) -> tuple[str, ...]:
+    """Return the fixed in-container zero-ceiling health-probe command."""
+
+    command = (
+        "python",
+        "-m",
+        "loom_capacity_manager.health_probe",
+        "--url",
+        "https://127.0.0.1:8443/healthz",
+        "--ca-file",
+        f"{credentials_directory}/server-ca.pem",
+        "--certificate-file",
+        f"{credentials_directory}/health-certificate.pem",
+        "--private-key-file",
+        f"{credentials_directory}/health-private-key.pem",
+        "--server-certificate-file",
+        f"{credentials_directory}/server-certificate.pem",
+    )
+    return (*command, "--observe") if observe else command
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -35,13 +61,13 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return value
 
 
-def parse_capacity_health_response(
+def parse_observed_capacity_health_response(
     status_code: int,
     payload: bytes,
 ) -> dict[str, object]:
-    """Validate one bounded response without Python's bool/int coercion."""
+    """Parse one bounded exact health observation without requiring zero."""
 
-    if status_code != 200 or not 0 < len(payload) <= _MAX_HEALTH_BYTES:
+    if status_code not in {200, 503} or not 0 < len(payload) <= _MAX_HEALTH_BYTES:
         raise CapacityHealthProbeError("capacity manager is not ready")
     try:
         document = json.loads(payload, object_pairs_hook=_unique_object)
@@ -50,10 +76,22 @@ def parse_capacity_health_response(
     if (
         not isinstance(document, dict)
         or set(document) != _HEALTH_FIELDS
-        or document["status"] != "ready"
+        or document["status"] != ("ready" if status_code == 200 else "not-ready")
         or type(document["executable_new_capacity_ceiling"]) is not int
-        or document["executable_new_capacity_ceiling"] != 0
+        or document["executable_new_capacity_ceiling"] < 0
     ):
+        raise CapacityHealthProbeError("capacity manager health observation is invalid")
+    return document
+
+
+def parse_capacity_health_response(
+    status_code: int,
+    payload: bytes,
+) -> dict[str, object]:
+    """Validate one bounded response without Python's bool/int coercion."""
+
+    document = parse_observed_capacity_health_response(status_code, payload)
+    if document["status"] != "ready" or document["executable_new_capacity_ceiling"] != 0:
         raise CapacityHealthProbeError(
             "capacity manager did not prove the zero-execution readiness boundary"
         )
@@ -86,14 +124,12 @@ def _validate_server_certificate_identities(path: Path) -> None:
                     break
                 payload.extend(chunk)
             closed = os.fstat(descriptor)
-            if (
-                (closed.st_dev, closed.st_ino, closed.st_size)
-                != (opened.st_dev, opened.st_ino, opened.st_size)
-                or len(payload) != opened.st_size
-            ):
-                raise ValueError(
-                    "capacity manager server certificate changed while reading"
-                )
+            if (closed.st_dev, closed.st_ino, closed.st_size) != (
+                opened.st_dev,
+                opened.st_ino,
+                opened.st_size,
+            ) or len(payload) != opened.st_size:
+                raise ValueError("capacity manager server certificate changed while reading")
         finally:
             os.close(descriptor)
         certificate = x509.load_pem_x509_certificate(bytes(payload))
@@ -107,9 +143,7 @@ def _validate_server_certificate_identities(path: Path) -> None:
     dns_names = set(identities.get_values_for_type(x509.DNSName))
     ip_addresses = set(identities.get_values_for_type(x509.IPAddress))
     if _MANAGER_SERVICE_DNS not in dns_names or _LOOPBACK_IP not in ip_addresses:
-        raise CapacityHealthProbeError(
-            "capacity manager server certificate identities are invalid"
-        )
+        raise CapacityHealthProbeError("capacity manager server certificate identities are invalid")
 
 
 def probe_capacity_manager(
@@ -120,6 +154,7 @@ def probe_capacity_manager(
     private_key_file: Path,
     server_certificate_file: Path,
     timeout_seconds: float = 3.0,
+    observe: bool = False,
 ) -> dict[str, object]:
     """Perform one bounded, server-verified, client-authenticated health request."""
 
@@ -138,6 +173,7 @@ def probe_capacity_manager(
         isinstance(timeout_seconds, bool)
         or not isinstance(timeout_seconds, (int, float))
         or not 0 < timeout_seconds <= 30
+        or type(observe) is not bool
     ):
         raise CapacityHealthProbeError("capacity health timeout is invalid")
     _validate_server_certificate_identities(server_certificate_file)
@@ -165,7 +201,8 @@ def probe_capacity_manager(
         raise
     except (OSError, ValueError, ssl.SSLError, httpx.HTTPError) as exc:
         raise CapacityHealthProbeError("capacity health transport failed") from exc
-    return parse_capacity_health_response(status_code, bytes(payload))
+    parser = parse_observed_capacity_health_response if observe else parse_capacity_health_response
+    return parser(status_code, bytes(payload))
 
 
 def main() -> None:
@@ -176,6 +213,11 @@ def main() -> None:
     parser.add_argument("--private-key-file", type=Path, required=True)
     parser.add_argument("--server-certificate-file", type=Path, required=True)
     parser.add_argument("--timeout-seconds", type=float, default=3.0)
+    parser.add_argument(
+        "--observe",
+        action="store_true",
+        help="Emit an exact read-only health observation without requiring ceiling zero.",
+    )
     arguments = parser.parse_args()
     try:
         document = probe_capacity_manager(
@@ -185,6 +227,7 @@ def main() -> None:
             private_key_file=arguments.private_key_file,
             server_certificate_file=arguments.server_certificate_file,
             timeout_seconds=arguments.timeout_seconds,
+            observe=arguments.observe,
         )
     except CapacityHealthProbeError as exc:
         sys.stderr.write(f"error: {exc}\n")
@@ -198,7 +241,9 @@ if __name__ == "__main__":  # pragma: no cover - module entry point
 
 __all__ = [
     "CapacityHealthProbeError",
+    "capacity_health_probe_argv",
     "main",
     "parse_capacity_health_response",
+    "parse_observed_capacity_health_response",
     "probe_capacity_manager",
 ]

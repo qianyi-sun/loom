@@ -4,6 +4,7 @@ import hashlib
 import importlib
 import io
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,10 @@ from loom.personal_dev_control_plane_config import (
 )
 from loom.personal_dev_control_plane_render import (
     render_shadow_personal_dev_control_plane,
+)
+from loom.personal_dev_control_plane_status import (
+    PersonalDevShadowComponent,
+    PersonalDevShadowStatus,
 )
 from loom_cli.__main__ import main
 from loom_cli.admin_cmd import dispatch
@@ -61,6 +66,29 @@ def _argv(release: Path, digest: str, *, profile: Path = _PROFILE) -> list[str]:
     return [
         "personal-dev-control-plane",
         "render",
+        "--file",
+        str(profile),
+        "--trusted-release-file",
+        str(release),
+        "--trusted-release-sha256",
+        digest,
+    ]
+
+
+def _status_argv(
+    release: Path,
+    digest: str,
+    kubeconfig: Path,
+    *,
+    profile: Path = _PROFILE,
+) -> list[str]:
+    return [
+        "personal-dev-control-plane",
+        "status",
+        "--namespace",
+        "loom-dev",
+        "--kubeconfig",
+        str(kubeconfig),
         "--file",
         str(profile),
         "--trusted-release-file",
@@ -269,3 +297,223 @@ def test_personal_control_plane_registration_does_not_extend_service_or_dev(
     assert stopped.value.code == 0
     assert expected in captured.out
     assert "personal-dev-control-plane" not in captured.out
+
+
+@pytest.mark.parametrize("ready", [True, False])
+def test_status_emits_one_canonical_record_and_readiness_exit_code(
+    tmp_path: Path,
+    ready: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    release_path, release_digest = _release(tmp_path)
+    kubeconfig = tmp_path / "reviewed-kubeconfig"
+    kubeconfig.write_text("reviewed", encoding="utf-8")
+    command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
+    status = PersonalDevShadowStatus(
+        ready=ready,
+        blockers=() if ready else ("manager_probe_unavailable",),
+        input_sha256="a" * 64,
+        release_sha256="b" * 64,
+        manager_ceiling=0 if ready else None,
+        components=(PersonalDevShadowComponent("manager", int(ready), ready),),
+    )
+
+    class _Runner:
+        def __init__(self, path: Path) -> None:
+            assert path == kubeconfig
+
+    def _observe(
+        runner: object,
+        *,
+        expected: object,
+        namespace: str,
+    ) -> PersonalDevShadowStatus:
+        assert isinstance(runner, _Runner)
+        assert expected.resource_count == 32
+        assert namespace == "loom-dev"
+        return status
+
+    monkeypatch.setattr(command, "_SubprocessKubectlRunner", _Runner)
+    monkeypatch.setattr(command, "observe_personal_dev_shadow_status", _observe)
+
+    result = dispatch(_status_argv(release_path, release_digest, kubeconfig.resolve()))
+
+    captured = capsys.readouterr()
+    expected_output = (
+        json.dumps(
+            status.to_dict(),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        + "\n"
+    )
+    assert result == (0 if ready else 1)
+    assert captured.out == expected_output
+    assert captured.err == ""
+
+
+@pytest.mark.parametrize(
+    "omitted",
+    [
+        "--kubeconfig",
+        "--file",
+        "--trusted-release-file",
+        "--trusted-release-sha256",
+    ],
+)
+def test_status_requires_kubeconfig_and_every_trust_binding_argument(
+    tmp_path: Path,
+    omitted: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    release_path, release_digest = _release(tmp_path)
+    kubeconfig = tmp_path / "reviewed-kubeconfig"
+    kubeconfig.write_text("reviewed", encoding="utf-8")
+    argv = _status_argv(release_path, release_digest, kubeconfig.resolve())
+    index = argv.index(omitted)
+    del argv[index : index + 2]
+
+    with pytest.raises(SystemExit) as stopped:
+        dispatch(argv)
+
+    captured = capsys.readouterr()
+    assert stopped.value.code == 2
+    assert captured.out == ""
+    assert f"the following arguments are required: {omitted}" in captured.err
+
+
+def test_status_rejects_abbreviated_option(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    release_path, release_digest = _release(tmp_path)
+    kubeconfig = tmp_path / "reviewed-kubeconfig"
+    kubeconfig.write_text("reviewed", encoding="utf-8")
+    argv = _status_argv(release_path, release_digest, kubeconfig.resolve())
+    argv.extend(["--trusted-release-sha", "do-not-accept"])
+
+    with pytest.raises(SystemExit) as stopped:
+        dispatch(argv)
+
+    captured = capsys.readouterr()
+    assert stopped.value.code == 2
+    assert captured.out == ""
+    assert "unrecognized arguments: --trusted-release-sha do-not-accept" in captured.err
+
+
+@pytest.mark.parametrize("unsafe", ["relative", "symlink", "parent-symlink", "symlink-loop"])
+def test_status_rejects_nonabsolute_or_symlink_kubeconfig_before_observation(
+    tmp_path: Path,
+    unsafe: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    release_path, release_digest = _release(tmp_path)
+    kubeconfig = tmp_path / "reviewed-kubeconfig"
+    kubeconfig.write_text("reviewed", encoding="utf-8")
+    if unsafe == "relative":
+        selected = Path("relative-kubeconfig")
+    elif unsafe == "symlink":
+        selected = tmp_path / "linked-kubeconfig"
+        selected.symlink_to(kubeconfig)
+    elif unsafe == "parent-symlink":
+        real_parent = tmp_path / "real-parent"
+        real_parent.mkdir()
+        nested_kubeconfig = real_parent / "reviewed-kubeconfig"
+        nested_kubeconfig.write_text("reviewed", encoding="utf-8")
+        linked_parent = tmp_path / "linked-parent"
+        linked_parent.symlink_to(real_parent, target_is_directory=True)
+        selected = linked_parent / "reviewed-kubeconfig"
+    else:
+        selected = tmp_path / "looped-kubeconfig"
+        selected.symlink_to(selected)
+    command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
+
+    def _unexpected(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("unsafe kubeconfig reached observation")
+
+    monkeypatch.setattr(command, "observe_personal_dev_shadow_status", _unexpected)
+
+    result = dispatch(_status_argv(release_path, release_digest, selected))
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert captured.out == ""
+    assert captured.err == "error: personal-dev control-plane status inputs are invalid\n"
+
+
+def test_status_redacts_invalid_release_before_observation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    release_path, release_digest = _release(tmp_path)
+    release_path.chmod(0o644)
+    kubeconfig = tmp_path / "reviewed-kubeconfig"
+    kubeconfig.write_text("reviewed", encoding="utf-8")
+    command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
+
+    def _unexpected(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("invalid release reached observation")
+
+    monkeypatch.setattr(command, "observe_personal_dev_shadow_status", _unexpected)
+
+    result = dispatch(_status_argv(release_path, release_digest, kubeconfig.resolve()))
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert captured.out == ""
+    assert captured.err == "error: personal-dev control-plane status inputs are invalid\n"
+
+
+def test_status_subprocess_runner_stops_at_combined_output_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / "kubectl"
+    executable.write_text(
+        "#!/usr/bin/env python3\nimport sys\nsys.stdout.write('x' * (4 * 1024 * 1024 + 1))\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
+    runner = command._SubprocessKubectlRunner(tmp_path / "reviewed-kubeconfig")
+
+    with pytest.raises(OSError, match="output exceeds"):
+        runner.run(["get", "namespaces"], timeout_seconds=5)
+
+
+def test_status_subprocess_runner_returns_bounded_stdout_stderr_and_exit_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / "kubectl"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "sys.stdout.write('bounded-out')\n"
+        "sys.stderr.write('bounded-err')\n"
+        "raise SystemExit(3)\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
+    kubeconfig = tmp_path / "reviewed-kubeconfig"
+    runner = command._SubprocessKubectlRunner(kubeconfig)
+
+    result = runner.run(["get", "namespaces"], timeout_seconds=5)
+
+    assert result.args == [
+        "kubectl",
+        "--kubeconfig",
+        str(kubeconfig),
+        "get",
+        "namespaces",
+    ]
+    assert result.returncode == 3
+    assert result.stdout == "bounded-out"
+    assert result.stderr == "bounded-err"

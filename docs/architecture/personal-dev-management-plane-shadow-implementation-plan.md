@@ -488,12 +488,15 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
   `release_sha256: str | None`, `manager_ceiling: int | None`, and bounded
   component summaries.
 - Produces
-  `observe_personal_dev_shadow_status(runner: KubectlRunner, *, namespace: str = "loom-dev") -> PersonalDevShadowStatus`.
+  `observe_personal_dev_shadow_status(runner: KubectlRunner, *, expected: RenderedPersonalDevControlPlane, namespace: str = "loom-dev") -> PersonalDevShadowStatus`.
 - Produces:
-  `loom admin personal-dev-control-plane status --namespace loom-dev --kubeconfig PATH`.
+  `loom admin personal-dev-control-plane status --namespace loom-dev --kubeconfig PATH --file PROFILE --trusted-release-file RELEASE --trusted-release-sha256 SHA256`.
 - Status emits one sorted compact JSON line and performs no write verb.
+- Status requires the same trusted inputs as render and computes the expected
+  manifest locally; live labels alone are not accepted as proof that images or
+  package-owned RBAC still match the trusted release.
 
-- [ ] **Step 1: Write the failing status matrix**
+- [x] **Step 1: Write the failing status matrix**
 
   Use an injected fake runner that records exact argv and returns bounded JSON.
   Cover namespace missing; shared objects absent; StatefulSet/Deployment not
@@ -518,7 +521,7 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
   with an empty or mismatched current context unless `--kubeconfig` selects the
   reviewed file explicitly.
 
-- [ ] **Step 2: Run tests and observe the missing observer failure**
+- [x] **Step 2: Run tests and observe the missing observer failure**
 
   ```bash
   PYTHONPATH=src:. /home/hongjian/loom/.venv/bin/python -m pytest -q \
@@ -526,7 +529,7 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
     tests/loom_cli/test_personal_dev_control_plane_cmd.py -k status
   ```
 
-- [ ] **Step 3: Implement bounded parsing and command wiring**
+- [x] **Step 3: Implement bounded parsing and command wiring**
 
   Define a protocol:
 
@@ -540,12 +543,18 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
   local mTLS health probe path through the existing
   `capacity-control-plane status` helper. Cap each response at 4 MiB, reject
   duplicate identities and unknown JSON shapes, and never read Secret objects.
+  Use the probe's explicit read-only observation mode so a real nonzero ceiling
+  is returned as evidence; keep the existing capacity status command on its
+  stricter ready-and-zero default.
 
   Add `status` with `allow_abbrev=False`, namespace fixed to `loom-dev`, an
-  absolute non-symlink kubeconfig, and a 60-second total timeout. Exit `0` only
-  for `ready=true`; otherwise emit the canonical status and exit `1`.
+  absolute non-symlink kubeconfig, the exact profile/trusted-release binding,
+  and a 60-second total timeout. Compare every package-owned live object with
+  the locally rendered expected object while allowing only server-added fields.
+  Exit `0` only for `ready=true`; otherwise emit the canonical status and exit
+  `1`.
 
-- [ ] **Step 4: Run status, CLI, and capacity status regressions**
+- [x] **Step 4: Run status, CLI, and capacity status regressions**
 
   ```bash
   PYTHONPATH=src:. /home/hongjian/loom/.venv/bin/python -m pytest -q \
@@ -563,7 +572,7 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
     src/loom_cli/personal_dev_control_plane_cmd.py
   ```
 
-- [ ] **Step 5: Commit read-only status**
+- [x] **Step 5: Commit read-only status**
 
   ```bash
   git add src/loom/personal_dev_control_plane_status.py \
