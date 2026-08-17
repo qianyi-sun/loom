@@ -67,17 +67,36 @@ def test_personal_management_shadow_runbook_has_exact_bounded_rehearsal() -> Non
     runbook = _read("docs/runbooks/personal-dev-management-plane-shadow.md")
     normalized = " ".join(runbook.split())
 
+    assert "set -euo pipefail" in runbook
     assert "umask 077" in runbook
+    assert "management-shadow/<approved-window-id>" in runbook
+    assert 'test ! -e "$shadow_render"' in runbook
+    assert 'test ! -e "$render_evidence"' in runbook
     assert 'install -d -m 0700 "$evidence_dir"' in runbook
     assert 'test "$(stat -c %u "$trusted_release")" = "$(id -u)"' in runbook
     assert 'test "$(stat -c %a "$trusted_release")" = 600' in runbook
     assert 'test "$(stat -c %h "$trusted_release")" = 1' in runbook
+    assert 'test "$(stat -c %u "$kubeconfig")" = "$(id -u)"' in runbook
+    assert 'test "$(stat -c %a "$kubeconfig")" = 600' in runbook
+    assert 'test "$(stat -c %h "$kubeconfig")" = 1' in runbook
+    assert 'test -z "$(git status --porcelain=v1 --untracked-files=all)"' in runbook
+    assert 'repository_source_sha="$(git rev-parse HEAD)"' in runbook
+    assert 'repository_source_tree="$(git rev-parse HEAD^{tree})"' in runbook
+    assert "export PYTHONPATH=src:." in runbook
+    assert '$(jq -r .source_sha "$trusted_release")' in runbook
+    assert '$(jq -r .source_tree "$trusted_release")' in runbook
+    assert 'test "$(stat -c %u "$profile")" = "$(id -u)"' in runbook
+    assert 'test "$(stat -c %h "$profile")" = 1' in runbook
     assert "loom admin personal-dev-control-plane render" in normalized
     assert '--file "$profile"' in normalized
     assert '--trusted-release-file "$trusted_release"' in normalized
     assert '--trusted-release-sha256 "$trusted_release_sha256"' in normalized
     assert 'sha256sum "$shadow_render"' in runbook
     assert 'kubectl --kubeconfig "$kubeconfig" diff --server-side' in normalized
+    assert "diff_status=0" in runbook
+    assert "|| diff_status=$?" in runbook
+    assert 'test "$diff_status" -eq 0 || test "$diff_status" -eq 1' in runbook
+    assert '"$evidence_dir/server-side-diff.txt"' in runbook
     assert "--field-manager=loom-personal-dev-control-plane" in normalized
     assert 'kubectl --kubeconfig "$kubeconfig" apply --server-side' in normalized
     assert "issue #1280 shadow window" in runbook.casefold()
@@ -97,11 +116,22 @@ def test_personal_management_shadow_runbook_has_exact_bounded_rehearsal() -> Non
     ) in normalized
     assert "reapply the previous reviewed shadow" in runbook.casefold()
     assert "stop if any `loom-dev-<owner>` namespace exists" in runbook.casefold()
+    assert "stop if any `loom-build-*` namespace exists" in runbook.casefold()
     assert "schema-compatible" in runbook.casefold()
     assert 'rollback_status_evidence="$evidence_dir/rollback-shadow.status.json"' in runbook
     assert '--file "$previous_profile"' in normalized
     assert '--trusted-release-file "$previous_trusted_release"' in normalized
     assert '--trusted-release-sha256 "$previous_trusted_release_sha256"' in normalized
+    assert 'cmp -s "$previous_shadow_render_tmp" "$previous_shadow_render"' in runbook
+    assert "yaml.safe_load_all" in runbook
+    assert "render_identity_set" in runbook
+    assert "rollback-current-identities" in runbook
+    assert "rollback-previous-identities" in runbook
+    assert 'kind == "Job" and name.startswith("loom-personal-dev-migrate-")' in runbook
+    assert 'cmp -s "$current_identities_tmp" "$previous_identities_tmp"' in runbook
+    assert "rollback_diff_status=0" in runbook
+    assert "|| rollback_diff_status=$?" in runbook
+    assert 'test "$rollback_diff_status" -eq 0 || test "$rollback_diff_status" -eq 1' in runbook
     assert 'sha256sum "$rollback_status_evidence"' in runbook
 
 
@@ -124,6 +154,33 @@ def test_personal_management_shadow_runbook_preserves_authority_boundaries() -> 
     assert "approved secret channel" in lowered
     assert "never delete pvcs" in lowered
     assert "physical capacity unchanged" in lowered
+    assert "flattened and self-contained" in lowered
+
+
+def test_personal_management_shadow_runbook_rechecks_interlocks_at_each_apply() -> None:
+    runbook = _read("docs/runbooks/personal-dev-management-plane-shadow.md")
+
+    forward_diff = runbook.index('test "$diff_status" -eq 0 || test "$diff_status" -eq 1')
+    forward_apply = runbook.index(
+        'kubectl --kubeconfig "$kubeconfig" apply --server-side',
+        forward_diff,
+    )
+    forward_interlock = runbook[forward_diff:forward_apply]
+    rollback_diff = runbook.index(
+        'test "$rollback_diff_status" -eq 0 || test "$rollback_diff_status" -eq 1'
+    )
+    rollback_apply = runbook.index(
+        'kubectl --kubeconfig "$kubeconfig" apply --server-side',
+        rollback_diff,
+    )
+    rollback_interlock = runbook[rollback_diff:rollback_apply]
+
+    for interlock in (forward_interlock, rollback_interlock):
+        assert "assert_reviewed_kubeconfig" in interlock
+        assert "assert_no_dynamic_namespaces" in interlock
+        assert "assert_zero_capacity" in interlock
+    assert "assert_current_shadow_artifacts" in forward_interlock
+    assert "assert_previous_shadow_artifacts" in rollback_interlock
 
 
 def test_dev_fleet_readme_coordinates_both_shadow_readiness_gates() -> None:

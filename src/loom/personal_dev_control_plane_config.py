@@ -148,7 +148,24 @@ class _BuilderInput(_StrictModel):
     @field_validator("registry_prefix")
     @classmethod
     def _registry_prefix_is_bounded(cls, value: str) -> str:
-        if len(value) > 253 or _REGISTRY_PREFIX.fullmatch(value) is None:
+        try:
+            parsed = urlsplit(f"//{value}")
+            port = parsed.port
+        except ValueError:
+            raise ValueError("builder registry prefix is invalid") from None
+        hostname = parsed.hostname
+        if (
+            len(value) > 253
+            or _REGISTRY_PREFIX.fullmatch(value) is None
+            or hostname is None
+            or len(hostname) > 253
+            or _DNS_SUBDOMAIN.fullmatch(hostname) is None
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or (port is not None and not 1 <= port <= 65535)
+        ):
             raise ValueError("builder registry prefix is invalid")
         return value
 
@@ -613,12 +630,69 @@ def _resource_envelope(value: _ResourceEnvelopeInput) -> ResourceEnvelope:
     return ResourceEnvelope(**value.model_dump())
 
 
+def _profile_file_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_nlink,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _read_profile(path: Path) -> bytes:
+    descriptor: int | None = None
+    try:
+        path_before = path.lstat()
+        if (
+            not stat.S_ISREG(path_before.st_mode)
+            or stat.S_ISLNK(path_before.st_mode)
+            or path_before.st_uid != os.geteuid()
+            or path_before.st_nlink != 1
+            or not 0 < path_before.st_size <= MAX_TRUSTED_RELEASE_BYTES
+        ):
+            raise ValueError
+        descriptor = os.open(
+            path,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0),
+        )
+        opened = os.fstat(descriptor)
+        if _profile_file_identity(opened) != _profile_file_identity(path_before):
+            raise ValueError
+        payload = bytearray()
+        while len(payload) <= MAX_TRUSTED_RELEASE_BYTES:
+            chunk = os.read(
+                descriptor,
+                min(64 * 1024, MAX_TRUSTED_RELEASE_BYTES + 1 - len(payload)),
+            )
+            if not chunk:
+                break
+            payload.extend(chunk)
+        if (
+            len(payload) != opened.st_size
+            or _profile_file_identity(os.fstat(descriptor)) != _profile_file_identity(opened)
+            or _profile_file_identity(path.lstat()) != _profile_file_identity(path_before)
+        ):
+            raise ValueError
+        return bytes(payload)
+    except (OSError, ValueError):
+        raise ValueError("personal-dev control-plane profile is invalid") from None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
 def load_personal_dev_control_plane_profile(path: Path) -> PersonalDevControlPlaneProfile:
     """Load the strict non-secret shadow profile."""
 
-    payload = path.read_bytes()
-    if not payload or len(payload) > MAX_TRUSTED_RELEASE_BYTES:
-        raise ValueError("personal-dev control-plane profile is invalid")
+    payload = _read_profile(path)
     try:
         document = tomllib.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError):
@@ -758,7 +832,7 @@ def load_personal_dev_trusted_release(
         if not isinstance(value, dict) or _canonical_json(value) != payload:
             raise ValueError("release JSON is not canonical")
         parsed = _TrustedReleaseInput.model_validate(value)
-    except (UnicodeError, ValueError):
+    except (RecursionError, UnicodeError, ValueError):
         raise _invalid_release() from None
     release = PersonalDevTrustedRelease(
         schema_version=parsed.schema_version,

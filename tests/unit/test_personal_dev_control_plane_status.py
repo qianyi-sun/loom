@@ -257,8 +257,15 @@ def _healthy_fixture(
         _CONTEXT: "reviewed-loom-dev\n",
         _NAMESPACES: {
             "apiVersion": "v1",
-            "kind": "List",
-            "items": [namespace, {"metadata": {"name": "kube-system"}}],
+            "kind": "NamespaceList",
+            "items": [
+                namespace,
+                {
+                    "apiVersion": "v1",
+                    "kind": "Namespace",
+                    "metadata": {"name": "kube-system"},
+                },
+            ],
         },
         _RUNTIME_CLASS: {
             "apiVersion": "node.k8s.io/v1",
@@ -321,7 +328,7 @@ def test_healthy_shadow_returns_canonical_bounded_status_and_safe_commands(
         "components": [
             {"name": "cluster-resources", "observed": 10, "ready": True},
             {"name": "manager", "observed": 1, "ready": True},
-            {"name": "namespaced-resources", "observed": 27, "ready": True},
+            {"name": "namespaced-resources", "observed": 28, "ready": True},
             {"name": "namespaces", "observed": 1, "ready": True},
             {"name": "runtime-class", "observed": 1, "ready": True},
         ],
@@ -352,6 +359,7 @@ def test_healthy_shadow_returns_canonical_bounded_status_and_safe_commands(
     ("mutation", "blocker"),
     [
         ("namespace-missing", "namespace_missing"),
+        ("namespace-wrong-kind", "namespace_inventory_invalid"),
         ("shared-object-missing", "resource_inventory_drift"),
         ("statefulset-not-ready", "storage_not_ready"),
         ("deployment-not-ready", "management_not_ready"),
@@ -370,6 +378,7 @@ def test_healthy_shadow_returns_canonical_bounded_status_and_safe_commands(
         ("runtime-class-missing", "runtime_class_missing"),
         ("scanner-pvc-missing", "storage_not_ready"),
         ("unexpected-personal-namespace", "unexpected_personal_namespace"),
+        ("unexpected-builder-namespace", "unexpected_builder_namespace"),
         ("cluster-binding-drift", "cluster_resource_drift"),
         ("manager-unavailable", "manager_probe_unavailable"),
         ("manager-not-ready", "manager_probe_unavailable"),
@@ -388,6 +397,9 @@ def test_shadow_status_matrix_reports_stable_sorted_blockers(
 
     if mutation == "namespace-missing":
         namespaces[:] = [item for item in namespaces if item["metadata"]["name"] != "loom-dev"]
+    elif mutation == "namespace-wrong-kind":
+        shared = next(item for item in namespaces if item["metadata"]["name"] == "loom-dev")
+        shared.update({"apiVersion": "v1", "kind": "ConfigMap"})
     elif mutation == "shared-object-missing":
         namespaced.remove(_item(runner, _NAMESPACED, "Service", "loom-dev-minio"))
     elif mutation == "statefulset-not-ready":
@@ -478,7 +490,17 @@ def test_shadow_status_matrix_reports_stable_sorted_blockers(
             )
         )
     elif mutation == "unexpected-personal-namespace":
-        namespaces.append({"metadata": {"name": "loom-dev-alice"}})
+        namespaces.append(
+            {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "loom-dev-alice"}}
+        )
+    elif mutation == "unexpected-builder-namespace":
+        namespaces.append(
+            {
+                "apiVersion": "v1",
+                "kind": "Namespace",
+                "metadata": {"name": "loom-build-attempt"},
+            }
+        )
     elif mutation == "cluster-binding-drift":
         binding = _item(
             runner,
@@ -511,7 +533,7 @@ def test_shadow_status_matrix_reports_stable_sorted_blockers(
         assert first.input_sha256 is None
         assert first.release_sha256 is None
     components = {component.name: component for component in first.components}
-    if mutation == "unexpected-personal-namespace":
+    if mutation in {"unexpected-personal-namespace", "unexpected-builder-namespace"}:
         assert components["namespaces"].ready is False
     if mutation in {"manager-nonzero", "manager-not-ready"}:
         assert components["manager"].observed == 1
@@ -580,12 +602,20 @@ def test_observer_accepts_bounded_successful_migration_history(tmp_path: Path) -
     assert result.ready is True
     assert result.blockers == ()
     components = {component.name: component for component in result.components}
-    assert components["namespaced-resources"].observed == 29
+    assert components["namespaced-resources"].observed == 30
 
 
 @pytest.mark.parametrize(
     "invalid",
-    ["duplicate", "unknown-shape", "oversized", "combined-output", "nonfinite"],
+    [
+        "duplicate",
+        "unknown-shape",
+        "missing-api-version",
+        "deep-json",
+        "oversized",
+        "combined-output",
+        "nonfinite",
+    ],
 )
 def test_observer_rejects_duplicate_unknown_or_oversized_inventory(
     tmp_path: Path,
@@ -599,6 +629,14 @@ def test_observer_rejects_duplicate_unknown_or_oversized_inventory(
         document = runner.responses[_NAMESPACED]
         assert isinstance(document, dict)
         document["unexpected"] = True
+    elif invalid == "missing-api-version":
+        document = runner.responses[_NAMESPACED]
+        assert isinstance(document, dict)
+        del document["apiVersion"]
+    elif invalid == "deep-json":
+        runner.responses[_NAMESPACED] = (
+            '{"apiVersion":"v1","items":' + "[" * 1100 + "0" + "]" * 1100 + ',"kind":"List"}'
+        )
     elif invalid == "oversized":
         runner.responses[_NAMESPACED] = "x" * (4 * 1024 * 1024 + 1)
     elif invalid == "combined-output":

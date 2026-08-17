@@ -5,6 +5,8 @@ import importlib
 import io
 import json
 import os
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -60,6 +62,40 @@ def _release(tmp_path: Path) -> tuple[Path, str]:
     path.write_bytes(payload)
     path.chmod(0o600)
     return path, hashlib.sha256(payload).hexdigest()
+
+
+def _reviewed_kubeconfig(tmp_path: Path) -> Path:
+    path = tmp_path / "reviewed-kubeconfig"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "apiVersion": "v1",
+                "clusters": [
+                    {
+                        "cluster": {
+                            "certificate-authority-data": "cmV2aWV3ZWQtY2E=",
+                            "server": "https://127.0.0.1:6443",
+                        },
+                        "name": "reviewed",
+                    }
+                ],
+                "contexts": [
+                    {
+                        "context": {"cluster": "reviewed", "user": "reviewed"},
+                        "name": "reviewed-loom-dev",
+                    }
+                ],
+                "current-context": "reviewed-loom-dev",
+                "kind": "Config",
+                "preferences": {},
+                "users": [{"name": "reviewed", "user": {"token": "reviewed-token"}}],
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+    return path
 
 
 def _argv(release: Path, digest: str, *, profile: Path = _PROFILE) -> list[str]:
@@ -307,8 +343,7 @@ def test_status_emits_one_canonical_record_and_readiness_exit_code(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     release_path, release_digest = _release(tmp_path)
-    kubeconfig = tmp_path / "reviewed-kubeconfig"
-    kubeconfig.write_text("reviewed", encoding="utf-8")
+    kubeconfig = _reviewed_kubeconfig(tmp_path)
     command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
     status = PersonalDevShadowStatus(
         ready=ready,
@@ -330,7 +365,7 @@ def test_status_emits_one_canonical_record_and_readiness_exit_code(
         namespace: str,
     ) -> PersonalDevShadowStatus:
         assert isinstance(runner, _Runner)
-        assert expected.resource_count == 32
+        assert expected.resource_count == 33
         assert namespace == "loom-dev"
         return status
 
@@ -369,8 +404,7 @@ def test_status_requires_kubeconfig_and_every_trust_binding_argument(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     release_path, release_digest = _release(tmp_path)
-    kubeconfig = tmp_path / "reviewed-kubeconfig"
-    kubeconfig.write_text("reviewed", encoding="utf-8")
+    kubeconfig = _reviewed_kubeconfig(tmp_path)
     argv = _status_argv(release_path, release_digest, kubeconfig.resolve())
     index = argv.index(omitted)
     del argv[index : index + 2]
@@ -389,8 +423,7 @@ def test_status_rejects_abbreviated_option(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     release_path, release_digest = _release(tmp_path)
-    kubeconfig = tmp_path / "reviewed-kubeconfig"
-    kubeconfig.write_text("reviewed", encoding="utf-8")
+    kubeconfig = _reviewed_kubeconfig(tmp_path)
     argv = _status_argv(release_path, release_digest, kubeconfig.resolve())
     argv.extend(["--trusted-release-sha", "do-not-accept"])
 
@@ -403,7 +436,22 @@ def test_status_rejects_abbreviated_option(
     assert "unrecognized arguments: --trusted-release-sha do-not-accept" in captured.err
 
 
-@pytest.mark.parametrize("unsafe", ["relative", "symlink", "parent-symlink", "symlink-loop"])
+@pytest.mark.parametrize(
+    "unsafe",
+    [
+        "relative",
+        "symlink",
+        "parent-symlink",
+        "symlink-loop",
+        "world-readable",
+        "hardlink",
+        "empty",
+        "oversized",
+        "external-cluster-ca",
+        "external-client-key",
+        "exec-credential-plugin",
+    ],
+)
 def test_status_rejects_nonabsolute_or_symlink_kubeconfig_before_observation(
     tmp_path: Path,
     unsafe: str,
@@ -411,8 +459,7 @@ def test_status_rejects_nonabsolute_or_symlink_kubeconfig_before_observation(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     release_path, release_digest = _release(tmp_path)
-    kubeconfig = tmp_path / "reviewed-kubeconfig"
-    kubeconfig.write_text("reviewed", encoding="utf-8")
+    kubeconfig = _reviewed_kubeconfig(tmp_path)
     if unsafe == "relative":
         selected = Path("relative-kubeconfig")
     elif unsafe == "symlink":
@@ -423,12 +470,40 @@ def test_status_rejects_nonabsolute_or_symlink_kubeconfig_before_observation(
         real_parent.mkdir()
         nested_kubeconfig = real_parent / "reviewed-kubeconfig"
         nested_kubeconfig.write_text("reviewed", encoding="utf-8")
+        nested_kubeconfig.chmod(0o600)
         linked_parent = tmp_path / "linked-parent"
         linked_parent.symlink_to(real_parent, target_is_directory=True)
         selected = linked_parent / "reviewed-kubeconfig"
-    else:
+    elif unsafe == "symlink-loop":
         selected = tmp_path / "looped-kubeconfig"
         selected.symlink_to(selected)
+    elif unsafe == "world-readable":
+        kubeconfig.chmod(0o644)
+        selected = kubeconfig
+    elif unsafe == "hardlink":
+        selected = tmp_path / "hardlinked-kubeconfig"
+        os.link(kubeconfig, selected)
+    elif unsafe == "empty":
+        kubeconfig.write_bytes(b"")
+        selected = kubeconfig
+    elif unsafe == "oversized":
+        kubeconfig.write_bytes(b"x" * (1024 * 1024 + 1))
+        selected = kubeconfig
+    else:
+        document = yaml.safe_load(kubeconfig.read_text(encoding="utf-8"))
+        if unsafe == "external-cluster-ca":
+            document["clusters"][0]["cluster"] = {
+                "certificate-authority": "/tmp/external-ca.pem",
+                "server": "https://127.0.0.1:6443",
+            }
+        elif unsafe == "external-client-key":
+            document["users"][0]["user"] = {"client-key": "/tmp/external-key.pem"}
+        else:
+            document["users"][0]["user"] = {
+                "exec": {"apiVersion": "client.authentication.k8s.io/v1", "command": "helper"}
+            }
+        kubeconfig.write_text(yaml.safe_dump(document, sort_keys=True), encoding="utf-8")
+        selected = kubeconfig
     command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
 
     def _unexpected(*_args: object, **_kwargs: object) -> None:
@@ -451,8 +526,7 @@ def test_status_redacts_invalid_release_before_observation(
 ) -> None:
     release_path, release_digest = _release(tmp_path)
     release_path.chmod(0o644)
-    kubeconfig = tmp_path / "reviewed-kubeconfig"
-    kubeconfig.write_text("reviewed", encoding="utf-8")
+    kubeconfig = _reviewed_kubeconfig(tmp_path)
     command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
 
     def _unexpected(*_args: object, **_kwargs: object) -> None:
@@ -480,7 +554,8 @@ def test_status_subprocess_runner_stops_at_combined_output_bound(
     executable.chmod(0o700)
     monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
     command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
-    runner = command._SubprocessKubectlRunner(tmp_path / "reviewed-kubeconfig")
+    kubeconfig = _reviewed_kubeconfig(tmp_path)
+    runner = command._SubprocessKubectlRunner(kubeconfig)
 
     with pytest.raises(OSError, match="output exceeds"):
         runner.run(["get", "namespaces"], timeout_seconds=5)
@@ -502,7 +577,7 @@ def test_status_subprocess_runner_returns_bounded_stdout_stderr_and_exit_code(
     executable.chmod(0o700)
     monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
     command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
-    kubeconfig = tmp_path / "reviewed-kubeconfig"
+    kubeconfig = _reviewed_kubeconfig(tmp_path)
     runner = command._SubprocessKubectlRunner(kubeconfig)
 
     result = runner.run(["get", "namespaces"], timeout_seconds=5)
@@ -517,3 +592,179 @@ def test_status_subprocess_runner_returns_bounded_stdout_stderr_and_exit_code(
     assert result.returncode == 3
     assert result.stdout == "bounded-out"
     assert result.stderr == "bounded-err"
+
+
+def test_status_subprocess_runner_rejects_kubeconfig_change_during_observation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / "kubectl"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os\n"
+        "import pathlib\n"
+        "import sys\n"
+        "pathlib.Path(os.environ['LOOM_TEST_KUBECONFIG']).write_text('changed', encoding='utf-8')\n"
+        "sys.stdout.write('{}')\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
+    kubeconfig = _reviewed_kubeconfig(tmp_path)
+    monkeypatch.setenv("LOOM_TEST_KUBECONFIG", str(kubeconfig))
+    runner = command._SubprocessKubectlRunner(kubeconfig)
+
+    with pytest.raises(OSError, match="kubeconfig changed during observation"):
+        runner.run(["get", "namespaces"], timeout_seconds=5)
+
+
+def test_status_subprocess_runner_pins_kubeconfig_against_swap_and_restore(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ready = tmp_path / "ready"
+    proceed = tmp_path / "proceed"
+    consumed = tmp_path / "consumed"
+    restored = tmp_path / "restored"
+    executable = tmp_path / "kubectl"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os\n"
+        "import pathlib\n"
+        "import sys\n"
+        "import time\n"
+        "ready = pathlib.Path(os.environ['LOOM_TEST_READY'])\n"
+        "proceed = pathlib.Path(os.environ['LOOM_TEST_PROCEED'])\n"
+        "consumed = pathlib.Path(os.environ['LOOM_TEST_CONSUMED'])\n"
+        "restored = pathlib.Path(os.environ['LOOM_TEST_RESTORED'])\n"
+        "ready.touch()\n"
+        "for _ in range(500):\n"
+        "    if proceed.exists():\n"
+        "        break\n"
+        "    time.sleep(0.01)\n"
+        "else:\n"
+        "    raise SystemExit(2)\n"
+        "value = pathlib.Path(sys.argv[2]).read_text(encoding='utf-8')\n"
+        "consumed.write_text(value, encoding='utf-8')\n"
+        "for _ in range(500):\n"
+        "    if restored.exists():\n"
+        "        break\n"
+        "    time.sleep(0.01)\n"
+        "else:\n"
+        "    raise SystemExit(3)\n"
+        "sys.stdout.write(value)\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("LOOM_TEST_READY", str(ready))
+    monkeypatch.setenv("LOOM_TEST_PROCEED", str(proceed))
+    monkeypatch.setenv("LOOM_TEST_CONSUMED", str(consumed))
+    monkeypatch.setenv("LOOM_TEST_RESTORED", str(restored))
+    command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
+    kubeconfig = _reviewed_kubeconfig(tmp_path)
+    original = tmp_path / "reviewed-kubeconfig.original"
+    reviewed_payload = kubeconfig.read_text(encoding="utf-8")
+    runner = command._SubprocessKubectlRunner(kubeconfig)
+
+    def swap_path() -> None:
+        for _ in range(500):
+            if ready.exists():
+                break
+            time.sleep(0.01)
+        else:
+            return
+        kubeconfig.rename(original)
+        kubeconfig.write_text("attacker", encoding="utf-8")
+        proceed.touch()
+        for _ in range(500):
+            if consumed.exists():
+                break
+            time.sleep(0.01)
+        kubeconfig.unlink()
+        original.rename(kubeconfig)
+        restored.touch()
+
+    swapper = threading.Thread(target=swap_path)
+    swapper.start()
+    with pytest.raises(OSError, match="kubeconfig changed during observation"):
+        runner.run(["get", "namespaces"], timeout_seconds=10)
+    swapper.join(timeout=10)
+
+    assert not swapper.is_alive()
+    assert consumed.read_text(encoding="utf-8") == reviewed_payload
+
+
+def test_status_subprocess_runner_pins_kubeconfig_bytes_against_in_place_rewrite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ready = tmp_path / "ready"
+    proceed = tmp_path / "proceed"
+    consumed = tmp_path / "consumed"
+    restored = tmp_path / "restored"
+    executable = tmp_path / "kubectl"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os\n"
+        "import pathlib\n"
+        "import sys\n"
+        "import time\n"
+        "ready = pathlib.Path(os.environ['LOOM_TEST_READY'])\n"
+        "proceed = pathlib.Path(os.environ['LOOM_TEST_PROCEED'])\n"
+        "consumed = pathlib.Path(os.environ['LOOM_TEST_CONSUMED'])\n"
+        "restored = pathlib.Path(os.environ['LOOM_TEST_RESTORED'])\n"
+        "ready.touch()\n"
+        "for _ in range(500):\n"
+        "    if proceed.exists():\n"
+        "        break\n"
+        "    time.sleep(0.01)\n"
+        "else:\n"
+        "    raise SystemExit(2)\n"
+        "value = pathlib.Path(sys.argv[2]).read_text(encoding='utf-8')\n"
+        "consumed.write_text(value, encoding='utf-8')\n"
+        "for _ in range(500):\n"
+        "    if restored.exists():\n"
+        "        break\n"
+        "    time.sleep(0.01)\n"
+        "else:\n"
+        "    raise SystemExit(3)\n"
+        "sys.stdout.write(value)\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("LOOM_TEST_READY", str(ready))
+    monkeypatch.setenv("LOOM_TEST_PROCEED", str(proceed))
+    monkeypatch.setenv("LOOM_TEST_CONSUMED", str(consumed))
+    monkeypatch.setenv("LOOM_TEST_RESTORED", str(restored))
+    command = importlib.import_module("loom_cli.personal_dev_control_plane_cmd")
+    kubeconfig = _reviewed_kubeconfig(tmp_path)
+    reviewed_payload = kubeconfig.read_text(encoding="utf-8")
+    runner = command._SubprocessKubectlRunner(kubeconfig)
+
+    def rewrite_path() -> None:
+        for _ in range(500):
+            if ready.exists():
+                break
+            time.sleep(0.01)
+        else:
+            return
+        kubeconfig.write_text("attacker-controlled", encoding="utf-8")
+        proceed.touch()
+        for _ in range(500):
+            if consumed.exists():
+                break
+            time.sleep(0.01)
+        kubeconfig.write_text(reviewed_payload, encoding="utf-8")
+        restored.touch()
+
+    rewriter = threading.Thread(target=rewrite_path)
+    rewriter.start()
+    with pytest.raises(OSError, match="kubeconfig changed during observation"):
+        runner.run(["get", "namespaces"], timeout_seconds=10)
+    rewriter.join(timeout=10)
+
+    assert not rewriter.is_alive()
+    assert consumed.read_text(encoding="utf-8") == reviewed_payload

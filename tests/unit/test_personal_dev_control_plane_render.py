@@ -100,7 +100,7 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
     assert repeated == rendered
     assert rendered.yaml_text.endswith("\n")
     assert rendered.resource_count == len(documents)
-    assert rendered.resource_count == 32
+    assert rendered.resource_count == 33
     expected_input = hashlib.sha256(
         b"loom-personal-dev-shadow-render-v1\0"
         + profile.canonical_bytes()
@@ -138,7 +138,8 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
         ("Ingress", "loom-dev", "loom-personal-dev-management"),
         ("Deployment", "loom-dev", "loom-personal-dev-activation-agent"),
         ("NetworkPolicy", "loom-dev", "loom-personal-dev-default-deny"),
-        ("NetworkPolicy", "loom-dev", "loom-personal-dev-storage"),
+        ("NetworkPolicy", "loom-dev", "loom-personal-dev-postgres-ingress"),
+        ("NetworkPolicy", "loom-dev", "loom-personal-dev-minio-ingress"),
         ("NetworkPolicy", "loom-dev", "loom-personal-dev-management"),
         ("NetworkPolicy", "loom-dev", "loom-personal-dev-management-ingress"),
         ("NetworkPolicy", "loom-dev", "loom-personal-dev-migration-egress"),
@@ -152,7 +153,9 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
     for document in documents:
         metadata = document["metadata"]
         assert metadata["labels"]["app.kubernetes.io/managed-by"] == (
-            "loom-personal-dev-control-plane"
+            "loom-operator"
+            if document["kind"] == "Namespace"
+            else "loom-personal-dev-control-plane"
         )
         assert metadata["labels"]["loom.dev/render-input"] == expected_input[:32]
         assert metadata["labels"]["loom.dev/trusted-release"] == (rendered.release_sha256[:32])
@@ -169,6 +172,19 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
             assert template_metadata["annotations"]["loom.dev/trusted-release-sha256"] == (
                 rendered.release_sha256
             )
+
+
+def test_shared_namespace_uses_cross_package_operator_ownership(tmp_path: Path) -> None:
+    _, _, _, documents = _render(tmp_path)
+    namespace = next(document for document in documents if document["kind"] == "Namespace")
+
+    assert namespace["metadata"]["labels"]["app.kubernetes.io/managed-by"] == "loom-operator"
+    assert all(
+        document["metadata"]["labels"]["app.kubernetes.io/managed-by"]
+        == "loom-personal-dev-control-plane"
+        for document in documents
+        if document is not namespace
+    )
 
 
 def test_shadow_workloads_are_inert_immutable_and_exclude_shared_app(tmp_path: Path) -> None:
@@ -238,8 +254,10 @@ def test_minio_admin_bootstraps_base_buckets_before_readiness(tmp_path: Path) ->
         if container["name"] == "admin"
     )
     command = " ".join(admin["command"])
+    environment = {item["name"]: item.get("value") for item in admin["env"]}
 
     assert "MC_HOST_local" in command
+    assert environment["MC_CONFIG_DIR"] == "/tmp/mc"
     assert "@127.0.0.1:9000" in command
     assert "mc alias set" not in command
     assert "mc mb --ignore-existing local/artifacts local/trajectories" in command
@@ -368,6 +386,34 @@ def test_pods_are_restricted_finite_and_receive_only_explicit_api_tokens(
     assert profile.network.kubernetes_api_cidr not in migration_egress
 
 
+def test_storage_ingress_separates_postgres_and_minio_callers(tmp_path: Path) -> None:
+    _, _, _, documents = _render(tmp_path)
+    policies = {
+        item["metadata"]["name"]: item for item in documents if item["kind"] == "NetworkPolicy"
+    }
+
+    assert "loom-personal-dev-storage" not in policies
+    postgres = policies["loom-personal-dev-postgres-ingress"]
+    minio = policies["loom-personal-dev-minio-ingress"]
+    assert postgres["spec"]["podSelector"] == {"matchLabels": {"app": "loom-dev-postgres"}}
+    assert postgres["spec"]["ingress"][0]["ports"] == [{"protocol": "TCP", "port": 5432}]
+    postgres_sources = yaml.safe_dump(postgres["spec"]["ingress"][0]["from"])
+    assert "loom-personal-dev-management" in postgres_sources
+    assert "loom-personal-dev-migration" in postgres_sources
+    assert "loom-dev-instance-controller" in postgres_sources
+    assert "loom-personal-dev-activation-agent" not in postgres_sources
+    assert "loom-personal-dev-builder-controller" not in postgres_sources
+
+    assert minio["spec"]["podSelector"] == {"matchLabels": {"app": "loom-dev-minio"}}
+    assert minio["spec"]["ingress"][0]["ports"] == [{"protocol": "TCP", "port": 9000}]
+    minio_sources = yaml.safe_dump(minio["spec"]["ingress"][0]["from"])
+    assert "loom-personal-dev-management" in minio_sources
+    assert "loom-personal-dev-activation-agent" in minio_sources
+    assert "loom-dev-instance-controller" in minio_sources
+    assert "loom-personal-dev-builder-controller" in minio_sources
+    assert "loom-personal-dev-migration" not in minio_sources
+
+
 def test_rbac_uses_dynamic_rolebindings_and_fail_closed_principal_policies(
     tmp_path: Path,
 ) -> None:
@@ -446,6 +492,18 @@ def test_rbac_uses_dynamic_rolebindings_and_fail_closed_principal_policies(
     assert exact_management in resource_policy
     assert "startsWith('loom-dev-')" in namespace_policy
     assert "startsWith('loom-build-')" in namespace_policy
+    assert "matches('^loom-dev-[a-z]([-a-z0-9]{0,18}[a-z0-9])?$')" in namespace_policy
+    assert "matches('^loom-build-[0-9a-f]{32}-l[0-9a-f]{16}$')" in namespace_policy
+    assert (
+        "matches('^loom-dev-(dev|development|staging|production|prod|local|loom|shared|default)$')"
+        in namespace_policy
+    )
+    assert "== 'loom-dev-instance-controller'" in namespace_policy
+    assert "== 'loom-personal-dev-builder-controller'" in namespace_policy
+    assert (
+        "in ['loom-dev-instance-controller','loom-personal-dev-builder-controller']"
+        not in namespace_policy
+    )
     assert "request.namespace != 'loom-dev'" in resource_policy
     assert "request.operation == 'CONNECT'" in resource_policy
     assert "request.subResource == 'exec'" in resource_policy
@@ -471,6 +529,177 @@ def test_rbac_uses_dynamic_rolebindings_and_fail_closed_principal_policies(
     assert "startsWith('loom-build-')" not in activation_policy
     assert "services" in activation_policy
     assert "ingresses" in activation_policy
+
+
+def test_admission_requires_exact_namespace_shapes_for_every_mutation(
+    tmp_path: Path,
+) -> None:
+    _, _, _, documents = _render(tmp_path)
+    policies = {
+        item["metadata"]["name"]: item
+        for item in documents
+        if item["kind"] == "ValidatingAdmissionPolicy"
+    }
+
+    def expressions(name: str) -> str:
+        spec = policies[name]["spec"]
+        return "\n".join(
+            item["expression"]
+            for section in ("matchConditions", "validations")
+            for item in spec.get(section, [])
+        )
+
+    personal_pattern = "matches('^loom-dev-[a-z]([-a-z0-9]{0,18}[a-z0-9])?$')"
+    reserved_pattern = (
+        "matches('^loom-dev-(dev|development|staging|production|prod|local|loom|shared|default)$')"
+    )
+    builder_pattern = "matches('^loom-build-[0-9a-f]{32}-l[0-9a-f]{16}$')"
+    namespace_policy = expressions("loom-personal-dev-management-namespaces")
+    resource_policy = expressions("loom-personal-dev-management-resources")
+    activation_policy = expressions("loom-personal-dev-activation-resources")
+
+    for value in (namespace_policy, resource_policy, activation_policy):
+        assert personal_pattern in value
+        assert reserved_pattern in value
+    for value in (namespace_policy, resource_policy):
+        assert builder_pattern in value
+    assert builder_pattern not in activation_policy
+    assert (
+        "metadata.labels['app.kubernetes.io/managed-by'] == 'loom-dev-instance-controller'"
+        in resource_policy
+    )
+    assert "'loom-personal-dev-lifecycle'" in resource_policy
+    assert (
+        "metadata.labels['app.kubernetes.io/managed-by'] == "
+        "'loom-personal-dev-builder-controller'" in resource_policy
+    )
+
+
+def test_management_admission_binds_resource_names_to_each_family_contract(
+    tmp_path: Path,
+) -> None:
+    _, _, _, documents = _render(tmp_path)
+    policy = next(
+        item
+        for item in documents
+        if item["kind"] == "ValidatingAdmissionPolicy"
+        and item["metadata"]["name"] == "loom-personal-dev-management-resources"
+    )
+    expressions = "\n".join(item["expression"] for item in policy["spec"]["validations"])
+
+    assert "matches('^loom-(control-plane|llm-gateway|service|web)-g[1-9][0-9]*$')" in (expressions)
+    assert "matches('^loom-migrate-[0-9a-f]{7}-g[1-9][0-9]*$')" in expressions
+    assert "['default-deny','runtime-egress','runtime-ingress','capacity-agent-egress']" in (
+        expressions
+    )
+    assert "matches('^build-contract-(amd64|arm64)-l[0-9a-f]{16}$')" in expressions
+    assert "matches('^build-capability-(amd64|arm64)-l[0-9a-f]{16}$')" in expressions
+    assert "['build-amd64','build-arm64']" in expressions
+    assert "['default-deny','builder-egress']" in expressions
+
+
+def test_management_admission_blocks_indirect_personal_secret_reads(
+    tmp_path: Path,
+) -> None:
+    _, _, _, documents = _render(tmp_path)
+    policy = next(
+        item
+        for item in documents
+        if item["kind"] == "ValidatingAdmissionPolicy"
+        and item["metadata"]["name"] == "loom-personal-dev-management-resources"
+    )
+    validations = policy["spec"]["validations"]
+    expressions = "\n".join(item["expression"] for item in validations)
+    messages = "\n".join(item["message"] for item in policy["spec"]["validations"])
+    workload_expression = next(
+        item["expression"]
+        for item in validations
+        if "builder workload cannot acquire" in item["message"]
+    )
+    application_secrets = "['loom-secrets','loom-admin-secret']"
+    capacity_secrets = "['loom-capacity-agent']"
+
+    assert "automountServiceAccountToken == false" in expressions
+    assert "serviceAccountName == 'default'" in expressions
+    for secret_names in (application_secrets, capacity_secrets):
+        assert f"volume.secret.secretName in {secret_names}" in workload_expression
+        assert f"source.secretRef.name in {secret_names}" in workload_expression
+        assert f"variable.valueFrom.secretKeyRef.name in {secret_names}" in workload_expression
+    assert "loom-capacity-agent-credentials" not in workload_expression
+    assert "metadata.name == 'loom-capacity-agent'" in workload_expression
+    assert "!has(volume.projected)" in expressions
+    assert "!has(volume.csi)" in expressions
+    assert (
+        "!has((request.operation == 'DELETE' ? oldObject : object).spec.template.spec.imagePullSecrets)"
+        in expressions
+    )
+    assert " not in " not in expressions
+    assert (
+        "volume.secret.secretName.matches("
+        "'^build-capability-(amd64|arm64)-l[0-9a-f]{16}$')" in expressions
+    )
+    assert "builder workload cannot acquire API or unrelated Secret authority" in messages
+
+
+def test_management_admission_binds_capacity_lifecycle_ownership_to_exact_resources(
+    tmp_path: Path,
+) -> None:
+    _, _, _, documents = _render(tmp_path)
+    policy = next(
+        item
+        for item in documents
+        if item["kind"] == "ValidatingAdmissionPolicy"
+        and item["metadata"]["name"] == "loom-personal-dev-management-resources"
+    )
+    ownership = next(
+        item["expression"]
+        for item in policy["spec"]["validations"]
+        if item["message"] == "management resource lacks its namespace-family ownership"
+    )
+
+    assert "['loom-capacity-agent','loom-capacity-agent-credentials']" in ownership
+    assert "metadata.name == 'loom-capacity-agent'" in ownership
+    assert "metadata.name == 'capacity-agent-egress'" in ownership
+    assert "'loom-personal-dev-lifecycle'" in ownership
+    assert "'loom-dev-instance-controller'" in ownership
+
+
+def test_activation_admission_constrains_stable_routes_to_exact_owner_and_generation(
+    tmp_path: Path,
+) -> None:
+    profile, _, _, documents = _render(tmp_path)
+    policy = next(
+        item
+        for item in documents
+        if item["kind"] == "ValidatingAdmissionPolicy"
+        and item["metadata"]["name"] == "loom-personal-dev-activation-resources"
+    )
+    expressions = "\n".join(item["expression"] for item in policy["spec"]["validations"])
+
+    assert "request.namespace == 'loom-dev-' +" in expressions
+    assert "metadata.labels['loom.dev/generation'].matches('^[1-9][0-9]*$')" in expressions
+    assert "spec.type == 'ClusterIP'" in expressions
+    assert "spec.selector.size() == 3" in expressions
+    assert "metadata.name + '-g' +" in expressions
+    assert "spec.ports.size() == 1" in expressions
+    for port in (80, 8080, 8090, 9100):
+        assert str(port) in expressions
+    assert f"spec.ingressClassName == '{profile.network.ingress_class_name}'" in expressions
+    assert (
+        "metadata.annotations['cert-manager.io/cluster-issuer'] == "
+        f"'{profile.network.ingress_cluster_issuer}'" in expressions
+    )
+    for value in (
+        "'.dev.yylx.world'",
+        "'cp-'",
+        "'gw-'",
+        "'loom-control-plane'",
+        "'loom-llm-gateway'",
+        "'loom-service'",
+        "'loom-web'",
+        "'loom-dev-tls'",
+    ):
+        assert value in expressions
 
 
 def test_migration_evidence_is_retained_for_long_lived_shadow_status(

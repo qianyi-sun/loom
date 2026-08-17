@@ -16,10 +16,12 @@ transition.
 
 Before rendering, and again immediately before apply or rollback:
 stop if any `loom-dev-<owner>` namespace exists. Also stop for an unapproved
-source commit or tree, a mutable or mismatched image, a changed trusted-release file, a
-noncanonical evidence record, missing Secret keys, a nonzero capacity-manager
-ceiling, an unexpected package-owned resource, a failed migration, an unbound
-PVC, a nonzero activation replica count, or an unavailable rollback artifact.
+source commit or tree, a mutable or mismatched image, a changed trusted-release
+file, a noncanonical evidence record, missing Secret keys, a nonzero
+capacity-manager ceiling, an unexpected package-owned resource, a failed
+migration, an unbound PVC, a nonzero activation replica count, or an
+unavailable rollback artifact. Stop if any `loom-build-*` namespace exists;
+the restricted builder is disabled throughout this rehearsal.
 
 Do not improvise cleanup. Never delete PVCs, databases, buckets, migration
 evidence, Secrets, or namespaces as part of this rehearsal. Retain the current
@@ -31,10 +33,13 @@ Use one exact CI-approved source commit and tree. The trusted-release document
 must be the canonical, current-user-owned mode-`0600` file produced by the
 protected image release for that source. It binds immutable digests for the
 service, builder, activation agent, PostgreSQL, MinIO, and MinIO client.
+Run every command block below in the same Bash session; the first block enables
+strict error and pipeline handling for the entire rehearsal.
 
 ```bash
+set -euo pipefail
 umask 077
-evidence_dir=artifacts/personal-dev/management-shadow
+evidence_dir='artifacts/personal-dev/management-shadow/<approved-window-id>'
 profile=deploy/dev-fleet/personal-dev-control-plane.toml
 trusted_release="$evidence_dir/trusted-release.json"
 trusted_release_sha256='<reviewed-64-lowercase-hex>'
@@ -50,15 +55,98 @@ previous_trusted_release_sha256='<previous-reviewed-64-lowercase-hex>'
 kubeconfig=/absolute/path/to/reviewed-kubeconfig
 
 install -d -m 0700 "$evidence_dir"
+test ! -e "$shadow_render"
+test ! -e "$render_evidence"
+test ! -e "$status_evidence"
+test "$(git rev-parse --show-toplevel)" = "$(pwd -P)"
+export PYTHONPATH=src:.
+test -z "$(git status --porcelain=v1 --untracked-files=all)"
 test -f "$trusted_release" && test ! -L "$trusted_release"
 test "$(stat -c %u "$trusted_release")" = "$(id -u)"
 test "$(stat -c %a "$trusted_release")" = 600
 test "$(stat -c %h "$trusted_release")" = 1
 test "$(sha256sum "$trusted_release" | awk '{print $1}')" = \
   "$trusted_release_sha256"
+repository_source_sha="$(git rev-parse HEAD)"
+repository_source_tree="$(git rev-parse HEAD^{tree})"
+test "$repository_source_sha" = "$(jq -r .source_sha "$trusted_release")"
+test "$repository_source_tree" = "$(jq -r .source_tree "$trusted_release")"
 test -f "$profile" && test ! -L "$profile"
+test "$(stat -c %u "$profile")" = "$(id -u)"
+test "$(stat -c %h "$profile")" = 1
+test "$(stat -c %s "$profile")" -gt 0
+test "$(stat -c %s "$profile")" -le 1048576
 test -f "$kubeconfig" && test ! -L "$kubeconfig"
 test "$(realpath -e "$kubeconfig")" = "$kubeconfig"
+test "$(stat -c %u "$kubeconfig")" = "$(id -u)"
+test "$(stat -c %a "$kubeconfig")" = 600
+test "$(stat -c %h "$kubeconfig")" = 1
+test "$(stat -c %s "$kubeconfig")" -gt 0
+test "$(stat -c %s "$kubeconfig")" -le 1048576
+profile_sha256="$(sha256sum "$profile" | awk '{print $1}')"
+kubeconfig_sha256="$(sha256sum "$kubeconfig" | awk '{print $1}')"
+kubeconfig_identity="$(stat -c '%d:%i:%f:%u:%g:%h:%s:%y:%z' "$kubeconfig")"
+
+assert_reviewed_kubeconfig() {
+  test -f "$kubeconfig" && test ! -L "$kubeconfig"
+  test "$(realpath -e "$kubeconfig")" = "$kubeconfig"
+  test "$(stat -c %u "$kubeconfig")" = "$(id -u)"
+  test "$(stat -c %a "$kubeconfig")" = 600
+  test "$(stat -c %h "$kubeconfig")" = 1
+  test "$(stat -c %s "$kubeconfig")" -gt 0
+  test "$(stat -c %s "$kubeconfig")" -le 1048576
+  test "$(stat -c '%d:%i:%f:%u:%g:%h:%s:%y:%z' "$kubeconfig")" = \
+    "$kubeconfig_identity"
+  test "$(sha256sum "$kubeconfig" | awk '{print $1}')" = "$kubeconfig_sha256"
+}
+
+assert_no_dynamic_namespaces() {
+  local forbidden_namespaces
+  forbidden_namespaces="$(
+    kubectl --kubeconfig "$kubeconfig" get namespaces -o json \
+      | jq -r '.items[].metadata.name |
+          select(startswith("loom-dev-") or startswith("loom-build-"))'
+  )"
+  test -z "$forbidden_namespaces"
+}
+
+capacity_shadow_status() {
+  uv run --no-sync loom admin capacity-control-plane status \
+    --namespace loom-dev \
+    --kubeconfig "$kubeconfig"
+}
+
+assert_zero_capacity() {
+  local capacity_status
+  capacity_status="$(capacity_shadow_status)"
+  test "$capacity_status" = \
+    '{"executable_new_capacity_ceiling":0,"status":"ready"}'
+}
+
+assert_status_input_safety() {
+  local checked_profile="$1"
+  local checked_release="$2"
+  local checked_release_sha256="$3"
+  local preflight_status
+  local status_rc=0
+  local valid=0
+  preflight_status="$(mktemp "$evidence_dir/preflight-status.XXXXXX.json")"
+  uv run --no-sync loom admin personal-dev-control-plane status \
+    --namespace loom-dev \
+    --kubeconfig "$kubeconfig" \
+    --file "$checked_profile" \
+    --trusted-release-file "$checked_release" \
+    --trusted-release-sha256 "$checked_release_sha256" \
+    > "$preflight_status" || status_rc=$?
+  if { test "$status_rc" -eq 0 || test "$status_rc" -eq 1; } &&
+    jq -e '.schema == "loom-personal-dev-control-plane-status-v1" and
+           (.blockers | index("kube_context_invalid") | not)' \
+      "$preflight_status" >/dev/null; then
+    valid=1
+  fi
+  rm -f "$preflight_status"
+  test "$valid" -eq 1
+}
 ```
 
 Keep the previous reviewed shadow YAML, profile, trusted-release file, trusted
@@ -91,13 +179,36 @@ mv "$render_tmp" "$shadow_render"
 mv "$render_evidence_tmp" "$render_evidence"
 sha256sum "$shadow_render" > "$shadow_render.sha256"
 chmod 0600 "$shadow_render.sha256"
+shadow_render_sha256="$(sha256sum "$shadow_render" | awk '{print $1}')"
+
+assert_current_shadow_artifacts() {
+  test -z "$(git status --porcelain=v1 --untracked-files=all)"
+  test "$(git rev-parse HEAD)" = "$(jq -r .source_sha "$trusted_release")"
+  test "$(git rev-parse HEAD^{tree})" = "$(jq -r .source_tree "$trusted_release")"
+  test -f "$profile" && test ! -L "$profile"
+  test "$(stat -c %u "$profile")" = "$(id -u)"
+  test "$(stat -c %h "$profile")" = 1
+  test "$(stat -c %s "$profile")" -gt 0
+  test "$(stat -c %s "$profile")" -le 1048576
+  test "$(sha256sum "$profile" | awk '{print $1}')" = "$profile_sha256"
+  test "$(sha256sum "$trusted_release" | awk '{print $1}')" = \
+    "$trusted_release_sha256"
+  test -f "$shadow_render" && test ! -L "$shadow_render"
+  test "$(stat -c %u "$shadow_render")" = "$(id -u)"
+  test "$(stat -c %a "$shadow_render")" = 600
+  test "$(stat -c %h "$shadow_render")" = 1
+  test "$(sha256sum "$shadow_render" | awk '{print $1}')" = \
+    "$shadow_render_sha256"
+  assert_status_input_safety \
+    "$profile" "$trusted_release" "$trusted_release_sha256"
+}
 
 jq -e \
   --arg release "$trusted_release_sha256" \
   --arg yaml "$(sha256sum "$shadow_render" | awk '{print $1}')" \
   '.schema == "loom-personal-dev-control-plane-render-v1" and
    .mode == "shadow" and
-   .resource_count == 32 and
+   .resource_count == 33 and
    .release_sha256 == $release and
    .yaml_sha256 == $yaml and
    (.input_sha256 | test("^[0-9a-f]{64}$")) and
@@ -117,21 +228,18 @@ application.
 The selected kubeconfig is explicit and canonical. Record its current context,
 prove that no personal namespace exists, and require the separate global
 capacity shadow to report ready at ceiling zero before opening the change
-window.
+window. It must be flattened and self-contained, with no external credential
+paths or exec credential plugins; status enforces those requirements and gives
+every command a read-only anonymous snapshot of the exact validated bytes.
 
 ```bash
+assert_reviewed_kubeconfig
 kubectl --kubeconfig "$kubeconfig" config current-context \
   > "$evidence_dir/kube-context.txt"
 
-personal_namespaces="$(
-  kubectl --kubeconfig "$kubeconfig" get namespaces -o json \
-    | jq -r '.items[].metadata.name | select(startswith("loom-dev-"))'
-)"
-test -z "$personal_namespaces"
+assert_no_dynamic_namespaces
 
-uv run --no-sync loom admin capacity-control-plane status \
-  --namespace loom-dev \
-  --kubeconfig "$kubeconfig" \
+capacity_shadow_status \
   > "$evidence_dir/capacity-shadow.status.json"
 test "$(tr -d '\n' < "$evidence_dir/capacity-shadow.status.json")" = \
   '{"executable_new_capacity_ceiling":0,"status":"ready"}'
@@ -170,10 +278,19 @@ namespace, mutable image, enabled personal flag, nonzero activation replica,
 or capacity resource outside the reviewed shadow is a stop condition.
 
 ```bash
+test ! -e "$evidence_dir/server-side-diff.txt"
+diff_status=0
 kubectl --kubeconfig "$kubeconfig" diff --server-side \
   --field-manager=loom-personal-dev-control-plane \
-  -f "$shadow_render"
+  -f "$shadow_render" \
+  > "$evidence_dir/server-side-diff.txt" 2>&1 || diff_status=$?
+test "$diff_status" -eq 0 || test "$diff_status" -eq 1
+chmod 0600 "$evidence_dir/server-side-diff.txt"
 
+assert_current_shadow_artifacts
+assert_no_dynamic_namespaces
+assert_zero_capacity
+assert_reviewed_kubeconfig
 kubectl --kubeconfig "$kubeconfig" apply --server-side \
   --field-manager=loom-personal-dev-control-plane \
   -f "$shadow_render" \
@@ -251,7 +368,7 @@ chmod 0600 "$status_evidence.sha256"
 The successful canonical shape is:
 
 ```json
-{"blockers":[],"components":[{"name":"cluster-resources","observed":10,"ready":true},{"name":"manager","observed":1,"ready":true},{"name":"namespaced-resources","observed":27,"ready":true},{"name":"namespaces","observed":1,"ready":true},{"name":"runtime-class","observed":1,"ready":true}],"input_sha256":"<render-input-sha256>","manager_ceiling":0,"mode":"shadow","ready":true,"release_sha256":"<trusted-release-sha256>","schema":"loom-personal-dev-control-plane-status-v1"}
+{"blockers":[],"components":[{"name":"cluster-resources","observed":10,"ready":true},{"name":"manager","observed":1,"ready":true},{"name":"namespaced-resources","observed":28,"ready":true},{"name":"namespaces","observed":1,"ready":true},{"name":"runtime-class","observed":1,"ready":true}],"input_sha256":"<render-input-sha256>","manager_ceiling":0,"mode":"shadow","ready":true,"release_sha256":"<trusted-release-sha256>","schema":"loom-personal-dev-control-plane-status-v1"}
 ```
 
 The namespaced observed count may include bounded retained successful migration
@@ -261,8 +378,9 @@ and digest fields remain bounded.
 ## 8. Roll back without deleting state
 
 Rollback is another issue #1280 window action. Stop if any
-`loom-dev-<owner>` namespace exists. Verify the previous manifest, its matching
-trusted release, and its recorded SHA-256 before continuing.
+`loom-dev-<owner>` namespace exists, and stop if any `loom-build-*` namespace
+exists. Verify the previous manifest, its matching trusted release, and its
+recorded SHA-256 before continuing.
 Reapply the previous reviewed shadow with the same field manager; do not
 synthesize a replacement manifest from live state.
 
@@ -271,6 +389,13 @@ schema-compatible with the current database state. This rehearsal does not
 downgrade schema, restore a database, or infer compatibility from a completed
 historical Job.
 
+Server-side apply does not remove objects absent from the older manifest.
+Before mutation, the procedure therefore requires identical current and
+previous resource identity sets after excluding immutable migration Jobs,
+which are retained as bounded evidence. Any other identity difference requires
+a separately reviewed cleanup plan and is a rollback stop condition; this
+runbook never guesses which live object is safe to delete.
+
 ```bash
 test -f "$previous_shadow_render" && test ! -L "$previous_shadow_render"
 test "$(stat -c %u "$previous_shadow_render")" = "$(id -u)"
@@ -278,22 +403,124 @@ test "$(stat -c %a "$previous_shadow_render")" = 600
 test "$(stat -c %h "$previous_shadow_render")" = 1
 test "$(sha256sum "$previous_shadow_render" | awk '{print $1}')" = "$previous_shadow_sha256"
 test -f "$previous_profile" && test ! -L "$previous_profile"
+test "$(stat -c %u "$previous_profile")" = "$(id -u)"
+test "$(stat -c %h "$previous_profile")" = 1
+test "$(stat -c %s "$previous_profile")" -gt 0
+test "$(stat -c %s "$previous_profile")" -le 1048576
 test -f "$previous_trusted_release" && test ! -L "$previous_trusted_release"
 test "$(stat -c %u "$previous_trusted_release")" = "$(id -u)"
 test "$(stat -c %a "$previous_trusted_release")" = 600
 test "$(stat -c %h "$previous_trusted_release")" = 1
 test "$(sha256sum "$previous_trusted_release" | awk '{print $1}')" = \
   "$previous_trusted_release_sha256"
+previous_profile_sha256="$(sha256sum "$previous_profile" | awk '{print $1}')"
 
-personal_namespaces="$(
+assert_previous_shadow_artifacts() {
+  test -f "$previous_shadow_render" && test ! -L "$previous_shadow_render"
+  test "$(stat -c %u "$previous_shadow_render")" = "$(id -u)"
+  test "$(stat -c %a "$previous_shadow_render")" = 600
+  test "$(stat -c %h "$previous_shadow_render")" = 1
+  test "$(sha256sum "$previous_shadow_render" | awk '{print $1}')" = \
+    "$previous_shadow_sha256"
+  test -f "$previous_profile" && test ! -L "$previous_profile"
+  test "$(stat -c %u "$previous_profile")" = "$(id -u)"
+  test "$(stat -c %h "$previous_profile")" = 1
+  test "$(stat -c %s "$previous_profile")" -gt 0
+  test "$(stat -c %s "$previous_profile")" -le 1048576
+  test "$(sha256sum "$previous_profile" | awk '{print $1}')" = \
+    "$previous_profile_sha256"
+  test "$(sha256sum "$previous_trusted_release" | awk '{print $1}')" = \
+    "$previous_trusted_release_sha256"
+  assert_status_input_safety \
+    "$previous_profile" "$previous_trusted_release" \
+    "$previous_trusted_release_sha256"
+}
+
+previous_shadow_render_tmp="$(mktemp "$evidence_dir/previous-shadow.XXXXXX.yaml")"
+previous_render_evidence_tmp="$(mktemp "$evidence_dir/previous-shadow.XXXXXX.json")"
+if ! uv run --no-sync loom admin personal-dev-control-plane render \
+  --file "$previous_profile" \
+  --trusted-release-file "$previous_trusted_release" \
+  --trusted-release-sha256 "$previous_trusted_release_sha256" \
+  > "$previous_shadow_render_tmp" 2> "$previous_render_evidence_tmp"; then
+  rm -f "$previous_shadow_render_tmp" "$previous_render_evidence_tmp"
+  exit 1
+fi
+chmod 0600 "$previous_shadow_render_tmp" "$previous_render_evidence_tmp"
+if ! cmp -s "$previous_shadow_render_tmp" "$previous_shadow_render"; then
+  rm -f "$previous_shadow_render_tmp" "$previous_render_evidence_tmp"
+  exit 1
+fi
+rm -f "$previous_shadow_render_tmp" "$previous_render_evidence_tmp"
+
+current_identities_tmp="$(mktemp "$evidence_dir/rollback-current-identities.XXXXXX.txt")"
+previous_identities_tmp="$(mktemp "$evidence_dir/rollback-previous-identities.XXXXXX.txt")"
+render_identity_set() {
+  uv run --no-sync python - "$1" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+import yaml
+
+documents = list(yaml.safe_load_all(Path(sys.argv[1]).read_text(encoding="utf-8")))
+identities = set()
+for document in documents:
+    if not isinstance(document, dict) or not isinstance(document.get("metadata"), dict):
+        raise SystemExit("manifest resource identity is invalid")
+    api_version = document.get("apiVersion")
+    kind = document.get("kind")
+    name = document["metadata"].get("name")
+    namespace = document["metadata"].get("namespace", "")
+    if not all(isinstance(value, str) and value for value in (api_version, kind, name)):
+        raise SystemExit("manifest resource identity is invalid")
+    if not isinstance(namespace, str):
+        raise SystemExit("manifest resource identity is invalid")
+    if kind == "Job" and name.startswith("loom-personal-dev-migrate-"):
+        continue
+    identity = (api_version, kind, namespace, name)
+    if identity in identities:
+        raise SystemExit("manifest resource identity is duplicated")
+    identities.add(identity)
+for identity in sorted(identities):
+    print(json.dumps(identity, separators=(",", ":"), ensure_ascii=True))
+PY
+}
+if ! render_identity_set "$shadow_render" > "$current_identities_tmp"; then
+  rm -f "$current_identities_tmp" "$previous_identities_tmp"
+  exit 1
+fi
+if ! render_identity_set "$previous_shadow_render" > "$previous_identities_tmp"; then
+  rm -f "$current_identities_tmp" "$previous_identities_tmp"
+  exit 1
+fi
+unset -f render_identity_set
+chmod 0600 "$current_identities_tmp" "$previous_identities_tmp"
+if ! cmp -s "$current_identities_tmp" "$previous_identities_tmp"; then
+  rm -f "$current_identities_tmp" "$previous_identities_tmp"
+  exit 1
+fi
+rm -f "$current_identities_tmp" "$previous_identities_tmp"
+
+forbidden_namespaces="$(
   kubectl --kubeconfig "$kubeconfig" get namespaces -o json \
-    | jq -r '.items[].metadata.name | select(startswith("loom-dev-"))'
+    | jq -r '.items[].metadata.name |
+        select(startswith("loom-dev-") or startswith("loom-build-"))'
 )"
-test -z "$personal_namespaces"
+test -z "$forbidden_namespaces"
 
+test ! -e "$evidence_dir/rollback-server-side-diff.txt"
+rollback_diff_status=0
 kubectl --kubeconfig "$kubeconfig" diff --server-side \
   --field-manager=loom-personal-dev-control-plane \
-  -f "$previous_shadow_render"
+  -f "$previous_shadow_render" \
+  > "$evidence_dir/rollback-server-side-diff.txt" 2>&1 || rollback_diff_status=$?
+test "$rollback_diff_status" -eq 0 || test "$rollback_diff_status" -eq 1
+chmod 0600 "$evidence_dir/rollback-server-side-diff.txt"
+assert_previous_shadow_artifacts
+assert_no_dynamic_namespaces
+assert_zero_capacity
+assert_reviewed_kubeconfig
 kubectl --kubeconfig "$kubeconfig" apply --server-side \
   --field-manager=loom-personal-dev-control-plane \
   -f "$previous_shadow_render" \

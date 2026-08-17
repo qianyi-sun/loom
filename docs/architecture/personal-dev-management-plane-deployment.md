@@ -70,6 +70,9 @@ remains a separate #906 package and review.
 The renderer emits these resources, all pinned to the exact `loom-dev`
 namespace unless Kubernetes requires cluster scope:
 
+- the shared `loom-dev` Namespace under the same `loom-operator` ownership
+  label as the global-capacity package, with package-specific render evidence
+  kept in annotations instead of competing for Namespace ownership;
 - `loom-dev-postgres` StatefulSet, headless/service endpoints, and persistent
   volume claim for the management database plus derived personal databases;
 - `loom-dev-minio` StatefulSet, Service, and persistent volume claim for source,
@@ -85,7 +88,9 @@ namespace unless Kubernetes requires cluster scope:
 - service accounts and least-privilege RBAC for the management service,
   restricted builder jobs, and activation agent;
 - NetworkPolicies that allow only the required DNS, PostgreSQL, MinIO, registry,
-  global-manager, ingress, and personal-namespace control paths; and
+  global-manager, ingress, and personal-namespace control paths, with separate
+  PostgreSQL and MinIO ingress policies so migration and builder callers cannot
+  inherit each other's storage access; and
 - internal Services plus one operator-configured management API Ingress. No
   shared Control Plane, Gateway, worker, family orchestrator, pipeline
   orchestrator, or web Deployment is rendered.
@@ -103,13 +108,41 @@ ResourceQuota, LimitRange, ConfigMap, capability Secret, NetworkPolicy, and Job
 contract; they cannot host a personal application or alter shared
 infrastructure. The activation principal remains limited to `loom-dev-*` and
 receives authority there only through the per-namespace RoleBinding rendered
-by the lifecycle.
+by the lifecycle. Every resource mutation rechecks the complete namespace
+shape, reserved-name exclusion, exact family resource name, and managed-by
+label. Personal application objects use `loom-dev-instance-controller`, while
+the separately fenced capacity-agent objects retain
+`loom-personal-dev-lifecycle`; builder objects use
+`loom-personal-dev-builder-controller`. A broad prefix or a pre-existing
+malformed namespace cannot bypass the policy.
 
 The namespace-local management role can get only the four fixed lifecycle
 Secrets; it cannot list or watch arbitrary application or TLS Secrets.
 Management may prepare only generation-suffixed candidate Services and has no
 Ingress mutation verb. Stable Services and Ingresses remain exclusive to the
-candidate-independent activation principal.
+candidate-independent activation principal. Its admission contract binds the
+namespace owner and deployment generation, permits only internal ClusterIP
+Services with exact selectors and ports, and fixes every Ingress host, backend,
+TLS Secret, class, and annotation. Admission applies the same fixed Secret set
+to personal Deployment and Job volume/environment references, rejects
+projected or CSI Secret paths, and keeps API-token automount disabled.
+Builder Jobs are likewise limited to attempt-capability Secrets and the
+unprivileged default service account, without projected API credentials. Both
+workload families reject `imagePullSecrets`, closing the remaining indirect
+Secret reference path.
+
+Admission deliberately does not duplicate every field of the dynamic
+Deployment, Job, ConfigMap, quota, or NetworkPolicy constructors in CEL. The
+digest-pinned, CI-approved management service is the trusted manifest
+generator: arbitrary uploaded source enters only the attempt-scoped builder
+and then the fixed personal component images. It cannot supply Kubernetes
+objects, labels, RBAC, Secret references, service accounts, routes, or network
+policy. Admission independently fences the authority-bearing boundaries above
+so a personal image has no Kubernetes credential and cannot widen them. A
+future threat model that treats the management release itself as untrusted
+would require a separate signed-manifest admission authority; partially
+reimplementing its constructors in CEL would not contain a process that
+already holds the lifecycle, publisher, and shared-storage credentials.
 
 The builder RuntimeClass is an independently installed cluster capability. The
 shadow package records its exact future name but sets builder preparation to
@@ -121,7 +154,9 @@ those observed values match the plan.
 ## Configuration and immutable release binding
 
 `deploy/dev-fleet/personal-dev-control-plane.toml` is the non-secret live
-profile. Its fixed invariants are:
+profile. The loader accepts one current-user-owned, single-link regular file,
+pins its descriptor identity across the bounded read, and rejects symlink,
+replacement, or in-place races. Its fixed invariants are:
 
 - namespace: `loom-dev`;
 - personal namespace prefix: `loom-dev-`;
@@ -218,8 +253,14 @@ be accepted and no stable personal route can be changed.
 - the management service is healthy with both mutation features disabled;
 - the activation agent is absent or scaled to zero;
 - the global manager reports a healthy executable ceiling of `0`; and
-- no unexpected `loom-dev-*` namespace or package-owned cluster-scoped binding
-  exists.
+- no unexpected `loom-dev-*` or `loom-build-*` namespace or package-owned
+  cluster-scoped binding exists.
+
+The status command accepts only an owner-only, flattened, self-contained
+kubeconfig. External certificate, key, or token files, legacy auth providers,
+and exec credential plugins are rejected before observation. Every kubectl
+process receives a read-only anonymous snapshot of the exact validated bytes,
+so a path or in-place rewrite cannot change the authority it consumes.
 
 ### Zero-capacity acceptance
 

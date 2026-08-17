@@ -158,24 +158,32 @@ def _run(
 
 
 def _json_document(payload: str) -> dict[str, Any]:
-    value = json.loads(
-        payload,
-        object_pairs_hook=_unique_object,
-        parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()),
-    )
+    try:
+        value = json.loads(
+            payload,
+            object_pairs_hook=_unique_object,
+            parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()),
+        )
+    except RecursionError:
+        raise ValueError("JSON document is too deeply nested") from None
     if not isinstance(value, dict):
         raise ValueError("JSON document is not an object")
     return value
 
 
-def _list_items(result: subprocess.CompletedProcess[str]) -> list[dict[str, Any]]:
+def _list_items(
+    result: subprocess.CompletedProcess[str],
+    *,
+    expected_kind: str,
+) -> list[dict[str, Any]]:
     if result.returncode != 0:
         raise OSError("kubectl inventory is unavailable")
     document = _json_document(result.stdout)
     items = document.get("items")
     if (
         not set(document).issubset({"apiVersion", "kind", "metadata", "items"})
-        or document.get("kind") != "List"
+        or document.get("apiVersion") != "v1"
+        or document.get("kind") != expected_kind
         or not isinstance(items, list)
         or len(items) > _MAX_INVENTORY_ITEMS
         or any(not isinstance(item, dict) for item in items)
@@ -543,23 +551,28 @@ def observe_personal_dev_shadow_status(
         namespace_result = results[_NAMESPACE_COMMAND]
         if namespace_result is None:
             raise ValueError("namespace inventory response is invalid")
-        namespace_items = _list_items(namespace_result)
+        namespace_items = _list_items(namespace_result, expected_kind="NamespaceList")
         names: dict[str, dict[str, Any]] = {}
         for item in namespace_items:
+            if item.get("apiVersion") != "v1" or item.get("kind") != "Namespace":
+                raise ValueError("namespace inventory item has an invalid shape")
             metadata = _metadata(item)
             name = metadata.get("name") if metadata else None
             if not isinstance(name, str) or name in names:
                 raise ValueError("namespace identity is invalid or duplicated")
             names[name] = item
         personal_names = sorted(name for name in names if name.startswith("loom-dev-"))
-        namespace_observed = int(_NAMESPACE in names) + len(personal_names)
+        builder_names = sorted(name for name in names if name.startswith("loom-build-"))
+        namespace_observed = int(_NAMESPACE in names) + len(personal_names) + len(builder_names)
         if personal_names:
             blockers.add("unexpected_personal_namespace")
+        if builder_names:
+            blockers.add("unexpected_builder_namespace")
         shared_namespace_ok = _NAMESPACE in names and _expected_subset(
             expected_namespace,
             names[_NAMESPACE],
         )
-        namespace_ok = shared_namespace_ok and not personal_names
+        namespace_ok = shared_namespace_ok and not personal_names and not builder_names
         if not shared_namespace_ok:
             blockers.add("namespace_missing")
     except (OSError, json.JSONDecodeError, UnicodeError, ValueError):
@@ -593,7 +606,7 @@ def observe_personal_dev_shadow_status(
         namespaced_result = results[_NAMESPACED_COMMAND]
         if namespaced_result is None:
             raise ValueError("namespaced inventory response is invalid")
-        namespaced_items = _list_items(namespaced_result)
+        namespaced_items = _list_items(namespaced_result, expected_kind="List")
         live_namespaced = _index_unique(namespaced_items)
         namespaced_observed = len(live_namespaced)
         pods = [item for item in namespaced_items if item.get("kind") == "Pod"]
@@ -846,7 +859,7 @@ def observe_personal_dev_shadow_status(
         cluster_result = results[_CLUSTER_COMMAND]
         if cluster_result is None:
             raise ValueError("cluster inventory response is invalid")
-        cluster_items = _list_items(cluster_result)
+        cluster_items = _list_items(cluster_result, expected_kind="List")
         live_cluster = _index_unique(cluster_items)
         cluster_observed = len(live_cluster)
         cluster_ok = set(live_cluster) == set(expected_cluster_index) and all(

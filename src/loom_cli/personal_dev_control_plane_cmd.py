@@ -10,10 +10,13 @@ import selectors
 import stat
 import subprocess
 import sys
+import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
+
+import yaml  # type: ignore[import-untyped]
 
 from loom.personal_dev_control_plane_config import (
     load_personal_dev_control_plane_profile,
@@ -30,6 +33,8 @@ from loom.personal_dev_control_plane_status import (
 _RENDER_ERROR = "error: personal-dev control-plane render inputs are invalid\n"
 _STATUS_ERROR = "error: personal-dev control-plane status inputs are invalid\n"
 _KUBECTL_READ_BYTES = 64 * 1024
+_MAX_KUBECONFIG_BYTES = 1024 * 1024
+_KubeconfigIdentity = tuple[int, int, int, int, int, int, int, int, int]
 
 
 def _render(args: argparse.Namespace) -> int:
@@ -70,7 +75,22 @@ def _render(args: argparse.Namespace) -> int:
 
 class _SubprocessKubectlRunner:
     def __init__(self, kubeconfig: Path) -> None:
-        self._prefix = ("kubectl", "--kubeconfig", str(kubeconfig))
+        self._kubeconfig = kubeconfig
+        loaded = _load_safe_kubeconfig(kubeconfig)
+        if loaded is None:
+            raise ValueError("kubeconfig is invalid")
+        self._kubeconfig_identity, self._kubeconfig_payload = loaded
+
+    def _validate_kubeconfig(self) -> None:
+        if _load_safe_kubeconfig(self._kubeconfig) != (
+            self._kubeconfig_identity,
+            self._kubeconfig_payload,
+        ):
+            raise OSError("kubeconfig changed during observation")
+
+    def _open_kubeconfig(self) -> int:
+        self._validate_kubeconfig()
+        return _anonymous_kubeconfig_snapshot(self._kubeconfig_payload)
 
     def run(
         self,
@@ -80,14 +100,26 @@ class _SubprocessKubectlRunner:
     ) -> subprocess.CompletedProcess[str]:
         if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 60:
             raise ValueError("kubectl timeout is invalid")
-        command = [*self._prefix, *argv]
-        process = subprocess.Popen(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            close_fds=True,
-        )
+        self._validate_kubeconfig()
+        kubeconfig_descriptor = self._open_kubeconfig()
+        display_command = ["kubectl", "--kubeconfig", str(self._kubeconfig), *argv]
+        command = [
+            "kubectl",
+            "--kubeconfig",
+            f"/proc/self/fd/{kubeconfig_descriptor}",
+            *argv,
+        ]
+        try:
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                close_fds=True,
+                pass_fds=(kubeconfig_descriptor,),
+            )
+        finally:
+            os.close(kubeconfig_descriptor)
         if process.stdout is None or process.stderr is None:  # pragma: no cover
             process.kill()
             process.wait()
@@ -132,6 +164,7 @@ class _SubprocessKubectlRunner:
             if remaining <= 0:
                 raise subprocess.TimeoutExpired(command, timeout_seconds)
             returncode = process.wait(timeout=remaining)
+            self._validate_kubeconfig()
         except BaseException:
             if process.poll() is None:
                 process.kill()
@@ -142,28 +175,195 @@ class _SubprocessKubectlRunner:
             process.stdout.close()
             process.stderr.close()
         return subprocess.CompletedProcess(
-            [*self._prefix, *argv],
+            display_command,
             returncode,
             streams["stdout"][1].decode("utf-8"),
             streams["stderr"][1].decode("utf-8"),
         )
 
 
-def _safe_kubeconfig(path: Path) -> bool:
-    if not path.is_absolute():
+def _kubeconfig_identity(opened: os.stat_result) -> _KubeconfigIdentity:
+    return (
+        opened.st_dev,
+        opened.st_ino,
+        opened.st_mode,
+        opened.st_uid,
+        opened.st_gid,
+        opened.st_nlink,
+        opened.st_size,
+        opened.st_mtime_ns,
+        opened.st_ctime_ns,
+    )
+
+
+def _self_contained_kubeconfig(payload: bytes) -> bool:
+    try:
+        document = yaml.safe_load(payload)
+    except (RecursionError, UnicodeDecodeError, yaml.YAMLError):
         return False
+    if (
+        not isinstance(document, Mapping)
+        or document.get("apiVersion") != "v1"
+        or document.get("kind") != "Config"
+        or not isinstance(document.get("current-context"), str)
+        or not document["current-context"]
+    ):
+        return False
+
+    def entries(field: str, body_field: str) -> dict[str, Mapping[str, object]] | None:
+        values = document.get(field)
+        if not isinstance(values, list) or not 1 <= len(values) <= 128:
+            return None
+        result: dict[str, Mapping[str, object]] = {}
+        for value in values:
+            if not isinstance(value, Mapping):
+                return None
+            name = value.get("name")
+            body = value.get(body_field)
+            if (
+                not isinstance(name, str)
+                or not name
+                or name in result
+                or not isinstance(body, Mapping)
+            ):
+                return None
+            result[name] = body
+        return result
+
+    clusters = entries("clusters", "cluster")
+    contexts = entries("contexts", "context")
+    users = entries("users", "user")
+    if clusters is None or contexts is None or users is None:
+        return False
+    current = contexts.get(document["current-context"])
+    if current is None:
+        return False
+    cluster_name = current.get("cluster")
+    user_name = current.get("user")
+    if (
+        not isinstance(cluster_name, str)
+        or not isinstance(user_name, str)
+        or cluster_name not in clusters
+        or user_name not in users
+    ):
+        return False
+    if any("certificate-authority" in cluster for cluster in clusters.values()):
+        return False
+    external_user_fields = {
+        "auth-provider",
+        "client-certificate",
+        "client-key",
+        "exec",
+        "tokenFile",
+    }
+    return all(not external_user_fields.intersection(user) for user in users.values())
+
+
+def _load_safe_kubeconfig(path: Path) -> tuple[_KubeconfigIdentity, bytes] | None:
+    if not path.is_absolute():
+        return None
     try:
         if path.resolve(strict=True) != path:
-            return False
-        opened = path.lstat()
+            return None
+        path_metadata = path.lstat()
     except (OSError, RuntimeError):
-        return False
-    return stat.S_ISREG(opened.st_mode) and not stat.S_ISLNK(opened.st_mode)
+        return None
+    if (
+        not stat.S_ISREG(path_metadata.st_mode)
+        or stat.S_ISLNK(path_metadata.st_mode)
+        or path_metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(path_metadata.st_mode) != 0o600
+        or path_metadata.st_nlink != 1
+        or not 0 < path_metadata.st_size <= _MAX_KUBECONFIG_BYTES
+    ):
+        return None
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        opened = os.fstat(descriptor)
+        identity = _kubeconfig_identity(opened)
+        if identity != _kubeconfig_identity(path_metadata):
+            return None
+        payload = bytearray()
+        while len(payload) <= _MAX_KUBECONFIG_BYTES:
+            chunk = os.read(
+                descriptor, min(_KUBECTL_READ_BYTES, _MAX_KUBECONFIG_BYTES + 1 - len(payload))
+            )
+            if not chunk:
+                break
+            payload.extend(chunk)
+        if (
+            len(payload) != opened.st_size
+            or _kubeconfig_identity(os.fstat(descriptor)) != identity
+            or _safe_path_identity(path) != identity
+            or not _self_contained_kubeconfig(bytes(payload))
+        ):
+            return None
+        return identity, bytes(payload)
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
+
+
+def _safe_path_identity(path: Path) -> _KubeconfigIdentity | None:
+    try:
+        return _kubeconfig_identity(path.lstat())
+    except OSError:
+        return None
+
+
+def _anonymous_kubeconfig_snapshot(payload: bytes) -> int:
+    descriptor: int | None = None
+    try:
+        temporary_directory = tempfile.gettempdir()
+        temporary_flag = getattr(os, "O_TMPFILE", 0)
+        if temporary_flag:
+            try:
+                descriptor = os.open(
+                    temporary_directory,
+                    temporary_flag | os.O_RDWR | getattr(os, "O_CLOEXEC", 0),
+                    0o600,
+                )
+            except OSError:
+                descriptor = None
+        if descriptor is None:
+            descriptor, temporary_path = tempfile.mkstemp(
+                prefix="loom-personal-dev-kubeconfig-",
+                dir=temporary_directory,
+            )
+            os.unlink(temporary_path)
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("kubeconfig snapshot write failed")
+            view = view[written:]
+        os.fchmod(descriptor, 0o400)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        read_descriptor = os.open(
+            f"/proc/self/fd/{descriptor}",
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
+        )
+        os.close(descriptor)
+        return read_descriptor
+    except BaseException:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise
+
+
+def _safe_kubeconfig(path: Path) -> _KubeconfigIdentity | None:
+    loaded = _load_safe_kubeconfig(path)
+    return None if loaded is None else loaded[0]
 
 
 def _status(args: argparse.Namespace) -> int:
     try:
-        if not _safe_kubeconfig(args.kubeconfig):
+        if _safe_kubeconfig(args.kubeconfig) is None:
             raise ValueError("kubeconfig is invalid")
         profile = load_personal_dev_control_plane_profile(args.file)
         release = load_personal_dev_trusted_release(
@@ -171,12 +371,13 @@ def _status(args: argparse.Namespace) -> int:
             args.trusted_release_sha256,
         )
         expected = render_shadow_personal_dev_control_plane(profile, release)
+        runner = _SubprocessKubectlRunner(args.kubeconfig)
     except (OSError, TypeError, ValueError):
         sys.stderr.write(_STATUS_ERROR)
         return 2
 
     status_value = observe_personal_dev_shadow_status(
-        _SubprocessKubectlRunner(args.kubeconfig),
+        runner,
         expected=expected,
         namespace=args.namespace,
     )

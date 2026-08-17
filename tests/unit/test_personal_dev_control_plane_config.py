@@ -161,6 +161,14 @@ def test_checked_in_shadow_profile_is_exact_and_canonical() -> None:
             'publisher_identity = "system:serviceaccount:other:loom-personal-dev-management"',
         ),
         lambda text: text.replace(
+            'registry_prefix = "ghcr.io/qianyi-sun/loom-dev"',
+            'registry_prefix = "ghcr..io/qianyi-sun/loom-dev"',
+        ),
+        lambda text: text.replace(
+            'registry_prefix = "ghcr.io/qianyi-sun/loom-dev"',
+            'registry_prefix = "ghcr.io:99999/qianyi-sun/loom-dev"',
+        ),
+        lambda text: text.replace(
             'capacity_manager_pod_label_key = "app.kubernetes.io/name"',
             'capacity_manager_pod_label_key = "/name"',
         ),
@@ -201,6 +209,29 @@ def test_profile_rejects_missing_and_duplicate_pools(tmp_path: Path) -> None:
         load_personal_dev_control_plane_profile(missing)
     with pytest.raises((ValidationError, ValueError)):
         load_personal_dev_control_plane_profile(duplicate)
+
+
+@pytest.mark.parametrize("unsafe", ["symlink", "hardlink", "empty", "oversized"])
+def test_profile_rejects_unstable_or_unbounded_file_identity(
+    tmp_path: Path,
+    unsafe: str,
+) -> None:
+    source = tmp_path / "profile.toml"
+    source.write_bytes(_PROFILE.read_bytes())
+    selected = source
+    if unsafe == "symlink":
+        selected = tmp_path / "linked-profile.toml"
+        selected.symlink_to(source)
+    elif unsafe == "hardlink":
+        selected = tmp_path / "hardlinked-profile.toml"
+        os.link(source, selected)
+    elif unsafe == "empty":
+        source.write_bytes(b"")
+    else:
+        source.write_bytes(b"x" * (1024 * 1024 + 1))
+
+    with pytest.raises(ValueError, match="profile is invalid"):
+        load_personal_dev_control_plane_profile(selected)
 
 
 def test_trusted_release_loads_exact_owner_only_canonical_bytes(tmp_path: Path) -> None:
@@ -332,6 +363,14 @@ def test_trusted_release_rejects_invalid_contract(
     ],
 )
 def test_trusted_release_rejects_noncanonical_payload(tmp_path: Path, payload: bytes) -> None:
+    path, digest = _write_release(tmp_path, payload=payload)
+
+    with pytest.raises(PersonalDevTrustedReleaseError, match="trusted release is invalid"):
+        load_personal_dev_trusted_release(path, digest)
+
+
+def test_trusted_release_rejects_pathologically_deep_json(tmp_path: Path) -> None:
+    payload = b"[" * 2_000 + b"0" + b"]" * 2_000
     path, digest = _write_release(tmp_path, payload=payload)
 
     with pytest.raises(PersonalDevTrustedReleaseError, match="trusted release is invalid"):

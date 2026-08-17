@@ -400,6 +400,16 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
   git commit -m "feat(dev): render inert personal management plane"
   ```
 
+  Post-review corrections: the shared Namespace uses the cross-package
+  `loom-operator` ownership label; admission rechecks exact personal/builder
+  namespace shapes, exact resource names, and family-specific resource
+  ownership on every mutation (including the separately fenced personal
+  capacity lifecycle); dynamic workloads cannot use an indirect Secret or API
+  token or image-pull reference to widen that authority; activation routes bind
+  exact owners, generations, ClusterIP selectors and ports, Ingress hosts and
+  backends, TLS, class, and annotations; and PostgreSQL and MinIO use separate
+  ingress policies with disjoint callers.
+
 ---
 
 ### Task 4: Operator render command
@@ -503,7 +513,7 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
   ready; migration absent/failed/running/succeeded; init failure; mutable or
   changed images; mismatched render/release labels; personal flags missing,
   malformed, or true; activation replicas nonzero; RuntimeClass/PVC absent;
-  unexpected `loom-dev-*` namespace; package-owned cluster binding drift;
+  unexpected `loom-dev-*` or `loom-build-*` namespace; package-owned cluster binding drift;
   manager probe unavailable/malformed/nonzero; and a complete healthy shadow.
 
   Require sorted stable blocker codes and bounded names/counts only. The
@@ -586,7 +596,17 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
   consistent, immutable, successful terminal migration Job/Pod pairs as
   historical evidence while still requiring the exact current trusted
   migration. Malformed, failed, running, unpaired, or excess history blocks
-  readiness.
+  readiness. It also accepts Kubernetes' exact `NamespaceList` shape, requires
+  exact list API versions, rejects pathologically nested JSON, and runs every
+  kubectl command against a read-only anonymous snapshot of one owner-only,
+  flattened, self-contained kubeconfig with no external credential files or
+  plugins.
+
+  Post-review input correction: the non-secret TOML profile is also read from
+  one current-user-owned, single-link descriptor-stable regular file so a path
+  or in-place race cannot change render authority after review. Pathologically
+  nested trusted-release JSON is converted to the same stable invalid-input
+  result as every other malformed release rather than escaping the loader.
 
 ---
 
@@ -649,7 +669,7 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
   PYTHONPATH=src:. /home/hongjian/loom/.venv/bin/python -m pytest -q \
     tests/ops/test_personal_dev_control_plane_package_boundary.py \
     tests/unit/test_cli_docs_examples.py \
-    tests/ops/test_component_ownership.py
+    tests/ops/test_component_ownership_manifest.py
   ! git grep -n 'loom-dev-shared' -- deploy config
   ! git grep -n 'executable_new_capacity_ceiling[" =:]*[1-9]' -- \
     deploy/dev-fleet docs/runbooks/personal-dev-management-plane-shadow.md
@@ -665,6 +685,17 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
     config/component-ownership.toml
   git commit -m "docs(dev): add personal management shadow rehearsal"
   ```
+
+  Post-review correction: the rehearsal uses strict Bash error propagation and
+  fresh output paths, blocks builder namespaces as well as personal namespaces,
+  and re-renders the previous profile/release to byte-compare rollback YAML
+  before any rollback apply. It also stops before rollback mutation unless the
+  current and previous non-migration resource identity sets are equal; an
+  identity-changing rollback requires a separately reviewed cleanup plan
+  because server-side apply does not prune stale resources. Immediately after
+  each reviewed server-side diff and before each apply, it rechecks the exact
+  artifact and kubeconfig bytes, absence of dynamic namespaces, read-only
+  kubeconfig safety, and the global manager's ready zero ceiling.
 
 ---
 
@@ -708,9 +739,8 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
     src/loom src/loom_cli tests
   PYTHONPATH=src:. /home/hongjian/loom/.venv/bin/python -m mypy \
     src/loom src/loom_cli
-  PYTHONPATH=src:. /home/hongjian/loom/.venv/bin/python scripts/generate_config.py --check
   PYTHONPATH=src:. /home/hongjian/loom/.venv/bin/python -m pytest -q \
-    tests/integration/test_migrations.py \
+    tests/integration/test_alembic_migrations.py \
     tests/integration/test_capacity_management_migrations.py
   ```
 

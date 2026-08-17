@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 
 import yaml  # type: ignore[import-untyped]
 
+from loom.dev_instance import INGRESS_HOST
 from loom.personal_dev_control_plane_config import (
     PersonalDevControlPlaneProfile,
     PersonalDevTrustedRelease,
@@ -19,6 +20,11 @@ from loom.personal_dev_control_plane_config import (
 _MANAGED_BY = "loom-personal-dev-control-plane"
 _MANAGEMENT_PRINCIPAL = "system:serviceaccount:loom-dev:loom-personal-dev-management"
 _ACTIVATION_PRINCIPAL = "system:serviceaccount:loom-dev:loom-personal-dev-activation-agent"
+_PERSONAL_NAMESPACE_PATTERN = r"^loom-dev-[a-z]([-a-z0-9]{0,18}[a-z0-9])?$"
+_RESERVED_PERSONAL_NAMESPACE_PATTERN = (
+    r"^loom-dev-(dev|development|staging|production|prod|local|loom|shared|default)$"
+)
+_BUILDER_NAMESPACE_PATTERN = r"^loom-build-[0-9a-f]{32}-l[0-9a-f]{16}$"
 _MANAGEMENT_FILES = (
     "admin-secrets.toml",
     "capacity-lifecycle-ca.pem",
@@ -179,6 +185,7 @@ def _namespace(context: _RenderContext) -> dict[str, Any]:
     metadata = _metadata(context, "loom-dev")
     metadata["labels"].update(
         {
+            "app.kubernetes.io/managed-by": "loom-operator",
             "pod-security.kubernetes.io/enforce": "restricted",
             "pod-security.kubernetes.io/enforce-version": "latest",
             "pod-security.kubernetes.io/audit": "restricted",
@@ -188,6 +195,18 @@ def _namespace(context: _RenderContext) -> dict[str, Any]:
         }
     )
     return {"apiVersion": "v1", "kind": "Namespace", "metadata": metadata}
+
+
+def _personal_namespace_cel(value: str) -> str:
+    return (
+        f"({value}.startsWith('loom-dev-') && "
+        f"{value}.matches('{_PERSONAL_NAMESPACE_PATTERN}') && "
+        f"!{value}.matches('{_RESERVED_PERSONAL_NAMESPACE_PATTERN}'))"
+    )
+
+
+def _builder_namespace_cel(value: str) -> str:
+    return f"({value}.startsWith('loom-build-') && {value}.matches('{_BUILDER_NAMESPACE_PATTERN}'))"
 
 
 def _service_account(
@@ -414,6 +433,9 @@ def _admission_binding(context: _RenderContext, name: str) -> dict[str, Any]:
 def _management_namespace_admission(context: _RenderContext) -> tuple[dict[str, Any], ...]:
     name = "loom-personal-dev-management-namespaces"
     target = "(request.operation == 'DELETE' ? oldObject : object)"
+    target_name = f"{target}.metadata.name"
+    personal_namespace = _personal_namespace_cel(target_name)
+    builder_namespace = _builder_namespace_cel(target_name)
     policy = {
         "apiVersion": "admissionregistration.k8s.io/v1",
         "kind": "ValidatingAdmissionPolicy",
@@ -438,11 +460,11 @@ def _management_namespace_admission(context: _RenderContext) -> tuple[dict[str, 
             ],
             "validations": [
                 {
-                    "expression": (
-                        f"{target}.metadata.name.startsWith('loom-dev-') || "
-                        f"{target}.metadata.name.startsWith('loom-build-')"
+                    "expression": f"{personal_namespace} || {builder_namespace}",
+                    "message": (
+                        "management may create only exact personal or attempt-bound builder "
+                        "namespaces"
                     ),
-                    "message": "management may create only personal or builder namespaces",
                 },
                 {
                     "expression": (
@@ -453,11 +475,14 @@ def _management_namespace_admission(context: _RenderContext) -> tuple[dict[str, 
                 },
                 {
                     "expression": (
-                        f"{target}.metadata.labels['app.kubernetes.io/managed-by'] in "
-                        "['loom-dev-instance-controller',"
-                        "'loom-personal-dev-builder-controller']"
+                        f"({target}.metadata.name.startsWith('loom-dev-') && "
+                        f"{target}.metadata.labels['app.kubernetes.io/managed-by'] == "
+                        "'loom-dev-instance-controller') || "
+                        f"({target}.metadata.name.startsWith('loom-build-') && "
+                        f"{target}.metadata.labels['app.kubernetes.io/managed-by'] == "
+                        "'loom-personal-dev-builder-controller')"
                     ),
-                    "message": "managed namespace authority label is invalid",
+                    "message": "managed namespace family and authority label differ",
                 },
             ],
         },
@@ -468,6 +493,8 @@ def _management_namespace_admission(context: _RenderContext) -> tuple[dict[str, 
 def _management_resource_admission(context: _RenderContext) -> tuple[dict[str, Any], ...]:
     name = "loom-personal-dev-management-resources"
     target = "(request.operation == 'DELETE' ? oldObject : object)"
+    personal_namespace = _personal_namespace_cel("request.namespace")
+    builder_namespace = _builder_namespace_cel("request.namespace")
     shared_minio_exec = (
         "(request.operation == 'CONNECT' && request.namespace == 'loom-dev' && "
         "request.resource.group == '' && request.resource.version == 'v1' && "
@@ -478,6 +505,113 @@ def _management_resource_admission(context: _RenderContext) -> tuple[dict[str, A
     build_resources = (
         "['configmaps','limitranges','resourcequotas','secrets','jobs',"
         "'networkpolicies','rolebindings']"
+    )
+    personal_application_secret_names = "['loom-secrets','loom-admin-secret']"
+    personal_capacity_secret_names = "['loom-capacity-agent']"
+    personal_capacity_resource_secret_names = (
+        "['loom-capacity-agent','loom-capacity-agent-credentials']"
+    )
+    personal_secret_names = (
+        "['loom-secrets','loom-admin-secret','loom-capacity-agent',"
+        "'loom-capacity-agent-credentials']"
+    )
+    capacity_owned_resource = (
+        "((request.resource.resource == 'secrets' && "
+        f"{target}.metadata.name in {personal_capacity_resource_secret_names}) || "
+        "(request.resource.resource == 'deployments' && "
+        f"{target}.metadata.name == 'loom-capacity-agent') || "
+        "(request.resource.resource == 'networkpolicies' && "
+        f"{target}.metadata.name == 'capacity-agent-egress'))"
+    )
+    personal_resource_names = (
+        f"(request.resource.resource == 'secrets' || "
+        "(request.resource.resource == 'services' && "
+        f"{target}.metadata.name.matches("
+        "'^loom-(control-plane|llm-gateway|service|web)-g[1-9][0-9]*$')) || "
+        "(request.resource.resource == 'deployments' && "
+        f"({target}.metadata.name == 'loom-capacity-agent' || "
+        f"{target}.metadata.name.matches("
+        "'^loom-(control-plane|llm-gateway|service|web)-g[1-9][0-9]*$'))) || "
+        "(request.resource.resource == 'jobs' && "
+        f"{target}.metadata.name.matches("
+        "'^loom-migrate-[0-9a-f]{7}-g[1-9][0-9]*$')) || "
+        "(request.resource.resource == 'networkpolicies' && "
+        f"{target}.metadata.name in "
+        "['default-deny','runtime-egress','runtime-ingress','capacity-agent-egress']) || "
+        "request.resource.resource == 'rolebindings')"
+    )
+    builder_resource_names = (
+        "((request.resource.resource == 'configmaps' && "
+        f"{target}.metadata.name.matches("
+        "'^build-contract-(amd64|arm64)-l[0-9a-f]{16}$')) || "
+        "(request.resource.resource == 'limitranges' && "
+        f"{target}.metadata.name == 'builder-limits') || "
+        "(request.resource.resource == 'resourcequotas' && "
+        f"{target}.metadata.name == 'builder-quota') || "
+        "(request.resource.resource == 'secrets' && "
+        f"{target}.metadata.name.matches("
+        "'^build-capability-(amd64|arm64)-l[0-9a-f]{16}$')) || "
+        "(request.resource.resource == 'jobs' && "
+        f"{target}.metadata.name in ['build-amd64','build-arm64']) || "
+        "(request.resource.resource == 'networkpolicies' && "
+        f"{target}.metadata.name in ['default-deny','builder-egress']) || "
+        "request.resource.resource == 'rolebindings')"
+    )
+    pod_spec = f"{target}.spec.template.spec"
+
+    def container_secret_references(field: str, secret_names: str) -> str:
+        containers = f"{pod_spec}.{field}"
+        return (
+            f"(!has({containers}) || {containers}.all(container, "
+            "(!has(container.envFrom) || container.envFrom.all(source, "
+            f"!has(source.secretRef) || source.secretRef.name in {secret_names})) && "
+            "(!has(container.env) || container.env.all(variable, "
+            "!has(variable.valueFrom) || !has(variable.valueFrom.secretKeyRef) || "
+            f"variable.valueFrom.secretKeyRef.name in {secret_names}))))"
+        )
+
+    def container_without_secret_references(field: str) -> str:
+        containers = f"{pod_spec}.{field}"
+        return (
+            f"(!has({containers}) || {containers}.all(container, "
+            "(!has(container.envFrom) || container.envFrom.all(source, "
+            "!has(source.secretRef))) && "
+            "(!has(container.env) || container.env.all(variable, "
+            "!has(variable.valueFrom) || !has(variable.valueFrom.secretKeyRef)))))"
+        )
+
+    bounded_service_account = (
+        f"(!has({pod_spec}.serviceAccountName) || {pod_spec}.serviceAccountName == 'default')"
+    )
+
+    def personal_workload_secret_references(secret_names: str) -> str:
+        return (
+            f"({pod_spec}.automountServiceAccountToken == false && "
+            f"{bounded_service_account} && "
+            f"!has({pod_spec}.imagePullSecrets) && "
+            f"(!has({pod_spec}.volumes) || {pod_spec}.volumes.all(volume, "
+            f"(!has(volume.secret) || volume.secret.secretName in {secret_names}) && "
+            "!has(volume.projected) && !has(volume.csi))) && "
+            f"{container_secret_references('containers', secret_names)} && "
+            f"{container_secret_references('initContainers', secret_names)})"
+        )
+
+    application_workload_secret_references = personal_workload_secret_references(
+        personal_application_secret_names
+    )
+    capacity_workload_secret_references = personal_workload_secret_references(
+        personal_capacity_secret_names
+    )
+    builder_workload_secret_references = (
+        f"({pod_spec}.automountServiceAccountToken == false && "
+        f"{bounded_service_account} && "
+        f"!has({pod_spec}.imagePullSecrets) && "
+        f"(!has({pod_spec}.volumes) || {pod_spec}.volumes.all(volume, "
+        "(!has(volume.secret) || volume.secret.secretName.matches("
+        "'^build-capability-(amd64|arm64)-l[0-9a-f]{16}$')) && "
+        "!has(volume.projected) && !has(volume.csi))) && "
+        f"{container_without_secret_references('containers')} && "
+        f"{container_without_secret_references('initContainers')})"
     )
     policy = {
         "apiVersion": "admissionregistration.k8s.io/v1",
@@ -515,9 +649,9 @@ def _management_resource_admission(context: _RenderContext) -> tuple[dict[str, A
                 },
                 {
                     "expression": (
-                        "((request.namespace.startsWith('loom-dev-') && "
+                        f"(({personal_namespace} && "
                         f"request.resource.resource in {app_resources}) || "
-                        "(request.namespace.startsWith('loom-build-') && "
+                        f"({builder_namespace} && "
                         f"request.resource.resource in {build_resources})) || "
                         f"{shared_minio_exec}"
                     ),
@@ -525,13 +659,54 @@ def _management_resource_admission(context: _RenderContext) -> tuple[dict[str, A
                 },
                 {
                     "expression": (
+                        f"{shared_minio_exec} || "
+                        f"({personal_namespace} && {personal_resource_names}) || "
+                        f"({builder_namespace} && {builder_resource_names})"
+                    ),
+                    "message": "management resource name is outside its family contract",
+                },
+                {
+                    "expression": (
+                        f"{shared_minio_exec} || "
+                        f"({personal_namespace} && "
+                        f"(({capacity_owned_resource} && "
+                        f"{target}.metadata.labels['app.kubernetes.io/managed-by'] == "
+                        "'loom-personal-dev-lifecycle') || "
+                        f"(!{capacity_owned_resource} && "
+                        f"{target}.metadata.labels['app.kubernetes.io/managed-by'] == "
+                        "'loom-dev-instance-controller'))) || "
+                        f"({builder_namespace} && "
+                        f"{target}.metadata.labels['app.kubernetes.io/managed-by'] == "
+                        "'loom-personal-dev-builder-controller')"
+                    ),
+                    "message": "management resource lacks its namespace-family ownership",
+                },
+                {
+                    "expression": (
+                        f"{shared_minio_exec} || "
+                        "!(request.resource.resource in ['deployments','jobs']) || "
+                        f"({personal_namespace} && "
+                        "((request.resource.resource == 'deployments' && "
+                        f"{target}.metadata.name == 'loom-capacity-agent' && "
+                        f"{capacity_workload_secret_references}) || "
+                        f"({target}.metadata.name != 'loom-capacity-agent' && "
+                        f"{application_workload_secret_references}))) || "
+                        f"({builder_namespace} && request.resource.resource == 'jobs' && "
+                        f"{builder_workload_secret_references})"
+                    ),
+                    "message": (
+                        "personal workload can reference only fixed lifecycle Secrets; builder "
+                        "workload cannot acquire API or unrelated Secret authority"
+                    ),
+                },
+                {
+                    "expression": (
                         "request.resource.resource != 'secrets' || "
                         "(request.namespace.startsWith('loom-dev-') && "
-                        f"{target}.metadata.name in "
-                        "['loom-secrets','loom-admin-secret','loom-capacity-agent',"
-                        "'loom-capacity-agent-credentials']) || "
+                        f"{target}.metadata.name in {personal_secret_names}) || "
                         "(request.namespace.startsWith('loom-build-') && "
-                        f"{target}.metadata.name.startsWith('build-capability-'))"
+                        f"{target}.metadata.name.matches("
+                        "'^build-capability-(amd64|arm64)-l[0-9a-f]{16}$'))"
                     ),
                     "message": "management Secret name is outside its fixed contract",
                 },
@@ -570,9 +745,89 @@ def _management_resource_admission(context: _RenderContext) -> tuple[dict[str, A
     return policy, _admission_binding(context, name)
 
 
-def _activation_admission(context: _RenderContext) -> tuple[dict[str, Any], ...]:
+def _activation_admission(
+    context: _RenderContext,
+    profile: PersonalDevControlPlaneProfile,
+) -> tuple[dict[str, Any], ...]:
     name = "loom-personal-dev-activation-resources"
     target = "(request.operation == 'DELETE' ? oldObject : object)"
+    personal_namespace = _personal_namespace_cel("request.namespace")
+    owner = f"{target}.metadata.labels['loom.dev/instance']"
+    generation = f"{target}.metadata.labels['loom.dev/generation']"
+    service_port = (
+        f"({target}.metadata.name == 'loom-control-plane' ? 8080 : "
+        f"{target}.metadata.name == 'loom-llm-gateway' ? 9100 : "
+        f"{target}.metadata.name == 'loom-service' ? 8090 : 80)"
+    )
+    target_port = f"({target}.metadata.name == 'loom-web' ? 8080 : {service_port})"
+    service_contract = (
+        "request.resource.resource != 'services' || "
+        f"((!has({target}.metadata.annotations) || {target}.metadata.annotations.size() == 0) && "
+        f"(!has({target}.spec.type) || {target}.spec.type == 'ClusterIP') && "
+        f"(!has({target}.spec.clusterIP) || {target}.spec.clusterIP != 'None') && "
+        f"(!has({target}.spec.externalName)) && "
+        f"(!has({target}.spec.externalIPs) || {target}.spec.externalIPs.size() == 0) && "
+        f"(!has({target}.spec.loadBalancerClass)) && "
+        f"(!has({target}.spec.loadBalancerSourceRanges) || "
+        f"{target}.spec.loadBalancerSourceRanges.size() == 0) && "
+        f"(!has({target}.spec.publishNotReadyAddresses) || "
+        f"{target}.spec.publishNotReadyAddresses == false) && "
+        f"(!has({target}.spec.sessionAffinity) || {target}.spec.sessionAffinity == 'None') && "
+        f"(!has({target}.spec.internalTrafficPolicy) || "
+        f"{target}.spec.internalTrafficPolicy == 'Cluster') && "
+        f"{target}.spec.selector.size() == 3 && "
+        f"{target}.spec.selector['app'] == {target}.metadata.name + '-g' + {generation} && "
+        f"{target}.spec.selector['loom.dev/instance'] == {owner} && "
+        f"{target}.spec.selector['loom.dev/generation'] == {generation} && "
+        f"{target}.spec.ports.size() == 1 && "
+        f"{target}.spec.ports[0].port == {service_port} && "
+        f"{target}.spec.ports[0].targetPort == {target_port} && "
+        f"(!has({target}.spec.ports[0].protocol) || "
+        f"{target}.spec.ports[0].protocol == 'TCP'))"
+    )
+
+    def ingress_path(
+        rule_index: int,
+        path_index: int,
+        *,
+        path: str,
+        service: str,
+        port: int,
+    ) -> str:
+        item = f"{target}.spec.rules[{rule_index}].http.paths[{path_index}]"
+        return (
+            f"({item}.path == '{path}' && {item}.pathType == 'Prefix' && "
+            f"{item}.backend.service.name == '{service}' && "
+            f"{item}.backend.service.port.number == {port})"
+        )
+
+    ingress_contract = (
+        "request.resource.resource != 'ingresses' || "
+        f"({target}.metadata.annotations.size() == 2 && "
+        f"{target}.metadata.annotations['cert-manager.io/cluster-issuer'] == "
+        f"'{profile.network.ingress_cluster_issuer}' && "
+        f"{target}.metadata.annotations['nginx.ingress.kubernetes.io/proxy-read-timeout'] == "
+        "'300' && "
+        f"{target}.spec.ingressClassName == '{profile.network.ingress_class_name}' && "
+        f"!has({target}.spec.defaultBackend) && "
+        f"{target}.spec.rules.size() == 3 && "
+        f"{target}.spec.rules[0].host == {owner} + '.dev.{INGRESS_HOST}' && "
+        f"{target}.spec.rules[0].http.paths.size() == 2 && "
+        f"{ingress_path(0, 0, path='/api/v1', service='loom-service', port=8090)} && "
+        f"{ingress_path(0, 1, path='/', service='loom-web', port=80)} && "
+        f"{target}.spec.rules[1].host == 'cp-' + {owner} + '.dev.{INGRESS_HOST}' && "
+        f"{target}.spec.rules[1].http.paths.size() == 1 && "
+        f"{ingress_path(1, 0, path='/', service='loom-control-plane', port=8080)} && "
+        f"{target}.spec.rules[2].host == 'gw-' + {owner} + '.dev.{INGRESS_HOST}' && "
+        f"{target}.spec.rules[2].http.paths.size() == 1 && "
+        f"{ingress_path(2, 0, path='/', service='loom-llm-gateway', port=9100)} && "
+        f"{target}.spec.tls.size() == 1 && "
+        f"{target}.spec.tls[0].secretName == 'loom-dev-tls' && "
+        f"{target}.spec.tls[0].hosts.size() == 3 && "
+        f"{target}.spec.tls[0].hosts[0] == {owner} + '.dev.{INGRESS_HOST}' && "
+        f"{target}.spec.tls[0].hosts[1] == 'cp-' + {owner} + '.dev.{INGRESS_HOST}' && "
+        f"{target}.spec.tls[0].hosts[2] == 'gw-' + {owner} + '.dev.{INGRESS_HOST}')"
+    )
     policy = {
         "apiVersion": "admissionregistration.k8s.io/v1",
         "kind": "ValidatingAdmissionPolicy",
@@ -597,10 +852,7 @@ def _activation_admission(context: _RenderContext) -> tuple[dict[str, Any], ...]
             ],
             "validations": [
                 {
-                    "expression": (
-                        "request.namespace != 'loom-dev' && "
-                        "request.namespace.startsWith('loom-dev-')"
-                    ),
+                    "expression": personal_namespace,
                     "message": "activation may mutate routes only in personal namespaces",
                 },
                 {
@@ -619,6 +871,21 @@ def _activation_admission(context: _RenderContext) -> tuple[dict[str, Any], ...]
                         f"{target}.metadata.name == 'loom-dev')"
                     ),
                     "message": "activation resource name is outside the stable-route contract",
+                },
+                {
+                    "expression": (
+                        f"request.namespace == 'loom-dev-' + {owner} && "
+                        f"{generation}.matches('^[1-9][0-9]*$')"
+                    ),
+                    "message": "activation route owner or generation is invalid",
+                },
+                {
+                    "expression": service_contract,
+                    "message": "activation Service differs from the exact stable-route contract",
+                },
+                {
+                    "expression": ingress_contract,
+                    "message": "activation Ingress differs from the exact stable-route contract",
                 },
             ],
         },
@@ -834,7 +1101,10 @@ def _minio(
                                     )
                                 ),
                             ],
-                            "env": secret_env,
+                            "env": [
+                                *secret_env,
+                                _literal_env("MC_CONFIG_DIR", "/tmp/mc"),
+                            ],
                             "readinessProbe": {
                                 "exec": {
                                     "command": [
@@ -1538,18 +1808,45 @@ def _network_policies(
         "loom-personal-dev-default-deny",
         {"podSelector": {}, "policyTypes": ["Ingress", "Egress"]},
     )
-    storage = policy(
-        "loom-personal-dev-storage",
+    postgres_ingress = policy(
+        "loom-personal-dev-postgres-ingress",
         {
-            "podSelector": {
-                "matchExpressions": [
-                    {
-                        "key": "app",
-                        "operator": "In",
-                        "values": ["loom-dev-postgres", "loom-dev-minio"],
-                    }
-                ]
-            },
+            "podSelector": {"matchLabels": {"app": "loom-dev-postgres"}},
+            "policyTypes": ["Ingress"],
+            "ingress": [
+                {
+                    "from": [
+                        {
+                            "podSelector": {
+                                "matchExpressions": [
+                                    {
+                                        "key": "app",
+                                        "operator": "In",
+                                        "values": [
+                                            "loom-personal-dev-management",
+                                            "loom-personal-dev-migration",
+                                        ],
+                                    }
+                                ]
+                            }
+                        },
+                        {
+                            "namespaceSelector": {
+                                "matchLabels": {
+                                    "app.kubernetes.io/managed-by": ("loom-dev-instance-controller")
+                                }
+                            }
+                        },
+                    ],
+                    "ports": [{"protocol": "TCP", "port": 5432}],
+                }
+            ],
+        },
+    )
+    minio_ingress = policy(
+        "loom-personal-dev-minio-ingress",
+        {
+            "podSelector": {"matchLabels": {"app": "loom-dev-minio"}},
             "policyTypes": ["Ingress"],
             "ingress": [
                 {
@@ -1563,7 +1860,6 @@ def _network_policies(
                                         "values": [
                                             "loom-personal-dev-management",
                                             "loom-personal-dev-activation-agent",
-                                            "loom-personal-dev-migration",
                                         ],
                                     }
                                 ]
@@ -1586,10 +1882,7 @@ def _network_policies(
                             }
                         },
                     ],
-                    "ports": [
-                        {"protocol": "TCP", "port": 5432},
-                        {"protocol": "TCP", "port": 9000},
-                    ],
+                    "ports": [{"protocol": "TCP", "port": 9000}],
                 }
             ],
         },
@@ -1655,7 +1948,15 @@ def _network_policies(
             ],
         },
     )
-    return default, storage, management, management_ingress, migration, activation
+    return (
+        default,
+        postgres_ingress,
+        minio_ingress,
+        management,
+        management_ingress,
+        migration,
+        activation,
+    )
 
 
 def _sort_key(document: dict[str, Any]) -> tuple[int, str, str, str, str]:
@@ -1709,7 +2010,7 @@ def render_shadow_personal_dev_control_plane(
         _activation_role(context),
         *_management_namespace_admission(context),
         *_management_resource_admission(context),
-        *_activation_admission(context),
+        *_activation_admission(context, profile),
         _service_account(context, profile.identities.management_service_account),
         _service_account(context, profile.identities.activation_service_account),
         shared_role,
