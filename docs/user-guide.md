@@ -1557,6 +1557,33 @@ loom run
   under `.loom/agent/`. Requires a provider + model; does not use
   `loom-launcher` or per-trial `install_script`. See
   [`architecture/terminus2-runtime.md`](architecture/terminus2-runtime.md).
+
+  Optional student/teacher/student switch (#1380): default remains a
+  **single-model** trial. Opt in on `loom eval batch create` with:
+
+  ```bash
+  loom eval batch create \
+    --agent terminus-2 \
+    --provider <name> \
+    --model <student> \
+    --multi-model \
+    --multi-model-secondary <teacher> \
+    [--multi-model-switch-episode 3] \
+    [--multi-model-teacher-episodes 2] \
+    ...
+  ```
+
+  Same BYO connection. Student until K1, teacher for `teacher_episodes`, then
+  student from K2 to the end. K1 is sampled if the switch-episode flag is
+  omitted. Not supported with `--combinations-json`.
+
+  If a worker dies after the agent has already written episode checkpoints,
+  Loom **does not** restart Harbor from episode 1 on the same trial
+  trajectory (that would glue a new student run onto a partial
+  student/teacher log). The attempt fails with `terminus-2 recovery_failed`.
+  Retry the task as a new trial that inherits the same K1/K2 plan. See
+  [terminus2-runtime.md](architecture/terminus2-runtime.md)
+  (mid-trajectory switch, worker retry).
 - any other name — resolved via `loom_launcher.get_adapter(name)` from the
   included adapters (claude-code, codex, openhands, aider,
   opencode, swe-agent, mini-swe-agent, openhands-sdk, gemini-cli,

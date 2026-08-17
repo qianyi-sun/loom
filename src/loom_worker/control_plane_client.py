@@ -1188,6 +1188,62 @@ class HttpControlPlaneClient:
             if owned:
                 await client.aclose()
 
+    async def reclaim_terminus_execution(
+        self,
+        *,
+        trial_id: UUID,
+        step_id: str,
+        worker_id: UUID | None = None,
+    ) -> dict[str, Any]:
+        client, owned = self._http()
+        try:
+            body: dict[str, Any] = {"step_id": step_id}
+            if worker_id is not None:
+                body["worker_id"] = str(worker_id)
+            r = await client.post(
+                f"/trials/{trial_id}/terminus/reclaim",
+                headers=self._headers,
+                json=body,
+            )
+            r.raise_for_status()
+            return r.json()  # type: ignore[no-any-return]
+        finally:
+            if owned:
+                await client.aclose()
+
+    async def post_episode_checkpoint(
+        self,
+        *,
+        trial_id: UUID,
+        execution_id: UUID,
+        run_attempt_id: UUID,
+        episode: int,
+        active_role: str,
+        last_call_ordinal: int,
+        last_seq: int,
+        tmux_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        client, owned = self._http()
+        try:
+            r = await client.post(
+                f"/trials/{trial_id}/terminus/episode-checkpoints",
+                headers=self._headers,
+                json={
+                    "execution_id": str(execution_id),
+                    "run_attempt_id": str(run_attempt_id),
+                    "episode": episode,
+                    "active_role": active_role,
+                    "last_call_ordinal": last_call_ordinal,
+                    "last_seq": last_seq,
+                    "tmux_session_id": tmux_session_id,
+                },
+            )
+            r.raise_for_status()
+            return r.json()  # type: ignore[no-any-return]
+        finally:
+            if owned:
+                await client.aclose()
+
     async def get_trial_llm_calls(self, trial_id: UUID) -> list[dict[str, Any]]:
         """Fetch every `llm_calls` row the Gateway recorded against this
         trial (Plan 11 amendment A11.1). Called by the worker at finalize

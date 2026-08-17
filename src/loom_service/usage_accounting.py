@@ -304,6 +304,9 @@ async def estimate_pre_run_batch_budget(
     settings: Any,
     budget_usd: Decimal | int | float | str | None,
     budget_policy: str,
+    secondary_model_id: str | None = None,
+    teacher_episodes: int | None = None,
+    episode_ceiling: int | None = None,
 ) -> PreRunBudgetEstimate:
     calls_per_trial = _settings_int(
         settings,
@@ -442,6 +445,41 @@ async def estimate_pre_run_batch_budget(
         cached_input_tokens=0,
         cache_write_tokens=0,
     )
+    if secondary_model_id:
+        teacher_lookup = (
+            normalize_yibuapi_model_name(secondary_model_id)
+            if lookup_provider == YIBUAPI_RATE_CARD_PROVIDER
+            else secondary_model_id
+        )
+        try:
+            teacher_entry = lookup_entry(
+                table,
+                ModelSpec(provider=lookup_provider, name=teacher_lookup),
+            )
+        except RateCardNotFoundError:
+            return PreRunBudgetEstimate(
+                budget_usd=budget_value,
+                budget_policy=policy,
+                pre_run_estimated_cost_usd=None,
+                cost_estimate_source="unpriced",
+                cost_estimate_confidence="unavailable",
+                pre_run_estimated_llm_calls_count=estimated_calls,
+                pre_run_estimated_prompt_tokens=estimated_input_tokens,
+                pre_run_estimated_completion_tokens=estimated_output_tokens,
+                unpriced_reason="missing_rate_card_entry",
+            )
+        teacher_cost = compute_cost_usd(
+            teacher_entry,
+            input_tokens=estimated_input_tokens,
+            output_tokens=estimated_output_tokens,
+            cached_input_tokens=0,
+            cache_write_tokens=0,
+        )
+        ceiling = max(int(episode_ceiling or 50), 2)
+        teacher_n = max(int(teacher_episodes or 2), 1)
+        teacher_share = min(teacher_n / ceiling, 0.95)
+        student_share = 1.0 - teacher_share
+        cost = (student_share * float(cost)) + (teacher_share * float(teacher_cost))
     return PreRunBudgetEstimate(
         budget_usd=budget_value,
         budget_policy=policy,

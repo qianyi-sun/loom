@@ -271,6 +271,9 @@ def build_model_input_trajectory(
                 "llm_call_id": str(call.id),
                 "step_id": call.step_id,
                 "model": call.model,
+                "requested_model": call.requested_model or call.model,
+                "response_model": call.response_model,
+                "role": call.role,
                 "dialect": call.dialect,
                 "messages": messages,
             }

@@ -8,6 +8,8 @@ Wraps the server-side routes:
 - POST /api/v1/batches                 → `loom eval batch create`
   (optional ``trial_config.workspace_staging_policy_name`` via
   ``--workspace-staging-policy``; #1263)
+  (optional terminus-2 ``trial_config.multi_model`` via ``--multi-model``;
+  #1380 — default remains single-model)
 - GET  /api/v1/batches[/{id}]          → `loom eval batch {list, show}`
 - POST /api/v1/batches/{id}/cancel     → `loom eval batch cancel`
 
@@ -521,6 +523,33 @@ def _batch_create(args: argparse.Namespace) -> int:
         with authed_client(cfg) as c:
             combinations = args.combinations_json
             conn: dict[str, Any] | None = None
+            multi_model = bool(getattr(args, "multi_model", False))
+            if multi_model and combinations is not None:
+                sys.stderr.write(
+                    "error: --multi-model is not supported with "
+                    "--combinations-json; use the single-agent "
+                    "`--agent terminus-2` path.\n",
+                )
+                return 2
+            if multi_model:
+                if args.agent != "terminus-2":
+                    sys.stderr.write(
+                        "error: --multi-model requires --agent terminus-2 "
+                        f"(got {args.agent!r}). Default remains a single-model trial.\n",
+                    )
+                    return 2
+                if not args.multi_model_secondary:
+                    sys.stderr.write(
+                        "error: --multi-model requires "
+                        "--multi-model-secondary <model-id>.\n",
+                    )
+                    return 2
+                if not args.provider or not args.model:
+                    sys.stderr.write(
+                        "error: --multi-model requires --provider and "
+                        "--model (primary) plus --multi-model-secondary.\n",
+                    )
+                    return 2
             if combinations is not None:
                 conflicting = [
                     flag
@@ -596,6 +625,32 @@ def _batch_create(args: argparse.Namespace) -> int:
                 trial_config["workspace_staging_policy_name"] = (
                     args.workspace_staging_policy
                 )
+            if multi_model:
+                # #1380: student → teacher → student (terminus-2 only).
+                assert conn is not None
+                assert args.multi_model_secondary is not None
+                multi_model_block: dict[str, Any] = {
+                    "enabled": True,
+                    "policy": "student_teacher_student",
+                    "secondary_model": _build_agent_model(
+                        conn["type"],
+                        args.multi_model_secondary,
+                        agent_provider_override=args.agent_provider,
+                    ),
+                }
+                if args.multi_model_switch_episode is not None:
+                    multi_model_block["switch_episode"] = (
+                        args.multi_model_switch_episode
+                    )
+                if getattr(args, "multi_model_teacher_episodes", None) is not None:
+                    multi_model_block["teacher_episodes"] = (
+                        args.multi_model_teacher_episodes
+                    )
+                if args.multi_model_episode_ceiling is not None:
+                    multi_model_block["episode_ceiling"] = (
+                        args.multi_model_episode_ceiling
+                    )
+                trial_config["multi_model"] = multi_model_block
             # --benchmark / --task-set are shortcuts for common task_filter
             # shapes. Operators wanting richer filters use --task-filter JSON
             # instead. Multiple selector forms are rejected so precedence stays
@@ -1457,6 +1512,60 @@ def dispatch(argv: list[str]) -> int:
             "`none` uses full-bundle upload. Omit to keep current "
             "defaults (TB2.1-r6 tasks always enforce tb21). "
             "terminal-bench-2@tb2.1-r6/* cannot select `none`."
+        ),
+    )
+    p_bc.add_argument(
+        "--multi-model",
+        dest="multi_model",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable terminus-2 student/teacher/student model switch (#1380). "
+            "Default is off (single-model trial). Requires "
+            "--agent terminus-2, --provider/--model (student), and "
+            "--multi-model-secondary (teacher). Same BYO provider connection. "
+            "Student runs until K1, teacher for teacher_episodes, then student "
+            "returns at K2. K1 is --multi-model-switch-episode or sampled."
+        ),
+    )
+    p_bc.add_argument(
+        "--multi-model-secondary",
+        dest="multi_model_secondary",
+        default=None,
+        help=(
+            "Teacher (usually larger) upstream model id. Student is --model. "
+            "Required with --multi-model. Same provider connection."
+        ),
+    )
+    p_bc.add_argument(
+        "--multi-model-switch-episode",
+        dest="multi_model_switch_episode",
+        type=int,
+        default=None,
+        help=(
+            "Harbor episode index (1-based, >= 2) where the teacher takes "
+            "over (K1). Omit to let the server sample once into "
+            "[2, --multi-model-episode-ceiling]."
+        ),
+    )
+    p_bc.add_argument(
+        "--multi-model-episode-ceiling",
+        dest="multi_model_episode_ceiling",
+        type=int,
+        default=None,
+        help=(
+            "Upper bound for random K1 sampling when "
+            "--multi-model-switch-episode is omitted (default on server: 50)."
+        ),
+    )
+    p_bc.add_argument(
+        "--multi-model-teacher-episodes",
+        dest="multi_model_teacher_episodes",
+        type=int,
+        default=None,
+        help=(
+            "How many Harbor episodes the teacher keeps (default 2). "
+            "K2 = K1 + this value; student then continues to the end."
         ),
     )
     p_bc.set_defaults(handler=_batch_create)

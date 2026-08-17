@@ -109,6 +109,7 @@ class TrialClaimV1(PipelineModel):
     family_state_uri: str | None
     family_run_spec: dict[str, Any] | None
     task_image_materialization: TaskImageExecutionGrantV1 | None = None
+    model_switch_plan: dict[str, Any] | None = None
     state: Literal["claimed"]
 
 

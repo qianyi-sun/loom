@@ -109,6 +109,9 @@ class _PsycopgWatcherConnection(WatcherConnection):
     async def close(self) -> None:
         await self._conn.close()
 
+    async def execute(self, sql: str) -> object:
+        return await self._conn.execute(sql)
+
     def notifies(self) -> AsyncIterator[object]:
         return self._conn.notifies()
 

@@ -29,6 +29,8 @@ from pydantic import BaseModel
 from sqlalchemy import and_, func, or_, select
 
 from loom.db.schema import LlmCall, Task, Team, Trial, User
+from loom.model_switch_store import load_model_switch_plan, plan_snapshot_from_row
+from loom_service.multi_model import usage_by_role
 from loom.models.types import ModelSpec
 from loom_llm_gateway.rate_card import (
     COST_META_CONFIDENCE_KEY,
@@ -629,6 +631,12 @@ async def get_trial(
     )
     base["debug_evidence"] = debug_evidence
     base["diagnosis"] = build_trial_diagnosis(debug_evidence)
+    plan_row = await load_model_switch_plan(s, trial.id)
+    if plan_row is not None:
+        base["model_switch_plan"] = plan_snapshot_from_row(plan_row).model_dump(
+            mode="json",
+        )
+        base["usage_by_role"] = usage_by_role(llm_calls)
     return base
 
 

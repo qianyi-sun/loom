@@ -57,6 +57,13 @@ class EventKind(StrEnum):
     TERMINUS2_PARSE_RETRY = "terminus2_parse_retry"
     TERMINUS2_CONTEXT_BOUNDARY = "terminus2_context_boundary"
     TERMINUS2_ARTIFACT_REF = "terminus2_artifact_ref"
+    TERMINUS2_MODEL_SWITCH = "terminus2_model_switch"
+    TERMINUS2_MODEL_SWITCH_PLANNED = "terminus2_model_switch_planned"
+    TERMINUS2_LLM_CALL_STARTED = "terminus2_llm_call_started"
+    TERMINUS2_LLM_CALL_COMPLETED = "terminus2_llm_call_completed"
+    TERMINUS2_LLM_CALL_FAILED = "terminus2_llm_call_failed"
+    TERMINUS2_EPISODE_CHECKPOINT = "terminus2_episode_checkpoint"
+    TERMINUS2_RECOVERY_FAILED = "terminus2_recovery_failed"
 
 
 class _EventBase(BaseModel):
@@ -227,6 +234,9 @@ class LLMCallEvent(_EventBase):
     # produced the response. Surfaces in ATIF for retry-rate
     # analysis without parsing logs.
     attempt: int = Field(default=1, ge=1)
+    requested_model: str | None = None
+    response_model: str | None = None
+    role: Literal["student", "teacher"] | None = None
 
 
 # Agent (continued) + verifier + network + sys ────────────────────────────────
@@ -385,6 +395,81 @@ class Terminus2ArtifactRefEvent(_EventBase):
     share_policy: Literal["restricted", "shared"]
 
 
+class Terminus2ModelSwitchEvent(_EventBase):
+    """Emitted on each student/teacher role cut (#1380). At least two per full run."""
+
+    kind: Literal[EventKind.TERMINUS2_MODEL_SWITCH] = EventKind.TERMINUS2_MODEL_SWITCH
+    switch_episode: int = Field(ge=2)
+    from_role: Literal["student", "teacher"] = "student"
+    to_role: Literal["student", "teacher"] = "teacher"
+    from_model: ModelSpec
+    to_model: ModelSpec
+
+
+class Terminus2ModelSwitchPlannedEvent(_EventBase):
+    kind: Literal[EventKind.TERMINUS2_MODEL_SWITCH_PLANNED] = (
+        EventKind.TERMINUS2_MODEL_SWITCH_PLANNED
+    )
+    switch_episode: int = Field(ge=2)
+    from_role: Literal["student", "teacher"]
+    to_role: Literal["student", "teacher"]
+    from_model: ModelSpec
+    to_model: ModelSpec
+
+
+class Terminus2LlmCallStartedEvent(_EventBase):
+    kind: Literal[EventKind.TERMINUS2_LLM_CALL_STARTED] = (
+        EventKind.TERMINUS2_LLM_CALL_STARTED
+    )
+    client_call_id: UUID
+    episode: int = Field(ge=0)
+    call_ordinal: int = Field(ge=1)
+    role: Literal["student", "teacher"]
+    requested_model: str
+
+
+class Terminus2LlmCallCompletedEvent(_EventBase):
+    kind: Literal[EventKind.TERMINUS2_LLM_CALL_COMPLETED] = (
+        EventKind.TERMINUS2_LLM_CALL_COMPLETED
+    )
+    client_call_id: UUID
+    episode: int = Field(ge=0)
+    call_ordinal: int = Field(ge=1)
+    role: Literal["student", "teacher"]
+    requested_model: str
+    response_model: str | None = None
+
+
+class Terminus2LlmCallFailedEvent(_EventBase):
+    kind: Literal[EventKind.TERMINUS2_LLM_CALL_FAILED] = (
+        EventKind.TERMINUS2_LLM_CALL_FAILED
+    )
+    client_call_id: UUID
+    episode: int = Field(ge=0)
+    call_ordinal: int = Field(ge=1)
+    role: Literal["student", "teacher"]
+    requested_model: str
+    error: str
+
+
+class Terminus2EpisodeCheckpointEvent(_EventBase):
+    kind: Literal[EventKind.TERMINUS2_EPISODE_CHECKPOINT] = (
+        EventKind.TERMINUS2_EPISODE_CHECKPOINT
+    )
+    episode: int = Field(ge=1)
+    active_role: Literal["student", "teacher"]
+    checksum: str
+    last_call_ordinal: int = Field(ge=0)
+
+
+class Terminus2RecoveryFailedEvent(_EventBase):
+    kind: Literal[EventKind.TERMINUS2_RECOVERY_FAILED] = (
+        EventKind.TERMINUS2_RECOVERY_FAILED
+    )
+    reason: str
+    last_episode: int | None = None
+
+
 TrajectoryEvent = Annotated[
     TrialStartEvent | TrialEndEvent | TrialErrorEvent | TrialCancelledEvent
     | StepStartEvent | StepEndEvent
@@ -396,6 +481,10 @@ TrajectoryEvent = Annotated[
     | WorkerLostClaimEvent | WorkerDrainInterruptedEvent
     | Terminus2RuntimeProvenanceEvent | Terminus2UserPromptEvent | Terminus2TurnEvent
     | Terminus2CommandEvent | Terminus2TerminalObservationEvent | Terminus2ParseRetryEvent
-    | Terminus2ContextBoundaryEvent | Terminus2ArtifactRefEvent,
+    | Terminus2ContextBoundaryEvent | Terminus2ArtifactRefEvent
+    | Terminus2ModelSwitchEvent | Terminus2ModelSwitchPlannedEvent
+    | Terminus2LlmCallStartedEvent | Terminus2LlmCallCompletedEvent
+    | Terminus2LlmCallFailedEvent | Terminus2EpisodeCheckpointEvent
+    | Terminus2RecoveryFailedEvent,
     Field(discriminator="kind"),
 ]

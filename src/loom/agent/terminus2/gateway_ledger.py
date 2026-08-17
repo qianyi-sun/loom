@@ -44,19 +44,65 @@ class GatewayCallLedger:
     async def refresh(self, cp_client: _CpClient) -> None:
         self._rows = await cp_client.get_trial_llm_calls(self._trial_id)
 
-    def resolve_for_metrics(self, metrics: dict[str, Any]) -> dict[str, Any]:
-        """Return the matching llm_calls row or raise fail-closed."""
+    def _available(self) -> list[dict[str, Any]]:
         if self._rows is None:
             raise CheckpointBridgeError(
                 "gateway ledger not refreshed before bridging Harbor step",
             )
-        input_tokens, output_tokens = harbor_metrics_tokens(metrics)
-        candidates = [
+        return [
             row
             for row in self._rows
             if str(row.get("id")) not in self._consumed_ids
             and str(row.get("step_id") or "") == self._step_id
             and not _row_is_failed_upstream(row)
+        ]
+
+    def resolve_for_metrics(
+        self,
+        metrics: dict[str, Any],
+        *,
+        episode: int | None = None,
+        client_call_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Return the matching llm_calls row or raise fail-closed."""
+        available = self._available()
+        if client_call_id:
+            hits = [
+                row for row in available
+                if str(row.get("client_call_id") or "") == str(client_call_id)
+            ]
+            if len(hits) == 1:
+                self._consumed_ids.add(str(hits[0]["id"]))
+                return hits[0]
+            raise CheckpointBridgeError(
+                f"no llm_calls row matches client_call_id={client_call_id}",
+            )
+
+        correlated = [
+            row for row in available
+            if str(row.get("correlation_status") or "") == "correlated"
+        ]
+        if episode is not None and correlated:
+            by_episode = [
+                row for row in correlated
+                if int(row.get("episode") or -1) == int(episode)
+            ]
+            by_episode.sort(key=lambda row: int(row.get("call_ordinal") or 0))
+            if by_episode:
+                row = by_episode[0]
+                self._consumed_ids.add(str(row["id"]))
+                return row
+            raise CheckpointBridgeError(
+                "no correlated llm_calls row for Harbor episode "
+                f"(step_id={self._step_id}, episode={episode})",
+            )
+
+        input_tokens, output_tokens = harbor_metrics_tokens(metrics)
+        candidates = [
+            row
+            for row in available
+            if str(row.get("correlation_status") or "legacy_uncorrelated")
+            != "correlated"
             and int(row.get("input_tokens") or 0) == input_tokens
             and int(row.get("output_tokens") or 0) == output_tokens
         ]

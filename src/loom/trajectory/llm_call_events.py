@@ -77,6 +77,13 @@ def llm_call_row_to_event(
         time_to_first_token_sec=None,
         gateway_request_id=str(row.get("id") or ""),
         attempt=int(row.get("attempt") or 1),
+        requested_model=(
+            str(row["requested_model"]) if row.get("requested_model") else None
+        ),
+        response_model=(
+            str(row["response_model"]) if row.get("response_model") else None
+        ),
+        role=row.get("role") if row.get("role") in {"student", "teacher"} else None,
     )
 
 

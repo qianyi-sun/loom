@@ -116,3 +116,13 @@ class TestAuxiliaryDockerfileNoRegression:
         # Parser exercise; guards against a syntax mistake in an auxiliary file
         # that would trip up ci/lint.
         _read_dockerfile(dockerfile)
+
+
+class TestEgressXdsIncludesListenRuntime:
+    """egress-xds imports loom_listen; the image must ship it (#609)."""
+
+    def test_copies_loom_listen_and_prometheus_client(self) -> None:
+        text = _read_dockerfile("Dockerfile.egress-xds")
+        assert "COPY src/loom_listen /app/loom_listen" in text
+        assert "prometheus-client" in text
+        assert "COPY src/loom_egress_xds /app/loom_egress_xds" in text

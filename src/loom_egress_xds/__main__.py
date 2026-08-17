@@ -85,6 +85,13 @@ class _PsycopgWatcherConnection(WatcherConnection):
     async def close(self) -> None:
         await self._conn.close()
 
+    async def execute(self, sql: str) -> Any:
+        # Required by the LISTEN/NOTIFY startup self-test
+        # (`notify_round_trip`). Without this, the watcher raises
+        # NotImplementedError, reconnects forever, and never publishes
+        # CDS/RDS — Envoy stays with an empty cluster set.
+        return await self._conn.execute(sql)
+
     def notifies(self) -> AsyncIterator[Any]:
         # psycopg exposes notifies as an async generator on the
         # connection. Each iteration yields a `Notify` object.

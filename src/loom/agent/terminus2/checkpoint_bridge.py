@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from datetime import UTC, datetime
@@ -22,6 +23,7 @@ from loom.agent.terminus2.provenance import (
 from loom.models.trajectory import (
     Terminus2ArtifactRefEvent,
     Terminus2CommandEvent,
+    Terminus2ModelSwitchEvent,
     Terminus2RuntimeProvenanceEvent,
     Terminus2TerminalObservationEvent,
     Terminus2TurnEvent,
@@ -59,6 +61,7 @@ class HarborCheckpointBridge:
             step_id=step_id,
         )
         self._seq = 0
+        self._seq_lock = asyncio.Lock()
         self._seen_step_ids: set[int] = set()
         self._provenance_emitted = False
 
@@ -156,7 +159,10 @@ class HarborCheckpointBridge:
                 "real gateway_request_id joins",
             )
 
-        llm_row = self._gateway_ledger.resolve_for_metrics(metrics)
+        llm_row = self._gateway_ledger.resolve_for_metrics(
+            metrics,
+            episode=int(step.get("step_id") or 0) or None,
+        )
         gateway_request_id = str(llm_row["id"])
         turn_id = str(uuid4())
         batch_id = str(uuid4())
@@ -289,3 +295,26 @@ class HarborCheckpointBridge:
                     share_policy="restricted",
                 ),
             )
+
+    async def emit_model_switch(
+        self,
+        *,
+        switch_episode: int,
+        from_model: ModelSpec,
+        to_model: ModelSpec,
+        from_role: str = "student",
+        to_role: str = "teacher",
+    ) -> None:
+        await self._trajectory.append(
+            Terminus2ModelSwitchEvent(
+                emitted_at=datetime.now(UTC),
+                trial_id=self._trial_id,
+                step_id=self._step_id,
+                seq=self._next_seq(),
+                switch_episode=switch_episode,
+                from_role=from_role,  # type: ignore[arg-type]
+                to_role=to_role,  # type: ignore[arg-type]
+                from_model=from_model,
+                to_model=to_model,
+            ),
+        )

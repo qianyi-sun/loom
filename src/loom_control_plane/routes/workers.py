@@ -45,6 +45,7 @@ from loom.pipeline.work_protocol import (
     WorkClaimRequestV1,
     WorkClaimV1,
 )
+from loom.model_switch_store import load_model_switch_plan, plan_snapshot_from_row
 from loom.task_image_materialization import get_trial_task_image_execution_grant
 from loom_control_plane.metrics import CLAIM_LATENCY_SEC
 from loom_control_plane.scheduler.claim import (
@@ -54,6 +55,13 @@ from loom_control_plane.scheduler.claim import (
 )
 
 router = APIRouter()
+
+
+async def _model_switch_plan_payload(session: Any, trial_id: UUID) -> dict[str, Any] | None:
+    row = await load_model_switch_plan(session, trial_id)
+    if row is None:
+        return None
+    return plan_snapshot_from_row(row).model_dump(mode="json")
 
 _WORKER_HEARTBEAT_STATUSES = {"active", "idle-exit", "shutting-down"}
 
@@ -369,6 +377,7 @@ async def claim_any_work(
                 family_run_spec=family_row["family_run_spec"] if family_row else None,
                 task_image_materialization=task_image_materialization,
                 state="claimed",
+                model_switch_plan=await _model_switch_plan_payload(session, row["id"]),
             )
         else:
             assert lease_token is not None

@@ -158,6 +158,9 @@ interface AdvancedState {
   backoffMultiplier: string;
   backoffJitter: string;
   submitPriority: string;
+  multiModelEnabled: boolean;
+  teacherModelName: string;
+  teacherEpisodes: string;
 }
 
 const INITIAL_ADVANCED: AdvancedState = {
@@ -178,6 +181,9 @@ const INITIAL_ADVANCED: AdvancedState = {
   backoffMultiplier: "2",
   backoffJitter: "0.2",
   submitPriority: "100",
+  multiModelEnabled: false,
+  teacherModelName: "",
+  teacherEpisodes: "2",
 };
 
 function buildAdvancedConfig(
@@ -263,6 +269,25 @@ function buildAdvancedConfig(
   const prio = numOrErr(s.submitPriority, "Submit priority", { min: 0, max: 1000 });
   if (typeof prio === "string") return { ok: false, error: prio };
   if (prio !== 100) out.submit_priority = prio;
+
+  if (s.multiModelEnabled) {
+    const teacher = s.teacherModelName.trim();
+    if (!teacher) {
+      return { ok: false, error: "Teacher model name is required when multi-model is enabled." };
+    }
+    const episodes = numOrErr(s.teacherEpisodes, "Teacher episodes", { min: 1, max: 1000 });
+    if (typeof episodes === "string") return { ok: false, error: episodes };
+    out.multi_model = {
+      enabled: true,
+      policy: "student_teacher_student",
+      teacher_episodes: episodes,
+      secondary_model: {
+        provider: "openai",
+        name: teacher,
+        source: "api",
+      },
+    };
+  }
 
   return { ok: true, value: out };
 }
@@ -1239,6 +1264,20 @@ export default function NewBatch(): JSX.Element {
     }
 
     const trial_config: Record<string, unknown> = { ...adv.value };
+    const mm = trial_config.multi_model as
+      | { enabled?: boolean; secondary_model?: Record<string, unknown> }
+      | undefined;
+    if (mm?.enabled && mm.secondary_model) {
+      const first = combos.value[0]?.agent_model;
+      if (first && typeof first === "object") {
+        mm.secondary_model = {
+          ...mm.secondary_model,
+          provider: first.provider,
+          source: first.source,
+        };
+        trial_config.multi_model = mm;
+      }
+    }
     const task_filter: CreateBatchBody["task_filter"] = {
       subset_kind: subsetKind,
     };
@@ -1942,6 +1981,54 @@ export default function NewBatch(): JSX.Element {
                     />
                     <Help>Higher = scheduled first. Default 100.</Help>
                   </label>
+                </fieldset>
+                <fieldset className="space-y-3">
+                  <legend className="text-sm font-semibold text-slate-700">
+                    Multi-model (terminus-2)
+                  </legend>
+                  <label className="flex items-center gap-2 text-sm text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={advanced.multiModelEnabled}
+                      onChange={(e) =>
+                        setAdv("multiModelEnabled", e.target.checked)
+                      }
+                    />
+                    Enable student → teacher → student switch
+                  </label>
+                  {advanced.multiModelEnabled ? (
+                    <>
+                      <label className="block max-w-md">
+                        <FieldLabel>Teacher model name</FieldLabel>
+                        <Input
+                          value={advanced.teacherModelName}
+                          onChange={(e) =>
+                            setAdv("teacherModelName", e.target.value)
+                          }
+                          placeholder="Same provider as the student model"
+                        />
+                        <Help>
+                          Secondary model on the same BYO connection. Combinations
+                          must use terminus-2.
+                        </Help>
+                      </label>
+                      <label className="block max-w-xs">
+                        <FieldLabel>Teacher episodes</FieldLabel>
+                        <Input
+                          type="number"
+                          min={1}
+                          max={1000}
+                          value={advanced.teacherEpisodes}
+                          onChange={(e) =>
+                            setAdv(
+                              "teacherEpisodes",
+                              clampInt(e.target.value, 1, 1000),
+                            )
+                          }
+                        />
+                      </label>
+                    </>
+                  ) : null}
                 </fieldset>
               </div>
             </details>

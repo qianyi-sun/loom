@@ -52,6 +52,10 @@ from starlette.responses import StreamingResponse
 
 from loom_llm_gateway.dialect import DIALECTS
 from loom_llm_gateway.llm_calls import record_call
+from loom_llm_gateway.model_switch_correlation import (
+    extract_and_strip_loom_fields,
+    persist_correlated_intent,
+)
 from loom_llm_gateway.request_params import normalize_request_params
 from loom_llm_gateway.retry import send_with_retry
 from loom_llm_gateway.routes._facade_common import (
@@ -127,6 +131,17 @@ async def openai_chat_facade(
     if client_requested_stream:
         upstream_payload["stream"] = False
         upstream_payload.pop("stream_options", None)
+    upstream_payload, loom_extras = extract_and_strip_loom_fields(upstream_payload)
+
+    async with request.app.state.session_factory() as session:
+        correlation = await persist_correlated_intent(
+            session,
+            trial_id=ctx.trial_id,
+            step_id=ctx.step_id,
+            extras=loom_extras,
+            jwt_connection_id=connection_id,
+            requested_model=payload["model"],
+        )
 
     # Resolve + decrypt. Both happen inside one session so the
     # SecretStore.get sees the same transaction the lookup did.
@@ -170,6 +185,7 @@ async def openai_chat_facade(
             request_payload=payload,
             failure_category="upstream_timeout",
             failure_error_type=type(e).__name__,
+            correlation=correlation,
         )
         raise HTTPException(
             status_code=504,
@@ -185,6 +201,7 @@ async def openai_chat_facade(
             request_payload=payload,
             failure_category="upstream_transport",
             failure_error_type=type(e).__name__,
+            correlation=correlation,
         )
         raise HTTPException(
             status_code=502,
@@ -203,6 +220,7 @@ async def openai_chat_facade(
             failure_category=http_failure_category(upstream_response.status_code),
             failure_status_code=upstream_response.status_code,
             attempt=outcome.attempt,
+            correlation=correlation,
         )
         raise HTTPException(
             status_code=upstream_response.status_code,
@@ -262,6 +280,17 @@ async def openai_chat_facade(
                 response_body=body,
                 api_key=api_key,
             ),
+            response_model=body.get("model") if isinstance(body.get("model"), str) else None,
+            **{k: correlation[k] for k in (
+                "client_call_id",
+                "agent_execution_id",
+                "agent_run_attempt_id",
+                "episode",
+                "call_ordinal",
+                "requested_model",
+                "role",
+                "correlation_status",
+            )},
         )
 
     return openai_chat_facade_result(
