@@ -46,9 +46,9 @@ def test_manager_credentials_become_exact_owner_only_regular_files(
     assert {path.name for path in destination.iterdir()} == _MANAGER_FILES
     assert all(path.is_file() and not path.is_symlink() for path in destination.iterdir())
     assert all(S_IMODE(path.stat().st_mode) == 0o600 for path in destination.iterdir())
-    assert {
-        path.name: path.read_text(encoding="utf-8") for path in destination.iterdir()
-    } == {filename: f"payload:{filename}" for filename in _MANAGER_FILES}
+    assert {path.name: path.read_text(encoding="utf-8") for path in destination.iterdir()} == {
+        filename: f"payload:{filename}" for filename in _MANAGER_FILES
+    }
 
 
 def test_migration_profile_contains_only_the_database_url(tmp_path: Path) -> None:
@@ -60,6 +60,23 @@ def test_migration_profile_contains_only_the_database_url(tmp_path: Path) -> Non
 
     assert [path.name for path in destination.iterdir()] == ["database-url"]
     assert S_IMODE((destination / "database-url").stat().st_mode) == 0o600
+
+
+def test_execution_policy_profile_becomes_one_owner_only_regular_file(
+    tmp_path: Path,
+) -> None:
+    source = _projected_source(tmp_path, {"execution-policy.json"})
+    destination = tmp_path / "runtime-policy" / "execution-policy"
+    destination.parent.mkdir()
+
+    copy_projected_credentials(source, destination, profile="execution-policy")
+
+    assert S_IMODE(destination.stat().st_mode) == 0o700
+    assert [path.name for path in destination.iterdir()] == ["execution-policy.json"]
+    policy = destination / "execution-policy.json"
+    assert policy.is_file() and not policy.is_symlink()
+    assert S_IMODE(policy.stat().st_mode) == 0o600
+    assert policy.stat().st_uid == destination.stat().st_uid
 
 
 def test_identical_rerun_is_idempotent_but_credential_drift_is_rejected(
@@ -78,9 +95,7 @@ def test_identical_rerun_is_idempotent_but_credential_drift_is_rejected(
 
     with pytest.raises(ValueError, match="differs"):
         copy_projected_credentials(source, destination, profile="manager")
-    assert (destination / "database-url").read_text(encoding="utf-8") == (
-        "payload:database-url"
-    )
+    assert (destination / "database-url").read_text(encoding="utf-8") == ("payload:database-url")
 
 
 def test_projected_credential_cannot_escape_its_volume(tmp_path: Path) -> None:
@@ -186,9 +201,7 @@ def test_projection_rotation_during_copy_fails_without_mixing_generations(
 def test_projection_requires_standard_data_key_symlinks(tmp_path: Path) -> None:
     source = _projected_source(tmp_path, {"database-url"})
     (source / "database-url").unlink()
-    (source / "database-url").symlink_to(
-        Path("..2026_08_11_120000") / "database-url"
-    )
+    (source / "database-url").symlink_to(Path("..2026_08_11_120000") / "database-url")
     destination = tmp_path / "runtime" / "credentials"
     destination.parent.mkdir()
 

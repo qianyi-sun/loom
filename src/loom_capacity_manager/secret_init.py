@@ -10,9 +10,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
 
-CredentialProfile = Literal["manager", "migration"]
+CredentialProfile = Literal["execution-policy", "manager", "migration"]
 
 _PROFILE_FILES: dict[CredentialProfile, frozenset[str]] = {
+    "execution-policy": frozenset({"execution-policy.json"}),
     "manager": frozenset(
         {
             "client-ca.pem",
@@ -62,9 +63,7 @@ class _ProjectedSnapshot:
                 dir_fd=self.source_descriptor,
             )
             visible = {
-                name
-                for name in os.listdir(self.source_descriptor)
-                if not name.startswith("..")
+                name for name in os.listdir(self.source_descriptor) if not name.startswith("..")
             }
             key_links = {
                 filename: (
@@ -99,8 +98,7 @@ class _ProjectedSnapshot:
                 if (
                     not stat.S_ISLNK(metadata.st_mode)
                     or target != f"..data/{filename}"
-                    or (metadata.st_dev, metadata.st_ino)
-                    != self.key_link_identities[filename]
+                    or (metadata.st_dev, metadata.st_ino) != self.key_link_identities[filename]
                 ):
                     raise ValueError(
                         "projected capacity credential generation changed while being copied"
@@ -140,12 +138,8 @@ def _source_payloads(source: Path, expected: frozenset[str]) -> _ProjectedSnapsh
             source_metadata.st_dev,
             source_metadata.st_ino,
         ):
-            raise ValueError(
-                "projected capacity credential source changed while being opened"
-            )
-        visible = {
-            name for name in os.listdir(source_descriptor) if not name.startswith("..")
-        }
+            raise ValueError("projected capacity credential source changed while being opened")
+        visible = {name for name in os.listdir(source_descriptor) if not name.startswith("..")}
         if visible != expected:
             raise ValueError("projected capacity credential file set is invalid")
         data_link = os.stat(
@@ -202,9 +196,7 @@ def _source_payloads(source: Path, expected: frozenset[str]) -> _ProjectedSnapsh
                 raise ValueError("projected capacity credential is not a bounded regular file")
             descriptor = os.open(
                 filename,
-                os.O_RDONLY
-                | getattr(os, "O_CLOEXEC", 0)
-                | getattr(os, "O_NOFOLLOW", 0),
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
                 dir_fd=generation_descriptor,
             )
             try:
@@ -214,9 +206,7 @@ def _source_payloads(source: Path, expected: frozenset[str]) -> _ProjectedSnapsh
                     or not stat.S_ISREG(opened.st_mode)
                     or not 0 < opened.st_size <= _MAX_FILE_BYTES
                 ):
-                    raise ValueError(
-                        "projected capacity credential changed while being opened"
-                    )
+                    raise ValueError("projected capacity credential changed while being opened")
                 payloads[filename] = _read_bounded_descriptor(
                     descriptor,
                     expected_size=opened.st_size,
@@ -313,18 +303,13 @@ def copy_projected_credentials(
                 )
             snapshot.validate()
             return
-        staging = Path(
-            tempfile.mkdtemp(prefix=f".{destination.name}-", dir=destination_parent)
-        )
+        staging = Path(tempfile.mkdtemp(prefix=f".{destination.name}-", dir=destination_parent))
         try:
             for filename, payload in source_payloads.items():
                 target = staging / filename
                 descriptor = os.open(
                     target,
-                    os.O_WRONLY
-                    | os.O_CREAT
-                    | os.O_EXCL
-                    | getattr(os, "O_CLOEXEC", 0),
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
                     0o600,
                 )
                 try:

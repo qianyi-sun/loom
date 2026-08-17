@@ -345,6 +345,16 @@ class ExecutionActivationV2(StrictV2Model):
     executable: Literal[True] = True
 
 
+class ExecutionPreparationAbortV2(StrictV2Model):
+    """Retire one exact zero-ceiling prepared epoch without activating it."""
+
+    authority_incarnation: UUID
+    expected_writer_epoch: PositiveQuantity
+    execution_epoch: PositiveQuantity
+    execution_manifest_sha256: Digest
+    executable: Literal[True] = True
+
+
 class ExecutionDrainV2(StrictV2Model):
     """One explicit zeroing transition of an exact active epoch."""
 
@@ -942,6 +952,7 @@ __all__ = [
     "ExecutionContextV2",
     "ExecutionDrainV2",
     "ExecutionFenceV2",
+    "ExecutionPreparationAbortV2",
     "ExecutionPreparationPolicyV2",
     "ExecutionPreparationV2",
     "ExecutionRetirementExecutorCheckpointV2",

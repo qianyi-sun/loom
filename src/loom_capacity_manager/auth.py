@@ -29,6 +29,8 @@ CapacityScope = Literal[
     "capacity:report:pool",
     "capacity:grant:manage",
     "capacity:execute:pool",
+    "capacity:execution:prepare",
+    "capacity:execution:abort",
 ]
 
 
@@ -96,6 +98,11 @@ class _PrincipalDocument(_StrictModel):
                 self.executor_pool_generation,
             )
         )
+        has_execution_transition = bool(
+            {"capacity:execution:prepare", "capacity:execution:abort"}.intersection(self.scopes)
+        )
+        if has_execution_transition and (has_subject or self.pool_id is not None):
+            raise ValueError("execution transition principal must be unbound")
         if has_subject and not all(value is not None for value in subject_values):
             raise ValueError("incomplete subject binding")
         if has_pool_reporter and self.pool_id is None:
@@ -265,6 +272,8 @@ class CapacityPrincipalVerifier:
                 label = "invalid pool binding"
             elif "single-purpose" in message:
                 label = "bound principal must be single-purpose"
+            elif "execution transition" in message:
+                label = "execution transition principal must be unbound"
             elif "operator" in message:
                 label = "principal registry requires an operator"
             elif "scope" in message or "literal_error" in message:

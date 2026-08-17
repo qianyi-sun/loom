@@ -47,6 +47,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutionAuthorityV2,
     ExecutionContextV2,
     ExecutionDrainV2,
+    ExecutionPreparationAbortV2,
     ExecutionPreparationPolicyV2,
     ExecutionPreparationV2,
     ExecutionRetirementV2,
@@ -509,6 +510,12 @@ class CapacityManagementStore:
             raise ValueError("freshness_seconds must be a positive integer")
         self._freshness = timedelta(seconds=freshness_seconds)
         self._execution_policy = execution_policy
+
+    @property
+    def execution_policy(self) -> ExecutionPreparationPolicyV2 | None:
+        """Return the immutable process-local execution preparation policy."""
+
+        return self._execution_policy
 
     async def propose_fleet_configuration(
         self,
@@ -2165,6 +2172,133 @@ class CapacityManagementStore:
             )
             await session.flush()
             return context
+
+    async def abort_prepared_execution_epoch(
+        self,
+        session: AsyncSession,
+        request: ExecutionPreparationAbortV2,
+        *,
+        actor: str,
+        idempotency_key: UUID,
+    ) -> RetiredExecutionEpoch:
+        """Return an exact zero-ceiling preparation to shadow authority."""
+
+        self._validate_execution_actor(actor)
+        request_digest = canonical_executable_digest(request)
+        request_payload = request.model_dump(mode="json", exclude_none=False)
+        async with _write_transaction(session):
+            authority = await _lock_any_authority(session)
+            replay = (
+                await session.execute(
+                    select(CapacityExecutionEpoch)
+                    .where(CapacityExecutionEpoch.retirement_idempotency_key == idempotency_key)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if replay is not None:
+                if (
+                    replay.retirement_actor != actor
+                    or replay.retirement_request_digest != request_digest
+                    or replay.retirement_request_payload != request_payload
+                ):
+                    raise IdempotencyConflictError(
+                        "execution preparation abort idempotency key was reused"
+                    )
+                if (
+                    replay.state != "retired"
+                    or replay.retired_at is None
+                    or replay.authority_incarnation != request.authority_incarnation
+                    or replay.prepared_writer_epoch != request.expected_writer_epoch
+                    or replay.current_writer_epoch != request.expected_writer_epoch + 1
+                    or replay.execution_epoch != request.execution_epoch
+                    or replay.execution_manifest_sha256 != request.execution_manifest_sha256
+                    or replay.effective_ceiling != 0
+                    or replay.effective_rate_per_minute != 0
+                    or replay.activation_actor is not None
+                    or replay.drain_actor is not None
+                ):
+                    raise ExecutionConflictError("execution preparation abort replay is incomplete")
+                return RetiredExecutionEpoch(
+                    execution_epoch=replay.execution_epoch,
+                    execution_manifest_sha256=replay.execution_manifest_sha256,
+                    retired_at=replay.retired_at,
+                    replayed=True,
+                )
+
+            row = (
+                await session.execute(
+                    select(CapacityExecutionEpoch)
+                    .where(CapacityExecutionEpoch.execution_epoch == request.execution_epoch)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if row is None or row.state != "prepared":
+                raise ExecutionConflictError("exact prepared execution epoch is unavailable")
+            if (
+                authority.authority_incarnation != request.authority_incarnation
+                or authority.writer_epoch != request.expected_writer_epoch
+                or authority.execution_state != "prepared"
+                or authority.execution_epoch != request.execution_epoch
+                or authority.execution_manifest_sha256 != request.execution_manifest_sha256
+                or authority.executable_new_capacity_ceiling != 0
+                or row.authority_incarnation != request.authority_incarnation
+                or row.current_writer_epoch != request.expected_writer_epoch
+                or row.execution_manifest_sha256 != request.execution_manifest_sha256
+                or row.effective_ceiling != 0
+                or row.effective_rate_per_minute != 0
+            ):
+                raise ExecutionConflictError("prepared execution abort fence changed")
+            preparation = self._execution_preparation_from_row(row)
+            await self._validate_execution_preparation(session, authority, preparation)
+            intent = (
+                await session.execute(
+                    select(CapacityExecutableIntent.intent_id)
+                    .where(CapacityExecutableIntent.execution_epoch == row.execution_epoch)
+                    .limit(1)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if intent is not None:
+                raise ExecutionConflictError(
+                    "prepared execution abort requires an empty intent set"
+                )
+
+            now = await _db_now(session)
+            successor_writer_epoch = authority.writer_epoch + 1
+            row.state = "retired"
+            row.current_writer_epoch = successor_writer_epoch
+            row.retirement_actor = actor
+            row.retirement_idempotency_key = idempotency_key
+            row.retirement_request_digest = request_digest
+            row.retirement_request_payload = request_payload
+            row.retired_at = now
+            authority.writer_epoch = successor_writer_epoch
+            authority.execution_epoch = 0
+            authority.execution_state = "shadow"
+            authority.execution_manifest_sha256 = None
+            authority.executable_new_capacity_ceiling = 0
+            authority.increase_freeze = True
+            authority.increase_freeze_reason = "execution_preparation_aborted"
+            authority.updated_at = now
+            await session.flush()
+            session.add(
+                _audit(
+                    actor_kind="operator",
+                    actor_id=actor,
+                    event_kind="capacity_execution_preparation_aborted",
+                    object_binding={
+                        "execution_epoch": row.execution_epoch,
+                        "execution_manifest_sha256": row.execution_manifest_sha256,
+                    },
+                    detail={"idempotency_key": str(idempotency_key)},
+                )
+            )
+            return RetiredExecutionEpoch(
+                execution_epoch=row.execution_epoch,
+                execution_manifest_sha256=row.execution_manifest_sha256,
+                retired_at=now,
+                replayed=False,
+            )
 
     async def activate_execution_epoch(
         self,

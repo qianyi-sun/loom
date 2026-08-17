@@ -44,12 +44,20 @@ from loom_capacity_manager.executable_contracts import (
     CandidateBindingV2,
     ExecutableBootstrapAcknowledgementV2,
     ExecutableBootstrapProposalV2,
+    ExecutableExecutorHeartbeatV2,
+    ExecutableExecutorInventoryV2,
+    ExecutableExecutorRegistrationV2,
     ExecutableIntentBindingV2,
     ExecutableReservationAcceptanceV2,
     ExecutableSubmissionRecoveryV2,
     ExecutionActivationV2,
     ExecutionContextV2,
     ExecutionFenceV2,
+    ExecutionPreparationAbortV2,
+    ExecutionPreparationPolicyV2,
+    ExecutionPreparationV2,
+    canonical_executable_bytes,
+    canonical_inventory_confirmation_journal_head,
 )
 from loom_capacity_manager.execution_store import (
     ProposedExecutableBootstrap,
@@ -63,6 +71,7 @@ from loom_capacity_manager.models import (
     CapacityAuthorityState,
 )
 from loom_capacity_manager.ownership import public_key_fingerprint
+from loom_capacity_manager.preparation_readiness import PreparedExecutionReadinessV2
 from loom_capacity_manager.reconciler import (
     ReconciliationFailurePersistenceError,
     reconcile_shadow_once,
@@ -103,6 +112,10 @@ OLDLAB_TOKEN = "oldlab-api-secret"
 DYNAMIC_DEMAND_TOKEN = "dynamic-demand-api-secret"
 OLDLAB_EXECUTOR_TOKEN = "oldlab-executor-secret"
 OLDLAB_V2_EXECUTOR_TOKEN = "oldlab-v2-executor-secret"
+EXECUTION_PREPARE_TOKEN = "execution-prepare-secret"
+EXECUTION_ABORT_TOKEN = "execution-abort-secret"
+EXECUTION_READ_TOKEN = "execution-read-secret"
+GB10_V2_EXECUTOR_TOKEN = "gb10-v2-executor-secret"
 OLDLAB_EXECUTOR_INCARNATION = UUID("00000000-0000-4000-8000-000000000601")
 OLDLAB_OWNERSHIP_PRIVATE_KEY = Ed25519PrivateKey.from_private_bytes(b"\x03" * 32)
 V2_TRANCHE_ID = UUID(int=41)
@@ -939,6 +952,121 @@ async def api_context_v2_executor_generation(
     await _reset_capacity_database(capacity_session_factory)
 
 
+@pytest.fixture
+async def execution_preparation_api_context(
+    tmp_path: Path,
+    capacity_postgres_url: str,
+    capacity_session_factory: async_sessionmaker[AsyncSession],
+) -> AsyncIterator[
+    tuple[
+        TestClient,
+        FastAPI,
+        CapacityManagerSettings,
+        ExecutionPreparationV2,
+        ExecutionPreparationPolicyV2,
+    ]
+]:
+    """Build the real pinned-policy API around one committed shadow fixture."""
+
+    await _reset_capacity_database(capacity_session_factory)
+    policy = execution_policy()
+    async with capacity_session_factory() as session:
+        fixture = await setup_execution(session, execution_policy=policy)
+        await session.commit()
+
+    registry_path = _owner_file(
+        tmp_path / "execution-principals.json",
+        json.dumps(
+            {
+                "schema_version": 1,
+                "principals": [
+                    _principal(
+                        "execution-preparer",
+                        EXECUTION_PREPARE_TOKEN,
+                        ["capacity:execution:prepare", "capacity:reconcile"],
+                    ),
+                    _principal(
+                        "execution-aborter",
+                        EXECUTION_ABORT_TOKEN,
+                        ["capacity:execution:abort"],
+                    ),
+                    _principal(
+                        "execution-reader",
+                        EXECUTION_READ_TOKEN,
+                        ["capacity:read"],
+                    ),
+                    *(
+                        _principal(
+                            f"{binding.pool_id}-v2-executor",
+                            (
+                                GB10_V2_EXECUTOR_TOKEN
+                                if binding.pool_id == "gb10"
+                                else OLDLAB_V2_EXECUTOR_TOKEN
+                            ),
+                            ["capacity:execute:pool"],
+                            pool_id=binding.pool_id,
+                            executor_id=binding.executor_id,
+                            executor_incarnation=binding.executor_incarnation,
+                            executor_pool_generation=binding.pool_generation,
+                        )
+                        for binding in policy.executors
+                    ),
+                ],
+            }
+        ),
+    )
+    policy_payload = canonical_executable_bytes(policy)
+    policy_path = _owner_file(
+        tmp_path / "execution-policy.json",
+        policy_payload.decode("ascii"),
+    )
+    policy_sha256 = hashlib.sha256(policy_payload).hexdigest()
+    settings = CapacityManagerSettings(
+        principals_file=registry_path,
+        db_url_file=_owner_file(tmp_path / "execution-database-url", capacity_postgres_url),
+        expected_authority_incarnation=AUTHORITY_ID,
+        tls_cert_file=_owner_file(tmp_path / "execution-server.crt", "test"),
+        tls_key_file=_owner_file(tmp_path / "execution-server.key", "test"),
+        tls_client_ca_file=_owner_file(tmp_path / "execution-client-ca.crt", "test"),
+        execution_policy_file=policy_path,
+        execution_policy_sha256=policy_sha256,
+        freshness_seconds=120,
+    )
+    app = create_app(settings)
+    with TestClient(app) as client:
+        assert client.get("/healthz").status_code == 200
+        request = fixture.request.model_copy(
+            update={"expected_writer_epoch": app.state.writer.writer_epoch}
+        )
+        yield client, app, settings, request, policy
+    await _reset_capacity_database(capacity_session_factory)
+
+
+def _execution_registration(
+    prepared: ExecutionContextV2,
+    policy: ExecutionPreparationPolicyV2,
+    *,
+    pool_id: str,
+) -> ExecutableExecutorRegistrationV2:
+    binding = next(item for item in policy.executors if item.pool_id == pool_id)
+    return ExecutableExecutorRegistrationV2(
+        execution=prepared,
+        executor_id=binding.executor_id,
+        executor_incarnation=binding.executor_incarnation,
+        pool_id=binding.pool_id,
+        pool_generation=binding.pool_generation,
+        signing_key_id=f"{binding.pool_id}-key",
+        signing_key_sha256=binding.signing_key_sha256,
+        local_authority_sha256=binding.local_authority_sha256,
+        controller_authority_sha256=binding.controller_authority_sha256,
+    )
+
+
+def _v2_executor_headers(pool_id: str) -> dict[str, str]:
+    token = GB10_V2_EXECUTOR_TOKEN if pool_id == "gb10" else OLDLAB_V2_EXECUTOR_TOKEN
+    return {"Authorization": f"Bearer {token}"}
+
+
 @contextmanager
 def hold_reconciliation_open(
     client: TestClient,
@@ -993,6 +1121,9 @@ def _assert_exact_approved_routes(app: FastAPI) -> None:
             "/v1/executors/{pool_id}/reservations/{tranche_id}/release",
             ("POST",),
         ),
+        ("/v2/execution-preparations", ("POST",)),
+        ("/v2/executors/{pool_id}/registration", ("PUT",)),
+        ("/v2/execution-preparations/{execution_epoch}/abort", ("POST",)),
         ("/v2/executors/{pool_id}/heartbeat", ("PUT",)),
         ("/v2/executors/{pool_id}/checkpoint", ("GET",)),
         ("/v2/executors/{pool_id}/context", ("GET",)),
@@ -1028,6 +1159,7 @@ def _assert_exact_approved_routes(app: FastAPI) -> None:
         ("/v1/status/pools", ("GET",)),
         ("/v1/status/executors", ("GET",)),
         ("/v1/status/reservations", ("GET",)),
+        ("/v2/status/execution-preparation", ("GET",)),
         ("/v2/status/executors", ("GET",)),
         ("/v2/status/subjects/{subject_id}", ("GET",)),
         ("/v1/shadow-epochs/{allocation_epoch}", ("GET",)),
@@ -1042,6 +1174,513 @@ def test_shadow_api_exposes_exactly_the_approved_routes(
 ) -> None:
     _client, app, _settings, _allocator = api_context
     _assert_exact_approved_routes(app)
+
+
+def test_execution_preparation_and_registration_routes_are_exact_and_replayable(
+    execution_preparation_api_context: tuple[
+        TestClient,
+        FastAPI,
+        CapacityManagerSettings,
+        ExecutionPreparationV2,
+        ExecutionPreparationPolicyV2,
+    ],
+) -> None:
+    """Protected routes reject identity drift and preserve exact retries."""
+
+    client, _app, _settings, request, policy = execution_preparation_api_context
+    prepare_path = "/v2/execution-preparations"
+    prepare_headers = {"Authorization": f"Bearer {EXECUTION_PREPARE_TOKEN}"}
+    preparation_key = UUID(int=15001)
+
+    assert client.post(prepare_path, json=request.model_dump(mode="json")).status_code == 401
+    assert (
+        client.post(
+            prepare_path,
+            headers={"Authorization": "Bearer invalid"},
+            json=request.model_dump(mode="json"),
+        ).status_code
+        == 401
+    )
+    assert (
+        client.post(
+            prepare_path,
+            headers={"Authorization": f"Bearer {EXECUTION_READ_TOKEN}"},
+            json=request.model_dump(mode="json"),
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post(
+            prepare_path,
+            headers=prepare_headers,
+            json=request.model_dump(mode="json"),
+        ).status_code
+        == 422
+    )
+    assert (
+        client.post(
+            prepare_path,
+            headers=prepare_headers | {"Idempotency-Key": "not-a-uuid"},
+            json=request.model_dump(mode="json"),
+        ).status_code
+        == 422
+    )
+    invalid_contract = client.post(
+        prepare_path,
+        headers=prepare_headers | {"Idempotency-Key": str(UUID(int=14999))},
+        json={},
+    )
+    assert invalid_contract.status_code == 422
+    assert invalid_contract.json() == {"detail": "invalid capacity contract"}
+    assert (
+        client.post(
+            prepare_path,
+            headers=prepare_headers | {"Idempotency-Key": str(UUID(int=15000))},
+            content=b"x" * (MAX_CONTRACT_BYTES + 1),
+        ).status_code
+        == 413
+    )
+
+    prepared_response = client.post(
+        prepare_path,
+        headers=prepare_headers | {"Idempotency-Key": str(preparation_key)},
+        json=request.model_dump(mode="json"),
+    )
+    assert prepared_response.status_code == 200, prepared_response.text
+    prepared = ExecutionContextV2.model_validate_json(prepared_response.content)
+    assert prepared.execution_state == "prepared"
+    assert prepared.executable_new_capacity_ceiling == 0
+    assert prepared.executable_new_capacity_rate_per_minute == 0
+    replay = client.post(
+        prepare_path,
+        headers=prepare_headers | {"Idempotency-Key": str(preparation_key)},
+        json=request.model_dump(mode="json"),
+    )
+    assert replay.status_code == 200
+    assert replay.json() == prepared_response.json()
+    conflict = client.post(
+        prepare_path,
+        headers=prepare_headers | {"Idempotency-Key": str(preparation_key)},
+        json=request.model_copy(update={"rollback_evidence_sha256": "f" * 64}).model_dump(
+            mode="json"
+        ),
+    )
+    assert conflict.status_code == 409
+    assert conflict.json() == {"detail": "capacity state conflict"}
+
+    registration = _execution_registration(prepared, policy, pool_id="gb10")
+    registration_path = "/v2/executors/gb10/registration"
+    executor_headers = _v2_executor_headers("gb10")
+    registration_key = UUID(int=15002)
+    assert (
+        client.put(
+            registration_path,
+            headers=executor_headers,
+            json=registration.model_dump(mode="json"),
+        ).status_code
+        == 422
+    )
+    assert (
+        client.put(
+            registration_path,
+            headers=prepare_headers | {"Idempotency-Key": str(UUID(int=15003))},
+            json=registration.model_dump(mode="json"),
+        ).status_code
+        == 403
+    )
+    assert (
+        client.put(
+            "/v2/executors/oldlab/registration",
+            headers=executor_headers | {"Idempotency-Key": str(UUID(int=15004))},
+            json=registration.model_dump(mode="json"),
+        ).status_code
+        == 403
+    )
+    for index, change in enumerate(
+        (
+            {"pool_id": "oldlab"},
+            {"executor_id": "other-executor"},
+            {"executor_incarnation": UUID(int=15005)},
+            {"pool_generation": 2},
+        ),
+        start=15006,
+    ):
+        rejected = client.put(
+            registration_path,
+            headers=executor_headers | {"Idempotency-Key": str(UUID(int=index))},
+            json=registration.model_copy(update=change).model_dump(mode="json"),
+        )
+        assert rejected.status_code == 403
+        assert rejected.json() == {"detail": "forbidden"}
+
+    registered = client.put(
+        registration_path,
+        headers=executor_headers | {"Idempotency-Key": str(registration_key)},
+        json=registration.model_dump(mode="json"),
+    )
+    assert registered.status_code == 200, registered.text
+    assert registered.json() == prepared.model_dump(mode="json")
+    registration_replay = client.put(
+        registration_path,
+        headers=executor_headers | {"Idempotency-Key": str(registration_key)},
+        json=registration.model_dump(mode="json"),
+    )
+    assert registration_replay.status_code == 200
+    assert registration_replay.json() == registered.json()
+    reused = client.put(
+        registration_path,
+        headers=executor_headers | {"Idempotency-Key": str(registration_key)},
+        json=registration.model_copy(update={"signing_key_id": "changed-key"}).model_dump(
+            mode="json"
+        ),
+    )
+    assert reused.status_code == 409
+    assert reused.json() == {"detail": "capacity state conflict"}
+
+
+def test_execution_preparation_abort_is_exact_and_keeps_active_routes_absent(
+    execution_preparation_api_context: tuple[
+        TestClient,
+        FastAPI,
+        CapacityManagerSettings,
+        ExecutionPreparationV2,
+        ExecutionPreparationPolicyV2,
+    ],
+) -> None:
+    """Abort is separately scoped, exactly fenced, replayable, and zero-only."""
+
+    client, app, settings, request, _policy = execution_preparation_api_context
+    prepare_headers = {
+        "Authorization": f"Bearer {EXECUTION_PREPARE_TOKEN}",
+        "Idempotency-Key": str(UUID(int=15100)),
+    }
+    prepared_response = client.post(
+        "/v2/execution-preparations",
+        headers=prepare_headers,
+        json=request.model_dump(mode="json"),
+    )
+    assert prepared_response.status_code == 200, prepared_response.text
+    prepared = ExecutionContextV2.model_validate_json(prepared_response.content)
+    abort = ExecutionPreparationAbortV2(
+        authority_incarnation=prepared.authority_incarnation,
+        expected_writer_epoch=prepared.writer_epoch,
+        execution_epoch=prepared.execution_epoch,
+        execution_manifest_sha256=prepared.execution_manifest_sha256,
+    )
+    abort_path = f"/v2/execution-preparations/{prepared.execution_epoch}/abort"
+    abort_headers = {"Authorization": f"Bearer {EXECUTION_ABORT_TOKEN}"}
+    abort_key = UUID(int=15101)
+
+    assert (
+        client.post(
+            abort_path,
+            headers={"Authorization": f"Bearer {EXECUTION_PREPARE_TOKEN}"},
+            json=abort.model_dump(mode="json"),
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post(
+            abort_path,
+            headers=abort_headers,
+            json=abort.model_dump(mode="json"),
+        ).status_code
+        == 422
+    )
+    crossed = client.post(
+        f"/v2/execution-preparations/{prepared.execution_epoch + 1}/abort",
+        headers=abort_headers | {"Idempotency-Key": str(UUID(int=15102))},
+        json=abort.model_dump(mode="json"),
+    )
+    assert crossed.status_code == 403
+    assert crossed.json() == {"detail": "forbidden"}
+
+    retired = client.post(
+        abort_path,
+        headers=abort_headers | {"Idempotency-Key": str(abort_key)},
+        json=abort.model_dump(mode="json"),
+    )
+    assert retired.status_code == 200, retired.text
+    assert retired.json()["execution_epoch"] == prepared.execution_epoch
+    assert retired.json()["execution_manifest_sha256"] == prepared.execution_manifest_sha256
+    assert retired.json()["replayed"] is False
+    assert app.state.writer == WriterFence(
+        authority_incarnation=prepared.authority_incarnation,
+        writer_epoch=prepared.writer_epoch + 1,
+    )
+    assert client.get("/healthz").json() == {
+        "status": "ready",
+        "executable_new_capacity_ceiling": 0,
+    }
+    replay = client.post(
+        abort_path,
+        headers=abort_headers | {"Idempotency-Key": str(abort_key)},
+        json=abort.model_dump(mode="json"),
+    )
+    assert replay.status_code == 200
+    assert replay.json() == retired.json() | {"replayed": True}
+    changed = abort.model_copy(update={"execution_manifest_sha256": "f" * 64})
+    conflict = client.post(
+        abort_path,
+        headers=abort_headers | {"Idempotency-Key": str(abort_key)},
+        json=changed.model_dump(mode="json"),
+    )
+    assert conflict.status_code == 409
+    assert conflict.json() == {"detail": "capacity state conflict"}
+
+    for forbidden_path in (
+        "/v2/execution-activations",
+        "/v2/execution-drains",
+        "/v2/execution-retirements",
+        "/v2/execution-transitions",
+    ):
+        response = client.post(
+            forbidden_path,
+            headers=abort_headers | {"Idempotency-Key": str(UUID(int=15103))},
+            json={},
+        )
+        assert response.status_code == 404
+
+    replacement_app = create_app(settings)
+    with TestClient(replacement_app) as replacement_client:
+        replacement_writer = replacement_app.state.writer
+        assert replacement_writer.writer_epoch == prepared.writer_epoch + 2
+        replacement_replay = replacement_client.post(
+            abort_path,
+            headers=abort_headers | {"Idempotency-Key": str(abort_key)},
+            json=abort.model_dump(mode="json"),
+        )
+        assert replacement_replay.status_code == 200
+        assert replacement_replay.json() == retired.json() | {"replayed": True}
+        assert replacement_app.state.writer == replacement_writer
+        assert replacement_client.get("/healthz").status_code == 200
+
+
+def test_execution_preparation_status_requires_complete_fresh_two_pool_evidence(
+    execution_preparation_api_context: tuple[
+        TestClient,
+        FastAPI,
+        CapacityManagerSettings,
+        ExecutionPreparationV2,
+        ExecutionPreparationPolicyV2,
+    ],
+) -> None:
+    """Readiness exposes bounded progress and becomes true only after confirmation."""
+
+    client, _app, settings, request, policy = execution_preparation_api_context
+    status_path = "/v2/status/execution-preparation"
+    read_headers = {"Authorization": f"Bearer {EXECUTION_READ_TOKEN}"}
+    assert client.get(status_path).status_code == 401
+    assert client.get(status_path, headers=_v2_executor_headers("gb10")).status_code == 403
+
+    shadow_response = client.get(status_path, headers=read_headers)
+    assert shadow_response.status_code == 200
+    shadow = PreparedExecutionReadinessV2.model_validate_json(shadow_response.content)
+    assert shadow.ready is False
+    assert shadow.policy_sha256 == settings.execution_policy_sha256
+    assert shadow.blockers == ("manager-shadow",)
+
+    prepared_response = client.post(
+        "/v2/execution-preparations",
+        headers={
+            "Authorization": f"Bearer {EXECUTION_PREPARE_TOKEN}",
+            "Idempotency-Key": str(UUID(int=15200)),
+        },
+        json=request.model_dump(mode="json"),
+    )
+    assert prepared_response.status_code == 200, prepared_response.text
+    prepared = ExecutionContextV2.model_validate_json(prepared_response.content)
+    incomplete = PreparedExecutionReadinessV2.model_validate_json(
+        client.get(status_path, headers=read_headers).content
+    )
+    assert incomplete.ready is False
+    assert incomplete.blockers == ("executor-registration-missing",)
+
+    registrations = {
+        pool_id: _execution_registration(prepared, policy, pool_id=pool_id)
+        for pool_id in ("gb10", "oldlab")
+    }
+    for index, (pool_id, registration) in enumerate(registrations.items(), start=15201):
+        response = client.put(
+            f"/v2/executors/{pool_id}/registration",
+            headers=_v2_executor_headers(pool_id) | {"Idempotency-Key": str(UUID(int=index))},
+            json=registration.model_dump(mode="json"),
+        )
+        assert response.status_code == 200, response.text
+    registered = PreparedExecutionReadinessV2.model_validate_json(
+        client.get(status_path, headers=read_headers).content
+    )
+    assert registered.ready is False
+    assert registered.blockers == ("executor-inventory-missing", "executor-lease-expired")
+
+    for pool_id, registration in registrations.items():
+        headers = _v2_executor_headers(pool_id)
+        heartbeat = ExecutableExecutorHeartbeatV2(
+            execution=prepared,
+            executor_id=registration.executor_id,
+            executor_incarnation=registration.executor_incarnation,
+            pool_id=pool_id,
+            pool_generation=registration.pool_generation,
+            heartbeat_sequence=1,
+            journal_sequence=0,
+            journal_digest="0" * 64,
+        )
+        response = client.put(
+            f"/v2/executors/{pool_id}/heartbeat",
+            headers=headers,
+            json=heartbeat.model_dump(mode="json"),
+        )
+        assert response.status_code == 200, response.text
+        inventory = ExecutableExecutorInventoryV2(
+            execution=prepared,
+            executor_id=registration.executor_id,
+            executor_incarnation=registration.executor_incarnation,
+            pool_id=pool_id,
+            pool_generation=registration.pool_generation,
+            inventory_sequence=1,
+            journal_sequence=0,
+            journal_digest="0" * 64,
+            records=(),
+        )
+        response = client.put(
+            f"/v2/executors/{pool_id}/inventory",
+            headers=headers,
+            json=inventory.model_dump(mode="json"),
+        )
+        assert response.status_code == 200, response.text
+        confirmation_sequence, confirmation_digest = canonical_inventory_confirmation_journal_head(
+            inventory
+        )
+        confirmed = heartbeat.model_copy(
+            update={
+                "heartbeat_sequence": 2,
+                "journal_sequence": confirmation_sequence,
+                "journal_digest": confirmation_digest,
+            }
+        )
+        response = client.put(
+            f"/v2/executors/{pool_id}/heartbeat",
+            headers=headers,
+            json=confirmed.model_dump(mode="json"),
+        )
+        assert response.status_code == 200, response.text
+
+    ready_response = client.get(status_path, headers=read_headers)
+    assert ready_response.status_code == 200
+    ready = PreparedExecutionReadinessV2.model_validate_json(ready_response.content)
+    assert ready.ready is True
+    assert ready.blockers == ()
+    assert ready.execution == prepared
+    assert tuple(item.pool_id for item in ready.executors) == ("gb10", "oldlab")
+    assert ready.executable is False
+
+
+def test_execution_preparation_status_reports_disabled_policy(
+    api_context: tuple[TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator],
+    operator_headers: dict[str, str],
+) -> None:
+    """The default shadow deployment remains healthy but preparation-disabled."""
+
+    client, _app, settings, _allocator = api_context
+    response = client.get(
+        "/v2/status/execution-preparation",
+        headers=operator_headers,
+    )
+
+    assert response.status_code == 200
+    readiness = PreparedExecutionReadinessV2.model_validate_json(response.content)
+    assert settings.execution_policy_file is None
+    assert readiness.ready is False
+    assert readiness.policy_mode == "disabled"
+    assert readiness.policy_sha256 is None
+    assert readiness.blockers == ("execution-policy-disabled", "manager-shadow")
+
+
+def test_execution_preparation_status_rejects_unverified_injected_policy_digest(
+    execution_preparation_api_context: tuple[
+        TestClient,
+        FastAPI,
+        CapacityManagerSettings,
+        ExecutionPreparationV2,
+        ExecutionPreparationPolicyV2,
+    ],
+) -> None:
+    """Settings cannot lend raw-file provenance to another injected policy."""
+
+    _client, _app, settings, _request, policy = execution_preparation_api_context
+    injected_store = CapacityManagementStore(
+        execution_policy=policy.model_copy(update={"rollback_evidence_sha256": "f" * 64})
+    )
+    verifier = StaticPrincipalVerifier(
+        CapacityPrincipal(
+            principal_id="injected-reader",
+            scopes=frozenset({"capacity:read"}),
+            subject_id=None,
+            subject_incarnation=None,
+            demand_reporter_incarnation=None,
+            pool_id=None,
+            pool_reporter_incarnation=None,
+            executor_id=None,
+            executor_incarnation=None,
+            executor_pool_generation=None,
+        )
+    )
+    app = create_app(
+        settings,
+        verifier=verifier,
+        management_store=injected_store,
+    )
+    with TestClient(app) as client:
+        response = client.get(
+            "/v2/status/execution-preparation",
+            headers={"Authorization": "Bearer injected"},
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "execution preparation status unavailable"}
+
+
+def test_execution_transition_route_rejects_an_injected_bound_principal(
+    execution_preparation_api_context: tuple[
+        TestClient,
+        FastAPI,
+        CapacityManagerSettings,
+        ExecutionPreparationV2,
+        ExecutionPreparationPolicyV2,
+    ],
+) -> None:
+    """Route authorization remains safe if a verifier bypasses registry validation."""
+
+    _client, _app, settings, request, _policy = execution_preparation_api_context
+    verifier = StaticPrincipalVerifier(
+        CapacityPrincipal(
+            principal_id="injected-subject-preparer",
+            scopes=frozenset({"capacity:execution:prepare"}),
+            subject_id=SUBJECT_ID,
+            subject_incarnation=SUBJECT_INCARNATION,
+            demand_reporter_incarnation=DEMAND_REPORTER_ID,
+            pool_id=None,
+            pool_reporter_incarnation=None,
+            executor_id=None,
+            executor_incarnation=None,
+            executor_pool_generation=None,
+        )
+    )
+    app = create_app(settings, verifier=verifier)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v2/execution-preparations",
+            headers={
+                "Authorization": "Bearer injected",
+                "Idempotency-Key": str(UUID(int=15300)),
+            },
+            json=request.model_copy(
+                update={"expected_writer_epoch": app.state.writer.writer_epoch}
+            ).model_dump(mode="json"),
+        )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "forbidden"}
 
 
 def test_executable_status_is_read_only_and_shadow_is_never_worker_available(

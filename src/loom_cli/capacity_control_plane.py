@@ -14,7 +14,16 @@ import yaml  # type: ignore[import-untyped]
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from loom_capacity_executor.config import ImmutablePoolManifest
+from loom_capacity_manager.executable_contracts import (
+    ExecutionPreparationPolicyV2,
+    canonical_executable_bytes,
+    canonical_executable_digest,
+)
 from loom_capacity_manager.schema_startup import _capacity_head
+from loom_capacity_pool_executor.config import (
+    SlurmInventoryPolicyDocument,
+    canonical_slurm_inventory_policy_bytes,
+)
 
 _DNS_LABEL_RE = re.compile(r"[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?")
 _LABEL_NAME_RE = re.compile(r"[A-Za-z0-9](?:[-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?")
@@ -28,6 +37,12 @@ _MEMORY_RE = re.compile(r"([1-9][0-9]*)(Ki|Mi|Gi)")
 _MAX_CPU_MILLICORES = 64_000
 _MAX_RESOURCE_MEMORY_BYTES = 1024**4
 _MAX_POSTGRES_STORAGE_BYTES = 64 * 1024**4
+_MAX_CONFIGMAP_POLICY_BYTES = 1024 * 1024
+_EXECUTION_POLICY_DIRECTORY = "/etc/loom-capacity-manager/execution-policy"
+_EXECUTION_POLICY_FILENAME = "execution-policy.json"
+_EXECUTION_POLICY_PATH = f"{_EXECUTION_POLICY_DIRECTORY}/{_EXECUTION_POLICY_FILENAME}"
+_EXECUTION_POLICY_PROJECTED_VOLUME = "execution-policy-projected"
+_EXECUTION_POLICY_RUNTIME_VOLUME = "execution-policy-runtime"
 
 
 class _StrictModel(BaseModel):
@@ -228,6 +243,7 @@ class CapacityPoolExecutorBinding(_StrictModel):
     tls_certificate_file: str = Field(min_length=1, max_length=4096)
     tls_private_key_file: str = Field(min_length=1, max_length=4096)
     ownership_key_file: str = Field(min_length=1, max_length=4096)
+    inventory: SlurmInventoryPolicyDocument
 
     @model_validator(mode="after")
     def _exact_binding(self) -> CapacityPoolExecutorBinding:
@@ -241,6 +257,8 @@ class CapacityPoolExecutorBinding(_StrictModel):
             raise ValueError("executor incarnation must be a canonical UUID") from exc
         if incarnation.int == 0 or str(incarnation) != self.executor_incarnation:
             raise ValueError("executor incarnation must be a canonical non-nil UUID")
+        if re.fullmatch(r"/[A-Za-z0-9._/-]+", self.config_file) is None:
+            raise ValueError("pool executor configuration path is unsafe for service rendering")
         for label, value in (
             ("configuration", self.config_file),
             ("state directory", self.state_directory),
@@ -258,6 +276,16 @@ class CapacityPoolExecutorBinding(_StrictModel):
             raise ValueError("pool executor configuration must be controller-local JSON")
         if Path(self.journal_file).parent != Path(self.state_directory):
             raise ValueError("pool executor journal must be directly inside its state directory")
+        if self.inventory.pool_id != self.pool_id:
+            raise ValueError("inventory policy differs from its pool binding")
+        if self.inventory.pool_generation != self.pool_generation:
+            raise ValueError("inventory policy differs from its pool generation")
+        if self.inventory.controller_cluster != self.slurm_cluster:
+            raise ValueError("inventory controller differs from its Slurm cluster binding")
+        if self.inventory.query_uid != self.local_uid:
+            raise ValueError("inventory query uid differs from its pool binding")
+        if self.partition not in self.inventory.relevant_partitions:
+            raise ValueError("inventory policy omits the bound Slurm partition")
         return self
 
 
@@ -317,10 +345,19 @@ class CapacityPoolExecutorProfile(_StrictModel):
             "TLS certificate credential": tuple(pool.tls_certificate_file for pool in self.pools),
             "TLS private-key credential": tuple(pool.tls_private_key_file for pool in self.pools),
             "ownership-key credential": tuple(pool.ownership_key_file for pool in self.pools),
+            "Slurm cluster": tuple(pool.slurm_cluster for pool in self.pools),
+            "controller host": tuple(pool.controller_host for pool in self.pools),
+            "inventory reporter": tuple(pool.inventory.reporter_incarnation for pool in self.pools),
+            "partition": tuple(pool.partition for pool in self.pools),
         }
         for label, values in unique_fields.items():
             if len(set(values)) != len(values):
-                raise ValueError(f"pool {label} bindings must use distinct credentials/state")
+                raise ValueError(f"pool {label} bindings must be distinct")
+        node_ids = tuple(
+            node.node_id.casefold() for pool in self.pools for node in pool.inventory.nodes
+        )
+        if len(node_ids) != len(set(node_ids)):
+            raise ValueError("pool inventory nodes must be distinct across controllers")
         return self
 
 
@@ -459,6 +496,19 @@ def render_capacity_pool_executor_configs(
     }
 
 
+def render_capacity_pool_inventory_policies(
+    profile: CapacityPoolExecutorProfile,
+) -> dict[str, str]:
+    """Render canonical controller-local read-only inventory policies."""
+
+    if not isinstance(profile, CapacityPoolExecutorProfile):
+        raise TypeError("capacity pool-executor profile is invalid")
+    return {
+        pool.pool_id: canonical_slurm_inventory_policy_bytes(pool.inventory).decode("ascii") + "\n"
+        for pool in profile.pools
+    }
+
+
 def render_capacity_pool_executor_service_environment(
     profile: CapacityPoolExecutorProfile,
     pool_id: Literal["gb10", "oldlab"] | str,
@@ -468,11 +518,19 @@ def render_capacity_pool_executor_service_environment(
     if not isinstance(profile, CapacityPoolExecutorProfile):
         raise TypeError("capacity pool-executor profile is invalid")
     pool = _pool_binding(profile, pool_id)
+    inventory_policy = canonical_slurm_inventory_policy_bytes(pool.inventory).decode("ascii") + "\n"
+    inventory_policy_sha256 = hashlib.sha256(inventory_policy.encode("ascii")).hexdigest()
+    inventory_policy_file = Path(pool.config_file).with_name(
+        f"{pool.pool_id}-inventory-policy.json"
+    )
     return (
         f"LOOM_CAPACITY_EXECUTOR_CONFIG={pool.config_file}\n"
         "LOOM_CAPACITY_EXECUTOR_EXECUTABLE_CEILING=0\n"
+        "LOOM_CAPACITY_EXECUTOR_EXPECTED_INVENTORY_POLICY_SHA256="
+        f"{inventory_policy_sha256}\n"
         "LOOM_CAPACITY_EXECUTOR_EXPECTED_MANIFEST_SHA256="
         f"{capacity_pool_executor_manifest_sha256(profile, pool.pool_id)}\n"
+        f"LOOM_CAPACITY_EXECUTOR_INVENTORY_POLICY={inventory_policy_file}\n"
         f"LOOM_CAPACITY_EXECUTOR_POOL={pool.pool_id}\n"
     )
 
@@ -806,6 +864,8 @@ def _manager_deployment(
     *,
     manager_image: str,
     authority_incarnation: UUID,
+    execution_policy_config_map: str | None = None,
+    execution_policy_sha256: str | None = None,
 ) -> dict[str, Any]:
     labels = _pod_labels("loom-capacity-manager", "manager")
     init, mounts, volumes = _credential_parts(
@@ -852,6 +912,78 @@ def _manager_deployment(
             ("LOOM_CAPACITY_PORT", "8443"),
         )
     ]
+    if execution_policy_config_map is not None:
+        assert execution_policy_sha256 is not None
+        environment.extend(
+            [
+                {
+                    "name": "LOOM_CAPACITY_EXECUTION_POLICY_FILE",
+                    "value": _EXECUTION_POLICY_PATH,
+                },
+                {
+                    "name": "LOOM_CAPACITY_EXECUTION_POLICY_SHA256",
+                    "value": execution_policy_sha256,
+                },
+            ]
+        )
+        init.append(
+            {
+                "name": "execution-policy-init",
+                "image": manager_image,
+                "imagePullPolicy": "IfNotPresent",
+                "command": ["python", "-m", "loom_capacity_manager.secret_init"],
+                "args": [
+                    "--profile",
+                    "execution-policy",
+                    "--source",
+                    f"{_RUNTIME_ROOT}/projected-policy",
+                    "--destination",
+                    f"{_RUNTIME_ROOT}/runtime-policy/execution-policy",
+                ],
+                "securityContext": _container_security(read_only_root=True),
+                "resources": profile.manager_resources.kubernetes(),
+                "volumeMounts": [
+                    {
+                        "name": _EXECUTION_POLICY_PROJECTED_VOLUME,
+                        "mountPath": f"{_RUNTIME_ROOT}/projected-policy",
+                        "readOnly": True,
+                    },
+                    {
+                        "name": _EXECUTION_POLICY_RUNTIME_VOLUME,
+                        "mountPath": f"{_RUNTIME_ROOT}/runtime-policy",
+                    },
+                ],
+            }
+        )
+        mounts.append(
+            {
+                "name": _EXECUTION_POLICY_RUNTIME_VOLUME,
+                "mountPath": _EXECUTION_POLICY_DIRECTORY,
+                "subPath": "execution-policy",
+                "readOnly": True,
+            }
+        )
+        volumes.extend(
+            [
+                {
+                    "name": _EXECUTION_POLICY_PROJECTED_VOLUME,
+                    "configMap": {
+                        "name": execution_policy_config_map,
+                        "defaultMode": 0o444,
+                        "items": [
+                            {
+                                "key": _EXECUTION_POLICY_FILENAME,
+                                "path": _EXECUTION_POLICY_FILENAME,
+                            }
+                        ],
+                    },
+                },
+                {
+                    "name": _EXECUTION_POLICY_RUNTIME_VOLUME,
+                    "emptyDir": {"medium": "Memory", "sizeLimit": "2Mi"},
+                },
+            ]
+        )
     return {
         "apiVersion": "apps/v1",
         "kind": "Deployment",
@@ -1031,6 +1163,8 @@ def render_capacity_control_plane_manifests(
     *,
     manager_image: str,
     authority_incarnation: UUID,
+    execution_policy: ExecutionPreparationPolicyV2 | None = None,
+    execution_policy_sha256: str | None = None,
 ) -> str:
     """Render one exact, cluster-internal, zero-execution authority release."""
 
@@ -1042,6 +1176,35 @@ def render_capacity_control_plane_manifests(
         raise TypeError("capacity authority incarnation must be a UUID")
     if authority_incarnation.int == 0:
         raise ValueError("capacity authority incarnation must be non-nil")
+    if (execution_policy is None) != (execution_policy_sha256 is None):
+        raise ValueError("execution policy and digest must be supplied together")
+    execution_policy_document: dict[str, Any] | None = None
+    execution_policy_config_map: str | None = None
+    if execution_policy is not None:
+        if not isinstance(execution_policy, ExecutionPreparationPolicyV2):
+            raise TypeError("execution policy must be ExecutionPreparationPolicyV2")
+        if not isinstance(execution_policy_sha256, str) or (
+            re.fullmatch(r"[0-9a-f]{64}", execution_policy_sha256) is None
+            or execution_policy_sha256 == "0" * 64
+            or execution_policy_sha256 != canonical_executable_digest(execution_policy)
+        ):
+            raise ValueError("execution policy digest differs from its canonical payload")
+        policy_bytes = canonical_executable_bytes(execution_policy)
+        if len(policy_bytes) > _MAX_CONFIGMAP_POLICY_BYTES:
+            raise ValueError("execution policy exceeds the ConfigMap byte bound")
+        policy_payload = policy_bytes.decode("ascii")
+        execution_policy_config_map = (
+            f"loom-capacity-execution-policy-{execution_policy_sha256[:32]}"
+        )
+        metadata = _metadata(execution_policy_config_map)
+        metadata["annotations"] = {"loom.yylx.dev/execution-policy-sha256": execution_policy_sha256}
+        execution_policy_document = {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": metadata,
+            "immutable": True,
+            "data": {_EXECUTION_POLICY_FILENAME: policy_payload},
+        }
     image_digest = manager_image.rsplit("@sha256:", 1)[1]
     migration_head = _capacity_head()
     documents = [
@@ -1062,6 +1225,7 @@ def render_capacity_control_plane_manifests(
                 },
             },
         },
+        *(() if execution_policy_document is None else (execution_policy_document,)),
         _postgres_service(),
         _postgres_statefulset(profile),
         _migration_job(
@@ -1076,6 +1240,8 @@ def render_capacity_control_plane_manifests(
             profile,
             manager_image=manager_image,
             authority_incarnation=authority_incarnation,
+            execution_policy_config_map=execution_policy_config_map,
+            execution_policy_sha256=execution_policy_sha256,
         ),
         *_network_policies(profile),
     ]
@@ -1099,4 +1265,5 @@ __all__ = [
     "render_capacity_control_plane_manifests",
     "render_capacity_pool_executor_configs",
     "render_capacity_pool_executor_service_environment",
+    "render_capacity_pool_inventory_policies",
 ]

@@ -31,6 +31,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableSubmissionRecoveryV2,
     ExecutionContextV2,
     ExecutionFenceV2,
+    canonical_executable_bytes,
     canonical_executable_digest,
 )
 from loom_capacity_manager.grant_contracts import (
@@ -671,4 +672,91 @@ async def test_executable_client_fetches_exact_current_execution_context() -> No
     assert current == expected
     assert [request.url.path for request in seen] == ["/v2/executors/oldlab/context"]
     assert seen[0].headers["authorization"] == "Bearer executor-secret"
+    await http.aclose()
+
+
+# Production breaks caught: prepared executors could not register their exact
+# identity, or a retry could drift to another idempotency key/context.
+async def test_executable_client_register_execution_executor_uses_exact_prepared_binding() -> None:
+    prepared = ExecutionContextV2(
+        authority_incarnation=UUID(int=60),
+        writer_epoch=7,
+        configuration_epoch=9,
+        execution_epoch=11,
+        execution_manifest_sha256="c" * 64,
+        execution_state="prepared",
+        executable_new_capacity_ceiling=0,
+        executable_new_capacity_rate_per_minute=0,
+        trusted_fleet_release_sha256="d" * 64,
+    )
+    registration = ExecutableExecutorRegistrationV2(
+        execution=prepared,
+        executor_id="oldlab-executor",
+        executor_incarnation=UUID(int=61),
+        pool_id="oldlab",
+        pool_generation=2,
+        signing_key_id="oldlab-key",
+        signing_key_sha256="a" * 64,
+        local_authority_sha256="b" * 64,
+        controller_authority_sha256="e" * 64,
+    )
+    idempotency_key = UUID(int=62)
+    seen: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, content=prepared.model_dump_json().encode("ascii"))
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = ExecutableCapacityExecutorClient(
+        registration,
+        manager_origin="https://capacity.example.test",
+        bearer_token="executor-secret",
+        http_client=http,
+    )
+
+    result = await client.register_execution_executor(idempotency_key=idempotency_key)
+
+    assert result == prepared
+    assert len(seen) == 1
+    assert seen[0].method == "PUT"
+    assert seen[0].url.path == "/v2/executors/oldlab/registration"
+    assert seen[0].headers["authorization"] == "Bearer executor-secret"
+    assert seen[0].headers["content-type"] == "application/json"
+    assert seen[0].headers["idempotency-key"] == str(idempotency_key)
+    assert seen[0].content == canonical_executable_bytes(registration)
+    await http.aclose()
+
+
+async def test_executable_client_register_execution_executor_rejects_context_drift() -> None:
+    registration = _executable_registration().model_copy(
+        update={
+            "execution": _executable_registration().execution.model_copy(
+                update={
+                    "execution_state": "prepared",
+                    "executable_new_capacity_ceiling": 0,
+                    "executable_new_capacity_rate_per_minute": 0,
+                }
+            )
+        }
+    )
+    changed = registration.execution.model_copy(update={"writer_epoch": 5})
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                content=changed.model_dump_json().encode("ascii"),
+            )
+        )
+    )
+    client = ExecutableCapacityExecutorClient(
+        registration,
+        manager_origin="https://capacity.example.test",
+        bearer_token="executor-secret",
+        http_client=http,
+    )
+
+    with pytest.raises(ExecutorTransportError, match="registration binding changed"):
+        await client.register_execution_executor(idempotency_key=UUID(int=63))
+
     await http.aclose()

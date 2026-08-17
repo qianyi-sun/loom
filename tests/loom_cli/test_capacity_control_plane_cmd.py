@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import subprocess
 from pathlib import Path
 
 import pytest
 import yaml  # type: ignore[import-untyped]
 
+from loom_capacity_manager.executable_contracts import canonical_executable_bytes
 from loom_cli.admin_cmd import dispatch
+from tests.capacity_execution_fixtures import execution_policy
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PROFILE = _REPO_ROOT / "deploy/dev-fleet/capacity-control-plane.toml"
@@ -120,6 +124,115 @@ def test_admin_render_does_not_echo_invalid_authority_input(
     assert secret_value not in captured.err
 
 
+def test_admin_render_loads_exact_execution_policy_without_partial_output(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    payload = canonical_executable_bytes(execution_policy())
+    policy_file = tmp_path / "execution-policy.json"
+    policy_file.write_bytes(payload)
+    policy_file.chmod(0o600)
+    digest = hashlib.sha256(payload).hexdigest()
+
+    result = dispatch(
+        [
+            "capacity-control-plane",
+            "render",
+            "--file",
+            str(_PROFILE),
+            "--manager-image",
+            _MANAGER_IMAGE,
+            "--authority-incarnation",
+            _AUTHORITY,
+            "--execution-policy-file",
+            str(policy_file),
+            "--execution-policy-sha256",
+            digest,
+        ]
+    )
+
+    captured = capsys.readouterr()
+    documents = [document for document in yaml.safe_load_all(captured.out) if document]
+    config_map = next(document for document in documents if document["kind"] == "ConfigMap")
+    manager = next(document for document in documents if document["kind"] == "Deployment")
+    assert result == 0
+    assert captured.err == ""
+    assert config_map["metadata"]["name"].endswith(digest[:32])
+    policy_source = next(
+        volume
+        for volume in manager["spec"]["template"]["spec"]["volumes"]
+        if volume["name"] == "execution-policy-projected"
+    )
+    assert policy_source["configMap"]["name"] == config_map["metadata"]["name"]
+
+
+@pytest.mark.parametrize(
+    "policy_arguments",
+    (
+        ("--execution-policy-file", "do-not-open-policy"),
+        ("--execution-policy-sha256", "e" * 64),
+    ),
+)
+def test_admin_render_rejects_unpaired_execution_policy_without_partial_output(
+    capsys: pytest.CaptureFixture[str],
+    policy_arguments: tuple[str, str],
+) -> None:
+    result = dispatch(
+        [
+            "capacity-control-plane",
+            "render",
+            "--file",
+            str(_PROFILE),
+            "--manager-image",
+            _MANAGER_IMAGE,
+            "--authority-incarnation",
+            _AUTHORITY,
+            *policy_arguments,
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert captured.out == ""
+    assert captured.err == "error: execution policy path and digest must be supplied together\n"
+
+
+def test_admin_render_redacts_rejected_execution_policy(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    secret = "execution-policy-value-must-not-escape"
+    policy_file = tmp_path / "policy.json"
+    policy_file.write_text(json.dumps({"secret": secret}), encoding="utf-8")
+    policy_file.chmod(0o600)
+
+    result = dispatch(
+        [
+            "capacity-control-plane",
+            "render",
+            "--file",
+            str(_PROFILE),
+            "--manager-image",
+            _MANAGER_IMAGE,
+            "--authority-incarnation",
+            _AUTHORITY,
+            "--execution-policy-file",
+            str(policy_file),
+            "--execution-policy-sha256",
+            hashlib.sha256(policy_file.read_bytes()).hexdigest(),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert captured.out == ""
+    assert captured.err == (
+        "error: capacity control-plane render failed: execution preparation policy is invalid\n"
+    )
+    assert secret not in captured.err
+    assert str(policy_file) not in captured.err
+
+
 def test_admin_render_executor_writes_only_one_complete_inert_pool_config(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -168,6 +281,65 @@ def test_admin_render_executor_service_environment_is_nonsecret_and_zero_ceiling
     assert "LOOM_CAPACITY_EXECUTOR_EXECUTABLE_CEILING=0\n" in captured.out
     assert "token" not in captured.out.lower()
     assert "private" not in captured.out.lower()
+
+
+def test_admin_render_executor_writes_only_the_selected_inventory_policy(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = dispatch(
+        [
+            "capacity-control-plane",
+            "render-executor",
+            "--file",
+            str(_EXECUTOR_PROFILE),
+            "--pool",
+            "gb10",
+            "--output",
+            "inventory-policy",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert result == 0
+    assert captured.err == ""
+    assert payload["pool_id"] == "gb10"
+    assert payload["controller_cluster"] == "gb10"
+    assert payload["relevant_partitions"] == ["gb10-workers"]
+    assert {node["pool_id"] for node in payload["nodes"]} == {"gb10"}
+    assert "oldlab-node" not in captured.out
+
+
+def test_admin_render_executor_rejects_invalid_inventory_without_partial_or_leaked_output(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rejected_value = "do-not-echo-this-inventory-policy-value"
+    profile = tmp_path / "capacity-pool-executor.toml"
+    profile.write_text(
+        _EXECUTOR_PROFILE.read_text(encoding="utf-8")
+        + f'\nunexpected_inventory_secret = "{rejected_value}"\n',
+        encoding="utf-8",
+    )
+
+    result = dispatch(
+        [
+            "capacity-control-plane",
+            "render-executor",
+            "--file",
+            str(profile),
+            "--pool",
+            "oldlab",
+            "--output",
+            "inventory-policy",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert captured.out == ""
+    assert captured.err == "error: capacity pool-executor render inputs are invalid\n"
+    assert rejected_value not in captured.err
 
 
 def test_admin_status_executes_the_fixed_in_pod_zero_ceiling_probe(

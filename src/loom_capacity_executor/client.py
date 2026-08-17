@@ -623,6 +623,10 @@ class ExecutableCapacityExecutorClient:
         return None
 
     def _assert_contract_binding(self, value: StrictV2Model) -> None:
+        if isinstance(value, ExecutableExecutorRegistrationV2):
+            if value != self.registration:
+                raise ExecutorTransportError("executable executor registration changed")
+            return
         if (
             not isinstance(value, ExecutableIntentBindingV2)
             and getattr(value, "executable", None) is not True
@@ -667,6 +671,7 @@ class ExecutableCapacityExecutorClient:
         receipt_model: type[_ReceiptT],
         *,
         contract: StrictV2Model | None = None,
+        idempotency_key: UUID | None = None,
     ) -> _ReceiptT:
         content: bytes | None = None
         if contract is not None:
@@ -680,6 +685,9 @@ class ExecutableCapacityExecutorClient:
             headers={
                 "Authorization": f"Bearer {self._bearer_token}",
                 **({"Content-Type": "application/json"} if content is not None else {}),
+                **(
+                    {"Idempotency-Key": str(idempotency_key)} if idempotency_key is not None else {}
+                ),
             },
             body_label="receipt",
         )
@@ -725,6 +733,22 @@ class ExecutableCapacityExecutorClient:
             f"/v2/executors/{self.registration.pool_id}/context",
             ExecutionContextV2,
         )
+
+    async def register_execution_executor(
+        self,
+        *,
+        idempotency_key: UUID,
+    ) -> ExecutionContextV2:
+        context = await self._request(
+            "PUT",
+            f"/v2/executors/{self.registration.pool_id}/registration",
+            ExecutionContextV2,
+            contract=self.registration,
+            idempotency_key=idempotency_key,
+        )
+        if context != self.registration.execution:
+            raise ExecutorTransportError("capacity manager registration binding changed")
+        return context
 
     async def heartbeat_executable_executor(
         self,

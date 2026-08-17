@@ -33,6 +33,8 @@ def _operator(token: str = "operator-secret") -> dict[str, object]:
             "capacity:configure:fleet",
             "capacity:configure:subject",
             "capacity:configure:activate",
+            "capacity:execution:abort",
+            "capacity:execution:prepare",
             "capacity:reconcile",
             "capacity:read",
         ],
@@ -180,6 +182,26 @@ def test_registry_rejects_non_positive_executor_pool_generation(tmp_path: Path) 
                 tmp_path / "non-positive-generation.json",
                 [_operator(), invalid_generation],
             )
+        )
+
+
+@pytest.mark.parametrize(
+    "scope",
+    ("capacity:execution:prepare", "capacity:execution:abort"),
+)
+def test_execution_transition_principal_must_be_unbound(
+    tmp_path: Path,
+    scope: str,
+) -> None:
+    principal = _operator()
+    principal["scopes"] = [scope, "capacity:reconcile"]
+    principal["subject_id"] = str(SUBJECT_ID)
+    principal["subject_incarnation"] = str(SUBJECT_INCARNATION)
+    principal["demand_reporter_incarnation"] = str(REPORTER_INCARNATION)
+
+    with pytest.raises(PrincipalRegistryError, match="execution transition"):
+        CapacityPrincipalVerifier.from_file(
+            _write_registry(tmp_path / "bound-transition.json", [principal])
         )
 
 

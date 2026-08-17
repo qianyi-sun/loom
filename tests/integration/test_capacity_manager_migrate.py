@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -47,8 +48,8 @@ _MIGRATION_ADVISORY_LOCK = (1280266061, 1128353857)
 _TEST_BINDING_GATE_LOCK = (1280266061, 1413829460)
 
 
-def _seed_active_execution(connection: Connection) -> int:
-    """Seed one minimal active epoch inside a caller-owned rollback transaction."""
+def _seed_prepared_execution(connection: Connection) -> int:
+    """Seed one minimal prepared epoch inside a caller-owned rollback transaction."""
 
     execution_epoch = 1_200_001
     configuration_epoch = 1_200_001
@@ -163,6 +164,13 @@ def _seed_active_execution(connection: Connection) -> int:
         ),
         {"execution_epoch": execution_epoch},
     )
+    return execution_epoch
+
+
+def _seed_active_execution(connection: Connection) -> int:
+    """Seed one minimal active epoch inside a caller-owned rollback transaction."""
+
+    execution_epoch = _seed_prepared_execution(connection)
     connection.execute(
         text(
             "UPDATE capacity_execution_epochs SET state = 'active', "
@@ -623,6 +631,103 @@ def test_direct_sql_cannot_skip_drain_or_mutate_active_envelope(
             ),
             {"execution_epoch": execution_epoch},
         ).one() == ("active", 1, 1)
+    finally:
+        transaction.rollback()
+        connection.close()
+        engine.dispose()
+
+
+def test_prepared_abort_guard_accepts_only_exact_operator_request_evidence(
+    capacity_postgres_url: str,
+) -> None:
+    """Canonical abort evidence is independent of the caller's search path."""
+
+    engine = create_engine(capacity_postgres_url)
+    connection = engine.connect()
+    transaction = connection.begin()
+    try:
+        connection.execute(text("CREATE SCHEMA capacity_prepared_abort_decoy"))
+        connection.execute(
+            text(
+                "CREATE FUNCTION capacity_prepared_abort_decoy.sha256(bytea) "
+                "RETURNS bytea LANGUAGE sql IMMUTABLE AS "
+                "'SELECT decode(repeat(''00'', 32), ''hex'')'"
+            )
+        )
+        connection.execute(
+            text("SET LOCAL search_path TO capacity_prepared_abort_decoy, public, pg_catalog")
+        )
+        execution_epoch = _seed_prepared_execution(connection)
+        authority = connection.execute(
+            select(CapacityAuthorityState.authority_incarnation).where(
+                CapacityAuthorityState.singleton_id == 1
+            )
+        ).scalar_one()
+        payload = {
+            "schema_version": 2,
+            "authority_incarnation": str(authority),
+            "expected_writer_epoch": 1,
+            "execution_epoch": execution_epoch,
+            "execution_manifest_sha256": "4" * 64,
+            "executable": True,
+        }
+        digest = hashlib.sha256(
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            ).encode("ascii")
+        ).hexdigest()
+        statement = text(
+            "UPDATE capacity_execution_epochs SET state = 'retired', "
+            "current_writer_epoch = 2, retirement_actor = 'preparation-operator', "
+            "retirement_idempotency_key = :idempotency_key, "
+            "retirement_request_digest = :digest, "
+            "retirement_request_payload = CAST(:payload AS jsonb), retired_at = now() "
+            "WHERE execution_epoch = :execution_epoch"
+        )
+        values = {
+            "idempotency_key": UUID(int=12210),
+            "digest": digest,
+            "payload": json.dumps(payload),
+            "execution_epoch": execution_epoch,
+        }
+
+        with pytest.raises(IntegrityError, match="retirement evidence is not exact"):
+            with connection.begin_nested():
+                connection.execute(statement, values | {"digest": "f" * 64})
+
+        connection.execute(statement, values)
+        connection.execute(
+            text(
+                "UPDATE capacity_authority_state SET writer_epoch = 2, "
+                "execution_epoch = 0, execution_state = 'shadow', "
+                "execution_manifest_sha256 = NULL, executable_new_capacity_ceiling = 0, "
+                "increase_freeze = true, "
+                "increase_freeze_reason = 'execution_preparation_aborted' "
+                "WHERE singleton_id = 1"
+            )
+        )
+        connection.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
+
+        assert connection.execute(
+            text(
+                "SELECT state, current_writer_epoch, retirement_actor, "
+                "retirement_idempotency_key, retirement_request_digest, "
+                "retirement_request_payload FROM capacity_execution_epochs "
+                "WHERE execution_epoch = :execution_epoch"
+            ),
+            {"execution_epoch": execution_epoch},
+        ).one() == (
+            "retired",
+            2,
+            "preparation-operator",
+            UUID(int=12210),
+            digest,
+            payload,
+        )
     finally:
         transaction.rollback()
         connection.close()

@@ -462,6 +462,31 @@ class PoolExecutorConfig:
         if pool_id != self.pool_id:
             raise ExecutorConfigError("pool binding differs from controller-local configuration")
 
+    def assert_inventory_policy_binding(
+        self,
+        *,
+        pool_id: str,
+        pool_generation: int,
+        query_uid: int,
+        controller_cluster: str,
+        relevant_partitions: tuple[str, ...],
+    ) -> None:
+        """Require one read-only inventory policy to match this local identity."""
+
+        if (
+            pool_id != self.pool_id
+            or type(pool_generation) is not int
+            or pool_generation != self.pool_generation
+            or type(query_uid) is not int
+            or query_uid != self.local_uid
+            or query_uid != os.geteuid()
+            or controller_cluster != self.slurm_cluster
+            or self.partition not in relevant_partitions
+        ):
+            raise ExecutorConfigError(
+                "inventory policy differs from exact controller-local binding"
+            )
+
     @property
     def registration(self) -> ExecutableExecutorRegistrationV2:
         return ExecutableExecutorRegistrationV2(
