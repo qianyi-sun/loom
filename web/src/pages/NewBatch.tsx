@@ -43,6 +43,7 @@ import {
   buildProviderOverride,
   type ProviderOverride,
 } from "../components/agentModelSelection";
+import { useAuth } from "../auth/useAuth";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import CommandSnippet from "../components/CommandSnippet";
@@ -785,6 +786,7 @@ function buildIdentityPreview(args: {
 }
 
 export default function NewBatch(): JSX.Element {
+  const { currentTeamId } = useAuth();
   const [nameSuffix, setNameSuffix] = useState("");
   const [backend, setBackend] = useState("");
   const [selectedBenchmarks, setSelectedBenchmarks] = useState<Set<string>>(
@@ -832,8 +834,9 @@ export default function NewBatch(): JSX.Element {
     staleTime: 5 * 60 * 1000,
   });
   const providerConnections = useQuery({
-    queryKey: ["provider-connections"],
-    queryFn: () => api.listProviderConnections(),
+    queryKey: ["provider-connections", currentTeamId],
+    queryFn: () => api.listProviderConnections(currentTeamId ?? undefined),
+    enabled: currentTeamId !== null,
     staleTime: 5 * 60 * 1000,
   });
   const models = useQuery({
@@ -1113,7 +1116,7 @@ export default function NewBatch(): JSX.Element {
   }
 
   function buildProviderSelection(): ProviderSelectionResult {
-    const overrides: ProviderOverride[] = [];
+    const overrides: Array<{ index: number; value: ProviderOverride }> = [];
     for (let i = 0; i < rows.length; i++) {
       const r = rows[i];
       const selectedAgent = agents.data?.items.find(
@@ -1121,13 +1124,41 @@ export default function NewBatch(): JSX.Element {
       );
       if (!selectedAgent) continue;
       const override = buildProviderOverride(r.picker, selectedAgent.needs_model);
-      if (override) overrides.push(override);
+      if (override) overrides.push({ index: i, value: override });
     }
-    return { ok: true, value: overrides };
+    if (overrides.length === 0) return { ok: true, value: [] };
+    if (providerConnections.isPending) {
+      return {
+        ok: false,
+        error: "Provider connections for the active team are still loading.",
+      };
+    }
+    if (providerConnections.isError || !providerConnections.data) {
+      return {
+        ok: false,
+        error: "Provider connections for the active team could not be loaded. Retry before submitting.",
+      };
+    }
+    const activeProviderIds = new Set(
+      providerConnections.data.items.map((connection) => connection.id),
+    );
+    for (const override of overrides) {
+      if (!activeProviderIds.has(override.value.provider_connection_id)) {
+        return {
+          ok: false,
+          error: `Combination ${override.index + 1}: select a provider connection for the active team.`,
+        };
+      }
+    }
+    return { ok: true, value: overrides.map((override) => override.value) };
   }
 
   const submit = async (): Promise<void> => {
     setLocalError(null);
+    if (!currentTeamId) {
+      setLocalError("Select an active team before submitting a batch.");
+      return;
+    }
     if (!backend) {
       setLocalError("Pick a backend.");
       return;
@@ -1259,6 +1290,7 @@ export default function NewBatch(): JSX.Element {
     }
 
     const payload: CreateBatchBody = {
+      team_id: currentTeamId,
       backend,
       task_filter,
       trial_config,
@@ -1966,6 +1998,7 @@ export default function NewBatch(): JSX.Element {
                     disabled={create.isPending}
                     specificAgentToggle
                     defaultAgentName={DEFAULT_AGENT_NAME}
+                    teamId={currentTeamId}
                   />
                   <div className="grid grid-cols-2 gap-3">
                     <label className="block">

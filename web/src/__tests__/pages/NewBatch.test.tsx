@@ -10,11 +10,13 @@
  * Pydantic 422s.
  */
 
+import { useQueryClient } from "@tanstack/react-query";
 import { fireEvent, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CreateBatchBody } from "../../api/client";
+import { useAuth } from "../../auth/useAuth";
 import NewBatch from "../../pages/NewBatch";
 import type { FetchMock } from "../../test-utils/fetchMock";
 import { renderWithProviders } from "../../test-utils/renderWithProviders";
@@ -304,11 +306,47 @@ const BATCH_RESPONSE = {
   created_at: "2026-06-08T00:00:00Z",
 };
 
+const ACTIVE_TEAM_ID = "22222222-2222-4222-8222-222222222222";
+const SWITCHED_TEAM_ID = "44444444-4444-4444-8444-444444444444";
+
+const AUTH_ME_RESPONSE = {
+  user: {
+    id: "admin-user",
+    username: "admin",
+    email: null,
+    display_name: "Admin",
+    is_platform_admin: true,
+  },
+  teams: [{ id: ACTIVE_TEAM_ID, name: "Active team", role: "owner" }],
+  current_team: { id: ACTIVE_TEAM_ID, name: "Active team", role: "owner" },
+  role: "owner",
+  scopes: ["admin"],
+  is_platform_admin: true,
+  csrf_token: "csrf-new-batch",
+};
+
+const FOREIGN_PROVIDER_CONNECTIONS_RESPONSE = {
+  items: [
+    {
+      id: "99999999-9999-4999-8999-999999999999",
+      team_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      name: "Foreign team provider",
+      type: "openai-compatible",
+      status: "valid",
+    },
+  ],
+};
+
+let activeTeamProvidersAvailable = true;
+
 function mockEndpoints(opts: {
   matchingTasks?: number;
   noBenchmarks?: boolean;
   emptyBenchmark?: boolean;
   legacyBenchmark?: boolean;
+  requireActiveTeamProviderScope?: boolean;
+  switchTeamId?: string;
+  honorActiveTeamProviderAvailability?: boolean;
   /**
    * Override for `POST /api/v1/tasks/count`. When set, the count
    * endpoint returns this value regardless of body. Used by the
@@ -372,11 +410,43 @@ function mockEndpoints(opts: {
             headers: { "Content-Type": "application/json" },
           }),
         );
+      if (url.includes("/api/v1/auth/team")) {
+        const teamId = opts.switchTeamId ?? ACTIVE_TEAM_ID;
+        return json({
+          ...AUTH_ME_RESPONSE,
+          teams: [
+            ...AUTH_ME_RESPONSE.teams,
+            { id: teamId, name: "Switched team", role: "owner" },
+          ],
+          current_team: { id: teamId, name: "Switched team", role: "owner" },
+          csrf_token: "csrf-switched-team",
+        });
+      }
+      if (url.includes("/api/v1/auth/me")) return json(AUTH_ME_RESPONSE);
       if (url.includes("/api/v1/agents")) return json(AGENTS_RESPONSE);
       if (url.includes("/api/v1/provider-connections/") && url.endsWith("/models")) {
         return json({ model_id: "manual-vllm-checkpoint" }, 201);
       }
       if (url.includes("/api/v1/provider-connections")) {
+        if (
+          opts.switchTeamId &&
+          url.includes(`team_id=${opts.switchTeamId}`)
+        ) {
+          return json({ items: [] });
+        }
+        if (
+          opts.honorActiveTeamProviderAvailability &&
+          !activeTeamProvidersAvailable &&
+          url.includes(`team_id=${ACTIVE_TEAM_ID}`)
+        ) {
+          return json({ items: [] });
+        }
+        if (
+          opts.requireActiveTeamProviderScope &&
+          !url.includes(`team_id=${ACTIVE_TEAM_ID}`)
+        ) {
+          return json(FOREIGN_PROVIDER_CONNECTIONS_RESPONSE);
+        }
         return json(PROVIDER_CONNECTIONS_RESPONSE);
       }
       if (url.includes("/api/v1/models?view=raw")) return json(RAW_MODELS_RESPONSE);
@@ -411,6 +481,36 @@ function mockEndpoints(opts: {
     });
 }
 
+function TeamSwitchHarness(): JSX.Element {
+  const { switchTeam } = useAuth();
+  return (
+    <>
+      <button type="button" onClick={() => void switchTeam(SWITCHED_TEAM_ID)}>
+        Switch active team
+      </button>
+      <NewBatch />
+    </>
+  );
+}
+
+function ProviderRefreshHarness(): JSX.Element {
+  const queryClient = useQueryClient();
+  const refreshProviders = (): void => {
+    activeTeamProvidersAvailable = false;
+    void queryClient.invalidateQueries({
+      queryKey: ["provider-connections", ACTIVE_TEAM_ID],
+    });
+  };
+  return (
+    <>
+      <button type="button" onClick={refreshProviders}>
+        Remove selected provider
+      </button>
+      <NewBatch />
+    </>
+  );
+}
+
 function batchCall(
   spy: FetchMock,
 ): { url: string; body: CreateBatchBody } | null {
@@ -422,6 +522,22 @@ function batchCall(
     url: String(found[0]),
     body: JSON.parse((found[1] as RequestInit).body as string) as CreateBatchBody,
   };
+}
+
+function providerListRequests(spy: FetchMock): string[] {
+  return spy.mock.calls.flatMap((c) => {
+    const url = String(c[0]);
+    const method = (c[1] as RequestInit | undefined)?.method ?? "GET";
+    const isProviderList =
+      method === "GET" &&
+      url.includes("/api/v1/provider-connections") &&
+      !url.includes("/models");
+    return isProviderList ? [url] : [];
+  });
+}
+
+function providerListRequest(spy: FetchMock): string | null {
+  return providerListRequests(spy)[0] ?? null;
 }
 
 function manualModelCall(
@@ -495,6 +611,7 @@ const SUBMIT_BTN = /Submit (\d+ trials?|batch)/i;
 
 describe("NewBatch", () => {
   beforeEach(() => {
+    activeTeamProvidersAvailable = true;
     window.localStorage.clear();
     window.localStorage.setItem("loom_token", "test-token");
     vi.restoreAllMocks();
@@ -1186,6 +1303,116 @@ describe("NewBatch", () => {
         provider_model_id: "deepseek-chat",
       },
     ]);
+  });
+
+  it("scopes provider choices and submission to the active team", async () => {
+    const spy = mockEndpoints({
+      matchingTasks: 12,
+      requireActiveTeamProviderScope: true,
+    });
+    const user = userEvent.setup();
+    renderWithProviders(<NewBatch />);
+    await waitForNewBatchReady();
+
+    await vi.waitFor(() =>
+      expect(providerListRequest(spy)).toContain(`team_id=${ACTIVE_TEAM_ID}`),
+    );
+    await pickBackend();
+    await pickBenchmark();
+    await pickDefaultModel(user);
+    await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
+    await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
+
+    const body = batchCall(spy)!.body;
+    expect(body.team_id).toBe(ACTIVE_TEAM_ID);
+    expect(body.combinations?.[0].provider_connection_id).toBe(
+      "11111111-1111-4111-8111-111111111111",
+    );
+  });
+
+  it("cannot save or submit a provider selected before the active team changes", async () => {
+    const spy = mockEndpoints({
+      matchingTasks: 12,
+      switchTeamId: SWITCHED_TEAM_ID,
+    });
+    const user = userEvent.setup();
+    renderWithProviders(<TeamSwitchHarness />);
+    await waitForNewBatchReady();
+    await pickBackend();
+    await pickBenchmark();
+    await user.selectOptions(
+      await screen.findByLabelText(/^Provider connection$/i),
+      "11111111-1111-4111-8111-111111111111",
+    );
+    await user.selectOptions(
+      screen.getByLabelText(/^Model$/i),
+      screen.getByRole("option", { name: /Ad-hoc model ID/i }),
+    );
+    await user.type(
+      await screen.findByPlaceholderText("manual-vllm-checkpoint"),
+      "manual-vllm-checkpoint",
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "Switch active team" }),
+    );
+    await vi.waitFor(() =>
+      expect(
+        spy.mock.calls.some((call) =>
+          String(call[0]).includes(`team_id=${SWITCHED_TEAM_ID}`),
+        ),
+      ).toBe(true),
+    );
+
+    await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
+    await vi.waitFor(() =>
+      expect(screen.getByText(/needs a model/i)).toBeInTheDocument(),
+    );
+    expect(manualModelCall(spy)).toBeNull();
+    expect(batchCall(spy)).toBeNull();
+  });
+
+  it("cannot save or submit a provider removed from the active team", async () => {
+    const spy = mockEndpoints({
+      matchingTasks: 12,
+      honorActiveTeamProviderAvailability: true,
+    });
+    const user = userEvent.setup();
+    renderWithProviders(<ProviderRefreshHarness />);
+    await waitForNewBatchReady();
+    await pickBackend();
+    await pickBenchmark();
+    await user.selectOptions(
+      await screen.findByLabelText(/^Provider connection$/i),
+      "11111111-1111-4111-8111-111111111111",
+    );
+    await user.selectOptions(
+      screen.getByLabelText(/^Model$/i),
+      screen.getByRole("option", { name: /Ad-hoc model ID/i }),
+    );
+    await user.type(
+      await screen.findByPlaceholderText("manual-vllm-checkpoint"),
+      "manual-vllm-checkpoint",
+    );
+    const initialProviderLoads = providerListRequests(spy).length;
+
+    await user.click(
+      screen.getByRole("button", { name: "Remove selected provider" }),
+    );
+    await vi.waitFor(() =>
+      expect(providerListRequests(spy).length).toBeGreaterThan(
+        initialProviderLoads,
+      ),
+    );
+
+    await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
+    await vi.waitFor(() =>
+      expect(
+        screen.getByText(/select a provider connection for the active team/i),
+      ).toBeInTheDocument(),
+    );
+    expect(manualModelCall(spy)).toBeNull();
+    expect(batchCall(spy)).toBeNull();
   });
 
   it("submits different BYO provider routes per combination", async () => {
