@@ -480,8 +480,7 @@ def _mint_worker_token(args: argparse.Namespace) -> int:
         else:
             label = "worker"
             next_step = (
-                "update the `worker-token` key in `loom-secrets` and restart "
-                "`deploy/loom-worker`"
+                "update the `worker-token` key in `loom-secrets` and restart `deploy/loom-worker`"
             )
         sys.stdout.write(
             f"New {label} token minted.\n"
