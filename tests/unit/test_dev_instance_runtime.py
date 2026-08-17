@@ -7,6 +7,7 @@ from uuid import UUID
 
 import httpx
 import pytest
+import yaml
 
 from loom.dev_instance import RequestedPolicy, derive_identity
 from loom.dev_instance_manifest import DevInstanceManifestConfig, PersonalDevManifestBinding
@@ -241,7 +242,7 @@ class _CandidateRunner(_Runner):
                                     "containers": [
                                         {"image": _personal_manifest_config().image(component)}
                                     ]
-                                }
+                                },
                             },
                         },
                         "status": {
@@ -285,10 +286,9 @@ async def test_candidate_generation_prepares_exact_images_without_switching_rout
         kubectl=KubectlClient("kubectl", runner=runner),
     )
 
-    observation = await provisioner.prepare(
-        derive_identity("alice"),
-        _personal_manifest_config(),
-    )
+    identity = derive_identity("alice")
+    await provisioner.bootstrap(identity, _personal_manifest_config())
+    observation = await provisioner.prepare(identity, _personal_manifest_config())
 
     applied = "\n".join(stdin or "" for _argv, stdin in runner.calls)
     assert "kind: Ingress" not in applied
@@ -298,6 +298,34 @@ async def test_candidate_generation_prepares_exact_images_without_switching_rout
     assert len(observation.resource_evidence_sha256) == 64
     rollout_commands = [argv for argv, _stdin in runner.calls if "rollout" in argv]
     assert len(rollout_commands) == 4
+
+
+async def test_candidate_generation_binds_manager_before_waiting_for_migration() -> None:
+    runner = _CandidateRunner()
+    provisioner = KubectlCandidateGenerationProvisioner(
+        kubectl=KubectlClient("kubectl", runner=runner),
+    )
+
+    identity = derive_identity("alice")
+    await provisioner.bootstrap(identity, _personal_manifest_config())
+    await provisioner.prepare(identity, _personal_manifest_config())
+
+    events: list[str] = []
+    for argv, stdin in runner.calls:
+        if "apply" in argv:
+            for document in yaml.safe_load_all(stdin or ""):
+                identity = (document["kind"], document["metadata"]["name"])
+                if identity == ("RoleBinding", "loom-personal-dev-management"):
+                    events.append("management-binding")
+                elif document["kind"] == "Job":
+                    events.append("migration-apply")
+        elif "wait" in argv:
+            events.append("migration-wait")
+    assert events == [
+        "management-binding",
+        "migration-apply",
+        "migration-wait",
+    ]
 
 
 class _S3:

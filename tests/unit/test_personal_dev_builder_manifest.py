@@ -31,9 +31,7 @@ def test_builder_manifest_is_attempt_bound_restricted_and_finite() -> None:
         "loom.dev/operation": str(registration.build_attempt.operation_id),
         "loom.dev/attempt": str(registration.build_attempt.id),
         "loom.dev/operation-epoch": str(registration.build_attempt.operation_epoch),
-        "loom.dev/build-attempt-sequence": str(
-            registration.build_attempt.attempt_sequence
-        ),
+        "loom.dev/build-attempt-sequence": str(registration.build_attempt.attempt_sequence),
         "loom.dev/build-lease-epoch": str(registration.build_attempt.lease_epoch),
     }
 
@@ -71,6 +69,24 @@ def test_builder_manifest_is_attempt_bound_restricted_and_finite() -> None:
         volume for volume in spec["volumes"] if volume["name"] == "attempt-capability"
     )
     assert capability["secret"]["defaultMode"] == 0o400
+    binding = next(
+        document
+        for document in documents
+        if document["kind"] == "RoleBinding"
+        and document["metadata"]["name"] == "loom-personal-dev-management"
+    )
+    assert binding["roleRef"] == {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "ClusterRole",
+        "name": "loom-personal-dev-managed-namespace",
+    }
+    assert binding["subjects"] == [
+        {
+            "kind": "ServiceAccount",
+            "name": "loom-personal-dev-management",
+            "namespace": "loom-dev",
+        }
+    ]
 
 
 def test_builder_network_policy_denies_internal_authority_and_allows_exact_routes() -> None:
@@ -91,20 +107,13 @@ def test_builder_network_policy_denies_internal_authority_and_allows_exact_route
     }
     egress = policies["builder-egress"]["spec"]["egress"]
     assert any(
-        peer.get("namespaceSelector", {}).get("matchLabels", {}).get(
-            "kubernetes.io/metadata.name"
-        )
+        peer.get("namespaceSelector", {}).get("matchLabels", {}).get("kubernetes.io/metadata.name")
         == "loom-dev"
         and rule["ports"] == [{"protocol": "TCP", "port": 9000}]
         for rule in egress
         for peer in rule["to"]
     )
-    public_blocks = [
-        peer["ipBlock"]
-        for rule in egress
-        for peer in rule["to"]
-        if "ipBlock" in peer
-    ]
+    public_blocks = [peer["ipBlock"] for rule in egress for peer in rule["to"] if "ipBlock" in peer]
     ipv4 = next(block for block in public_blocks if block["cidr"] == "0.0.0.0/0")
     assert "10.0.0.0/8" in ipv4["except"]
     assert "169.254.0.0/16" in ipv4["except"]

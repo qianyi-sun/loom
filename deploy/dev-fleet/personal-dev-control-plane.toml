@@ -1,0 +1,97 @@
+schema_version = 1
+namespace = "loom-dev"
+personal_namespace_prefix = "loom-dev-"
+min_slots_default = 0
+max_slots_limit = 8
+executable_new_capacity_ceiling = 0
+dev_instances_enabled = false
+personal_dev_builder_enabled = false
+activation_agent_replicas = 0
+protocol_versions_json = "{\"capacity-agent\":\"v1\",\"claim-guard\":\"v1\",\"control-plane-worker\":\"v1\",\"database-migrations\":\"expand-compatible-v1\",\"personal-dev-activation\":\"v1\"}"
+
+[identities]
+management_secret = "loom-personal-dev-management"
+activation_public_secret = "loom-personal-dev-activation-public"
+activation_private_secret = "loom-personal-dev-activation-agent"
+management_service_account = "loom-personal-dev-management"
+builder_service_account = "loom-personal-dev-builder"
+activation_service_account = "loom-personal-dev-activation-agent"
+management_service = "loom-personal-dev-management"
+management_ingress = "loom-personal-dev-management"
+scanner_cache_pvc = "loom-personal-dev-scanner-cache"
+
+[storage]
+storage_class_name = "longhorn"
+postgres_storage = "20Gi"
+minio_storage = "100Gi"
+scanner_cache_storage = "20Gi"
+
+[builder]
+prepared = false
+runtime_class_name = "loom-personal-dev-builder"
+publisher_identity = "system:serviceaccount:loom-dev:loom-personal-dev-management"
+registry_prefix = "ghcr.io/qianyi-sun/loom-dev"
+
+[network]
+public_origin = "https://loom-service.dev.yylx.world"
+ingress_class_name = "nginx"
+ingress_cluster_issuer = "letsencrypt-prod"
+kubernetes_api_cidr = "10.43.0.1/32"
+kubernetes_api_port = 443
+dns_namespace = "kube-system"
+dns_pod_label_key = "k8s-app"
+dns_pod_label_value = "kube-dns"
+dns_port = 53
+capacity_manager_origin = "https://loom-capacity-manager.loom-dev.svc.cluster.local:8443"
+capacity_manager_pod_label_key = "app.kubernetes.io/name"
+capacity_manager_pod_label_value = "loom-capacity-manager"
+capacity_manager_port = 8443
+
+[limits]
+global_live_instances = 16
+per_owner_live_instances = 2
+per_owner_aggregate_min_slots = 8
+per_owner_aggregate_max_slots = 16
+builder_global_concurrency = 4
+builder_per_owner_concurrency = 1
+source_max_archive_bytes = 402653184
+candidate_retained_count = 8
+candidate_retained_bytes = 3221225472
+
+[resources.postgres]
+cpu_request = "250m"
+memory_request = "512Mi"
+cpu_limit = "2"
+memory_limit = "4Gi"
+
+[resources.minio]
+cpu_request = "250m"
+memory_request = "512Mi"
+cpu_limit = "2"
+memory_limit = "4Gi"
+
+[resources.migration]
+cpu_request = "50m"
+memory_request = "128Mi"
+cpu_limit = "1"
+memory_limit = "1Gi"
+
+[resources.management]
+cpu_request = "100m"
+memory_request = "256Mi"
+cpu_limit = "1"
+memory_limit = "2Gi"
+
+[resources.activation]
+cpu_request = "50m"
+memory_request = "128Mi"
+cpu_limit = "500m"
+memory_limit = "512Mi"
+
+[[pools]]
+pool_id = "gb10"
+architecture = "arm64"
+
+[[pools]]
+pool_id = "oldlab"
+architecture = "x86_64"

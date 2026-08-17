@@ -12,6 +12,7 @@ from uuid import UUID
 from pydantic import ValidationError
 
 from loom_capacity_manager.execution_policy import load_execution_preparation_policy
+from loom_capacity_manager.health_probe import capacity_health_probe_argv
 from loom_cli.capacity_control_plane import (
     load_capacity_control_plane_profile,
     load_capacity_pool_executor_profile,
@@ -22,7 +23,6 @@ from loom_cli.capacity_control_plane import (
 )
 
 _NAMESPACE = "loom-dev"
-_CREDENTIALS = "/var/run/loom-capacity-manager/runtime/credentials"
 
 
 def _non_nil_uuid_argument(value: str) -> UUID:
@@ -106,19 +106,7 @@ def _status(args: argparse.Namespace) -> int:
             "-c",
             "manager",
             "--",
-            "python",
-            "-m",
-            "loom_capacity_manager.health_probe",
-            "--url",
-            "https://127.0.0.1:8443/healthz",
-            "--ca-file",
-            f"{_CREDENTIALS}/server-ca.pem",
-            "--certificate-file",
-            f"{_CREDENTIALS}/health-certificate.pem",
-            "--private-key-file",
-            f"{_CREDENTIALS}/health-private-key.pem",
-            "--server-certificate-file",
-            f"{_CREDENTIALS}/server-certificate.pem",
+            *capacity_health_probe_argv(),
         ]
     )
     try:

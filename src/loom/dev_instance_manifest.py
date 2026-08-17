@@ -149,6 +149,31 @@ def _activation_agent_role_binding(
     }
 
 
+def _management_role_binding(
+    identity: DevInstanceIdentity,
+    config: DevInstanceManifestConfig,
+) -> dict[str, Any]:
+    """Grant the trusted manager read/wait authority only inside this namespace."""
+
+    return {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "RoleBinding",
+        "metadata": _metadata("loom-personal-dev-management", identity, config),
+        "roleRef": {
+            "apiGroup": "rbac.authorization.k8s.io",
+            "kind": "ClusterRole",
+            "name": "loom-personal-dev-managed-namespace",
+        },
+        "subjects": [
+            {
+                "kind": "ServiceAccount",
+                "name": "loom-personal-dev-management",
+                "namespace": "loom-dev",
+            }
+        ],
+    }
+
+
 def _metadata(
     name: str,
     identity: DevInstanceIdentity,
@@ -759,7 +784,10 @@ def dev_instance_manifest_documents(
     preparation: tuple[dict[str, Any], ...] = (
         namespace,
         *(
-            (_activation_agent_role_binding(identity, config),)
+            (
+                _management_role_binding(identity, config),
+                _activation_agent_role_binding(identity, config),
+            )
             if personal_candidate
             else ()
         ),

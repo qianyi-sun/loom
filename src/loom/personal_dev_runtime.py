@@ -37,6 +37,12 @@ class ReusablePersonalDevSecretVault(Protocol):
 
 
 class CandidateGenerationProvisioner(Protocol):
+    async def bootstrap(
+        self,
+        identity: DevInstanceIdentity,
+        config: DevInstanceManifestConfig,
+    ) -> None: ...
+
     async def prepare(
         self,
         identity: DevInstanceIdentity,
@@ -76,20 +82,14 @@ class PersonalDevPreparationRuntime:
     access: AccessBootstrap
     password_factory: Callable[[], str] = field(default=lambda: secrets.token_hex(10))
 
-    async def prepare(
+    def _manifest_config(
         self,
         claim: PersonalDevReconciliationClaim,
-        *,
-        access: OwnerAccessSnapshot,
-    ) -> PersonalDevReadinessObservation:
+    ) -> tuple[DevInstanceIdentity, DevInstanceManifestConfig]:
         operation = claim.operation
-        if operation.kind not in {"create", "update"}:
-            raise ValueError("personal-dev preparation requires a create or update operation")
-        if access.user_id != operation.owner_user_id or access.team_id != operation.owner_team_id:
-            raise RuntimeError("personal-dev bootstrap owner changed during reconciliation")
         images = personal_dev_candidate_images(claim)
         identity = derive_identity(operation.environment_name)
-        manifest_config = DevInstanceManifestConfig(
+        return identity, DevInstanceManifestConfig(
             image_tag="",
             candidate_sha=operation.candidate_sha,
             deployment_generation=operation.deployment_generation,
@@ -108,6 +108,20 @@ class PersonalDevPreparationRuntime:
                 operation_epoch=operation.operation_epoch,
             ),
         )
+
+    async def prepare(
+        self,
+        claim: PersonalDevReconciliationClaim,
+        *,
+        access: OwnerAccessSnapshot,
+    ) -> PersonalDevReadinessObservation:
+        operation = claim.operation
+        if operation.kind not in {"create", "update"}:
+            raise ValueError("personal-dev preparation requires a create or update operation")
+        if access.user_id != operation.owner_user_id or access.team_id != operation.owner_team_id:
+            raise RuntimeError("personal-dev bootstrap owner changed during reconciliation")
+        identity, manifest_config = self._manifest_config(claim)
+        await self.cluster.bootstrap(identity, manifest_config)
         password = await self.vault.database_password(identity)
         if password is None:
             if operation.kind == "update":
@@ -134,7 +148,8 @@ class PersonalDevPreparationRuntime:
         operation = claim.operation
         if access.user_id != operation.owner_user_id or access.team_id != operation.owner_team_id:
             raise RuntimeError("personal-dev bootstrap owner changed during reconciliation")
-        identity = derive_identity(operation.environment_name)
+        identity, manifest_config = self._manifest_config(claim)
+        await self.cluster.bootstrap(identity, manifest_config)
         password = await self.vault.database_password(identity)
         if password is None:
             raise RuntimeError("personal-dev fixture credential disappeared before bootstrap")

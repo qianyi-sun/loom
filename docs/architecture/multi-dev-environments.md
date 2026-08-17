@@ -15,6 +15,16 @@ personal-candidate lifecycle described here. Staging and production remain
 protected rollout targets: the command validates their full Git candidate and
 then directs the operator to `loom cluster rollout` rather than mutating them.
 
+The shared management-plane architecture and trust boundaries are specified in
+the [personal management-plane deployment design](personal-dev-management-plane-deployment.md).
+Its exact inert deployment procedure is the
+[personal management-plane shadow rehearsal](../runbooks/personal-dev-management-plane-shadow.md).
+That package installs shared infrastructure only in `loom-dev`; it neither
+creates a personal application namespace nor enables the lifecycle controller,
+builder, activation agent, or physical capacity. Personal application
+acceptance remains a later gate after both the personal-management shadow and
+the separate global-capacity zero-ceiling shadow report ready.
+
 ## Checked-in interfaces
 
 The candidate-aware lifecycle has a high-level CLI entry point as well as
