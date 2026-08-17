@@ -203,7 +203,7 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
 - Public/private profiles contain only `public-key` and `private-key`,
   respectively.
 
-- [ ] **Step 1: Write failing projection and destination tests**
+- [x] **Step 1: Write failing projection and destination tests**
 
   Reuse Kubernetes' real `..data -> ..generation` plus per-key symlink layout in
   the fixtures. Cover exact copy, idempotent identical replay, projection
@@ -216,14 +216,14 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
   is a single-link regular file owned by the process UID, and no source Secret
   path appears in an exception message.
 
-- [ ] **Step 2: Run the tests and observe the missing-module failure**
+- [x] **Step 2: Run the tests and observe the missing-module failure**
 
   ```bash
   PYTHONPATH=src:. /home/hongjian/loom/.venv/bin/python -m pytest -q \
     tests/unit/test_personal_dev_secret_init.py
   ```
 
-- [ ] **Step 3: Implement descriptor-pinned exact copying**
+- [x] **Step 3: Implement descriptor-pinned exact copying**
 
   Follow the proven generation-snapshot algorithm in
   `src/loom_capacity_manager/secret_init.py`, but keep profile names and errors
@@ -233,7 +233,7 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
   before atomic rename. Never log payloads or filenames that could contain
   user-supplied text.
 
-- [ ] **Step 4: Run tests, lint, and mypy**
+- [x] **Step 4: Run tests, lint, and mypy**
 
   ```bash
   PYTHONPATH=src:. /home/hongjian/loom/.venv/bin/python -m pytest -q \
@@ -245,7 +245,7 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
     src/loom/personal_dev_secret_init.py
   ```
 
-- [ ] **Step 5: Commit credential preparation**
+- [x] **Step 5: Commit credential preparation**
 
   ```bash
   git add src/loom/personal_dev_secret_init.py \
