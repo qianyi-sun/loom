@@ -158,6 +158,11 @@ def _load_enabled_builder_config(args: argparse.Namespace) -> TaskImageBuilderPo
         raise TaskImageBuilderPolicyError(
             "task-image builder runtime configuration is invalid",
         ) from exc
+    return config
+
+
+def _validate_builder_runtime_files(config: TaskImageBuilderPoolConfig) -> None:
+    """Validate scale-up inputs without making emergency drain depend on them."""
     if not Path(config.env_file).is_file():
         raise TaskImageBuilderPolicyError("task-image builder env file is unavailable")
     if not Path(config.repo_dir).is_dir():
@@ -182,7 +187,6 @@ def _load_enabled_builder_config(args: argparse.Namespace) -> TaskImageBuilderPo
         raise TaskImageBuilderPolicyError(
             "task-image builder registry credential metadata is unsafe"
         )
-    return config
 
 
 async def _validate_builder_credentials(
@@ -235,7 +239,7 @@ async def _validate_builder_credentials(
     )
     if not isinstance(matching_auth, dict) or not any(
         isinstance(matching_auth.get(key), str) and matching_auth[key]
-        for key in ("auth", "identitytoken", "username")
+        for key in ("auth", "identitytoken")
     ):
         raise TaskImageBuilderPolicyError(
             "task-image builder registry credentials do not authorize the configured registry"
@@ -267,11 +271,13 @@ async def _reconcile_with_credentials(
     scale_up_allowed: bool,
 ) -> Any | None:
     async with session.begin():
-        await _validate_builder_credentials(
-            session,
-            env_file=config.env_file,
-            registry_docker_config_dir=config.registry_docker_config_dir,
-        )
+        if scale_up_allowed:
+            _validate_builder_runtime_files(config)
+            await _validate_builder_credentials(
+                session,
+                env_file=config.env_file,
+                registry_docker_config_dir=config.registry_docker_config_dir,
+            )
         if runner is None:
             return None
         return await reconcile_task_image_builder_autoscaler_once(

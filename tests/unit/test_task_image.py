@@ -122,6 +122,34 @@ async def test_resolve_task_image_prefers_explicit_docker_image(
     assert called is False
 
 
+async def test_resolve_task_image_prefers_dockerfile_grant_when_both_are_declared(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    task_dir = tmp_path / "task"
+    dockerfile = task_dir / "environment" / "Dockerfile"
+    dockerfile.parent.mkdir(parents=True)
+    dockerfile.write_text("FROM alpine:3.19\n")
+    registry_image = "registry.example/loom-task@sha256:" + "1" * 64
+    fake_images = _FakeImages(cached_images={registry_image})
+    fake_client = _FakeDockerClient(fake_images)
+    monkeypatch.setattr(task_image.docker, "from_env", lambda **_kwargs: fake_client)
+
+    image = await resolve_task_image(
+        task_config=_task_config(
+            docker_image="python:3.11-alpine",
+            dockerfile="environment/Dockerfile",
+        ),
+        task_dir=task_dir,
+        task_checksum="abc123",
+        registry_image=registry_image,
+        build_if_missing=False,
+    )
+
+    assert image == registry_image
+    assert fake_images.get_calls == [registry_image]
+
+
 async def test_resolve_task_image_builds_and_caches_dockerfile_image(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,

@@ -255,6 +255,53 @@ async def test_materialization_builds_and_publishes_every_dockerfile_component(
     assert observed["removed"] == task_dir
 
 
+async def test_publication_recorder_failure_retains_just_pushed_digest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    claim = _claim()
+    task_dir = tmp_path / "task"
+    (task_dir / "environment").mkdir(parents=True)
+    (task_dir / "environment" / "Dockerfile").write_text("FROM alpine\n")
+    registry_image = "registry.example/loom-task@sha256:" + "4" * 64
+    monkeypatch.setattr(task_image_builder, "host_cpu_arch", lambda: "arm64")
+    monkeypatch.setattr(task_image_builder, "_build_worker_object_store", lambda _s: object())
+
+    async def materialize(**_kwargs: Any) -> Path:
+        return task_dir
+
+    async def resolve(**_kwargs: Any) -> str:
+        return "loom-task:base"
+
+    async def sidecars(**_kwargs: Any) -> dict[str, str]:
+        return {}
+
+    async def publish(**_kwargs: Any) -> str:
+        return registry_image
+
+    async def record_publication(_component: str, _registry_image: str) -> bool:
+        raise ConnectionError("publication endpoint unavailable")
+
+    async def verify_architecture(**_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(task_image_builder, "_materialize_task_dir", materialize)
+    monkeypatch.setattr(task_image_builder, "sha256_of_dir", lambda _path: claim.task_checksum)
+    monkeypatch.setattr(task_image_builder, "resolve_task_image", resolve)
+    monkeypatch.setattr(task_image_builder, "build_task_sidecar_images", sidecars)
+    monkeypatch.setattr(task_image_builder, "publish_local_image_to_registry", publish)
+    monkeypatch.setattr(task_image_builder, "verify_local_image_architecture", verify_architecture)
+
+    with pytest.raises(task_image_builder.TaskImagePublicationError) as exc_info:
+        await task_image_builder.materialize_and_publish_task_images(
+            claim,
+            _settings(),  # type: ignore[arg-type]
+            publication_recorder=record_publication,
+        )
+
+    assert exc_info.value.registry_images == {"task": registry_image}
+
+
 async def test_materialization_rejects_bundle_metadata_drift(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

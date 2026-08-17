@@ -185,10 +185,11 @@ async def resolve_task_image(
 ) -> str:
     """Return the Docker image a service worker should use for this task.
 
-    ``environment.docker_image`` remains the fastest path. When a task declares
-    ``environment.dockerfile`` instead, build it from the materialized task
-    bundle if the deterministic cache tag is absent. Tasks that declare neither
-    keep the historic ``alpine`` fallback.
+    ``environment.docker_image`` remains the fastest path when no Dockerfile is
+    declared. A declared ``environment.dockerfile`` is authoritative, including
+    for legacy configs that contain both fields, and is built from the
+    materialized task bundle if the deterministic cache tag is absent. Tasks
+    that declare neither keep the historic ``alpine`` fallback.
 
     When ``build_slot_provider`` is supplied and a build is actually
     required (deterministic tag not present in the local daemon), the
@@ -198,10 +199,8 @@ async def resolve_task_image(
     is a cheap `client.images.get(tag)` on the local daemon. #275.
     """
 
-    if task_config.environment.docker_image:
-        return task_config.environment.docker_image
     if task_config.environment.dockerfile is None:
-        return DEFAULT_TASK_IMAGE
+        return task_config.environment.docker_image or DEFAULT_TASK_IMAGE
 
     dockerfile = _resolve_dockerfile_path(
         task_dir=task_dir,

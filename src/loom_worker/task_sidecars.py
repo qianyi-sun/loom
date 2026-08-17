@@ -216,13 +216,13 @@ class DockerTaskSidecarRuntime:
         return ordered
 
     async def _resolve_sidecar_image(self, sidecar: TaskSidecarConfig) -> str:
-        if sidecar.docker_image:
-            if await asyncio.to_thread(self._image_exists, sidecar.docker_image):
-                return sidecar.docker_image
-            async with self._setup_slot():
-                await asyncio.to_thread(self._ensure_pulled_image, sidecar.docker_image)
-            return sidecar.docker_image
         if sidecar.dockerfile is None:
+            if sidecar.docker_image:
+                if await asyncio.to_thread(self._image_exists, sidecar.docker_image):
+                    return sidecar.docker_image
+                async with self._setup_slot():
+                    await asyncio.to_thread(self._ensure_pulled_image, sidecar.docker_image)
+                return sidecar.docker_image
             raise TaskImageBuildError(
                 f"sidecar {sidecar.name!r} declares neither docker_image nor dockerfile",
             )

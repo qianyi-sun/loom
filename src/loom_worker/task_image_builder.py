@@ -252,6 +252,10 @@ async def materialize_and_publish_task_images(
                     registry_repo=registry_repo,
                     docker_api_timeout_sec=settings.docker_api_timeout_sec,
                 )
+                # The push is already externally visible. Retain its immutable
+                # digest locally before the evidence API call so a recorder
+                # outage can still use the fenced failure-report path.
+                published[component] = registry_image
                 if publication_recorder is not None and not await publication_recorder(
                     component,
                     registry_image,
@@ -259,7 +263,6 @@ async def materialize_and_publish_task_images(
                     raise TaskImageLeaseLostError(
                         "task image lease was lost while recording publication evidence"
                     )
-                published[component] = registry_image
             except Exception as exc:
                 if isinstance(exc, TaskImageLeaseLostError):
                     raise

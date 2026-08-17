@@ -9,8 +9,9 @@ pull images but must not build them.
 
 Task image materialization is therefore a control-plane prerequisite, separate
 from trial execution. It covers the task's primary Dockerfile and every
-Dockerfile-backed sidecar. Prebuilt `docker_image` references remain pull-only
-inputs and do not create build work.
+Dockerfile-backed sidecar. A declared Dockerfile is authoritative when a legacy
+config also contains `docker_image`; otherwise prebuilt `docker_image`
+references remain pull-only inputs and do not create build work.
 
 ## Architecture
 
@@ -34,12 +35,19 @@ the returned immutable manifest digests, and marks the row ready. Builders use
 lease epochs and heartbeats so a
 stale process cannot publish readiness after its lease has been reclaimed.
 
-Ordinary Loom workers never wait for or perform a build. After the scheduler
-observes readiness, the trial claim carries the frozen task snapshot and exact
-per-component registry digests. The execution worker verifies the bundle and
-pulls those digest references—not re-derived tags—before starting the sandbox.
-A registry miss after readiness is an infrastructure consistency failure rather
-than permission to rebuild on a packed node.
+Ordinary Loom workers never wait for or perform a task-authored Dockerfile
+build. After the scheduler observes readiness, the trial claim carries the
+frozen task snapshot and exact per-component registry digests. The execution
+worker verifies the bundle and pulls those digest references—not re-derived
+tags—before starting the sandbox. A registry miss after readiness is an
+infrastructure consistency failure rather than permission to rebuild on a
+packed node.
+
+Agent-adapter `install_script` layering is the pre-existing trial-image cache
+subsystem, not a task-image component: its identity depends on the selected
+trial agent as well as the resolved task-image digest. Containment-required
+service workers may only pull those cached layers; moving that separate cache
+to its own durable materialization queue is outside this task-image lifecycle.
 
 ## State and failure handling
 
@@ -88,9 +96,9 @@ mixed-version rollout races. The queue and builder endpoints remain inert until
 the builder policy and registry are configured. Registration may enqueue while
 the policy is disabled, but trials requiring an unbuilt image remain queued
 rather than failing after claim. Existing prebuilt-image tasks are unaffected.
-The old worker-side build
-fallback remains available to explicit local/CLI workflows; service trial
-workers are pull-only once builder readiness gating is active.
+The old task-Dockerfile build fallback remains available to explicit local/CLI
+workflows; service trial workers are pull-only for task-authored Dockerfile
+components once builder readiness gating is active.
 
 ## Verification
 

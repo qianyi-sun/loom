@@ -85,14 +85,8 @@ def test_enabled_policy_maps_to_exclusive_runtime_config(
     tmp_path: Path,
 ) -> None:
     env_file = tmp_path / "builder.env"
-    env_file.write_text("LOOM_WORKER_TOKEN=builder-token\n", encoding="utf-8")
     repo_dir = tmp_path / "repo"
-    repo_dir.mkdir()
     registry_docker_config_dir = tmp_path / "registry-docker"
-    registry_docker_config_dir.mkdir(mode=0o700)
-    registry_config = registry_docker_config_dir / "config.json"
-    registry_config.write_text('{"auths": {"registry.example": {}}}\n', encoding="utf-8")
-    registry_config.chmod(0o600)
     policy = {
         "environment": "staging",
         "pool_name": "task-image-builder-gb10",
@@ -136,6 +130,8 @@ def test_enabled_policy_maps_to_exclusive_runtime_config(
     assert config.exclusive is True
     assert config.requested_concurrency == 1
     assert config.env_file == str(env_file)
+    assert config.repo_dir == str(repo_dir)
+    assert config.registry_docker_config_dir == str(registry_docker_config_dir)
 
 
 def test_invalid_global_execution_witness_enters_drain_only_mode(
@@ -228,7 +224,93 @@ async def test_builder_credentials_require_expected_registry_auth_entry(
         )
 
 
-async def test_reconcile_validates_credentials_inside_single_transaction(
+async def test_builder_credentials_reject_username_only_registry_entry(
+    module: Any,
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / "builder.env"
+    env_file.write_text(
+        "LOOM_WORKER_TOKEN=builder-token\n"
+        "LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO=registry.example/loom\n",
+        encoding="utf-8",
+    )
+    registry_config_dir = _registry_config(tmp_path)
+    registry_config_file = registry_config_dir / "config.json"
+    registry_config_file.write_text(
+        '{"auths": {"registry.example": {"username": "builder"}}}\n',
+        encoding="utf-8",
+    )
+    registry_config_file.chmod(0o600)
+
+    class _Session:
+        async def execute(self, _query: object) -> Any:
+            return SimpleNamespace(
+                one_or_none=lambda: ("worker", ["task-image:build"], None, None)
+            )
+
+    with pytest.raises(module.TaskImageBuilderPolicyError, match="registry credentials"):
+        await module._validate_builder_credentials(
+            _Session(),
+            env_file=str(env_file),
+            registry_docker_config_dir=str(registry_config_dir),
+        )
+
+
+async def test_drain_only_reconcile_bypasses_builder_credentials(
+    module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class _Transaction:
+        async def __aenter__(self) -> None:
+            events.append("begin")
+
+        async def __aexit__(self, *_args: Any) -> None:
+            events.append("commit")
+
+    class _Session:
+        def begin(self) -> _Transaction:
+            return _Transaction()
+
+    async def validate(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("drain must not depend on builder credentials")
+
+    def validate_runtime(_config: object) -> None:
+        raise AssertionError("drain must not depend on builder runtime files")
+
+    async def reconcile(*_args: Any, **_kwargs: Any) -> str:
+        events.append("reconcile")
+        return "result"
+
+    monkeypatch.setattr(module, "_validate_builder_credentials", validate)
+    monkeypatch.setattr(
+        module,
+        "_validate_builder_runtime_files",
+        validate_runtime,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        module,
+        "reconcile_task_image_builder_autoscaler_once",
+        reconcile,
+    )
+
+    result = await module._reconcile_with_credentials(
+        _Session(),
+        config=SimpleNamespace(
+            env_file="/secure/builder.env",
+            registry_docker_config_dir="/secure/registry-docker",
+        ),
+        runner=object(),
+        scale_up_allowed=False,
+    )
+
+    assert result == "result"
+    assert events == ["begin", "reconcile", "commit"]
+
+
+async def test_scale_up_reconcile_validates_credentials_inside_transaction(
     module: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -248,11 +330,20 @@ async def test_reconcile_validates_credentials_inside_single_transaction(
     async def validate(*_args: Any, **_kwargs: Any) -> None:
         events.append("validate")
 
+    def validate_runtime(_config: object) -> None:
+        events.append("runtime")
+
     async def reconcile(*_args: Any, **_kwargs: Any) -> str:
         events.append("reconcile")
         return "result"
 
     monkeypatch.setattr(module, "_validate_builder_credentials", validate)
+    monkeypatch.setattr(
+        module,
+        "_validate_builder_runtime_files",
+        validate_runtime,
+        raising=False,
+    )
     monkeypatch.setattr(
         module,
         "reconcile_task_image_builder_autoscaler_once",
@@ -266,8 +357,8 @@ async def test_reconcile_validates_credentials_inside_single_transaction(
             registry_docker_config_dir="/secure/registry-docker",
         ),
         runner=object(),
-        scale_up_allowed=False,
+        scale_up_allowed=True,
     )
 
     assert result == "result"
-    assert events == ["begin", "validate", "reconcile", "commit"]
+    assert events == ["begin", "runtime", "validate", "reconcile", "commit"]

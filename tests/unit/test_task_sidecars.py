@@ -72,6 +72,44 @@ def test_sidecar_image_tag_is_native_architecture_qualified() -> None:
     )
 
 
+async def test_sidecar_dockerfile_grant_wins_when_prebuilt_image_is_also_declared(
+    tmp_path: Path,
+) -> None:
+    task_dir = tmp_path / "task"
+    context = task_dir / "sidecars" / "api"
+    context.mkdir(parents=True)
+    (context / "Dockerfile").write_text("FROM alpine:3.19\n")
+    sidecar = TaskSidecarConfig(
+        name="api",
+        docker_image="registry.example/prebuilt-api:latest",
+        dockerfile=PurePosixPath("sidecars/api/Dockerfile"),
+        docker_build_context=PurePosixPath("sidecars/api"),
+    )
+    task_config = _task_config().model_copy(
+        update={
+            "environment": _task_config().environment.model_copy(
+                update={"sidecars": [sidecar]}
+            )
+        }
+    )
+    registry_image = "registry.example/loom-task@sha256:" + "3" * 64
+    client = _FakeDockerClient()
+    runtime = DockerTaskSidecarRuntime(
+        task_config=task_config,
+        task_dir=task_dir,
+        task_checksum="abc123",
+        trial_id=uuid4(),
+        registry_images={"sidecar:api": registry_image},
+        pull_only=True,
+    )
+    runtime._client = client
+
+    image = await runtime._resolve_sidecar_image(sidecar)
+
+    assert image == registry_image
+    assert client.images.pull_calls == [registry_image]
+
+
 class _FakeImages:
     def __init__(self) -> None:
         self.get_calls: list[str] = []
