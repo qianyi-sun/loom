@@ -284,6 +284,21 @@
     "default": "2000",
     "required": false
   },
+  "task_image_builder_idle_exit_seconds": {
+    "annotation": "<class 'int'>",
+    "default": "120",
+    "required": false
+  },
+  "task_image_local_ttl_hours": {
+    "annotation": "<class 'int'>",
+    "default": "168",
+    "required": false
+  },
+  "task_image_min_free_gb": {
+    "annotation": "<class 'int'>",
+    "default": "20",
+    "required": false
+  },
   "task_materialize_timeout_sec": {
     "annotation": "<class 'float'>",
     "default": "300.0",

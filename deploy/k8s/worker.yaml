@@ -123,6 +123,12 @@ spec:
           value: '536870912'
         - name: LOOM_TASK_IMAGE_BUILD_MAX_FILES
           value: '2000'
+        - name: LOOM_WORKER_TASK_IMAGE_BUILDER_IDLE_EXIT_SECONDS
+          value: '120'
+        - name: LOOM_WORKER_TASK_IMAGE_LOCAL_TTL_HOURS
+          value: '168'
+        - name: LOOM_WORKER_TASK_IMAGE_MIN_FREE_GB
+          value: '20'
         - name: LOOM_WORKER_TASK_MATERIALIZE_TIMEOUT_SEC
           value: '300.0'
         - name: LOOM_WORKER_TOKEN

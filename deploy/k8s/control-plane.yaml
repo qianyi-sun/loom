@@ -133,6 +133,10 @@ spec:
           value: static_keys
         - name: LOOM_CP_STORAGE_BACKEND
           value: minio
+        - name: LOOM_CP_TASK_IMAGE_BUILDER_LEASE_SECONDS
+          value: '300.0'
+        - name: LOOM_CP_TASK_IMAGE_REGISTRY_GRACE_HOURS
+          value: '168'
         - name: LOOM_CP_TRAJECTORIES_BUCKET
           value: trajectories
         - name: LOOM_CP_TRIAL_RETRY_DEFAULT_BACKOFF_BASE_SEC

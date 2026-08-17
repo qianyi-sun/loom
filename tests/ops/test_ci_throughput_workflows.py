@@ -2350,6 +2350,7 @@ def test_staging_gate_consumes_manifest_owned_system_smoke_lane() -> None:
         for step in system_smoke["steps"]
         if step.get("name") == "Cleanup system-smoke compose stack"
     )
+    cleanup_script = " ".join(cleanup_step["run"].replace("\\\n", " ").split())
 
     assert set(system_smoke["needs"]) == {"plan", "staging-route"}
     assert "needs.plan.outputs.required == 'true'" in system_smoke["if"]
@@ -2360,8 +2361,10 @@ def test_staging_gate_consumes_manifest_owned_system_smoke_lane() -> None:
         in scripts
     )
     assert 'uv run --no-sync pytest --timeout=1200 "${test_paths[@]}"' in scripts
-    assert "--profile worker logs --no-color --tail=300" in scripts
-    assert "--profile worker down -v --remove-orphans" in scripts
+    assert (
+        "--profile worker --profile task-image-builder down -v --remove-orphans"
+        in cleanup_script
+    )
     assert pytest_step["env"]["LOOM_SYSTEM_SMOKE_DIAGNOSTICS"] == (
         "${{ runner.temp }}/system-smoke-compose.log"
     )
@@ -2371,6 +2374,10 @@ def test_staging_gate_consumes_manifest_owned_system_smoke_lane() -> None:
     )
     assert 'cat "${LOOM_SYSTEM_SMOKE_DIAGNOSTICS}"' in diagnostics_step["run"]
     assert cleanup_step["if"] == "always()"
+    assert cleanup_step["env"]["LOOM_WORKER_TOKEN"] == "unused-cleanup-token"
+    assert cleanup_step["env"]["LOOM_TASK_IMAGE_BUILDER_TOKEN"] == (
+        "unused-cleanup-builder-token"
+    )
 
 
 def test_repository_checks_writes_default_fast_coverage_summary() -> None:

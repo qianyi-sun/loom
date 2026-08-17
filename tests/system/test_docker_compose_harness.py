@@ -30,7 +30,9 @@ def test_compose_uses_one_test_only_step_jwt_signing_key() -> None:
 
 def test_compose_mounts_runtime_fixtures_and_uses_fast_test_cancellation() -> None:
     compose = yaml.safe_load(docker_compose.COMPOSE_FILE.read_text(encoding="utf-8"))
+    services = compose["services"]
     worker = compose["services"]["worker"]
+    builder = services["task-image-builder"]
 
     assert worker["environment"]["LOOM_WORKER_FIXTURES_ROOT"] == (
         "/app/tests/fixtures/tasks"
@@ -57,6 +59,20 @@ def test_compose_mounts_runtime_fixtures_and_uses_fast_test_cancellation() -> No
         ).read_text(encoding="utf-8"),
     )
     assert hello_task["environment"]["cpu_arch"] == "any"
+    assert services["registry"]["ports"] == ["55000:5000"]
+    assert builder["command"] == ["python", "-m", "loom_worker.task_image_builder"]
+    assert builder["environment"]["LOOM_WORKER_TOKEN"] == (
+        "${LOOM_TASK_IMAGE_BUILDER_TOKEN:?LOOM_TASK_IMAGE_BUILDER_TOKEN "
+        "must be set before builder compose-up}"
+    )
+    assert builder["environment"]["LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO"] == (
+        "localhost:55000/loom-task-images"
+    )
+    assert builder["environment"][
+        "LOOM_WORKER_TASK_IMAGE_BUILDER_IDLE_EXIT_SECONDS"
+    ] == "120"
+    assert builder["profiles"] == ["task-image-builder"]
+    assert "/var/run/docker.sock:/var/run/docker.sock" in builder["volumes"]
 
 
 def test_worker_image_installs_direct_benchmark_runtime_dependency() -> None:
@@ -73,9 +89,11 @@ def test_stack_up_migrates_blank_database_before_starting_services(
     monkeypatch: Any,
 ) -> None:
     events: list[tuple[Any, ...]] = []
+    compose_envs: list[tuple[tuple[str, ...], dict[str, str] | None]] = []
 
     def fake_compose(*args: str, **kwargs: Any) -> subprocess.CompletedProcess[str]:
         events.append(("compose", *args))
+        compose_envs.append((args, kwargs.get("env_extra")))
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
     def fake_wait(services: list[str], timeout_sec: float) -> None:
@@ -92,34 +110,54 @@ def test_stack_up_migrates_blank_database_before_starting_services(
         return subprocess.CompletedProcess(
             command,
             0,
-            stdout="team-token\nworker-token\n",
+            stdout="team-token\nworker-token\nbuilder-token\n",
             stderr="",
         )
+
+    def fake_wait_for_materialization(task_id: str, *, timeout_sec: float) -> None:
+        events.append(("materialization-ready", task_id, timeout_sec))
 
     def fake_canary(team_token: str, *, timeout_sec: float) -> None:
         events.append(("claim-canary", team_token, timeout_sec))
 
     monkeypatch.setattr(docker_compose, "_compose", fake_compose)
     monkeypatch.setattr(docker_compose, "_wait_services_healthy", fake_wait)
+    monkeypatch.setattr(
+        docker_compose,
+        "_wait_task_image_materialization_ready",
+        fake_wait_for_materialization,
+        raising=False,
+    )
     monkeypatch.setattr(docker_compose, "_verify_worker_claim_canary", fake_canary)
     monkeypatch.setattr(docker_compose.subprocess, "run", fake_run)
 
     assert docker_compose.stack_up(timeout_sec=17) == ("team-token", "worker-token")
 
-    assert events[0] == ("compose", "up", "-d", "postgres", "minio")
-    assert events[1] == ("wait", ("postgres", "minio"), 17)
+    assert events[0] == ("compose", "up", "-d", "postgres", "minio", "registry")
+    assert events[1] == ("wait", ("postgres", "minio", "registry"), 17)
     assert events[2][0] == "migrate"
     assert events[2][1][0:3] == (sys.executable, "-m", "alembic")
     assert events[2][2] == docker_compose.DB_URL
     assert events[3] == ("compose", "up", "-d", "--build")
     assert events[4] == (
         "wait",
-        ("postgres", "minio", "llm-gateway", "control-plane"),
+        ("postgres", "minio", "registry", "llm-gateway", "control-plane"),
         17,
     )
     assert events[5][0] == "seed"
     assert events[5][1][0] == sys.executable
     assert events[6] == (
+        "compose",
+        "--profile",
+        "task-image-builder",
+        "up",
+        "-d",
+        "--build",
+        "--no-deps",
+        "task-image-builder",
+    )
+    assert events[7] == ("materialization-ready", "hello-world", 17)
+    assert events[8] == (
         "compose",
         "--profile",
         "worker",
@@ -129,12 +167,20 @@ def test_stack_up_migrates_blank_database_before_starting_services(
         "--no-deps",
         "worker",
     )
-    assert events[7] == ("wait", ("worker",), 60.0)
-    assert events[8] == (
+    assert events[9] == ("wait", ("worker",), 60.0)
+    assert events[10] == (
         "claim-canary",
         "team-token",
         docker_compose._CANARY_MAX_TIMEOUT_SEC,
     )
+    builder_env = next(
+        env
+        for args, env in compose_envs
+        if args and args[-1] == "task-image-builder"
+    )
+    worker_env = next(env for args, env in compose_envs if args and args[-1] == "worker")
+    assert builder_env == {"LOOM_TASK_IMAGE_BUILDER_TOKEN": "builder-token"}
+    assert worker_env == {"LOOM_WORKER_TOKEN": "worker-token"}
 
 
 def test_wait_services_healthy_bounds_compose_inspection(monkeypatch: Any) -> None:
@@ -178,13 +224,30 @@ def test_stack_up_cleans_partial_compose_state_on_setup_failure(
     assert compose_calls[-1] == (
         "--profile",
         "worker",
+        "--profile",
+        "task-image-builder",
         "down",
         "-v",
         "--remove-orphans",
     )
     assert compose_calls[-3:-1] == [
-        ("--profile", "worker", "ps", "-a"),
-        ("--profile", "worker", "logs", "--no-color", "--tail=300"),
+        (
+            "--profile",
+            "worker",
+            "--profile",
+            "task-image-builder",
+            "ps",
+            "-a",
+        ),
+        (
+            "--profile",
+            "worker",
+            "--profile",
+            "task-image-builder",
+            "logs",
+            "--no-color",
+            "--tail=300",
+        ),
     ]
 
 
@@ -414,9 +477,32 @@ def test_failed_teardown_redacts_diagnostics_before_down(
     docker_compose.stack_down_with_diagnostics(failed=True)
 
     assert calls == [
-        ("--profile", "worker", "ps", "-a"),
-        ("--profile", "worker", "logs", "--no-color", "--tail=300"),
-        ("--profile", "worker", "down", "-v", "--remove-orphans"),
+        (
+            "--profile",
+            "worker",
+            "--profile",
+            "task-image-builder",
+            "ps",
+            "-a",
+        ),
+        (
+            "--profile",
+            "worker",
+            "--profile",
+            "task-image-builder",
+            "logs",
+            "--no-color",
+            "--tail=300",
+        ),
+        (
+            "--profile",
+            "worker",
+            "--profile",
+            "task-image-builder",
+            "down",
+            "-v",
+            "--remove-orphans",
+        ),
     ]
     assert timeouts == [
         docker_compose._COMPOSE_DIAGNOSTICS_TIMEOUT_SEC,
@@ -450,7 +536,15 @@ def test_diagnostics_failure_does_not_mask_teardown(monkeypatch: Any) -> None:
     docker_compose.stack_down_with_diagnostics(failed=True)
 
     assert calls == [
-        ("--profile", "worker", "down", "-v", "--remove-orphans"),
+        (
+            "--profile",
+            "worker",
+            "--profile",
+            "task-image-builder",
+            "down",
+            "-v",
+            "--remove-orphans",
+        ),
     ]
 
 

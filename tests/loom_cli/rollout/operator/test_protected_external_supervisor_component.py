@@ -131,13 +131,7 @@ def _bound_single_artifact(tmp_path: Path):
     repository = Path(__file__).resolve().parents[4]
     shutil.copyfile(repository / "deploy/environment-state/staging.toml", profile_target)
     profile_text = profile_target.read_text(encoding="utf-8")
-    profile_text = profile_text.replace("enabled = false", "enabled = true", 1)
     profile_text = profile_text.replace("materialize = false", "materialize = true", 1)
-    profile_text = profile_text.replace(
-        "enabled = false\nactive = false",
-        "enabled = true\nactive = true",
-        1,
-    )
     # These component mechanics tests retain one supervisor so their exact
     # operation-order assertions stay focused.  The transition suite exercises
     # the additive legacy-GB10 -> GB10+OLDLAB protected transition.

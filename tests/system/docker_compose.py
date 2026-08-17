@@ -5,15 +5,16 @@ System tests are explicitly OUT of the default `pytest tests/` collection
 (see pyproject.toml: `addopts = "--ignore=tests/system"`). Run them with
 `pytest tests/system -v` from a host with Docker + docker-compose v2.
 
-Compose-up has FOUR ordered phases because services require an Alembic-head
-database and the worker container needs a real token before it can register:
+Compose-up has FIVE ordered phases because services require an Alembic-head
+database and the execution services need distinct scoped tokens:
 
-  1. Bring up Postgres + MinIO, then apply Alembic migrations.
+  1. Bring up Postgres + MinIO + the local registry, then apply migrations.
   2. Bring up control-plane + gateway (worker excluded by its profile).
   3. Run seed_test_data.py against the migrated Postgres to mint a
-     team token + worker token + seed the fixture task.
-  4. Re-invoke `docker compose up -d --build` with the worker profile enabled
-     and `LOOM_WORKER_TOKEN` exported into the subprocess env.
+     team token + worker token + task-image builder token and seed the fixture.
+  4. Start the dedicated task-image builder and wait for the native fixture
+     materialization to become ready.
+  5. Start the trial worker with its ordinary worker token.
 
 stack_up() returns both raw tokens so tests can use the team token for
 HTTP calls; the worker token lives inside the worker container env.
@@ -23,13 +24,16 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 import httpx
+from sqlalchemy import create_engine, select
 
+from loom.db.schema import TaskImageMaterialization
 from loom.security.redaction import redact_text
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -44,6 +48,12 @@ _COMPOSE_INSPECT_TIMEOUT_SEC = 5.0
 _COMPOSE_DIAGNOSTICS_TIMEOUT_SEC = 15.0
 _COMPOSE_TEARDOWN_TIMEOUT_SEC = 60.0
 _TERMINAL_TRIAL_STATES = {"succeeded", "failed", "cancelled"}
+_RUNTIME_PROFILE_ARGS = (
+    "--profile",
+    "worker",
+    "--profile",
+    "task-image-builder",
+)
 
 
 def _compose(
@@ -58,6 +68,7 @@ def _compose(
     # worker service is not in the active profile. The :? required-form
     # in compose only triggers when the service is selected.
     env.setdefault("LOOM_WORKER_TOKEN", "unused-no-profile")
+    env.setdefault("LOOM_TASK_IMAGE_BUILDER_TOKEN", "unused-no-profile")
     if env_extra:
         env.update(env_extra)
     return subprocess.run(
@@ -125,8 +136,8 @@ def _stack_up(
     # Stage 1: start stateful dependencies, then apply migrations explicitly.
     # Long-running services validate schema-at-head and intentionally never
     # auto-migrate, so they must not be started against a blank database.
-    _compose("up", "-d", "postgres", "minio")
-    _wait_services_healthy(["postgres", "minio"], timeout_sec=timeout_sec)
+    _compose("up", "-d", "postgres", "minio", "registry")
+    _wait_services_healthy(["postgres", "minio", "registry"], timeout_sec=timeout_sec)
     migration_env = os.environ.copy()
     migration_env["LOOM_DB_URL"] = DB_URL
     subprocess.run(
@@ -147,19 +158,28 @@ def _stack_up(
     # Stage 2: start application services. Worker remains excluded by profile.
     _compose("up", "-d", "--build")
     _wait_services_healthy(
-        ["postgres", "minio", "llm-gateway", "control-plane"],
+        ["postgres", "minio", "registry", "llm-gateway", "control-plane"],
         timeout_sec=timeout_sec,
     )
 
     # Stage 3: mint a team + worker token (and seed the fixture).
     seed = subprocess.run(
         [sys.executable, "scripts/seed_test_data.py",
-         "--task-id", task_id, "--print", "both"],
+         "--task-id", task_id, "--print", "system"],
         check=True, cwd=REPO_ROOT, capture_output=True, text=True,
     )
-    team_token, worker_token = seed.stdout.strip().splitlines()[:2]
+    team_token, worker_token, builder_token = seed.stdout.strip().splitlines()[:3]
 
-    # Stage 4: start the worker with the real token wired in.
+    # Stage 4: build and publish the native task image before a trial worker is
+    # allowed to claim the Dockerfile-backed canary.
+    _compose(
+        "--profile", "task-image-builder", "up", "-d", "--build", "--no-deps",
+        "task-image-builder",
+        env_extra={"LOOM_TASK_IMAGE_BUILDER_TOKEN": builder_token},
+    )
+    _wait_task_image_materialization_ready(task_id, timeout_sec=timeout_sec)
+
+    # Stage 5: start the worker with the ordinary trial token wired in.
     _compose(
         "--profile", "worker", "up", "-d", "--build", "--no-deps", "worker",
         env_extra={"LOOM_WORKER_TOKEN": worker_token},
@@ -170,11 +190,53 @@ def _stack_up(
     return team_token, worker_token
 
 
+def _wait_task_image_materialization_ready(
+    task_id: str,
+    *,
+    timeout_sec: float,
+) -> None:
+    machine = platform.machine().lower()
+    if machine in {"x86_64", "amd64"}:
+        cpu_arch = "x86_64"
+    elif machine in {"aarch64", "arm64"}:
+        cpu_arch = "arm64"
+    else:
+        raise RuntimeError(f"unsupported system-smoke builder architecture {machine!r}")
+
+    engine = create_engine(DB_URL)
+    deadline = time.monotonic() + timeout_sec
+    try:
+        while time.monotonic() < deadline:
+            with engine.connect() as connection:
+                row = connection.execute(
+                    select(
+                        TaskImageMaterialization.state,
+                        TaskImageMaterialization.failure_message,
+                    ).where(
+                        TaskImageMaterialization.task_id == task_id,
+                        TaskImageMaterialization.cpu_arch == cpu_arch,
+                    )
+                ).one_or_none()
+            if row is not None and row.state == "ready":
+                return
+            if row is not None and row.state == "failed":
+                raise RuntimeError(
+                    "system-smoke task image materialization failed: "
+                    f"{row.failure_message or 'no diagnostic'}"
+                )
+            time.sleep(0.25)
+    finally:
+        engine.dispose()
+    raise RuntimeError(
+        "system-smoke task image materialization did not become ready "
+        f"within {timeout_sec}s"
+    )
+
+
 def stack_down() -> None:
     try:
         _compose(
-            "--profile",
-            "worker",
+            *_RUNTIME_PROFILE_ARGS,
             "down",
             "-v",
             "--remove-orphans",
@@ -432,10 +494,10 @@ def preserve_compose_diagnostics() -> None:
 
     sections: list[str] = []
     for heading, args in (
-        ("compose ps -a", ("--profile", "worker", "ps", "-a")),
+        ("compose ps -a", (*_RUNTIME_PROFILE_ARGS, "ps", "-a")),
         (
             "compose logs --tail=300",
-            ("--profile", "worker", "logs", "--no-color", "--tail=300"),
+            (*_RUNTIME_PROFILE_ARGS, "logs", "--no-color", "--tail=300"),
         ),
     ):
         try:

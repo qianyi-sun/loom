@@ -47,13 +47,22 @@ def _artifact(
     shutil.copyfile(repository / "deploy/environment-state/staging.toml", profile)
     shutil.copyfile(repository / "scripts/ops/worker_pool_autoscaler_external_once.py", script)
     profile_text = profile.read_text(encoding="utf-8")
-    profile_text = profile_text.replace("enabled = false", "enabled = true", 1)
-    profile_text = profile_text.replace("materialize = false", "materialize = true", 1)
-    profile_text = profile_text.replace(
-        "enabled = false\nactive = false",
-        "enabled = true\nactive = true",
-        1,
+    policy_marker = "\n# Task-image builders are a separate capacity class."
+    policy_end = "\n[[gb10_worker_pool_desired_states]]"
+    before_policies, separator, after_policy_marker = profile_text.partition(policy_marker)
+    assert separator
+    _builder_policies, separator, after_policies = after_policy_marker.partition(
+        policy_end
     )
+    assert separator
+    profile_text = before_policies + policy_end + after_policies
+    supervisor_marker = "\n# Builder supervisors are installed as disabled units."
+    profile_text, separator, _builder_supervisors = profile_text.partition(
+        supervisor_marker
+    )
+    assert separator
+    profile_text += "\n"
+    profile_text = profile_text.replace("materialize = false", "materialize = true", 1)
     if timer_on_unit_active_sec != 30:
         enablement = "enabled = true\nactive = true\n"
         profile_text = profile_text.replace(

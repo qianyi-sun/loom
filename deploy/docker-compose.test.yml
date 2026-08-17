@@ -32,6 +32,11 @@ services:
       timeout: 2s
       retries: 20
 
+  registry:
+    image: registry:2
+    ports:
+      - "55000:5000"
+
   llm-gateway:
     image: loom-llm-gateway:dev
     build:
@@ -101,6 +106,34 @@ services:
     profiles: ["worker"]
     depends_on:
       control-plane:
+        condition: service_started
+    volumes:
+      - ../tests/fixtures/tasks:/app/tests/fixtures/tasks:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  task-image-builder:
+    image: loom-worker:dev
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.worker
+    command: ["python", "-m", "loom_worker.task_image_builder"]
+    environment:
+      LOOM_WORKER_CONTROL_PLANE_URL: http://control-plane:8080
+      LOOM_WORKER_TOKEN: "${LOOM_TASK_IMAGE_BUILDER_TOKEN:?LOOM_TASK_IMAGE_BUILDER_TOKEN must be set before builder compose-up}"
+      LOOM_WORKER_MINIO_ENDPOINT: http://minio:9000
+      LOOM_WORKER_MINIO_ACCESS_KEY: loomtest
+      LOOM_WORKER_MINIO_SECRET_KEY: loomtest
+      LOOM_WORKER_FIXTURES_ROOT: /app/tests/fixtures/tasks
+      # Docker runs on the host through the mounted socket, so loopback reaches
+      # the registry's published host port and yields real RepoDigests for the
+      # subsequent pull-only trial worker.
+      LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO: localhost:55000/loom-task-images
+      LOOM_WORKER_TASK_IMAGE_BUILDER_IDLE_EXIT_SECONDS: "120"
+    profiles: ["task-image-builder"]
+    depends_on:
+      control-plane:
+        condition: service_started
+      registry:
         condition: service_started
     volumes:
       - ../tests/fixtures/tasks:/app/tests/fixtures/tasks:ro

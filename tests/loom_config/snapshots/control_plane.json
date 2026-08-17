@@ -254,6 +254,16 @@
     "default": "'minio'",
     "required": false
   },
+  "task_image_builder_lease_seconds": {
+    "annotation": "<class 'float'>",
+    "default": "300.0",
+    "required": false
+  },
+  "task_image_registry_grace_hours": {
+    "annotation": "<class 'int'>",
+    "default": "168",
+    "required": false
+  },
   "trajectories_bucket": {
     "annotation": "<class 'str'>",
     "default": "'trajectories'",
