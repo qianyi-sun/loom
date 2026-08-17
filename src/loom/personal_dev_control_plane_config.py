@@ -12,12 +12,16 @@ import stat
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal
 from urllib.parse import urlsplit
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from loom.db.schema_startup import service_schema_heads
 
 NAMESPACE = "loom-dev"
 PERSONAL_NAMESPACE_PREFIX = "loom-dev-"
@@ -50,6 +54,10 @@ _REGISTRY_PREFIX = re.compile(
     r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::[1-9][0-9]{0,4})?"
     r"(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+"
 )
+_PRINCIPAL_ID = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?")
+_KEY_ID = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?")
+_SCHEMA_HEAD = re.compile(r"[0-9]{4}")
+_CANONICAL_TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 
 
 class _StrictModel(BaseModel):
@@ -442,6 +450,268 @@ class _TrustedReleaseInput(_StrictModel):
         return value
 
 
+def _nonzero_digest(value: str, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or _DIGEST.fullmatch(value) is None
+        or value == "0" * 64
+    ):
+        raise ValueError(f"{label} is invalid")
+    return value
+
+
+def _canonical_uuid(value: str, label: str) -> str:
+    try:
+        parsed = UUID(value)
+    except (AttributeError, TypeError, ValueError):
+        raise ValueError(f"{label} is invalid") from None
+    if parsed.int == 0 or str(parsed) != value:
+        raise ValueError(f"{label} is invalid")
+    return value
+
+
+def _canonical_timestamp(value: str) -> str:
+    if _CANONICAL_TIMESTAMP.fullmatch(value) is None:
+        raise ValueError("acceptance timestamp is invalid")
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    except ValueError:
+        raise ValueError("acceptance timestamp is invalid") from None
+    if parsed.strftime("%Y-%m-%dT%H:%M:%SZ") != value:
+        raise ValueError("acceptance timestamp is invalid")
+    return value
+
+
+class _AcceptanceSourceInput(_StrictModel):
+    commit: str
+    tree: str
+
+    @field_validator("commit", "tree")
+    @classmethod
+    def _source_identity_is_exact(cls, value: str) -> str:
+        if _GIT_IDENTITY.fullmatch(value) is None or value == "0" * 40:
+            raise ValueError("acceptance source identity is invalid")
+        return value
+
+
+class _AcceptanceReleaseInput(_StrictModel):
+    trusted_release_sha256: str
+    release_evidence_sha256: str
+    shadow_manifest_sha256: str
+    images: _ImagesInput
+
+    @field_validator(
+        "trusted_release_sha256",
+        "release_evidence_sha256",
+        "shadow_manifest_sha256",
+    )
+    @classmethod
+    def _release_digest_is_exact(cls, value: str) -> str:
+        return _nonzero_digest(value, "acceptance release digest")
+
+
+class _AcceptanceStorageInput(_StrictModel):
+    schema_head: str
+    backup_restore_evidence_sha256: str
+
+    @field_validator("schema_head")
+    @classmethod
+    def _schema_head_is_exact(cls, value: str) -> str:
+        if _SCHEMA_HEAD.fullmatch(value) is None:
+            raise ValueError("acceptance schema head is invalid")
+        return value
+
+    @field_validator("backup_restore_evidence_sha256")
+    @classmethod
+    def _backup_evidence_is_exact(cls, value: str) -> str:
+        return _nonzero_digest(value, "acceptance backup/restore evidence digest")
+
+
+class _AcceptanceActivationInput(_StrictModel):
+    public_key_sha256: str
+    key_id: str
+
+    @field_validator("public_key_sha256")
+    @classmethod
+    def _public_key_is_exact(cls, value: str) -> str:
+        return _nonzero_digest(value, "acceptance public key digest")
+
+    @field_validator("key_id")
+    @classmethod
+    def _key_id_is_safe(cls, value: str) -> str:
+        if _KEY_ID.fullmatch(value) is None:
+            raise ValueError("acceptance activation key id is invalid")
+        return value
+
+
+class _AcceptanceBuilderInput(_StrictModel):
+    runtime_class_name: str
+    runtime_handler: str
+    runtime_profile_sha256: str
+    trusted_launcher_profile_sha256: str
+    scanner_binary_sha256: str
+    scanner_database_sha256: str
+    scanner_java_database_sha256: str
+    scanner_finding_policy_sha256: str
+    publisher_identity: str
+    registry_prefix: str
+    protocol_map_sha256: str
+
+    @field_validator("runtime_class_name")
+    @classmethod
+    def _runtime_class_is_safe(cls, value: str) -> str:
+        if len(value) > 253 or _DNS_SUBDOMAIN.fullmatch(value) is None:
+            raise ValueError("acceptance RuntimeClass is invalid")
+        return value
+
+    @field_validator("runtime_handler")
+    @classmethod
+    def _runtime_handler_is_safe(cls, value: str) -> str:
+        if _DNS_LABEL.fullmatch(value) is None:
+            raise ValueError("acceptance runtime handler is invalid")
+        return value
+
+    @field_validator(
+        "runtime_profile_sha256",
+        "trusted_launcher_profile_sha256",
+        "scanner_binary_sha256",
+        "scanner_database_sha256",
+        "scanner_java_database_sha256",
+        "scanner_finding_policy_sha256",
+        "protocol_map_sha256",
+    )
+    @classmethod
+    def _builder_digest_is_exact(cls, value: str) -> str:
+        return _nonzero_digest(value, "acceptance builder digest")
+
+    @field_validator("publisher_identity")
+    @classmethod
+    def _publisher_identity_is_safe(cls, value: str) -> str:
+        parts = value.split(":")
+        if (
+            len(parts) != 4
+            or parts[:2] != ["system", "serviceaccount"]
+            or any(_DNS_LABEL.fullmatch(part) is None for part in parts[2:])
+        ):
+            raise ValueError("acceptance publisher identity is invalid")
+        return value
+
+    @field_validator("registry_prefix")
+    @classmethod
+    def _registry_prefix_is_safe(cls, value: str) -> str:
+        return _BuilderInput._registry_prefix_is_bounded(value)
+
+
+class _AcceptanceManagerInput(_StrictModel):
+    authority_incarnation: str
+    configuration_epoch: int = Field(gt=0)
+    execution_state: Literal["shadow", "prepared", "drain-only"]
+    execution_epoch: int = Field(ge=0)
+    executable_new_capacity_ceiling: Literal[0]
+
+    @field_validator("authority_incarnation")
+    @classmethod
+    def _authority_is_exact(cls, value: str) -> str:
+        return _canonical_uuid(value, "manager authority incarnation")
+
+    @model_validator(mode="after")
+    def _manager_state_is_non_executable(self) -> _AcceptanceManagerInput:
+        coherent = (
+            self.execution_epoch == 0
+            if self.execution_state == "shadow"
+            else self.execution_epoch > 0
+        )
+        if not coherent:
+            raise ValueError("acceptance manager checkpoint is incoherent")
+        return self
+
+
+class _AcceptancePrincipalsInput(_StrictModel):
+    lifecycle_principal_id: str
+    reporter_principal_id: str
+
+    @field_validator("lifecycle_principal_id", "reporter_principal_id")
+    @classmethod
+    def _principal_is_safe(cls, value: str) -> str:
+        if _PRINCIPAL_ID.fullmatch(value) is None:
+            raise ValueError("acceptance principal id is invalid")
+        return value
+
+    @model_validator(mode="after")
+    def _principals_are_distinct(self) -> _AcceptancePrincipalsInput:
+        if self.lifecycle_principal_id == self.reporter_principal_id:
+            raise ValueError("acceptance principals must be distinct")
+        return self
+
+
+class _AcceptanceQuotasInput(_StrictModel):
+    global_live_instances: int = Field(ge=1, le=64)
+    per_owner_live_instances: int = Field(ge=1, le=8)
+    per_owner_aggregate_min_slots: int = Field(ge=0, le=16)
+    per_owner_aggregate_max_slots: int = Field(ge=1, le=32)
+    builder_global_concurrency: int = Field(ge=1, le=16)
+    builder_per_owner_concurrency: int = Field(ge=1, le=4)
+    source_max_archive_bytes: int = Field(ge=1, le=1024 * 1024 * 1024)
+    candidate_retained_count: int = Field(ge=1, le=32)
+    candidate_retained_bytes: int = Field(ge=1, le=16 * 1024 * 1024 * 1024)
+
+    @model_validator(mode="after")
+    def _quotas_are_consistent(self) -> _AcceptanceQuotasInput:
+        if (
+            self.per_owner_live_instances > self.global_live_instances
+            or self.per_owner_aggregate_min_slots > self.per_owner_aggregate_max_slots
+            or self.builder_per_owner_concurrency > self.builder_global_concurrency
+        ):
+            raise ValueError("acceptance quotas are inconsistent")
+        return self
+
+
+class _AcceptanceOwnerInput(_StrictModel):
+    team_id: str
+    user_id: str
+
+    @field_validator("team_id", "user_id")
+    @classmethod
+    def _owner_id_is_exact(cls, value: str) -> str:
+        return _canonical_uuid(value, "acceptance owner id")
+
+
+class _AcceptanceWindowInput(_StrictModel):
+    started_at: str
+    expires_at: str
+    rollback_expires_at: str
+
+    @field_validator("started_at", "expires_at", "rollback_expires_at")
+    @classmethod
+    def _timestamp_is_canonical(cls, value: str) -> str:
+        return _canonical_timestamp(value)
+
+
+class _AcceptancePlanInput(_StrictModel):
+    schema_version: Literal[1]
+    source: _AcceptanceSourceInput
+    release: _AcceptanceReleaseInput
+    storage: _AcceptanceStorageInput
+    activation: _AcceptanceActivationInput
+    builder: _AcceptanceBuilderInput
+    manager: _AcceptanceManagerInput
+    principals: _AcceptancePrincipalsInput
+    quotas: _AcceptanceQuotasInput
+    acceptance_owners: list[_AcceptanceOwnerInput] = Field(min_length=2, max_length=2)
+    window: _AcceptanceWindowInput
+
+    @model_validator(mode="after")
+    def _owners_are_distinct(self) -> _AcceptancePlanInput:
+        identities = {
+            identity
+            for owner in self.acceptance_owners
+            for identity in (owner.team_id, owner.user_id)
+        }
+        if len(identities) != 4:
+            raise ValueError("acceptance owners must be distinct")
+        return self
+
+
 @dataclass(frozen=True, slots=True)
 class PoolCapability:
     pool_id: str
@@ -605,8 +875,135 @@ class PersonalDevTrustedRelease:
         return _canonical_json(self.canonical_value())
 
 
+@dataclass(frozen=True, slots=True)
+class PersonalDevAcceptanceSource:
+    commit: str
+    tree: str
+
+
+@dataclass(frozen=True, slots=True)
+class PersonalDevAcceptanceRelease:
+    trusted_release_sha256: str
+    release_evidence_sha256: str
+    shadow_manifest_sha256: str
+    images: PersonalDevTrustedImages
+
+
+@dataclass(frozen=True, slots=True)
+class PersonalDevAcceptanceStorage:
+    schema_head: str
+    backup_restore_evidence_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class PersonalDevAcceptanceActivation:
+    public_key_sha256: str
+    key_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class PersonalDevAcceptanceBuilder:
+    runtime_class_name: str
+    runtime_handler: str
+    runtime_profile_sha256: str
+    trusted_launcher_profile_sha256: str
+    scanner_binary_sha256: str
+    scanner_database_sha256: str
+    scanner_java_database_sha256: str
+    scanner_finding_policy_sha256: str
+    publisher_identity: str
+    registry_prefix: str
+    protocol_map_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class PersonalDevAcceptanceManager:
+    authority_incarnation: UUID
+    configuration_epoch: int
+    execution_state: Literal["shadow", "prepared", "drain-only"]
+    execution_epoch: int
+    executable_new_capacity_ceiling: int
+
+
+@dataclass(frozen=True, slots=True)
+class PersonalDevAcceptancePrincipals:
+    lifecycle_principal_id: str
+    reporter_principal_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class PersonalDevAcceptanceOwner:
+    team_id: UUID
+    user_id: UUID
+
+
+@dataclass(frozen=True, slots=True)
+class PersonalDevAcceptanceWindow:
+    started_at: datetime
+    expires_at: datetime
+    rollback_expires_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class PersonalDevAcceptancePlan:
+    schema_version: int
+    source: PersonalDevAcceptanceSource
+    release: PersonalDevAcceptanceRelease
+    storage: PersonalDevAcceptanceStorage
+    activation: PersonalDevAcceptanceActivation
+    builder: PersonalDevAcceptanceBuilder
+    manager: PersonalDevAcceptanceManager
+    principals: PersonalDevAcceptancePrincipals
+    quotas: PersonalDevControlPlaneLimits
+    acceptance_owners: tuple[PersonalDevAcceptanceOwner, PersonalDevAcceptanceOwner]
+    window: PersonalDevAcceptanceWindow
+
+    def canonical_value(self) -> dict[str, Any]:
+        return {
+            "acceptance_owners": [
+                {"team_id": str(owner.team_id), "user_id": str(owner.user_id)}
+                for owner in self.acceptance_owners
+            ],
+            "activation": _dataclass_value(self.activation),
+            "builder": _dataclass_value(self.builder),
+            "manager": {
+                **_dataclass_value(self.manager),
+                "authority_incarnation": str(self.manager.authority_incarnation),
+            },
+            "principals": _dataclass_value(self.principals),
+            "quotas": _dataclass_value(self.quotas),
+            "release": {
+                "images": _dataclass_value(self.release.images),
+                "release_evidence_sha256": self.release.release_evidence_sha256,
+                "shadow_manifest_sha256": self.release.shadow_manifest_sha256,
+                "trusted_release_sha256": self.release.trusted_release_sha256,
+            },
+            "schema_version": self.schema_version,
+            "source": _dataclass_value(self.source),
+            "storage": _dataclass_value(self.storage),
+            "window": {
+                "expires_at": _format_timestamp(self.window.expires_at),
+                "rollback_expires_at": _format_timestamp(
+                    self.window.rollback_expires_at
+                ),
+                "started_at": _format_timestamp(self.window.started_at),
+            },
+        }
+
+    def canonical_bytes(self) -> bytes:
+        return _canonical_json(self.canonical_value())
+
+    @property
+    def sha256(self) -> str:
+        return hashlib.sha256(self.canonical_bytes()).hexdigest()
+
+
 class PersonalDevTrustedReleaseError(ValueError):
     """The trusted release file is unsafe, unstable, or invalid."""
+
+
+class PersonalDevAcceptancePlanError(ValueError):
+    """The personal-development acceptance plan is unsafe or inconsistent."""
 
 
 def _canonical_json(value: object) -> bytes:
@@ -617,6 +1014,12 @@ def _canonical_json(value: object) -> bytes:
         ensure_ascii=True,
         allow_nan=False,
     ).encode("ascii")
+
+
+def _format_timestamp(value: datetime) -> str:
+    if value.tzinfo is None:
+        raise ValueError("acceptance timestamp is naive")
+    return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _dataclass_value(value: object) -> dict[str, Any]:
@@ -783,6 +1186,7 @@ def _read_trusted_release(path: Path) -> bytes:
             after = os.fstat(descriptor)
         finally:
             os.close(descriptor)
+        after_path = path.lstat()
     except PersonalDevTrustedReleaseError:
         raise
     except OSError:
@@ -803,6 +1207,10 @@ def _read_trusted_release(path: Path) -> bytes:
         len(payload) != before.st_size
         or len(payload) > MAX_TRUSTED_RELEASE_BYTES
         or any(getattr(before, field) != getattr(after, field) for field in stable_fields)
+        or any(
+            getattr(before_path, field) != getattr(after_path, field)
+            for field in stable_fields
+        )
     ):
         raise _invalid_release()
     return payload
@@ -846,12 +1254,195 @@ def load_personal_dev_trusted_release(
     return release
 
 
+def _invalid_acceptance_plan() -> PersonalDevAcceptancePlanError:
+    return PersonalDevAcceptancePlanError("personal-dev acceptance plan is invalid")
+
+
+def _parse_acceptance_timestamp(value: str) -> datetime:
+    _canonical_timestamp(value)
+    return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+
+
+def load_personal_dev_acceptance_plan(
+    path: Path,
+    expected_sha256: str,
+) -> PersonalDevAcceptancePlan:
+    """Load one digest-pinned, owner-only canonical acceptance plan."""
+
+    if (
+        not isinstance(expected_sha256, str)
+        or _DIGEST.fullmatch(expected_sha256) is None
+        or expected_sha256 == "0" * 64
+    ):
+        raise _invalid_acceptance_plan()
+    try:
+        payload = _read_trusted_release(path)
+    except PersonalDevTrustedReleaseError:
+        raise _invalid_acceptance_plan() from None
+    if not hmac.compare_digest(hashlib.sha256(payload).hexdigest(), expected_sha256):
+        raise _invalid_acceptance_plan()
+    try:
+        value = json.loads(
+            payload,
+            object_pairs_hook=_duplicate_rejecting_object,
+            parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()),
+        )
+        if not isinstance(value, dict) or _canonical_json(value) != payload:
+            raise ValueError("acceptance plan JSON is not canonical")
+        parsed = _AcceptancePlanInput.model_validate(value)
+        first_owner, second_owner = parsed.acceptance_owners
+        plan = PersonalDevAcceptancePlan(
+            schema_version=parsed.schema_version,
+            source=PersonalDevAcceptanceSource(**parsed.source.model_dump()),
+            release=PersonalDevAcceptanceRelease(
+                trusted_release_sha256=parsed.release.trusted_release_sha256,
+                release_evidence_sha256=parsed.release.release_evidence_sha256,
+                shadow_manifest_sha256=parsed.release.shadow_manifest_sha256,
+                images=PersonalDevTrustedImages(**parsed.release.images.model_dump()),
+            ),
+            storage=PersonalDevAcceptanceStorage(**parsed.storage.model_dump()),
+            activation=PersonalDevAcceptanceActivation(**parsed.activation.model_dump()),
+            builder=PersonalDevAcceptanceBuilder(**parsed.builder.model_dump()),
+            manager=PersonalDevAcceptanceManager(
+                authority_incarnation=UUID(parsed.manager.authority_incarnation),
+                configuration_epoch=parsed.manager.configuration_epoch,
+                execution_state=parsed.manager.execution_state,
+                execution_epoch=parsed.manager.execution_epoch,
+                executable_new_capacity_ceiling=(
+                    parsed.manager.executable_new_capacity_ceiling
+                ),
+            ),
+            principals=PersonalDevAcceptancePrincipals(**parsed.principals.model_dump()),
+            quotas=PersonalDevControlPlaneLimits(**parsed.quotas.model_dump()),
+            acceptance_owners=(
+                PersonalDevAcceptanceOwner(
+                    team_id=UUID(first_owner.team_id),
+                    user_id=UUID(first_owner.user_id),
+                ),
+                PersonalDevAcceptanceOwner(
+                    team_id=UUID(second_owner.team_id),
+                    user_id=UUID(second_owner.user_id),
+                ),
+            ),
+            window=PersonalDevAcceptanceWindow(
+                started_at=_parse_acceptance_timestamp(parsed.window.started_at),
+                expires_at=_parse_acceptance_timestamp(parsed.window.expires_at),
+                rollback_expires_at=_parse_acceptance_timestamp(
+                    parsed.window.rollback_expires_at
+                ),
+            ),
+        )
+    except (RecursionError, UnicodeError, ValueError):
+        raise _invalid_acceptance_plan() from None
+    if plan.canonical_bytes() != payload:
+        raise _invalid_acceptance_plan()
+    return plan
+
+
+def validate_personal_dev_acceptance_plan(
+    profile: PersonalDevControlPlaneProfile,
+    release: PersonalDevTrustedRelease,
+    shadow_yaml_sha256: str,
+    plan: PersonalDevAcceptancePlan,
+    *,
+    now: datetime,
+) -> None:
+    """Fail closed unless one plan exactly binds the release and inert profile."""
+
+    try:
+        if not isinstance(profile, PersonalDevControlPlaneProfile) or not isinstance(
+            release, PersonalDevTrustedRelease
+        ):
+            raise ValueError
+        if not isinstance(plan, PersonalDevAcceptancePlan):
+            raise ValueError
+        if (
+            profile.namespace != NAMESPACE
+            or profile.personal_namespace_prefix != PERSONAL_NAMESPACE_PREFIX
+            or type(profile.min_slots_default) is not int
+            or profile.min_slots_default != 0
+            or type(profile.max_slots_limit) is not int
+            or not 0 <= profile.max_slots_limit <= 8
+            or type(profile.executable_new_capacity_ceiling) is not int
+            or profile.executable_new_capacity_ceiling != 0
+            or profile.dev_instances_enabled is not False
+            or profile.personal_dev_builder_enabled is not False
+            or type(profile.activation_agent_replicas) is not int
+            or profile.activation_agent_replicas != 0
+            or len(profile.pools) != len(REQUIRED_POOLS)
+            or {item.pool_id: item.architecture for item in profile.pools}
+            != REQUIRED_POOLS
+        ):
+            raise ValueError
+        shadow_yaml_sha256 = _nonzero_digest(
+            shadow_yaml_sha256, "shadow manifest digest"
+        )
+        if (
+            plan.source.commit != release.source_sha
+            or plan.source.tree != release.source_tree
+            or plan.release.trusted_release_sha256
+            != hashlib.sha256(release.canonical_bytes()).hexdigest()
+            or plan.release.release_evidence_sha256
+            != release.release_evidence_sha256
+            or plan.release.shadow_manifest_sha256 != shadow_yaml_sha256
+            or plan.release.images != release.images
+        ):
+            raise ValueError
+        heads = service_schema_heads()
+        if len(heads) != 1 or plan.storage.schema_head not in heads:
+            raise ValueError
+        if (
+            plan.builder.runtime_class_name != profile.builder.runtime_class_name
+            or plan.builder.publisher_identity != profile.builder.publisher_identity
+            or plan.builder.registry_prefix != profile.builder.registry_prefix
+            or plan.builder.protocol_map_sha256
+            != hashlib.sha256(
+                _canonical_json(dict(profile.protocol_versions))
+            ).hexdigest()
+        ):
+            raise ValueError
+        if plan.quotas != profile.limits:
+            raise ValueError
+        if (
+            plan.manager.executable_new_capacity_ceiling
+            != profile.executable_new_capacity_ceiling
+        ):
+            raise ValueError
+        if (
+            not isinstance(now, datetime)
+            or now.tzinfo is None
+            or now.utcoffset() is None
+        ):
+            raise ValueError
+        observed_at = now.astimezone(UTC)
+        if not (
+            plan.window.started_at
+            <= observed_at
+            < plan.window.expires_at
+            <= plan.window.rollback_expires_at
+        ):
+            raise ValueError
+    except (OSError, RuntimeError, ValueError):
+        raise _invalid_acceptance_plan() from None
+
+
 __all__ = [
     "MAX_TRUSTED_RELEASE_BYTES",
     "NAMESPACE",
     "PERSONAL_NAMESPACE_PREFIX",
     "REQUIRED_IMAGE_KEYS",
     "REQUIRED_POOLS",
+    "PersonalDevAcceptanceActivation",
+    "PersonalDevAcceptanceBuilder",
+    "PersonalDevAcceptanceManager",
+    "PersonalDevAcceptanceOwner",
+    "PersonalDevAcceptancePlan",
+    "PersonalDevAcceptancePlanError",
+    "PersonalDevAcceptancePrincipals",
+    "PersonalDevAcceptanceRelease",
+    "PersonalDevAcceptanceSource",
+    "PersonalDevAcceptanceStorage",
+    "PersonalDevAcceptanceWindow",
     "PersonalDevBuilderTrust",
     "PersonalDevControlPlaneIdentities",
     "PersonalDevControlPlaneLimits",
@@ -864,6 +1455,8 @@ __all__ = [
     "PersonalDevTrustedReleaseError",
     "PoolCapability",
     "ResourceEnvelope",
+    "load_personal_dev_acceptance_plan",
     "load_personal_dev_control_plane_profile",
     "load_personal_dev_trusted_release",
+    "validate_personal_dev_acceptance_plan",
 ]

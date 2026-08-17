@@ -214,6 +214,7 @@ pytest, Ruff, mypy.
 **Files:**
 
 - Modify: `src/loom/personal_dev_control_plane_config.py`
+- Modify: `src/loom/db/schema_startup.py`
 - Create: `tests/unit/test_personal_dev_control_plane_acceptance_config.py`
 
 **Interfaces:**
@@ -225,7 +226,7 @@ pytest, Ruff, mypy.
 - `PersonalDevAcceptancePlan.canonical_bytes()` is the exact render/runtime
   binding.
 
-- [ ] **Step 1: Write failing plan-loader and cross-input tests**
+- [x] **Step 1: Write failing plan-loader and cross-input tests**
 
   Use one canonical fixture with exact nested objects `source`, `release`,
   `storage`, `activation`, `builder`, `manager`, `principals`, `quotas`,
@@ -249,7 +250,7 @@ pytest, Ruff, mypy.
   owners, invalid quotas, expired/not-yet-open windows, expiry beyond the
   rollback window, and zero digests.
 
-- [ ] **Step 2: Run tests and confirm the loader is absent**
+- [x] **Step 2: Run tests and confirm the loader is absent**
 
   Run:
 
@@ -260,7 +261,7 @@ pytest, Ruff, mypy.
 
   Expected: collection fails on the missing acceptance interfaces.
 
-- [ ] **Step 3: Implement frozen strict plan types and consistency validation**
+- [x] **Step 3: Implement frozen strict plan types and consistency validation**
 
   Reuse the trusted-release descriptor-pinned reader and canonical JSON helper.
   Parse timestamps only in canonical UTC `YYYY-MM-DDTHH:MM:SSZ` form. Permit
@@ -283,7 +284,7 @@ pytest, Ruff, mypy.
   JSON, require exact builder publisher/registry/RuntimeClass, and require
   `window.started_at <= now < window.expires_at <= window.rollback_expires_at`.
 
-- [ ] **Step 4: Verify and commit the acceptance plan contract**
+- [x] **Step 4: Verify and commit the acceptance plan contract**
 
   Run:
 
