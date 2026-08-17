@@ -1350,6 +1350,7 @@ export const api = {
     apiFetch<{
       items: {
         name: string;
+        aliases?: string[];
         needs_model: boolean;
         kind: "builtin" | "adapter";
         description: string;
@@ -1357,6 +1358,8 @@ export const api = {
         supported_providers: string[];
         /** PR-A: subset of ["api","local-server","hf"]. Empty when needs_model=false. */
         supported_model_sources: string[];
+        requires_capabilities?: string[];
+        provides_capabilities?: string[];
         service_mode_ready?: boolean;
         readiness_status?: "ready" | "unavailable";
         readiness_message?: string | null;

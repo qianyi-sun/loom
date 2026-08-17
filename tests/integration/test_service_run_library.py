@@ -14,7 +14,7 @@ import boto3
 import httpx
 import pytest
 from botocore.config import Config
-from sqlalchemy import create_engine, delete, event, insert, select, update
+from sqlalchemy import create_engine, delete, event, func, insert, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from testcontainers.minio import MinioContainer
@@ -2165,6 +2165,55 @@ async def test_clone_config_uses_destination_provider_and_records_provenance(
         assert row.required_worker_pools == []
         assert row.expected_trial_count == 1
     sync_engine.dispose()
+
+
+async def test_clone_config_rejects_task_that_became_agent_incompatible(
+    run_library_setup: dict[str, object],
+) -> None:
+    app = run_library_setup["app"]
+    raw_b = run_library_setup["raw_b"]
+    batch_shared = run_library_setup["batch_shared"]
+    conn_b = run_library_setup["conn_b"]
+    task_id = str(run_library_setup["task_id"])
+    postgres_url = str(run_library_setup["postgres_url"])
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as connection:
+        task_config = connection.execute(
+            select(Task.config).where(Task.id == task_id),
+        ).scalar_one()
+        connection.execute(
+            update(Task)
+            .where(Task.id == task_id)
+            .values(
+                config={
+                    **task_config,
+                    "required_agent_capabilities": ["workspace_exec"],
+                },
+            ),
+        )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        response = await ac.post(
+            f"/api/v1/run-library/batches/{batch_shared}/clone-config",
+            json={
+                "name": "must reject incompatible clone",
+                "provider_connection_id": str(conn_b),
+            },
+            headers={"Authorization": f"Bearer {raw_b}"},
+        )
+
+    assert response.status_code == 400, response.text
+    assert "workspace_exec" in response.json()["detail"]
+    with sync_engine.begin() as connection:
+        clone_count = connection.execute(
+            select(func.count())
+            .select_from(Batch)
+            .where(Batch.name == "must reject incompatible clone"),
+        ).scalar_one()
+    sync_engine.dispose()
+    assert clone_count == 0
 
 
 async def test_clone_and_reuse_reject_historical_benchmark_tasks(

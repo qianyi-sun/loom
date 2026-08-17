@@ -591,12 +591,18 @@ def _fetch_catalogs(
         if a.get("service_mode_ready") is True
     ]
     if agent_filter:
-        agents = [a for a in agents if a["name"] in agent_filter]
-        missing = agent_filter - {a["name"] for a in agents}
+        by_name = {
+            name: agent
+            for agent in agents
+            for name in (agent["name"], *(agent.get("aliases") or []))
+        }
+        missing = agent_filter - set(by_name)
         if missing:
             raise SystemExit(
                 f"--agent: unknown / not ready: {sorted(missing)}",
             )
+        canonical_names = {by_name[name]["name"] for name in agent_filter}
+        agents = [agent for agent in agents if agent["name"] in canonical_names]
 
     benchmarks_body = assert_2xx(
         c.get("/api/v1/benchmarks"), action="GET /benchmarks",

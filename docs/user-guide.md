@@ -274,7 +274,7 @@ Submit, monitor, inspect usage, and download through public `/api/v1` routes:
 ```bash
 loom eval batch create \
   --name-suffix public-cli-smoke \
-  --agent litellm \
+  --agent direct-completion \
   --provider smoke-openai \
   --model gpt-4o-mini \
   --benchmark humaneval \
@@ -546,7 +546,7 @@ target team:
 loom eval batch create \
   --team-id <target-team-id> \
   --name-suffix admin-provider-smoke \
-  --agent litellm \
+  --agent direct-completion \
   --provider smoke-openai \
   --model gpt-4o-mini \
   --benchmark humaneval \
@@ -746,7 +746,7 @@ loom config set token.anthropic sk-ant-...
 loom run --model anthropic/claude-opus-4-7 ...
 ```
 
-For service-mode `litellm` trials and Codex subprocess trials, API
+For service-mode `direct-completion` trials and Codex subprocess trials, API
 clients can include `trial_config.request_params` to pin non-sensitive
 generation controls such as `temperature`, `top_p`, `seed`, max output
 limits, reasoning effort, tool-choice mode, and provider decoding extras.
@@ -888,7 +888,7 @@ typing the URL:
    ```bash
    loom run \
      --task humaneval/HumanEval/0 \
-     --agent litellm \
+     --agent direct-completion \
      --model local/vllm/meta-llama/Llama-3.1-8B-Instruct \
      --backend docker
    ```
@@ -1388,8 +1388,8 @@ For model-backed agents, include a provider connection and model:
 
 ```bash
 loom eval batch create \
-  --name-suffix litellm-smoke \
-  --agent litellm \
+  --name-suffix direct-completion-smoke \
+  --agent direct-completion \
   --provider smoke-openai \
   --model gpt-4o-mini \
   --benchmark team-evals \
@@ -1522,7 +1522,7 @@ loom run
   --task SLUG/INSTANCE    # run one task; instance-id may contain '/'
                           # (e.g. humaneval/HumanEval/0, swe-bench-verified/django__django-12345)
   --split SPLIT           # default "test"
-  --agent NAME            # oracle | litellm | <launcher adapter>
+  --agent NAME            # oracle | direct-completion | <launcher adapter>
   --model PROVIDER/NAME   # e.g. anthropic/claude-opus-4-7
   --backend BACKEND       # docker | fake | daytona | modal
   --concurrency N         # parallel trials (default 1)
@@ -1537,7 +1537,9 @@ loom run
 `--agent`:
 - `oracle` — runs `solution/solve.sh` from the task bundle (reference
   baseline, no model call)
-- `litellm` — talks to the configured model via LiteLLM dialect routing
+- `direct-completion` — sends the prompt directly through the Gateway and can
+  project response text to exact artifact paths; it does not execute workspace
+  tools. `litellm` remains a deprecated compatibility alias.
 - `terminus-2` — Harbor Terminus2 embedded in the worker image; tool-use
   terminal loop with typed `terminus2_*` trajectory events and Harbor artifacts
   under `.loom/agent/`. Requires a provider + model; does not use

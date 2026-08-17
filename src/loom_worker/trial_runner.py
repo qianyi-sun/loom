@@ -56,7 +56,7 @@ OutputProjectionCallback = Callable[[dict[str, object], dict[str, object]], Awai
 # Factory signature: (task_dir, gateway, model, agent_name) → AgentRuntime.
 # agent_name is read from task_config.agent.name; the factory routes:
 #   "oracle"             → OracleAgent
-#   "litellm" (or model) → LiteLLMAgent
+#   "direct-completion"  → LiteLLMAgent (legacy alias: "litellm")
 #   <launcher adapter>   → SubprocessAgent wrapping the adapter
 AgentFactory = Callable[
     [Path, LLMGatewayClient, "ModelSpec | None", str],
@@ -248,7 +248,7 @@ class LocalTrialRunner:
             self.trial_config.agent_model,
             self.trial_config.agent_name,
         )
-        # #184: if the agent opts in (LiteLLMAgent), surface the task's
+        # #184: if the direct-completion runtime opts in, surface the task's
         # declared artifact paths so it can write the LLM's final
         # response somewhere the verifier can grade. Duck-typed so
         # Protocol-respecting agents that write their own artifacts

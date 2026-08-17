@@ -165,6 +165,12 @@ trial evidence with an actionable, retryable artifact diagnostic instead of
 being silently folded into a reward-0 score failure. Patterns are relative to
 `environment.workdir`.
 
+Adapters for tasks that require the agent to inspect the workspace, execute
+commands, or produce files through task tooling must emit the top-level
+`required_agent_capabilities = ["workspace_exec"]` contract. This requirement
+is independent of artifact extensions and prevents response-only agents from
+being selected for structurally incompatible tasks.
+
 Adapters that generate `verifier/run.sh` must also declare
 `[verifier.args].script_path`. Writing the script into the bundle is not enough:
 `ScriptVerifier` is constructed from task config and will fail before running

@@ -115,7 +115,7 @@ endpoint taxonomy, output schema, and provenance fields are fixed in the CLI;
 it does not discover arbitrary provider endpoint types or establish general
 provider support. It covers every repository-known default displayed
 `service_mode_ready=true` agent, including
-builtins and launcher adapters such as `litellm`, `opencode`, `aider`, Codex,
+built-ins and launcher adapters such as `direct-completion`, `opencode`, `aider`, Codex,
 Claude Code, and Gemini CLI. The JSON schema records each agent harness x
 provider endpoint cell as `supported`, `skipped`, or `blocked`, with protocol
 surface (`chat`, `responses`, `messages`, or `gemini`), streaming, tool-use,

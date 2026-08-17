@@ -15,7 +15,7 @@ import httpx
 import pytest
 from botocore.config import Config
 from fastapi import FastAPI
-from sqlalchemy import create_engine, delete, insert, select, text
+from sqlalchemy import create_engine, delete, func, insert, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -77,6 +77,12 @@ def _script_verifier_task_config(task_id: str) -> dict[str, object]:
         },
         "steps": [{"name": "main"}],
     }
+
+
+def _workspace_task_config(task_id: str) -> dict[str, object]:
+    config = _script_verifier_task_config(task_id)
+    config["required_agent_capabilities"] = ["workspace_exec"]
+    return config
 
 
 def _counter_value(
@@ -598,8 +604,105 @@ async def test_post_batch_rejects_cross_team_explicit_task_set_task_id(
             },
         )
 
-    assert r.status_code == 400, r.text
-    assert "zero tasks" in r.json()["detail"]
+    assert r.status_code == 404, r.text
+    assert r.json()["detail"] == "task not found"
+
+
+async def test_post_batch_rejects_mixed_visible_and_cross_team_explicit_task_ids_atomically(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, _raw_a, team_a = camp_setup
+    team_b = uuid4()
+    user_b = uuid4()
+    raw_b = f"loom_team_{uuid4().hex}"
+    task_set_id = f"ts/{team_a}/mixed-explicit-private-taskset"
+    private_task_id = f"{task_set_id}/tasks/row-1"
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(insert(Team).values(id=team_b, name=f"t-{team_b}"))
+        conn.execute(
+            insert(User).values(
+                id=user_b,
+                username=f"BatchMixedExplicitOther-{team_b.hex[:8]}",
+                username_normalized=f"batchmixedexplicitother-{team_b.hex[:8]}",
+                status="active",
+                is_platform_admin=False,
+            ),
+        )
+        conn.execute(
+            insert(Token).values(
+                token_hash=hashlib.sha256(raw_b.encode()).digest(),
+                type="team",
+                scopes=["submit", "read:own"],
+                team_id=team_b,
+                created_by_user_id=user_b,
+                issued_at=datetime.now(UTC),
+            ),
+        )
+        conn.execute(
+            insert(TeamMembership).values(
+                team_id=team_b,
+                user_id=user_b,
+                role="owner",
+            ),
+        )
+        conn.execute(
+            insert(TaskSet).values(
+                id=task_set_id,
+                owning_team_id=team_a,
+                slug="mixed-explicit-private-taskset",
+                display_name="Mixed Explicit Private TaskSet",
+                status="ready",
+                intents=["trajectory_generation"],
+                evaluation_ready=False,
+                task_count=1,
+                manifest_blob_uri=(
+                    f"s3://bucket/tasksets/user/{team_a}/mixed-explicit-private-taskset/"
+                    "manifest.yaml"
+                ),
+            ),
+        )
+        conn.execute(
+            insert(Task).values(
+                id=private_task_id,
+                checksum="x" * 64,
+                config=_valid_task_config(private_task_id),
+                source=(
+                    f"s3://bucket/tasksets/user/{team_a}/mixed-explicit-private-taskset/"
+                    "tasks/row-1/"
+                ),
+                task_set_id=task_set_id,
+                benchmark_id=None,
+            ),
+        )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw_b}"},
+            json={
+                "name": "Mixed visible and private explicit tasks",
+                "task_filter": {
+                    "task_ids": ["local/mit-0", private_task_id],
+                    "subset_kind": "explicit",
+                },
+                "trial_config": {"agent": {"name": "oracle"}},
+            },
+        )
+
+    with sync_engine.connect() as conn:
+        batch_count = conn.execute(select(func.count(Batch.id))).scalar_one()
+    sync_engine.dispose()
+
+    assert r.status_code == 404, r.text
+    assert r.json()["detail"] == "task not found"
+    assert batch_count == 0
 
 
 async def test_admin_submit_on_behalf_records_represented_user_owner_access_and_audit(
@@ -3864,6 +3967,241 @@ async def test_rerun_failed_batch_creates_linked_exact_targets(
     ]
 
 
+async def test_rerun_failed_validates_only_failed_agent_task_coordinates(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id = camp_setup
+    batch_id = uuid4()
+    failed_trial_id = uuid4()
+    combinations = [
+        {
+            "agent_name": "terminus-2",
+            "agent_model": {"provider": "openai", "name": "qwen"},
+            "n_per_task": 1,
+        },
+        {
+            "agent_name": "direct-completion",
+            "agent_model": {"provider": "openai", "name": "qwen"},
+            "n_per_task": 1,
+        },
+    ]
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            Task.__table__.update()
+            .where(Task.id == "local/mit-0")
+            .values(config=_workspace_task_config("local/mit-0")),
+        )
+        conn.execute(
+            insert(Batch).values(
+                id=batch_id,
+                team_id=team_id,
+                name="coordinate-specific-admission",
+                task_filter={"task_ids": ["local/mit-0"], "subset_kind": "explicit"},
+                trial_config={},
+                state="finished",
+                created_by_token_prefix="abcdef12",
+                expected_trial_count=2,
+                combinations=combinations,
+                result_status="partial_failed",
+                finished_at=datetime.now(UTC),
+            ),
+        )
+        conn.execute(
+            insert(Trial),
+            [
+                {
+                    "id": failed_trial_id,
+                    "task_id": "local/mit-0",
+                    "team_id": team_id,
+                    "state": "failed",
+                    "failure_reason": "gateway_error",
+                    "failure_message": "gateway 503",
+                    "config": {},
+                    "requires_caps": {},
+                    "submitted_at": datetime.now(UTC),
+                    "batch_id": batch_id,
+                    "sample_idx": 0,
+                    "combination_idx": 0,
+                    "result": None,
+                },
+                {
+                    "id": uuid4(),
+                    "task_id": "local/mit-0",
+                    "team_id": team_id,
+                    "state": "succeeded",
+                    "failure_reason": None,
+                    "failure_message": None,
+                    "config": {},
+                    "requires_caps": {},
+                    "submitted_at": datetime.now(UTC),
+                    "batch_id": batch_id,
+                    "sample_idx": 0,
+                    "combination_idx": 1,
+                    "result": {"aggregate_reward": 1.0},
+                },
+            ],
+        )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        response = await ac.post(
+            f"/api/v1/batches/{batch_id}/rerun-failed",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    rerun_batch_id = UUID(body["batch_id"])
+    assert body["rerun_target_count"] == 1
+
+    with sync_engine.connect() as conn:
+        rerun_targets = conn.execute(
+            select(Batch.rerun_targets).where(Batch.id == rerun_batch_id),
+        ).scalar_one()
+    sync_engine.dispose()
+
+    assert rerun_targets == [
+        {
+            "task_id": "local/mit-0",
+            "sample_idx": 0,
+            "combination_idx": 0,
+            "original_trial_id": str(failed_trial_id),
+            "failure_reason": "gateway_error",
+        }
+    ]
+
+
+async def test_rerun_failed_rejects_invalid_stored_combination_index(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id = camp_setup
+    batch_id = uuid4()
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            insert(Batch).values(
+                id=batch_id,
+                team_id=team_id,
+                name="invalid-rerun-combination-index",
+                task_filter={"task_ids": ["local/mit-0"], "subset_kind": "explicit"},
+                trial_config={},
+                state="finished",
+                created_by_token_prefix="abcdef12",
+                expected_trial_count=1,
+                combinations=[
+                    {
+                        "agent_name": "direct-completion",
+                        "agent_model": {"provider": "openai", "name": "qwen"},
+                        "n_per_task": 1,
+                    }
+                ],
+                result_status="all_failed",
+                finished_at=datetime.now(UTC),
+            ),
+        )
+        conn.execute(
+            insert(Trial).values(
+                id=uuid4(),
+                task_id="local/mit-0",
+                team_id=team_id,
+                state="failed",
+                failure_reason="gateway_error",
+                failure_message="gateway 503",
+                config={},
+                requires_caps={},
+                submitted_at=datetime.now(UTC),
+                batch_id=batch_id,
+                sample_idx=0,
+                combination_idx=1,
+                result=None,
+            ),
+        )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        response = await ac.post(
+            f"/api/v1/batches/{batch_id}/rerun-failed",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    with sync_engine.connect() as conn:
+        batch_count = conn.execute(select(func.count(Batch.id))).scalar_one()
+    sync_engine.dispose()
+
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"] == "rerun target combination_idx 1 is invalid"
+    assert batch_count == 1
+
+
+async def test_rerun_failed_rejects_task_that_became_agent_incompatible(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, team_id = camp_setup
+    batch_id = uuid4()
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            Task.__table__.update()
+            .where(Task.id == "local/mit-0")
+            .values(config=_workspace_task_config("local/mit-0")),
+        )
+        conn.execute(
+            insert(Batch).values(
+                id=batch_id,
+                team_id=team_id,
+                name="now-incompatible",
+                task_filter={"task_ids": ["local/mit-0"], "subset_kind": "explicit"},
+                trial_config={
+                    "agent_name": "direct-completion",
+                    "agent_model": {"provider": "openai", "name": "qwen"},
+                },
+                state="finished",
+                created_by_token_prefix="abcdef12",
+                expected_trial_count=1,
+                n_per_task=1,
+                result_status="all_failed",
+                finished_at=datetime.now(UTC),
+            ),
+        )
+        conn.execute(
+            insert(Trial).values(
+                id=uuid4(),
+                task_id="local/mit-0",
+                team_id=team_id,
+                state="failed",
+                failure_reason="gateway_error",
+                failure_message="gateway 503",
+                config={},
+                requires_caps={},
+                submitted_at=datetime.now(UTC),
+                batch_id=batch_id,
+                sample_idx=0,
+                combination_idx=0,
+                result=None,
+            ),
+        )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        response = await ac.post(
+            f"/api/v1/batches/{batch_id}/rerun-failed",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert response.status_code == 400, response.text
+    assert "workspace_exec" in response.json()["detail"]
+    with sync_engine.begin() as conn:
+        batch_count = conn.execute(select(func.count()).select_from(Batch)).scalar_one()
+    sync_engine.dispose()
+    assert batch_count == 1
+
+
 async def test_rerun_failed_rejects_historical_benchmark_task(
     camp_setup: tuple[FastAPI, str, UUID],
     postgres_url: str,
@@ -4835,3 +5173,99 @@ async def test_post_batch_does_not_filter_when_agent_has_no_requirements(
             },
         )
     assert r.status_code == 201, r.text
+
+
+@pytest.mark.parametrize("agent_name", ["direct-completion", "litellm"])
+async def test_post_batch_rejects_completion_agent_for_workspace_task(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+    agent_name: str,
+) -> None:
+    app, raw, _team_id = camp_setup
+    task_id = f"local/workspace-{agent_name}"
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            insert(Task).values(
+                id=task_id,
+                checksum="w" * 64,
+                config=_workspace_task_config(task_id),
+                source="local",
+                license="MIT",
+            ),
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        response = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "completion-on-workspace",
+                "task_filter": {
+                    "task_ids": [task_id],
+                    "subset_kind": "explicit",
+                },
+                "trial_config": {
+                    "agent_name": agent_name,
+                    "agent_model": {
+                        "provider": "openai",
+                        "name": "gpt-4o-mini",
+                    },
+                },
+            },
+        )
+
+    assert response.status_code == 400, response.text
+    detail = response.json()["detail"]
+    assert "agent×task capability mismatch" in detail
+    assert task_id in detail
+    assert "workspace_exec" in detail
+
+
+async def test_post_batch_allows_workspace_agent_for_workspace_task(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    app, raw, _team_id = camp_setup
+    task_id = "local/workspace-terminus"
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            insert(Task).values(
+                id=task_id,
+                checksum="z" * 64,
+                config=_workspace_task_config(task_id),
+                source="local",
+                license="MIT",
+            ),
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        response = await ac.post(
+            "/api/v1/batches",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "name": "terminus-on-workspace",
+                "task_filter": {
+                    "task_ids": [task_id],
+                    "subset_kind": "explicit",
+                },
+                "trial_config": {
+                    "agent_name": "terminus-2",
+                    "agent_model": {
+                        "provider": "openai",
+                        "name": "gpt-4o-mini",
+                    },
+                },
+            },
+        )
+
+    assert response.status_code == 201, response.text

@@ -45,6 +45,7 @@ def test_multimodal_uses_multimodal_task_id(tmp_path: Path) -> None:
         tomllib.loads((tmp_path / "task.toml").read_text()),
     )
     assert cfg.task.id == "swe-bench-multimodal/vega__vega-lite-9001"
+    assert cfg.required_agent_capabilities == frozenset({"workspace_exec"})
 
 
 def test_multimodal_no_images_falls_back_to_plain(tmp_path: Path) -> None:

@@ -202,7 +202,8 @@ async def test_agents_includes_builtins_and_adapters(
     assert r.status_code == 200
     names = {a["name"] for a in r.json()["items"]}
     # Builtins.
-    assert {"oracle", "litellm"}.issubset(names)
+    assert {"oracle", "direct-completion"}.issubset(names)
+    assert "litellm" not in names
     # A representative adapter from loom-launcher.
     assert "claude-code" in names
     # Internal launcher canaries are not part of the user-facing API catalog.
@@ -214,7 +215,8 @@ async def test_agents_includes_builtins_and_adapters(
     by_name = {a["name"]: a for a in r.json()["items"]}
     assert all(a["catalog_visibility"] == "displayed" for a in by_name.values())
     assert by_name["oracle"]["needs_model"] is False
-    assert by_name["litellm"]["needs_model"] is True
+    assert by_name["direct-completion"]["needs_model"] is True
+    assert by_name["direct-completion"]["aliases"] == ["litellm"]
     assert by_name["claude-code"]["needs_model"] is True
     assert by_name["oracle"]["kind"] == "builtin"
     assert by_name["claude-code"]["kind"] == "adapter"
@@ -238,8 +240,8 @@ async def test_agents_includes_builtins_and_adapters(
     # filter the model picker by agent.
     assert by_name["oracle"]["supported_providers"] == []
     assert by_name["oracle"]["supported_model_sources"] == []
-    assert by_name["litellm"]["supported_providers"] == ["*"]
-    assert set(by_name["litellm"]["supported_model_sources"]) == {
+    assert by_name["direct-completion"]["supported_providers"] == ["*"]
+    assert set(by_name["direct-completion"]["supported_model_sources"]) == {
         "api",
         "local-server",
         "hf",

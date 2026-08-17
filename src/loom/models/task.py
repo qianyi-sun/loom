@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import PurePosixPath
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 
 from loom.models.healthcheck import HealthcheckSpec
 from loom.models.mcp import MCPConnection
@@ -154,12 +154,20 @@ class MultiStepConfig(BaseModel):
 class TaskConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     schema_version: Literal["1"] = "1"
+    required_agent_capabilities: frozenset[str] = frozenset()
     task: TaskMetadata
     environment: EnvironmentConfig
     agent: AgentDefaults
     verifier: VerifierDefaults
     steps: list[StepConfig] = []
     multi_step: MultiStepConfig | None = None
+
+    @field_serializer("required_agent_capabilities", when_used="json")
+    def _serialize_required_agent_capabilities(
+        self,
+        value: frozenset[str],
+    ) -> list[str]:
+        return sorted(value)
 
 
 def normalize_steps(cfg: TaskConfig) -> TaskConfig:

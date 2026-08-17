@@ -35,9 +35,14 @@ from loom_benchmark_tool.db_url import normalize_db_url
 from loom_service.agent_catalog import AgentEntry, list_agents
 
 POSTGRES_CATALOG_UPSERT_BATCH_SIZE = 1000
-AGENT_CATALOG_VERSION = "service-catalog-v1"
-AGENT_CATALOG_SPEC_SCHEMA_VERSION = 1
+AGENT_CATALOG_VERSION = "service-catalog-v2"
+AGENT_CATALOG_SPEC_SCHEMA_VERSION = 2
 TB21_PROFILE_ID = "terminal-bench-2@tb2.1-r6"
+_WORKSPACE_EXEC_BENCHMARK_STEMS = (
+    "skillflow",
+    "skilllearnbench",
+    "swe-bench",
+)
 T = TypeVar("T")
 
 
@@ -628,6 +633,7 @@ async def provision_ready_benchmark_catalog(
 
 
 def _ready_catalog_rows(rows: CatalogRows, *, target_bucket: str) -> CatalogRows:
+    _require_republished_workspace_contracts(rows.tasks)
     tasks_by_benchmark: dict[str, list[TaskRow]] = defaultdict(list)
     for task in rows.tasks:
         if task.benchmark_id:
@@ -672,6 +678,36 @@ def _ready_catalog_rows(rows: CatalogRows, *, target_bucket: str) -> CatalogRows
         )
 
     return CatalogRows(benchmarks=ready_benchmarks, tasks=ready_tasks)
+
+
+def _requires_workspace_exec(benchmark_id: str | None) -> bool:
+    if benchmark_id is None:
+        return False
+    return any(
+        benchmark_id == stem
+        or benchmark_id.startswith(f"{stem}-")
+        or benchmark_id.startswith(f"{stem}@")
+        for stem in _WORKSPACE_EXEC_BENCHMARK_STEMS
+    )
+
+
+def _require_republished_workspace_contracts(tasks: Iterable[TaskRow]) -> None:
+    stale: list[str] = []
+    for task in tasks:
+        if not _requires_workspace_exec(task.benchmark_id):
+            continue
+        try:
+            config = TaskConfig.model_validate(task.config)
+        except ValidationError:
+            continue
+        if "workspace_exec" not in config.required_agent_capabilities:
+            stale.append(task.id)
+    if stale:
+        raise ValueError(
+            "republish workspace benchmark tasks with "
+            "required_agent_capabilities=[\"workspace_exec\"] before "
+            f"catalog provisioning; stale task examples: {sorted(stale)[:5]}",
+        )
 
 
 def agent_rows_from_service_catalog(

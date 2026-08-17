@@ -32,7 +32,7 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import cast, false, or_, select
+from sqlalchemy import cast, false, or_
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -42,7 +42,7 @@ from loom.benchmark_profiles import (
 )
 from loom.benchmark_readiness import CURRENTLY_UNSUPPORTED_BENCHMARK_IDS
 from loom.db.schema import Task, TaskSet
-from loom.db.task_set_visibility import visible_task_sets
+from loom.db.task_set_visibility import visible_task_sets, visible_tasks
 
 # Recognized task_filter keys. Anything else is rejected so a typo
 # (`liscense` instead of `license`) doesn't silently match nothing.
@@ -163,8 +163,8 @@ async def resolve_task_filter_with_diagnostics(
     - `"random_n"`: N randomly-chosen task ids. Requires `seed` so
       the same call reproduces the same selection (Python's seeded
       `random.sample` on the materialized candidate list).
-    - `"explicit"`: returns `task_ids` verbatim (after the existence
-      check below).
+    - `"explicit"`: returns the requested task ids only when every id
+      resolves to a visible candidate.
     """
     unknown = set(task_filter.keys()) - FILTER_KEYS
     if unknown:
@@ -193,17 +193,13 @@ async def resolve_task_filter_with_diagnostics(
     # is a dict like `{"verified": ["true"]}` applied as a JSONB
     # containment predicate per key — `AND` across keys, `OR` within
     # each key's value list.
-    stmt = select(Task.id, Task.benchmark_id).order_by(
-        Task.id.asc(),
-    )
-    visible_task_set_ids = visible_task_sets(team_id=team_id).with_only_columns(
-        TaskSet.id,
-    )
-    stmt = stmt.where(
-        or_(
-            Task.task_set_id.is_(None),
-            Task.task_set_id.in_(visible_task_set_ids),
-        ),
+    stmt = (
+        visible_tasks(team_id=team_id)
+        .with_only_columns(
+            Task.id,
+            Task.benchmark_id,
+        )
+        .order_by(Task.id.asc())
     )
     if CURRENTLY_UNSUPPORTED_BENCHMARK_IDS:
         stmt = stmt.where(
@@ -305,12 +301,9 @@ async def resolve_task_filter_with_diagnostics(
             benchmark_selection_provenance=benchmark_selection_provenance,
         )
     if subset_kind == "explicit":
-        # Explicit mode REQUIRES `task_ids` to be supplied AND the
-        # existence check above runs via the `Task.id.in_(ids)`
-        # predicate. The returned `candidates` is the intersection
-        # of the supplied list and the live tasks table; any supplied
-        # id not present in the table is silently dropped (the higher
-        # route layer checks for empty-result).
+        requested_ids = {str(task_id) for task_id in task_filter.get("task_ids", [])}
+        if requested_ids != set(candidates):
+            raise HTTPException(status_code=404, detail="task not found")
         return TaskFilterResult(
             task_ids=candidates,
             benchmark_selection_provenance=benchmark_selection_provenance,

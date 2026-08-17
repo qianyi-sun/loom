@@ -5,13 +5,14 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, delete, insert
+from sqlalchemy import create_engine, delete, func, insert, select, update
 from sqlalchemy.orm import sessionmaker
 
 from loom.db.schema import (
     Benchmark,
     DataLifecycleAuthority,
     Task,
+    TaskSet,
     Team,
     TeamQuota,
     Token,
@@ -86,10 +87,11 @@ def seed_team(postgres_url: str) -> Iterator[tuple[UUID, str]]:
                     DataLifecycleAuthority.team_id == team_id,
                 ),
             )
+            s.execute(delete(Task))
+            s.execute(delete(TaskSet))
             s.execute(delete(TeamQuota))
             s.execute(delete(User).where(User.id == user_id))
             s.execute(delete(Team))
-            s.execute(delete(Task))
             s.commit()
         engine.dispose()
 
@@ -168,6 +170,191 @@ def test_submit_rejects_unknown_task(app, seed_team):  # type: ignore[no-untyped
             json={"task_id": "nope", "config": {"agent_name": "oracle", "agent_model": None}},
         )
         assert r.status_code == 404
+
+
+def test_submit_hides_foreign_private_task_set_task(
+    app,
+    seed_team: tuple[UUID, str],
+    postgres_url: str,
+) -> None:
+    _team_id, raw = seed_team
+    foreign_team_id = uuid4()
+    task_set_id = f"ts/{foreign_team_id}/private-source"
+    task_id = f"{task_set_id}/tasks/row-1"
+    engine = create_engine(postgres_url)
+    session_factory = sessionmaker(engine)
+    with session_factory() as session:
+        session.execute(
+            insert(Team).values(
+                id=foreign_team_id,
+                name=f"foreign-{foreign_team_id}",
+            ),
+        )
+        session.execute(
+            insert(TaskSet).values(
+                id=task_set_id,
+                owning_team_id=foreign_team_id,
+                slug="private-source",
+                display_name="Private Source",
+                status="ready",
+                intents=["trajectory_generation"],
+                evaluation_ready=False,
+                task_count=1,
+                manifest_blob_uri=(
+                    f"s3://bucket/tasksets/user/{foreign_team_id}/private-source/manifest.yaml"
+                ),
+            ),
+        )
+        session.execute(
+            insert(Task).values(
+                id=task_id,
+                checksum="f" * 64,
+                config={
+                    "schema_version": "1",
+                    "required_agent_capabilities": ["workspace_exec"],
+                    "task": {"id": task_id, "name": task_id},
+                    "environment": {"os": "linux", "docker_image": "alpine"},
+                    "agent": {"name": "oracle"},
+                    "verifier": {"name": "script"},
+                    "steps": [{"name": "main"}],
+                },
+                source="local",
+                task_set_id=task_set_id,
+            ),
+        )
+        session.commit()
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/trials",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "task_id": task_id,
+                "config": {
+                    "agent_name": "direct-completion",
+                    "agent_model": {"provider": "openai", "name": "gpt-4o-mini"},
+                },
+            },
+        )
+
+    assert response.status_code == 404, response.text
+    assert response.json()["detail"] == "task not found"
+    with session_factory() as session:
+        trial_count = session.execute(select(func.count()).select_from(Trial)).scalar_one()
+    engine.dispose()
+    assert trial_count == 0
+
+
+def test_submit_rejects_agent_that_cannot_satisfy_task_capabilities(
+    app,
+    seed_team: tuple[UUID, str],
+    postgres_url: str,
+) -> None:
+    _team_id, raw = seed_team
+    engine = create_engine(postgres_url)
+    session_factory = sessionmaker(engine)
+    with session_factory() as session:
+        task_config = session.execute(select(Task.config).where(Task.id == "hello")).scalar_one()
+        session.execute(
+            update(Task)
+            .where(Task.id == "hello")
+            .values(
+                config={
+                    **task_config,
+                    "required_agent_capabilities": ["workspace_exec"],
+                },
+            ),
+        )
+        session.commit()
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/trials",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "task_id": "hello",
+                "config": {
+                    "agent_name": "direct-completion",
+                    "agent_model": {"provider": "openai", "name": "gpt-4o-mini"},
+                },
+            },
+        )
+
+    assert response.status_code == 400, response.text
+    assert "workspace_exec" in response.json()["detail"]
+    with session_factory() as session:
+        trial_count = session.execute(select(func.count()).select_from(Trial)).scalar_one()
+    engine.dispose()
+    assert trial_count == 0
+
+
+def test_submit_applies_immutable_tb21_workspace_requirement(
+    app,
+    seed_team: tuple[UUID, str],
+    postgres_url: str,
+) -> None:
+    _team_id, raw = seed_team
+    profile_id = "terminal-bench-2@tb2.1-r6"
+    task_id = f"{profile_id}/capability-overlay-test"
+    engine = create_engine(postgres_url)
+    session_factory = sessionmaker(engine)
+    try:
+        with session_factory() as session:
+            session.execute(
+                insert(Benchmark).values(
+                    id=profile_id,
+                    display_name="Terminal-Bench 2.1",
+                    upstream_kind="harbor-package",
+                    upstream_locator="terminal-bench/terminal-bench-2-1",
+                    upstream_revision="6",
+                    license_spdx="Apache-2.0",
+                    license_url="https://example.test/license",
+                    splits=["test"],
+                    execution_state="runnable",
+                ),
+            )
+            session.execute(
+                insert(Task).values(
+                    id=task_id,
+                    checksum="3" * 64,
+                    benchmark_id=profile_id,
+                    config={
+                        "schema_version": "1",
+                        "task": {"id": task_id, "name": task_id},
+                        "environment": {"os": "linux", "docker_image": "alpine"},
+                        "agent": {"name": "oracle"},
+                        "verifier": {"name": "script"},
+                        "steps": [{"name": "main"}],
+                    },
+                ),
+            )
+            session.commit()
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/trials",
+                headers={"Authorization": f"Bearer {raw}"},
+                json={
+                    "task_id": task_id,
+                    "config": {
+                        "agent_name": "direct-completion",
+                        "agent_model": {"provider": "openai", "name": "gpt-4o-mini"},
+                    },
+                },
+            )
+
+        assert response.status_code == 400, response.text
+        assert "workspace_exec" in response.json()["detail"]
+        with session_factory() as session:
+            trial_count = session.execute(select(func.count()).select_from(Trial)).scalar_one()
+        assert trial_count == 0
+    finally:
+        with session_factory() as session:
+            session.execute(delete(Trial).where(Trial.task_id == task_id))
+            session.execute(delete(Task).where(Task.id == task_id))
+            session.execute(delete(Benchmark).where(Benchmark.id == profile_id))
+            session.commit()
+        engine.dispose()
 
 
 def test_submit_rejects_invalid_task_config(app, seed_team):  # type: ignore[no-untyped-def]

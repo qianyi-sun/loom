@@ -56,6 +56,7 @@ from loom_service.provider_connection_lookup import validate_provider_connection
 from loom_service.public_links import public_url_for
 from loom_service.routes.object_downloads import stream_object_response
 from loom_service.stale_running_debug import trial_stale_running_debug_context
+from loom_service.submission_compat import validate_submission_agent_task_compatibility
 from loom_service.usage_accounting import (
     empty_usage_projection,
     price_snapshots_for_trials,
@@ -820,6 +821,12 @@ async def submit_trial(
     require_scope(ctx, "submit")
     require_submitting_user(ctx)
     _validate_agent_name(payload.config)
+    await validate_submission_agent_task_compatibility(
+        s,
+        team_id=ctx.team_id,
+        task_ids=[payload.task_id],
+        trial_config=payload.config,
+    )
 
     # Validate the optional provider_connection_id before forwarding.
     # Doing this in loom_service (not control-plane) avoids a

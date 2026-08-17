@@ -30,10 +30,10 @@ const AGENTS_RESPONSE = {
       supported_model_sources: [],
     },
     {
-      name: "litellm",
+      name: "direct-completion",
       needs_model: true,
       kind: "builtin",
-      description: "Multi-provider tool-loop agent.",
+      description: "Direct completion without workspace tools.",
       supported_providers: ["*"],
       supported_model_sources: ["api", "local-server", "hf"],
     },
@@ -296,8 +296,8 @@ function tasksResponse(
 
 const BATCH_RESPONSE = {
   batch_id: "00000000-0000-0000-0000-000000000001",
-  name: "humaneval | litellm/deepseek-chat",
-  description: "Tasks: humaneval. Combinations: litellm/openai/deepseek-chat x1.",
+  name: "humaneval | direct-completion/deepseek-chat",
+  description: "Tasks: humaneval. Combinations: direct-completion/openai/deepseek-chat x1.",
   expected_trial_count: 3,
   n_per_task: 1,
   state: "submitted",
@@ -583,6 +583,21 @@ describe("NewBatch", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("hides the canonical model runner from specific-agent choices", async () => {
+    const user = userEvent.setup();
+    mockEndpoints({ matchingTasks: 12 });
+    renderWithProviders(<NewBatch />);
+    await waitForNewBatchReady();
+
+    await user.click(
+      screen.getByRole("checkbox", { name: /Use a specific agent/i }),
+    );
+
+    expect(
+      screen.queryByRole("option", { name: /^direct-completion$/i }),
+    ).not.toBeInTheDocument();
+  });
+
   it("blocks submit when no task source is picked", async () => {
     const spy = mockEndpoints({ matchingTasks: 12 });
     const user = userEvent.setup();
@@ -715,7 +730,7 @@ describe("NewBatch", () => {
     expect(call.body.trial_config).toEqual({});
     expect(call.body.combinations).toEqual([
       {
-        agent_name: "litellm",
+        agent_name: "direct-completion",
         agent_model: {
           provider: "openai",
           name: "deepseek-chat",
@@ -1160,7 +1175,7 @@ describe("NewBatch", () => {
     expect(body.provider_model_id).toBeUndefined();
     expect(body.combinations).toEqual([
       {
-        agent_name: "litellm",
+        agent_name: "direct-completion",
         agent_model: {
           provider: "openai",
           name: "deepseek-chat",
@@ -1209,12 +1224,12 @@ describe("NewBatch", () => {
     expect(body.provider_model_id).toBeUndefined();
     expect(body.combinations).toMatchObject([
       {
-        agent_name: "litellm",
+        agent_name: "direct-completion",
         provider_connection_id: "11111111-1111-4111-8111-111111111111",
         provider_model_id: "deepseek-chat",
       },
       {
-        agent_name: "litellm",
+        agent_name: "direct-completion",
         provider_connection_id: "33333333-3333-4333-8333-333333333333",
         provider_model_id: "qwen3.6-35b-a3b",
       },

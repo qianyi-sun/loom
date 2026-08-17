@@ -4,8 +4,8 @@ Loom drives three kinds of agents:
 
 1. **OracleAgent** — runs `solution/solve.sh` from the task bundle.
    Reference baseline; no model call.
-2. **LiteLLMAgent** — talks to the configured model via LiteLLM
-   dialect routing through the Loom Gateway.
+2. **Direct-completion runtime** — sends the task prompt to the configured
+   model through the Loom Gateway without workspace tools.
 3. **SubprocessAgent + a launcher adapter** — wraps an external CLI
    agent (claude-code, codex, openhands, ...) launched as a
    subprocess inside the sandbox. The included CLI adapters live
@@ -100,7 +100,7 @@ under `_BUILTIN`:
 | Slug | Execution | Capture | Notes |
 |---|---|---|---|
 | `oracle` | `builtin-oracle` | none | Runs `solution/solve.sh`; no model |
-| `litellm` | `builtin-litellm` | `gateway-llm-calls` | Single-shot Gateway completion |
+| `direct-completion` | `builtin-direct-completion` | `gateway-llm-calls` | Response-only Gateway completion; `litellm` is a deprecated alias |
 | `terminus-2` | `builtin-terminus2-harbor` | `typed_events+harbor_artifacts` | Pinned Harbor `Terminus2` in-process; typed `terminus2_*` events + `.loom/agent/` artifacts |
 
 `terminus-2` is installed via `deploy/Dockerfile.worker`, not per-trial
@@ -228,7 +228,7 @@ If the official Codex template does not consume `{extra_flags}`, the
 report must classify the official side as provider defaults rather
 than treating computed flags as effective params.
 
-For the service-mode `litellm` worker path, callers can also set
+For the service-mode `direct-completion` worker path, callers can also set
 `trial_config.request_params` to safe generation controls such as
 `{"temperature":0,"top_p":0.5,"seed":1234}`. The worker strips
 prompt/message payloads, headers, credentials, and unknown extras

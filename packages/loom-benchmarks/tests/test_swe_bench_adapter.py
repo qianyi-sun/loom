@@ -25,6 +25,7 @@ def test_swe_bench_full_uses_swe_bench_prefix(tmp_path: Path) -> None:
     )
     assert cfg.task.id == "swe-bench/astropy__astropy-12907"
     assert cfg.verifier.name == "pytest"
+    assert cfg.required_agent_capabilities == frozenset({"workspace_exec"})
 
 
 def test_swe_bench_full_inherits_image_rule(tmp_path: Path) -> None:

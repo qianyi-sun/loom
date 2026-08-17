@@ -14,7 +14,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from typing import Literal
 
-from loom_service.agent_catalog import AgentEntry, list_agents
+from loom_service.agent_catalog import AgentEntry, list_agents, resolve_agents
 
 RuntimeCheckKind = Literal["executable", "python_module"]
 DependencyState = Literal["not_required", "satisfied", "missing"]
@@ -170,12 +170,7 @@ def build_runtime_audit_items(
 ) -> list[AgentRuntimeAuditItem]:
     catalog = list_agents()
     if agents:
-        requested = set(agents)
-        known = {agent.name for agent in catalog}
-        unknown = sorted(requested - known)
-        if unknown:
-            raise ValueError(f"unknown agent(s): {', '.join(unknown)}")
-        catalog = [agent for agent in catalog if agent.name in requested]
+        catalog = resolve_agents(agents)
 
     runner = check_runner or DockerRuntimeCheckRunner(
         image=image,

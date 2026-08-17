@@ -55,7 +55,6 @@ from loom_service.admin_audit import (
     write_admin_audit_event,
 )
 from loom_service.agent_catalog import (
-    get_agent,
     known_names,
     validate_agent_model_compat,
 )
@@ -84,7 +83,11 @@ from loom_service.monitor_filters import (
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.provider_connection_lookup import validate_provider_connection
 from loom_service.stale_running_debug import batch_stale_running_decisions
-from loom_service.task_compat import task_supports_agent
+from loom_service.submission_compat import (
+    AgentTaskIncompatibilityError,
+    validate_submission_agent_task_compatibility,
+    validate_submission_agent_task_pairs,
+)
 from loom_service.task_config_validation import (
     expected_trial_count,
     invalid_task_config_detail,
@@ -637,91 +640,6 @@ async def _estimate_pre_run_budget_for_payload(
     ]
 
 
-def _agents_in_batch(
-    combinations: Sequence[Combination],
-    single_agent_name: Any,
-) -> list[str]:
-    """Collect the agent names involved in this batch: every combo's
-    `agent_name` for multi-combination batches, else the single
-    `trial_config.agent_name`. Empty when the request used neither
-    surface (legacy default-agent path)."""
-    if combinations:
-        return list({c.agent_name for c in combinations})
-    if isinstance(single_agent_name, str) and single_agent_name:
-        return [single_agent_name]
-    return []
-
-
-async def _reject_agent_task_incompat(
-    session: Any,
-    *,
-    valid_task_ids: Sequence[str],
-    combinations: Sequence[Combination],
-    single_agent_name: Any,
-) -> None:
-    """#320 preflight. For every agent in the batch, drop any task
-    that doesn't expose every capability the agent requires
-    (currently only `solution_solve_sh` for oracle). Reject the whole
-    batch with a structured 400 listing the offending (agent, task)
-    pairs so the caller can resubmit with a per-agent task slate."""
-    agents = _agents_in_batch(combinations, single_agent_name)
-    if not agents or not valid_task_ids:
-        return
-    # Skip the DB read entirely if every agent is capability-permissive.
-    requirements: dict[str, frozenset[str]] = {}
-    for name in agents:
-        entry = get_agent(name)
-        if entry is None or not entry.requires_capabilities:
-            continue
-        requirements[name] = entry.requires_capabilities
-    if not requirements:
-        return
-
-    rows = (
-        await session.execute(
-            select(Task.id, Task.config, Task.tags).where(
-                Task.id.in_(list(valid_task_ids)),
-            ),
-        )
-    ).all()
-    configs: dict[str, Any] = {str(tid): cfg for tid, cfg, _ in rows}
-    tags_by_id: dict[str, dict[str, str]] = {str(tid): dict(tags or {}) for tid, _, tags in rows}
-
-    offenders: dict[str, list[str]] = {}
-    for agent_name, required in requirements.items():
-        bad = [
-            tid
-            for tid in valid_task_ids
-            if not task_supports_agent(
-                configs.get(tid) or {},
-                required,
-                tags=tags_by_id.get(tid),
-            )
-        ]
-        if bad:
-            offenders[agent_name] = bad
-
-    if not offenders:
-        return
-
-    pairs = "; ".join(
-        f"{name}: {len(ids)} task(s) (e.g. {sorted(ids)[0]})"
-        for name, ids in sorted(offenders.items())
-    )
-    detail = (
-        f"agent×task capability mismatch — {pairs}. The listed agents "
-        f"cannot run these tasks at the platform level (e.g. oracle "
-        f"requires a benchmark adapter that ships `solution/solve.sh`). "
-        f"Submit per-agent batches with the "
-        f"compatible task slate, or drop the incompatible agent."
-    )
-    _reject_submission(
-        reason="agent_task_incompat",
-        status_code=400,
-        detail=detail,
-    )
-
-
 def _serialize(
     b: Batch,
     *,
@@ -1001,6 +919,17 @@ async def _create_batch_record(
     # Audit M2: a filter materializing to zero tasks creates a
     # batch stuck in `submitted` forever — reject up front.
     if not task_ids:
+        explicit_task_ids = payload.task_filter.get("task_ids")
+        if isinstance(explicit_task_ids, (list, tuple)) and all(
+            isinstance(task_id, str) for task_id in explicit_task_ids
+        ):
+            await validate_submission_agent_task_compatibility(
+                s,
+                team_id=submission_team_id,
+                task_ids=explicit_task_ids,
+                combinations=payload.combinations,
+                trial_config=trial_config,
+            )
         _reject_submission(
             reason="empty_filter",
             status_code=400,
@@ -1021,18 +950,22 @@ async def _create_batch_record(
             detail=invalid_task_config_detail(invalid_tasks),
         )
 
-    # #320 preflight: skip launching trials for (agent, task) combos
-    # where the agent's `requires_capabilities` doesn't match what the
-    # task bundle exposes. The current case is oracle, which needs
-    # `solution/solve.sh` (granted by the pytest-verifier heuristic).
-    # Reject upfront with a structured detail instead of fanning out
-    # into trials that deterministically AgentError mid-run.
-    await _reject_agent_task_incompat(
-        s,
-        valid_task_ids=valid_task_ids,
-        combinations=payload.combinations,
-        single_agent_name=trial_config.get("agent_name"),
-    )
+    # Reject structurally incompatible agent/task pairs instead of fanning
+    # out trials that cannot satisfy the task's execution contract.
+    try:
+        await validate_submission_agent_task_compatibility(
+            s,
+            team_id=submission_team_id,
+            task_ids=valid_task_ids,
+            combinations=payload.combinations,
+            trial_config=trial_config,
+        )
+    except AgentTaskIncompatibilityError as exc:
+        _reject_submission(
+            reason="agent_task_incompat",
+            status_code=exc.status_code,
+            detail=str(exc.detail),
+        )
 
     token_prefix = ctx.token_hash.hex()[:8] if ctx.token_hash else "00000000"
 
@@ -2389,11 +2322,59 @@ async def rerun_failed_batch(
         require_runnable=True,
     )
     if set(rerun_task_result.task_ids) != set(task_ids):
+        await validate_submission_agent_task_compatibility(
+            s,
+            team_id=b.team_id,
+            task_ids=task_ids,
+            combinations=b.combinations or [],
+            trial_config=b.trial_config,
+        )
         _reject_submission(
             reason="invalid_input",
             status_code=400,
             detail="rerun target tasks are missing or no longer runnable",
         )
+    agent_task_pairs: list[tuple[str, str]] = []
+    combinations = list(b.combinations or [])
+    for target in targets:
+        task_id = str(target["task_id"])
+        combination_idx = int(target["combination_idx"])
+        if combination_idx < 0 or (
+            combinations and combination_idx >= len(combinations)
+        ):
+            _reject_submission(
+                reason="invalid_input",
+                status_code=400,
+                detail=f"rerun target combination_idx {combination_idx} is invalid",
+            )
+        if combinations:
+            agent_name = combinations[combination_idx].get("agent_name")
+            if not isinstance(agent_name, str) or not agent_name:
+                _reject_submission(
+                    reason="invalid_input",
+                    status_code=400,
+                    detail=(
+                        f"combinations[{combination_idx}].agent_name must be a "
+                        "non-empty string"
+                    ),
+                )
+        else:
+            if combination_idx != 0:
+                _reject_submission(
+                    reason="invalid_input",
+                    status_code=400,
+                    detail=f"rerun target combination_idx {combination_idx} is invalid",
+                )
+            raw_agent_name = b.trial_config.get("agent_name")
+            if not isinstance(raw_agent_name, str) or not raw_agent_name:
+                continue
+            agent_name = raw_agent_name
+        agent_task_pairs.append((task_id, agent_name))
+    await validate_submission_agent_task_pairs(
+        s,
+        team_id=b.team_id,
+        agent_task_pairs=agent_task_pairs,
+    )
     token_prefix = ctx.token_hash.hex()[:8] if ctx.token_hash else "00000000"
     rerun_id = uuid4()
     rerun_created_at = datetime.now(UTC)

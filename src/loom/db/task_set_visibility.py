@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import Select, and_, false, select
+from sqlalchemy import Select, and_, false, or_, select
 
-from loom.db.schema import TaskSet
+from loom.db.schema import Task, TaskSet
 
 
 def visible_task_sets(*, team_id: UUID | None) -> Select[tuple[TaskSet]]:
@@ -24,4 +24,21 @@ def visible_task_sets(*, team_id: UUID | None) -> Select[tuple[TaskSet]]:
             TaskSet.visibility == "private",
             TaskSet.soft_deleted_at.is_(None),
         )
+    )
+
+
+def visible_tasks(*, team_id: UUID | None) -> Select[tuple[Task]]:
+    """Return tasks visible to the given team.
+
+    Global tasks have no TaskSet. TaskSet-backed tasks are visible only
+    through the submitting team's visible TaskSets.
+    """
+    visible_task_set_ids = visible_task_sets(team_id=team_id).with_only_columns(
+        TaskSet.id,
+    )
+    return select(Task).where(
+        or_(
+            Task.task_set_id.is_(None),
+            Task.task_set_id.in_(visible_task_set_ids),
+        ),
     )

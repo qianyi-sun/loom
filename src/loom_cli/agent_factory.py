@@ -48,7 +48,7 @@ def build_agent_factory(
 
     Routes:
       - "oracle"  -> OracleAgent
-      - "litellm" -> LiteLLMAgent (requires model)
+      - "direct-completion" / legacy "litellm" -> LiteLLMAgent (requires model)
       - any other -> SubprocessAgent wrapping loom_launcher.get_adapter(name)
                      (requires model; AgentError if name is unknown)
     """
@@ -62,10 +62,10 @@ def build_agent_factory(
         agent: AgentRuntime
         if agent_name == "oracle":
             agent = OracleAgent(task_dir=task_dir, trial_id=trial_id)
-        elif agent_name == "litellm":
+        elif agent_name in {"direct-completion", "litellm"}:
             if model is None:
                 raise AgentError(
-                    "litellm agent requires task.agent.model to be set",
+                    "direct-completion agent requires task.agent.model to be set",
                 )
             agent = LiteLLMAgent(  # type: ignore[assignment]
                 model=model,
@@ -93,7 +93,7 @@ def build_agent_factory(
             adapter = get_adapter(agent_name)
             if adapter is None:
                 raise AgentError(
-                    f"unknown agent {agent_name!r} — not 'oracle'/'litellm' "
+                    f"unknown agent {agent_name!r} — not a built-in runtime "
                     f"and not registered in loom-launcher",
                 )
             if model is None:

@@ -20,7 +20,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from loom_service.agent_catalog import AgentEntry, list_agents
+from loom_service.agent_catalog import AgentEntry, list_agents, resolve_agents
 
 SmokeState = Literal["passed", "failed"]
 AgentSmokeRunner = Callable[..., Awaitable["AgentRuntimeSmokeItem"]]
@@ -103,16 +103,9 @@ def render_agent_smoke_table(items: list[AgentRuntimeSmokeItem]) -> str:
 
 
 def _select_agents(agents: Sequence[str] | None) -> list[AgentEntry]:
-    catalog = list_agents()
     if not agents:
-        return catalog
-    requested = set(agents)
-    known = {agent.name for agent in catalog}
-    unknown = sorted(requested - known)
-    if unknown:
-        separator = ", "
-        raise ValueError(f"unknown agent(s): {separator.join(unknown)}")
-    return [agent for agent in catalog if agent.name in requested]
+        return list_agents()
+    return resolve_agents(agents)
 
 
 async def _run_smoke_matrix(

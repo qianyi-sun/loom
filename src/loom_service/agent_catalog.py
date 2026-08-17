@@ -11,8 +11,8 @@ Each entry also declares what models it accepts:
 
 - `supported_providers`: tuple of provider names (`"anthropic"`,
   `"openai"`, …) or `("*",)` for "any provider the LLM Gateway can
-  route". CLI adapters lock to one provider; generic agents (litellm,
-  aider, openhands) accept anything.
+  route". CLI adapters lock to one provider; generic agents
+  (direct-completion, aider, openhands) accept anything.
 - `supported_model_sources`: subset of `{"api", "local-server", "hf"}`
   matching the `ModelSpec.source` discriminator. Empty tuple means the
   agent doesn't take a model at all (oracle).
@@ -30,6 +30,7 @@ that should restrict can be overridden in `_ADAPTER_OVERRIDES`).
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
@@ -102,6 +103,7 @@ class AgentEntry:
     needs_model: bool
     kind: AgentKind
     description: str
+    aliases: tuple[str, ...] = ()
     supported_providers: tuple[str, ...] = ()
     supported_model_sources: tuple[str, ...] = ()
     runtime_contract: RuntimeContract = RuntimeContract(
@@ -120,10 +122,14 @@ class AgentEntry:
     # preflight to skip incompatible (agent, task) combos before
     # fan-out instead of bubbling agent_error after submit.
     requires_capabilities: frozenset[str] = frozenset()
+    # Execution surfaces this runtime exposes to a task. Tasks declare
+    # requirements separately in TaskConfig.required_agent_capabilities.
+    provides_capabilities: frozenset[str] = frozenset()
 
     def to_dict(self) -> dict[str, object]:
         return {
             "name": self.name,
+            "aliases": list(self.aliases),
             "needs_model": self.needs_model,
             "kind": self.kind,
             "description": self.description,
@@ -135,6 +141,7 @@ class AgentEntry:
             "readiness_message": self.readiness_message,
             "catalog_visibility": self.catalog_visibility,
             "requires_capabilities": sorted(self.requires_capabilities),
+            "provides_capabilities": sorted(self.provides_capabilities),
         }
 
     def readiness_error(self) -> str | None:
@@ -167,20 +174,22 @@ _BUILTIN: tuple[AgentEntry, ...] = (
         # out at POST /batches preflight rather than launched and
         # failed mid-trial with `AgentError: solve.sh ... not found`.
         requires_capabilities=frozenset({"solution_solve_sh"}),
+        provides_capabilities=frozenset({"workspace_exec"}),
     ),
     AgentEntry(
-        name="litellm",
+        name="direct-completion",
+        aliases=("litellm",),
         needs_model=True,
         kind="builtin",
         description=(
-            "Multi-provider tool-loop agent. Routes through the LLM "
-            "Gateway via LiteLLM — pick any provider+model the rate "
-            "card knows about, or a HuggingFace / local-server model."
+            "Direct model completion with response-text artifact projection. "
+            "Routes through the LLM Gateway and supports API, HuggingFace, "
+            "and local-server models; it does not execute workspace tools."
         ),
         supported_providers=("*",),
         supported_model_sources=("api", "local-server", "hf"),
         runtime_contract=_ready_builtin_contract(
-            execution="builtin-litellm",
+            execution="builtin-direct-completion",
             capture="gateway-llm-calls",
             endpoint_dialect="openai_chat",
             api_key_env="LOOM_STEP_TOKEN",
@@ -208,6 +217,7 @@ _BUILTIN: tuple[AgentEntry, ...] = (
             base_url_env="LOOM_GATEWAY_URL",
             model_name_template="openai/{model_id}",
         ),
+        provides_capabilities=frozenset({"workspace_exec"}),
     ),
 )
 # Note: `claude-code-inbox` was a separate catalog entry for the v0.7
@@ -446,6 +456,7 @@ def list_agents(*, include_internal: bool = False) -> list[AgentEntry]:
                 readiness_status=readiness_status,
                 readiness_message=readiness_message,
                 catalog_visibility=visibility,
+                provides_capabilities=frozenset({"workspace_exec"}),
             ),
         )
     return entries
@@ -455,15 +466,39 @@ def known_names() -> frozenset[str]:
     """Set of valid `agent_name` values for fast membership check at
     the request boundary. Recomputed per call because adapter
     registration is import-time (idempotent + cheap)."""
-    return frozenset(e.name for e in list_agents())
+    return frozenset(
+        name
+        for entry in list_agents()
+        for name in (entry.name, *entry.aliases)
+    )
 
 
 def get_agent(name: str, *, include_internal: bool = False) -> AgentEntry | None:
     """Look up an entry by name; returns None for unknown agents."""
     for e in list_agents(include_internal=include_internal):
-        if e.name == name:
+        if e.name == name or name in e.aliases:
             return e
     return None
+
+
+def resolve_agents(
+    names: Iterable[str],
+    *,
+    include_internal: bool = False,
+) -> list[AgentEntry]:
+    """Resolve canonical names and aliases, deduplicated in catalog order."""
+    catalog = list_agents(include_internal=include_internal)
+    by_name = {
+        name: entry
+        for entry in catalog
+        for name in (entry.name, *entry.aliases)
+    }
+    requested = set(names)
+    unknown = sorted(requested - set(by_name))
+    if unknown:
+        raise ValueError(f"unknown agent(s): {', '.join(unknown)}")
+    canonical_names = {by_name[name].name for name in requested}
+    return [entry for entry in catalog if entry.name in canonical_names]
 
 
 def validate_agent_model_compat(

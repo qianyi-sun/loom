@@ -70,4 +70,4 @@ def test_user_guide_documents_current_batch_create_command() -> None:
     assert "loom eval batch create" in user_guide
     assert "--provider smoke-openai" in user_guide
     assert "--model gpt-4o-mini" in user_guide
-    assert "--agent litellm" in user_guide
+    assert "--agent direct-completion" in user_guide

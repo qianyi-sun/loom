@@ -38,7 +38,7 @@ describe("CommandSnippet", () => {
     render(
       <CommandSnippet
         command={
-          "loom eval batch create --benchmark humaneval --agent litellm --provider smoke-openai --model gpt-4o-mini"
+          "loom eval batch create --benchmark humaneval --agent direct-completion --provider smoke-openai --model gpt-4o-mini"
         }
       />,
     );

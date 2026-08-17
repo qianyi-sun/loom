@@ -170,7 +170,9 @@ set depends on the deployed catalog, image build, and benchmark compatibility
 checks, but common families include:
 
 - `oracle`, for no-model canaries and ground-truth smoke;
-- `litellm`, for provider-backed tool-loop runs;
+- `direct-completion`, for response-only Gateway completions with exact-path
+  text projection and no workspace tools (`litellm` remains a deprecated
+  compatibility alias);
 - coding-agent CLI adapters from `loom-launcher`, including Codex, Claude Code,
   Gemini CLI, OpenHands, OpenHands SDK, OpenCode, Aider, SWE-agent,
   mini-SWE-agent, Qwen CLI, and Kimi CLI;

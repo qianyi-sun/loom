@@ -1,14 +1,14 @@
-"""LiteLLMAgent — generic tool-loop using the LLM Gateway client.
+"""Direct-completion runtime using the LLM Gateway client.
 
-v1 behaviour: send the instruction as a single user message; loop until the
+Send the instruction as a single user message; continue completions until the
 gateway returns `finish_reason='stop'` (or max_turns hit). Each response is
-emitted as an `llm_call` event. Tool dispatch (parsing tool_calls and
-running them inside env.exec) is a v1.5 concern — Plan 4 + the agent
-follow-ups extend this loop.
+emitted as an `llm_call` event. This runtime does not expose tools or execute
+commands in the task workspace.
 """
 
 from __future__ import annotations
 
+import glob
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -33,7 +33,7 @@ from loom.trajectory.writer import TrajectoryWriter
 
 @dataclass
 class LiteLLMAgent:
-    """Out-of-box tool-loop agent. All LLM calls go through the Gateway client."""
+    """Direct completion with Gateway accounting and text projection."""
 
     model: ModelSpec
     gateway: LLMGatewayClient
@@ -42,7 +42,7 @@ class LiteLLMAgent:
     system_prompt: str = "You are a helpful agent. Complete the task."
     max_turns: int = 8
     mode: Literal["out-of-box", "in-box"] = "out-of-box"
-    name: str = "litellm-agent"
+    name: str = "direct-completion"
     version: str = "1.0"
     supports_os: frozenset[OS] = field(default_factory=lambda: frozenset({"linux"}))
     # Trial finalization must not project gateway llm_calls rows back into the
@@ -80,6 +80,7 @@ class LiteLLMAgent:
         skills_dir: PurePosixPath | None,
         step_id: str,
     ) -> None:
+        artifact_paths = _validate_artifact_paths(self.artifact_paths)
         messages: list[ChatMessage] = [
             ChatMessage(role="user", content=instruction),
         ]
@@ -143,14 +144,19 @@ class LiteLLMAgent:
                         for p in raw_content
                     )
                 )
-                await self._write_artifacts(env, content_str)
+                await self._write_artifacts(env, content_str, artifact_paths)
                 return
 
         raise AgentError(
             f"LiteLLMAgent exhausted max_turns={self.max_turns} without 'stop'",
         )
 
-    async def _write_artifacts(self, env: Driver, content: str) -> None:
+    async def _write_artifacts(
+        self,
+        env: Driver,
+        content: str,
+        artifact_paths: Sequence[tuple[str, PurePosixPath]],
+    ) -> None:
         """#184: write the LLM's final response into the declared
         artifact paths so file-artifact benchmarks (pytest etc.) can
         grade it. Rendering is artifact-aware: final-answer artifacts keep
@@ -159,12 +165,12 @@ class LiteLLMAgent:
         historical fenced-block extraction. Each path is written
         individually to `/workspace/{path}` via the driver's upload.
         """
-        if not self.artifact_paths:
+        if not artifact_paths:
             return
         import tempfile
         from pathlib import Path
 
-        for rel_path in self.artifact_paths:
+        for rel_path, artifact_path in artifact_paths:
             body = _render_artifact_body(content, rel_path)
             with tempfile.NamedTemporaryFile(
                 mode="w",
@@ -175,10 +181,30 @@ class LiteLLMAgent:
                 tf.write(body)
                 tmp = Path(tf.name)
             try:
-                dst = self.workdir / rel_path
+                dst = self.workdir / artifact_path
                 await env.upload(tmp, dst)
             finally:
                 tmp.unlink(missing_ok=True)
+
+
+def _validate_artifact_paths(
+    paths: Sequence[str],
+) -> tuple[tuple[str, PurePosixPath], ...]:
+    validated: list[tuple[str, PurePosixPath]] = []
+    for rel_path in paths:
+        artifact_path = PurePosixPath(rel_path)
+        if (
+            not artifact_path.parts
+            or artifact_path.is_absolute()
+            or ".." in artifact_path.parts
+            or glob.has_magic(rel_path)
+        ):
+            raise AgentError(
+                "direct-completion requires an exact relative artifact path; "
+                f"got {rel_path!r}",
+            )
+        validated.append((rel_path, artifact_path))
+    return tuple(validated)
 
 
 _FINAL_ANSWER_ARTIFACT_FILENAMES = frozenset({"final_answer.txt"})

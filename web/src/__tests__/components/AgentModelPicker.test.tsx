@@ -12,7 +12,7 @@ import {
 import type { FetchMock } from "../../test-utils/fetchMock";
 
 const INITIAL_VALUE: AgentModelValue = {
-  agentName: "litellm",
+  agentName: "direct-completion",
   source: "api",
   modelProvider: "",
   modelName: "",
@@ -41,10 +41,10 @@ function mockPickerEndpoints(
         return json({
           items: [
             {
-              name: "litellm",
+              name: "direct-completion",
               needs_model: true,
               kind: "builtin",
-              description: "Multi-provider tool-loop agent.",
+              description: "Direct completion without workspace tools.",
               supported_providers: ["*"],
               supported_model_sources: modelSources,
             },

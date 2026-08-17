@@ -120,6 +120,21 @@ async def auth_setup(
         s.execute(insert(TeamMembership).values(
             team_id=team_d, user_id=admin_user_id, role="owner",
         ))
+        s.execute(
+            insert(Task).values(
+                id="local/task-1",
+                checksum="x" * 64,
+                config={
+                    "schema_version": "1",
+                    "task": {"id": "local/task-1", "name": "local/task-1"},
+                    "environment": {"os": "linux", "docker_image": "alpine"},
+                    "agent": {"name": "oracle"},
+                    "verifier": {"name": "pytest"},
+                    "steps": [{"name": "main"}],
+                },
+                source="local",
+            ),
+        )
         s.commit()
     try:
         yield app, team_a, team_b, team_c, team_d

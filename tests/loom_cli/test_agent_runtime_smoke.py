@@ -60,6 +60,22 @@ def test_run_agent_smoke_matrix_rejects_unknown_agent() -> None:
         )
 
 
+def test_run_agent_smoke_matrix_resolves_and_deduplicates_legacy_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_run_one(**kwargs: Any) -> smoke.AgentRuntimeSmokeItem:
+        return _item(kwargs["agent"].name)
+
+    monkeypatch.setattr(smoke, "_run_one_agent_smoke", fake_run_one)
+
+    items = smoke.run_agent_smoke_matrix(
+        image="loom-sandbox:test",
+        agents=["litellm", "direct-completion"],
+    )
+
+    assert [item.name for item in items] == ["direct-completion"]
+
+
 def test_run_agent_smoke_matrix_records_agent_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

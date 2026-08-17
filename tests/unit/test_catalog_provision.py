@@ -28,6 +28,13 @@ def _valid_task_config(task_id: str) -> dict[str, object]:
     }
 
 
+def _workspace_task_config(task_id: str) -> dict[str, object]:
+    return {
+        **_valid_task_config(task_id),
+        "required_agent_capabilities": ["workspace_exec"],
+    }
+
+
 class FakeCatalog:
     def __init__(self, rows: CatalogRows | None = None) -> None:
         self.rows = rows or CatalogRows(benchmarks=[], tasks=[])
@@ -153,19 +160,101 @@ def test_agent_rows_from_service_catalog_include_contract_and_provenance() -> No
     )
 
     by_name = {row.name: row for row in rows}
-    assert {"oracle", "litellm"}.issubset(by_name)
+    assert {"oracle", "direct-completion"}.issubset(by_name)
+    assert "litellm" not in by_name
 
     oracle = by_name["oracle"]
-    assert oracle.version == "service-catalog-v1"
+    assert oracle.version == "service-catalog-v2"
     assert oracle.mode == "builtin"
     assert oracle.spec["name"] == "oracle"
     assert oracle.spec["needs_model"] is False
     assert oracle.spec["runtime_contract"]["execution"] == "builtin-oracle"
     assert oracle.spec["catalog_provenance"] == {
         "source": "loom_service.agent_catalog",
-        "schema_version": 1,
+        "schema_version": 2,
         "provisioned_by": "release:staging",
     }
+
+
+def test_ready_catalog_requires_workspace_benchmarks_to_be_republished() -> None:
+    benchmark_id = "skillflow"
+    task_id = f"{benchmark_id}/task"
+    source = CatalogRows(
+        benchmarks=[
+            BenchmarkRow(
+                id=benchmark_id,
+                display_name="SkillFlow",
+                upstream_kind="huggingface",
+                upstream_locator="example/skillflow",
+                upstream_revision="rev",
+                license_spdx="MIT",
+                license_url="https://example.test/license",
+                splits=["test"],
+                series="workspace",
+                imported_by="source",
+            ),
+        ],
+        tasks=[
+            TaskRow(
+                id=task_id,
+                checksum="a" * 64,
+                config=_valid_task_config(task_id),
+                source=f"s3://source-bucket/{benchmark_id}/task/",
+                license="MIT",
+                benchmark_id=benchmark_id,
+                tags={},
+            ),
+        ],
+    )
+
+    with pytest.raises(ValueError, match=r"republish.*workspace_exec"):
+        catalog_provision._ready_catalog_rows(
+            source,
+            target_bucket="target-bucket",
+        )
+
+
+@pytest.mark.parametrize(
+    "benchmark_id",
+    ["swe-bench", "swe-bench-verified", "swe-bench-multimodal"],
+)
+def test_ready_catalog_requires_swe_bench_tasks_to_be_republished(
+    benchmark_id: str,
+) -> None:
+    task_id = f"{benchmark_id}/task"
+    source = CatalogRows(
+        benchmarks=[
+            BenchmarkRow(
+                id=benchmark_id,
+                display_name="SWE-Bench",
+                upstream_kind="huggingface",
+                upstream_locator="princeton-nlp/SWE-bench",
+                upstream_revision="rev",
+                license_spdx="MIT",
+                license_url="https://example.test/license",
+                splits=["test"],
+                series="code",
+                imported_by="source",
+            ),
+        ],
+        tasks=[
+            TaskRow(
+                id=task_id,
+                checksum="a" * 64,
+                config=_valid_task_config(task_id),
+                source=f"s3://source-bucket/{benchmark_id}/task/",
+                license="MIT",
+                benchmark_id=benchmark_id,
+                tags={},
+            ),
+        ],
+    )
+
+    with pytest.raises(ValueError, match=r"republish.*workspace_exec"):
+        catalog_provision._ready_catalog_rows(
+            source,
+            target_bucket="target-bucket",
+        )
 
 
 def test_tb21_catalog_provision_requires_target_local_activation() -> None:
@@ -238,7 +327,7 @@ async def test_tb21_catalog_drift_fails_before_target_object_copy() -> None:
     source_task = TaskRow(
         id=task_id,
         checksum="a" * 64,
-        config=_valid_task_config(task_id),
+        config=_workspace_task_config(task_id),
         source=f"s3://source-bucket/{profile_id}/task/",
         license="Apache-2.0",
         benchmark_id=profile_id,
@@ -298,7 +387,7 @@ async def test_exact_runnable_tb21_target_is_reset_for_local_reactivation() -> N
     source_task = TaskRow(
         id=task_id,
         checksum="a" * 64,
-        config=_valid_task_config(task_id),
+        config=_workspace_task_config(task_id),
         source=f"s3://source-bucket/{profile_id}/task/",
         license="Apache-2.0",
         benchmark_id=profile_id,
@@ -457,8 +546,10 @@ async def test_provision_ready_catalog_filters_blocked_rows_and_copies_missing_o
     assert stats.bytes_uploaded == 5
     assert stats.bytes_skipped == 4
     assert target_objects.buckets == {"loom-benchmarks"}
-    assert {"oracle", "litellm"}.issubset({row.name for row in target.rows.agents})
-    assert all(row.version == "service-catalog-v1" for row in target.rows.agents)
+    assert {"oracle", "direct-completion"}.issubset(
+        {row.name for row in target.rows.agents},
+    )
+    assert all(row.version == "service-catalog-v2" for row in target.rows.agents)
     assert target.rows.benchmarks == [
         replace(source.rows.benchmarks[0], imported_by="staging-provision"),
     ]

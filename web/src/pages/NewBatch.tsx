@@ -81,6 +81,7 @@ interface BenchmarkItem {
 const FAN_OUT_CONFIRM_THRESHOLD = 200;
 const MAX_COMBINATIONS = 16;
 const TASK_SET_ID_PREFIX = "ts/";
+const DEFAULT_AGENT_NAME = "direct-completion";
 
 function isTaskSetId(id: string): boolean {
   return id.startsWith(TASK_SET_ID_PREFIX);
@@ -719,7 +720,7 @@ function identityCombinationPart(rows: ComboRow[]): { name: string; description:
   const names: string[] = [];
   const descriptions: string[] = [];
   for (const row of rows) {
-    const agent = row.picker.agentName || "litellm";
+    const agent = row.picker.agentName || DEFAULT_AGENT_NAME;
     const samples = Number.parseInt(row.nPerTask, 10);
     const sampleText = Number.isFinite(samples) && samples > 0 ? samples : 1;
     const label = row.label.trim();
@@ -1964,7 +1965,7 @@ export default function NewBatch(): JSX.Element {
                     onChange={(v) => updateRow(i, { picker: v })}
                     disabled={create.isPending}
                     specificAgentToggle
-                    defaultAgentName="litellm"
+                    defaultAgentName={DEFAULT_AGENT_NAME}
                   />
                   <div className="grid grid-cols-2 gap-3">
                     <label className="block">
