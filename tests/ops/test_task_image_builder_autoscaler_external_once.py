@@ -48,6 +48,12 @@ def _args(module: Any, tmp_path: Path, *extra: str):
             "gx10-01c7",
             "--kubeconfig",
             str(tmp_path / "kubeconfig"),
+            "--global-execution-witness-json",
+            str(tmp_path / "global-execution-witness.json"),
+            "--manager-public-key",
+            str(tmp_path / "global-execution-manager.pub"),
+            "--expected-manager-public-key-sha256",
+            "a" * 64,
             *extra,
         ]
     )
@@ -112,6 +118,31 @@ def test_enabled_policy_maps_to_exclusive_runtime_config(
     assert config.exclusive is True
     assert config.requested_concurrency == 1
     assert config.env_file == str(env_file)
+
+
+async def test_reconcile_requires_global_execution_witness_before_capacity_access(
+    module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        module,
+        "_load_enabled_builder_config",
+        lambda _args: SimpleNamespace(slurm_cluster_id="gb10"),
+    )
+    monkeypatch.setattr(
+        module.transport,
+        "_validate_local_slurm_authority",
+        lambda _args: SimpleNamespace(cluster_name="trt-gb10"),
+    )
+    monkeypatch.setattr(
+        module.transport,
+        "_database_port_forward_config",
+        lambda _args: pytest.fail("capacity access preceded global execution fencing"),
+    )
+
+    with pytest.raises(module.TaskImageBuilderPolicyError, match="global execution witness"):
+        await module._main_async(_args(module, tmp_path))
 
 
 async def test_builder_token_validation_requires_dedicated_scope(

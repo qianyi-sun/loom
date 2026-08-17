@@ -27,6 +27,11 @@ from loom_cli.environment_state import (  # noqa: E402
     EnvironmentStateProfileError,
     load_environment_state_profile,
 )
+from loom_control_plane.global_execution_fence import (  # noqa: E402
+    GlobalExecutionFenceError,
+    assert_legacy_scale_up_allowed,
+    load_global_execution_witness,
+)
 from loom_control_plane.task_image_builder_autoscaler import (  # noqa: E402
     SubprocessTaskImageBuilderSlurmRunner,
     TaskImageBuilderPoolConfig,
@@ -38,6 +43,32 @@ _REGISTRY_REPO_ENV_KEY = "LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO"
 
 class TaskImageBuilderPolicyError(transport.ExternalAutoscalerError, ValueError):
     """The dedicated builder policy is absent, disabled, or unsafe."""
+
+
+def _require_global_execution_scale_up(
+    args: argparse.Namespace,
+    *,
+    slurm_cluster_id: str,
+) -> None:
+    try:
+        witness = load_global_execution_witness(
+            args.global_execution_witness_json,
+            manager_public_key_path=args.manager_public_key,
+            expected_manager_public_key_sha256=args.expected_manager_public_key_sha256,
+            expected_manager_public_key_sha256_file=(
+                args.expected_manager_public_key_sha256_file
+            ),
+        )
+        assert_legacy_scale_up_allowed(
+            witness,
+            expected_authority="global-capacity-manager",
+            expected_pool_id=slurm_cluster_id,
+            now=datetime.now(UTC),
+        )
+    except GlobalExecutionFenceError as exc:
+        raise TaskImageBuilderPolicyError(
+            "global execution witness is unavailable or forbids builder scale-up",
+        ) from exc
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -189,6 +220,11 @@ async def _main_async(args: argparse.Namespace) -> None:
     if authority.cluster_name != expected_cluster:
         raise TaskImageBuilderPolicyError(
             "local Slurm authority does not match the builder policy",
+        )
+    if not args.validate_only:
+        _require_global_execution_scale_up(
+            args,
+            slurm_cluster_id=config.slurm_cluster_id,
         )
     port_forward = transport._database_port_forward_config(args)
     db_connect_timeout_sec = transport._validated_timeout(

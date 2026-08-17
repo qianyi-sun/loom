@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from scripts.ops.task_image_builder_autoscaler_external_once import _parser as builder_parser
 
 from loom_cli.cluster_release_manifest import _external_worker_summary
 from loom_cli.environment_state import (
@@ -74,6 +75,12 @@ def test_staging_builder_supervisors_are_present_but_disabled() -> None:
         assert row["active"] is False
         assert row["script_path"].endswith(
             "/scripts/ops/task_image_builder_autoscaler_external_once.py"
+        )
+        args = builder_parser().parse_args(row["args"])
+        assert args.global_execution_witness_json.name.endswith("-witness.json")
+        assert args.manager_public_key.name == "manager-ed25519.pub"
+        assert args.expected_manager_public_key_sha256_file.name == (
+            "manager-ed25519.pub.sha256"
         )
 
 
