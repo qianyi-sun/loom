@@ -164,7 +164,7 @@ class _FakeRunner:
 
 def _pod_for(item: dict[str, Any], suffix: str, *, phase: str) -> dict[str, Any]:
     template = item["spec"]["template"]
-    return {
+    pod = {
         "apiVersion": "v1",
         "kind": "Pod",
         "metadata": {
@@ -179,6 +179,9 @@ def _pod_for(item: dict[str, Any], suffix: str, *, phase: str) -> dict[str, Any]
             "initContainerStatuses": [],
         },
     }
+    if item["kind"] == "Job":
+        pod["metadata"]["labels"]["job-name"] = item["metadata"]["name"]
+    return pod
 
 
 def _healthy_fixture(
@@ -539,6 +542,45 @@ def test_observer_rejects_untrusted_generated_resource_drift(
 
     assert result.ready is False
     assert "resource_inventory_drift" in result.blockers
+
+
+def test_observer_accepts_bounded_successful_migration_history(tmp_path: Path) -> None:
+    expected, runner = _healthy_fixture(tmp_path)
+    items = _items(runner, _NAMESPACED)
+    current_job = next(item for item in items if item["kind"] == "Job")
+    current_pod = next(
+        item
+        for item in items
+        if item["kind"] == "Pod"
+        and item["metadata"]["labels"].get("app") == "loom-personal-dev-migration"
+    )
+    historical_job = copy.deepcopy(current_job)
+    historical_pod = copy.deepcopy(current_pod)
+    historical_input = "a" * 64
+    historical_release = "b" * 64
+    historical_name = f"loom-personal-dev-migrate-{historical_input[:16]}-{historical_release[:16]}"
+
+    historical_job["metadata"]["name"] = historical_name
+    historical_pod["metadata"]["name"] = f"{historical_name}-abcde"
+    historical_pod["metadata"]["labels"]["job-name"] = historical_name
+    for metadata in (
+        historical_job["metadata"],
+        historical_job["spec"]["template"]["metadata"],
+        historical_pod["metadata"],
+    ):
+        metadata["labels"]["loom.dev/render-input"] = historical_input[:32]
+        metadata["labels"]["loom.dev/trusted-release"] = historical_release[:32]
+        metadata["annotations"]["loom.dev/render-input-sha256"] = historical_input
+        metadata["annotations"]["loom.dev/trusted-release-sha256"] = historical_release
+    historical_pod["spec"] = copy.deepcopy(historical_job["spec"]["template"]["spec"])
+    items.extend([historical_job, historical_pod])
+
+    result = _observe(expected, runner)
+
+    assert result.ready is True
+    assert result.blockers == ()
+    components = {component.name: component for component in result.components}
+    assert components["namespaced-resources"].observed == 29
 
 
 @pytest.mark.parametrize(

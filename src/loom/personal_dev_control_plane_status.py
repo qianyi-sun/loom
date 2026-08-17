@@ -25,6 +25,8 @@ _MAX_INVENTORY_ITEMS = 4096
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _IMAGE = re.compile(r"[^\s@]+@sha256:[0-9a-f]{64}")
 _CONTEXT = re.compile(r"[A-Za-z0-9_.:@/-]{1,253}")
+_MIGRATION_JOB = re.compile(r"loom-personal-dev-migrate-([0-9a-f]{16})-([0-9a-f]{16})")
+_MAX_MIGRATION_HISTORY = 8
 
 _CONTEXT_COMMAND = ("config", "current-context")
 _NAMESPACE_COMMAND = ("get", "namespaces", "--output=json")
@@ -275,20 +277,30 @@ def _digest_matches(
     input_sha256: str,
     release_sha256: str,
 ) -> bool:
+    return _observed_digests(item) == (input_sha256, release_sha256)
+
+
+def _observed_digests(item: Mapping[str, Any]) -> tuple[str, str] | None:
     metadata = _metadata(item)
     if metadata is None:
-        return False
+        return None
     labels = metadata.get("labels")
     annotations = metadata.get("annotations")
-    return (
-        isinstance(labels, Mapping)
-        and isinstance(annotations, Mapping)
-        and labels.get("app.kubernetes.io/managed-by") == _MANAGED_BY
-        and labels.get("loom.dev/render-input") == input_sha256[:32]
-        and labels.get("loom.dev/trusted-release") == release_sha256[:32]
-        and annotations.get("loom.dev/render-input-sha256") == input_sha256
-        and annotations.get("loom.dev/trusted-release-sha256") == release_sha256
-    )
+    if not isinstance(labels, Mapping) or not isinstance(annotations, Mapping):
+        return None
+    input_sha256 = annotations.get("loom.dev/render-input-sha256")
+    release_sha256 = annotations.get("loom.dev/trusted-release-sha256")
+    if (
+        not isinstance(input_sha256, str)
+        or not isinstance(release_sha256, str)
+        or _DIGEST.fullmatch(input_sha256) is None
+        or _DIGEST.fullmatch(release_sha256) is None
+        or labels.get("app.kubernetes.io/managed-by") != _MANAGED_BY
+        or labels.get("loom.dev/render-input") != input_sha256[:32]
+        or labels.get("loom.dev/trusted-release") != release_sha256[:32]
+    ):
+        return None
+    return input_sha256, release_sha256
 
 
 def _containers(item: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -324,6 +336,14 @@ def _images_match(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> boo
     return expected_images == actual_images and all(
         isinstance(image, str) and _IMAGE.fullmatch(image) is not None
         for image in actual_images.values()
+    )
+
+
+def _images_are_immutable(item: Mapping[str, Any]) -> bool:
+    containers = _containers(item)
+    return bool(containers) and all(
+        isinstance(container.get("image"), str) and _IMAGE.fullmatch(container["image"]) is not None
+        for container in containers
     )
 
 
@@ -595,9 +615,77 @@ def observe_personal_dev_shadow_status(
             for template in item["spec"].get("volumeClaimTemplates", [])
         }
         generated_pvcs = set(expected_generated_pvcs)
-        allowed_extra = generated_pvcs | {
-            identity for identity, item in live_namespaced.items() if item.get("kind") == "Pod"
+        current_migration_name = next(
+            _metadata(item).get("name")  # type: ignore[union-attr]
+            for item in expected_namespaced
+            if item.get("kind") == "Job"
+        )
+        historical_jobs = {
+            identity: item
+            for identity, item in live_namespaced.items()
+            if item.get("kind") == "Job"
+            and _metadata(item).get("name") != current_migration_name  # type: ignore[union-attr]
+            and isinstance(_metadata(item).get("name"), str)  # type: ignore[union-attr]
+            and _MIGRATION_JOB.fullmatch(_metadata(item)["name"]) is not None  # type: ignore[index]
         }
+        historical_job_names = {
+            _metadata(item)["name"]: (identity, item)  # type: ignore[index]
+            for identity, item in historical_jobs.items()
+        }
+        historical_pods: dict[
+            str,
+            list[tuple[tuple[str, str, str, str], dict[str, Any]]],
+        ] = {name: [] for name in historical_job_names}
+        for identity, pod in live_namespaced.items():
+            if pod.get("kind") != "Pod":
+                continue
+            metadata = _metadata(pod)
+            labels = metadata.get("labels") if metadata else None
+            job_name = labels.get("job-name") if isinstance(labels, Mapping) else None
+            if isinstance(job_name, str) and job_name in historical_pods:
+                historical_pods[job_name].append((identity, pod))
+        history_drift = len(historical_jobs) > _MAX_MIGRATION_HISTORY
+        for name, (_identity_value, job) in historical_job_names.items():
+            match = _MIGRATION_JOB.fullmatch(name)
+            digests = _observed_digests(job)
+            pod_entries = historical_pods[name]
+            if (
+                match is None
+                or digests is None
+                or match.groups() != (digests[0][:16], digests[1][:16])
+                or _migration_state(job) != "succeeded"
+                or not _images_are_immutable(job)
+                or len(pod_entries) != 1
+            ):
+                history_drift = True
+                continue
+            _pod_identity, pod = pod_entries[0]
+            job_spec = job.get("spec")
+            template = job_spec.get("template") if isinstance(job_spec, Mapping) else None
+            pod_status = pod.get("status")
+            if (
+                not isinstance(template, Mapping)
+                or _observed_digests(pod) != digests
+                or not _expected_subset(
+                    {
+                        "metadata": template.get("metadata"),
+                        "spec": template.get("spec"),
+                    },
+                    pod,
+                )
+                or not isinstance(pod_status, Mapping)
+                or pod_status.get("phase") != "Succeeded"
+            ):
+                history_drift = True
+        historical_identities = set(historical_jobs) | {
+            identity for entries in historical_pods.values() for identity, _pod in entries
+        }
+        current_pods = [pod for pod in pods if _identity(pod) not in historical_identities]
+        allowed_extra = (
+            generated_pvcs
+            | historical_identities
+            | {identity for identity, item in live_namespaced.items() if item.get("kind") == "Pod"}
+        )
         live_expected = {
             identity: live_namespaced[identity]
             for identity in expected_namespaced_index
@@ -637,7 +725,7 @@ def observe_personal_dev_shadow_status(
             )
         observed_pods: dict[str, list[dict[str, Any]]] = {app: [] for app in expected_pod_templates}
         pod_drift = False
-        for pod in pods:
+        for pod in current_pods:
             metadata = _metadata(pod)
             labels = metadata.get("labels") if metadata else None
             app = labels.get("app") if isinstance(labels, Mapping) else None
@@ -651,7 +739,7 @@ def observe_personal_dev_shadow_status(
             len(observed_pods[app]) != expected_count
             for app, (_template, expected_count) in expected_pod_templates.items()
         )
-        if missing or unexpected or drifted or generated_pvc_drift or pod_drift:
+        if missing or unexpected or drifted or generated_pvc_drift or pod_drift or history_drift:
             blockers.add("resource_inventory_drift")
 
         digest_ok = all(
@@ -661,6 +749,7 @@ def observe_personal_dev_shadow_status(
                 release_sha256=expected.release_sha256,
             )
             for item in namespaced_items
+            if _identity(item) not in historical_identities
         )
         if not digest_ok:
             blockers.add("resource_digest_drift")
