@@ -419,7 +419,7 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
   YAML SHA-256.
 - No apply, enable, prepare, activate, or acceptance subcommand exists.
 
-- [ ] **Step 1: Write failing parser/output/error tests**
+- [x] **Step 1: Write failing parser/output/error tests**
 
   Cover successful exact bytes, absent required arguments, abbreviated/unknown
   options, unsafe release file, validation failure before stdout, broken pipe,
@@ -429,14 +429,14 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
   Assert `loom admin --help` lists the command while `loom service up` and
   `loom dev` parsers remain unchanged.
 
-- [ ] **Step 2: Run and observe missing command**
+- [x] **Step 2: Run and observe missing command**
 
   ```bash
   PYTHONPATH=src:. /home/hongjian/loom/.venv/bin/python -m pytest -q \
     tests/loom_cli/test_personal_dev_control_plane_cmd.py
   ```
 
-- [ ] **Step 3: Implement the narrow argparse handler**
+- [x] **Step 3: Implement the narrow argparse handler**
 
   Parse with `allow_abbrev=False`. Load and validate every input before writing
   stdout. Use `sys.stdout.write(rendered.yaml_text)` once, then write this
@@ -450,7 +450,7 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
   Redact validation errors to stable messages and never echo a Secret value or
   release-file payload.
 
-- [ ] **Step 4: Run CLI plus affected admin tests**
+- [x] **Step 4: Run CLI plus affected admin tests**
 
   ```bash
   PYTHONPATH=src:. /home/hongjian/loom/.venv/bin/python -m pytest -q \
@@ -461,7 +461,7 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
     tests/loom_cli/test_personal_dev_control_plane_cmd.py
   ```
 
-- [ ] **Step 5: Commit the render command**
+- [x] **Step 5: Commit the render command**
 
   ```bash
   git add src/loom_cli/personal_dev_control_plane_cmd.py \

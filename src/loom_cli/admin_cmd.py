@@ -337,9 +337,7 @@ def _acquire_environment_state_rollout_lock(
         diagnostic = getattr(exc, "diagnostic", None)
         if isinstance(diagnostic, dict):
             sys.stderr.write(
-                "rollout lock diagnostic: "
-                + json.dumps(diagnostic, sort_keys=True)
-                + "\n",
+                "rollout lock diagnostic: " + json.dumps(diagnostic, sort_keys=True) + "\n",
             )
         raise
     sys.stderr.write(
@@ -652,9 +650,7 @@ def _ensure_smoke_user(args: argparse.Namespace) -> int:
                 "team": cred.team_name,
                 "user_id": str(cred.user_id),
                 "team_id": str(cred.team_id),
-                "expires_at": (
-                    cred.expires_at.isoformat() if cred.expires_at else None
-                ),
+                "expires_at": (cred.expires_at.isoformat() if cred.expires_at else None),
                 "rotated_prior": cred.rotated_prior,
             },
             sys.stdout,
@@ -722,9 +718,7 @@ def _ensure_batch_runner_token(args: argparse.Namespace) -> int:
             {
                 "token": tok.raw_token,
                 "token_hash_prefix": tok.token_hash_prefix,
-                "expires_at": (
-                    tok.expires_at.isoformat() if tok.expires_at else None
-                ),
+                "expires_at": (tok.expires_at.isoformat() if tok.expires_at else None),
                 "rotated_prior": tok.rotated_prior,
             },
             sys.stdout,
@@ -1088,10 +1082,7 @@ def _format_environment_state_value(value: Any) -> str:
 def _environment_state_label(profile: EnvironmentStateProfile) -> str:
     if profile.control_plane_environment == profile.environment:
         return profile.environment
-    return (
-        f"{profile.environment} "
-        f"(CP environment {profile.control_plane_environment})"
-    )
+    return f"{profile.environment} (CP environment {profile.control_plane_environment})"
 
 
 def _fetch_environment_state(
@@ -1408,14 +1399,12 @@ def _environment_state_check_impl(
                 f"reason={blocker.get('last_decision_reason') or '-'}\n",
             )
         sys.stderr.write(
-            "Resolve the autoscaler blocker before accepting this environment as "
-            "release-ready.\n",
+            "Resolve the autoscaler blocker before accepting this environment as release-ready.\n",
         )
         return 1
 
     sys.stdout.write(
-        f"Environment state {_environment_state_label(profile)} "
-        "matches desired profile.\n",
+        f"Environment state {_environment_state_label(profile)} matches desired profile.\n",
     )
     if profile.catalog_provisioning.get("required"):
         command = profile.catalog_provisioning.get("command")
@@ -1950,9 +1939,13 @@ def dispatch(argv: list[str]) -> int:
     sub = parser.add_subparsers(dest="admin_cmd", required=True)
 
     from loom_cli.capacity_control_plane_cmd import add_capacity_control_plane_subparser
+    from loom_cli.personal_dev_control_plane_cmd import (
+        add_personal_dev_control_plane_subparser,
+    )
     from loom_cli.pipeline_admin_cmd import add_pipeline_admin_subparser
 
     add_capacity_control_plane_subparser(sub)
+    add_personal_dev_control_plane_subparser(sub)
     add_pipeline_admin_subparser(sub)
 
     p_env_diagnostics = sub.add_parser(
@@ -2278,7 +2271,9 @@ def dispatch(argv: list[str]) -> int:
     )
     _add_common_args(p_autoscaler_status)
     p_autoscaler_status.add_argument(
-        "--format", choices=["text", "json"], default="text",
+        "--format",
+        choices=["text", "json"],
+        default="text",
         help="Output format.",
     )
     p_autoscaler_status.set_defaults(handler=_worker_pool_autoscaler_status)
@@ -2301,10 +2296,7 @@ def dispatch(argv: list[str]) -> int:
             "--file",
             type=Path,
             required=True,
-            help=(
-                "TOML desired-state profile, for example "
-                "deploy/environment-state/staging.toml."
-            ),
+            help=("TOML desired-state profile, for example deploy/environment-state/staging.toml."),
         )
         p.add_argument(
             "--environment",
