@@ -76,12 +76,8 @@ def test_capacity_runtime_wires_global_projector_and_trusted_installer(
     agent_certificate = credential("agent-certificate.pem", "agent-certificate")
     agent_private_key = credential("agent-private-key.pem", "agent-private-key")
     lifecycle_ca = credential("lifecycle-ca.pem", "lifecycle-ca")
-    lifecycle_certificate = credential(
-        "lifecycle-certificate.pem", "lifecycle-certificate"
-    )
-    lifecycle_private_key = credential(
-        "lifecycle-private-key.pem", "lifecycle-private-key"
-    )
+    lifecycle_certificate = credential("lifecycle-certificate.pem", "lifecycle-certificate")
+    lifecycle_private_key = credential("lifecycle-private-key.pem", "lifecycle-private-key")
 
     def projector_from_files(connection: object) -> object:
         captured["connection"] = connection
@@ -98,9 +94,7 @@ def test_capacity_runtime_wires_global_projector_and_trusted_installer(
     )
     settings = _settings(
         tmp_path,
-        personal_dev_capacity_agent_image=(
-            "registry.example/loom-service@sha256:" + "1" * 64
-        ),
+        personal_dev_capacity_agent_image=("registry.example/loom-service@sha256:" + "1" * 64),
         personal_dev_capacity_ca_file=agent_ca,
         personal_dev_capacity_certificate_file=agent_certificate,
         personal_dev_capacity_private_key_file=agent_private_key,

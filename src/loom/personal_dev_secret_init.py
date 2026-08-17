@@ -27,7 +27,7 @@ _PROFILE_FILES: dict[CredentialProfile, frozenset[str]] = {
             "capacity-reporter-ca.pem",
             "capacity-reporter-certificate.pem",
             "capacity-reporter-private-key.pem",
-            "registry-config.json",
+            "config.json",
         }
     ),
     "activation-public": frozenset({"public-key"}),

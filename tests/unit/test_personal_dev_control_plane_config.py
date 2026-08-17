@@ -36,6 +36,7 @@ def _release() -> dict[str, Any]:
             ),
             "postgres": "docker.io/library/postgres@sha256:" + "6" * 64,
             "minio": "quay.io/minio/minio@sha256:" + "7" * 64,
+            "minio_client": "quay.io/minio/mc@sha256:" + "9" * 64,
         },
         "release_evidence_sha256": "8" * 64,
     }
@@ -214,6 +215,7 @@ def test_trusted_release_loads_exact_owner_only_canonical_bytes(tmp_path: Path) 
     assert release.images.personal_dev_activation_agent.endswith("5" * 64)
     assert release.images.postgres.endswith("6" * 64)
     assert release.images.minio.endswith("7" * 64)
+    assert release.images.minio_client.endswith("9" * 64)
     assert release.release_evidence_sha256 == "8" * 64
     assert release.canonical_bytes() == path.read_bytes()
 

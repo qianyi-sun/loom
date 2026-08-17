@@ -28,6 +28,7 @@ REQUIRED_IMAGE_KEYS = {
     "personal_dev_activation_agent",
     "postgres",
     "minio",
+    "minio_client",
 }
 MAX_TRUSTED_RELEASE_BYTES = 1024 * 1024
 
@@ -373,6 +374,7 @@ class _ImagesInput(_StrictModel):
     personal_dev_activation_agent: str
     postgres: str
     minio: str
+    minio_client: str
 
     @model_validator(mode="after")
     def _images_are_exact_and_distinct(self) -> _ImagesInput:
@@ -384,6 +386,7 @@ class _ImagesInput(_StrictModel):
             ),
             "postgres": "docker.io/library/postgres",
             "minio": "quay.io/minio/minio",
+            "minio_client": "quay.io/minio/mc",
         }
         digests: list[str] = []
         for key, repository in repositories.items():
@@ -561,6 +564,7 @@ class PersonalDevTrustedImages:
     personal_dev_activation_agent: str
     postgres: str
     minio: str
+    minio_client: str
 
 
 @dataclass(frozen=True, slots=True)

@@ -62,7 +62,7 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
   `schema_version`, `source_sha`, `source_tree`, `images`, and
   `release_evidence_sha256`.
 - `images` has exactly `loom_service`, `personal_dev_builder`,
-  `personal_dev_activation_agent`, `postgres`, and `minio`.
+  `personal_dev_activation_agent`, `postgres`, `minio`, and `minio_client`.
 
 - [x] **Step 1: Write failing profile and release tests**
 
@@ -84,6 +84,7 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
           ),
           "postgres": "docker.io/library/postgres@sha256:" + "6" * 64,
           "minio": "quay.io/minio/minio@sha256:" + "7" * 64,
+          "minio_client": "quay.io/minio/mc@sha256:" + "9" * 64,
       },
       "release_evidence_sha256": "8" * 64,
   }
@@ -133,6 +134,7 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
       "personal_dev_activation_agent",
       "postgres",
       "minio",
+      "minio_client",
   }
   ```
 
@@ -195,7 +197,7 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
   `copy_projected_credentials(source: Path, destination: Path, *, profile: CredentialProfile) -> None`.
 - Produces `python -m loom.personal_dev_secret_init --profile ... --source ... --destination ...`.
 - `management-files` contains exactly:
-  `admin-secrets.toml`, `registry-config.json`, `capacity-lifecycle-token`,
+  `admin-secrets.toml`, `config.json`, `capacity-lifecycle-token`,
   `capacity-lifecycle-ca.pem`, `capacity-lifecycle-certificate.pem`,
   `capacity-lifecycle-private-key.pem`, `capacity-reporter-ca.pem`,
   `capacity-reporter-certificate.pem`, and
@@ -274,7 +276,7 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
 - YAML ordering is stable by the tuple `(scope, apiVersion, kind, namespace,
   name)`; mapping keys are emitted in deterministic insertion order.
 
-- [ ] **Step 1: Write failing complete-resource and invariant tests**
+- [x] **Step 1: Write failing complete-resource and invariant tests**
 
   Assert exact identities and document counts for Namespace; PostgreSQL and
   MinIO StatefulSets/Services/PVC templates; scanner-cache PVC; migration Job;
@@ -314,12 +316,16 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
 
   Assert the combination of RBAC and fail-closed `ValidatingAdmissionPolicy`
   bindings lets management create/read/update/delete only derived
-  `loom-dev-*` namespaces and their required namespaced resources, while the
-  activation agent can get candidate Deployments and apply stable
-  Services/Ingresses only in `loom-dev-*`. The policies match the exact service
-  account principals and reject either principal against `loom-dev`, other
-  namespaces, Secret reads outside its own pre-provisioned inputs, nodes,
-  leases outside its bounded names, and all Slurm/external-host authority.
+  `loom-dev-*` application namespaces, attempt-scoped `loom-build-*` builder
+  namespaces, and each family's exact resources. Personal Secret authority is
+  limited to the lifecycle's fixed generated names; builder Secret authority
+  is limited to attempt-capability names. The activation agent can get
+  candidate Deployments and apply stable Services/Ingresses only in
+  `loom-dev-*`, and gains that authority only through lifecycle-created
+  per-namespace RoleBindings. The policies match the exact service-account
+  principals and reject either principal against `loom-dev`, other namespaces,
+  unrelated Secrets, nodes, leases outside bounded names, and all
+  Slurm/external-host authority.
 
   Set `automountServiceAccountToken: false` everywhere. Management and
   activation pods receive explicit short-lived, audience-bound projected API
@@ -327,7 +333,7 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
   no service-account token. NetworkPolicy permits Kubernetes API egress only
   to the exact CIDR and port in the strict profile, never `0.0.0.0/0`.
 
-- [ ] **Step 2: Run tests and observe the missing-renderer failure**
+- [x] **Step 2: Run tests and observe the missing-renderer failure**
 
   ```bash
   PYTHONPATH=src:. /home/hongjian/loom/.venv/bin/python -m pytest -q \
@@ -335,7 +341,7 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
     tests/ops/test_personal_dev_control_plane_package_boundary.py
   ```
 
-- [ ] **Step 3: Implement pure resource builders and canonical input digest**
+- [x] **Step 3: Implement pure resource builders and canonical input digest**
 
   Build ordinary Python dictionaries and serialize with
   `yaml.safe_dump_all(..., explicit_start=False, sort_keys=False,
@@ -350,11 +356,13 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
       + release.canonical_bytes()
   ```
 
-  Add labels `app.kubernetes.io/managed-by=loom-personal-dev-control-plane`,
-  `loom.dev/render-input-sha256=<digest>`, and
-  `loom.dev/trusted-release-sha256=<release digest>` to every resource and pod
-  template. Migration Job name includes the first 16 characters of both
-  digests so immutable changes create a new Job.
+  Add label `app.kubernetes.io/managed-by=loom-personal-dev-control-plane`,
+  32-character `loom.dev/render-input` and `loom.dev/trusted-release` labels,
+  and full `loom.dev/render-input-sha256` and
+  `loom.dev/trusted-release-sha256` annotations to every resource and pod
+  template. Full SHA-256 values are annotations because Kubernetes label
+  values are limited to 63 characters. Migration Job name includes the first
+  16 characters of both digests so immutable changes create a new Job.
 
   The service container uses the immutable `loom_service` image for both the
   management Deployment and candidate-independent capacity-agent setting. It
@@ -362,7 +370,7 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
   clients and NetworkPolicy blocks those routes. Builder and activation images
   come only from their dedicated release entries.
 
-- [ ] **Step 4: Run focused tests and static checks**
+- [x] **Step 4: Run focused tests and static checks**
 
   ```bash
   PYTHONPATH=src:. /home/hongjian/loom/.venv/bin/python -m pytest -q \
@@ -383,7 +391,7 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
     src/loom/personal_dev_control_plane_render.py
   ```
 
-- [ ] **Step 5: Commit the shadow renderer**
+- [x] **Step 5: Commit the shadow renderer**
 
   ```bash
   git add src/loom/personal_dev_control_plane_render.py \

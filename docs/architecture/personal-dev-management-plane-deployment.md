@@ -73,8 +73,11 @@ namespace unless Kubernetes requires cluster scope:
 - `loom-dev-postgres` StatefulSet, headless/service endpoints, and persistent
   volume claim for the management database plus derived personal databases;
 - `loom-dev-minio` StatefulSet, Service, and persistent volume claim for source,
-  build, evidence, and personal buckets;
-- an immutable, release-bound migration Job for the management database;
+  build, evidence, and personal buckets; its pinned client sidecar creates the
+  base `artifacts` and `trajectories` buckets idempotently over loopback and
+  withholds readiness until both exist;
+- an immutable, release-bound migration Job for the management database, with
+  a bounded database wait and a dedicated DNS/PostgreSQL-only egress policy;
 - `loom-service` as the management API and lifecycle reconciler, using the
   trusted release's immutable service image;
 - `loom-personal-dev-activation-agent`, using its separately published immutable
@@ -92,6 +95,21 @@ service supplies its exact immutable reference to attempt-scoped Jobs. The
 candidate-independent capacity agent uses the exact immutable `loom-service`
 image and is installed only inside an activated personal namespace by the
 existing lifecycle.
+
+The management principal has two disjoint admission-constrained namespace
+families: `loom-dev-*` for personal applications and `loom-build-*` for
+attempt-scoped builder sandboxes. Builder namespaces admit only their existing
+ResourceQuota, LimitRange, ConfigMap, capability Secret, NetworkPolicy, and Job
+contract; they cannot host a personal application or alter shared
+infrastructure. The activation principal remains limited to `loom-dev-*` and
+receives authority there only through the per-namespace RoleBinding rendered
+by the lifecycle.
+
+The namespace-local management role can get only the four fixed lifecycle
+Secrets; it cannot list or watch arbitrary application or TLS Secrets.
+Management may prepare only generation-suffixed candidate Services and has no
+Ingress mutation verb. Stable Services and Ingresses remain exclusive to the
+candidate-independent activation principal.
 
 The builder RuntimeClass is an independently installed cluster capability. The
 shadow package records its exact future name but sets builder preparation to
@@ -120,7 +138,8 @@ The render command requires complete digest references for:
 - `loom-personal-dev-builder`;
 - `loom-personal-dev-activation-agent`;
 - PostgreSQL; and
-- MinIO.
+- MinIO plus the separate MinIO client sidecar used for bounded tenant
+  administration.
 
 Mutable tags, missing architectures, zero digests, duplicate repositories, or
 an image set from different trusted releases fail before YAML is written. The
@@ -177,6 +196,10 @@ projected Secret. Scalar settings already consumed through the schema-backed
 service environment (database URLs, MinIO keys, and the SecretStore master key)
 use bounded `secretKeyRef` entries and never appear in rendered YAML or command
 arguments.
+
+The registry credential is projected and copied as `config.json`, the exact
+filename required by Docker-compatible tooling; no symlink or post-copy rename
+bridges a differently named Secret key.
 
 ## State transitions and failure handling
 

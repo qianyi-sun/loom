@@ -164,19 +164,37 @@ def test_personal_generation_prepares_without_switching_stable_routes() -> None:
         "loom-service-g8",
         "loom-web-g8",
     }
-    role_bindings = [
-        document for document in preparation if document["kind"] == "RoleBinding"
-    ]
-    assert len(role_bindings) == 1
-    assert role_bindings[0]["roleRef"] == {
+    role_bindings = [document for document in preparation if document["kind"] == "RoleBinding"]
+    assert len(role_bindings) == 2
+    activation_binding = next(
+        item
+        for item in role_bindings
+        if item["metadata"]["name"] == "loom-personal-dev-activation-agent"
+    )
+    assert activation_binding["roleRef"] == {
         "apiGroup": "rbac.authorization.k8s.io",
         "kind": "ClusterRole",
         "name": "loom-personal-dev-activation-agent",
     }
-    assert role_bindings[0]["subjects"] == [
+    assert activation_binding["subjects"] == [
         {
             "kind": "ServiceAccount",
             "name": "loom-personal-dev-activation-agent",
+            "namespace": "loom-dev",
+        }
+    ]
+    management_binding = next(
+        item for item in role_bindings if item["metadata"]["name"] == "loom-personal-dev-management"
+    )
+    assert management_binding["roleRef"] == {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "ClusterRole",
+        "name": "loom-personal-dev-managed-namespace",
+    }
+    assert management_binding["subjects"] == [
+        {
+            "kind": "ServiceAccount",
+            "name": "loom-personal-dev-management",
             "namespace": "loom-dev",
         }
     ]
@@ -221,18 +239,16 @@ def test_personal_manifest_default_denies_network_and_allows_only_required_route
         port["port"]
         for rule in egress
         if any(
-            peer.get("namespaceSelector", {}).get("matchLabels", {}).get(
-                "kubernetes.io/metadata.name"
-            )
+            peer.get("namespaceSelector", {})
+            .get("matchLabels", {})
+            .get("kubernetes.io/metadata.name")
             == "loom-dev"
             for peer in rule["to"]
         )
         for port in rule["ports"]
     }
     assert shared_ports == {5432, 9000}
-    public = next(
-        rule for rule in egress if any("ipBlock" in peer for peer in rule["to"])
-    )
+    public = next(rule for rule in egress if any("ipBlock" in peer for peer in rule["to"]))
     ipv4 = next(peer["ipBlock"] for peer in public["to"] if peer["ipBlock"]["cidr"] == "0.0.0.0/0")
     assert "10.0.0.0/8" in ipv4["except"]
     assert "169.254.0.0/16" in ipv4["except"]
@@ -240,9 +256,7 @@ def test_personal_manifest_default_denies_network_and_allows_only_required_route
 
     ingress = policies["runtime-ingress"]["spec"]["ingress"]
     assert any(
-        peer.get("namespaceSelector", {}).get("matchLabels", {}).get(
-            "kubernetes.io/metadata.name"
-        )
+        peer.get("namespaceSelector", {}).get("matchLabels", {}).get("kubernetes.io/metadata.name")
         == "ingress-nginx"
         for rule in ingress
         for peer in rule["from"]

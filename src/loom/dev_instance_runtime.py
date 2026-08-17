@@ -962,13 +962,37 @@ class KubectlCandidateGenerationProvisioner:
 
     kubectl: KubectlClient
 
+    async def bootstrap(
+        self,
+        identity: DevInstanceIdentity,
+        config: DevInstanceManifestConfig,
+    ) -> None:
+        documents = personal_dev_preparation_manifest_documents(identity, config)
+        try:
+            management_binding = next(
+                document
+                for document in documents
+                if document["kind"] == "RoleBinding"
+                and document["metadata"]["name"] == "loom-personal-dev-management"
+            )
+        except StopIteration:
+            raise DevInstanceRuntimeError(
+                "personal namespace read authority is unavailable",
+            ) from None
+        await self.kubectl.apply(
+            yaml.safe_dump_all(
+                (documents[0], management_binding),
+                sort_keys=False,
+                explicit_start=True,
+            ),
+        )
+
     async def prepare(
         self,
         identity: DevInstanceIdentity,
         config: DevInstanceManifestConfig,
     ) -> PersonalDevReadinessObservation:
         documents = personal_dev_preparation_manifest_documents(identity, config)
-        namespace = documents[0]
         try:
             migration_index = next(
                 index for index, document in enumerate(documents) if document["kind"] == "Job"
@@ -976,8 +1000,19 @@ class KubectlCandidateGenerationProvisioner:
         except StopIteration:
             raise DevInstanceRuntimeError("candidate migration manifest is unavailable") from None
         migration = documents[migration_index]
-        runtime = (*documents[1:migration_index], *documents[migration_index + 1 :])
-        await self.kubectl.apply(yaml.safe_dump(namespace, sort_keys=False))
+        bootstrap = tuple(
+            document
+            for document in documents[1:migration_index]
+            if not (
+                document["kind"] == "RoleBinding"
+                and document["metadata"]["name"] == "loom-personal-dev-management"
+            )
+        )
+        runtime = documents[migration_index + 1 :]
+        await self.bootstrap(identity, config)
+        await self.kubectl.apply(
+            yaml.safe_dump_all(bootstrap, sort_keys=False, explicit_start=True),
+        )
         await self.kubectl.apply(yaml.safe_dump(migration, sort_keys=False))
         migration_name = str(migration["metadata"]["name"])
         await self.kubectl.wait_job(identity.namespace, migration_name)

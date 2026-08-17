@@ -15,9 +15,7 @@ from loom.personal_dev_candidate import (
     PersonalDevPlatform,
 )
 
-_IMMUTABLE_IMAGE_RE = re.compile(
-    r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,511}@sha256:[0-9a-f]{64}"
-)
+_IMMUTABLE_IMAGE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,511}@sha256:[0-9a-f]{64}")
 _STORAGE_RE = re.compile(r"[1-9][0-9]*(?:Mi|Gi)")
 _CPU_RE = re.compile(r"[1-9][0-9]*")
 _MANAGED_LABELS = {
@@ -79,10 +77,13 @@ class PersonalDevBuilderManifestConfig:
             raise ValueError("personal-dev builder capability secret name is invalid")
         if self.shared_namespace != "loom-dev":
             raise ValueError("personal-dev builder shared namespace must be loom-dev")
-        if re.fullmatch(
-            r"[a-z0-9](?:[-a-z0-9.]{0,61}[a-z0-9])?",
-            self.runtime_class_name,
-        ) is None:
+        if (
+            re.fullmatch(
+                r"[a-z0-9](?:[-a-z0-9.]{0,61}[a-z0-9])?",
+                self.runtime_class_name,
+            )
+            is None
+        ):
             raise ValueError("personal-dev builder runtime class is invalid")
         if self.image_pull_policy not in {"Always", "IfNotPresent", "Never"}:
             raise ValueError("personal-dev builder image pull policy is invalid")
@@ -181,9 +182,7 @@ def personal_dev_builder_manifest_documents(
     namespace = f"loom-build-{attempt.id.hex}-{lease_suffix}"
     architecture = platform.rsplit("/", 1)[1]
     contract_name = f"build-contract-{architecture}-{lease_suffix}"
-    capability_secret_name = (
-        f"{config.capability_secret_name}-{architecture}-{lease_suffix}"
-    )
+    capability_secret_name = f"{config.capability_secret_name}-{architecture}-{lease_suffix}"
     namespace_document = {
         "apiVersion": "v1",
         "kind": "Namespace",
@@ -196,6 +195,23 @@ def personal_dev_builder_manifest_documents(
                 "pod-security.kubernetes.io/warn": "restricted",
             },
         },
+    }
+    management_binding = {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "RoleBinding",
+        "metadata": _metadata("loom-personal-dev-management", namespace, registration),
+        "roleRef": {
+            "apiGroup": "rbac.authorization.k8s.io",
+            "kind": "ClusterRole",
+            "name": "loom-personal-dev-managed-namespace",
+        },
+        "subjects": [
+            {
+                "kind": "ServiceAccount",
+                "name": "loom-personal-dev-management",
+                "namespace": "loom-dev",
+            }
+        ],
     }
     quota = {
         "apiVersion": "v1",
@@ -431,6 +447,7 @@ def personal_dev_builder_manifest_documents(
     }
     return (
         namespace_document,
+        management_binding,
         quota,
         limit_range,
         default_deny,

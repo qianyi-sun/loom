@@ -21,7 +21,7 @@ _MANAGEMENT_FILES = {
     "capacity-reporter-ca.pem",
     "capacity-reporter-certificate.pem",
     "capacity-reporter-private-key.pem",
-    "registry-config.json",
+    "config.json",
 }
 
 

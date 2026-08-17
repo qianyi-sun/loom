@@ -662,6 +662,7 @@ async def test_live_preparation_runtime_converges_fixtures_then_exact_generation
         password = None
 
         async def database_password(self, _identity):
+            assert events and events[-1] == "namespace-authority"
             return self.password
 
         async def store(self, _identity, password):
@@ -675,6 +676,12 @@ async def test_live_preparation_runtime_converges_fixtures_then_exact_generation
             events.append("tenant")
 
     class _Cluster:
+        async def bootstrap(self, _identity, config):
+            assert config.candidate_sha == "a" * 64
+            assert config.lifecycle_binding is not None
+            assert config.lifecycle_binding.attempt_id == _ATTEMPT_ID
+            events.append("namespace-authority")
+
         async def prepare(self, _identity, config):
             assert config.candidate_sha == "a" * 64
             assert config.lifecycle_binding is not None
@@ -705,13 +712,20 @@ async def test_live_preparation_runtime_converges_fixtures_then_exact_generation
     )
 
     assert observation == _observation()
-    assert events == ["database", "buckets", "secrets", "tenant", "generation"]
+    assert events == [
+        "namespace-authority",
+        "database",
+        "buckets",
+        "secrets",
+        "tenant",
+        "generation",
+    ]
 
     await runtime.bootstrap_access(
         _claim(),
         access=owner_access,  # type: ignore[arg-type]
     )
-    assert events[-1] == "access"
+    assert events[-2:] == ["namespace-authority", "access"]
 
 
 @pytest.mark.asyncio
