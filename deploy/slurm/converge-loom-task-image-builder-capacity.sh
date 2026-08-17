@@ -126,7 +126,11 @@ if [[ "$association_cluster" != "$CLUSTER" \
   exit 1
 fi
 
-reservation_state="$(scontrol show reservation "$RESERVATION" -o 2>/dev/null || true)"
+reservation_state="$(
+  scontrol show reservation -o 2>/dev/null \
+    | grep -E "^ReservationName=$RESERVATION([[:space:]]|$)" \
+    || true
+)"
 validate_reservation() {
   local state="$1"
   for expected in \
@@ -156,7 +160,7 @@ else
   # while the active reservation prevents a replacement job from taking the node.
   scontrol create reservation ReservationName="$RESERVATION" StartTime=now \
     Duration=INFINITE Nodes="$NODE" PartitionName="$PARTITION" \
-    Users="$SERVICE_USER" Accounts="$ACCOUNT" Flags=SPEC_NODES,IGNORE_JOBS
+    Users="$SERVICE_USER" Accounts="$ACCOUNT" Flags=IGNORE_JOBS
 fi
 reservation_readback="$(scontrol show reservation "$RESERVATION" -o)"
 if ! validate_reservation "$reservation_readback"; then

@@ -35,7 +35,8 @@ def test_converger_is_fixed_parseable_and_nonpreemptive() -> None:
     assert "MaxSubmitJobsPU=1" in source
     assert "MaxWall=04:00:00" in source
     assert "Duration=INFINITE" in source
-    assert "Flags=SPEC_NODES,IGNORE_JOBS" in source
+    assert "Flags=IGNORE_JOBS" in source
+    assert 'grep -E "^ReservationName=$RESERVATION' in source
     assert "scancel" not in source
     assert "delete qos" not in source
     assert "delete reservation" not in source
