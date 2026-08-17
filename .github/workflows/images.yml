@@ -2133,6 +2133,256 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+  personal-dev-trusted-release:
+    name: publish protected personal-development trusted release
+    needs: [plan, publish-manifest]
+    if: >-
+      (github.event_name == 'push' ||
+       (github.event_name == 'workflow_dispatch' &&
+        needs.plan.outputs.trusted_publish == 'true')) &&
+      (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') &&
+      needs.plan.outputs.gate_mode == 'full' &&
+      needs.plan.outputs.required == 'true' &&
+      needs.publish-manifest.result == 'success' &&
+      contains(needs.plan.outputs.images, '"image":"service"') &&
+      contains(needs.plan.outputs.images, '"image":"personal-dev-builder"') &&
+      contains(needs.plan.outputs.images, '"image":"personal-dev-activation-agent"')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+
+      - name: Download exact service AMD64 architecture evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: image-release-record-service-amd64-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: /tmp/loom-personal-dev-release-records
+
+      - name: Download exact service ARM64 architecture evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: image-release-record-service-arm64-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: /tmp/loom-personal-dev-release-records
+
+      - name: Download exact personal-dev-builder AMD64 architecture evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: image-release-record-personal-dev-builder-amd64-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: /tmp/loom-personal-dev-release-records
+
+      - name: Download exact personal-dev-builder ARM64 architecture evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: image-release-record-personal-dev-builder-arm64-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: /tmp/loom-personal-dev-release-records
+
+      - name: Download exact personal-dev-activation-agent AMD64 architecture evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: image-release-record-personal-dev-activation-agent-amd64-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: /tmp/loom-personal-dev-release-records
+
+      - name: Download exact personal-dev-activation-agent ARM64 architecture evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: image-release-record-personal-dev-activation-agent-arm64-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: /tmp/loom-personal-dev-release-records
+
+      - name: Read back six immutable image indexes
+        shell: bash
+        env:
+          GHCR_ACTOR: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.sha }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/loom-personal-dev-release-manifests
+          printf '%s' "$GHCR_TOKEN" \
+            | docker login ghcr.io --username "$GHCR_ACTOR" --password-stdin
+          owner_lower=$(printf '%s' "$REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+          for binding in \
+            service=loom-service \
+            personal-dev-builder=loom-personal-dev-builder \
+            personal-dev-activation-agent=loom-personal-dev-activation-agent; do
+            component=${binding%%=*}
+            image_name=${binding#*=}
+            subject="ghcr.io/${owner_lower}/${image_name}"
+            by_tag="/tmp/${component}-by-tag.json"
+            by_digest="/tmp/${component}-by-digest.json"
+            docker buildx imagetools inspect --raw \
+              "${subject}:manifest-${HEAD_SHA}" > "$by_tag"
+            digest="sha256:$(sha256sum "$by_tag" | awk '{print $1}')"
+            docker buildx imagetools inspect --raw \
+              "${subject}@${digest}" > "$by_digest"
+            cmp --silent "$by_tag" "$by_digest"
+            mv "$by_digest" \
+              "/tmp/loom-personal-dev-release-manifests/${component}.json"
+          done
+          for key in postgres minio minio_client; do
+            reference=$(jq -er --arg key "$key" \
+              '.images[$key].reference' \
+              deploy/dev-fleet/personal-dev-external-images.json)
+            manifest="/tmp/loom-personal-dev-release-manifests/${key}.json"
+            docker buildx imagetools inspect --raw "$reference" > "$manifest"
+            observed="sha256:$(sha256sum "$manifest" | awk '{print $1}')"
+            [[ "$reference" == *@"$observed" ]] || {
+              echo "FAIL: external image index digest readback changed" >&2
+              exit 1
+            }
+          done
+
+      - name: Assemble canonical personal-development release
+        shell: bash
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          tree_sha=$(git rev-parse "${HEAD_SHA}^{tree}")
+          python3 scripts/ci_personal_dev_trusted_release.py assemble \
+            --records-dir /tmp/loom-personal-dev-release-records \
+            --manifests-dir /tmp/loom-personal-dev-release-manifests \
+            --external-images-file deploy/dev-fleet/personal-dev-external-images.json \
+            --repository "$GITHUB_REPOSITORY" \
+            --ref-name "$REF_NAME" \
+            --source-sha "$HEAD_SHA" \
+            --source-tree "$tree_sha" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --event-name "$GITHUB_EVENT_NAME" \
+            --repository-id "$GITHUB_REPOSITORY_ID" \
+            --repository-owner-id "$GITHUB_REPOSITORY_OWNER_ID" \
+            --runner-environment "$RUNNER_ENVIRONMENT" \
+            --output-dir /tmp/loom-personal-dev-trusted-release
+
+      - name: Verify three protected Loom manifest attestations
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF_NAME: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          tree_sha=$(git rev-parse "${HEAD_SHA}^{tree}")
+          evidence=/tmp/loom-personal-dev-trusted-release/trusted-release-evidence.json
+          for component in service personal-dev-builder personal-dev-activation-agent; do
+            case "$component" in
+              service)
+                image_name=loom-service
+                dockerfile=deploy/Dockerfile.service
+                ;;
+              personal-dev-builder)
+                image_name=loom-personal-dev-builder
+                dockerfile=deploy/Dockerfile.personal-dev-builder
+                ;;
+              personal-dev-activation-agent)
+                image_name=loom-personal-dev-activation-agent
+                dockerfile=deploy/Dockerfile.personal-dev-activation-agent
+                ;;
+              *) exit 1 ;;
+            esac
+            reference=$(jq -er --arg component "$component" \
+              '.internal_images[$component].reference' "$evidence")
+            subject_name=${reference%@*}
+            subject_digest=${reference##*@}
+            verification="/tmp/${component}-manifest.verified.json"
+            gh attestation verify "oci://${reference}" \
+              --bundle-from-oci \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/images.yml" \
+              --source-digest "$HEAD_SHA" \
+              --source-ref "refs/heads/${REF_NAME}" \
+              --deny-self-hosted-runners \
+              --predicate-type https://slsa.dev/provenance/v1 \
+              --format json > "$verification"
+            amd64_digest=$(jq -er --arg component "$component" \
+              '.internal_images[$component].platforms["linux/amd64"].subject_digest' \
+              "$evidence")
+            arm64_digest=$(jq -er --arg component "$component" \
+              '.internal_images[$component].platforms["linux/arm64"].subject_digest' \
+              "$evidence")
+            amd64_scan=$(jq -er --arg component "$component" \
+              '.internal_images[$component].platforms["linux/amd64"].scan_report_sha256' \
+              "$evidence")
+            arm64_scan=$(jq -er --arg component "$component" \
+              '.internal_images[$component].platforms["linux/arm64"].scan_report_sha256' \
+              "$evidence")
+            amd64_build=$(jq -cer --arg component "$component" \
+              '.internal_images[$component].platforms["linux/amd64"].build' "$evidence")
+            arm64_build=$(jq -cer --arg component "$component" \
+              '.internal_images[$component].platforms["linux/arm64"].build' "$evidence")
+            python3 scripts/ci_image_release_evidence.py verify-manifest \
+              --verification "$verification" \
+              --repository "$GITHUB_REPOSITORY" \
+              --ref-name "$REF_NAME" \
+              --head-sha "$HEAD_SHA" \
+              --tree-sha "$tree_sha" \
+              --run-id "$GITHUB_RUN_ID" \
+              --run-attempt "$GITHUB_RUN_ATTEMPT" \
+              --event-name "$GITHUB_EVENT_NAME" \
+              --repository-id "$GITHUB_REPOSITORY_ID" \
+              --repository-owner-id "$GITHUB_REPOSITORY_OWNER_ID" \
+              --runner-environment "$RUNNER_ENVIRONMENT" \
+              --image "$component" \
+              --image-name "$image_name" \
+              --dockerfile "$dockerfile" \
+              --build-context . \
+              --subject-name "$subject_name" \
+              --subject-digest "$subject_digest" \
+              --architecture-digest "linux/amd64=${amd64_digest}" \
+              --architecture-digest "linux/arm64=${arm64_digest}" \
+              --scan-report-digest "linux/amd64=${amd64_scan}" \
+              --scan-report-digest "linux/arm64=${arm64_scan}" \
+              --architecture-build "linux/amd64=${amd64_build}" \
+              --architecture-build "linux/arm64=${arm64_build}"
+          done
+
+      - name: Revalidate canonical personal-development release
+        shell: bash
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          tree_sha=$(git rev-parse "${HEAD_SHA}^{tree}")
+          output=/tmp/loom-personal-dev-trusted-release
+          python3 scripts/ci_personal_dev_trusted_release.py validate \
+            --records-dir /tmp/loom-personal-dev-release-records \
+            --manifests-dir /tmp/loom-personal-dev-release-manifests \
+            --external-images-file deploy/dev-fleet/personal-dev-external-images.json \
+            --repository "$GITHUB_REPOSITORY" \
+            --ref-name "$REF_NAME" \
+            --source-sha "$HEAD_SHA" \
+            --source-tree "$tree_sha" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --event-name "$GITHUB_EVENT_NAME" \
+            --repository-id "$GITHUB_REPOSITORY_ID" \
+            --repository-owner-id "$GITHUB_REPOSITORY_OWNER_ID" \
+            --runner-environment "$RUNNER_ENVIRONMENT" \
+            --release-file "$output/trusted-release.json" \
+            --evidence-file "$output/trusted-release-evidence.json" \
+            --sha256-file "$output/trusted-release.sha256"
+
+      - name: Upload protected personal-development trusted release
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: personal-dev-trusted-release-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: |
+            /tmp/loom-personal-dev-trusted-release/trusted-release.json
+            /tmp/loom-personal-dev-trusted-release/trusted-release-evidence.json
+            /tmp/loom-personal-dev-trusted-release/trusted-release.sha256
+          if-no-files-found: error
+          retention-days: 90
+
   images-gate:
     name: >-
       ${{ github.event_name == 'workflow_dispatch' &&
@@ -2147,7 +2397,7 @@ jobs:
           'images-gate-filtered' }}
     runs-on: ubuntu-latest
     if: always() && needs.plan.outputs.gate_mode != 'filtered'
-    needs: [plan, build, stage1-build, candidate-index, publish, publish-manifest, stage1-publish, stage1-publish-index]
+    needs: [plan, build, stage1-build, candidate-index, publish, publish-manifest, personal-dev-trusted-release, stage1-publish, stage1-publish-index]
     steps:
       - name: Enforce selected image result
         env:
@@ -2160,6 +2410,7 @@ jobs:
           CANDIDATE_INDEX_RESULT: ${{ needs.candidate-index.result }}
           PUBLISH_RESULT: ${{ needs.publish.result }}
           MANIFEST_RESULT: ${{ needs.publish-manifest.result }}
+          PERSONAL_DEV_RELEASE_RESULT: ${{ needs.personal-dev-trusted-release.result }}
           STAGE1_IMAGES: ${{ needs.plan.outputs.stage1_images }}
           STAGE1_BUILD_RESULT: ${{ needs.stage1-build.result }}
           STAGE1_PUBLISH_RESULT: ${{ needs.stage1-publish.result }}
@@ -2174,6 +2425,7 @@ jobs:
           STAGE1_BUILD_RESULT=${STAGE1_BUILD_RESULT:-skipped}
           STAGE1_PUBLISH_RESULT=${STAGE1_PUBLISH_RESULT:-skipped}
           STAGE1_INDEX_RESULT=${STAGE1_INDEX_RESULT:-skipped}
+          PERSONAL_DEV_RELEASE_RESULT=${PERSONAL_DEV_RELEASE_RESULT:-skipped}
           [[ "$PLAN_RESULT" == "success" ]] || exit 1
           case "$GATE_MODE" in
             full|filtered) ;;
@@ -2193,6 +2445,24 @@ jobs:
             true|false) ;;
             *) echo "FAIL: invalid planner boolean required=${REQUIRED@Q}" >&2; exit 1 ;;
           esac
+          personal_dev_release_selected=$(python3 -c '
+          import json, sys
+          images = json.load(sys.stdin)
+          selected = {item.get("image") for item in images if isinstance(item, dict)}
+          required = {
+              "service",
+              "personal-dev-builder",
+              "personal-dev-activation-agent",
+          }
+          print("true" if required <= selected else "false")
+          ' <<< "$STANDARD_IMAGES")
+          if [[ "$REQUIRED" == "true" \
+                && ("$EVENT_NAME" == "push" || "$TRUSTED_PUBLISH" == "true") \
+                && "$personal_dev_release_selected" == "true" ]]; then
+            [[ "$PERSONAL_DEV_RELEASE_RESULT" == "success" ]] || exit 1
+          else
+            [[ "$PERSONAL_DEV_RELEASE_RESULT" == "skipped" ]] || exit 1
+          fi
           if [[ "$REQUIRED" == "true" ]]; then
             if [[ "$EVENT_NAME" == "push" || "$TRUSTED_PUBLISH" == "true" ]]; then
               [[ "$BUILD_RESULT" == "skipped" ]] || exit 1
