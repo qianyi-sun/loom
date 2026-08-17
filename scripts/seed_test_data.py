@@ -3,7 +3,8 @@
 Two modes:
 
 - `--mode test` (default) — system-test fixture: hello-world Task,
-  card-e2e RateCard, + team/worker tokens. Existing tests rely on these rows.
+  card-e2e RateCard, + team/worker/builder tokens. Existing tests rely on these
+  rows.
 - `--mode dev` — what `loom service up` calls: team/worker tokens + every shipped
   benchmark adapter registered from HF Hub so the SPA dropdown is
   populated and submittable out of the box, plus a checked-in, network-free
@@ -25,11 +26,11 @@ converts in-process, uploads to local MinIO, and writes `s3://` source
 URLs. Slow on first boot (minutes), network-heavy, but works without
 HF Hub access.
 
-Prints team/worker service tokens to stdout. System tests and local automation
-use the team token as a bearer credential for API calls, and workers use the
-worker token for control-plane registration/claims. Browser users do not log in
-with these tokens; public/dev browser login uses username/password account
-setup or reset links. The dev admin token is file-backed and managed by
+Prints selected test/dev service tokens to stdout. System tests use the team
+token for API calls, the ordinary worker token for trial claims, and a distinct
+least-privilege builder token for task-image materialization. Browser users do
+not log in with these tokens; public/dev browser login uses username/password
+account setup or reset links. The dev admin token is file-backed and managed by
 `loom service init-admin`, `loom service up`, and `loom service rotate-admin`.
 
 In production, an admin uses /admin/* + the rate-card admin endpoint; this
@@ -40,6 +41,7 @@ script side-channels straight into Postgres for speed and refuses to run when
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import json
 import os
@@ -51,8 +53,10 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from loom_benchmarks.util import sha256_of_dir
 from sqlalchemy import create_engine, insert, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from loom.db.schema import (
@@ -65,6 +69,7 @@ from loom.db.schema import (
     Token,
     User,
 )
+from loom.task_image_materialization import ensure_task_image_materializations
 
 DB_URL = "postgresql+psycopg://loom:loom@localhost:55432/loom"
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -78,6 +83,20 @@ _SLB_DEV_BASELINES = (
     "skilllearnbench-b4-skill-creator-claude-haiku-4-5",
 )
 _SLB_DEV_TASKS = tuple(f"anthropic-poster-design-{index}" for index in range(1, 6))
+
+
+async def _ensure_test_task_image_queue(db_url: str, task_id: str) -> None:
+    """Use the registration queue helper for direct-insert system fixtures."""
+    engine = create_async_engine(db_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session, session.begin():
+            task = await session.get(Task, task_id)
+            if task is None:
+                raise RuntimeError(f"seeded system task {task_id!r} is unavailable")
+            await ensure_task_image_materializations(session, task_row=task)
+    finally:
+        await engine.dispose()
 _SKILLFLOW_DEV_BENCHMARK = "skillflow-iterative"
 
 
@@ -393,7 +412,9 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--print", choices=("team", "worker", "both", "all"), default="team",
+        "--print",
+        choices=("team", "worker", "both", "system", "all"),
+        default="team",
         help=(
             "Which token to print to stdout (default: team). "
             "Admin credentials are file-backed singleton secrets."
@@ -482,6 +503,7 @@ def main() -> None:
     token_prefix = "loom_api_" if args.mode == "test" else "loom_team_"
     raw_team = token_prefix + secrets.token_hex(8)
     raw_worker = "loom_w_" + secrets.token_hex(8)
+    raw_builder = "loom_tib_" + secrets.token_bytes(32).hex()
     now = datetime.now(UTC)
 
     # Test-mode task fixture is loaded ONLY when --mode test (or
@@ -493,9 +515,7 @@ def main() -> None:
         if not (fixture_dir / "task.toml").is_file():
             raise SystemExit(f"unknown fixture {args.task_id} at {fixture_dir}")
         config = tomllib.loads((fixture_dir / "task.toml").read_text())
-        checksum = hashlib.sha256(
-            (fixture_dir / "task.toml").read_bytes(),
-        ).hexdigest()
+        checksum = sha256_of_dir(fixture_dir)
 
     with session_local() as s:
         s.execute(insert(Team).values(id=team_id, name=f"e2e-{team_id}"))
@@ -528,6 +548,14 @@ def main() -> None:
             issued_at=now, expires_at=None,
         ))
         if args.mode == "test":
+            s.execute(insert(Token).values(
+                token_hash=hashlib.sha256(raw_builder.encode()).digest(),
+                type="worker",
+                scopes=["task-image:build"],
+                team_id=None,
+                issued_at=now,
+                expires_at=None,
+            ))
             # Task may already exist if called twice for the same
             # fixture (e.g., stack_up + a second test re-seeding).
             # Skip in that case so repeated calls don't crash the
@@ -574,6 +602,9 @@ def main() -> None:
 
         s.commit()
     engine.dispose()
+
+    if args.mode == "test":
+        asyncio.run(_ensure_test_task_image_queue(args.db_url, args.task_id))
 
     # Default path: register from HF Hub. `run_register` opens its
     # own async session per benchmark; no shared sync session.
@@ -651,6 +682,12 @@ def main() -> None:
     elif args.print == "both":
         print(raw_team)
         print(raw_worker)
+    elif args.print == "system":
+        if args.mode != "test":
+            raise SystemExit("--print system is only available in --mode test")
+        print(raw_team)
+        print(raw_worker)
+        print(raw_builder)
     else:  # "all"
         print(f"team: {raw_team}")
         print(f"worker: {raw_worker}")

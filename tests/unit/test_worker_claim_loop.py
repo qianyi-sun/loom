@@ -138,6 +138,19 @@ def test_idle_exit_tracker_claim_resets_idle_timer() -> None:
     assert tracker.idle_for_seconds == 3.0
 
 
+def test_managed_image_eviction_tracker_runs_periodically() -> None:
+    now = iter([100.0, 3_699.0, 3_700.0, 7_299.0, 7_300.0])
+    tracker = ml._PeriodicMaintenanceTracker(  # type: ignore[attr-defined]
+        interval_seconds=3_600,
+        now=lambda: next(now),
+    )
+
+    assert tracker.due() is False
+    assert tracker.due() is True
+    assert tracker.due() is False
+    assert tracker.due() is True
+
+
 def test_configure_blocking_io_executor_sets_loop_default(
     monkeypatch,
 ) -> None:  # type: ignore[no-untyped-def]

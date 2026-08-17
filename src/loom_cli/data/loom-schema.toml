@@ -1411,6 +1411,36 @@ python_type = "int"
 default     = 20
 description = "Capacity-pressure backstop: when worker disk free drops below this, delete oldest-by-creation trial-cache images regardless of TTL."
 
+[service_config.task_image_local_ttl_hours]
+used_by     = ["worker"]
+python_type = "int"
+default     = 168
+description = "Creation-age TTL for all Loom-managed local task, sidecar, and layered images."
+
+[service_config.task_image_min_free_gb]
+used_by     = ["worker"]
+python_type = "int"
+default     = 20
+description = "Free-space floor for managed-image eviction on builder and execution Docker daemons."
+
+[service_config.task_image_registry_grace_hours]
+used_by     = ["control-plane"]
+python_type = "int"
+default     = 168
+description = "Grace period before an unreferenced task-image materialization becomes eligible for registry deletion and garbage collection."
+
+[service_config.task_image_builder_idle_exit_seconds]
+used_by     = ["worker"]
+python_type = "int"
+default     = 120
+description = "Idle duration after which an exclusive task-image builder exits so its Slurm allocation can scale to zero."
+
+[service_config.task_image_builder_lease_seconds]
+used_by     = ["control-plane"]
+python_type = "float"
+default     = 300.0
+description = "Server-authoritative task-image builder lease duration renewed by fenced heartbeats."
+
 [service_config.trial_cache_build_lock_timeout_sec]
 used_by     = ["worker"]
 python_type = "float"

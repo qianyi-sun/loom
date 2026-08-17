@@ -1,6 +1,6 @@
 import hashlib
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, delete, insert, select, update
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import Token, WorkerPoolAutoscalerPolicy
+from loom.db.schema import TaskImageMaterialization, Token, WorkerPoolAutoscalerPolicy
 from loom_control_plane.app import create_app
 from loom_control_plane.config import ControlPlaneSettings
 
@@ -251,6 +251,185 @@ def test_issue_worker_token_accepts_singleton_admin_secret(
     body = r.json()
     assert body["token"].startswith("loom_w_")
     assert "token_hash_prefix" in body
+
+
+def test_issue_task_image_builder_token_is_least_privilege(
+    app,  # type: ignore[no-untyped-def]
+    postgres_url: str,
+) -> None:
+    with TestClient(app) as client:
+        response = client.post(
+            "/admin/task-image-builder-tokens",
+            headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
+            json={"expires_in_days": 30},
+        )
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["token"].startswith("loom_tib_")
+
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            row = session.scalar(
+                select(Token).where(
+                    Token.token_hash == hashlib.sha256(body["token"].encode()).digest(),
+                )
+            )
+            assert row is not None
+            assert row.type == "worker"
+            assert row.scopes == ["task-image:build"]
+            assert row.team_id is None
+            assert row.expires_at is not None
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"expires_in_days": 0},
+        {"expires_in_days": "30"},
+        {"expires_in_days": 30, "scopes": ["worker:claim"]},
+    ],
+)
+def test_issue_task_image_builder_token_rejects_unsafe_payloads(
+    app,  # type: ignore[no-untyped-def]
+    payload: dict[str, object],
+) -> None:
+    with TestClient(app) as client:
+        response = client.post(
+            "/admin/task-image-builder-tokens",
+            headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
+            json=payload,
+        )
+
+    assert response.status_code == 422
+
+
+def test_issue_task_image_registry_gc_token_is_least_privilege(
+    app,  # type: ignore[no-untyped-def]
+    postgres_url: str,
+) -> None:
+    with TestClient(app) as client:
+        response = client.post(
+            "/admin/task-image-registry-gc-tokens",
+            headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
+            json={"expires_in_days": 30},
+        )
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["token"].startswith("loom_tigc_")
+
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            row = session.scalar(
+                select(Token).where(
+                    Token.token_hash == hashlib.sha256(body["token"].encode()).digest(),
+                )
+            )
+            assert row is not None
+            assert row.type == "worker"
+            assert row.scopes == ["task-image:gc"]
+            assert row.team_id is None
+            assert row.expires_at is not None
+    finally:
+        engine.dispose()
+
+
+def test_admin_can_requeue_exhausted_task_image_materialization(
+    app,  # type: ignore[no-untyped-def]
+    postgres_url: str,
+) -> None:
+    materialization_id = uuid4()
+    task_id = f"admin-task-image-retry/{materialization_id}"
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            session.add(
+                TaskImageMaterialization(
+                    id=materialization_id,
+                    materialization_key=hashlib.sha256(task_id.encode()).hexdigest(),
+                    task_id=task_id,
+                    task_checksum="a" * 64,
+                    cpu_arch="x86_64",
+                    task_config={},
+                    state="failed",
+                    attempt_count=3,
+                    failure_reason="registry_unavailable",
+                    failure_message="attempts exhausted",
+                    finished_at=datetime.now(UTC),
+                )
+            )
+            session.commit()
+
+        with TestClient(app) as client:
+            response = client.post(
+                f"/admin/task-image-materializations/{materialization_id}/retry",
+                headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
+            )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["state"] == "queued"
+        with sessionmaker(engine)() as session:
+            row = session.get(TaskImageMaterialization, materialization_id)
+            assert row is not None
+            assert row.state == "queued"
+            assert row.attempt_count == 0
+            assert row.failure_reason is None
+            assert row.failure_message is None
+            assert row.finished_at is None
+    finally:
+        with sessionmaker(engine)() as session:
+            row = session.get(TaskImageMaterialization, materialization_id)
+            if row is not None:
+                session.delete(row)
+                session.commit()
+        engine.dispose()
+
+
+def test_admin_retry_rejects_active_task_image_materialization(
+    app,  # type: ignore[no-untyped-def]
+    postgres_url: str,
+) -> None:
+    materialization_id = uuid4()
+    task_id = f"admin-task-image-active/{materialization_id}"
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            session.add(
+                TaskImageMaterialization(
+                    id=materialization_id,
+                    materialization_key=hashlib.sha256(task_id.encode()).hexdigest(),
+                    task_id=task_id,
+                    task_checksum="b" * 64,
+                    cpu_arch="x86_64",
+                    task_config={},
+                    state="running",
+                    claimed_by="builder-active",
+                    lease_epoch=1,
+                    lease_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+                )
+            )
+            session.commit()
+
+        with TestClient(app) as client:
+            response = client.post(
+                f"/admin/task-image-materializations/{materialization_id}/retry",
+                headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
+            )
+
+        assert response.status_code == 409
+        assert "cannot be retried" in response.json()["detail"]
+    finally:
+        with sessionmaker(engine)() as session:
+            row = session.get(TaskImageMaterialization, materialization_id)
+            if row is not None:
+                session.delete(row)
+                session.commit()
+        engine.dispose()
 
 
 def test_revoke_token(app):  # type: ignore[no-untyped-def]

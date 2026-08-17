@@ -12,15 +12,17 @@ import asyncio
 import contextlib
 import hashlib
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import UUID
 
 import docker
-from docker.errors import ImageNotFound
+from docker.errors import APIError, ImageNotFound, NotFound
 
 from loom.driver.build_containment import forbid_build_when_contained
+from loom.driver.task_image import _registry_tag_for
 from loom.models.healthcheck import HealthcheckSpec
 from loom.models.task import TaskConfig, TaskSidecarConfig
 from loom_worker.task_image import (
@@ -39,15 +41,20 @@ def task_sidecar_image_tag(
     sidecar: TaskSidecarConfig,
     *,
     task_checksum: str,
+    cpu_arch: str | None = None,
 ) -> str:
     dockerfile = sidecar.dockerfile
     dockerfile_text = dockerfile.as_posix() if dockerfile is not None else ""
     build_context = sidecar.docker_build_context
     build_context_text = build_context.as_posix() if build_context is not None else ""
+    native_cpu_arch = cpu_arch or task_config.environment.cpu_arch
+    if native_cpu_arch not in {"x86_64", "arm64"}:
+        raise ValueError("cpu_arch must resolve to x86_64 or arm64")
     material = "\n".join(
         [
             task_config.task.id,
             task_checksum,
+            native_cpu_arch,
             sidecar.name,
             dockerfile_text,
             build_context_text,
@@ -55,6 +62,41 @@ def task_sidecar_image_tag(
     )
     digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
     return f"loom-sidecar:{digest}"
+
+
+async def build_task_sidecar_images(
+    *,
+    task_config: TaskConfig,
+    task_dir: Path,
+    task_checksum: str,
+    cpu_arch: str,
+    docker_api_timeout_sec: int | None = None,
+) -> dict[str, str]:
+    """Build all Dockerfile-backed sidecars without starting containers."""
+    runtime = DockerTaskSidecarRuntime(
+        task_config=task_config,
+        task_dir=task_dir,
+        task_checksum=task_checksum,
+        trial_id=UUID(int=0),
+        docker_api_timeout_sec=docker_api_timeout_sec,
+        cpu_arch=cpu_arch,
+    )
+    runtime._client = (
+        docker.from_env()
+        if docker_api_timeout_sec is None
+        else docker.from_env(timeout=docker_api_timeout_sec)
+    )
+    try:
+        images: dict[str, str] = {}
+        for sidecar in runtime._ordered_sidecars():
+            if sidecar.dockerfile is not None:
+                images[sidecar.name] = await runtime._resolve_sidecar_image(sidecar)
+        return images
+    finally:
+        if runtime._client is not None:
+            with contextlib.suppress(Exception):
+                runtime._client.close()
+            runtime._client = None
 
 
 class DockerTaskSidecarRuntime:
@@ -73,6 +115,10 @@ class DockerTaskSidecarRuntime:
         container_pids: int = 0,
         container_cgroup_parent: str | None = None,
         runtime_identity_labels: tuple[tuple[str, str], ...] = (),
+        cpu_arch: str | None = None,
+        registry_repo: str | None = None,
+        registry_images: Mapping[str, str] | None = None,
+        pull_only: bool = False,
     ) -> None:
         self.task_config = task_config
         self.task_dir = task_dir
@@ -88,6 +134,10 @@ class DockerTaskSidecarRuntime:
         self.container_pids = container_pids
         self.container_cgroup_parent = container_cgroup_parent
         self.runtime_identity_labels = runtime_identity_labels
+        self.cpu_arch = cpu_arch
+        self.registry_repo = registry_repo
+        self.registry_images = dict(registry_images) if registry_images is not None else None
+        self.pull_only = pull_only
         self._client: Any | None = None
         self._containers: list[Any] = []
         self._network: Any | None = None
@@ -166,13 +216,13 @@ class DockerTaskSidecarRuntime:
         return ordered
 
     async def _resolve_sidecar_image(self, sidecar: TaskSidecarConfig) -> str:
-        if sidecar.docker_image:
-            if await asyncio.to_thread(self._image_exists, sidecar.docker_image):
-                return sidecar.docker_image
-            async with self._setup_slot():
-                await asyncio.to_thread(self._ensure_pulled_image, sidecar.docker_image)
-            return sidecar.docker_image
         if sidecar.dockerfile is None:
+            if sidecar.docker_image:
+                if await asyncio.to_thread(self._image_exists, sidecar.docker_image):
+                    return sidecar.docker_image
+                async with self._setup_slot():
+                    await asyncio.to_thread(self._ensure_pulled_image, sidecar.docker_image)
+                return sidecar.docker_image
             raise TaskImageBuildError(
                 f"sidecar {sidecar.name!r} declares neither docker_image nor dockerfile",
             )
@@ -185,13 +235,58 @@ class DockerTaskSidecarRuntime:
             dockerfile=dockerfile,
             docker_build_context=sidecar.docker_build_context,
         )
+        component = f"sidecar:{sidecar.name}"
+        if self.registry_images is not None:
+            registry_ref = self.registry_images.get(component)
+            if registry_ref is None:
+                raise TaskImageBuildError(
+                    f"materialized image grant is missing component {component!r}"
+                )
+            if re.fullmatch(r"[^\s@]+@sha256:[0-9a-f]{64}", registry_ref) is None:
+                raise TaskImageBuildError(
+                    f"materialized sidecar image {component!r} is not an immutable digest"
+                )
+            if await asyncio.to_thread(self._image_exists, registry_ref):
+                return registry_ref
+            client = self._client
+            assert client is not None
+            try:
+                async with self._setup_slot():
+                    await asyncio.to_thread(client.images.pull, registry_ref)
+            except (ImageNotFound, NotFound, APIError) as exc:
+                raise TaskImageBuildError(
+                    f"materialized sidecar image {registry_ref!r} is unavailable; "
+                    "execution is fenced to the recorded registry digest"
+                ) from exc
+            return registry_ref
         tag = task_sidecar_image_tag(
             self.task_config,
             sidecar,
             task_checksum=self.task_checksum,
+            cpu_arch=self.cpu_arch,
         )
         if await asyncio.to_thread(self._image_exists, tag):
             return tag
+        if self.registry_repo:
+            registry_ref = _registry_tag_for(tag, self.registry_repo)
+            client = self._client
+            assert client is not None
+            try:
+                async with self._setup_slot():
+                    await asyncio.to_thread(client.images.pull, registry_ref)
+            except (ImageNotFound, NotFound, APIError) as exc:
+                if self.pull_only:
+                    raise TaskImageBuildError(
+                        f"sidecar image {tag!r} is not available from the configured "
+                        "registry; execution workers are pull-only",
+                    ) from exc
+            else:
+                return registry_ref
+        if self.pull_only:
+            raise TaskImageBuildError(
+                f"sidecar image {tag!r} has no configured registry; "
+                "execution workers are pull-only",
+            )
         async with self._setup_slot():
             await asyncio.to_thread(
                 self._ensure_built_image,
@@ -249,13 +344,20 @@ class DockerTaskSidecarRuntime:
             rm=True,
             forcerm=True,
             pull=False,
+            platform=(
+                "linux/amd64"
+                if (self.cpu_arch or self.task_config.environment.cpu_arch) == "x86_64"
+                else "linux/arm64"
+            ),
             labels={
                 "loom.setup-build": "true",
                 "loom.setup-kind": "task-sidecar",
+                "loom.task-sidecar": "true",
                 "loom.task_id": self.task_config.task.id,
                 "loom.task_checksum": self.task_checksum,
                 "loom.task_sidecar": sidecar.name,
                 "loom.task_dockerfile": rel_dockerfile,
+                "loom.created-at": datetime.now(UTC).isoformat(),
             },
         )
 

@@ -108,6 +108,7 @@ def _external_worker_summary(
             "environment_state_file": None,
             "control_plane_environment": None,
             "slurm_pools": [],
+            "task_image_builder_policies": [],
             "gb10_desired_states": [],
             "external_slurm_runner_prerequisites": {},
             "external_slurm_autoscaler_supervisors": [],
@@ -143,6 +144,25 @@ def _external_worker_summary(
                 "allowed_nodes": actuator_config.get("allowed_nodes"),
                 "env_file": actuator_config.get("env_file"),
                 "repo_dir": actuator_config.get("repo_dir"),
+            }
+        )
+
+    task_image_builder_policies: list[dict[str, Any]] = []
+    for policy in resolved.get("task_image_builder_policies", []):
+        if not isinstance(policy, dict):
+            continue
+        task_image_builder_policies.append(
+            {
+                "pool_name": policy.get("pool_name"),
+                "enabled": policy.get("enabled", False),
+                "slurm_cluster_id": policy.get("slurm_cluster_id"),
+                "cpu_arch": policy.get("cpu_arch"),
+                "exclusive": policy.get("exclusive", True),
+                "requested_concurrency": policy.get("requested_concurrency", 1),
+                "max_jobs": policy.get("max_jobs"),
+                "env_file": policy.get("env_file"),
+                "repo_dir": policy.get("repo_dir"),
+                "activation_blockers": policy.get("activation_blockers", []),
             }
         )
 
@@ -197,6 +217,7 @@ def _external_worker_summary(
         },
         "control_plane_environment": control_plane_environment,
         "slurm_pools": slurm_pools,
+        "task_image_builder_policies": task_image_builder_policies,
         "gb10_desired_states": gb10_desired_states,
         "external_slurm_runner_prerequisites": prerequisites,
         "external_slurm_autoscaler_supervisors": supervisors,

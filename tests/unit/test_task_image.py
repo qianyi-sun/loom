@@ -59,6 +59,7 @@ class _FakeImages:
         self.cached_images = cached_images or set()
         self.image_attrs = image_attrs or {}
         self.get_calls: list[str] = []
+        self.pull_calls: list[str] = []
         self.build_calls: list[dict[str, Any]] = []
 
     def get(self, image: str) -> object:
@@ -73,6 +74,11 @@ class _FakeImages:
         if isinstance(tag, str):
             self.cached_images.add(tag)
         return object(), []
+
+    def pull(self, image: str) -> object:
+        self.pull_calls.append(image)
+        self.cached_images.add(image)
+        return object()
 
 
 class _FakeDockerClient:
@@ -116,6 +122,34 @@ async def test_resolve_task_image_prefers_explicit_docker_image(
     assert called is False
 
 
+async def test_resolve_task_image_prefers_dockerfile_grant_when_both_are_declared(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    task_dir = tmp_path / "task"
+    dockerfile = task_dir / "environment" / "Dockerfile"
+    dockerfile.parent.mkdir(parents=True)
+    dockerfile.write_text("FROM alpine:3.19\n")
+    registry_image = "registry.example/loom-task@sha256:" + "1" * 64
+    fake_images = _FakeImages(cached_images={registry_image})
+    fake_client = _FakeDockerClient(fake_images)
+    monkeypatch.setattr(task_image.docker, "from_env", lambda **_kwargs: fake_client)
+
+    image = await resolve_task_image(
+        task_config=_task_config(
+            docker_image="python:3.11-alpine",
+            dockerfile="environment/Dockerfile",
+        ),
+        task_dir=task_dir,
+        task_checksum="abc123",
+        registry_image=registry_image,
+        build_if_missing=False,
+    )
+
+    assert image == registry_image
+    assert fake_images.get_calls == [registry_image]
+
+
 async def test_resolve_task_image_builds_and_caches_dockerfile_image(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -140,21 +174,51 @@ async def test_resolve_task_image_builds_and_caches_dockerfile_image(
     # `_ensure_dockerfile_image`'s own pre-build check once the slot
     # has been claimed.
     assert fake_images.get_calls == [image, image]
-    assert fake_images.build_calls == [
-        {
-            "path": str(task_dir),
-            "dockerfile": "environment/Dockerfile",
-            "tag": image,
-            "rm": True,
-            "forcerm": True,
-            "pull": False,
-            "labels": {
-                "loom.task_id": "team-bench/task-1",
-                "loom.task_checksum": "abc123",
-                "loom.task_dockerfile": "environment/Dockerfile",
-            },
-        }
-    ]
+    assert len(fake_images.build_calls) == 1
+    build = fake_images.build_calls[0]
+    assert {key: value for key, value in build.items() if key != "labels"} == {
+        "path": str(task_dir),
+        "dockerfile": "environment/Dockerfile",
+        "tag": image,
+        "rm": True,
+        "forcerm": True,
+        "pull": False,
+        "platform": "linux/amd64",
+    }
+    assert build["labels"] == {
+        "loom.task-image": "true",
+        "loom.task_id": "team-bench/task-1",
+        "loom.task_checksum": "abc123",
+        "loom.task_dockerfile": "environment/Dockerfile",
+        "loom.created-at": build["labels"]["loom.created-at"],
+    }
+    assert fake_client.closed is True
+
+
+async def test_resolve_task_image_pulls_exact_materialized_digest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    task_dir = tmp_path / "task"
+    dockerfile = task_dir / "environment" / "Dockerfile"
+    dockerfile.parent.mkdir(parents=True)
+    dockerfile.write_text("FROM alpine:3.19\n")
+    fake_images = _FakeImages()
+    fake_client = _FakeDockerClient(fake_images)
+    monkeypatch.setattr(task_image.docker, "from_env", lambda: fake_client)
+    immutable_ref = "registry.example/loom-task@sha256:" + "a" * 64
+
+    image = await resolve_task_image(
+        task_config=_task_config(dockerfile="environment/Dockerfile"),
+        task_dir=task_dir,
+        task_checksum="abc123",
+        registry_image=immutable_ref,
+        build_if_missing=False,
+    )
+
+    assert image == immutable_ref
+    assert fake_images.pull_calls == [immutable_ref]
+    assert fake_images.build_calls == []
     assert fake_client.closed is True
 
 
@@ -810,6 +874,20 @@ def test_registry_tag_for_splits_on_last_colon_for_ported_registry() -> None:
     )
 
 
+def test_task_image_tag_is_native_architecture_qualified() -> None:
+    cfg = _task_config(dockerfile="environment/Dockerfile")
+
+    assert task_image_tag(
+        cfg,
+        task_checksum="abc123",
+        cpu_arch="x86_64",
+    ) != task_image_tag(
+        cfg,
+        task_checksum="abc123",
+        cpu_arch="arm64",
+    )
+
+
 async def test_contained_worker_pulls_base_image_from_registry_instead_of_building(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
@@ -886,6 +964,30 @@ async def test_contained_worker_refuses_build_when_registry_misses(
             registry_repo="192.168.50.13:5000/loom-task",
         )
     assert images.pull_calls  # tried the registry before refusing
+    assert images.build_calls == []
+
+
+async def test_execution_worker_never_builds_when_registry_misses(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    task_dir = tmp_path / "task"
+    dockerfile = task_dir / "environment" / "Dockerfile"
+    dockerfile.parent.mkdir(parents=True)
+    dockerfile.write_text("FROM alpine:3.19\n")
+    images = _RegistryFakeImages()
+    monkeypatch.setattr(task_image.docker, "from_env", lambda *a, **k: _FakeDockerClient(images))
+
+    with pytest.raises(TaskImageBuildError, match="registry"):
+        await resolve_task_image(
+            task_config=_task_config(dockerfile="environment/Dockerfile"),
+            task_dir=task_dir,
+            task_checksum="abc123",
+            cpu_arch="x86_64",
+            registry_repo="192.168.50.13:5000/loom-task",
+            build_if_missing=False,
+        )
+
+    assert images.pull_calls
     assert images.build_calls == []
 
 

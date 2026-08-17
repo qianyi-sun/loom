@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import Benchmark
+from loom.db.schema import Benchmark, TaskImageMaterialization
 from loom.db.schema import Task as TaskRow
 from loom.models.task import TaskConfig
 from loom_benchmark_tool.register_cmd import run_register
@@ -36,6 +36,11 @@ async def db(postgres_url: str) -> AsyncIterator[AsyncSession]:
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     with sl() as s:
+        s.execute(
+            delete(TaskImageMaterialization).where(
+                TaskImageMaterialization.task_id.like("fake-bench/%")
+            )
+        )
         s.execute(delete(TaskRow).where(TaskRow.benchmark_id == "fake-bench"))
         s.execute(delete(Benchmark).where(Benchmark.id == "fake-bench"))
         s.commit()
@@ -50,6 +55,11 @@ async def db(postgres_url: str) -> AsyncIterator[AsyncSession]:
         await engine.dispose()
         sync_engine = create_engine(postgres_url)
         with sessionmaker(sync_engine)() as s:
+            s.execute(
+                delete(TaskImageMaterialization).where(
+                    TaskImageMaterialization.task_id.like("fake-bench/%")
+                )
+            )
             s.execute(delete(TaskRow).where(TaskRow.benchmark_id == "fake-bench"))
             s.execute(delete(Benchmark).where(Benchmark.id == "fake-bench"))
             s.commit()
@@ -291,3 +301,62 @@ async def test_register_writes_valid_task_config_from_vnext_manifest(
     assert row.source == ("hf://fake-org/loom-benchmark-fake-bench@main/task-001/")
     assert row.tags == {"difficulty": "smoke"}
     TaskConfig.model_validate(row.config)
+
+
+async def test_register_enqueues_dockerfile_task_for_each_native_architecture(
+    db: AsyncSession,
+    postgres_url: str,
+) -> None:
+    task_id = "fake-bench/dockerfile-task"
+    task_config = _valid_task_config(task_id)
+    task_config["environment"] = {
+        "os": "linux",
+        "cpu_arch": "any",
+        "dockerfile": "environment/Dockerfile",
+    }
+    manifest = {
+        "schema_version": 3,
+        "benchmark_id": "fake-bench",
+        "display_name": "Fake materialized benchmark",
+        "upstream_kind": "huggingface",
+        "upstream_locator": "fake-org/fake-bench",
+        "upstream_revision": "main",
+        "license_spdx": "MIT",
+        "license_url": "",
+        "splits": ["test"],
+        "tasks": [
+            {
+                "task_id": task_id,
+                "instance_id": "dockerfile-task",
+                "hf_path": "dockerfile-task/",
+                "checksum": "sha256:" + "4" * 64,
+                "license_spdx": "MIT",
+                "split": "test",
+                "tags": {},
+                "task_config": task_config,
+            }
+        ],
+    }
+    with patch("loom_benchmark_tool.register_cmd.read_manifest_from_hf") as read_manifest:
+        read_manifest.return_value = manifest
+        await run_register(
+            benchmark="fake-bench",
+            hf_org="fake-org",
+            hf_token=None,
+            db_url=postgres_url,
+            registered_by="test",
+        )
+
+    rows = (
+        (
+            await db.execute(
+                select(TaskImageMaterialization)
+                .where(TaskImageMaterialization.task_id == task_id)
+                .order_by(TaskImageMaterialization.cpu_arch.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert [row.cpu_arch for row in rows] == ["x86_64", "arm64"]
+    assert all(row.state == "queued" for row in rows)

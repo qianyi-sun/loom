@@ -288,8 +288,9 @@ jobs:
           if [[ ! -s "${LOOM_SYSTEM_SMOKE_DIAGNOSTICS}" ]]; then
             echo "fixture diagnostics missing; capturing remaining Compose state" >&2
             # The helper captures the equivalent of
-            # `--profile worker logs --no-color --tail=300` and redacts it
-            # before writing to runner.temp.
+            # `--profile worker --profile task-image-builder logs
+            # --no-color --tail=300` and redacts it before writing to
+            # runner.temp.
             uv run --no-sync python -c \
               'from tests.system.docker_compose import preserve_compose_diagnostics; preserve_compose_diagnostics()' \
               || true
@@ -304,9 +305,11 @@ jobs:
         if: always()
         env:
           LOOM_WORKER_TOKEN: unused-cleanup-token
+          LOOM_TASK_IMAGE_BUILDER_TOKEN: unused-cleanup-builder-token
         run: |
           timeout 60s docker compose -f deploy/docker-compose.test.yml \
-            --profile worker down -v --remove-orphans
+            --profile worker --profile task-image-builder \
+            down -v --remove-orphans
 
   staging-smoke-gate:
     name: >-

@@ -80,13 +80,7 @@ def _external_supervisor_artifact() -> ExternalSupervisorArtifact:
 
 def _external_supervisor_profile() -> bytes:
     profile = (REPO_ROOT / "deploy/environment-state/staging.toml").read_text(encoding="utf-8")
-    profile = profile.replace("enabled = false", "enabled = true", 1)
     profile = profile.replace("materialize = false", "materialize = true", 1)
-    profile = profile.replace(
-        "enabled = false\nactive = false",
-        "enabled = true\nactive = true",
-        1,
-    )
     payload = profile.encode()
     assert hashlib.sha256(payload).hexdigest() == _external_supervisor_artifact().profile_sha256
     return payload

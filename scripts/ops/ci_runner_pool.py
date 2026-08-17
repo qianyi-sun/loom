@@ -103,6 +103,7 @@ GUEST_BASE_IMAGES = (
     "python:3.12-bookworm",
     "python:3.12.13-slim-bookworm",
     "python:3.12-slim",
+    "registry:2",
     "testcontainers/ryuk:0.8.1",
     "tonistiigi/binfmt:latest",
 )

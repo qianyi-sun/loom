@@ -12,11 +12,13 @@ from loom.db.schema import (
     Benchmark,
     DataLifecycleAuthority,
     Task,
+    TaskImageMaterialization,
     TaskSet,
     Team,
     TeamQuota,
     Token,
     Trial,
+    TrialTaskImageMaterialization,
     User,
 )
 from loom_control_plane.app import create_app
@@ -75,12 +77,36 @@ def seed_team(postgres_url: str) -> Iterator[tuple[UUID, str]]:
                 config={},
             )
         )
+        s.execute(
+            insert(Task).values(
+                id="dockerfile-any",
+                checksum="sha256:" + "2" * 64,
+                source="s3://loom-tasks/dockerfile-any",
+                config={
+                    "schema_version": "1",
+                    "task": {"id": "dockerfile-any", "name": "dockerfile-any"},
+                    "environment": {
+                        "os": "linux",
+                        "cpu_arch": "any",
+                        "dockerfile": "environment/Dockerfile",
+                    },
+                    "agent": {"name": "oracle"},
+                    "verifier": {"name": "pytest"},
+                    "steps": [{"name": "main"}],
+                },
+            )
+        )
         s.commit()
     try:
         yield team_id, raw
     finally:
         with session_factory() as s:
             s.execute(delete(Trial))
+            s.execute(
+                delete(TaskImageMaterialization).where(
+                    TaskImageMaterialization.task_id == "dockerfile-any"
+                )
+            )
             s.execute(delete(Token))
             s.execute(
                 delete(DataLifecycleAuthority).where(
@@ -126,6 +152,144 @@ def test_submit_creates_trial(app, seed_team):  # type: ignore[no-untyped-def]
         assert "trial_id" in body
         assert body["state"] == "queued"
         assert "submitted_at" in body
+
+
+def test_submit_enqueues_and_links_each_required_task_image(
+    app,
+    seed_team,
+    postgres_url: str,
+):  # type: ignore[no-untyped-def]
+    _, raw = seed_team
+    with TestClient(app) as client:
+        response = client.post(
+            "/trials",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "task_id": "dockerfile-any",
+                "config": {"agent_name": "oracle", "agent_model": None},
+            },
+        )
+
+    assert response.status_code == 201, response.text
+    trial_id = UUID(response.json()["trial_id"])
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            materializations = session.scalars(
+                select(TaskImageMaterialization)
+                .join(
+                    TrialTaskImageMaterialization,
+                    TrialTaskImageMaterialization.materialization_id == TaskImageMaterialization.id,
+                )
+                .where(TrialTaskImageMaterialization.trial_id == trial_id)
+                .order_by(TaskImageMaterialization.cpu_arch.desc())
+            ).all()
+        assert [row.cpu_arch for row in materializations] == ["x86_64", "arm64"]
+        assert all(row.state == "queued" for row in materializations)
+        assert all(row.task_checksum == "2" * 64 for row in materializations)
+    finally:
+        engine.dispose()
+
+
+def test_idempotent_resubmission_repairs_missing_task_image_links(
+    app,
+    seed_team,
+    postgres_url: str,
+):  # type: ignore[no-untyped-def]
+    _, raw = seed_team
+    idempotency_key = f"task-image-repair-{uuid4()}"
+    request_json = {
+        "task_id": "dockerfile-any",
+        "idempotency_key": idempotency_key,
+        "config": {"agent_name": "oracle", "agent_model": None},
+    }
+    with TestClient(app) as client:
+        first = client.post(
+            "/trials",
+            headers={"Authorization": f"Bearer {raw}"},
+            json=request_json,
+        )
+    assert first.status_code == 201, first.text
+    trial_id = UUID(first.json()["trial_id"])
+
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            session.execute(
+                delete(TrialTaskImageMaterialization).where(
+                    TrialTaskImageMaterialization.trial_id == trial_id
+                )
+            )
+            session.execute(
+                delete(TaskImageMaterialization).where(
+                    TaskImageMaterialization.task_id == "dockerfile-any"
+                )
+            )
+            session.commit()
+
+        with TestClient(app) as client:
+            second = client.post(
+                "/trials",
+                headers={"Authorization": f"Bearer {raw}"},
+                json=request_json,
+            )
+        assert second.status_code == 201, second.text
+        assert UUID(second.json()["trial_id"]) == trial_id
+
+        with sessionmaker(engine)() as session:
+            repaired_architectures = session.scalars(
+                select(TaskImageMaterialization.cpu_arch)
+                .join(
+                    TrialTaskImageMaterialization,
+                    TrialTaskImageMaterialization.materialization_id
+                    == TaskImageMaterialization.id,
+                )
+                .where(TrialTaskImageMaterialization.trial_id == trial_id)
+                .order_by(TaskImageMaterialization.cpu_arch)
+            ).all()
+        assert repaired_architectures == ["arm64", "x86_64"]
+    finally:
+        engine.dispose()
+
+
+def test_submit_prebuilt_task_creates_no_task_image_links(
+    app,
+    seed_team,
+    postgres_url: str,
+):  # type: ignore[no-untyped-def]
+    _, raw = seed_team
+    with TestClient(app) as client:
+        response = client.post(
+            "/trials",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "task_id": "hello",
+                "config": {"agent_name": "oracle", "agent_model": None},
+            },
+        )
+
+    assert response.status_code == 201, response.text
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            link_count = len(
+                session.scalars(
+                    select(TrialTaskImageMaterialization).where(
+                        TrialTaskImageMaterialization.trial_id == UUID(response.json()["trial_id"])
+                    )
+                ).all()
+            )
+            materialization_count = len(
+                session.scalars(
+                    select(TaskImageMaterialization).where(
+                        TaskImageMaterialization.task_id == "hello"
+                    )
+                ).all()
+            )
+        assert link_count == 0
+        assert materialization_count == 0
+    finally:
+        engine.dispose()
 
 
 def test_submit_rejects_legacy_team_token_without_user_owner(

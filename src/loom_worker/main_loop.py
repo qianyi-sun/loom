@@ -1,9 +1,9 @@
 """Worker main loop — wires settings → register → heartbeat thread →
 claim loop → runner pool → drain.
 
-The claim payload carries the trial's id + team + task_id + trial config
-+ requires_caps; the full TaskConfig body lives behind a second
-round-trip to `GET /tasks/{task_id}/bundle` (Plan 7 Task 1).
+Dockerfile-backed claims carry the immutable task snapshot and registry
+digests selected by the scheduler. Prebuilt-image tasks retain the historic
+second round-trip to `GET /tasks/{task_id}/bundle`.
 
 Remaining v1 limitation: the worker uses a tempfile mkdtemp() for the
 task directory. The solution/ + tests/ + environment/ subtrees that live
@@ -65,6 +65,7 @@ from loom.startup_retry import (
     retry_startup_dependency_sync,
 )
 from loom.task_bundle_compat import validate_task_dir_compatibility
+from loom.task_image_materialization import TaskImageExecutionGrantV1
 from loom.trajectory.cp_event_sink import CpEventSink
 from loom.trajectory.storage import (
     MinioObjectStore,
@@ -103,11 +104,11 @@ from loom_worker.sandbox_singleton import (
 )
 from loom_worker.signal_handler import ShutdownState, install_signal_handlers
 from loom_worker.step_gateway_client import StepTokenGatewayClient
-from loom_worker.task_image import resolve_task_image
+from loom_worker.task_image import TaskImageBuildError, resolve_task_image
 from loom_worker.task_sidecars import DockerTaskSidecarRuntime
 from loom_worker.trial_cache import (
     _daemon_build_slot,
-    evict_stale_cache,
+    evict_stale_managed_images_from_env,
     resolve_trial_image,
 )
 from loom_worker.trial_cancellation_watchdog import (
@@ -388,6 +389,25 @@ class _IdleExitTracker:
         return self._idle_for_seconds >= self.after_seconds
 
 
+@dataclass
+class _PeriodicMaintenanceTracker:
+    interval_seconds: float
+    now: Callable[[], float] = time.monotonic
+    _last_run_at: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.interval_seconds <= 0:
+            raise ValueError("maintenance interval must be positive")
+        self._last_run_at = self.now()
+
+    def due(self) -> bool:
+        current = self.now()
+        if current - self._last_run_at < self.interval_seconds:
+            return False
+        self._last_run_at = current
+        return True
+
+
 def _resolve_blocking_io_max_workers(settings: WorkerSettings) -> int:
     configured = settings.blocking_io_max_workers
     if configured is not None:
@@ -572,6 +592,7 @@ async def run_worker(
             idle_exit = _IdleExitTracker(
                 after_seconds=settings.idle_exit_after_seconds,
             )
+            image_eviction = _PeriodicMaintenanceTracker(interval_seconds=3_600)
             # PR-E: per-worker vLLM registry. Opt-in via settings; the
             # `enabled=False` path still constructs the object so the
             # trial runner gets a deterministic AgentError instead of
@@ -624,6 +645,8 @@ async def run_worker(
                     sandbox_allocator=sandbox_allocator,
                     sandbox_singleton=sandbox_singleton,
                 )
+                if image_eviction.due():
+                    await asyncio.to_thread(_run_trial_cache_eviction, settings)
                 should_idle_exit = idle_exit.observe(
                     claimed=claimed,
                     in_flight=pool.in_flight,
@@ -792,18 +815,12 @@ def _run_orphan_sandbox_cleanup(
 
 
 def _run_trial_cache_eviction(settings: WorkerSettings) -> None:
-    """Best-effort prune of stale layered images at worker startup.
+    """Best-effort prune of all Loom-managed images.
 
-    TTL (trial_cache_ttl_hours) + free-space backstop
-    (trial_cache_min_free_gb). Docker errors are logged and swallowed —
-    eviction is opportunistic and must not fail worker boot."""
-    import docker as _docker
-
-    try:
-        client = _docker.from_env()
-        evict_stale_cache(client, settings)
-    except Exception:
-        logger.exception("trial_cache eviction failed at startup")
+    Docker errors are logged and swallowed by the shared eviction helper;
+    opportunistic cleanup must not fail worker boot or claim processing.
+    """
+    evict_stale_managed_images_from_env(settings)
 
 
 async def _ensure_runtime_buckets(
@@ -1108,7 +1125,29 @@ async def _spawn_trial(
         )
         try:
             trial_config = TrialConfig.model_validate(payload.get("config") or {})
-            bundle = await cp_client.get_task_bundle(str(payload["task_id"]))
+            raw_task_image_materialization = payload.get("task_image_materialization")
+            task_image_materialization = (
+                TaskImageExecutionGrantV1.model_validate(raw_task_image_materialization)
+                if raw_task_image_materialization is not None
+                else None
+            )
+            if task_image_materialization is None:
+                bundle = await cp_client.get_task_bundle(str(payload["task_id"]))
+            else:
+                host_arch = _host_cpu_arch()
+                if task_image_materialization.cpu_arch != host_arch:
+                    raise TaskImageBuildError(
+                        "task image materialization architecture mismatch "
+                        f"expected={host_arch} "
+                        f"granted={task_image_materialization.cpu_arch}"
+                    )
+                bundle = {
+                    "id": str(payload["task_id"]),
+                    "checksum": task_image_materialization.task_checksum,
+                    "config": task_image_materialization.task_config,
+                    "source": task_image_materialization.task_source,
+                    "source_provenance": (task_image_materialization.task_source_provenance),
+                }
             task_config = TaskConfig.model_validate(bundle["config"])
             task_checksum = str(bundle["checksum"])
             raw_provenance = bundle.get("source_provenance")
@@ -1141,6 +1180,25 @@ async def _spawn_trial(
                 benchmark_cache=settings.benchmark_cache,
                 timeout_sec=settings.task_materialize_timeout_sec,
             )
+            if task_image_materialization is not None:
+                actual_checksum = sha256_of_dir(task_dir)
+                if actual_checksum != task_image_materialization.task_checksum:
+                    raise TaskImageBuildError(
+                        "materialized task bundle checksum mismatch "
+                        f"expected={task_image_materialization.task_checksum} "
+                        f"actual={actual_checksum}"
+                    )
+                expected_metadata_checksum = task_image_materialization.task_source_provenance.get(
+                    "bundle_file_metadata_sha256"
+                )
+                if expected_metadata_checksum is not None:
+                    actual_metadata_checksum = bundle_file_metadata_sha256(task_dir)
+                    if actual_metadata_checksum != expected_metadata_checksum:
+                        raise TaskImageBuildError(
+                            "materialized task bundle metadata mismatch "
+                            f"expected={expected_metadata_checksum} "
+                            f"actual={actual_metadata_checksum}"
+                        )
             if task_config.task.id.startswith("terminal-bench-2@tb2.1-r6/"):
                 _verify_materialized_tb21_bundle_checksum(
                     task_dir=task_dir,
@@ -1171,9 +1229,16 @@ async def _spawn_trial(
                 # the require_cgroup_parent line above so partial/fake settings
                 # degrade gracefully (registry disabled).
                 registry_repo=(getattr(settings, "trial_cache_registry_repo", "") or None),
+                registry_image=(
+                    task_image_materialization.registry_images.get("task")
+                    if task_image_materialization is not None
+                    else None
+                ),
                 registry_pull_timeout_sec=getattr(
                     settings, "trial_cache_registry_pull_timeout_sec", 15.0
                 ),
+                cpu_arch=_host_cpu_arch(),
+                build_if_missing=False,
             )
             # #317 Phase 1: if the chosen agent declares an
             # install_script, layer the agent install onto the task
@@ -1359,6 +1424,14 @@ async def _spawn_trial(
                 container_pids=settings.container_pids,
                 container_cgroup_parent=_worker_cgroup_parent(settings),
                 runtime_identity_labels=_runtime_identity_labels(settings),
+                cpu_arch=_host_cpu_arch(),
+                registry_repo=(getattr(settings, "trial_cache_registry_repo", "") or None),
+                registry_images=(
+                    task_image_materialization.registry_images
+                    if task_image_materialization is not None
+                    else None
+                ),
+                pull_only=True,
                 setup_slot_provider=lambda: _daemon_build_slot(
                     cp_client,
                     settings,

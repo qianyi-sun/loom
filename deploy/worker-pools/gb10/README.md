@@ -17,6 +17,53 @@ Every trial container is capped at 2 CPUs, 11500 MiB, and 512 PIDs. Jobs are
 non-exclusive, resource-aware, limited to the partition's one-day maximum, and
 bounded by `max_jobs=14` and `pending_job_cap=2`.
 
+## Task-image builders
+
+Dockerfile-backed task images use the separate
+`task-image-builder-gb10` (ARM64) and `task-image-builder-oldlab` (x86_64)
+policies. These are scale-to-zero Slurm pools, not permanently reserved hosts:
+queued image materializations create at most one exclusive, concurrency-one
+builder allocation per architecture; the allocation can process several images
+and exits after 120 idle seconds. Trial workers remain non-exclusive and
+pull-only.
+
+Both builder policies and their external supervisors are committed disabled.
+Activation requires a least-privilege token carrying `task-image:build`, a
+dedicated builder env file, an owner-only Docker `config.json` mounted only into
+the builder container, the declared Slurm account/QoS/exclusive reservation,
+native exclusive capacity, and a registry-retention controller. The
+builder token's scope must be exactly `task-image:build`; mint it with
+`loom admin tokens worker mint --kind task-image-builder`. The registry
+retention controller uses a different token whose scope must be exactly
+`task-image:gc`; mint it with
+`loom admin tokens worker mint --kind task-image-registry-gc`. Never share
+either credential with the other controller or with trial workers.
+
+Both native capacity classes remain blocked until safe exclusive capacity is
+provisioned: GB10 for ARM64 and OLDLAB for x86_64. Nodes may remain in shared
+Slurm inventory, but the named builder reservation and `--exclusive` allocation
+must prevent overlap with packed trial jobs; nodes hosting services outside
+Slurm must be removed from the builder inventory. Do not remove activation
+blockers or reuse ordinary trial-worker credentials to make either policy
+start.
+
+Registry retention must use Loom's fenced protocol; do not apply an independent
+age-only registry lifecycle rule to task-image repositories. The deployment-
+owned controller repeatedly calls
+`POST /api/v1/internal/task-image-materializations/registry-gc/claim` with its
+stable `gc_id`, deletes every unique immutable digest in the returned
+`registry_images` map and `registry_image_history` list (an already-absent
+manifest is success), and calls
+`POST /api/v1/internal/task-image-materializations/registry-gc/{id}/complete`
+with that same `gc_id` and `lease_epoch` only after every deletion is confirmed.
+A 204 claim response ends the pass. The controller must finish within the
+server-issued lease; an expired claim is safely reassigned at a higher epoch.
+Loom rechecks current-task and nonterminal-trial references before claim and
+again at completion, requeueing a rebuild if a reference races deletion. Clear
+`registry_retention_not_provisioned` only after this controller, its dedicated
+API token, registry deletion credential, monitoring, and scheduled supervisor
+have rollout evidence.
+
 The fixed accepted inventory stays explicit even when a host is busy. A
 healthy busy node can advertise no free capacity and becomes eligible again
 after resources are released. The autoscaler does not reinterpret a busy host

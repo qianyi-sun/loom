@@ -2023,6 +2023,8 @@ def test_committed_staging_supervisors_bind_to_their_physical_controllers() -> N
     assert by_pool == {
         "gb10": "gx10-01c7",
         "oldlab": "TRT-EAI-OLDLAB-1",
+        "task-image-builder-gb10": "gx10-01c7",
+        "task-image-builder-oldlab": "TRT-EAI-OLDLAB-1",
     }
 
 
@@ -2387,7 +2389,11 @@ def test_committed_staging_profile_activates_both_slurm_supervisors() -> None:
         expected_environment="staging",
     )
 
-    supervisors = profile.external_slurm_autoscaler_supervisors
+    supervisors = [
+        row
+        for row in profile.external_slurm_autoscaler_supervisors
+        if row["enabled"] and row["active"]
+    ]
     assert len(supervisors) == 2
     by_name = {supervisor["name"]: supervisor for supervisor in supervisors}
     gb10 = by_name["gb10-staging"]
@@ -2434,7 +2440,7 @@ def test_staging_profile_loader_rejects_candidate_self_attested_activation(
     profile_text = Path("deploy/environment-state/staging.toml").read_text(encoding="utf-8")
     profile_path = tmp_path / "staging.toml"
     profile_path.write_text(
-        profile_text.replace("enabled = false", "enabled = true", 1)
+        profile_text
         + """
 
 [external_slurm_runner_prerequisites.service_identity]

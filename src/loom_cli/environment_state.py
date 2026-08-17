@@ -117,6 +117,7 @@ class EnvironmentStateProfile:
     environment: str
     control_plane_environment: str
     autoscaler_policies: list[dict[str, Any]]
+    task_image_builder_policies: list[dict[str, Any]]
     gb10_desired_states: list[dict[str, Any]]
     catalog_provisioning: dict[str, Any]
     rate_card_sync: dict[str, Any]
@@ -332,6 +333,49 @@ def _validate_supervisor_collisions(
         seen_ports.add(port)
 
 
+def _validate_task_image_builder_contract(
+    policies: list[dict[str, Any]],
+    *,
+    trial_policies: list[dict[str, Any]],
+    supervisors: list[dict[str, Any]],
+) -> None:
+    pool_names = [str(policy["pool_name"]) for policy in policies]
+    cpu_arches = [str(policy["cpu_arch"]) for policy in policies]
+    if len(pool_names) != len(set(pool_names)):
+        raise EnvironmentStateProfileError(
+            "task_image_builder_policies contains duplicate pool_name values",
+        )
+    if len(cpu_arches) != len(set(cpu_arches)):
+        raise EnvironmentStateProfileError(
+            "task_image_builder_policies contains duplicate cpu_arch values",
+        )
+    trial_pool_names = {str(policy["pool_name"]) for policy in trial_policies}
+    overlap = sorted(set(pool_names) & trial_pool_names)
+    if overlap:
+        raise EnvironmentStateProfileError(
+            "task-image builder pool identities overlap trial pools: " + ", ".join(overlap),
+        )
+    for policy in policies:
+        pool_name = str(policy["pool_name"])
+        matches = [row for row in supervisors if row["pool_name"] == pool_name]
+        if len(matches) != 1:
+            raise EnvironmentStateProfileError(
+                f"task-image builder pool {pool_name!r} requires exactly one supervisor",
+            )
+        supervisor = matches[0]
+        enabled = bool(policy["enabled"])
+        if supervisor["enabled"] is not enabled or supervisor["active"] is not enabled:
+            raise EnvironmentStateProfileError(
+                f"task-image builder pool {pool_name!r} policy and supervisor activation differ",
+            )
+        if not str(supervisor["script_path"]).endswith(
+            "/scripts/ops/task_image_builder_autoscaler_external_once.py"
+        ):
+            raise EnvironmentStateProfileError(
+                f"task-image builder pool {pool_name!r} uses the wrong supervisor entrypoint",
+            )
+
+
 def staging_gb10_external_activation_blockers(
     *,
     environment: object,
@@ -436,6 +480,132 @@ def _normalize_autoscaler_policy(
     )
     if payload.get("disabled_reason") is None and "disabled_reason" not in item:
         payload.pop("disabled_reason", None)
+    return payload
+
+
+def _normalize_task_image_builder_policy(
+    item: dict[str, Any],
+    *,
+    environment: str,
+    index: int,
+) -> dict[str, Any]:
+    field = f"task_image_builder_policies[{index}]"
+    required = (
+        "pool_name",
+        "slurm_cluster_id",
+        "cpu_arch",
+        "allowed_nodes",
+        "env_file",
+        "repo_dir",
+        "registry_docker_config_dir",
+        "partition",
+        "time_limit",
+        "requested_cpus",
+        "requested_memory_mib",
+        "max_jobs",
+        "pending_job_cap",
+    )
+    missing = [name for name in required if name not in item]
+    if missing:
+        raise EnvironmentStateProfileError(
+            f"{field} is missing required fields: {', '.join(missing)}",
+        )
+    payload = {
+        "environment": environment,
+        "enabled": False,
+        "exclusive": True,
+        "requested_concurrency": 1,
+        "idle_exit_after_seconds": 120,
+        "sbatch_path": "sbatch",
+        "squeue_path": "squeue",
+        "sacct_path": "sacct",
+        "scancel_path": "scancel",
+        "command_timeout_seconds": 20.0,
+        "slurm_account": "",
+        "slurm_qos": "",
+        "slurm_reservation": "",
+        "job_output_dir": "",
+        "activation_blockers": [],
+        **item,
+    }
+    payload["pool_name"] = _clean_nonempty(payload["pool_name"], f"{field}.pool_name")
+    payload["slurm_cluster_id"] = _clean_nonempty(
+        payload["slurm_cluster_id"], f"{field}.slurm_cluster_id"
+    )
+    payload["cpu_arch"] = _clean_nonempty(payload["cpu_arch"], f"{field}.cpu_arch")
+    expected_cluster = {"x86_64": "oldlab", "arm64": "gb10"}.get(payload["cpu_arch"])
+    if expected_cluster is None or payload["slurm_cluster_id"] != expected_cluster:
+        raise EnvironmentStateProfileError(
+            f"{field} native architecture does not match its Slurm cluster",
+        )
+    payload["enabled"] = _strict_boolean(payload["enabled"], f"{field}.enabled")
+    payload["exclusive"] = _strict_boolean(payload["exclusive"], f"{field}.exclusive")
+    if not payload["exclusive"]:
+        raise EnvironmentStateProfileError(f"{field}.exclusive must be true")
+    nodes = _as_string_list(payload["allowed_nodes"], f"{field}.allowed_nodes")
+    if not nodes or any(not node.strip() for node in nodes):
+        raise EnvironmentStateProfileError(f"{field}.allowed_nodes must not be empty")
+    payload["allowed_nodes"] = nodes
+    blockers = _as_string_list(payload["activation_blockers"], f"{field}.activation_blockers")
+    payload["activation_blockers"] = blockers
+    if payload["enabled"] and blockers:
+        raise EnvironmentStateProfileError(
+            f"{field} cannot be enabled while activation blockers remain",
+        )
+    for name in (
+        "env_file",
+        "repo_dir",
+        "registry_docker_config_dir",
+        "partition",
+        "time_limit",
+        "sbatch_path",
+        "squeue_path",
+        "sacct_path",
+        "scancel_path",
+    ):
+        payload[name] = _clean_nonempty(payload[name], f"{field}.{name}")
+    for name in ("slurm_account", "slurm_qos", "slurm_reservation", "job_output_dir"):
+        payload[name] = str(payload[name]).strip()
+    if payload["enabled"]:
+        for name in (
+            "slurm_account",
+            "slurm_qos",
+            "slurm_reservation",
+            "job_output_dir",
+        ):
+            if not payload[name]:
+                raise EnvironmentStateProfileError(
+                    f"{field}.{name} must be non-empty when enabled",
+                )
+    for name in (
+        "requested_cpus",
+        "requested_memory_mib",
+        "requested_concurrency",
+        "max_jobs",
+        "pending_job_cap",
+        "idle_exit_after_seconds",
+    ):
+        value = payload[name]
+        if type(value) is not int or value <= 0:
+            raise EnvironmentStateProfileError(f"{field}.{name} must be a positive integer")
+    if payload["requested_concurrency"] != 1:
+        raise EnvironmentStateProfileError(
+            f"{field}.requested_concurrency must equal one",
+        )
+    if payload["max_jobs"] > len(nodes):
+        raise EnvironmentStateProfileError(
+            f"{field}.max_jobs must not exceed allowed_nodes",
+        )
+    if payload["pending_job_cap"] > payload["max_jobs"]:
+        raise EnvironmentStateProfileError(
+            f"{field}.pending_job_cap must not exceed max_jobs",
+        )
+    timeout = payload["command_timeout_seconds"]
+    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
+        raise EnvironmentStateProfileError(
+            f"{field}.command_timeout_seconds must be positive",
+        )
+    payload["command_timeout_seconds"] = float(timeout)
     return payload
 
 
@@ -626,6 +796,19 @@ def load_environment_state_profile(
             ),
         )
     ]
+    task_image_builder_policies = [
+        _normalize_task_image_builder_policy(
+            item,
+            environment=control_plane_environment,
+            index=idx,
+        )
+        for idx, item in enumerate(
+            _as_list(
+                raw.get("task_image_builder_policies"),
+                "task_image_builder_policies",
+            ),
+        )
+    ]
     gb10_desired_states = [
         _normalize_gb10_desired_state(
             item,
@@ -669,6 +852,11 @@ def load_environment_state_profile(
         )
     ]
     _validate_supervisor_collisions(external_slurm_autoscaler_supervisors)
+    _validate_task_image_builder_contract(
+        task_image_builder_policies,
+        trial_policies=autoscaler_policies,
+        supervisors=external_slurm_autoscaler_supervisors,
+    )
     external_slurm_runner_prerequisites = _as_dict(
         external_slurm_runner_prerequisites,
         "external_slurm_runner_prerequisites",
@@ -687,6 +875,7 @@ def load_environment_state_profile(
         environment=environment,
         control_plane_environment=control_plane_environment,
         autoscaler_policies=autoscaler_policies,
+        task_image_builder_policies=task_image_builder_policies,
         gb10_desired_states=gb10_desired_states,
         catalog_provisioning=_as_dict(catalog, "catalog_provisioning"),
         rate_card_sync=_as_dict(rate_card_sync, "rate_card_sync"),

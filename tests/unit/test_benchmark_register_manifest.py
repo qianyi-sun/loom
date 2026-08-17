@@ -21,6 +21,10 @@ from loom_benchmark_tool.register_cmd import (
 )
 
 
+async def _empty_async_result() -> None:
+    return None
+
+
 def test_hf_snapshot_copy_restores_mode_without_mutating_symlink_blob(
     tmp_path: Path,
 ) -> None:
@@ -471,6 +475,13 @@ async def test_run_register_mirror_writes_internal_source_and_hf_provenance(
         def on_conflict_do_update(self, **_kwargs: object) -> FakeInsert:
             return self
 
+        def returning(self, *_args: object) -> FakeInsert:
+            return self
+
+    class FakeResult:
+        def scalar_one(self) -> object:
+            return object()
+
     class FakeEngine:
         async def dispose(self) -> None:
             return None
@@ -495,8 +506,11 @@ async def test_run_register_mirror_writes_internal_source_and_hf_provenance(
         async def scalar(self, _statement: object) -> None:
             return None
 
-        async def execute(self, statement: FakeInsert, *_args: object) -> None:
+        async def execute(
+            self, statement: FakeInsert, *_args: object
+        ) -> FakeResult:
             executed.append(statement)
+            return FakeResult()
 
         async def commit(self) -> None:
             return None
@@ -525,6 +539,10 @@ async def test_run_register_mirror_writes_internal_source_and_hf_provenance(
     monkeypatch.setattr(
         "loom_benchmark_tool.register_cmd.pg_insert",
         lambda model: FakeInsert(model),
+    )
+    monkeypatch.setattr(
+        "loom_benchmark_tool.register_cmd.ensure_task_image_materializations",
+        lambda *_args, **_kwargs: _empty_async_result(),
     )
 
     result = await run_register(
@@ -808,6 +826,13 @@ async def test_run_register_source_object_store_writes_s3_task_rows(
         def on_conflict_do_update(self, **_kwargs: object) -> FakeInsert:
             return self
 
+        def returning(self, *_args: object) -> FakeInsert:
+            return self
+
+    class FakeResult:
+        def scalar_one(self) -> object:
+            return object()
+
     class FakeEngine:
         async def dispose(self) -> None:
             return None
@@ -822,8 +847,9 @@ async def test_run_register_source_object_store_writes_s3_task_rows(
         def begin(self) -> FakeSession:
             return self
 
-        async def execute(self, statement: FakeInsert) -> None:
+        async def execute(self, statement: FakeInsert) -> FakeResult:
             executed.append(statement)
+            return FakeResult()
 
         async def commit(self) -> None:
             return None
@@ -848,6 +874,10 @@ async def test_run_register_source_object_store_writes_s3_task_rows(
     monkeypatch.setattr(
         "loom_benchmark_tool.register_cmd.pg_insert",
         lambda model: FakeInsert(model),
+    )
+    monkeypatch.setattr(
+        "loom_benchmark_tool.register_cmd.ensure_task_image_materializations",
+        lambda *_args, **_kwargs: _empty_async_result(),
     )
 
     result = await run_register(

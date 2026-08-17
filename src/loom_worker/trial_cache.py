@@ -30,6 +30,7 @@ import asyncio
 import contextlib
 import logging
 import random
+import shutil
 import textwrap
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
@@ -200,9 +201,8 @@ def _build_layered_image_sync(
             # 40 lines so operators see pip's / apt's actual error.
             # Same shape as task_image._format_build_log_tail (#350).
             tail, full_log = _format_build_log_sections(exc.build_log)
-            diagnostic_detail = (
-                f"failed to build layered image {tag!r}: {exc}"
-                + (f"\nbuild log (full):\n{full_log}" if full_log else "")
+            diagnostic_detail = f"failed to build layered image {tag!r}: {exc}" + (
+                f"\nbuild log (full):\n{full_log}" if full_log else ""
             )
             raise TrialCacheError(
                 f"failed to build layered image {tag!r}: {exc}"
@@ -559,9 +559,7 @@ async def resolve_trial_image(
                     tag=local_tag,
                     base_digest=task_image_digest,
                     install_script=install_script,
-                    require_containment=bool(
-                        getattr(settings, "require_cgroup_parent", False)
-                    ),
+                    require_containment=bool(getattr(settings, "require_cgroup_parent", False)),
                 )
 
                 # AWAITED push under the slot — prevents the v3 race
@@ -637,63 +635,97 @@ def _push_image(client: Any, source_tag: str, registry_tag: str) -> None:
 # ─── Eviction ──────────────────────────────────────────────────────
 
 
-def evict_stale_cache(client: Any, settings: WorkerSettings) -> None:
-    """Worker-side cache cleanup. Called once per hour from the worker
-    daemon. Two passes:
+_MANAGED_IMAGE_LABELS = (
+    "loom.task-image=true",
+    "loom.task-sidecar=true",
+    "loom.trial-cache=true",
+)
 
-    1. TTL prune by creation age (Docker's native filter). Removes
-       cached images older than `trial_cache_ttl_hours`.
-    2. Capacity backstop: if free disk drops below
-       `trial_cache_min_free_gb`, delete oldest-by-creation
-       trial-cache images regardless of TTL.
 
-    Docker doesn't track last-access on images, so this is creation-
-    age TTL + creation-order LRU approximation. True LRU would require
-    a sidecar SQLite file (deferred — see plan risk #17)."""
-    import shutil
-
-    # Pass 1: TTL prune
-    try:
-        client.images.prune(
-            filters={
-                "label": "loom.trial-cache=true",
-                "until": f"{settings.trial_cache_ttl_hours}h",
-                "dangling": False,
-            }
+def evict_stale_managed_images(client: Any, settings: WorkerSettings) -> None:
+    """Bound all Loom-managed Docker images by age and disk pressure."""
+    ttl_hours = int(
+        getattr(
+            settings,
+            "task_image_local_ttl_hours",
+            getattr(settings, "trial_cache_ttl_hours", 168),
         )
-    except APIError as exc:
-        logger.warning("trial_cache TTL prune failed: %s", exc)
+    )
+    min_free_gb = int(
+        getattr(
+            settings,
+            "task_image_min_free_gb",
+            getattr(settings, "trial_cache_min_free_gb", 20),
+        )
+    )
+    for label in _MANAGED_IMAGE_LABELS:
+        try:
+            client.images.prune(
+                filters={
+                    "label": label,
+                    "until": f"{ttl_hours}h",
+                    "dangling": False,
+                }
+            )
+        except APIError as exc:
+            logger.warning("managed image TTL prune failed label=%s: %s", label, exc)
 
-    # Pass 2: capacity backstop
+    docker_root = "/"
+    with contextlib.suppress(Exception):
+        info = client.info()
+        if isinstance(info, dict) and isinstance(info.get("DockerRootDir"), str):
+            docker_root = info["DockerRootDir"]
     try:
-        free_gb = shutil.disk_usage("/").free / 1024**3
+        free_gb = shutil.disk_usage(docker_root).free / 1024**3
     except OSError as exc:
-        logger.warning("trial_cache disk-usage probe failed: %s", exc)
+        logger.warning("managed image disk-usage probe failed: %s", exc)
         return
-    if free_gb >= settings.trial_cache_min_free_gb:
+    if free_gb >= min_free_gb:
         return
 
+    by_id: dict[str, Any] = {}
     try:
-        cached = sorted(
-            client.images.list(filters={"label": "loom.trial-cache=true"}),
-            key=lambda img: img.attrs.get("Created", ""),
-        )
+        for label in _MANAGED_IMAGE_LABELS:
+            for image in client.images.list(filters={"label": label}):
+                by_id[str(image.id)] = image
     except APIError as exc:
-        logger.warning("trial_cache list failed: %s", exc)
+        logger.warning("managed image list failed: %s", exc)
         return
+    cached = sorted(by_id.values(), key=lambda image: image.attrs.get("Created", ""))
 
     for img in cached:
-        if free_gb >= settings.trial_cache_min_free_gb:
+        if free_gb >= min_free_gb:
             break
         try:
             client.images.remove(img.id, force=True)
         except APIError as exc:
-            logger.debug("trial_cache remove failed for %s: %s", img.id, exc)
+            logger.debug("managed image remove failed for %s: %s", img.id, exc)
             continue
         try:
-            free_gb = shutil.disk_usage("/").free / 1024**3
+            free_gb = shutil.disk_usage(docker_root).free / 1024**3
         except OSError:
             return
+
+
+def evict_stale_cache(client: Any, settings: WorkerSettings) -> None:
+    """Compatibility alias for the generalized managed-image eviction."""
+    evict_stale_managed_images(client, settings)
+
+
+def evict_stale_managed_images_from_env(settings: WorkerSettings) -> None:
+    """Best-effort managed-image eviction using the configured Docker daemon."""
+    try:
+        client = docker.from_env()
+    except Exception:
+        logger.exception("managed image eviction Docker client failed")
+        return
+    try:
+        evict_stale_managed_images(client, settings)
+    except Exception:
+        logger.exception("managed image eviction failed")
+    finally:
+        with contextlib.suppress(Exception):
+            client.close()
 
 
 class _SupportsCacheSlots(Protocol):

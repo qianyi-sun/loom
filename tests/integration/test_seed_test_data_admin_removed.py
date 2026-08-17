@@ -1,13 +1,31 @@
 from __future__ import annotations
 
+import hashlib
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
+import pytest
 from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import TeamMembership, Token, User
+from loom.db.schema import TaskImageMaterialization, TeamMembership, Token, User
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_seeded_task_image_materializations(postgres_url: str) -> Iterator[None]:
+    yield
+    engine = create_engine(postgres_url)
+    session_factory = sessionmaker(engine)
+    with session_factory() as session:
+        session.execute(
+            delete(TaskImageMaterialization).where(
+                TaskImageMaterialization.task_id == "hello-world"
+            )
+        )
+        session.commit()
+    engine.dispose()
 
 
 def test_seed_test_data_does_not_create_db_admin_tokens(postgres_url: str) -> None:
@@ -72,4 +90,50 @@ def test_seed_test_data_does_not_create_db_admin_tokens(postgres_url: str) -> No
         for row in rows
     )
 
+    engine.dispose()
+
+
+def test_seed_test_data_system_output_includes_least_privilege_builder_token(
+    postgres_url: str,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/seed_test_data.py",
+            "--db-url",
+            postgres_url,
+            "--mode",
+            "test",
+            "--print",
+            "system",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    team_token, worker_token, builder_token = result.stdout.strip().splitlines()
+    assert team_token.startswith("loom_api_")
+    assert worker_token.startswith("loom_w_")
+    assert builder_token.startswith("loom_tib_")
+
+    engine = create_engine(postgres_url)
+    session_factory = sessionmaker(engine)
+    with session_factory() as session:
+        builder_row = session.execute(
+            select(Token.type, Token.scopes).where(
+                Token.token_hash == hashlib.sha256(builder_token.encode()).digest()
+            )
+        ).one()
+        materializations = session.execute(
+            select(
+                TaskImageMaterialization.cpu_arch,
+                TaskImageMaterialization.state,
+            ).where(TaskImageMaterialization.task_id == "hello-world")
+        ).all()
+    assert builder_row == ("worker", ["task-image:build"])
+    assert set(materializations) == {("x86_64", "queued"), ("arm64", "queued")}
     engine.dispose()

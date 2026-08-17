@@ -47,6 +47,7 @@ from loom_control_plane.routes import (
     pipeline_catalog,
     state,
     step_tokens,
+    task_image_materializations,
     tasks,
     trajectory,
     trial_cache,
@@ -280,6 +281,7 @@ def create_app(settings: ControlPlaneSettings) -> FastAPI:
     app.include_router(admin.router)
     app.include_router(step_tokens.router)
     app.include_router(trial_cache.router)
+    app.include_router(task_image_materializations.router)
     # /metrics: standard prometheus_client ASGI app. Mounted at the
     # top-level for prometheus scrapers (operator-supplied
     # ServiceMonitor / PodMonitor uses the default `/metrics` path).

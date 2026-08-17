@@ -17,7 +17,7 @@ from loom.models.task import (
     VerifierDefaults,
 )
 from loom_worker import task_sidecars
-from loom_worker.task_sidecars import DockerTaskSidecarRuntime
+from loom_worker.task_sidecars import DockerTaskSidecarRuntime, task_sidecar_image_tag
 
 
 def _task_config() -> TaskConfig:
@@ -55,6 +55,61 @@ def _task_config() -> TaskConfig:
     )
 
 
+def test_sidecar_image_tag_is_native_architecture_qualified() -> None:
+    config = _task_config()
+    sidecar = next(sidecar for sidecar in config.environment.sidecars if sidecar.name == "api")
+
+    assert task_sidecar_image_tag(
+        config,
+        sidecar,
+        task_checksum="abc123",
+        cpu_arch="x86_64",
+    ) != task_sidecar_image_tag(
+        config,
+        sidecar,
+        task_checksum="abc123",
+        cpu_arch="arm64",
+    )
+
+
+async def test_sidecar_dockerfile_grant_wins_when_prebuilt_image_is_also_declared(
+    tmp_path: Path,
+) -> None:
+    task_dir = tmp_path / "task"
+    context = task_dir / "sidecars" / "api"
+    context.mkdir(parents=True)
+    (context / "Dockerfile").write_text("FROM alpine:3.19\n")
+    sidecar = TaskSidecarConfig(
+        name="api",
+        docker_image="registry.example/prebuilt-api:latest",
+        dockerfile=PurePosixPath("sidecars/api/Dockerfile"),
+        docker_build_context=PurePosixPath("sidecars/api"),
+    )
+    task_config = _task_config().model_copy(
+        update={
+            "environment": _task_config().environment.model_copy(
+                update={"sidecars": [sidecar]}
+            )
+        }
+    )
+    registry_image = "registry.example/loom-task@sha256:" + "3" * 64
+    client = _FakeDockerClient()
+    runtime = DockerTaskSidecarRuntime(
+        task_config=task_config,
+        task_dir=task_dir,
+        task_checksum="abc123",
+        trial_id=uuid4(),
+        registry_images={"sidecar:api": registry_image},
+        pull_only=True,
+    )
+    runtime._client = client
+
+    image = await runtime._resolve_sidecar_image(sidecar)
+
+    assert image == registry_image
+    assert client.images.pull_calls == [registry_image]
+
+
 class _FakeImages:
     def __init__(self) -> None:
         self.get_calls: list[str] = []
@@ -65,7 +120,7 @@ class _FakeImages:
         self.get_calls.append(image)
         if image == "postgres:15":
             raise ImageNotFound("missing")
-        if image.startswith("loom-sidecar:"):
+        if image.startswith(("loom-sidecar:", "registry.example/")):
             raise ImageNotFound("missing")
         return object()
 
@@ -232,6 +287,9 @@ async def test_sidecar_runtime_builds_and_starts_in_dependency_order(
     assert fake_client.images.pull_calls == ["postgres:15"]
     assert fake_client.images.build_calls[0]["path"] == str(api_context)
     assert fake_client.images.build_calls[0]["dockerfile"] == "Dockerfile"
+    assert fake_client.images.build_calls[0]["platform"] == "linux/amd64"
+    assert fake_client.images.build_calls[0]["labels"]["loom.task-sidecar"] == "true"
+    assert fake_client.images.build_calls[0]["labels"]["loom.created-at"]
     assert [c["name"] for c in fake_client.containers.create_calls] == [
         f"loom-sidecar-{trial_id}-db",
         f"loom-sidecar-{trial_id}-api",
@@ -309,6 +367,73 @@ async def test_sidecar_runtime_enters_setup_slot_for_pull_and_build(
     assert slot.entered == 2
     assert slot.exited == 2
     assert slot.depth == 0
+
+
+async def test_execution_sidecar_pulls_architecture_qualified_registry_image(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    api_context = tmp_path / ".loom-build" / "sidecars" / "api"
+    api_context.mkdir(parents=True)
+    (api_context / "Dockerfile").write_text("FROM python:3.11-slim\n")
+    fake_client = _FakeDockerClient()
+    monkeypatch.setattr(task_sidecars.docker, "from_env", lambda: fake_client)
+    config = _task_config()
+    api_sidecar = next(sidecar for sidecar in config.environment.sidecars if sidecar.name == "api")
+    local_tag = task_sidecar_image_tag(
+        config,
+        api_sidecar,
+        task_checksum="abc123",
+        cpu_arch="arm64",
+    )
+    registry_repo = "registry.example/loom-task"
+    registry_ref = f"{registry_repo}:{local_tag.rpartition(':')[2]}"
+    runtime = DockerTaskSidecarRuntime(
+        task_config=config,
+        task_dir=tmp_path,
+        task_checksum="abc123",
+        trial_id=uuid4(),
+        health_poll_interval_sec=0,
+        cpu_arch="arm64",
+        registry_repo=registry_repo,
+        pull_only=True,
+    )
+
+    await runtime.start(network_name="loom-task-net")
+    await runtime.stop()
+
+    assert fake_client.images.pull_calls == ["postgres:15", registry_ref]
+    assert fake_client.images.build_calls == []
+    assert fake_client.containers.create_calls[1]["image"] == registry_ref
+
+
+async def test_execution_sidecar_pulls_exact_materialized_digest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    api_context = tmp_path / ".loom-build" / "sidecars" / "api"
+    api_context.mkdir(parents=True)
+    (api_context / "Dockerfile").write_text("FROM python:3.11-slim\n")
+    fake_client = _FakeDockerClient()
+    monkeypatch.setattr(task_sidecars.docker, "from_env", lambda: fake_client)
+    immutable_ref = "registry.example/loom-task@sha256:" + "b" * 64
+    runtime = DockerTaskSidecarRuntime(
+        task_config=_task_config(),
+        task_dir=tmp_path,
+        task_checksum="abc123",
+        trial_id=uuid4(),
+        health_poll_interval_sec=0,
+        cpu_arch="arm64",
+        registry_images={"sidecar:api": immutable_ref},
+        pull_only=True,
+    )
+
+    await runtime.start(network_name="loom-task-net")
+    await runtime.stop()
+
+    assert fake_client.images.pull_calls == ["postgres:15", immutable_ref]
+    assert fake_client.images.build_calls == []
+    assert fake_client.containers.create_calls[1]["image"] == immutable_ref
 
 
 async def test_sidecar_runtime_removes_container_when_start_fails_after_create(

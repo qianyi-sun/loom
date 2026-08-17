@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 from uuid import UUID, uuid4
@@ -725,3 +726,80 @@ def test_build_layered_image_preserves_full_diagnostic_detail() -> None:
     assert exc.value.diagnostic_detail is not None
     assert "layer noise line 0" in exc.value.diagnostic_detail
     assert "LAYER_FINAL_ERROR" in exc.value.diagnostic_detail
+
+
+def test_evict_stale_managed_images_covers_all_managed_kinds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = MagicMock()
+    settings = _StubSettings(trial_cache_ttl_hours=24)
+    settings.task_image_local_ttl_hours = 48
+    settings.task_image_min_free_gb = 20
+    images = {
+        "loom.task-image=true": [
+            SimpleNamespace(id="base-old", attrs={"Created": "2026-01-01"}),
+        ],
+        "loom.task-sidecar=true": [
+            SimpleNamespace(id="sidecar-middle", attrs={"Created": "2026-02-01"}),
+        ],
+        "loom.trial-cache=true": [
+            SimpleNamespace(id="layer-new", attrs={"Created": "2026-03-01"}),
+        ],
+    }
+
+    def list_images(*, filters):  # type: ignore[no-untyped-def]
+        return images[filters["label"]]
+
+    client.images.list.side_effect = list_images
+    disk_samples = iter(
+        [
+            SimpleNamespace(free=1 * 1024**3),
+            SimpleNamespace(free=5 * 1024**3),
+            SimpleNamespace(free=25 * 1024**3),
+        ]
+    )
+    monkeypatch.setattr(trial_cache.shutil, "disk_usage", lambda _path: next(disk_samples))
+
+    trial_cache.evict_stale_managed_images(client, settings)
+
+    assert [call.kwargs["filters"] for call in client.images.prune.call_args_list] == [
+        {
+            "label": "loom.task-image=true",
+            "until": "48h",
+            "dangling": False,
+        },
+        {
+            "label": "loom.task-sidecar=true",
+            "until": "48h",
+            "dangling": False,
+        },
+        {
+            "label": "loom.trial-cache=true",
+            "until": "48h",
+            "dangling": False,
+        },
+    ]
+    assert [call.args[0] for call in client.images.remove.call_args_list] == [
+        "base-old",
+        "sidecar-middle",
+    ]
+
+
+def test_managed_image_eviction_from_env_closes_docker_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = MagicMock()
+    settings = _StubSettings(trial_cache_ttl_hours=24)
+    settings.task_image_local_ttl_hours = 48
+    settings.task_image_min_free_gb = 20
+    monkeypatch.setattr(trial_cache.docker, "from_env", lambda: client)
+    monkeypatch.setattr(
+        trial_cache.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=25 * 1024**3),
+    )
+
+    trial_cache.evict_stale_managed_images_from_env(settings)
+
+    assert client.images.prune.call_count == 3
+    client.close.assert_called_once_with()
