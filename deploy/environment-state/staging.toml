@@ -163,6 +163,8 @@ allowed_nodes = [
   "trt-gb10-15",
 ]
 env_file = "/shared_work2/loom-staging-rollout/worker-envs/staging-task-image-builder-gb10-${IMAGE_TAG}.env"
+env_template_file = "/shared_work2/loom-staging-rollout/worker-envs/staging-gb10-worker-${IMAGE_TAG}.env"
+builder_token_file = "/shared_work2/loom-staging-rollout/credentials/task-image-builder-token"
 repo_dir = "/shared_work2/loom-staging-rollout/worker-repos/loom-remote-worker-${IMAGE_TAG}"
 registry_docker_config_dir = "/shared_work2/loom-staging-rollout/credentials/task-image-builder-docker"
 partition = "gb10"
@@ -198,6 +200,8 @@ allowed_nodes = [
   "trt-eai-oldlab-5",
 ]
 env_file = "/shared_work/loom/staging-rollout/worker-envs/staging-task-image-builder-oldlab-${IMAGE_TAG}.env"
+env_template_file = "/shared_work/loom/staging-rollout/worker-envs/staging-oldlab-worker-${IMAGE_TAG}.env"
+builder_token_file = "/shared_work/loom/staging-rollout/credentials/task-image-builder-token"
 repo_dir = "/shared_work/loom/staging-rollout/worker-repos/loom-remote-worker-${IMAGE_TAG}"
 registry_docker_config_dir = "/shared_work/loom/staging-rollout/credentials/task-image-builder-docker"
 partition = "all"

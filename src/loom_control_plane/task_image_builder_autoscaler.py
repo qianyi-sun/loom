@@ -32,6 +32,8 @@ class TaskImageBuilderPoolConfig:
     cpu_arch: Literal["x86_64", "arm64"]
     allowed_nodes: tuple[str, ...]
     env_file: str
+    env_template_file: str
+    builder_token_file: str
     repo_dir: str
     partition: str
     time_limit: str
@@ -83,6 +85,8 @@ class TaskImageBuilderPoolConfig:
                 raise ValueError("task image builder node name is invalid")
         for name, value in (
             ("env_file", self.env_file),
+            ("env_template_file", self.env_template_file),
+            ("builder_token_file", self.builder_token_file),
             ("repo_dir", self.repo_dir),
             ("registry_docker_config_dir", self.registry_docker_config_dir),
         ):

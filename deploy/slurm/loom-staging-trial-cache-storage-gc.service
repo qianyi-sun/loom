@@ -1,0 +1,16 @@
+[Unit]
+Description=Loom staging registry offline blob garbage collection
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/loom-staging-trial-cache-storage-gc
+TimeoutStartSec=2h
+Nice=10
+IOSchedulingClass=idle
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

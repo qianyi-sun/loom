@@ -1,0 +1,13 @@
+[Unit]
+Description=Run Loom staging fenced task-image registry retention
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+AccuracySec=1min
+RandomizedDelaySec=2min
+Persistent=true
+Unit=loom-staging-task-image-registry-gc.service
+
+[Install]
+WantedBy=timers.target

@@ -8,12 +8,24 @@ Wants=network-online.target
 Type=simple
 ExecStartPre=-/usr/bin/docker rm --force loom-trial-cache-registry-tls
 ExecStartPre=-/usr/bin/docker rm --force loom-staging-trial-cache-registry
-ExecStart=/usr/bin/docker run --rm --name loom-staging-trial-cache-registry --publish 192.168.50.103:5443:5000 --mount type=bind,source=/data/loom-staging/registry,target=/var/lib/registry --mount type=bind,source=/etc/loom/staging-trial-cache-registry,target=/run/loom-registry-tls,readonly --env REGISTRY_HTTP_TLS_CERTIFICATE=/run/loom-registry-tls/server.crt --env REGISTRY_HTTP_TLS_KEY=/run/loom-registry-tls/server.key registry@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
-ExecStop=-/usr/bin/docker stop --time 20 loom-staging-trial-cache-registry
+ExecStartPre=-/usr/bin/docker rm --force loom-staging-trial-cache-registry-proxy
+ExecStartPre=-/usr/bin/docker rm --force loom-staging-trial-cache-registry-backend
+ExecStartPre=-/usr/bin/docker network rm loom-staging-trial-cache-registry
+ExecStartPre=/usr/bin/docker network create --internal loom-staging-trial-cache-registry
+ExecStartPre=/usr/bin/docker run --detach --restart=on-failure:5 --name loom-staging-trial-cache-registry-backend --network loom-staging-trial-cache-registry --network-alias registry --mount type=bind,source=/data/loom-staging/registry,target=/var/lib/registry --mount type=bind,source=/etc/loom/staging-trial-cache-registry/registry.yml,target=/etc/docker/registry/config.yml,readonly registry@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373 /etc/docker/registry/config.yml
+ExecStart=/usr/bin/docker run --rm --name loom-staging-trial-cache-registry-proxy --network loom-staging-trial-cache-registry --publish 192.168.50.103:5443:5000 --mount type=bind,source=/etc/loom/staging-trial-cache-registry/nginx.conf,target=/etc/nginx/nginx.conf,readonly --mount type=bind,source=/etc/loom/staging-trial-cache-registry,target=/run/loom-registry-tls,readonly --mount type=bind,source=/etc/loom/staging-trial-cache-registry,target=/run/loom-registry-auth,readonly nginx@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
+ExecStop=-/usr/bin/docker stop --time 20 loom-staging-trial-cache-registry-proxy
+ExecStopPost=-/usr/bin/docker stop --time 20 loom-staging-trial-cache-registry-backend
+ExecStopPost=-/usr/bin/docker rm --force loom-staging-trial-cache-registry-backend
+ExecStopPost=-/usr/bin/docker network rm loom-staging-trial-cache-registry
 Restart=always
 RestartSec=5
 TimeoutStartSec=0
 TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
 
 [Install]
 WantedBy=multi-user.target

@@ -16,11 +16,19 @@ CA_FILE = ROOT / "deploy/worker-pools/trial-cache/staging-ca.crt"
 REGISTRY_UNIT = ROOT / "deploy/slurm/loom-staging-trial-cache-registry.service"
 REGISTRY_INSTALLER = ROOT / "deploy/slurm/install-loom-staging-trial-cache-registry.sh"
 CA_INSTALLER = ROOT / "deploy/slurm/install-loom-staging-trial-cache-ca.sh"
+REGISTRY_CONFIG = ROOT / "deploy/slurm/loom-staging-trial-cache-registry.yml"
+REGISTRY_PROXY = ROOT / "deploy/slurm/loom-staging-trial-cache-registry-nginx.conf"
+REGISTRY_GC_UNIT = ROOT / "deploy/slurm/loom-staging-task-image-registry-gc.service"
+REGISTRY_GC_TIMER = ROOT / "deploy/slurm/loom-staging-task-image-registry-gc.timer"
+STORAGE_GC_UNIT = ROOT / "deploy/slurm/loom-staging-trial-cache-storage-gc.service"
+STORAGE_GC_TIMER = ROOT / "deploy/slurm/loom-staging-trial-cache-storage-gc.timer"
+STORAGE_GC_SCRIPT = ROOT / "deploy/slurm/loom-staging-trial-cache-storage-gc"
 
 REGISTRY_REPO = "192.168.50.103:5443/loom-trial-cache"
 CA_SHA256 = "539c97669d322f4fe91b91b4b8187a62a6618f5a9ec3f409e1ca5f9d7c56ecc3"
 CANARY_DIGEST = "sha256:c64c687cbea9300178b30c95835354e34c4e4febc4badfe27102879de0483b5e"
 REGISTRY_IMAGE = "registry@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373"
+NGINX_IMAGE = "nginx@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10"
 
 
 def _fake_docker(path: Path) -> Path:
@@ -149,11 +157,21 @@ def test_registry_assets_are_parseable_and_pin_the_live_public_ca() -> None:
     assert "Loom-Staging-Trial-Cache-CA" in certificate.stdout
     unit = REGISTRY_UNIT.read_text(encoding="utf-8")
     installer_source = REGISTRY_INSTALLER.read_text(encoding="utf-8")
+    registry_config = REGISTRY_CONFIG.read_text(encoding="utf-8")
+    proxy_config = REGISTRY_PROXY.read_text(encoding="utf-8")
     assert f" {REGISTRY_IMAGE}" in unit
+    assert f" {NGINX_IMAGE}" in unit
     assert f'REGISTRY_IMAGE="{REGISTRY_IMAGE}"' in installer_source
+    assert f'NGINX_IMAGE="{NGINX_IMAGE}"' in installer_source
     assert " registry:2" not in unit
+    assert "delete:\n    enabled: true" in registry_config
+    assert "map $request_method $registry_auth_file" in proxy_config
+    assert "default /run/loom-registry-auth/builder.htpasswd;" in proxy_config
+    assert "DELETE /run/loom-registry-auth/gc.htpasswd;" in proxy_config
+    assert "limit_except GET HEAD" in proxy_config
+    assert "auth_basic_user_file $registry_auth_file;" in proxy_config
 
-    for installer in (REGISTRY_INSTALLER, CA_INSTALLER):
+    for installer in (REGISTRY_INSTALLER, CA_INSTALLER, STORAGE_GC_SCRIPT):
         parsed = subprocess.run(
             [bash, "-n", str(installer)],
             capture_output=True,
@@ -163,9 +181,28 @@ def test_registry_assets_are_parseable_and_pin_the_live_public_ca() -> None:
         assert parsed.returncode == 0, parsed.stderr
 
     verified = subprocess.run(
-        [systemd_analyze, "verify", str(REGISTRY_UNIT)],
+        [
+            systemd_analyze,
+            "verify",
+            str(REGISTRY_UNIT),
+            str(REGISTRY_GC_UNIT),
+            str(REGISTRY_GC_TIMER),
+            str(STORAGE_GC_UNIT),
+            str(STORAGE_GC_TIMER),
+        ],
         capture_output=True,
         text=True,
         check=False,
     )
-    assert verified.returncode == 0, verified.stderr
+    missing_installed_commands = (
+        "Command /usr/local/libexec/loom-staging-task-image-registry-gc is not executable: "
+        "No such file or directory",
+        "Command /usr/local/libexec/loom-staging-trial-cache-storage-gc is not executable: "
+        "No such file or directory",
+    )
+    unexpected = [
+        line
+        for line in verified.stderr.splitlines()
+        if line and not any(expected in line for expected in missing_installed_commands)
+    ]
+    assert unexpected == [], verified.stderr

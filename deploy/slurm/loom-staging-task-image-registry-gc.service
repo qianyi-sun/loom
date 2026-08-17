@@ -1,0 +1,25 @@
+[Unit]
+Description=Loom staging fenced task-image registry retention
+After=network-online.target loom-staging-trial-cache-registry.service
+Wants=network-online.target
+Requires=loom-staging-trial-cache-registry.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/local/libexec/loom-staging-task-image-registry-gc --cp-url http://127.0.0.1:18081 --cp-token-file /etc/loom/staging-trial-cache-registry/gc-control-plane-token --registry-url https://192.168.50.103:5443 --registry-namespace loom-trial-cache --registry-docker-config-dir /etc/loom/staging-trial-cache-registry/gc-docker --ca-file /etc/loom/staging-trial-cache-registry/ca.crt
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

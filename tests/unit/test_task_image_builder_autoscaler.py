@@ -21,6 +21,8 @@ def _config() -> TaskImageBuilderPoolConfig:
         cpu_arch="arm64",
         allowed_nodes=("gb10-1", "gb10-2"),
         env_file="/shared/loom/builder.env",
+        env_template_file="/shared/loom/trial-worker.env",
+        builder_token_file="/shared/loom/builder-token",
         repo_dir="/shared/loom/repo",
         partition="gb10",
         time_limit="04:00:00",

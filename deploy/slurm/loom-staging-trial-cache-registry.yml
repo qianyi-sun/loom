@@ -1,0 +1,28 @@
+version: 0.1
+
+log:
+  level: info
+  formatter: text
+
+storage:
+  filesystem:
+    rootdirectory: /var/lib/registry
+  delete:
+    enabled: true
+  maintenance:
+    uploadpurging:
+      enabled: true
+      age: 168h
+      interval: 24h
+      dryrun: false
+
+http:
+  addr: 0.0.0.0:5000
+  headers:
+    Docker-Distribution-Api-Version: [registry/2.0]
+
+health:
+  storagedriver:
+    enabled: true
+    interval: 30s
+    threshold: 3

@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Reclaim blobs only after the fenced retention controller deleted manifests.
+set -euo pipefail
+
+REGISTRY_SERVICE="loom-staging-trial-cache-registry.service"
+REGISTRY_IMAGE="registry@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373"
+DATA_ROOT="/data/loom-staging/registry"
+CONFIG="/etc/loom/staging-trial-cache-registry/registry.yml"
+LOCK="/run/loom-staging-trial-cache-storage-gc.lock"
+
+if [[ "$#" -ne 0 || "$(id -u)" -ne 0 ]]; then
+  echo "error: staging trial-cache storage GC requires root and no arguments" >&2
+  exit 1
+fi
+if [[ "$(hostname -s)" != "TRT-EAI-OLDLAB-1" ]]; then
+  echo "error: staging trial-cache storage GC is OLDLAB-1-only" >&2
+  exit 1
+fi
+for path in "$DATA_ROOT" "$CONFIG"; do
+  if [[ ! -e "$path" || -L "$path" ]]; then
+    echo "error: staging trial-cache storage GC input is unavailable" >&2
+    exit 1
+  fi
+done
+if ! docker image inspect "$REGISTRY_IMAGE" >/dev/null; then
+  echo "error: pinned registry image is unavailable" >&2
+  exit 1
+fi
+
+exec 9>"$LOCK"
+if ! flock --nonblock 9; then
+  echo "error: staging trial-cache storage GC is already running" >&2
+  exit 1
+fi
+
+was_active=false
+if systemctl is-active --quiet "$REGISTRY_SERVICE"; then
+  was_active=true
+  systemctl stop "$REGISTRY_SERVICE"
+fi
+restore_registry() {
+  if [[ "$was_active" == true ]]; then
+    systemctl start "$REGISTRY_SERVICE"
+  fi
+}
+trap restore_registry EXIT INT TERM
+
+docker run --rm \
+  --name loom-staging-trial-cache-storage-gc \
+  --mount type=bind,source="$DATA_ROOT",target=/var/lib/registry \
+  --mount type=bind,source="$CONFIG",target=/etc/docker/registry/config.yml,readonly \
+  "$REGISTRY_IMAGE" /bin/registry garbage-collect /etc/docker/registry/config.yml
+
+restore_registry
+was_active=false
+trap - EXIT INT TERM
+systemctl is-active --quiet "$REGISTRY_SERVICE"
