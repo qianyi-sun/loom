@@ -23,6 +23,10 @@ from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
 from sqlalchemy.dialects.postgresql import UUID as PgUUID  # noqa: N811
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from loom_capacity_manager.executable_contracts import (
+    MAX_EXECUTABLE_ADMISSION_PROPOSAL_BYTES,
+)
+
 
 class Base(DeclarativeBase):
     """Metadata root used only by the capacity management migration tree."""
@@ -1948,6 +1952,86 @@ class CapacityExecutableExecutorState(Base):
     )
 
 
+class CapacityExecutableTranche(Base):
+    """Immutable manager proposal shared by every intent in one reservation tranche."""
+
+    __tablename__ = "capacity_executable_tranches"
+    __table_args__ = (
+        CheckConstraint(
+            "execution_epoch > 0 AND configuration_epoch > 0 "
+            "AND allocation_epoch > 0 AND pool_generation > 0",
+            name="capacity_executable_tranche_quantity_check",
+        ),
+        CheckConstraint(
+            "pool_id IN ('oldlab','gb10') "
+            "AND execution_manifest_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND proposal_digest ~ '^[0-9a-f]{64}$'",
+            name="capacity_executable_tranche_binding_check",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(proposal_payload) = 'object' "
+            "AND octet_length(proposal_payload::text) <= 8388608",
+            name="capacity_executable_tranche_payload_check",
+        ),
+        ForeignKeyConstraint(
+            ("execution_epoch", "execution_manifest_sha256"),
+            (
+                "capacity_execution_epochs.execution_epoch",
+                "capacity_execution_epochs.execution_manifest_sha256",
+            ),
+            name="capacity_executable_tranche_execution_fkey",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ("allocation_epoch", "execution_epoch", "execution_manifest_sha256"),
+            (
+                "capacity_allocation_epochs.allocation_epoch",
+                "capacity_allocation_epochs.execution_epoch",
+                "capacity_allocation_epochs.execution_manifest_sha256",
+            ),
+            name="capacity_executable_tranche_allocation_fkey",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            (
+                "execution_epoch",
+                "execution_manifest_sha256",
+                "executor_id",
+                "executor_incarnation",
+                "pool_id",
+                "pool_generation",
+            ),
+            (
+                "capacity_execution_executors.execution_epoch",
+                "capacity_execution_executors.execution_manifest_sha256",
+                "capacity_execution_executors.executor_id",
+                "capacity_execution_executors.executor_incarnation",
+                "capacity_execution_executors.pool_id",
+                "capacity_execution_executors.pool_generation",
+            ),
+            name="capacity_executable_tranche_executor_fkey",
+            ondelete="RESTRICT",
+        ),
+    )
+
+    tranche_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    execution_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    execution_manifest_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    configuration_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    allocation_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    executor_id: Mapped[str] = mapped_column(Text, nullable=False)
+    executor_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    pool_id: Mapped[str] = mapped_column(Text, nullable=False)
+    pool_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    subject_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    subject_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    proposal_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    proposal_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class CapacityExecutableIntent(Base):
     """One exact executable shape and every monotonic transition it acquires."""
 
@@ -1970,7 +2054,7 @@ class CapacityExecutableIntent(Base):
             name="capacity_executable_intent_digest_check",
         ),
         CheckConstraint(
-            "state IN ('proposed','accepted','launch-ready','permitted',"
+            "state IN ('proposed','accepted','bootstrap-acknowledged','launch-ready','permitted',"
             "'submitting-unknown','bound','observed','terminal','closing','released',"
             "'quarantined')",
             name="capacity_executable_intent_state_check",
@@ -1987,13 +2071,23 @@ class CapacityExecutableIntent(Base):
         ),
         UniqueConstraint("intent_id", name="capacity_executable_intent_identity_key"),
         UniqueConstraint("shape_instance_id", name="capacity_executable_shape_identity_key"),
-        UniqueConstraint("tranche_id", name="capacity_executable_tranche_identity_key"),
+        UniqueConstraint(
+            "tranche_id",
+            "intent_id",
+            name="capacity_executable_tranche_intent_key",
+        ),
         UniqueConstraint("permit_id", name="capacity_executable_permit_identity_key"),
         UniqueConstraint(
             "execution_epoch",
             "allocation_epoch",
             "launch_rank",
             name="capacity_executable_launch_rank_key",
+        ),
+        ForeignKeyConstraint(
+            ("tranche_id",),
+            ("capacity_executable_tranches.tranche_id",),
+            name="capacity_executable_intent_tranche_fkey",
+            ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
             ("execution_epoch", "execution_manifest_sha256"),
@@ -2196,6 +2290,223 @@ class CapacityExecutableBootstrapAcknowledgement(Base):
     bootstrap_registration_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
     bootstrap_evidence_sha256: Mapped[str] = mapped_column(Text, nullable=False)
     protected_admission_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    acknowledgement_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    actor_id: Mapped[str] = mapped_column(Text, nullable=False)
+    acknowledgement_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class CapacityExecutableAdmissionProposal(Base):
+    """Append-only manager plan awaiting exact protected local enrichment."""
+
+    __tablename__ = "capacity_executable_admission_proposals"
+    __table_args__ = (
+        CheckConstraint(
+            "execution_epoch > 0 AND allocation_epoch > 0 "
+            "AND pool_id IN ('oldlab','gb10')",
+            name="capacity_executable_admission_proposal_quantity_check",
+        ),
+        CheckConstraint(
+            "execution_manifest_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND protected_admission_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND manager_input_digest ~ '^[0-9a-f]{64}$' "
+            "AND manager_allocation_digest ~ '^[0-9a-f]{64}$' "
+            "AND proposal_digest ~ '^[0-9a-f]{64}$'",
+            name="capacity_executable_admission_proposal_digest_check",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(proposal_payload) = 'object' "
+            "AND octet_length(convert_to("
+            "public.capacity_executable_canonical_jsonb_text(proposal_payload),"
+            "'UTF8')) <= "
+            f"{MAX_EXECUTABLE_ADMISSION_PROPOSAL_BYTES}",
+            name="capacity_executable_admission_proposal_payload_check",
+        ),
+        CheckConstraint(
+            "expires_at > created_at AND expires_at <= created_at + interval '10 minutes'",
+            name="capacity_executable_admission_proposal_expiry_check",
+        ),
+        ForeignKeyConstraint(
+            ("tranche_id",),
+            ("capacity_executable_tranches.tranche_id",),
+            name="capacity_executable_admission_proposal_tranche_fkey",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "proposal_id",
+            "proposal_digest",
+            name="capacity_executable_admission_proposal_exact_key",
+        ),
+        UniqueConstraint(
+            "execution_epoch",
+            "allocation_epoch",
+            "subject_id",
+            "subject_incarnation",
+            "pool_id",
+            name="capacity_executable_admission_proposal_scope_key",
+        ),
+        UniqueConstraint("plan_id", name="capacity_executable_admission_plan_key"),
+        UniqueConstraint(
+            "admission_incarnation",
+            name="capacity_executable_admission_incarnation_key",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    proposal_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    plan_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    admission_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    tranche_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    execution_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    execution_manifest_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    allocation_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    subject_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    subject_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    pool_id: Mapped[str] = mapped_column(Text, nullable=False)
+    reporter_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    protected_admission_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    manager_input_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    manager_allocation_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    proposal_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    proposal_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class CapacityExecutableAdmissionAcknowledgement(Base):
+    """Append-only subject-agent proof of one atomically converged protected plan."""
+
+    __tablename__ = "capacity_executable_admission_acknowledgements"
+    __table_args__ = (
+        CheckConstraint(
+            "execution_epoch > 0 AND allocation_epoch > 0 "
+            "AND pool_id IN ('oldlab','gb10')",
+            name="capacity_executable_admission_ack_quantity_check",
+        ),
+        CheckConstraint(
+            "execution_manifest_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND protected_admission_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND proposal_digest ~ '^[0-9a-f]{64}$' "
+            "AND prepared_plan_digest ~ '^[0-9a-f]{64}$' "
+            "AND acknowledgement_digest ~ '^[0-9a-f]{64}$'",
+            name="capacity_executable_admission_ack_digest_check",
+        ),
+        CheckConstraint(
+            "actor_id <> '' AND octet_length(actor_id) <= 256 "
+            "AND jsonb_typeof(acknowledgement_payload) = 'object' "
+            "AND octet_length(acknowledgement_payload::text) <= 8388608",
+            name="capacity_executable_admission_ack_payload_check",
+        ),
+        ForeignKeyConstraint(
+            ("proposal_id", "proposal_digest"),
+            (
+                "capacity_executable_admission_proposals.proposal_id",
+                "capacity_executable_admission_proposals.proposal_digest",
+            ),
+            name="capacity_executable_admission_ack_proposal_fkey",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "idempotency_key",
+            name="capacity_executable_admission_ack_idempotency_key",
+        ),
+        UniqueConstraint(
+            "proposal_id",
+            name="capacity_executable_admission_ack_proposal_key",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    idempotency_key: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    proposal_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    plan_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    admission_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    tranche_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    execution_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    execution_manifest_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    allocation_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    subject_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    subject_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    pool_id: Mapped[str] = mapped_column(Text, nullable=False)
+    reporter_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    protected_admission_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    proposal_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    prepared_plan_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    acknowledgement_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    actor_id: Mapped[str] = mapped_column(Text, nullable=False)
+    acknowledgement_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class CapacityExecutableAdmissionClosureAcknowledgement(Base):
+    """Append-only protected proof that one manager admission closure was cleaned up."""
+
+    __tablename__ = "capacity_executable_admission_closure_acknowledgements"
+    __table_args__ = (
+        CheckConstraint(
+            "close_reason IN ('expired','allocation-superseded','manager-closed')",
+            name="capacity_executable_admission_closure_ack_reason_check",
+        ),
+        CheckConstraint(
+            "protected_admission_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND proposal_digest ~ '^[0-9a-f]{64}$' "
+            "AND disposition_digest ~ '^[0-9a-f]{64}$' "
+            "AND acknowledgement_digest ~ '^[0-9a-f]{64}$'",
+            name="capacity_executable_admission_closure_ack_digest_check",
+        ),
+        CheckConstraint(
+            "disposition_kind IN ('abandoned','never-converged')",
+            name="capacity_executable_admission_closure_ack_disposition_check",
+        ),
+        CheckConstraint(
+            "actor_id <> '' AND octet_length(actor_id) <= 256 "
+            "AND jsonb_typeof(acknowledgement_payload) = 'object' "
+            "AND octet_length(acknowledgement_payload::text) <= 8388608",
+            name="capacity_executable_admission_closure_ack_payload_check",
+        ),
+        ForeignKeyConstraint(
+            ("proposal_id", "proposal_digest"),
+            (
+                "capacity_executable_admission_proposals.proposal_id",
+                "capacity_executable_admission_proposals.proposal_digest",
+            ),
+            name="capacity_executable_admission_closure_ack_proposal_fkey",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "idempotency_key",
+            name="capacity_executable_admission_closure_ack_idempotency_key",
+        ),
+        UniqueConstraint(
+            "closure_id",
+            name="capacity_executable_admission_closure_ack_closure_key",
+        ),
+        UniqueConstraint(
+            "proposal_id",
+            name="capacity_executable_admission_closure_ack_proposal_key",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    idempotency_key: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    closure_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    proposal_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    proposal_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    plan_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    admission_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    subject_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    subject_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    reporter_incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    protected_admission_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    close_reason: Mapped[str] = mapped_column(Text, nullable=False)
+    disposition_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    disposition_digest: Mapped[str] = mapped_column(Text, nullable=False)
     acknowledgement_digest: Mapped[str] = mapped_column(Text, nullable=False)
     actor_id: Mapped[str] = mapped_column(Text, nullable=False)
     acknowledgement_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)

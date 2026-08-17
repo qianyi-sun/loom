@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Literal
 from uuid import UUID, uuid4
 
 import pytest
@@ -26,12 +27,18 @@ from loom_capacity_agent.admission import (
     ExecutableReleaseRequestV2,
     ExecutableWorkerRegistrationV2,
     ExecutableWorkerWithdrawalRequestV2,
+    NeverConvergedAdmissionPlanV1,
     PhysicalJobBindingV2,
     PreparedAdmissionPlanV1,
     PreparedPlacementAllowanceV1,
     PreparedWorkerShapeV1,
     ProtectedReleasePublicationCheckpointV2,
     PublishableExecutableProtectedReleaseV2,
+)
+from loom_capacity_agent.admission_convergence import (
+    ProtectedAdmissionPlanCoordinator,
+    ProtectedAdmissionPlanError,
+    _build_protected_admission_convergence,
 )
 from loom_capacity_agent.claim_guard import (
     ExecutableClaimProposalV2,
@@ -41,6 +48,7 @@ from loom_capacity_agent.claim_guard import (
 from loom_capacity_agent.contracts import (
     AgentPoolCapabilityV1,
     AgentRegistrationV1,
+    GuardLifecycleDemandObservationV2,
     ReporterConfigurationV1,
 )
 from loom_capacity_agent.executable_admission import (
@@ -54,15 +62,26 @@ from loom_capacity_agent.lifecycle_store import CapacityAttemptLifecycleStore
 from loom_capacity_agent.prepared_store import CapacityPreparedAdmissionStore
 from loom_capacity_agent.store import (
     acknowledge_executable_protected_release_publication,
+    capture_lifecycle_demand_observation,
     read_next_executable_protected_release,
 )
-from loom_capacity_guard.contracts import GuardFenceV1
+from loom_capacity_guard.contracts import (
+    GuardFenceV1,
+    ProtectedAttemptV1,
+    SealedRequirementsV1,
+)
+from loom_capacity_guard.contracts import canonical_bytes as guard_canonical_bytes
+from loom_capacity_guard.contracts import canonical_digest as guard_canonical_digest
 from loom_capacity_manager.contracts import ResourceVectorV1, WorkerShapeV1
 from loom_capacity_manager.contracts import (
     canonical_digest as manager_canonical_digest,
 )
 from loom_capacity_manager.executable_contracts import (
     CandidateBindingV2,
+    ExecutableAdmissionAllowanceV2,
+    ExecutableAdmissionPlanClosureV2,
+    ExecutableAdmissionPlanProposalV2,
+    ExecutableAdmissionShapeV2,
     ExecutableBootstrapProposalV2,
     ExecutableBootstrapRegistrationV2,
     ExecutableIntentBindingV2,
@@ -160,6 +179,1429 @@ async def _seed_protected_attempt(
                 "requirements_digest": requirements_digest,
             },
         )
+
+
+def _admission_configuration(
+    registration: AgentRegistrationV1,
+) -> ReporterConfigurationV1:
+    return ReporterConfigurationV1(
+        **registration.model_dump(mode="python"),
+        protected_admission_sha256="e" * 64,
+        pool_capabilities=(
+            AgentPoolCapabilityV1(
+                capability_id="oldlab-test-capability",
+                pool_id="oldlab",
+                operating_system="linux",
+                cpu_architecture="x86_64",
+                gpu_vendor="none",
+                network_policies=("public",),
+            ),
+        ),
+    )
+
+
+async def _seed_lifecycle_attempt(
+    database: dict[str, object],
+    *,
+    protected_attempt_id: UUID,
+    execution_generation: int = 7,
+    required_pool: Literal["oldlab", "gb10"] = "oldlab",
+) -> ProtectedAttemptV1:
+    requirements = SealedRequirementsV1(
+        os="linux",
+        cpu_arch="x86_64",
+        gpu_vendor="none",
+        network_policies=("public",),
+        required_pool=required_pool,
+    )
+    attempt = ProtectedAttemptV1(
+        trial_id=_seed_trial(database),
+        protected_attempt_id=protected_attempt_id,
+        execution_generation=execution_generation,
+        requirements_digest=guard_canonical_digest(requirements),
+    )
+    async with _owner_session(database) as (_, guard_store, _session):
+        await guard_store.register_trial_attempt(attempt, requirements)
+    return attempt
+
+
+async def _initialize_manager_bound_admission_agent(
+    database: dict[str, object],
+    *,
+    binding: ExecutableIntentBindingV2,
+    reporter_incarnation: UUID,
+    protected_admission_sha256: str,
+) -> tuple[AgentRegistrationV1, ReporterConfigurationV1]:
+    """Create a real guard authority bound to one manager-owned subject."""
+
+    fence = GuardFenceV1(
+        environment_id="dev-e2e",
+        subject_id=binding.subject_id,
+        subject_incarnation=binding.subject_incarnation,
+        authority_incarnation=UUID(int=701),
+        reporter_incarnation=reporter_incarnation,
+        deployment_generation=binding.deployment_generation,
+        configuration_generation=1,
+        candidate_digest=binding.candidate.publication_sha256,
+    )
+    registration = _registration(fence).model_copy(
+        update={
+            "candidate_identity_algorithm": binding.candidate.algorithm,
+            "candidate_identity": binding.candidate.identity,
+            "candidate_publication_sha256": binding.candidate.publication_sha256,
+        }
+    )
+    configuration = ReporterConfigurationV1(
+        **registration.model_dump(mode="python"),
+        protected_admission_sha256=protected_admission_sha256,
+        pool_capabilities=(
+            AgentPoolCapabilityV1(
+                capability_id=f"{binding.pool_id}-manager-guard-e2e",
+                pool_id=binding.pool_id,
+                operating_system="linux",
+                cpu_architecture="x86_64",
+                gpu_vendor="none",
+                network_policies=("public",),
+            ),
+        ),
+    )
+    async with _owner_session(database) as (agent_store, guard_store, _session):
+        await guard_store.initialize_disabled_authority(fence)
+        await agent_store.register_agent(registration)
+    return registration, configuration
+
+
+def _admission_proposal(
+    configuration: ReporterConfigurationV1,
+    attempts: tuple[ProtectedAttemptV1, ...],
+    *,
+    request: ExecutableBootstrapRegistrationV2 | None = None,
+) -> ExecutableAdmissionPlanProposalV2:
+    template = (
+        request
+        or _bootstrap(
+            configuration.subject_id,
+            configuration.subject_incarnation,
+        )
+    ).binding
+    resources = ResourceVectorV1(
+        slots=max(1, len(attempts)),
+        cpu_millicores=1000 * max(1, len(attempts)),
+        memory_bytes=1024 * max(1, len(attempts)),
+    )
+    binding = template.model_copy(
+        update={
+            "concurrency_slots": max(1, len(attempts)),
+            "resources": resources,
+        }
+    )
+    worker_shape = WorkerShapeV1(
+        shape_id=binding.shape_id,
+        concurrency_slots=binding.concurrency_slots,
+        total_resources=resources,
+        node_resources=(resources,),
+        compatible_domain_ids=("oldlab-x86",),
+        capabilities=(
+            "cpu_arch.x86_64",
+            "gpu_vendor.none",
+            "network.public",
+            "os.linux",
+        ),
+    )
+    shape = ExecutableAdmissionShapeV2(
+        binding=binding,
+        protocol_generation=1,
+        protocol_digest="5" * 64,
+        worker_shape=worker_shape,
+        worker_shape_digest=manager_canonical_digest(worker_shape),
+        bootstrap_registration_epoch=1,
+    )
+    return ExecutableAdmissionPlanProposalV2(
+        proposal_id=uuid4(),
+        plan_id=uuid4(),
+        admission_incarnation=uuid4(),
+        reporter_incarnation=configuration.reporter_incarnation,
+        protected_admission_sha256=configuration.protected_admission_sha256,
+        manager_input_digest="6" * 64,
+        manager_allocation_digest="7" * 64,
+        lease_not_after=datetime.now(UTC) + timedelta(minutes=5),
+        shapes=(shape,),
+        allowances=tuple(
+            ExecutableAdmissionAllowanceV2(
+                allowance_id=uuid4(),
+                protected_attempt_id=attempt.protected_attempt_id,
+                shape_instance_id=binding.shape_instance_id,
+                shape_slot_index=index,
+                submission_intent_id=binding.intent_id,
+            )
+            for index, attempt in enumerate(attempts)
+        ),
+    )
+
+
+async def _capture_lifecycle(
+    database: dict[str, object],
+    registration: AgentRegistrationV1,
+    *,
+    expected_high_water: int,
+) -> GuardLifecycleDemandObservationV2:
+    async with _serializable_agent_session(database) as session:
+        return await capture_lifecycle_demand_observation(
+            session,
+            registration=registration,
+            expected_high_water=expected_high_water,
+            max_attempts=100,
+        )
+
+
+async def _prepare_abandonment_claim_race(
+    database: dict[str, object],
+) -> tuple[
+    AgentRegistrationV1,
+    ReporterConfigurationV1,
+    ExecutableClaimProposalV2,
+    ExecutableAdmissionPlanClosureV2,
+    GuardLifecycleDemandObservationV2,
+    UUID,
+]:
+    _fence, registration = await _initialize_and_register(database)
+    configuration = _admission_configuration(registration)
+    capability = "single-use-bootstrap-capability"
+    bootstrap_sha256 = hashlib.sha256(capability.encode("ascii")).hexdigest()
+    request = await _protect_bootstrap(
+        database,
+        registration,
+        bootstrap_sha256=bootstrap_sha256,
+    )
+    worker = _worker(request)
+    attempt = await _seed_lifecycle_attempt(
+        database,
+        protected_attempt_id=UUID(int=341),
+    )
+    proposal = _admission_proposal(
+        configuration,
+        (attempt,),
+        request=request,
+    )
+    pending = await _capture_lifecycle(
+        database,
+        registration,
+        expected_high_water=0,
+    )
+    async with _serializable_agent_session(database) as session:
+        await ProtectedAdmissionPlanCoordinator(
+            session,
+            configuration=configuration,
+        ).converge(proposal, pending)
+    assigned = await _capture_lifecycle(
+        database,
+        registration,
+        expected_high_water=1,
+    )
+    async with _serializable_executor_session(database) as session:
+        store = ExecutableAdmissionStore(session, registration=registration)
+        await store.prepare_worker(request, bootstrap_sha256=bootstrap_sha256)
+        await store.bind_slurm_job(_physical(request))
+        await store.register_worker(worker, bootstrap_capability=capability)
+    return (
+        registration,
+        configuration,
+        ExecutableClaimProposalV2(
+            operation_id=UUID(int=342),
+            protected_attempt_id=attempt.protected_attempt_id,
+            execution_generation=attempt.execution_generation,
+            requirements_digest=attempt.requirements_digest,
+            worker_id=worker.worker_id,
+            worker_incarnation=worker.worker_incarnation,
+            expected_claim_high_water=0,
+        ),
+        ExecutableAdmissionPlanClosureV2(
+            closure_id=UUID(int=343),
+            proposal=proposal,
+            close_reason="manager-closed",
+        ),
+        assigned,
+        request.binding.intent_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_protected_admission_convergence_commits_and_exactly_replays(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    _fence, registration = await _initialize_and_register(capacity_guard_database)
+    configuration = _admission_configuration(registration)
+    attempts = (
+        await _seed_lifecycle_attempt(
+            capacity_guard_database,
+            protected_attempt_id=UUID(int=301),
+        ),
+        await _seed_lifecycle_attempt(
+            capacity_guard_database,
+            protected_attempt_id=UUID(int=302),
+        ),
+    )
+    proposal = _admission_proposal(configuration, attempts)
+    pending = await _capture_lifecycle(
+        capacity_guard_database,
+        registration,
+        expected_high_water=0,
+    )
+    async with _serializable_agent_session(capacity_guard_database) as session:
+        first = await ProtectedAdmissionPlanCoordinator(
+            session,
+            configuration=configuration,
+        ).converge(proposal, pending)
+
+    assigned = await _capture_lifecycle(
+        capacity_guard_database,
+        registration,
+        expected_high_water=1,
+    )
+    async with _serializable_agent_session(capacity_guard_database) as session:
+        replay = await ProtectedAdmissionPlanCoordinator(
+            session,
+            configuration=configuration,
+        ).converge(proposal, assigned)
+
+    assert replay == first
+    assert first.acknowledgement.assignment_count == 2
+    async with _owner_session(capacity_guard_database) as (_, _, session):
+        counts = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT "
+                        "(SELECT count(*) FROM loom_capacity_guard.prepared_admission_plans) "
+                        "AS plans, "
+                        "(SELECT count(*) FROM loom_capacity_guard.prepared_worker_shapes) "
+                        "AS shapes, "
+                        "(SELECT count(*) FROM "
+                        "loom_capacity_guard.prepared_placement_allowances) AS allowances, "
+                        "(SELECT count(*) FROM loom_capacity_guard.attempt_lifecycle_heads "
+                        "WHERE lifecycle_state = 'assigned') AS assigned"
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
+    assert dict(counts) == {"plans": 1, "shapes": 1, "allowances": 2, "assigned": 2}
+
+
+@pytest.mark.asyncio
+async def test_failed_publication_rejects_retry_after_local_withdrawal(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    """A withdrawal after a failed send must invalidate the cached acknowledgement."""
+
+    _fence, registration = await _initialize_and_register(capacity_guard_database)
+    configuration = _admission_configuration(registration)
+    attempt = await _seed_lifecycle_attempt(
+        capacity_guard_database,
+        protected_attempt_id=UUID(int=303),
+    )
+    proposal = _admission_proposal(configuration, (attempt,))
+    pending = await _capture_lifecycle(
+        capacity_guard_database,
+        registration,
+        expected_high_water=0,
+    )
+    convergence = _build_protected_admission_convergence(
+        configuration,
+        proposal,
+        pending,
+    )
+    async with _serializable_agent_session(capacity_guard_database) as session:
+        work = await ProtectedAdmissionPlanCoordinator(
+            session,
+            configuration=configuration,
+        ).converge(proposal, pending)
+
+    with pytest.raises(RuntimeError, match="manager unavailable"):
+        async with _serializable_agent_session(capacity_guard_database) as session:
+            authorized = await ProtectedAdmissionPlanCoordinator(
+                session,
+                configuration=configuration,
+            ).authorize_publication(work)
+            assert authorized == work
+            raise RuntimeError("manager unavailable")
+
+    assignment = convergence.transitions[0]
+    withdrawal = assignment.model_copy(
+        update={
+            "transition_id": uuid4(),
+            "expected_transition_sequence": 1,
+            "operation": "withdraw",
+            "expected_state": "assigned",
+            "target_state": "pending-unassigned",
+            "transition_reason": "manager-admission-closed",
+        }
+    )
+    async with _serializable_agent_session(capacity_guard_database) as session:
+        await CapacityAttemptLifecycleStore(
+            session,
+            registration=registration,
+        ).apply_transition(withdrawal)
+
+    with pytest.raises(DBAPIError, match="current protected assignment"):
+        async with _serializable_agent_session(capacity_guard_database) as session:
+            await ProtectedAdmissionPlanCoordinator(
+                session,
+                configuration=configuration,
+            ).authorize_publication(work)
+
+
+@pytest.mark.asyncio
+async def test_protected_admission_convergence_rejects_assigned_replay_after_terminal(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    """Catch an obsolete assigned observation authorizing an acknowledgement."""
+
+    _fence, registration = await _initialize_and_register(capacity_guard_database)
+    configuration = _admission_configuration(registration)
+    attempt = await _seed_lifecycle_attempt(
+        capacity_guard_database,
+        protected_attempt_id=UUID(int=303),
+    )
+    proposal = _admission_proposal(configuration, (attempt,))
+    pending = await _capture_lifecycle(
+        capacity_guard_database,
+        registration,
+        expected_high_water=0,
+    )
+    convergence = _build_protected_admission_convergence(
+        configuration,
+        proposal,
+        pending,
+    )
+    async with _serializable_agent_session(capacity_guard_database) as session:
+        await ProtectedAdmissionPlanCoordinator(
+            session,
+            configuration=configuration,
+        ).converge(proposal, pending)
+
+    assigned = await _capture_lifecycle(
+        capacity_guard_database,
+        registration,
+        expected_high_water=1,
+    )
+    terminal = convergence.transitions[0].model_copy(
+        update={
+            "transition_id": UUID(int=304),
+            "expected_transition_sequence": 1,
+            "operation": "cancel",
+            "expected_state": "assigned",
+            "target_state": "cancelled-terminal",
+            "transition_reason": "owner-cancelled-assigned",
+        }
+    )
+    async with _serializable_agent_session(capacity_guard_database) as session:
+        await CapacityAttemptLifecycleStore(
+            session,
+            registration=registration,
+        ).apply_transition(terminal)
+
+    with pytest.raises(DBAPIError, match="current protected assignment"):
+        async with _serializable_agent_session(capacity_guard_database) as session:
+            await ProtectedAdmissionPlanCoordinator(
+                session,
+                configuration=configuration,
+            ).converge(proposal, assigned)
+
+    async with _owner_session(capacity_guard_database) as (_, _, session):
+        head = (
+            await session.execute(
+                text(
+                    "SELECT lifecycle_state, transition_sequence "
+                    "FROM loom_capacity_guard.attempt_lifecycle_heads "
+                    "WHERE protected_attempt_id = :protected_attempt_id"
+                ),
+                {"protected_attempt_id": attempt.protected_attempt_id},
+            )
+        ).one()
+    assert head == ("cancelled-terminal", 2)
+
+
+@pytest.mark.asyncio
+async def test_protected_admission_convergence_rejects_assigned_replay_after_claim(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    """Catch a claimed attempt replaying its pre-claim acknowledgement."""
+
+    _fence, registration = await _initialize_and_register(capacity_guard_database)
+    configuration = _admission_configuration(registration)
+    capability = "single-use-bootstrap-capability"
+    bootstrap_sha256 = hashlib.sha256(capability.encode("ascii")).hexdigest()
+    request = await _protect_bootstrap(
+        capacity_guard_database,
+        registration,
+        bootstrap_sha256=bootstrap_sha256,
+    )
+    worker = _worker(request)
+    attempt = await _seed_lifecycle_attempt(
+        capacity_guard_database,
+        protected_attempt_id=UUID(int=305),
+    )
+    proposal = _admission_proposal(
+        configuration,
+        (attempt,),
+        request=request,
+    )
+    pending = await _capture_lifecycle(
+        capacity_guard_database,
+        registration,
+        expected_high_water=0,
+    )
+    async with _serializable_agent_session(capacity_guard_database) as session:
+        await ProtectedAdmissionPlanCoordinator(
+            session,
+            configuration=configuration,
+        ).converge(proposal, pending)
+
+    assigned = await _capture_lifecycle(
+        capacity_guard_database,
+        registration,
+        expected_high_water=1,
+    )
+    claim = ExecutableClaimProposalV2(
+        operation_id=UUID(int=306),
+        protected_attempt_id=attempt.protected_attempt_id,
+        execution_generation=attempt.execution_generation,
+        requirements_digest=attempt.requirements_digest,
+        worker_id=worker.worker_id,
+        worker_incarnation=worker.worker_incarnation,
+        expected_claim_high_water=0,
+    )
+    async with _serializable_executor_session(capacity_guard_database) as session:
+        store = ExecutableAdmissionStore(session, registration=registration)
+        await store.prepare_worker(request, bootstrap_sha256=bootstrap_sha256)
+        await store.bind_slurm_job(_physical(request))
+        await store.register_worker(worker, bootstrap_capability=capability)
+        assert await store.admit_claim(claim) is not None
+
+    with pytest.raises(DBAPIError, match="current protected assignment"):
+        async with _serializable_agent_session(capacity_guard_database) as session:
+            await ProtectedAdmissionPlanCoordinator(
+                session,
+                configuration=configuration,
+            ).converge(proposal, assigned)
+
+    assert await _claim_terminal_counts(capacity_guard_database) == (1, 0, 1)
+
+
+@pytest.mark.asyncio
+async def test_protected_admission_abandonment_rejects_existing_executable_claim(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    """Catch cleanup withdrawing an assignment after its claim committed."""
+
+    registration, configuration, claim, closure, assigned, _intent_id = (
+        await _prepare_abandonment_claim_race(capacity_guard_database)
+    )
+    async with _serializable_executor_session(capacity_guard_database) as session:
+        admitted = await ExecutableAdmissionStore(
+            session,
+            registration=registration,
+        ).admit_claim(claim)
+        assert admitted is not None
+
+    with pytest.raises(DBAPIError, match="executable claim"):
+        async with _serializable_agent_session(capacity_guard_database) as session:
+            await ProtectedAdmissionPlanCoordinator(
+                session,
+                configuration=configuration,
+            ).abandon(closure, assigned)
+
+    assert await _abandonment_claim_outcome(
+        capacity_guard_database,
+        protected_attempt_id=claim.protected_attempt_id,
+        plan_id=closure.proposal.plan_id,
+    ) == ("assigned", 1, 0)
+
+
+@pytest.mark.asyncio
+async def test_never_converged_tombstone_rejects_recomputed_noncanonical_nested_digest(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    """Direct SQL cannot redefine a closure digest over non-canonical bytes."""
+
+    _fence, registration = await _initialize_and_register(capacity_guard_database)
+    configuration = _admission_configuration(registration)
+    request = await _protect_bootstrap(
+        capacity_guard_database,
+        registration,
+        bootstrap_sha256="6" * 64,
+    )
+    proposal = _admission_proposal(configuration, (), request=request)
+    closure = ExecutableAdmissionPlanClosureV2(
+        closure_id=uuid4(),
+        proposal=proposal,
+        close_reason="manager-closed",
+    )
+    tombstone = NeverConvergedAdmissionPlanV1(
+        **registration.model_dump(mode="python", exclude_none=False),
+        registration_digest=guard_canonical_digest(registration),
+        closure=closure,
+        closure_digest=canonical_executable_digest(closure),
+        proposal_digest=canonical_executable_digest(proposal),
+    )
+    noncanonical_closure = canonical_executable_bytes(closure) + b" "
+    forged = tombstone.model_copy(
+        update={"closure_digest": hashlib.sha256(noncanonical_closure).hexdigest()}
+    )
+
+    with pytest.raises(DBAPIError, match=r"canonical|tombstone payload changed"):
+        async with _serializable_agent_session(capacity_guard_database) as session:
+            await session.execute(
+                text(
+                    "SELECT loom_capacity_guard."
+                    "tombstone_never_converged_admission_plan("
+                    ":agent_incarnation, CAST(:payload AS jsonb), "
+                    "CAST(:canonical_payload AS bytea), :payload_digest, "
+                    "CAST(:registration_payload AS bytea), :registration_digest, "
+                    "CAST(:closure_payload AS bytea), :closure_digest, "
+                    "CAST(:proposal_payload AS bytea), :proposal_digest)"
+                ),
+                {
+                    "agent_incarnation": registration.agent_incarnation,
+                    "payload": guard_canonical_bytes(forged).decode("ascii"),
+                    "canonical_payload": guard_canonical_bytes(forged),
+                    "payload_digest": guard_canonical_digest(forged),
+                    "registration_payload": guard_canonical_bytes(registration),
+                    "registration_digest": tombstone.registration_digest,
+                    "closure_payload": noncanonical_closure,
+                    "closure_digest": forged.closure_digest,
+                    "proposal_payload": canonical_executable_bytes(proposal),
+                    "proposal_digest": tombstone.proposal_digest,
+                },
+            )
+
+
+@pytest.mark.parametrize(
+    "changed_field",
+    (
+        "deployment_generation",
+        "candidate",
+        "protected_admission_sha256",
+        "pool_id",
+    ),
+)
+@pytest.mark.asyncio
+async def test_never_converged_tombstone_sql_rejects_untrusted_local_binding(
+    capacity_guard_database: dict[str, object],
+    changed_field: str,
+) -> None:
+    """The SECURITY DEFINER boundary must rebind every local proposal fact."""
+
+    _fence, registration = await _initialize_and_register(capacity_guard_database)
+    configuration = _admission_configuration(registration)
+    request = await _protect_bootstrap(
+        capacity_guard_database,
+        registration,
+        bootstrap_sha256="6" * 64,
+    )
+    proposal = _admission_proposal(configuration, (), request=request)
+    binding_update: dict[str, object] = {}
+    proposal_update: dict[str, object] = {}
+    if changed_field == "deployment_generation":
+        binding_update[changed_field] = proposal.shapes[0].binding.deployment_generation + 1
+    elif changed_field == "candidate":
+        binding_update[changed_field] = CandidateBindingV2(
+            algorithm="git-sha1",
+            identity="1" * 40,
+            publication_sha256=proposal.shapes[0].binding.candidate.publication_sha256,
+        )
+    elif changed_field == "protected_admission_sha256":
+        proposal_update[changed_field] = "f" * 64
+    elif changed_field == "pool_id":
+        binding_update[changed_field] = "gb10"
+    else:  # pragma: no cover - parametrization is closed above
+        raise AssertionError(changed_field)
+    if binding_update:
+        proposal_update["shapes"] = (
+            proposal.shapes[0].model_copy(
+                update={
+                    "binding": proposal.shapes[0].binding.model_copy(
+                        update=binding_update
+                    )
+                }
+            ),
+        )
+    changed = proposal.model_copy(update=proposal_update)
+    closure = ExecutableAdmissionPlanClosureV2(
+        closure_id=uuid4(),
+        proposal=changed,
+        close_reason="manager-closed",
+    )
+    tombstone = NeverConvergedAdmissionPlanV1(
+        **registration.model_dump(mode="python", exclude_none=False),
+        registration_digest=guard_canonical_digest(registration),
+        closure=closure,
+        closure_digest=canonical_executable_digest(closure),
+        proposal_digest=canonical_executable_digest(changed),
+    )
+
+    with pytest.raises(DBAPIError, match=r"binding|bootstrap|tombstone payload changed"):
+        async with _serializable_agent_session(capacity_guard_database) as session:
+            await CapacityPreparedAdmissionStore(
+                session,
+                registration=configuration,
+            ).tombstone_never_converged_plan(tombstone)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "forgery",
+    ("deployment", "candidate", "pool", "bootstrap-registration"),
+)
+async def test_never_converged_tombstone_sql_rejects_untrusted_later_shape(
+    capacity_guard_database: dict[str, object],
+    forgery: str,
+) -> None:
+    """Every shape, not only the canonical anchor, must match protected bootstrap."""
+
+    _fence, registration = await _initialize_and_register(capacity_guard_database)
+    configuration = _admission_configuration(registration)
+    first_request = await _protect_bootstrap(
+        capacity_guard_database,
+        registration,
+        bootstrap_sha256="6" * 64,
+    )
+    second_template = first_request.model_copy(
+        update={
+            "binding": first_request.binding.model_copy(
+                update={
+                    "intent_id": uuid4(),
+                    "shape_instance_id": (
+                        f"{first_request.binding.shape_instance_id}-second"
+                    ),
+                }
+            )
+        }
+    )
+    second_request = await _protect_bootstrap(
+        capacity_guard_database,
+        registration,
+        bootstrap_sha256="7" * 64,
+        request=second_template,
+    )
+    first = _admission_proposal(configuration, (), request=first_request)
+    second_shape = first.shapes[0].model_copy(
+        update={
+            "binding": second_request.binding,
+            "bootstrap_registration_epoch": (
+                second_request.bootstrap_registration_epoch
+            ),
+        }
+    )
+    proposal = ExecutableAdmissionPlanProposalV2.model_validate(
+        first.model_dump(mode="python")
+        | {"shapes": (first.shapes[0], second_shape)}
+    )
+    closure = ExecutableAdmissionPlanClosureV2(
+        closure_id=uuid4(),
+        proposal=proposal,
+        close_reason="manager-closed",
+    )
+    tombstone = NeverConvergedAdmissionPlanV1(
+        **registration.model_dump(mode="python", exclude_none=False),
+        registration_digest=guard_canonical_digest(registration),
+        closure=closure,
+        closure_digest=canonical_executable_digest(closure),
+        proposal_digest=canonical_executable_digest(proposal),
+    )
+    forged_proposal_payload = proposal.model_dump(mode="json", exclude_none=False)
+    forged_shape = forged_proposal_payload["shapes"][1]
+    if forgery == "deployment":
+        forged_shape["binding"]["deployment_generation"] += 1
+    elif forgery == "candidate":
+        forged_shape["binding"]["candidate"]["identity"] = "1" * 40
+    elif forgery == "pool":
+        forged_shape["binding"]["pool_id"] = (
+            "gb10" if forged_shape["binding"]["pool_id"] != "gb10" else "oldlab"
+        )
+    elif forgery == "bootstrap-registration":
+        forged_shape["bootstrap_registration_epoch"] += 1
+    else:  # pragma: no cover - parametrization is closed above
+        raise AssertionError(forgery)
+    proposal_payload = json.dumps(
+        forged_proposal_payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("ascii")
+    proposal_digest = hashlib.sha256(proposal_payload).hexdigest()
+    forged_closure_payload = closure.model_dump(mode="json", exclude_none=False)
+    forged_closure_payload["proposal"] = forged_proposal_payload
+    closure_payload = json.dumps(
+        forged_closure_payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("ascii")
+    closure_digest = hashlib.sha256(closure_payload).hexdigest()
+    forged_tombstone_payload = tombstone.model_dump(mode="json", exclude_none=False)
+    forged_tombstone_payload.update(
+        {
+            "closure": forged_closure_payload,
+            "closure_digest": closure_digest,
+            "proposal_digest": proposal_digest,
+        }
+    )
+    canonical_payload = json.dumps(
+        forged_tombstone_payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("ascii")
+
+    with pytest.raises(DBAPIError, match=r"bootstrap|binding|tombstone payload changed"):
+        async with _serializable_agent_session(capacity_guard_database) as session:
+            await session.execute(
+                text(
+                    "SELECT loom_capacity_guard."
+                    "tombstone_never_converged_admission_plan("
+                    ":agent_incarnation, CAST(:payload AS jsonb), "
+                    "CAST(:canonical_payload AS bytea), :payload_digest, "
+                    "CAST(:registration_payload AS bytea), :registration_digest, "
+                    "CAST(:closure_payload AS bytea), :closure_digest, "
+                    "CAST(:proposal_payload AS bytea), :proposal_digest)"
+                ),
+                {
+                    "agent_incarnation": registration.agent_incarnation,
+                    "payload": canonical_payload.decode("ascii"),
+                    "canonical_payload": canonical_payload,
+                    "payload_digest": hashlib.sha256(canonical_payload).hexdigest(),
+                    "registration_payload": guard_canonical_bytes(registration),
+                    "registration_digest": tombstone.registration_digest,
+                    "closure_payload": closure_payload,
+                    "closure_digest": closure_digest,
+                    "proposal_payload": proposal_payload,
+                    "proposal_digest": proposal_digest,
+                },
+            )
+
+
+@pytest.mark.asyncio
+async def test_never_converged_tombstone_exactly_replays_and_blocks_later_prepare(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    """An exact negative receipt is append-only and permanently excludes its plan."""
+
+    _fence, registration = await _initialize_and_register(capacity_guard_database)
+    configuration = _admission_configuration(registration)
+    request = await _protect_bootstrap(
+        capacity_guard_database,
+        registration,
+        bootstrap_sha256="6" * 64,
+    )
+    proposal = _admission_proposal(configuration, (), request=request)
+    closure = ExecutableAdmissionPlanClosureV2(
+        closure_id=uuid4(),
+        proposal=proposal,
+        close_reason="manager-closed",
+    )
+
+    async with _serializable_agent_session(capacity_guard_database) as session:
+        first = await ProtectedAdmissionPlanCoordinator(
+            session,
+            configuration=configuration,
+        ).close(closure, None)
+    async with _serializable_agent_session(capacity_guard_database) as session:
+        replay = await ProtectedAdmissionPlanCoordinator(
+            session,
+            configuration=configuration,
+        ).close(closure, None)
+
+    assert replay == first
+    assert isinstance(first.disposition, NeverConvergedAdmissionPlanV1)
+    assert first.acknowledgement.disposition_kind == "never-converged"
+    tombstone = first.disposition
+    exact_registration = AgentRegistrationV1.model_validate(
+        {
+            field: getattr(tombstone, field)
+            for field in AgentRegistrationV1.model_fields
+        }
+    )
+    with pytest.raises(DBAPIError, match=r"tombstone payload changed"):
+        async with _serializable_agent_session(capacity_guard_database) as session:
+            await session.execute(
+                text(
+                    "SELECT loom_capacity_guard."
+                    "tombstone_never_converged_admission_plan("
+                    ":agent_incarnation, CAST(:payload AS jsonb), "
+                    "CAST(:canonical_payload AS bytea), :payload_digest, "
+                    "CAST(:registration_payload AS bytea), :registration_digest, "
+                    "CAST(:closure_payload AS bytea), :closure_digest, "
+                    "CAST(:proposal_payload AS bytea), :proposal_digest)"
+                ),
+                {
+                    "agent_incarnation": registration.agent_incarnation,
+                    "payload": guard_canonical_bytes(tombstone).decode("ascii"),
+                    "canonical_payload": guard_canonical_bytes(tombstone),
+                    "payload_digest": guard_canonical_digest(tombstone),
+                    "registration_payload": guard_canonical_bytes(exact_registration),
+                    "registration_digest": tombstone.registration_digest,
+                    "closure_payload": canonical_executable_bytes(closure) + b" ",
+                    "closure_digest": tombstone.closure_digest,
+                    "proposal_payload": canonical_executable_bytes(proposal),
+                    "proposal_digest": tombstone.proposal_digest,
+                },
+            )
+    with pytest.raises(DBAPIError, match=r"never-converged|tombstone|closed"):
+        async with _serializable_agent_session(capacity_guard_database) as session:
+            await ProtectedAdmissionPlanCoordinator(
+                session,
+                configuration=configuration,
+            ).converge(
+                proposal,
+                GuardLifecycleDemandObservationV2(
+                    **registration.model_dump(mode="python"),
+                    sequence=1,
+                    source_observed_at=datetime.now(UTC),
+                    attempts=(),
+                ),
+            )
+
+    changed = closure.model_copy(update={"closure_id": uuid4()})
+    with pytest.raises(DBAPIError, match=r"replay|changed|tombstone"):
+        async with _serializable_agent_session(capacity_guard_database) as session:
+            await ProtectedAdmissionPlanCoordinator(
+                session,
+                configuration=configuration,
+            ).close(changed, None)
+
+    for statement in (
+        "UPDATE loom_capacity_guard.never_converged_admission_plans "
+        "SET proposal_digest = proposal_digest",
+        "DELETE FROM loom_capacity_guard.never_converged_admission_plans",
+        "TRUNCATE loom_capacity_guard.never_converged_admission_plans CASCADE",
+    ):
+        with pytest.raises(DBAPIError, match="append-only"):
+            async with _owner_session(capacity_guard_database) as (_, _, session):
+                await session.execute(text(statement))
+
+
+async def _run_prepare_or_tombstone(
+    database: dict[str, object],
+    *,
+    configuration: ReporterConfigurationV1,
+    proposal: ExecutableAdmissionPlanProposalV2,
+    closure: ExecutableAdmissionPlanClosureV2,
+    prepare: bool,
+    backend_pid: asyncio.Future[int],
+) -> object:
+    try:
+        async with _serializable_agent_session(database) as session:
+            backend_pid.set_result(
+                (await session.execute(text("SELECT pg_backend_pid()"))).scalar_one()
+            )
+            if prepare:
+                convergence = _build_protected_admission_convergence(
+                    configuration,
+                    proposal,
+                    GuardLifecycleDemandObservationV2(
+                        **{
+                            field: getattr(configuration, field)
+                            for field in AgentRegistrationV1.model_fields
+                        },
+                        sequence=1,
+                        source_observed_at=datetime.now(UTC),
+                        attempts=(),
+                    ),
+                )
+                return await CapacityPreparedAdmissionStore(
+                    session,
+                    registration=configuration,
+                ).prepare_plan(convergence.plan)
+            return await ProtectedAdmissionPlanCoordinator(
+                session,
+                configuration=configuration,
+            ).close(closure, None)
+    except DBAPIError as exc:
+        return exc
+
+
+@pytest.mark.asyncio
+async def test_prepare_and_never_converged_tombstone_allow_only_one_commit(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    """Both commits serialize on the guard authority and enforce mutual exclusion."""
+
+    _fence, registration = await _initialize_and_register(capacity_guard_database)
+    configuration = _admission_configuration(registration)
+    request = await _protect_bootstrap(
+        capacity_guard_database,
+        registration,
+        bootstrap_sha256="6" * 64,
+    )
+    proposal = _admission_proposal(configuration, (), request=request)
+    closure = ExecutableAdmissionPlanClosureV2(
+        closure_id=uuid4(),
+        proposal=proposal,
+        close_reason="manager-closed",
+    )
+    loop = asyncio.get_running_loop()
+    prepare_pid: asyncio.Future[int] = loop.create_future()
+    tombstone_pid: asyncio.Future[int] = loop.create_future()
+    prepare_task: asyncio.Task[object] | None = None
+    tombstone_task: asyncio.Task[object] | None = None
+    try:
+        async with _owner_session(capacity_guard_database) as (_, _, blocker):
+            blocker_pid = (
+                await blocker.execute(text("SELECT pg_backend_pid()"))
+            ).scalar_one()
+            await blocker.execute(
+                text(
+                    "SELECT singleton_id FROM loom_capacity_guard.agent_runtime_authority "
+                    "WHERE singleton_id = 1 FOR UPDATE"
+                )
+            )
+            prepare_task = asyncio.create_task(
+                _run_prepare_or_tombstone(
+                    capacity_guard_database,
+                    configuration=configuration,
+                    proposal=proposal,
+                    closure=closure,
+                    prepare=True,
+                    backend_pid=prepare_pid,
+                )
+            )
+            assert await _backend_waited_for_backend(
+                capacity_guard_database,
+                blocked_pid=await prepare_pid,
+                blocking_pid=blocker_pid,
+                task=prepare_task,
+            )
+            tombstone_task = asyncio.create_task(
+                _run_prepare_or_tombstone(
+                    capacity_guard_database,
+                    configuration=configuration,
+                    proposal=proposal,
+                    closure=closure,
+                    prepare=False,
+                    backend_pid=tombstone_pid,
+                )
+            )
+            assert await _backend_waited_for_backend(
+                capacity_guard_database,
+                blocked_pid=await tombstone_pid,
+                blocking_pid=await prepare_pid,
+                task=tombstone_task,
+            )
+        outcomes = await asyncio.gather(prepare_task, tombstone_task)
+    finally:
+        for task in (prepare_task, tombstone_task):
+            if task is not None and not task.done():
+                await task
+
+    assert sum(isinstance(outcome, DBAPIError) for outcome in outcomes) == 1
+    async with _owner_session(capacity_guard_database) as (_, _, session):
+        counts = (
+            await session.execute(
+                text(
+                    "SELECT "
+                    "(SELECT count(*) FROM loom_capacity_guard.prepared_admission_plans) "
+                    "AS prepared, "
+                    "(SELECT count(*) FROM "
+                    "loom_capacity_guard.never_converged_admission_plans) AS tombstoned"
+                )
+            )
+        ).one()
+    assert counts.prepared + counts.tombstoned == 1
+
+
+@pytest.mark.asyncio
+async def test_claim_first_serializes_plan_abandonment_before_withdrawal(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    """Catch cleanup missing a claim that is committing behind its lifecycle lock."""
+
+    registration, configuration, claim, closure, assigned, intent_id = (
+        await _prepare_abandonment_claim_race(capacity_guard_database)
+    )
+    loop = asyncio.get_running_loop()
+    claim_pid: asyncio.Future[int] = loop.create_future()
+    cleanup_pid: asyncio.Future[int] = loop.create_future()
+    claim_task: asyncio.Task[object] | None = None
+    cleanup_task: asyncio.Task[object] | None = None
+    try:
+        async with _owner_session(capacity_guard_database) as (_, _, blocker):
+            blocker_backend_pid = (
+                await blocker.execute(text("SELECT pg_backend_pid()"))
+            ).scalar_one()
+            locked_intent = await blocker.execute(
+                text(
+                    "SELECT intent_id FROM loom_capacity_guard.executable_claim_state "
+                    "WHERE intent_id = :intent_id FOR UPDATE"
+                ),
+                {"intent_id": intent_id},
+            )
+            assert locked_intent.scalar_one() == intent_id
+
+            claim_task = asyncio.create_task(
+                _run_claim_transaction(
+                    capacity_guard_database,
+                    registration,
+                    claim,
+                    claim_pid,
+                )
+            )
+            claim_backend_pid = await claim_pid
+            assert await _backend_waited_for_backend(
+                capacity_guard_database,
+                blocked_pid=claim_backend_pid,
+                blocking_pid=blocker_backend_pid,
+                task=claim_task,
+            )
+
+            cleanup_task = asyncio.create_task(
+                _run_abandonment_transaction(
+                    capacity_guard_database,
+                    registration,
+                    configuration,
+                    closure,
+                    assigned,
+                    cleanup_pid,
+                )
+            )
+            assert await _backend_waited_for_backend(
+                capacity_guard_database,
+                blocked_pid=await cleanup_pid,
+                blocking_pid=claim_backend_pid,
+                task=cleanup_task,
+            )
+
+        claim_result, cleanup_result = await asyncio.gather(
+            claim_task,
+            cleanup_task,
+        )
+    finally:
+        if claim_task is not None and not claim_task.done():
+            await claim_task
+        if cleanup_task is not None and not cleanup_task.done():
+            await cleanup_task
+
+    assert isinstance(claim_result, ExecutableClaimReceiptV2)
+    assert isinstance(cleanup_result, DBAPIError)
+    assert await _abandonment_claim_outcome(
+        capacity_guard_database,
+        protected_attempt_id=claim.protected_attempt_id,
+        plan_id=closure.proposal.plan_id,
+    ) == ("assigned", 1, 0)
+
+
+@pytest.mark.asyncio
+async def test_current_assignment_assertion_rejects_payload_equivocation(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    """Catch a historical transition identity being paired with changed bytes."""
+
+    _fence, registration = await _initialize_and_register(capacity_guard_database)
+    configuration = _admission_configuration(registration)
+    attempt = await _seed_lifecycle_attempt(
+        capacity_guard_database,
+        protected_attempt_id=UUID(int=307),
+    )
+    proposal = _admission_proposal(configuration, (attempt,))
+    pending = await _capture_lifecycle(
+        capacity_guard_database,
+        registration,
+        expected_high_water=0,
+    )
+    convergence = _build_protected_admission_convergence(
+        configuration,
+        proposal,
+        pending,
+    )
+    async with _serializable_agent_session(capacity_guard_database) as session:
+        await ProtectedAdmissionPlanCoordinator(
+            session,
+            configuration=configuration,
+        ).converge(proposal, pending)
+
+    equivocated = convergence.transitions[0].model_copy(
+        update={"transition_reason": "equivocated-manager-placement"}
+    )
+    with pytest.raises(DBAPIError, match="current protected assignment"):
+        async with _serializable_agent_session(capacity_guard_database) as session:
+            await CapacityAttemptLifecycleStore(
+                session,
+                registration=registration,
+            ).assert_current_assignment(equivocated)
+
+
+@pytest.mark.asyncio
+async def test_current_assignment_assertion_requires_serializable_transaction(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    _fence, registration = await _initialize_and_register(capacity_guard_database)
+    configuration = _admission_configuration(registration)
+    attempt = await _seed_lifecycle_attempt(
+        capacity_guard_database,
+        protected_attempt_id=UUID(int=308),
+    )
+    proposal = _admission_proposal(configuration, (attempt,))
+    pending = await _capture_lifecycle(
+        capacity_guard_database,
+        registration,
+        expected_high_water=0,
+    )
+    convergence = _build_protected_admission_convergence(
+        configuration,
+        proposal,
+        pending,
+    )
+    async with _serializable_agent_session(capacity_guard_database) as session:
+        await ProtectedAdmissionPlanCoordinator(
+            session,
+            configuration=configuration,
+        ).converge(proposal, pending)
+
+    with pytest.raises(DBAPIError, match="SERIALIZABLE"):
+        async with _agent_session(capacity_guard_database) as session:
+            await CapacityAttemptLifecycleStore(
+                session,
+                registration=registration,
+            ).assert_current_assignment(convergence.transitions[0])
+
+
+@pytest.mark.asyncio
+async def test_current_assignment_assertion_rejects_expired_prepared_plan(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    _fence, registration = await _initialize_and_register(capacity_guard_database)
+    configuration = _admission_configuration(registration)
+    attempt = await _seed_lifecycle_attempt(
+        capacity_guard_database,
+        protected_attempt_id=UUID(int=309),
+    )
+    proposal = _admission_proposal(configuration, (attempt,)).model_copy(
+        update={"lease_not_after": datetime.now(UTC) + timedelta(seconds=1)}
+    )
+    pending = await _capture_lifecycle(
+        capacity_guard_database,
+        registration,
+        expected_high_water=0,
+    )
+    convergence = _build_protected_admission_convergence(
+        configuration,
+        proposal,
+        pending,
+    )
+    async with _serializable_agent_session(capacity_guard_database) as session:
+        await ProtectedAdmissionPlanCoordinator(
+            session,
+            configuration=configuration,
+        ).converge(proposal, pending)
+
+    await asyncio.sleep(1.1)
+    with pytest.raises(DBAPIError, match="current protected assignment"):
+        async with _serializable_agent_session(capacity_guard_database) as session:
+            await CapacityAttemptLifecycleStore(
+                session,
+                registration=registration,
+            ).assert_current_assignment(convergence.transitions[0])
+
+
+@pytest.mark.asyncio
+async def test_current_assignment_assertion_rejects_cancelled_public_trial(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    _fence, registration = await _initialize_and_register(capacity_guard_database)
+    configuration = _admission_configuration(registration)
+    attempt = await _seed_lifecycle_attempt(
+        capacity_guard_database,
+        protected_attempt_id=UUID(int=310),
+    )
+    proposal = _admission_proposal(configuration, (attempt,))
+    pending = await _capture_lifecycle(
+        capacity_guard_database,
+        registration,
+        expected_high_water=0,
+    )
+    convergence = _build_protected_admission_convergence(
+        configuration,
+        proposal,
+        pending,
+    )
+    async with _serializable_agent_session(capacity_guard_database) as session:
+        await ProtectedAdmissionPlanCoordinator(
+            session,
+            configuration=configuration,
+        ).converge(proposal, pending)
+
+    admin = create_engine(_value(capacity_guard_database, "admin_url"))
+    try:
+        with admin.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE public.trials SET cancellation_requested_at = now() "
+                    "WHERE id = :trial_id"
+                ),
+                {"trial_id": attempt.trial_id},
+            )
+    finally:
+        admin.dispose()
+
+    with pytest.raises(DBAPIError, match="current protected assignment"):
+        async with _serializable_agent_session(capacity_guard_database) as session:
+            await CapacityAttemptLifecycleStore(
+                session,
+                registration=registration,
+            ).assert_current_assignment(convergence.transitions[0])
+
+
+@pytest.mark.asyncio
+async def test_protected_admission_convergence_rolls_back_every_new_row_on_late_conflict(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    _fence, registration = await _initialize_and_register(capacity_guard_database)
+    configuration = _admission_configuration(registration)
+    attempts = (
+        await _seed_lifecycle_attempt(
+            capacity_guard_database,
+            protected_attempt_id=UUID(int=311),
+        ),
+        await _seed_lifecycle_attempt(
+            capacity_guard_database,
+            protected_attempt_id=UUID(int=312),
+        ),
+    )
+    proposal = _admission_proposal(configuration, attempts)
+    stale = await _capture_lifecycle(
+        capacity_guard_database,
+        registration,
+        expected_high_water=0,
+    )
+    prepared = _build_protected_admission_convergence(configuration, proposal, stale)
+    second = prepared.transitions[1]
+    first_attempt_id = next(
+        attempt.protected_attempt_id
+        for attempt in attempts
+        if attempt.protected_attempt_id != second.protected_attempt_id
+    )
+    terminal = InertAttemptTransitionV1(
+        **registration.model_dump(mode="python"),
+        transition_id=uuid4(),
+        protected_attempt_id=second.protected_attempt_id,
+        execution_generation=second.execution_generation,
+        requirements_digest=second.requirements_digest,
+        expected_transition_sequence=0,
+        operation="cancel",
+        expected_state="pending-unassigned",
+        target_state="cancelled-terminal",
+        transition_reason="owner-cancelled-unclaimed",
+    )
+    async with _serializable_agent_session(capacity_guard_database) as session:
+        await CapacityAttemptLifecycleStore(
+            session,
+            registration=registration,
+        ).apply_transition(terminal)
+
+    with pytest.raises(DBAPIError, match="lifecycle"):
+        async with _serializable_agent_session(capacity_guard_database) as session:
+            await ProtectedAdmissionPlanCoordinator(
+                session,
+                configuration=configuration,
+            ).converge(proposal, stale)
+
+    async with _owner_session(capacity_guard_database) as (_, _, session):
+        counts = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT "
+                        "(SELECT count(*) FROM loom_capacity_guard.prepared_admission_plans) "
+                        "AS plans, "
+                        "(SELECT count(*) FROM "
+                        "loom_capacity_guard.prepared_placement_allowances) AS allowances, "
+                        "(SELECT count(*) FROM loom_capacity_guard.attempt_lifecycle_heads "
+                        "WHERE protected_attempt_id = :first_attempt "
+                        "AND lifecycle_state = 'pending-unassigned') AS first_pending, "
+                        "(SELECT count(*) FROM loom_capacity_guard.attempt_lifecycle_heads "
+                        "WHERE protected_attempt_id = :second_attempt "
+                        "AND lifecycle_state = 'cancelled-terminal') AS second_terminal"
+                    ),
+                    {
+                        "first_attempt": first_attempt_id,
+                        "second_attempt": second.protected_attempt_id,
+                    },
+                )
+            )
+            .mappings()
+            .one()
+        )
+    assert dict(counts) == {
+        "plans": 0,
+        "allowances": 0,
+        "first_pending": 1,
+        "second_terminal": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_protected_admission_convergence_rejects_nonserializable_caller(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    _fence, registration = await _initialize_and_register(capacity_guard_database)
+    configuration = _admission_configuration(registration)
+    attempt = await _seed_lifecycle_attempt(
+        capacity_guard_database,
+        protected_attempt_id=UUID(int=321),
+    )
+    proposal = _admission_proposal(configuration, (attempt,))
+    observation = await _capture_lifecycle(
+        capacity_guard_database,
+        registration,
+        expected_high_water=0,
+    )
+    with pytest.raises(ProtectedAdmissionPlanError, match="SERIALIZABLE"):
+        async with _agent_session(capacity_guard_database) as session:
+            await ProtectedAdmissionPlanCoordinator(
+                session,
+                configuration=configuration,
+            ).converge(proposal, observation)
+
+
+@pytest.mark.asyncio
+async def test_protected_admission_convergence_rejects_stale_local_generation(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    _fence, registration = await _initialize_and_register(capacity_guard_database)
+    configuration = _admission_configuration(registration)
+    attempt = await _seed_lifecycle_attempt(
+        capacity_guard_database,
+        protected_attempt_id=UUID(int=331),
+    )
+    proposal = _admission_proposal(configuration, (attempt,))
+    observation = await _capture_lifecycle(
+        capacity_guard_database,
+        registration,
+        expected_high_water=0,
+    )
+    stale_attempt = observation.attempts[0].model_copy(
+        update={"execution_generation": attempt.execution_generation + 1}
+    )
+    stale = observation.model_copy(update={"attempts": (stale_attempt,)})
+
+    with pytest.raises(DBAPIError, match="allowance"):
+        async with _serializable_agent_session(capacity_guard_database) as session:
+            await ProtectedAdmissionPlanCoordinator(
+                session,
+                configuration=configuration,
+            ).converge(proposal, stale)
+
+    async with _owner_session(capacity_guard_database) as (_, _, session):
+        assert (
+            await session.execute(
+                text("SELECT count(*) FROM loom_capacity_guard.prepared_admission_plans")
+            )
+        ).scalar_one() == 0
 
 
 async def _assign_protected_attempts(
@@ -411,6 +1853,27 @@ async def _run_claim_transaction(
         return exc
 
 
+async def _run_abandonment_transaction(
+    database: dict[str, object],
+    registration: AgentRegistrationV1,
+    configuration: ReporterConfigurationV1,
+    closure: ExecutableAdmissionPlanClosureV2,
+    observation: GuardLifecycleDemandObservationV2,
+    backend_pid: asyncio.Future[int],
+) -> object:
+    try:
+        async with _serializable_agent_session(database) as session:
+            backend_pid.set_result(
+                (await session.execute(text("SELECT pg_backend_pid()"))).scalar_one()
+            )
+            return await ProtectedAdmissionPlanCoordinator(
+                session,
+                configuration=configuration,
+            ).abandon(closure, observation)
+    except DBAPIError as exc:
+        return exc
+
+
 async def _run_terminal_transaction(
     database: dict[str, object],
     registration: AgentRegistrationV1,
@@ -447,6 +1910,31 @@ async def _backend_waited_for_lock(
                 ).scalar_one_or_none()
                 if wait_event_type == "Lock":
                     return True
+        return False
+    finally:
+        await engine.dispose()
+
+
+async def _backend_waited_for_backend(
+    database: dict[str, object],
+    *,
+    blocked_pid: int,
+    blocking_pid: int,
+    task: asyncio.Task[object],
+) -> bool:
+    engine = create_async_engine(make_url(_value(database, "admin_url")))
+    try:
+        async with engine.connect() as connection, asyncio.timeout(10):
+            while not task.done():
+                blocking_pids = (
+                    await connection.execute(
+                        text("SELECT pg_blocking_pids(:blocked_pid)"),
+                        {"blocked_pid": blocked_pid},
+                    )
+                ).scalar_one()
+                if blocking_pid in blocking_pids:
+                    return True
+                await asyncio.sleep(0.01)
         return False
     finally:
         await engine.dispose()
@@ -497,6 +1985,33 @@ async def _claim_terminal_counts(
             )
         ).one()
     return row.admitted, row.terminal, row.live
+
+
+async def _abandonment_claim_outcome(
+    database: dict[str, object],
+    *,
+    protected_attempt_id: UUID,
+    plan_id: UUID,
+) -> tuple[str, int, int]:
+    async with _owner_session(database) as (_, _, session):
+        row = (
+            await session.execute(
+                text(
+                    "SELECT head.lifecycle_state, "
+                    "(SELECT count(*) FROM loom_capacity_guard.executable_claim_leases "
+                    "WHERE protected_attempt_id = :protected_attempt_id) AS claims, "
+                    "(SELECT count(*) FROM loom_capacity_guard.abandoned_admission_plans "
+                    "WHERE plan_id = :plan_id) AS abandonments "
+                    "FROM loom_capacity_guard.attempt_lifecycle_heads AS head "
+                    "WHERE head.protected_attempt_id = :protected_attempt_id"
+                ),
+                {
+                    "protected_attempt_id": protected_attempt_id,
+                    "plan_id": plan_id,
+                },
+            )
+        ).one()
+    return row.lifecycle_state, row.claims, row.abandonments
 
 
 def _bootstrap(subject_id: UUID, subject_incarnation: UUID) -> ExecutableBootstrapRegistrationV2:
@@ -1003,7 +2518,7 @@ async def test_guard_0020_downgrade_serializes_committing_executable_evidence(
             await downgrade_task
         await executor_engine.dispose()
 
-    assert version == "guard_0020"
+    assert version == "guard_0021"
     assert evidence == 1
 
 
@@ -1090,7 +2605,9 @@ async def test_guard_0020_downgrade_gates_new_executor_calls_before_evidence(
                     ).scalar_one()
             finally:
                 await observer.dispose()
-            assert waiting_relation == "executable_admission_authority"
+            # guard_0021 first drops the abandoned-plan table, whose registration
+            # foreign key gates this writer before guard_0020 takes its own locks.
+            assert waiting_relation == "agent_registrations"
 
         downgrade_result, writer_result = await asyncio.gather(
             downgrade_task,

@@ -10,7 +10,15 @@ from uuid import uuid4
 import pytest
 
 from loom_capacity_agent import runtime as runtime_module
-from loom_capacity_agent.admission import ProtectedExecutableBootstrapRegistrationV2
+from loom_capacity_agent.admission import (
+    AbandonedAdmissionPlanV1,
+    NeverConvergedAdmissionPlanV1,
+    ProtectedExecutableBootstrapRegistrationV2,
+)
+from loom_capacity_agent.admission_convergence import (
+    ProtectedAdmissionPlanCleanupWork,
+    ProtectedAdmissionPlanWork,
+)
 from loom_capacity_agent.contracts import (
     AgentPoolCapabilityV1,
     AgentRegistrationV1,
@@ -22,9 +30,13 @@ from loom_capacity_agent.executable_release_reporter import (
     ExecutableProtectedReleaseReporterRuntime,
 )
 from loom_capacity_agent.runtime import CapacityAgentRuntime, load_database_url
+from loom_capacity_guard.contracts import canonical_digest as guard_canonical_digest
 from loom_capacity_manager.contracts import ResourceVectorV1
 from loom_capacity_manager.executable_contracts import (
     CandidateBindingV2,
+    ExecutableAdmissionAcknowledgementV2,
+    ExecutableAdmissionPlanClosureV2,
+    ExecutableAdmissionPlanProposalV2,
     ExecutableBootstrapAcknowledgementV2,
     ExecutableBootstrapProposalV2,
     ExecutableIntentBindingV2,
@@ -32,6 +44,7 @@ from loom_capacity_manager.executable_contracts import (
     canonical_executable_digest,
 )
 from tests.unit.test_capacity_agent_admission_contracts import publishable_release_fixture
+from tests.unit.test_capacity_agent_admission_convergence import _proposal as _admission_proposal
 
 
 def _configuration() -> ReporterConfigurationV1:
@@ -116,6 +129,40 @@ class _Factory:
         return _Session()
 
 
+class _CommitFailingTransaction:
+    def __init__(self, factory: _CommitFailingFactory) -> None:
+        self._factory = factory
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        if self._factory.fail_commit_exit:
+            raise RuntimeError("admission transaction commit failed")
+
+
+class _CommitFailingSession:
+    def __init__(self, factory: _CommitFailingFactory) -> None:
+        self._factory = factory
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
+
+    def begin(self) -> _CommitFailingTransaction:
+        return _CommitFailingTransaction(self._factory)
+
+
+class _CommitFailingFactory:
+    def __init__(self) -> None:
+        self.fail_commit_exit = False
+
+    def __call__(self) -> _CommitFailingSession:
+        return _CommitFailingSession(self)
+
+
 class _Publisher:
     def __init__(self, *, fail_once: bool = False) -> None:
         self.fail_once = fail_once
@@ -123,6 +170,12 @@ class _Publisher:
         self.bootstrap_work: list[ExecutableBootstrapProposalV2] = []
         self.bootstrap_acknowledgements: list[tuple[object, object]] = []
         self.fail_bootstrap_once = False
+        self.admission_work: object | None = None
+        self.admission_acknowledgements: list[tuple[object, object]] = []
+        self.fail_admission_once = False
+        self.admission_closure_acknowledgements: list[tuple[object, object]] = []
+        self.fail_admission_closure_once = False
+        self.admission_fetches = 0
 
     async def publish(self, snapshot):
         self.snapshots.append(snapshot)
@@ -141,6 +194,30 @@ class _Publisher:
         if self.fail_bootstrap_once:
             self.fail_bootstrap_once = False
             raise RuntimeError("bootstrap unavailable")
+        return object()
+
+    async def next_executable_admission_plan(self):
+        self.admission_fetches += 1
+        return self.admission_work
+
+    async def publish_executable_admission_acknowledgement(
+        self, acknowledgement, *, idempotency_key
+    ):
+        self.admission_acknowledgements.append((acknowledgement, idempotency_key))
+        if self.fail_admission_once:
+            self.fail_admission_once = False
+            raise RuntimeError("admission unavailable")
+        return object()
+
+    async def publish_executable_admission_closure_acknowledgement(
+        self, acknowledgement, *, idempotency_key
+    ):
+        self.admission_closure_acknowledgements.append(
+            (acknowledgement, idempotency_key)
+        )
+        if self.fail_admission_closure_once:
+            self.fail_admission_closure_once = False
+            raise RuntimeError("admission cleanup unavailable")
         return object()
 
 
@@ -223,6 +300,85 @@ def _bootstrap_work(
         acknowledgement=acknowledgement,
         idempotency_key=uuid4(),
     )
+
+
+def _admission_work(
+    configuration: ReporterConfigurationV1,
+) -> tuple[ExecutableAdmissionPlanProposalV2, ProtectedAdmissionPlanWork]:
+    proposal = _admission_proposal(configuration, allowance_count=0)
+    acknowledgement = ExecutableAdmissionAcknowledgementV2(
+        execution=proposal.shapes[0].binding.execution,
+        tranche_id=proposal.shapes[0].binding.tranche_id,
+        proposal_id=proposal.proposal_id,
+        plan_id=proposal.plan_id,
+        admission_incarnation=proposal.admission_incarnation,
+        subject_id=configuration.subject_id,
+        subject_incarnation=configuration.subject_incarnation,
+        pool_id="oldlab",
+        reporter_incarnation=configuration.reporter_incarnation,
+        protected_admission_sha256=configuration.protected_admission_sha256,
+        proposal_digest=canonical_executable_digest(proposal),
+        prepared_plan_digest="9" * 64,
+        assignment_count=0,
+    )
+    return proposal, ProtectedAdmissionPlanWork(
+        acknowledgement=acknowledgement,
+        idempotency_key=uuid4(),
+    )
+
+
+def _admission_cleanup_work(
+    configuration: ReporterConfigurationV1,
+    closure: ExecutableAdmissionPlanClosureV2,
+) -> ProtectedAdmissionPlanCleanupWork:
+    proposal = closure.proposal
+    anchor = proposal.shapes[0].binding
+    abandonment = AbandonedAdmissionPlanV1(
+        **{field: getattr(configuration, field) for field in AgentRegistrationV1.model_fields},
+        closure_id=closure.closure_id,
+        proposal_id=proposal.proposal_id,
+        proposal_digest=canonical_executable_digest(proposal),
+        plan_id=proposal.plan_id,
+        admission_incarnation=proposal.admission_incarnation,
+        manager_authority_incarnation=anchor.execution.authority_incarnation,
+        manager_writer_epoch=anchor.execution.writer_epoch,
+        manager_allocation_epoch=anchor.execution.allocation_epoch,
+        manager_input_digest=proposal.manager_input_digest,
+        manager_allocation_digest=proposal.manager_allocation_digest,
+        pool_id="oldlab",
+        close_reason=closure.close_reason,
+    )
+    return ProtectedAdmissionPlanCleanupWork(
+        closure=closure,
+        disposition=abandonment,
+    )
+
+
+def _never_converged_cleanup_work(
+    configuration: ReporterConfigurationV1,
+    closure: ExecutableAdmissionPlanClosureV2,
+) -> ProtectedAdmissionPlanCleanupWork:
+    registration = AgentRegistrationV1.model_validate(
+        {
+            field: getattr(configuration, field)
+            for field in AgentRegistrationV1.model_fields
+        }
+    )
+    tombstone = NeverConvergedAdmissionPlanV1(
+        **registration.model_dump(mode="python", exclude_none=False),
+        registration_digest=guard_canonical_digest(registration),
+        closure=closure,
+        closure_digest=canonical_executable_digest(closure),
+        proposal_digest=canonical_executable_digest(closure.proposal),
+    )
+    return ProtectedAdmissionPlanCleanupWork(
+        closure=closure,
+        disposition=tombstone,
+    )
+
+
+async def _authorize_admission(*_args: object, **kwargs: object) -> ProtectedAdmissionPlanWork:
+    return kwargs["work"]  # type: ignore[return-value]
 
 
 class _LoopRuntime:
@@ -445,6 +601,487 @@ async def test_failed_bootstrap_ack_retries_same_durable_work_without_recapture(
         (protected.acknowledgement, protected.idempotency_key),
     ]
     assert runtime.ready is True
+
+
+@pytest.mark.asyncio
+async def test_restart_recovers_admission_work_across_each_local_manager_crash_window() -> None:
+    configuration = _configuration().model_copy(update={"protected_admission_sha256": "b" * 64})
+    proposal, protected = _admission_work(configuration)
+    recovered = _observation(configuration, 1)
+    publisher = _Publisher()
+    publisher.admission_work = proposal
+    converged: list[tuple[object, object]] = []
+    attempts = 0
+
+    async def high_water(*_args: object, **_kwargs: object) -> int:
+        return 1
+
+    async def recover(*_args: object, **_kwargs: object):
+        return recovered
+
+    async def capture(*_args: object, **_kwargs: object):
+        raise AssertionError("durable recovery must publish before any new capture")
+
+    async def converge(*_args: object, **kwargs: object):
+        nonlocal attempts
+        attempts += 1
+        converged.append((kwargs["proposal"], kwargs["observation"]))
+        if attempts == 1:
+            raise RuntimeError("crash before local admission commit")
+        return protected
+
+    def runtime() -> CapacityAgentRuntime:
+        return CapacityAgentRuntime(
+            configuration=configuration,
+            session_factory=_Factory(),  # type: ignore[arg-type]
+            publisher=publisher,
+            max_attempts=100,
+            capture=capture,
+            recover=recover,
+            read_high_water=high_water,
+            converge_admission=converge,
+            authorize_admission_publication=_authorize_admission,
+        )
+
+    before_commit = runtime()
+    await before_commit.initialize()
+    with pytest.raises(RuntimeError, match="before local admission commit"):
+        await before_commit.run_once()
+    assert before_commit.ready is False
+
+    after_commit = runtime()
+    await after_commit.initialize()
+    publisher.fail_admission_once = True
+    with pytest.raises(RuntimeError, match="admission unavailable"):
+        await after_commit.run_once()
+    assert after_commit.ready is False
+
+    replay = runtime()
+    await replay.initialize()
+    await replay.run_once()
+
+    assert replay.ready is True
+    assert publisher.admission_fetches == 3
+    assert converged == [(proposal, recovered)] * 3
+    assert publisher.admission_acknowledgements == [
+        (protected.acknowledgement, protected.idempotency_key),
+        (protected.acknowledgement, protected.idempotency_key),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_restart_cleans_closed_admission_from_recovered_observation_without_reconverging() -> (
+    None
+):
+    """Durable manager closure must retire local work from its pre-convergence view."""
+
+    configuration = _configuration().model_copy(update={"protected_admission_sha256": "b" * 64})
+    proposal, _protected = _admission_work(configuration)
+    closure = ExecutableAdmissionPlanClosureV2(
+        closure_id=uuid4(),
+        proposal=proposal,
+        close_reason="expired",
+    )
+    cleanup = _admission_cleanup_work(configuration, closure)
+    recovered = _observation(configuration, 1)
+    publisher = _Publisher()
+    publisher.admission_work = closure
+    cleaned: list[tuple[object, object]] = []
+
+    async def high_water(*_args: object, **_kwargs: object) -> int:
+        return 1
+
+    async def recover(*_args: object, **_kwargs: object):
+        return recovered
+
+    async def capture(*_args: object, **_kwargs: object):
+        raise AssertionError("restart must reuse the durable pre-convergence observation")
+
+    async def converge(*_args: object, **_kwargs: object):
+        raise AssertionError("closed work must never enter normal convergence")
+
+    async def abandon(*_args: object, **kwargs: object):
+        cleaned.append((kwargs["closure"], kwargs["observation"]))
+        return cleanup
+
+    runtime = CapacityAgentRuntime(
+        configuration=configuration,
+        session_factory=_Factory(),  # type: ignore[arg-type]
+        publisher=publisher,
+        max_attempts=100,
+        capture=capture,
+        recover=recover,
+        read_high_water=high_water,
+        converge_admission=converge,
+        authorize_admission_publication=_authorize_admission,
+        abandon_admission=abandon,
+    )
+    await runtime.initialize()
+    await runtime.run_once()
+
+    assert cleaned == [(closure, recovered)]
+    assert publisher.admission_acknowledgements == []
+    assert publisher.admission_closure_acknowledgements == [
+        (cleanup.acknowledgement, cleanup.idempotency_key)
+    ]
+    assert runtime.ready is True
+
+
+@pytest.mark.asyncio
+async def test_failed_admission_cleanup_receipt_stays_pending_without_recapture() -> None:
+    """A committed cleanup must retry its exact manager receipt before any new work."""
+
+    configuration = _configuration().model_copy(update={"protected_admission_sha256": "b" * 64})
+    proposal, _protected = _admission_work(configuration)
+    closure = ExecutableAdmissionPlanClosureV2(
+        closure_id=uuid4(),
+        proposal=proposal,
+        close_reason="manager-closed",
+    )
+    cleanup = _admission_cleanup_work(configuration, closure)
+    observation = _observation(configuration, 1)
+    publisher = _Publisher()
+    publisher.admission_work = closure
+    publisher.fail_admission_closure_once = True
+    captures = 0
+    cleanups = 0
+
+    async def high_water(*_args: object, **_kwargs: object) -> int:
+        return 0
+
+    async def recover(*_args: object, **_kwargs: object):
+        raise AssertionError("zero high-water must not recover")
+
+    async def capture(*_args: object, **_kwargs: object):
+        nonlocal captures
+        captures += 1
+        return observation
+
+    async def abandon(*_args: object, **_kwargs: object):
+        nonlocal cleanups
+        cleanups += 1
+        return cleanup
+
+    runtime = CapacityAgentRuntime(
+        configuration=configuration,
+        session_factory=_Factory(),  # type: ignore[arg-type]
+        publisher=publisher,
+        max_attempts=100,
+        capture=capture,
+        recover=recover,
+        read_high_water=high_water,
+        abandon_admission=abandon,
+    )
+    await runtime.initialize()
+
+    with pytest.raises(RuntimeError, match="cleanup unavailable"):
+        await runtime.run_once()
+    assert runtime.ready is False
+    assert runtime._pending_admission_cleanup == cleanup
+
+    publisher.admission_work = None
+    await runtime.run_once()
+
+    assert runtime.ready is True
+    assert captures == 0
+    assert cleanups == 1
+    assert publisher.admission_fetches == 1
+    assert publisher.admission_closure_acknowledgements == [
+        (cleanup.acknowledgement, cleanup.idempotency_key),
+        (cleanup.acknowledgement, cleanup.idempotency_key),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_restart_replays_durable_cleanup_after_receipt_publish_crash() -> None:
+    """Losing in-memory pending state must replay cleanup from the recovered observation."""
+
+    configuration = _configuration().model_copy(update={"protected_admission_sha256": "b" * 64})
+    proposal, _protected = _admission_work(configuration)
+    closure = ExecutableAdmissionPlanClosureV2(
+        closure_id=uuid4(),
+        proposal=proposal,
+        close_reason="expired",
+    )
+    cleanup = _admission_cleanup_work(configuration, closure)
+    recovered = _observation(configuration, 1)
+    publisher = _Publisher()
+    publisher.admission_work = closure
+    publisher.fail_admission_closure_once = True
+    cleanups = 0
+
+    async def high_water(*_args: object, **_kwargs: object) -> int:
+        return 1
+
+    async def recover(*_args: object, **_kwargs: object):
+        return recovered
+
+    async def capture(*_args: object, **_kwargs: object):
+        raise AssertionError("receipt recovery must precede a new observation")
+
+    async def abandon(*_args: object, **_kwargs: object):
+        nonlocal cleanups
+        cleanups += 1
+        return cleanup
+
+    def new_runtime() -> CapacityAgentRuntime:
+        return CapacityAgentRuntime(
+            configuration=configuration,
+            session_factory=_Factory(),  # type: ignore[arg-type]
+            publisher=publisher,
+            max_attempts=100,
+            capture=capture,
+            recover=recover,
+            read_high_water=high_water,
+            abandon_admission=abandon,
+        )
+
+    crashed = new_runtime()
+    await crashed.initialize()
+    with pytest.raises(RuntimeError, match="cleanup unavailable"):
+        await crashed.run_once()
+
+    restarted = new_runtime()
+    await restarted.initialize()
+    await restarted.run_once()
+
+    assert restarted.ready is True
+    assert cleanups == 2
+    assert publisher.admission_fetches == 2
+    assert publisher.admission_closure_acknowledgements == [
+        (cleanup.acknowledgement, cleanup.idempotency_key),
+        (cleanup.acknowledgement, cleanup.idempotency_key),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_offline_closure_restart_replays_tombstone_without_demand_recapture() -> None:
+    """A never-prepared expired plan is closed before any new demand observation."""
+
+    configuration = _configuration().model_copy(
+        update={"protected_admission_sha256": "b" * 64}
+    )
+    proposal, _protected = _admission_work(configuration)
+    closure = ExecutableAdmissionPlanClosureV2(
+        closure_id=uuid4(),
+        proposal=proposal,
+        close_reason="expired",
+    )
+    cleanup = _never_converged_cleanup_work(configuration, closure)
+    publisher = _Publisher()
+    publisher.admission_work = closure
+    publisher.fail_admission_closure_once = True
+    cleanups = 0
+
+    async def high_water(*_args: object, **_kwargs: object) -> int:
+        return 0
+
+    async def recover(*_args: object, **_kwargs: object):
+        raise AssertionError("offline agent has no prior observation")
+
+    async def capture(*_args: object, **_kwargs: object):
+        raise AssertionError("closure retry must precede demand recapture")
+
+    async def close(*_args: object, **kwargs: object):
+        nonlocal cleanups
+        cleanups += 1
+        assert kwargs["observation"] is None
+        return cleanup
+
+    def new_runtime() -> CapacityAgentRuntime:
+        return CapacityAgentRuntime(
+            configuration=configuration,
+            session_factory=_Factory(),  # type: ignore[arg-type]
+            publisher=publisher,
+            max_attempts=100,
+            capture=capture,
+            recover=recover,
+            read_high_water=high_water,
+            abandon_admission=close,
+        )
+
+    crashed = new_runtime()
+    await crashed.initialize()
+    with pytest.raises(RuntimeError, match="cleanup unavailable"):
+        await crashed.run_once()
+
+    restarted = new_runtime()
+    await restarted.initialize()
+    await restarted.run_once()
+
+    assert cleanups == 2
+    assert publisher.admission_fetches == 2
+    assert publisher.snapshots == []
+    assert publisher.admission_closure_acknowledgements == [
+        (cleanup.acknowledgement, cleanup.idempotency_key),
+        (cleanup.acknowledgement, cleanup.idempotency_key),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_admission_commit_failure_does_not_leave_uncommitted_work_publishable() -> None:
+    configuration = _configuration().model_copy(update={"protected_admission_sha256": "b" * 64})
+    proposal, protected = _admission_work(configuration)
+    recovered = _observation(configuration, 1)
+    captured = _observation(configuration, 2)
+    factory = _CommitFailingFactory()
+    publisher = _Publisher()
+    publisher.admission_work = proposal
+    converged: list[tuple[object, object]] = []
+
+    async def high_water(*_args: object, **_kwargs: object) -> int:
+        return 1
+
+    async def recover(*_args: object, **_kwargs: object):
+        return recovered
+
+    async def capture(*_args: object, **_kwargs: object):
+        return captured
+
+    async def converge(*_args: object, **kwargs: object):
+        converged.append((kwargs["proposal"], kwargs["observation"]))
+        return protected
+
+    runtime = CapacityAgentRuntime(
+        configuration=configuration,
+        session_factory=factory,  # type: ignore[arg-type]
+        publisher=publisher,
+        max_attempts=100,
+        capture=capture,
+        recover=recover,
+        read_high_water=high_water,
+        converge_admission=converge,
+        authorize_admission_publication=_authorize_admission,
+    )
+    await runtime.initialize()
+    factory.fail_commit_exit = True
+
+    with pytest.raises(RuntimeError, match="transaction commit failed"):
+        await runtime.run_once()
+
+    assert runtime.ready is False
+    assert runtime._pending_admission is None
+    assert publisher.admission_acknowledgements == []
+
+    factory.fail_commit_exit = False
+    await runtime.run_once()
+
+    assert publisher.admission_fetches == 2
+    assert converged == [(proposal, recovered), (proposal, captured)]
+    assert publisher.admission_acknowledgements == [
+        (protected.acknowledgement, protected.idempotency_key)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_failed_admission_publication_replays_same_runtime_pending_work() -> None:
+    configuration = _configuration().model_copy(update={"protected_admission_sha256": "b" * 64})
+    proposal, protected = _admission_work(configuration)
+    observation = _observation(configuration, 1)
+    publisher = _Publisher()
+    publisher.admission_work = proposal
+    publisher.fail_admission_once = True
+    converged: list[tuple[object, object]] = []
+    captures = 0
+
+    async def high_water(*_args: object, **_kwargs: object) -> int:
+        return 0
+
+    async def recover(*_args: object, **_kwargs: object):
+        raise AssertionError("zero high-water must not recover")
+
+    async def capture(*_args: object, **_kwargs: object):
+        nonlocal captures
+        captures += 1
+        return observation
+
+    async def converge(*_args: object, **kwargs: object):
+        converged.append((kwargs["proposal"], kwargs["observation"]))
+        return protected
+
+    runtime = CapacityAgentRuntime(
+        configuration=configuration,
+        session_factory=_Factory(),  # type: ignore[arg-type]
+        publisher=publisher,
+        max_attempts=100,
+        capture=capture,
+        recover=recover,
+        read_high_water=high_water,
+        converge_admission=converge,
+        authorize_admission_publication=_authorize_admission,
+    )
+    await runtime.initialize()
+    with pytest.raises(RuntimeError, match="admission unavailable"):
+        await runtime.run_once()
+
+    assert runtime.ready is False
+    await runtime.run_once()
+
+    assert runtime.ready is True
+    assert captures == 1
+    assert publisher.admission_fetches == 1
+    assert converged == [(proposal, observation)]
+    assert publisher.admission_acknowledgements == [
+        (protected.acknowledgement, protected.idempotency_key),
+        (protected.acknowledgement, protected.idempotency_key),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_failed_admission_publication_reauthorizes_before_retry() -> None:
+    """A cached acknowledgement must not bypass current protected authority."""
+
+    configuration = _configuration().model_copy(update={"protected_admission_sha256": "b" * 64})
+    proposal, protected = _admission_work(configuration)
+    observation = _observation(configuration, 1)
+    publisher = _Publisher()
+    publisher.admission_work = proposal
+    publisher.fail_admission_once = True
+    authorization_attempts = 0
+
+    async def high_water(*_args: object, **_kwargs: object) -> int:
+        return 0
+
+    async def recover(*_args: object, **_kwargs: object):
+        raise AssertionError("zero high-water must not recover")
+
+    async def capture(*_args: object, **_kwargs: object):
+        return observation
+
+    async def converge(*_args: object, **_kwargs: object):
+        return protected
+
+    async def authorize(*_args: object, **_kwargs: object):
+        nonlocal authorization_attempts
+        authorization_attempts += 1
+        if authorization_attempts == 2:
+            raise RuntimeError("protected publication authority is stale")
+        return protected
+
+    runtime = CapacityAgentRuntime(
+        configuration=configuration,
+        session_factory=_Factory(),  # type: ignore[arg-type]
+        publisher=publisher,
+        max_attempts=100,
+        capture=capture,
+        recover=recover,
+        read_high_water=high_water,
+        converge_admission=converge,
+        authorize_admission_publication=authorize,
+    )
+    await runtime.initialize()
+
+    with pytest.raises(RuntimeError, match="admission unavailable"):
+        await runtime.run_once()
+    with pytest.raises(RuntimeError, match="publication authority is stale"):
+        await runtime.run_once()
+
+    assert authorization_attempts == 2
+    assert publisher.admission_acknowledgements == [
+        (protected.acknowledgement, protected.idempotency_key)
+    ]
+    assert runtime._pending_admission == protected
+    assert runtime.ready is False
 
 
 @pytest.mark.asyncio

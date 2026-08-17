@@ -1,6 +1,7 @@
 """Candidate-independent, zero-executable environment capacity reporter."""
 
 from loom_capacity_agent.admission import (
+    AbandonedAdmissionPlanV1,
     PreparedAdmissionPlanV1,
     PreparedBootstrapBindingV1,
     PreparedPlacementAllowanceV1,
@@ -9,6 +10,12 @@ from loom_capacity_agent.admission import (
     PreparedWorkerShapeV1,
     ProtectedReleasePublicationCheckpointV2,
     PublishableExecutableProtectedReleaseV2,
+)
+from loom_capacity_agent.admission_convergence import (
+    ProtectedAdmissionPlanCleanupWork,
+    ProtectedAdmissionPlanCoordinator,
+    ProtectedAdmissionPlanError,
+    ProtectedAdmissionPlanWork,
 )
 from loom_capacity_agent.claim_guard import (
     ClaimGuard,
@@ -24,6 +31,7 @@ from loom_capacity_agent.client import (
     DemandReporterClient,
     DemandReporterConnection,
     DemandReporterTLSFiles,
+    ExecutableAdmissionPlanClosureAcknowledgementReceiptV2,
     ExecutableProtectedReleasePublishReceiptV2,
     ProtectedReleasePublishReceiptV1,
 )
@@ -86,6 +94,7 @@ __all__ = [
     "LEGACY_MUTATION_INVENTORY_DIGEST",
     "LEGACY_MUTATION_PATH_IDS",
     "MAX_LEGACY_WRITER_CURSORS",
+    "AbandonedAdmissionPlanV1",
     "AgentPoolCapabilityV1",
     "AgentRegistrationV1",
     "CapacityAgentStore",
@@ -106,6 +115,7 @@ __all__ = [
     "DemandReporterConnection",
     "DemandReporterTLSFiles",
     "DisabledClaimGuard",
+    "ExecutableAdmissionPlanClosureAcknowledgementReceiptV2",
     "ExecutableProtectedReleasePublishReceiptV2",
     "ExecutableProtectedReleaseReporterRuntime",
     "GuardDemandAttemptV1",
@@ -125,6 +135,10 @@ __all__ = [
     "PreparedProtectedReleaseV1",
     "PreparedWorkerBindingV1",
     "PreparedWorkerShapeV1",
+    "ProtectedAdmissionPlanCleanupWork",
+    "ProtectedAdmissionPlanCoordinator",
+    "ProtectedAdmissionPlanError",
+    "ProtectedAdmissionPlanWork",
     "ProtectedExecutableBootstrapCoordinator",
     "ProtectedExecutableBootstrapError",
     "ProtectedExecutableBootstrapWork",

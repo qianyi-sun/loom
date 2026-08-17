@@ -20,6 +20,9 @@ from loom_capacity_guard.contracts import (
     PositiveGeneration,
     StrictGuardModel,
 )
+from loom_capacity_guard.contracts import (
+    canonical_digest as protected_digest,
+)
 from loom_capacity_manager.contracts import (
     MAX_FIXED_CLAIMS_PER_REPORT,
     Identifier,
@@ -27,6 +30,7 @@ from loom_capacity_manager.contracts import (
     canonical_digest,
 )
 from loom_capacity_manager.executable_contracts import (
+    ExecutableAdmissionPlanClosureV2,
     ExecutableIntentBindingV2,
     ExecutableProtectedReleaseV2,
     StrictV2Model,
@@ -208,6 +212,60 @@ class PreparedAdmissionPlanV1(AgentRegistrationV1):
                 raise ValueError("prepared allowance differs from its exact shape binding")
             if allowance.shape_slot_index >= prepared_shape.worker_shape.concurrency_slots:
                 raise ValueError("prepared allowance slot is outside its exact worker shape")
+        return self
+
+
+class AbandonedAdmissionPlanV1(AgentRegistrationV1):
+    """Exact local record that manager closure retired one prepared plan."""
+
+    closure_id: UUID
+    proposal_id: UUID
+    proposal_digest: Digest
+    plan_id: UUID
+    admission_incarnation: UUID
+    manager_authority_incarnation: UUID
+    manager_writer_epoch: NonNegativeSequence
+    manager_allocation_epoch: PositiveGeneration
+    manager_input_digest: Digest
+    manager_allocation_digest: Digest
+    pool_id: PhysicalPool
+    close_reason: Literal["expired", "allocation-superseded", "manager-closed"]
+    abandonment_state: Literal["abandoned"] = "abandoned"
+    executable: Literal[False] = False
+
+
+class NeverConvergedAdmissionPlanV1(AgentRegistrationV1):
+    """Append-only proof that one exact closed plan never existed locally."""
+
+    registration_digest: Digest
+    closure: ExecutableAdmissionPlanClosureV2
+    closure_digest: Digest
+    proposal_digest: Digest
+    disposition_state: Literal["never-converged"] = "never-converged"
+    executable: Literal[False] = False
+
+    @model_validator(mode="after")
+    def _exact_negative_evidence(self) -> NeverConvergedAdmissionPlanV1:
+        registration = AgentRegistrationV1.model_validate(
+            {
+                field: getattr(self, field)
+                for field in AgentRegistrationV1.model_fields
+            }
+        )
+        if protected_digest(registration) != self.registration_digest:
+            raise ValueError("registration digest does not match its exact contract")
+        if canonical_executable_digest(self.closure) != self.closure_digest:
+            raise ValueError("closure digest does not match its exact contract")
+        if canonical_executable_digest(self.closure.proposal) != self.proposal_digest:
+            raise ValueError("proposal digest does not match its exact contract")
+        proposal = self.closure.proposal
+        anchor = proposal.shapes[0].binding
+        if (
+            anchor.subject_id != self.subject_id
+            or anchor.subject_incarnation != self.subject_incarnation
+            or proposal.reporter_incarnation != self.reporter_incarnation
+        ):
+            raise ValueError("never-converged closure differs from its local registration")
         return self
 
 

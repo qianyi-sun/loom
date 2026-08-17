@@ -23,11 +23,33 @@ from loom_capacity_manager.contracts import (
     PositiveQuantity,
     Quantity,
     ResourceVectorV1,
+    WorkerShapeV1,
+    canonical_digest,
 )
 from loom_capacity_manager.grant_contracts import ReservationShapeV1
 
 _LOWER_HEX = re.compile(r"^[0-9a-f]+$")
 _EMPTY_JOURNAL_DIGEST = "0" * 64
+MAX_EXECUTABLE_ADMISSION_WORK_BYTES = MAX_CONTRACT_BYTES
+_MAX_EXECUTABLE_ADMISSION_CLOSURE_ENVELOPE_BYTES = len(
+    json.dumps(
+        {
+            "schema_version": 2,
+            "closure_id": str(UUID(int=0)),
+            "proposal": {},
+            "close_reason": "allocation-superseded",
+            "executable": False,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("ascii")
+) - len(b"{}")
+MAX_EXECUTABLE_ADMISSION_PROPOSAL_BYTES = (
+    MAX_EXECUTABLE_ADMISSION_WORK_BYTES
+    - _MAX_EXECUTABLE_ADMISSION_CLOSURE_ENVELOPE_BYTES
+)
 
 
 def _validate_journal_head(sequence: int, digest: str) -> None:
@@ -502,6 +524,294 @@ class ExecutableIntentBindingV2(StrictV2Model):
         return self
 
 
+class ExecutableAdmissionAllowanceV2(StrictV2Model):
+    """Manager-owned placement identity without environment-local attempt facts."""
+
+    allowance_id: UUID
+    protected_attempt_id: UUID
+    shape_instance_id: Identifier
+    shape_slot_index: Quantity
+    submission_intent_id: UUID
+
+
+class ExecutableAdmissionShapeV2(StrictV2Model):
+    """One complete intent and worker-shape binding in a protected plan proposal."""
+
+    binding: ExecutableIntentBindingV2
+    protocol_generation: PositiveQuantity
+    protocol_digest: Digest
+    worker_shape: WorkerShapeV1
+    worker_shape_digest: Digest
+    bootstrap_registration_epoch: PositiveQuantity
+
+    @model_validator(mode="after")
+    def _exact_worker_shape(self) -> ExecutableAdmissionShapeV2:
+        if (
+            canonical_digest(self.worker_shape) != self.worker_shape_digest
+            or self.worker_shape.shape_id != self.binding.shape_id
+            or self.worker_shape.concurrency_slots != self.binding.concurrency_slots
+            or self.worker_shape.total_resources != self.binding.resources
+            or len(self.worker_shape.node_resources) != len(self.binding.node_ids)
+        ):
+            raise ValueError("admission worker shape differs from its executable intent")
+        return self
+
+
+class ExecutableAdmissionPlanProposalV2(StrictV2Model):
+    """Complete manager-authored plan awaiting protected local attempt enrichment."""
+
+    proposal_id: UUID
+    plan_id: UUID
+    admission_incarnation: UUID
+    reporter_incarnation: UUID
+    protected_admission_sha256: Digest
+    manager_input_digest: Digest
+    manager_allocation_digest: Digest
+    lease_not_after: datetime
+    shapes: Annotated[
+        tuple[ExecutableAdmissionShapeV2, ...],
+        Field(min_length=1, max_length=MAX_FIXED_CLAIMS_PER_REPORT),
+    ]
+    allowances: Annotated[
+        tuple[ExecutableAdmissionAllowanceV2, ...],
+        Field(max_length=MAX_FIXED_CLAIMS_PER_REPORT),
+    ] = ()
+    executable: Literal[True] = True
+
+    _lease_not_after_utc = field_validator("lease_not_after")(_utc_time)
+
+    @field_validator("shapes")
+    @classmethod
+    def _canonical_shapes(
+        cls,
+        value: tuple[ExecutableAdmissionShapeV2, ...],
+    ) -> tuple[ExecutableAdmissionShapeV2, ...]:
+        shape_ids = [item.binding.shape_instance_id for item in value]
+        if len(shape_ids) != len(set(shape_ids)):
+            raise ValueError("duplicate admission shape identity")
+        intent_ids = [item.binding.intent_id for item in value]
+        if len(intent_ids) != len(set(intent_ids)):
+            raise ValueError("duplicate admission intent identity")
+        return tuple(sorted(value, key=lambda item: item.binding.shape_instance_id))
+
+    @field_validator("allowances")
+    @classmethod
+    def _canonical_allowances(
+        cls,
+        value: tuple[ExecutableAdmissionAllowanceV2, ...],
+    ) -> tuple[ExecutableAdmissionAllowanceV2, ...]:
+        allowance_ids = [item.allowance_id for item in value]
+        if len(allowance_ids) != len(set(allowance_ids)):
+            raise ValueError("duplicate admission allowance identity")
+        attempt_ids = [item.protected_attempt_id for item in value]
+        if len(attempt_ids) != len(set(attempt_ids)):
+            raise ValueError("duplicate admission protected attempt")
+        slots = [(item.shape_instance_id, item.shape_slot_index) for item in value]
+        if len(slots) != len(set(slots)):
+            raise ValueError("duplicate admission shape slot")
+        return tuple(sorted(value, key=lambda item: item.allowance_id.int))
+
+    @model_validator(mode="after")
+    def _complete_plan_binding(self) -> ExecutableAdmissionPlanProposalV2:
+        first = self.shapes[0]
+        anchor = first.binding
+        plan_binding = (
+            anchor.execution,
+            anchor.tranche_id,
+            anchor.subject_id,
+            anchor.subject_incarnation,
+            anchor.candidate,
+            anchor.candidate_generation,
+            anchor.deployment_generation,
+            anchor.pool_id,
+            anchor.pool_generation,
+            anchor.executor_id,
+            anchor.executor_incarnation,
+            anchor.profile_id,
+            anchor.profile_generation,
+            anchor.profile_digest,
+            first.protocol_generation,
+            first.protocol_digest,
+        )
+        for shape in self.shapes[1:]:
+            binding = shape.binding
+            if (
+                binding.execution,
+                binding.tranche_id,
+                binding.subject_id,
+                binding.subject_incarnation,
+                binding.candidate,
+                binding.candidate_generation,
+                binding.deployment_generation,
+                binding.pool_id,
+                binding.pool_generation,
+                binding.executor_id,
+                binding.executor_incarnation,
+                binding.profile_id,
+                binding.profile_generation,
+                binding.profile_digest,
+                shape.protocol_generation,
+                shape.protocol_digest,
+            ) != plan_binding:
+                raise ValueError("admission shapes do not share one exact plan binding")
+        shapes = {item.binding.shape_instance_id: item for item in self.shapes}
+        for allowance in self.allowances:
+            prepared_shape = shapes.get(allowance.shape_instance_id)
+            if (
+                prepared_shape is None
+                or allowance.submission_intent_id != prepared_shape.binding.intent_id
+                or allowance.shape_slot_index >= prepared_shape.binding.concurrency_slots
+            ):
+                raise ValueError("allowance differs from its exact admission shape")
+        plan_identities = {
+            self.proposal_id,
+            self.plan_id,
+            self.admission_incarnation,
+            self.reporter_incarnation,
+            anchor.execution.authority_incarnation,
+            anchor.tranche_id,
+            anchor.subject_id,
+            anchor.subject_incarnation,
+            anchor.executor_incarnation,
+        }
+        if len(plan_identities) != 9:
+            raise ValueError("admission plan authority identities must be distinct")
+        return self
+
+
+class ExecutableAdmissionPlanClosureV2(StrictV2Model):
+    """Durable manager evidence that one exact unacknowledged plan is closed."""
+
+    closure_id: UUID
+    proposal: ExecutableAdmissionPlanProposalV2
+    close_reason: Literal["expired", "allocation-superseded", "manager-closed"]
+    executable: Literal[False] = False
+
+    @model_validator(mode="after")
+    def _distinct_closure_identity(self) -> ExecutableAdmissionPlanClosureV2:
+        proposal = self.proposal
+        anchor = proposal.shapes[0].binding
+        if self.closure_id in {
+            proposal.proposal_id,
+            proposal.plan_id,
+            proposal.admission_incarnation,
+            anchor.tranche_id,
+            anchor.subject_id,
+            anchor.subject_incarnation,
+        }:
+            raise ValueError("admission closure identity must be distinct")
+        return self
+
+
+class ExecutableAdmissionPlanClosureAcknowledgementV2(StrictV2Model):
+    """Protected-agent evidence that one exact manager closure was converged locally."""
+
+    closure_id: UUID
+    proposal_id: UUID
+    proposal_digest: Digest
+    plan_id: UUID
+    admission_incarnation: UUID
+    subject_id: UUID
+    subject_incarnation: UUID
+    reporter_incarnation: UUID
+    protected_admission_sha256: Digest
+    close_reason: Literal["expired", "allocation-superseded", "manager-closed"]
+    disposition_kind: Literal["abandoned", "never-converged"]
+    disposition_digest: Digest
+    executable: Literal[False] = False
+
+    @model_validator(mode="after")
+    def _distinct_cleanup_identities(
+        self,
+    ) -> ExecutableAdmissionPlanClosureAcknowledgementV2:
+        identities = {
+            self.closure_id,
+            self.proposal_id,
+            self.plan_id,
+            self.admission_incarnation,
+            self.subject_id,
+            self.subject_incarnation,
+            self.reporter_incarnation,
+        }
+        if len(identities) != 7:
+            raise ValueError("admission closure acknowledgement identities must be distinct")
+        return self
+
+
+class ProtectedAdmissionAssignmentV2(StrictV2Model):
+    """Protected local attempt facts joined to one manager-owned allowance."""
+
+    transition_id: UUID
+    allowance_id: UUID
+    protected_attempt_id: UUID
+    execution_generation: PositiveQuantity
+    requirements_digest: Digest
+    shape_instance_id: Identifier
+    shape_slot_index: Quantity
+    submission_intent_id: UUID
+    lifecycle_sequence: PositiveQuantity
+
+
+class ExecutableAdmissionAcknowledgementV2(StrictV2Model):
+    """Exact evidence that one manager plan was committed by the protected agent."""
+
+    execution: ExecutionFenceV2
+    tranche_id: UUID
+    proposal_id: UUID
+    plan_id: UUID
+    admission_incarnation: UUID
+    subject_id: UUID
+    subject_incarnation: UUID
+    pool_id: Literal["oldlab", "gb10"]
+    reporter_incarnation: UUID
+    protected_admission_sha256: Digest
+    proposal_digest: Digest
+    prepared_plan_digest: Digest
+    assignment_count: Quantity
+    assignments: Annotated[
+        tuple[ProtectedAdmissionAssignmentV2, ...],
+        Field(max_length=MAX_FIXED_CLAIMS_PER_REPORT),
+    ] = ()
+    executable: Literal[True] = True
+
+    @field_validator("assignments")
+    @classmethod
+    def _canonical_assignments(
+        cls,
+        value: tuple[ProtectedAdmissionAssignmentV2, ...],
+    ) -> tuple[ProtectedAdmissionAssignmentV2, ...]:
+        for attribute, label in (
+            ("transition_id", "transition identity"),
+            ("allowance_id", "allowance identity"),
+            ("protected_attempt_id", "protected attempt"),
+        ):
+            identities = [getattr(item, attribute) for item in value]
+            if len(identities) != len(set(identities)):
+                raise ValueError(f"duplicate protected admission {label}")
+        slots = [(item.shape_instance_id, item.shape_slot_index) for item in value]
+        if len(slots) != len(set(slots)):
+            raise ValueError("duplicate protected admission shape slot")
+        return tuple(sorted(value, key=lambda item: item.allowance_id.int))
+
+    @model_validator(mode="after")
+    def _complete_acknowledgement(self) -> ExecutableAdmissionAcknowledgementV2:
+        if self.assignment_count != len(self.assignments):
+            raise ValueError("protected admission assignment count changed")
+        identities = {
+            self.execution.authority_incarnation,
+            self.tranche_id,
+            self.proposal_id,
+            self.plan_id,
+            self.admission_incarnation,
+            self.subject_id,
+            self.subject_incarnation,
+            self.reporter_incarnation,
+        }
+        if len(identities) != 8:
+            raise ValueError("protected admission acknowledgement identities must be distinct")
+        return self
+
+
 class ExecutableExecutorRegistrationV2(StrictV2Model):
     """Register one controller-local executor against a prepared epoch."""
 
@@ -874,6 +1184,29 @@ def canonical_executable_bytes(contract: StrictV2Model) -> bytes:
     return encoded
 
 
+def validate_executable_admission_work_size(payload: bytes) -> bytes:
+    """Accept one admission response at the shared limit and reject one byte more."""
+
+    if not isinstance(payload, bytes):
+        raise ValueError("executable admission work payload must be bytes")
+    if len(payload) > MAX_EXECUTABLE_ADMISSION_WORK_BYTES:
+        raise ValueError("executable admission work exceeds its response byte bound")
+    return payload
+
+
+def canonical_executable_admission_work_bytes(
+    work: ExecutableAdmissionPlanProposalV2 | ExecutableAdmissionPlanClosureV2,
+) -> bytes:
+    """Encode one exact manager admission response under its shared wire bound."""
+
+    if not isinstance(
+        work,
+        (ExecutableAdmissionPlanProposalV2, ExecutableAdmissionPlanClosureV2),
+    ):
+        raise ValueError("executable admission work has an invalid contract")
+    return validate_executable_admission_work_size(canonical_executable_bytes(work))
+
+
 def canonical_executable_digest(contract: StrictV2Model) -> str:
     """Return the SHA-256 digest of one canonical executable contract."""
 
@@ -928,7 +1261,15 @@ def canonical_inventory_confirmation_journal_head(
 
 
 __all__ = [
+    "MAX_EXECUTABLE_ADMISSION_PROPOSAL_BYTES",
+    "MAX_EXECUTABLE_ADMISSION_WORK_BYTES",
     "CandidateBindingV2",
+    "ExecutableAdmissionAcknowledgementV2",
+    "ExecutableAdmissionAllowanceV2",
+    "ExecutableAdmissionPlanClosureAcknowledgementV2",
+    "ExecutableAdmissionPlanClosureV2",
+    "ExecutableAdmissionPlanProposalV2",
+    "ExecutableAdmissionShapeV2",
     "ExecutableBootstrapAcknowledgementV2",
     "ExecutableBootstrapProposalV2",
     "ExecutableBootstrapRegistrationV2",
@@ -960,10 +1301,13 @@ __all__ = [
     "LegacyWriterFenceV2",
     "PoolControllerAuthorityV2",
     "PreparedExecutorBindingV2",
+    "ProtectedAdmissionAssignmentV2",
     "SignedExecutableOwnershipProofV2",
     "StrictV2Model",
     "SubjectExecutionAcknowledgementV2",
+    "canonical_executable_admission_work_bytes",
     "canonical_executable_bytes",
     "canonical_executable_digest",
     "canonical_inventory_confirmation_journal_head",
+    "validate_executable_admission_work_size",
 ]

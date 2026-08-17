@@ -47,6 +47,10 @@ from loom_capacity_manager.contracts import (
     canonical_digest,
 )
 from loom_capacity_manager.executable_contracts import (
+    ExecutableAdmissionAcknowledgementV2,
+    ExecutableAdmissionPlanClosureAcknowledgementV2,
+    ExecutableAdmissionPlanClosureV2,
+    ExecutableAdmissionPlanProposalV2,
     ExecutableBootstrapAcknowledgementV2,
     ExecutableBootstrapProposalV2,
     ExecutableExecutorHeartbeatV2,
@@ -63,6 +67,7 @@ from loom_capacity_manager.executable_contracts import (
     ExecutionPreparationAbortV2,
     ExecutionPreparationV2,
     PreparedExecutorBindingV2,
+    canonical_executable_admission_work_bytes,
     canonical_executable_digest,
 )
 from loom_capacity_manager.execution_policy import load_execution_preparation_policy
@@ -544,7 +549,15 @@ def create_app(
     execution_abort_body = contract_body(ExecutionPreparationAbortV2)
     executable_acceptance_body = contract_body(ExecutableReservationAcceptanceV2)
     executable_bootstrap_proposal_body = contract_body(ExecutableBootstrapProposalV2)
-    executable_bootstrap_acknowledgement_body = contract_body(ExecutableBootstrapAcknowledgementV2)
+    executable_bootstrap_acknowledgement_body = contract_body(
+        ExecutableBootstrapAcknowledgementV2
+    )
+    executable_admission_acknowledgement_body = contract_body(
+        ExecutableAdmissionAcknowledgementV2
+    )
+    executable_admission_closure_acknowledgement_body = contract_body(
+        ExecutableAdmissionPlanClosureAcknowledgementV2
+    )
     executable_consumption_body = contract_body(ExecutablePermitConsumptionV2)
     executable_recovery_body = contract_body(ExecutableSubmissionRecoveryV2)
     executable_close_body = contract_body(ExecutableIntentCloseV2)
@@ -1415,6 +1428,111 @@ def create_app(
         try:
             async with session_factory() as session:
                 result = await executions.acknowledge_bootstrap(
+                    session,
+                    value,
+                    actor=actor.principal_id,
+                    idempotency_key=idempotency_key,
+                )
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.get(
+        "/v2/subjects/{subject_id}/admission-work",
+        response_model=(
+            ExecutableAdmissionPlanProposalV2
+            | ExecutableAdmissionPlanClosureV2
+            | None
+        ),
+    )
+    async def next_subject_admission_work(
+        subject_id: UUID,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:report:demand")),
+    ) -> Response:
+        if (
+            actor.subject_id != subject_id
+            or actor.subject_incarnation is None
+            or actor.demand_reporter_incarnation is None
+        ):
+            raise HTTPException(status_code=403, detail="forbidden")
+        session_factory, executions = execution_runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await executions.next_subject_admission_plan(
+                    session,
+                    subject_id=subject_id,
+                    subject_incarnation=actor.subject_incarnation,
+                    reporter_incarnation=actor.demand_reporter_incarnation,
+                )
+            payload = (
+                b"null"
+                if result is None
+                else canonical_executable_admission_work_bytes(result)
+            )
+            return Response(content=payload, media_type="application/json")
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.put(
+        "/v2/subjects/{subject_id}/admission-acknowledgements/{proposal_id}"
+    )
+    async def acknowledge_executable_admission_plan(
+        subject_id: UUID,
+        proposal_id: UUID,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:report:demand")),
+        value: ExecutableAdmissionAcknowledgementV2 = Depends(
+            executable_admission_acknowledgement_body
+        ),
+        idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    ) -> Any:
+        if (
+            value.subject_id != subject_id
+            or value.proposal_id != proposal_id
+            or actor.subject_id != subject_id
+            or actor.subject_incarnation != value.subject_incarnation
+            or actor.demand_reporter_incarnation != value.reporter_incarnation
+        ):
+            raise HTTPException(status_code=403, detail="forbidden")
+        session_factory, executions = execution_runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await executions.acknowledge_admission_plan(
+                    session,
+                    value,
+                    actor=actor.principal_id,
+                    idempotency_key=idempotency_key,
+                )
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.put(
+        "/v2/subjects/{subject_id}/admission-closures/{closure_id}/acknowledgements"
+    )
+    async def acknowledge_executable_admission_plan_closure(
+        subject_id: UUID,
+        closure_id: UUID,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:report:demand")),
+        value: ExecutableAdmissionPlanClosureAcknowledgementV2 = Depends(
+            executable_admission_closure_acknowledgement_body
+        ),
+        idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    ) -> Any:
+        if (
+            value.subject_id != subject_id
+            or value.closure_id != closure_id
+            or actor.subject_id != subject_id
+            or actor.subject_incarnation != value.subject_incarnation
+            or actor.demand_reporter_incarnation != value.reporter_incarnation
+        ):
+            raise HTTPException(status_code=403, detail="forbidden")
+        session_factory, executions = execution_runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await executions.acknowledge_admission_plan_closure(
                     session,
                     value,
                     actor=actor.principal_id,

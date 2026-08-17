@@ -32,11 +32,17 @@ from loom_capacity_manager.contracts import (
     canonical_digest,
 )
 from loom_capacity_manager.executable_contracts import (
+    MAX_EXECUTABLE_ADMISSION_WORK_BYTES,
+    ExecutableAdmissionAcknowledgementV2,
+    ExecutableAdmissionPlanClosureAcknowledgementV2,
+    ExecutableAdmissionPlanClosureV2,
+    ExecutableAdmissionPlanProposalV2,
     ExecutableBootstrapAcknowledgementV2,
     ExecutableBootstrapProposalV2,
     ExecutableProtectedReleaseV2,
     canonical_executable_bytes,
     canonical_executable_digest,
+    validate_executable_admission_work_size,
 )
 from loom_capacity_manager.grant_contracts import (
     DryRunProtectedReleaseAcknowledgementV1,
@@ -103,6 +109,31 @@ class ExecutableProtectedReleasePublishReceiptV2(BaseModel):
     receipt_digest: Digest
     replayed: bool
     executable: Literal[True]
+
+
+class ExecutableAdmissionAcknowledgementReceiptV2(BaseModel):
+    """Exact manager receipt for one protected executable admission plan."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    proposal_id: UUID
+    prepared_plan_digest: Digest
+    receipt_digest: Digest
+    replayed: bool
+    executable: Literal[True]
+
+
+class ExecutableAdmissionPlanClosureAcknowledgementReceiptV2(BaseModel):
+    """Exact manager receipt for one protected local admission cleanup."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    closure_id: UUID
+    disposition_kind: Literal["abandoned", "never-converged"]
+    disposition_digest: Digest
+    receipt_digest: Digest
+    replayed: bool
+    executable: Literal[False]
 
 
 @dataclass(frozen=True, slots=True)
@@ -459,6 +490,225 @@ class DemandReporterClient:
             raise DemandPublishError("capacity manager bootstrap acknowledgement receipt changed")
         return receipt
 
+    async def next_executable_admission_plan(
+        self,
+    ) -> ExecutableAdmissionPlanProposalV2 | ExecutableAdmissionPlanClosureV2 | None:
+        """Fetch exact executable admission or closure work for this subject."""
+
+        endpoint = (
+            f"{self._manager_origin}/v2/subjects/{self._configuration.subject_id}/admission-work"
+        )
+        try:
+            async with self._http.stream(
+                "GET",
+                endpoint,
+                headers={"Authorization": f"Bearer {self._bearer_token}"},
+                follow_redirects=False,
+            ) as response:
+                if response.status_code != 200:
+                    raise DemandPublishError(
+                        "capacity manager rejected admission work with status "
+                        f"{response.status_code}"
+                    )
+                bounded_content = bytearray()
+                async for chunk in response.aiter_bytes():
+                    remaining = (
+                        MAX_EXECUTABLE_ADMISSION_WORK_BYTES + 1 - len(bounded_content)
+                    )
+                    bounded_content.extend(chunk[:remaining])
+                    if len(bounded_content) > MAX_EXECUTABLE_ADMISSION_WORK_BYTES:
+                        raise DemandPublishError(
+                            "capacity manager admission work exceeds its byte bound"
+                        )
+        except httpx.HTTPError:
+            raise DemandPublishError("capacity manager admission work transport failed") from None
+        response_content = bytes(bounded_content)
+        try:
+            validate_executable_admission_work_size(response_content)
+        except ValueError as exc:
+            raise DemandPublishError(
+                "capacity manager admission work exceeds its byte bound"
+            ) from exc
+        if response_content == b"null":
+            return None
+        try:
+            work: ExecutableAdmissionPlanProposalV2 | ExecutableAdmissionPlanClosureV2
+            work = ExecutableAdmissionPlanProposalV2.model_validate_json(response_content)
+        except (ValidationError, ValueError):
+            try:
+                work = ExecutableAdmissionPlanClosureV2.model_validate_json(response_content)
+            except (ValidationError, ValueError) as exc:
+                raise DemandPublishError(
+                    "capacity manager returned invalid admission work"
+                ) from exc
+        proposal = work.proposal if isinstance(work, ExecutableAdmissionPlanClosureV2) else work
+        binding = proposal.shapes[0].binding
+        if (
+            binding.subject_id != self._configuration.subject_id
+            or binding.subject_incarnation != self._configuration.subject_incarnation
+            or proposal.reporter_incarnation != self._configuration.reporter_incarnation
+            or binding.deployment_generation != self._configuration.deployment_generation
+            or binding.candidate.algorithm != self._configuration.candidate_identity_algorithm
+            or binding.candidate.identity != self._configuration.candidate_identity
+            or binding.candidate.publication_sha256
+            != self._configuration.candidate_publication_sha256
+            or proposal.protected_admission_sha256
+            != self._configuration.protected_admission_sha256
+        ):
+            raise DemandPublishError("capacity manager admission work binding changed")
+        return work
+
+    async def publish_executable_admission_acknowledgement(
+        self,
+        acknowledgement: ExecutableAdmissionAcknowledgementV2,
+        *,
+        idempotency_key: UUID,
+    ) -> ExecutableAdmissionAcknowledgementReceiptV2:
+        """Publish only an exact protected local admission convergence acknowledgement."""
+
+        if not isinstance(acknowledgement, ExecutableAdmissionAcknowledgementV2):
+            raise DemandPublishError("admission acknowledgement is not schema-v2")
+        if not isinstance(idempotency_key, UUID):
+            raise DemandPublishError("admission acknowledgement idempotency key must be a UUID")
+        if (
+            acknowledgement.subject_id != self._configuration.subject_id
+            or acknowledgement.subject_incarnation != self._configuration.subject_incarnation
+            or acknowledgement.reporter_incarnation != self._configuration.reporter_incarnation
+            or acknowledgement.protected_admission_sha256
+            != self._configuration.protected_admission_sha256
+        ):
+            raise DemandPublishError("admission acknowledgement binding changed")
+        try:
+            payload = canonical_executable_bytes(acknowledgement)
+        except (CapacityContractError, ValueError) as exc:
+            raise DemandPublishError(
+                "admission acknowledgement exceeds its canonical contract bound"
+            ) from exc
+        endpoint = (
+            f"{self._manager_origin}/v2/subjects/{acknowledgement.subject_id}/"
+            f"admission-acknowledgements/{acknowledgement.proposal_id}"
+        )
+        try:
+            response = await self._http.put(
+                endpoint,
+                content=payload,
+                headers={
+                    "Authorization": f"Bearer {self._bearer_token}",
+                    "Content-Type": "application/json",
+                    "Idempotency-Key": str(idempotency_key),
+                },
+                follow_redirects=False,
+            )
+        except httpx.HTTPError:
+            raise DemandPublishError(
+                "capacity manager admission acknowledgement transport failed"
+            ) from None
+        if response.status_code != 200:
+            raise DemandPublishError(
+                "capacity manager rejected admission acknowledgement with status "
+                f"{response.status_code}"
+            )
+        if len(response.content) > _MAX_RECEIPT_BYTES:
+            raise DemandPublishError(
+                "capacity manager admission acknowledgement receipt exceeds its byte bound"
+            )
+        try:
+            receipt = ExecutableAdmissionAcknowledgementReceiptV2.model_validate_json(
+                response.content
+            )
+        except (ValidationError, ValueError) as exc:
+            raise DemandPublishError(
+                "capacity manager returned an invalid admission acknowledgement receipt"
+            ) from exc
+        if (
+            receipt.proposal_id != acknowledgement.proposal_id
+            or receipt.prepared_plan_digest != acknowledgement.prepared_plan_digest
+            or receipt.receipt_digest != canonical_executable_digest(acknowledgement)
+        ):
+            raise DemandPublishError("capacity manager admission acknowledgement receipt changed")
+        return receipt
+
+    async def publish_executable_admission_closure_acknowledgement(
+        self,
+        acknowledgement: ExecutableAdmissionPlanClosureAcknowledgementV2,
+        *,
+        idempotency_key: UUID,
+    ) -> ExecutableAdmissionPlanClosureAcknowledgementReceiptV2:
+        """Publish exact protected evidence that one manager closure was cleaned up."""
+
+        if not isinstance(
+            acknowledgement,
+            ExecutableAdmissionPlanClosureAcknowledgementV2,
+        ):
+            raise DemandPublishError("admission closure acknowledgement is not schema-v2")
+        if not isinstance(idempotency_key, UUID):
+            raise DemandPublishError(
+                "admission closure acknowledgement idempotency key must be a UUID"
+            )
+        if (
+            acknowledgement.subject_id != self._configuration.subject_id
+            or acknowledgement.subject_incarnation
+            != self._configuration.subject_incarnation
+            or acknowledgement.reporter_incarnation
+            != self._configuration.reporter_incarnation
+            or acknowledgement.protected_admission_sha256
+            != self._configuration.protected_admission_sha256
+        ):
+            raise DemandPublishError("admission closure acknowledgement binding changed")
+        try:
+            payload = canonical_executable_bytes(acknowledgement)
+        except (CapacityContractError, ValueError) as exc:
+            raise DemandPublishError(
+                "admission closure acknowledgement exceeds its canonical contract bound"
+            ) from exc
+        endpoint = (
+            f"{self._manager_origin}/v2/subjects/{acknowledgement.subject_id}/"
+            f"admission-closures/{acknowledgement.closure_id}/acknowledgements"
+        )
+        try:
+            response = await self._http.put(
+                endpoint,
+                content=payload,
+                headers={
+                    "Authorization": f"Bearer {self._bearer_token}",
+                    "Content-Type": "application/json",
+                    "Idempotency-Key": str(idempotency_key),
+                },
+                follow_redirects=False,
+            )
+        except httpx.HTTPError:
+            raise DemandPublishError(
+                "capacity manager admission closure acknowledgement transport failed"
+            ) from None
+        if response.status_code != 200:
+            raise DemandPublishError(
+                "capacity manager rejected admission closure acknowledgement with status "
+                f"{response.status_code}"
+            )
+        if len(response.content) > _MAX_RECEIPT_BYTES:
+            raise DemandPublishError(
+                "capacity manager admission closure acknowledgement receipt exceeds its byte bound"
+            )
+        try:
+            receipt = ExecutableAdmissionPlanClosureAcknowledgementReceiptV2.model_validate_json(
+                response.content
+            )
+        except (ValidationError, ValueError) as exc:
+            raise DemandPublishError(
+                "capacity manager returned an invalid admission closure acknowledgement receipt"
+            ) from exc
+        if (
+            receipt.closure_id != acknowledgement.closure_id
+            or receipt.disposition_kind != acknowledgement.disposition_kind
+            or receipt.disposition_digest != acknowledgement.disposition_digest
+            or receipt.receipt_digest != canonical_executable_digest(acknowledgement)
+            or receipt.executable is not False
+        ):
+            raise DemandPublishError(
+                "capacity manager admission closure acknowledgement receipt changed"
+            )
+        return receipt
+
     async def publish_protected_release(
         self,
         release: PreparedProtectedReleaseV1,
@@ -655,6 +905,7 @@ __all__ = [
     "DemandReporterClient",
     "DemandReporterConnection",
     "DemandReporterTLSFiles",
+    "ExecutableAdmissionPlanClosureAcknowledgementReceiptV2",
     "ExecutableBootstrapAcknowledgementReceiptV2",
     "ExecutableProtectedReleasePublishReceiptV2",
     "ProtectedReleasePublishReceiptV1",

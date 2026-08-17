@@ -8,7 +8,12 @@ from uuid import UUID
 import pytest
 from pydantic import ValidationError
 
-from loom_capacity_manager.contracts import MAX_QUANTITY, ResourceVectorV1
+from loom_capacity_manager.contracts import (
+    MAX_QUANTITY,
+    ResourceVectorV1,
+    WorkerShapeV1,
+    canonical_digest,
+)
 from loom_capacity_manager.grant_contracts import (
     DryRunReservationProposalV1,
     ReservationShapeV1,
@@ -146,13 +151,25 @@ def _retirement_checkpoint(pool_id: str):
     )
 
 
-def _intent_binding():
+def _intent_binding(
+    *,
+    shape_instance_id: str = "shape-1",
+    intent_id: UUID = _DEFAULT_INTENT_ID,
+    shape_id: str = "one-slot",
+    concurrency_slots: int = 1,
+    node_id: str = "node-1",
+):
     contracts = _contracts()
+    resources = ResourceVectorV1(
+        slots=concurrency_slots,
+        cpu_millicores=1_000 * concurrency_slots,
+        memory_bytes=1_073_741_824 * concurrency_slots,
+    )
     return contracts.ExecutableIntentBindingV2(
         execution=_fence(),
         tranche_id=UUID(int=10),
-        intent_id=UUID(int=20),
-        shape_instance_id="shape-1",
+        intent_id=intent_id,
+        shape_instance_id=shape_instance_id,
         subject_id=UUID(int=11),
         subject_incarnation=UUID(int=12),
         account_id="owner-1",
@@ -164,17 +181,92 @@ def _intent_binding():
         pool_generation=8,
         executor_id="oldlab-executor",
         executor_incarnation=UUID(int=13),
-        shape_id="one-slot",
+        shape_id=shape_id,
         profile_id="profile-1",
         profile_generation=1,
         profile_digest="e" * 64,
+        concurrency_slots=concurrency_slots,
+        resources=resources,
+        node_ids=(node_id,),
+    )
+
+
+def _admission_shape(
+    *,
+    shape_instance_id: str,
+    intent_id: UUID,
+    shape_id: str,
+    concurrency_slots: int,
+    node_id: str,
+):
+    contracts = _contracts()
+    binding = _intent_binding(
+        shape_instance_id=shape_instance_id,
+        intent_id=intent_id,
+        shape_id=shape_id,
+        concurrency_slots=concurrency_slots,
+        node_id=node_id,
+    )
+    worker_shape = WorkerShapeV1(
+        shape_id=shape_id,
+        concurrency_slots=concurrency_slots,
+        total_resources=binding.resources,
+        node_resources=(binding.resources,),
+        compatible_domain_ids=("oldlab-domain",),
+        capabilities=("cpu_arch.x86_64", "os.linux"),
+    )
+    return contracts.ExecutableAdmissionShapeV2(
+        binding=binding,
+        protocol_generation=9,
+        protocol_digest="9" * 64,
+        worker_shape=worker_shape,
+        worker_shape_digest=canonical_digest(worker_shape),
+        bootstrap_registration_epoch=1,
+    )
+
+
+def _admission_plan_proposal():
+    contracts = _contracts()
+    first = _admission_shape(
+        shape_instance_id="shape-1",
+        intent_id=UUID(int=20),
+        shape_id="two-slot",
+        concurrency_slots=2,
+        node_id="node-1",
+    )
+    second = _admission_shape(
+        shape_instance_id="shape-2",
+        intent_id=UUID(int=21),
+        shape_id="one-slot",
         concurrency_slots=1,
-        resources=ResourceVectorV1(
-            slots=1,
-            cpu_millicores=1_000,
-            memory_bytes=1_073_741_824,
+        node_id="node-2",
+    )
+    return contracts.ExecutableAdmissionPlanProposalV2(
+        proposal_id=UUID(int=30),
+        plan_id=UUID(int=31),
+        admission_incarnation=UUID(int=32),
+        reporter_incarnation=UUID(int=33),
+        protected_admission_sha256="3" * 64,
+        manager_input_digest="4" * 64,
+        manager_allocation_digest="5" * 64,
+        lease_not_after=datetime.now(UTC) + timedelta(minutes=5),
+        shapes=(second, first),
+        allowances=(
+            contracts.ExecutableAdmissionAllowanceV2(
+                allowance_id=UUID(int=62),
+                protected_attempt_id=UUID(int=42),
+                shape_instance_id="shape-1",
+                shape_slot_index=1,
+                submission_intent_id=UUID(int=20),
+            ),
+            contracts.ExecutableAdmissionAllowanceV2(
+                allowance_id=UUID(int=61),
+                protected_attempt_id=UUID(int=41),
+                shape_instance_id="shape-1",
+                shape_slot_index=0,
+                submission_intent_id=UUID(int=20),
+            ),
         ),
-        node_ids=("node-1",),
     )
 
 
@@ -523,6 +615,220 @@ def test_executable_canonical_encoding_rejects_v1_contract() -> None:
                 shapes=(_shape(),),
             )
         )
+
+
+def test_admission_plan_proposal_canonicalizes_complete_batched_assignment() -> None:
+    """Dropping a shape or reordering manager evidence must change or reject the plan."""
+
+    contracts = _contracts()
+    proposal = _admission_plan_proposal()
+
+    assert tuple(item.binding.shape_instance_id for item in proposal.shapes) == (
+        "shape-1",
+        "shape-2",
+    )
+    assert tuple(item.allowance_id for item in proposal.allowances) == (
+        UUID(int=61),
+        UUID(int=62),
+    )
+    assert contracts.canonical_executable_digest(proposal) == (
+        contracts.canonical_executable_digest(
+            contracts.ExecutableAdmissionPlanProposalV2.model_validate_json(
+                proposal.model_dump_json()
+            )
+        )
+    )
+
+
+def test_admission_closure_acknowledgement_binds_exact_protected_cleanup() -> None:
+    """Closure receipts name either exact guard-owned closure disposition."""
+
+    contracts = _contracts()
+    proposal = _admission_plan_proposal()
+    acknowledgement = contracts.ExecutableAdmissionPlanClosureAcknowledgementV2(
+        closure_id=UUID(int=90),
+        proposal_id=proposal.proposal_id,
+        proposal_digest=contracts.canonical_executable_digest(proposal),
+        plan_id=proposal.plan_id,
+        admission_incarnation=proposal.admission_incarnation,
+        subject_id=proposal.shapes[0].binding.subject_id,
+        subject_incarnation=proposal.shapes[0].binding.subject_incarnation,
+        reporter_incarnation=proposal.reporter_incarnation,
+        protected_admission_sha256=proposal.protected_admission_sha256,
+        close_reason="allocation-superseded",
+        disposition_kind="never-converged",
+        disposition_digest="6" * 64,
+    )
+
+    assert acknowledgement.executable is False
+    assert acknowledgement.disposition_kind == "never-converged"
+    assert acknowledgement == (
+        contracts.ExecutableAdmissionPlanClosureAcknowledgementV2.model_validate_json(
+            contracts.canonical_executable_bytes(acknowledgement)
+        )
+    )
+
+
+def test_admission_work_uses_one_exact_response_byte_bound() -> None:
+    """Changing any layer to reject the exact limit or accept one byte more must fail."""
+
+    contracts = _contracts()
+    proposal = _admission_plan_proposal()
+    closure = contracts.ExecutableAdmissionPlanClosureV2(
+        closure_id=UUID(int=90),
+        proposal=proposal,
+        close_reason="allocation-superseded",
+    )
+    proposal_bytes = contracts.canonical_executable_bytes(proposal)
+    closure_bytes = contracts.canonical_executable_bytes(closure)
+
+    assert len(closure_bytes) - len(proposal_bytes) == (
+        contracts.MAX_EXECUTABLE_ADMISSION_WORK_BYTES
+        - contracts.MAX_EXECUTABLE_ADMISSION_PROPOSAL_BYTES
+    )
+    exact = b"x" * contracts.MAX_EXECUTABLE_ADMISSION_WORK_BYTES
+    assert contracts.validate_executable_admission_work_size(exact) is exact
+    with pytest.raises(ValueError, match="admission work exceeds"):
+        contracts.validate_executable_admission_work_size(exact + b"x")
+
+
+@pytest.mark.parametrize(
+    ("allowances", "message"),
+    [
+        (
+            lambda first, second: (
+                first,
+                second.model_copy(update={"allowance_id": first.allowance_id}),
+            ),
+            "duplicate admission allowance identity",
+        ),
+        (
+            lambda first, second: (
+                first,
+                second.model_copy(
+                    update={"protected_attempt_id": first.protected_attempt_id}
+                ),
+            ),
+            "duplicate admission protected attempt",
+        ),
+        (
+            lambda first, second: (
+                first,
+                second.model_copy(
+                    update={
+                        "shape_instance_id": first.shape_instance_id,
+                        "shape_slot_index": first.shape_slot_index,
+                    }
+                ),
+            ),
+            "duplicate admission shape slot",
+        ),
+    ],
+)
+def test_admission_plan_rejects_duplicate_allowance_authority(
+    allowances,
+    message: str,
+) -> None:
+    """Reusing an allowance, attempt, or physical slot must fail closed."""
+
+    contracts = _contracts()
+    proposal = _admission_plan_proposal()
+    first, second = proposal.allowances
+
+    with pytest.raises(ValidationError, match=message):
+        contracts.ExecutableAdmissionPlanProposalV2.model_validate(
+            proposal.model_dump(mode="python")
+            | {"allowances": allowances(first, second)}
+        )
+
+
+def test_admission_plan_rejects_allowance_outside_exact_shape_binding() -> None:
+    """Accepting an out-of-range slot or another intent would misassign work."""
+
+    contracts = _contracts()
+    proposal = _admission_plan_proposal()
+    allowance = proposal.allowances[0]
+
+    for change in (
+        {"shape_slot_index": 2},
+        {"submission_intent_id": UUID(int=21)},
+        {"shape_instance_id": "missing-shape"},
+    ):
+        with pytest.raises(ValidationError, match="exact admission shape"):
+            contracts.ExecutableAdmissionPlanProposalV2.model_validate(
+                proposal.model_dump(mode="python")
+                | {"allowances": (allowance.model_copy(update=change),)}
+            )
+
+
+def test_admission_shape_rejects_changed_worker_shape_binding() -> None:
+    """Changing the launch shape behind an accepted intent must fail the plan."""
+
+    contracts = _contracts()
+    proposal = _admission_plan_proposal()
+    shape = proposal.shapes[0]
+    changed_worker_shape = shape.worker_shape.model_copy(
+        update={"shape_id": "changed-shape"}
+    )
+
+    with pytest.raises(ValidationError, match="worker shape differs"):
+        contracts.ExecutableAdmissionShapeV2.model_validate(
+            shape.model_dump(mode="python")
+            | {
+                "worker_shape": changed_worker_shape,
+                "worker_shape_digest": canonical_digest(changed_worker_shape),
+            }
+        )
+
+
+def test_admission_acknowledgement_requires_canonical_exact_assignments() -> None:
+    """Omitting or duplicating protected assignment evidence must fail acknowledgement."""
+
+    contracts = _contracts()
+    proposal = _admission_plan_proposal()
+    assignments = tuple(
+        contracts.ProtectedAdmissionAssignmentV2(
+            transition_id=UUID(int=70 + index),
+            allowance_id=allowance.allowance_id,
+            protected_attempt_id=allowance.protected_attempt_id,
+            execution_generation=7,
+            requirements_digest=str(index) * 64,
+            shape_instance_id=allowance.shape_instance_id,
+            shape_slot_index=allowance.shape_slot_index,
+            submission_intent_id=allowance.submission_intent_id,
+            lifecycle_sequence=1,
+        )
+        for index, allowance in enumerate(reversed(proposal.allowances), start=1)
+    )
+    acknowledgement = contracts.ExecutableAdmissionAcknowledgementV2(
+        execution=proposal.shapes[0].binding.execution,
+        tranche_id=proposal.shapes[0].binding.tranche_id,
+        proposal_id=proposal.proposal_id,
+        plan_id=proposal.plan_id,
+        admission_incarnation=proposal.admission_incarnation,
+        subject_id=proposal.shapes[0].binding.subject_id,
+        subject_incarnation=proposal.shapes[0].binding.subject_incarnation,
+        pool_id=proposal.shapes[0].binding.pool_id,
+        reporter_incarnation=proposal.reporter_incarnation,
+        protected_admission_sha256=proposal.protected_admission_sha256,
+        proposal_digest=contracts.canonical_executable_digest(proposal),
+        prepared_plan_digest="6" * 64,
+        assignment_count=2,
+        assignments=assignments,
+    )
+
+    assert tuple(item.allowance_id for item in acknowledgement.assignments) == (
+        UUID(int=61),
+        UUID(int=62),
+    )
+    for invalid in (
+        acknowledgement.assignments[:1],
+        (acknowledgement.assignments[0], acknowledgement.assignments[0]),
+    ):
+        with pytest.raises(ValidationError):
+            contracts.ExecutableAdmissionAcknowledgementV2.model_validate(
+                acknowledgement.model_dump(mode="python") | {"assignments": invalid}
+            )
 
 
 def test_executable_proposal_rejects_duplicate_shape_and_intent() -> None:

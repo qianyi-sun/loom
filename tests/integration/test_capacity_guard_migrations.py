@@ -48,6 +48,8 @@ EXPECTED_GUARD_TABLES = {
     "prepared_admission_plans",
     "prepared_worker_shapes",
     "prepared_placement_allowances",
+    "abandoned_admission_plans",
+    "never_converged_admission_plans",
     "prepared_bootstrap_bindings",
     "prepared_worker_bindings",
     "protected_release_acknowledgements",
@@ -95,7 +97,7 @@ async def test_guard_schema_startup_returns_numeric_head(
 ) -> None:
     engine = create_async_engine(_value(capacity_guard_database, "migrator_url"))
     try:
-        assert await assert_capacity_guard_schema_at_head(engine) == 20
+        assert await assert_capacity_guard_schema_at_head(engine) == 21
     finally:
         await engine.dispose()
 
@@ -380,6 +382,107 @@ def _seed_executable_observation_rows(
     )
 
 
+def _insert_guard_0021_abandonment_evidence(connection: Any) -> UUID:
+    subject_id, _subject_incarnation, _intent_id, _worker_id, _worker_incarnation = (
+        _seed_executable_observation_rows(connection)
+    )
+    agent_incarnation = connection.execute(
+        text(
+            "SELECT agent_incarnation FROM loom_capacity_guard.agent_registrations "
+            "WHERE subject_id = :subject_id"
+        ),
+        {"subject_id": subject_id},
+    ).scalar_one()
+    plan_id = uuid4()
+    admission_incarnation = uuid4()
+    manager_authority_incarnation = uuid4()
+    connection.execute(
+        text(
+            "INSERT INTO loom_capacity_guard.prepared_admission_plans "
+            "(plan_id, agent_incarnation, admission_incarnation, "
+            "manager_authority_incarnation, manager_writer_epoch, "
+            "manager_allocation_epoch, manager_input_digest, "
+            "manager_allocation_digest, pool_id, pool_generation, profile_id, "
+            "profile_generation, profile_digest, protocol_generation, "
+            "protocol_digest, lease_not_after, plan_state, executable, payload, "
+            "payload_digest) VALUES "
+            "(:plan_id, :agent_incarnation, :admission_incarnation, "
+            ":manager_authority_incarnation, 3, 11, repeat('1', 64), "
+            "repeat('2', 64), 'oldlab', 13, 'oldlab-default', 17, "
+            "repeat('3', 64), 1, repeat('4', 64), now() + interval '1 hour', "
+            "'prepared', false, '{}'::jsonb, repeat('5', 64))"
+        ),
+        {
+            "plan_id": plan_id,
+            "agent_incarnation": agent_incarnation,
+            "admission_incarnation": admission_incarnation,
+            "manager_authority_incarnation": manager_authority_incarnation,
+        },
+    )
+    closure_id = uuid4()
+    connection.execute(
+        text(
+            "INSERT INTO loom_capacity_guard.abandoned_admission_plans "
+            "(closure_id, proposal_id, proposal_digest, plan_id, "
+            "admission_incarnation, agent_incarnation, "
+            "manager_authority_incarnation, manager_writer_epoch, "
+            "manager_allocation_epoch, manager_input_digest, "
+            "manager_allocation_digest, pool_id, close_reason, "
+            "abandonment_state, executable, payload, payload_digest) VALUES "
+            "(:closure_id, :proposal_id, repeat('6', 64), :plan_id, "
+            ":admission_incarnation, :agent_incarnation, "
+            ":manager_authority_incarnation, 3, 11, repeat('1', 64), "
+            "repeat('2', 64), 'oldlab', 'manager-closed', 'abandoned', false, "
+            "'{}'::jsonb, repeat('7', 64))"
+        ),
+        {
+            "closure_id": closure_id,
+            "proposal_id": uuid4(),
+            "plan_id": plan_id,
+            "admission_incarnation": admission_incarnation,
+            "agent_incarnation": agent_incarnation,
+            "manager_authority_incarnation": manager_authority_incarnation,
+        },
+    )
+    return closure_id
+
+
+def _insert_guard_0021_never_converged_evidence(connection: Any) -> tuple[UUID, UUID]:
+    subject_id, _subject_incarnation, _intent_id, _worker_id, _worker_incarnation = (
+        _seed_executable_observation_rows(connection)
+    )
+    agent_incarnation = connection.execute(
+        text(
+            "SELECT agent_incarnation FROM loom_capacity_guard.agent_registrations "
+            "WHERE subject_id = :subject_id"
+        ),
+        {"subject_id": subject_id},
+    ).scalar_one()
+    closure_id = uuid4()
+    plan_id = uuid4()
+    connection.execute(
+        text(
+            "INSERT INTO loom_capacity_guard.never_converged_admission_plans "
+            "(closure_id, proposal_id, plan_id, admission_incarnation, "
+            "agent_incarnation, registration_digest, closure_digest, "
+            "proposal_digest, close_reason, disposition_state, executable, "
+            "payload, payload_digest) VALUES "
+            "(:closure_id, :proposal_id, :plan_id, :admission_incarnation, "
+            ":agent_incarnation, repeat('1', 64), repeat('2', 64), "
+            "repeat('3', 64), 'manager-closed', 'never-converged', false, "
+            "'{}'::jsonb, repeat('4', 64))"
+        ),
+        {
+            "closure_id": closure_id,
+            "proposal_id": uuid4(),
+            "plan_id": plan_id,
+            "admission_incarnation": uuid4(),
+            "agent_incarnation": agent_incarnation,
+        },
+    )
+    return closure_id, plan_id
+
+
 def test_guard_schema_has_exact_owner_and_preserves_public_application_tables(
     capacity_guard_database: dict[str, object],
 ) -> None:
@@ -393,7 +496,7 @@ def test_guard_schema_has_exact_owner_and_preserves_public_application_tables(
             revision = connection.execute(
                 text("SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version")
             ).scalar_one()
-            assert revision == "guard_0020"
+            assert revision == "guard_0021"
             public_before = capacity_guard_database["public_tables_before"]
             assert isinstance(public_before, frozenset)
             assert frozenset(inspect(connection).get_table_names(schema="public")) == public_before
@@ -810,6 +913,245 @@ def _guard_config(database: dict[str, object]) -> AlembicConfig:
     return cfg
 
 
+def test_guard_0021_current_assignment_routine_is_agent_only_and_reversible(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    cfg = _guard_config(capacity_guard_database)
+    engine = create_engine(_value(capacity_guard_database, "admin_url"))
+    owner = _value(capacity_guard_database, "owner_role")
+    agent = _value(capacity_guard_database, "agent_role")
+    executor = _value(capacity_guard_database, "executor_role")
+    observer = _value(capacity_guard_database, "observer_role")
+    signature = (
+        "loom_capacity_guard.assert_current_inert_assignment(uuid,jsonb,bytea,text)"
+    )
+    try:
+        with engine.connect() as connection:
+            routine = (
+                connection.execute(
+                    text(
+                        "SELECT pg_get_userbyid(p.proowner) AS owner, p.prosecdef, "
+                        "p.proconfig FROM pg_proc AS p "
+                        "JOIN pg_namespace AS n ON n.oid = p.pronamespace "
+                        "WHERE n.nspname = 'loom_capacity_guard' "
+                        "AND p.proname = 'assert_current_inert_assignment'"
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            assert dict(routine) == {
+                "owner": owner,
+                "prosecdef": True,
+                "proconfig": ["search_path=pg_catalog"],
+            }
+            privileges = {
+                role: connection.execute(
+                    text("SELECT has_function_privilege(:role, :function, 'EXECUTE')"),
+                    {"role": role, "function": signature},
+                ).scalar_one()
+                for role in (agent, executor, observer, "public")
+            }
+            assert privileges == {
+                agent: True,
+                executor: False,
+                observer: False,
+                "public": False,
+            }
+
+        command.downgrade(cfg, "guard_0020")
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT to_regprocedure(:function)"),
+                {"function": signature},
+            ).scalar_one() is None
+            assert connection.execute(
+                text(
+                    "SELECT version_num FROM "
+                    "loom_capacity_guard.capacity_guard_alembic_version"
+                )
+            ).scalar_one() == "guard_0020"
+
+        command.upgrade(cfg, "head")
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT to_regprocedure(:function)"),
+                {"function": signature},
+            ).scalar_one() == signature
+            assert connection.execute(
+                text("SELECT has_function_privilege(:role, :function, 'EXECUTE')"),
+                {"role": agent, "function": signature},
+            ).scalar_one() is True
+            assert connection.execute(
+                text(
+                    "SELECT version_num FROM "
+                    "loom_capacity_guard.capacity_guard_alembic_version"
+                )
+            ).scalar_one() == "guard_0021"
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "statement",
+    (
+        "UPDATE loom_capacity_guard.abandoned_admission_plans "
+        "SET payload_digest = payload_digest",
+        "DELETE FROM loom_capacity_guard.abandoned_admission_plans",
+        "TRUNCATE loom_capacity_guard.abandoned_admission_plans CASCADE",
+    ),
+)
+def test_guard_0021_abandonment_evidence_is_append_only(
+    capacity_guard_database: dict[str, object],
+    statement: str,
+) -> None:
+    with _owner_connection(capacity_guard_database) as connection:
+        _insert_guard_0021_abandonment_evidence(connection)
+
+    with pytest.raises(DBAPIError, match="append-only"):
+        with _owner_connection(capacity_guard_database) as connection:
+            connection.execute(text(statement))
+
+
+def test_guard_0021_refuses_downgrade_with_abandonment_evidence(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    cfg = _guard_config(capacity_guard_database)
+    with _owner_connection(capacity_guard_database) as connection:
+        closure_id = _insert_guard_0021_abandonment_evidence(connection)
+
+    with pytest.raises(
+        RuntimeError,
+        match="cannot downgrade guard_0021 with abandonment evidence",
+    ):
+        command.downgrade(cfg, "guard_0020")
+
+    engine = create_engine(_value(capacity_guard_database, "admin_url"))
+    try:
+        with engine.connect() as connection:
+            assert connection.execute(
+                text(
+                    "SELECT version_num FROM "
+                    "loom_capacity_guard.capacity_guard_alembic_version"
+                )
+            ).scalar_one() == "guard_0021"
+            assert connection.execute(
+                text(
+                    "SELECT count(*) FROM "
+                    "loom_capacity_guard.abandoned_admission_plans "
+                    "WHERE closure_id = :closure_id"
+                ),
+                {"closure_id": closure_id},
+            ).scalar_one() == 1
+    finally:
+        engine.dispose()
+
+
+def test_guard_0021_refuses_downgrade_with_never_converged_evidence(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    cfg = _guard_config(capacity_guard_database)
+    with _owner_connection(capacity_guard_database) as connection:
+        closure_id, _plan_id = _insert_guard_0021_never_converged_evidence(connection)
+
+    with pytest.raises(
+        RuntimeError,
+        match="cannot downgrade guard_0021 with closure disposition evidence",
+    ):
+        command.downgrade(cfg, "guard_0020")
+
+    engine = create_engine(_value(capacity_guard_database, "admin_url"))
+    try:
+        with engine.connect() as connection:
+            assert connection.execute(
+                text(
+                    "SELECT version_num FROM "
+                    "loom_capacity_guard.capacity_guard_alembic_version"
+                )
+            ).scalar_one() == "guard_0021"
+            assert connection.execute(
+                text(
+                    "SELECT count(*) FROM "
+                    "loom_capacity_guard.never_converged_admission_plans "
+                    "WHERE closure_id = :closure_id"
+                ),
+                {"closure_id": closure_id},
+            ).scalar_one() == 1
+    finally:
+        engine.dispose()
+
+
+def test_guard_0021_empty_downgrade_and_reupgrade_restore_closure_guards(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    cfg = _guard_config(capacity_guard_database)
+    engine = create_engine(_value(capacity_guard_database, "admin_url"))
+    try:
+        command.downgrade(cfg, "guard_0020")
+        with engine.connect() as connection:
+            tables = set(inspect(connection).get_table_names(schema="loom_capacity_guard"))
+            assert {
+                "abandoned_admission_plans",
+                "never_converged_admission_plans",
+            }.isdisjoint(tables)
+
+        command.upgrade(cfg, "guard_0021")
+        with engine.connect() as connection:
+            triggers = set(
+                connection.execute(
+                    text(
+                        "SELECT trigger.tgname FROM pg_trigger AS trigger "
+                        "JOIN pg_class AS relation ON relation.oid = trigger.tgrelid "
+                        "JOIN pg_namespace AS namespace "
+                        "ON namespace.oid = relation.relnamespace "
+                        "WHERE namespace.nspname = 'loom_capacity_guard' "
+                        "AND relation.relname = 'abandoned_admission_plans' "
+                        "AND NOT trigger.tgisinternal"
+                    )
+                ).scalars()
+            )
+            assert triggers == {
+                "abandoned_admission_plans_append_only_row",
+                "abandoned_admission_plans_append_only_truncate",
+            }
+            never_converged_triggers = set(
+                connection.execute(
+                    text(
+                        "SELECT trigger.tgname FROM pg_trigger AS trigger "
+                        "JOIN pg_class AS relation ON relation.oid = trigger.tgrelid "
+                        "JOIN pg_namespace AS namespace "
+                        "ON namespace.oid = relation.relnamespace "
+                        "WHERE namespace.nspname = 'loom_capacity_guard' "
+                        "AND relation.relname = 'never_converged_admission_plans' "
+                        "AND NOT trigger.tgisinternal"
+                    )
+                ).scalars()
+            )
+            assert never_converged_triggers == {
+                "never_converged_admission_plans_append_only_row",
+                "never_converged_admission_plans_append_only_truncate",
+            }
+            prepared_triggers = set(
+                connection.execute(
+                    text(
+                        "SELECT trigger.tgname FROM pg_trigger AS trigger "
+                        "JOIN pg_class AS relation ON relation.oid = trigger.tgrelid "
+                        "JOIN pg_namespace AS namespace "
+                        "ON namespace.oid = relation.relnamespace "
+                        "WHERE namespace.nspname = 'loom_capacity_guard' "
+                        "AND relation.relname = 'prepared_admission_plans' "
+                        "AND NOT trigger.tgisinternal"
+                    )
+                ).scalars()
+            )
+            assert (
+                "prepared_admission_plans_never_converged_exclusion"
+                in prepared_triggers
+            )
+    finally:
+        engine.dispose()
+
+
 def test_guard_migration_downgrades_and_reupgrades_without_public_changes(
     capacity_guard_database: dict[str, object],
 ) -> None:
@@ -898,7 +1240,7 @@ def test_guard_0015_downgrade_restores_executor_only_observation(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0020"
+                == "guard_0021"
             )
         with observer.connect() as connection, pytest.raises(DBAPIError) as caught:
             connection.execute(statement)
@@ -1056,7 +1398,7 @@ def test_guard_0018_downgrades_to_0016_and_reupgrades_observation_faithfully(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0020"
+                == "guard_0021"
             )
             row = (
                 connection.execute(
@@ -1229,7 +1571,7 @@ def test_guard_0019_downgrades_to_0017_and_reupgrades_outbox_faithfully(
                         "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
                     )
                 ).scalar_one()
-                == "guard_0020"
+                == "guard_0021"
             )
             for signature in (read_signature, ack_signature):
                 assert (

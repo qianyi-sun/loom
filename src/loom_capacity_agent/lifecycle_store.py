@@ -89,5 +89,61 @@ class CapacityAttemptLifecycleStore:
                 )
         return parsed
 
+    async def assert_current_assignment(
+        self,
+        transition: InertAttemptTransitionV1,
+    ) -> InertAttemptTransitionV1:
+        """Return the assignment only while it is the exact runnable head."""
+
+        mismatches = tuple(
+            field
+            for field in _BINDING_FIELDS
+            if getattr(transition, field) != getattr(self._registration, field)
+        )
+        if mismatches:
+            raise CapacityAttemptLifecycleError(
+                f"attempt lifecycle binding mismatch: {', '.join(mismatches)}"
+            )
+        payload_bytes = canonical_bytes(transition)
+        async with self._session.begin_nested():
+            returned = (
+                await self._session.execute(
+                    text(
+                        f"SELECT {_SCHEMA}.assert_current_inert_assignment("
+                        ":agent_incarnation, CAST(:payload AS jsonb), "
+                        "CAST(:canonical_payload AS bytea), :payload_digest)"
+                    ),
+                    {
+                        "agent_incarnation": self._registration.agent_incarnation,
+                        "payload": payload_bytes.decode("ascii"),
+                        "canonical_payload": payload_bytes,
+                        "payload_digest": canonical_digest(transition),
+                    },
+                )
+            ).scalar_one()
+            if not isinstance(returned, Mapping):
+                raise CapacityAttemptLifecycleError(
+                    "protected assignment assertion returned a non-object"
+                )
+            try:
+                parsed = InertAttemptTransitionV1.model_validate_json(
+                    json.dumps(
+                        returned,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=True,
+                        allow_nan=False,
+                    ).encode("ascii")
+                )
+            except (ValidationError, ValueError) as exc:
+                raise CapacityAttemptLifecycleError(
+                    "protected assignment assertion returned an invalid transition"
+                ) from exc
+            if parsed != transition or canonical_bytes(parsed) != payload_bytes:
+                raise CapacityAttemptLifecycleError(
+                    "protected assignment assertion returned a different transition"
+                )
+        return parsed
+
 
 __all__ = ["CapacityAttemptLifecycleError", "CapacityAttemptLifecycleStore"]

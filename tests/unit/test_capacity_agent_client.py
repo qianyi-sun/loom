@@ -30,7 +30,11 @@ from loom_capacity_agent.reporter import build_demand_snapshot
 from loom_capacity_guard.contracts import canonical_digest as guard_canonical_digest
 from loom_capacity_manager.contracts import ResourceVectorV1, canonical_digest
 from loom_capacity_manager.executable_contracts import (
+    MAX_EXECUTABLE_ADMISSION_WORK_BYTES,
     CandidateBindingV2,
+    ExecutableAdmissionAcknowledgementV2,
+    ExecutableAdmissionPlanClosureAcknowledgementV2,
+    ExecutableAdmissionPlanClosureV2,
     ExecutableBootstrapAcknowledgementV2,
     ExecutableBootstrapProposalV2,
     ExecutableIntentBindingV2,
@@ -43,6 +47,37 @@ from loom_capacity_manager.grant_contracts import (
     canonical_grant_digest,
 )
 from tests.unit.test_capacity_agent_admission_contracts import publishable_release_fixture
+from tests.unit.test_capacity_agent_admission_convergence import _proposal as _admission_proposal
+
+
+class _GuardedAdmissionWorkStream(httpx.AsyncByteStream):
+    def __init__(
+        self,
+        *chunks: bytes,
+        fail_if_read_past_chunks: bool = False,
+    ) -> None:
+        self._chunks = chunks
+        self._fail_if_read_past_chunks = fail_if_read_past_chunks
+        self.read_past_limit = False
+        self.closed = False
+
+    async def __aiter__(self):  # type: ignore[no-untyped-def]
+        for chunk in self._chunks:
+            yield chunk
+        if self._fail_if_read_past_chunks:
+            self.read_past_limit = True
+            raise AssertionError("client read past the admission-work byte bound")
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class _StreamingAdmissionWorkTransport(httpx.AsyncBaseTransport):
+    def __init__(self, stream: _GuardedAdmissionWorkStream) -> None:
+        self.stream = stream
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, request=request, stream=self.stream)
 
 
 def _configuration() -> ReporterConfigurationV1:
@@ -389,6 +424,516 @@ async def test_subject_client_fetches_and_acknowledges_executable_bootstrap() ->
         f"{proposal.binding.intent_id}/bootstrap-acknowledgements",
     ]
     assert seen[1].headers["Idempotency-Key"] == str(idempotency_key)
+
+
+@pytest.mark.asyncio
+async def test_subject_client_fetches_and_acknowledges_executable_admission() -> None:
+    configuration = _configuration()
+    proposal = _admission_proposal(configuration, allowance_count=0)
+    acknowledgement = ExecutableAdmissionAcknowledgementV2(
+        execution=proposal.shapes[0].binding.execution,
+        tranche_id=proposal.shapes[0].binding.tranche_id,
+        proposal_id=proposal.proposal_id,
+        plan_id=proposal.plan_id,
+        admission_incarnation=proposal.admission_incarnation,
+        subject_id=configuration.subject_id,
+        subject_incarnation=configuration.subject_incarnation,
+        pool_id="oldlab",
+        reporter_incarnation=configuration.reporter_incarnation,
+        protected_admission_sha256=configuration.protected_admission_sha256,
+        proposal_digest=canonical_executable_digest(proposal),
+        prepared_plan_digest="9" * 64,
+        assignment_count=0,
+    )
+    idempotency_key = uuid4()
+    seen: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.method == "GET":
+            return httpx.Response(200, content=canonical_executable_bytes(proposal))
+        assert request.content == canonical_executable_bytes(acknowledgement)
+        return httpx.Response(
+            200,
+            json={
+                "proposal_id": str(proposal.proposal_id),
+                "prepared_plan_digest": acknowledgement.prepared_plan_digest,
+                "receipt_digest": canonical_executable_digest(acknowledgement),
+                "replayed": False,
+                "executable": True,
+            },
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = DemandReporterClient(
+        configuration,
+        manager_origin="https://capacity.internal",
+        bearer_token="reporter-secret",
+        http_client=http,
+    )
+    try:
+        fetched = await client.next_executable_admission_plan()
+        receipt = await client.publish_executable_admission_acknowledgement(
+            acknowledgement,
+            idempotency_key=idempotency_key,
+        )
+    finally:
+        await http.aclose()
+
+    assert fetched == proposal
+    assert receipt.proposal_id == proposal.proposal_id
+    assert receipt.prepared_plan_digest == acknowledgement.prepared_plan_digest
+    assert [request.url.path for request in seen] == [
+        f"/v2/subjects/{configuration.subject_id}/admission-work",
+        f"/v2/subjects/{configuration.subject_id}/admission-acknowledgements/"
+        f"{proposal.proposal_id}",
+    ]
+    assert seen[1].headers["Idempotency-Key"] == str(idempotency_key)
+
+
+@pytest.mark.asyncio
+async def test_subject_client_returns_exact_manager_admission_closure_evidence() -> None:
+    """Parsing every 200 response as a proposal must not discard durable cleanup work."""
+
+    configuration = _configuration()
+    proposal = _admission_proposal(configuration, allowance_count=0)
+    closure = ExecutableAdmissionPlanClosureV2(
+        closure_id=uuid4(),
+        proposal=proposal,
+        close_reason="expired",
+    )
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=canonical_executable_bytes(closure))
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = DemandReporterClient(
+        configuration,
+        manager_origin="https://capacity.internal",
+        bearer_token="reporter-secret",
+        http_client=http,
+    )
+    try:
+        fetched = await client.next_executable_admission_plan()
+    finally:
+        await http.aclose()
+
+    assert fetched == closure
+
+
+@pytest.mark.asyncio
+async def test_subject_client_publishes_exact_admission_closure_acknowledgement() -> None:
+    """Cleanup receipt publication must preserve exact protected closure evidence."""
+
+    configuration = _configuration()
+    proposal = _admission_proposal(configuration, allowance_count=0)
+    acknowledgement = ExecutableAdmissionPlanClosureAcknowledgementV2(
+        closure_id=uuid4(),
+        proposal_id=proposal.proposal_id,
+        proposal_digest=canonical_executable_digest(proposal),
+        plan_id=proposal.plan_id,
+        admission_incarnation=proposal.admission_incarnation,
+        subject_id=configuration.subject_id,
+        subject_incarnation=configuration.subject_incarnation,
+        reporter_incarnation=configuration.reporter_incarnation,
+        protected_admission_sha256=configuration.protected_admission_sha256,
+        close_reason="expired",
+        disposition_kind="never-converged",
+        disposition_digest="8" * 64,
+    )
+    idempotency_key = uuid4()
+    seen: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "closure_id": str(acknowledgement.closure_id),
+                "disposition_kind": acknowledgement.disposition_kind,
+                "disposition_digest": acknowledgement.disposition_digest,
+                "receipt_digest": canonical_executable_digest(acknowledgement),
+                "replayed": False,
+                "executable": False,
+            },
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = DemandReporterClient(
+        configuration,
+        manager_origin="https://capacity.internal",
+        bearer_token="reporter-secret",
+        http_client=http,
+    )
+    try:
+        receipt = await client.publish_executable_admission_closure_acknowledgement(
+            acknowledgement,
+            idempotency_key=idempotency_key,
+        )
+    finally:
+        await http.aclose()
+
+    assert receipt.closure_id == acknowledgement.closure_id
+    assert receipt.disposition_kind == acknowledgement.disposition_kind
+    assert receipt.disposition_digest == acknowledgement.disposition_digest
+    assert seen[0].url.path == (
+        f"/v2/subjects/{configuration.subject_id}/admission-closures/"
+        f"{acknowledgement.closure_id}/acknowledgements"
+    )
+    assert seen[0].headers["Idempotency-Key"] == str(idempotency_key)
+    assert seen[0].content == canonical_executable_bytes(acknowledgement)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrapped_in_closure", (False, True), ids=("proposal", "closure"))
+@pytest.mark.parametrize(
+    "changed_binding",
+    (
+        "subject_id",
+        "subject_incarnation",
+        "reporter_incarnation",
+        "deployment_generation",
+        "candidate_algorithm",
+        "candidate_identity",
+        "candidate_publication_sha256",
+        "protected_admission_sha256",
+    ),
+)
+async def test_subject_client_rejects_each_changed_admission_work_binding_before_acknowledging(
+    changed_binding: str,
+    wrapped_in_closure: bool,
+) -> None:
+    configuration = _configuration()
+    proposal = _admission_proposal(configuration, allowance_count=0)
+    if changed_binding == "reporter_incarnation":
+        proposal = proposal.model_copy(update={changed_binding: uuid4()})
+    elif changed_binding == "protected_admission_sha256":
+        proposal = proposal.model_copy(update={changed_binding: "0" * 64})
+    elif changed_binding in {
+        "candidate_algorithm",
+        "candidate_identity",
+        "candidate_publication_sha256",
+    }:
+        candidate = proposal.shapes[0].binding.candidate.model_copy(
+            update=(
+                {"algorithm": "git-sha1", "identity": "0" * 40}
+                if changed_binding == "candidate_algorithm"
+                else {
+                    {
+                        "candidate_identity": "identity",
+                        "candidate_publication_sha256": "publication_sha256",
+                    }[changed_binding]: "0" * 64
+                }
+            )
+        )
+        binding = proposal.shapes[0].binding.model_copy(update={"candidate": candidate})
+        proposal = proposal.model_copy(
+            update={"shapes": (proposal.shapes[0].model_copy(update={"binding": binding}),)}
+        )
+    else:
+        binding = proposal.shapes[0].binding.model_copy(
+            update={changed_binding: uuid4() if changed_binding != "deployment_generation" else 99}
+        )
+        proposal = proposal.model_copy(
+            update={"shapes": (proposal.shapes[0].model_copy(update={"binding": binding}),)}
+        )
+    work = (
+        ExecutableAdmissionPlanClosureV2(
+            closure_id=uuid4(),
+            proposal=proposal,
+            close_reason="manager-closed",
+        )
+        if wrapped_in_closure
+        else proposal
+    )
+    calls = 0
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, content=canonical_executable_bytes(work))
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = DemandReporterClient(
+        configuration,
+        manager_origin="https://capacity.internal",
+        bearer_token="reporter-secret",
+        http_client=http,
+    )
+    try:
+        with pytest.raises(DemandPublishError, match="binding"):
+            await client.next_executable_admission_plan()
+    finally:
+        await http.aclose()
+
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_subject_client_returns_none_only_for_admission_no_work_response() -> None:
+    configuration = _configuration()
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"null")
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = DemandReporterClient(
+        configuration,
+        manager_origin="https://capacity.internal",
+        bearer_token="reporter-secret",
+        http_client=http,
+    )
+    try:
+        assert await client.next_executable_admission_plan() is None
+    finally:
+        await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_subject_client_binds_admission_transport_to_bounded_non_redirected_responses() -> (
+    None
+):
+    configuration = _configuration()
+    proposal = _admission_proposal(configuration, allowance_count=0)
+    redirects: list[httpx.Request] = []
+
+    async def redirect(request: httpx.Request) -> httpx.Response:
+        redirects.append(request)
+        return httpx.Response(302, headers={"Location": "https://capacity.internal/other"})
+
+    redirect_http = httpx.AsyncClient(
+        transport=httpx.MockTransport(redirect), follow_redirects=True
+    )
+    redirect_client = DemandReporterClient(
+        configuration,
+        manager_origin="https://capacity.internal",
+        bearer_token="reporter-secret",
+        http_client=redirect_http,
+    )
+    try:
+        with pytest.raises(DemandPublishError, match="status 302"):
+            await redirect_client.next_executable_admission_plan()
+    finally:
+        await redirect_http.aclose()
+    assert len(redirects) == 1
+
+    canonical = canonical_executable_bytes(proposal)
+    exact_payload = canonical + b" " * (
+        MAX_EXECUTABLE_ADMISSION_WORK_BYTES - len(canonical)
+    )
+    assert len(exact_payload) == MAX_EXECUTABLE_ADMISSION_WORK_BYTES
+
+    exact_stream = _GuardedAdmissionWorkStream(
+        canonical,
+        exact_payload[len(canonical) :],
+    )
+    exact_http = httpx.AsyncClient(
+        transport=_StreamingAdmissionWorkTransport(exact_stream)
+    )
+    exact_client = DemandReporterClient(
+        configuration,
+        manager_origin="https://capacity.internal",
+        bearer_token="reporter-secret",
+        http_client=exact_http,
+    )
+    try:
+        assert await exact_client.next_executable_admission_plan() == proposal
+    finally:
+        await exact_http.aclose()
+    assert exact_stream.closed is True
+
+    oversized_stream = _GuardedAdmissionWorkStream(
+        exact_payload,
+        b"x",
+        fail_if_read_past_chunks=True,
+    )
+    oversized_http = httpx.AsyncClient(
+        transport=_StreamingAdmissionWorkTransport(oversized_stream)
+    )
+    oversized_client = DemandReporterClient(
+        configuration,
+        manager_origin="https://capacity.internal",
+        bearer_token="reporter-secret",
+        http_client=oversized_http,
+    )
+    try:
+        with pytest.raises(DemandPublishError, match="byte bound"):
+            await oversized_client.next_executable_admission_plan()
+    finally:
+        await oversized_http.aclose()
+    assert oversized_stream.read_past_limit is False
+    assert oversized_stream.closed is True
+
+    async def disconnected(_request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("offline")
+
+    disconnected_http = httpx.AsyncClient(transport=httpx.MockTransport(disconnected))
+    disconnected_client = DemandReporterClient(
+        configuration,
+        manager_origin="https://capacity.internal",
+        bearer_token="reporter-secret",
+        http_client=disconnected_http,
+    )
+    try:
+        with pytest.raises(DemandPublishError, match="transport"):
+            await disconnected_client.next_executable_admission_plan()
+    finally:
+        await disconnected_http.aclose()
+
+    assert proposal.proposal_id != UUID(int=0)
+
+
+@pytest.mark.asyncio
+async def test_subject_client_rejects_changed_or_oversized_admission_acknowledgement_receipts() -> (
+    None
+):
+    configuration = _configuration()
+    proposal = _admission_proposal(configuration, allowance_count=0)
+    acknowledgement = ExecutableAdmissionAcknowledgementV2(
+        execution=proposal.shapes[0].binding.execution,
+        tranche_id=proposal.shapes[0].binding.tranche_id,
+        proposal_id=proposal.proposal_id,
+        plan_id=proposal.plan_id,
+        admission_incarnation=proposal.admission_incarnation,
+        subject_id=configuration.subject_id,
+        subject_incarnation=configuration.subject_incarnation,
+        pool_id="oldlab",
+        reporter_incarnation=configuration.reporter_incarnation,
+        protected_admission_sha256=configuration.protected_admission_sha256,
+        proposal_digest=canonical_executable_digest(proposal),
+        prepared_plan_digest="9" * 64,
+        assignment_count=0,
+    )
+
+    async def changed_receipt(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "proposal_id": str(proposal.proposal_id),
+                "prepared_plan_digest": acknowledgement.prepared_plan_digest,
+                "receipt_digest": "0" * 64,
+                "replayed": True,
+                "executable": True,
+            },
+        )
+
+    changed_http = httpx.AsyncClient(transport=httpx.MockTransport(changed_receipt))
+    changed_client = DemandReporterClient(
+        configuration,
+        manager_origin="https://capacity.internal",
+        bearer_token="reporter-secret",
+        http_client=changed_http,
+    )
+    try:
+        with pytest.raises(DemandPublishError, match="receipt"):
+            await changed_client.publish_executable_admission_acknowledgement(
+                acknowledgement,
+                idempotency_key=uuid4(),
+            )
+    finally:
+        await changed_http.aclose()
+
+    async def oversized_receipt(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"x" * (16 * 1024 + 1))
+
+    oversized_http = httpx.AsyncClient(transport=httpx.MockTransport(oversized_receipt))
+    oversized_client = DemandReporterClient(
+        configuration,
+        manager_origin="https://capacity.internal",
+        bearer_token="reporter-secret",
+        http_client=oversized_http,
+    )
+    try:
+        with pytest.raises(DemandPublishError, match="byte bound"):
+            await oversized_client.publish_executable_admission_acknowledgement(
+                acknowledgement,
+                idempotency_key=uuid4(),
+            )
+    finally:
+        await oversized_http.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", (409, 503))
+async def test_subject_client_fails_closed_for_admission_acknowledgement_status(
+    status_code: int,
+) -> None:
+    configuration = _configuration()
+    proposal = _admission_proposal(configuration, allowance_count=0)
+    acknowledgement = ExecutableAdmissionAcknowledgementV2(
+        execution=proposal.shapes[0].binding.execution,
+        tranche_id=proposal.shapes[0].binding.tranche_id,
+        proposal_id=proposal.proposal_id,
+        plan_id=proposal.plan_id,
+        admission_incarnation=proposal.admission_incarnation,
+        subject_id=configuration.subject_id,
+        subject_incarnation=configuration.subject_incarnation,
+        pool_id="oldlab",
+        reporter_incarnation=configuration.reporter_incarnation,
+        protected_admission_sha256=configuration.protected_admission_sha256,
+        proposal_digest=canonical_executable_digest(proposal),
+        prepared_plan_digest="9" * 64,
+        assignment_count=0,
+    )
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code, json={"detail": "unavailable"})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = DemandReporterClient(
+        configuration,
+        manager_origin="https://capacity.internal",
+        bearer_token="reporter-secret",
+        http_client=http,
+    )
+    try:
+        with pytest.raises(DemandPublishError, match=f"status {status_code}"):
+            await client.publish_executable_admission_acknowledgement(
+                acknowledgement,
+                idempotency_key=uuid4(),
+            )
+    finally:
+        await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_subject_client_fails_closed_for_admission_acknowledgement_transport() -> None:
+    configuration = _configuration()
+    proposal = _admission_proposal(configuration, allowance_count=0)
+    acknowledgement = ExecutableAdmissionAcknowledgementV2(
+        execution=proposal.shapes[0].binding.execution,
+        tranche_id=proposal.shapes[0].binding.tranche_id,
+        proposal_id=proposal.proposal_id,
+        plan_id=proposal.plan_id,
+        admission_incarnation=proposal.admission_incarnation,
+        subject_id=configuration.subject_id,
+        subject_incarnation=configuration.subject_incarnation,
+        pool_id="oldlab",
+        reporter_incarnation=configuration.reporter_incarnation,
+        protected_admission_sha256=configuration.protected_admission_sha256,
+        proposal_digest=canonical_executable_digest(proposal),
+        prepared_plan_digest="9" * 64,
+        assignment_count=0,
+    )
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("offline")
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = DemandReporterClient(
+        configuration,
+        manager_origin="https://capacity.internal",
+        bearer_token="reporter-secret",
+        http_client=http,
+    )
+    try:
+        with pytest.raises(DemandPublishError, match="transport"):
+            await client.publish_executable_admission_acknowledgement(
+                acknowledgement,
+                idempotency_key=uuid4(),
+            )
+    finally:
+        await http.aclose()
 
 
 @pytest.mark.asyncio

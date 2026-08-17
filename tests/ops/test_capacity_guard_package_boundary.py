@@ -15,6 +15,8 @@ FORBIDDEN_IMPORTS = {
     "loom_control_plane.scheduler.claim",
     "loom_control_plane.slurm_job_cgroup",
     "loom_control_plane.slurm_worker_jobs",
+    "loom_capacity_manager.api",
+    "loom_capacity_manager.execution_store",
 }
 FORBIDDEN_TOKENS = {
     "claim_trial",

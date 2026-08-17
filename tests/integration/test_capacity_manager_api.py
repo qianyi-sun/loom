@@ -42,6 +42,11 @@ from loom_capacity_manager.contracts import (
 )
 from loom_capacity_manager.executable_contracts import (
     CandidateBindingV2,
+    ExecutableAdmissionAcknowledgementV2,
+    ExecutableAdmissionAllowanceV2,
+    ExecutableAdmissionPlanClosureAcknowledgementV2,
+    ExecutableAdmissionPlanProposalV2,
+    ExecutableAdmissionShapeV2,
     ExecutableBootstrapAcknowledgementV2,
     ExecutableBootstrapProposalV2,
     ExecutableExecutorHeartbeatV2,
@@ -56,11 +61,15 @@ from loom_capacity_manager.executable_contracts import (
     ExecutionPreparationAbortV2,
     ExecutionPreparationPolicyV2,
     ExecutionPreparationV2,
+    ProtectedAdmissionAssignmentV2,
     canonical_executable_bytes,
+    canonical_executable_digest,
     canonical_inventory_confirmation_journal_head,
 )
 from loom_capacity_manager.execution_store import (
     ProposedExecutableBootstrap,
+    RegisteredExecutableAdmissionPlan,
+    RegisteredExecutableAdmissionPlanClosure,
     RegisteredExecutableBootstrap,
 )
 from loom_capacity_manager.models import (
@@ -102,6 +111,7 @@ from tests.capacity_fixtures import (
     fleet_manifest,
     fleet_with_development_template,
     pool_observation,
+    shape,
     subject_configuration,
 )
 
@@ -1138,8 +1148,17 @@ def _assert_exact_approved_routes(app: FastAPI) -> None:
             ("POST",),
         ),
         ("/v2/subjects/{subject_id}/bootstrap-work", ("GET",)),
+        ("/v2/subjects/{subject_id}/admission-work", ("GET",)),
         (
             "/v2/subjects/{subject_id}/intents/{intent_id}/bootstrap-acknowledgements",
+            ("PUT",),
+        ),
+        (
+            "/v2/subjects/{subject_id}/admission-acknowledgements/{proposal_id}",
+            ("PUT",),
+        ),
+        (
+            "/v2/subjects/{subject_id}/admission-closures/{closure_id}/acknowledgements",
             ("PUT",),
         ),
         ("/v2/executors/{pool_id}/permits/{permit_id}/consume", ("POST",)),
@@ -2322,6 +2341,288 @@ def test_v2_bootstrap_routes_separate_executor_proposal_from_subject_acknowledge
     _value, actor, received_key = calls[-1][1]  # type: ignore[misc]
     assert actor == "dev-reporter"
     assert received_key == idempotency_key
+
+
+def test_v2_admission_routes_require_exact_subject_reporter_and_proposal(
+    api_context_v2_executor_generation: tuple[
+        TestClient, FastAPI, CapacityManagerSettings, BlockingAllocator
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Loosening any route binding must expose another subject's protected plan."""
+
+    client, app, _settings, _allocator = api_context_v2_executor_generation
+    binding = _v2_intent_binding()
+    worker_shape = shape()
+    allowance = ExecutableAdmissionAllowanceV2(
+        allowance_id=UUID(int=811),
+        protected_attempt_id=UUID(int=812),
+        shape_instance_id=binding.shape_instance_id,
+        shape_slot_index=0,
+        submission_intent_id=binding.intent_id,
+    )
+    proposal = ExecutableAdmissionPlanProposalV2(
+        proposal_id=UUID(int=813),
+        plan_id=UUID(int=814),
+        admission_incarnation=UUID(int=815),
+        reporter_incarnation=subject_configuration().demand_reporter_incarnation,
+        protected_admission_sha256="3" * 64,
+        manager_input_digest="6" * 64,
+        manager_allocation_digest="7" * 64,
+        lease_not_after=datetime.now(UTC) + timedelta(minutes=1),
+        shapes=(
+            ExecutableAdmissionShapeV2(
+                binding=binding,
+                protocol_generation=1,
+                protocol_digest="8" * 64,
+                worker_shape=worker_shape,
+                worker_shape_digest=canonical_digest(worker_shape),
+                bootstrap_registration_epoch=1,
+            ),
+        ),
+        allowances=(allowance,),
+    )
+    assignment = ProtectedAdmissionAssignmentV2(
+        transition_id=UUID(int=816),
+        allowance_id=allowance.allowance_id,
+        protected_attempt_id=allowance.protected_attempt_id,
+        execution_generation=1,
+        requirements_digest="9" * 64,
+        shape_instance_id=allowance.shape_instance_id,
+        shape_slot_index=allowance.shape_slot_index,
+        submission_intent_id=allowance.submission_intent_id,
+        lifecycle_sequence=1,
+    )
+    acknowledgement = ExecutableAdmissionAcknowledgementV2(
+        execution=binding.execution,
+        tranche_id=binding.tranche_id,
+        proposal_id=proposal.proposal_id,
+        plan_id=proposal.plan_id,
+        admission_incarnation=proposal.admission_incarnation,
+        subject_id=binding.subject_id,
+        subject_incarnation=binding.subject_incarnation,
+        pool_id="oldlab",
+        reporter_incarnation=proposal.reporter_incarnation,
+        protected_admission_sha256=proposal.protected_admission_sha256,
+        proposal_digest=canonical_executable_digest(proposal),
+        prepared_plan_digest="a" * 64,
+        assignment_count=1,
+        assignments=(assignment,),
+    )
+    closure_acknowledgement = ExecutableAdmissionPlanClosureAcknowledgementV2(
+        closure_id=UUID(int=817),
+        proposal_id=proposal.proposal_id,
+        proposal_digest=canonical_executable_digest(proposal),
+        plan_id=proposal.plan_id,
+        admission_incarnation=proposal.admission_incarnation,
+        subject_id=binding.subject_id,
+        subject_incarnation=binding.subject_incarnation,
+        reporter_incarnation=proposal.reporter_incarnation,
+        protected_admission_sha256=proposal.protected_admission_sha256,
+        close_reason="expired",
+        disposition_kind="never-converged",
+        disposition_digest="c" * 64,
+    )
+    calls: list[tuple[str, object]] = []
+
+    async def next_admission(
+        _session,  # type: ignore[no-untyped-def]
+        *,
+        subject_id,
+        subject_incarnation,
+        reporter_incarnation,
+    ):
+        calls.append(
+            (
+                "admission-work",
+                (subject_id, subject_incarnation, reporter_incarnation),
+            )
+        )
+        return proposal
+
+    async def acknowledge_admission(
+        _session,  # type: ignore[no-untyped-def]
+        value,
+        *,
+        actor,
+        idempotency_key,
+    ):
+        calls.append(("admission-acknowledgement", (value, actor, idempotency_key)))
+        return RegisteredExecutableAdmissionPlan(
+            proposal_id=value.proposal_id,
+            prepared_plan_digest=value.prepared_plan_digest,
+            receipt_digest="b" * 64,
+            replayed=False,
+        )
+
+    async def acknowledge_admission_closure(
+        _session,  # type: ignore[no-untyped-def]
+        value,
+        *,
+        actor,
+        idempotency_key,
+    ):
+        calls.append(("admission-closure", (value, actor, idempotency_key)))
+        return RegisteredExecutableAdmissionPlanClosure(
+            closure_id=value.closure_id,
+            disposition_kind=value.disposition_kind,
+            disposition_digest=value.disposition_digest,
+            receipt_digest=canonical_executable_digest(value),
+            replayed=False,
+        )
+
+    monkeypatch.setattr(
+        app.state.execution_store,
+        "next_subject_admission_plan",
+        next_admission,
+    )
+    monkeypatch.setattr(
+        app.state.execution_store,
+        "acknowledge_admission_plan",
+        acknowledge_admission,
+    )
+    monkeypatch.setattr(
+        app.state.execution_store,
+        "acknowledge_admission_plan_closure",
+        acknowledge_admission_closure,
+    )
+    reporter_headers = {"Authorization": f"Bearer {DEMAND_TOKEN}"}
+    executor_headers = {"Authorization": f"Bearer {OLDLAB_V2_EXECUTOR_TOKEN}"}
+
+    work = client.get(
+        f"/v2/subjects/{SUBJECT_ID}/admission-work",
+        headers=reporter_headers,
+    )
+    assert work.status_code == 200, work.text
+    assert work.content == canonical_executable_bytes(proposal)
+    assert ExecutableAdmissionPlanProposalV2.model_validate_json(work.content) == proposal
+    assert (
+        client.get(
+            f"/v2/subjects/{UUID(int=999)}/admission-work",
+            headers=reporter_headers,
+        ).status_code
+        == 403
+    )
+    assert (
+        client.get(
+            f"/v2/subjects/{SUBJECT_ID}/admission-work",
+            headers=executor_headers,
+        ).status_code
+        == 403
+    )
+
+    idempotency_key = uuid4()
+    acknowledged = client.put(
+        f"/v2/subjects/{SUBJECT_ID}/admission-acknowledgements/{proposal.proposal_id}",
+        headers=reporter_headers | {"Idempotency-Key": str(idempotency_key)},
+        json=acknowledgement.model_dump(mode="json"),
+    )
+    assert acknowledged.status_code == 200, acknowledged.text
+    assert acknowledged.json()["prepared_plan_digest"] == "a" * 64
+    assert (
+        client.put(
+            f"/v2/subjects/{SUBJECT_ID}/admission-acknowledgements/{UUID(int=999)}",
+            headers=reporter_headers | {"Idempotency-Key": str(uuid4())},
+            json=acknowledgement.model_dump(mode="json"),
+        ).status_code
+        == 403
+    )
+    assert (
+        client.put(
+            f"/v2/subjects/{UUID(int=999)}/admission-acknowledgements/"
+            f"{proposal.proposal_id}",
+            headers=reporter_headers | {"Idempotency-Key": str(uuid4())},
+            json=acknowledgement.model_dump(mode="json"),
+        ).status_code
+        == 403
+    )
+    wrong_subject = acknowledgement.model_copy(update={"subject_id": UUID(int=999)})
+    assert (
+        client.put(
+            f"/v2/subjects/{SUBJECT_ID}/admission-acknowledgements/"
+            f"{proposal.proposal_id}",
+            headers=reporter_headers | {"Idempotency-Key": str(uuid4())},
+            json=wrong_subject.model_dump(mode="json"),
+        ).status_code
+        == 403
+    )
+    wrong_subject_incarnation = acknowledgement.model_copy(
+        update={"subject_incarnation": UUID(int=999)}
+    )
+    assert (
+        client.put(
+            f"/v2/subjects/{SUBJECT_ID}/admission-acknowledgements/"
+            f"{proposal.proposal_id}",
+            headers=reporter_headers | {"Idempotency-Key": str(uuid4())},
+            json=wrong_subject_incarnation.model_dump(mode="json"),
+        ).status_code
+        == 403
+    )
+    wrong_reporter = acknowledgement.model_copy(
+        update={"reporter_incarnation": UUID(int=999)}
+    )
+    assert (
+        client.put(
+            f"/v2/subjects/{SUBJECT_ID}/admission-acknowledgements/{proposal.proposal_id}",
+            headers=reporter_headers | {"Idempotency-Key": str(uuid4())},
+            json=wrong_reporter.model_dump(mode="json"),
+        ).status_code
+        == 403
+    )
+    assert (
+        client.put(
+            f"/v2/subjects/{SUBJECT_ID}/admission-acknowledgements/"
+            f"{proposal.proposal_id}",
+            headers=executor_headers | {"Idempotency-Key": str(uuid4())},
+            json=acknowledgement.model_dump(mode="json"),
+        ).status_code
+        == 403
+    )
+    closure_key = uuid4()
+    closed = client.put(
+        f"/v2/subjects/{SUBJECT_ID}/admission-closures/"
+        f"{closure_acknowledgement.closure_id}/acknowledgements",
+        headers=reporter_headers | {"Idempotency-Key": str(closure_key)},
+        json=closure_acknowledgement.model_dump(mode="json"),
+    )
+    assert closed.status_code == 200, closed.text
+    assert closed.json()["closure_id"] == str(closure_acknowledgement.closure_id)
+    assert closed.json()["executable"] is False
+    assert (
+        client.put(
+            f"/v2/subjects/{SUBJECT_ID}/admission-closures/{UUID(int=999)}/"
+            "acknowledgements",
+            headers=reporter_headers | {"Idempotency-Key": str(uuid4())},
+            json=closure_acknowledgement.model_dump(mode="json"),
+        ).status_code
+        == 403
+    )
+    wrong_closure_reporter = closure_acknowledgement.model_copy(
+        update={"reporter_incarnation": UUID(int=999)}
+    )
+    assert (
+        client.put(
+            f"/v2/subjects/{SUBJECT_ID}/admission-closures/"
+            f"{closure_acknowledgement.closure_id}/acknowledgements",
+            headers=reporter_headers | {"Idempotency-Key": str(uuid4())},
+            json=wrong_closure_reporter.model_dump(mode="json"),
+        ).status_code
+        == 403
+    )
+    assert (
+        client.put(
+            f"/v2/subjects/{SUBJECT_ID}/admission-closures/"
+            f"{closure_acknowledgement.closure_id}/acknowledgements",
+            headers=executor_headers | {"Idempotency-Key": str(uuid4())},
+            json=closure_acknowledgement.model_dump(mode="json"),
+        ).status_code
+        == 403
+    )
+    assert [kind for kind, _value in calls] == [
+        "admission-work",
+        "admission-acknowledgement",
+        "admission-closure",
+    ]
 
 
 def test_lifecycle_can_project_and_authenticate_a_personal_demand_reporter(

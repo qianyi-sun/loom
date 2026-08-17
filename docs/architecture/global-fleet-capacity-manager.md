@@ -141,6 +141,26 @@ Database triggers use `search_path=pg_catalog`, qualify queue roots through
 `public`, reject illegal direct-SQL state/high-water changes, prohibit executor
 unfencing, and make command and protected-release receipts immutable.
 
+Accepted multi-shape reservations use one batched manager admission plan for
+the complete subject/pool tranche. After the first covered intent reaches
+`bootstrap-acknowledged`, the manager delivers the plan's exact shapes and
+allowances to the subject reporter. The capacity agent enriches those manager
+identities only with guard-local execution generations, sealed requirements
+digests, and lifecycle sequences. It then commits the prepared plan, worker
+shapes, placement allowances, and every protected assignment transition in one
+serializable transaction. Any changed or incomplete local fact rolls back the
+whole convergence. Only that committed transaction yields the exact
+acknowledgement returned to the manager; the manager rejects a partial,
+rebound, or replay-equivocated assignment set.
+
+Admission acknowledgement does not bypass bootstrap protection. An intent
+becomes `launch-ready` only when its exact protected bootstrap and the complete
+batched admission plan are both acknowledged; `bootstrap-acknowledged` remains
+the launch barrier until the plan acknowledgement is stored. Public task-claim
+routes remain disconnected, no checked-in runtime bridges this proof to a
+public claim or physical launch, and global activation remains prohibited at
+the shipped executable ceiling of zero.
+
 This queue is executable authority, not scheduler actuation. No checked-in
 daemon calls Slurm from these routes, and the Package 5A renderer still exposes
 no apply, activation, or ceiling-changing command.

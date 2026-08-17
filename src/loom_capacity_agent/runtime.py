@@ -20,6 +20,11 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from loom_capacity_agent.admission_convergence import (
+    ProtectedAdmissionPlanCleanupWork,
+    ProtectedAdmissionPlanCoordinator,
+    ProtectedAdmissionPlanWork,
+)
 from loom_capacity_agent.client import (
     DemandReporterClient,
     DemandReporterConnection,
@@ -47,6 +52,10 @@ from loom_capacity_agent.store import (
 )
 from loom_capacity_manager.contracts import DemandSnapshotV1
 from loom_capacity_manager.executable_contracts import (
+    ExecutableAdmissionAcknowledgementV2,
+    ExecutableAdmissionPlanClosureAcknowledgementV2,
+    ExecutableAdmissionPlanClosureV2,
+    ExecutableAdmissionPlanProposalV2,
     ExecutableBootstrapAcknowledgementV2,
     ExecutableBootstrapProposalV2,
 )
@@ -68,6 +77,24 @@ class DemandPublisher(Protocol):
         idempotency_key: UUID,
     ) -> object: ...
 
+    async def next_executable_admission_plan(
+        self,
+    ) -> ExecutableAdmissionPlanProposalV2 | ExecutableAdmissionPlanClosureV2 | None: ...
+
+    async def publish_executable_admission_acknowledgement(
+        self,
+        acknowledgement: ExecutableAdmissionAcknowledgementV2,
+        *,
+        idempotency_key: UUID,
+    ) -> object: ...
+
+    async def publish_executable_admission_closure_acknowledgement(
+        self,
+        acknowledgement: ExecutableAdmissionPlanClosureAcknowledgementV2,
+        *,
+        idempotency_key: UUID,
+    ) -> object: ...
+
 
 class LoopRuntime(Protocol):
     @property
@@ -80,6 +107,9 @@ Capture = Callable[..., Awaitable[GuardLifecycleDemandObservationV2]]
 Recover = Callable[..., Awaitable[GuardLifecycleDemandObservationV2]]
 ReadHighWater = Callable[..., Awaitable[int]]
 ProtectBootstrap = Callable[..., Awaitable[ProtectedExecutableBootstrapWork]]
+ConvergeAdmission = Callable[..., Awaitable[ProtectedAdmissionPlanWork]]
+AbandonAdmission = Callable[..., Awaitable[ProtectedAdmissionPlanCleanupWork]]
+AuthorizeAdmissionPublication = Callable[..., Awaitable[ProtectedAdmissionPlanWork]]
 
 
 async def protect_executable_bootstrap(
@@ -94,6 +124,50 @@ async def protect_executable_bootstrap(
         session,
         configuration=configuration,
     ).protect(proposal)
+
+
+async def converge_executable_admission(
+    session: AsyncSession,
+    *,
+    configuration: ReporterConfigurationV1,
+    proposal: ExecutableAdmissionPlanProposalV2,
+    observation: GuardLifecycleDemandObservationV2,
+) -> ProtectedAdmissionPlanWork:
+    """Commit one manager admission proposal against its published local observation."""
+
+    return await ProtectedAdmissionPlanCoordinator(
+        session,
+        configuration=configuration,
+    ).converge(proposal, observation)
+
+
+async def authorize_executable_admission_publication(
+    session: AsyncSession,
+    *,
+    configuration: ReporterConfigurationV1,
+    work: ProtectedAdmissionPlanWork,
+) -> ProtectedAdmissionPlanWork:
+    """Lock exact protected authority until the manager receives the acknowledgement."""
+
+    return await ProtectedAdmissionPlanCoordinator(
+        session,
+        configuration=configuration,
+    ).authorize_publication(work)
+
+
+async def abandon_executable_admission(
+    session: AsyncSession,
+    *,
+    configuration: ReporterConfigurationV1,
+    closure: ExecutableAdmissionPlanClosureV2,
+    observation: GuardLifecycleDemandObservationV2 | None,
+) -> ProtectedAdmissionPlanCleanupWork:
+    """Commit the exact local disposition for durable manager closure evidence."""
+
+    return await ProtectedAdmissionPlanCoordinator(
+        session,
+        configuration=configuration,
+    ).close(closure, observation)
 
 
 def load_reporter_configuration(path: Path) -> ReporterConfigurationV1:
@@ -144,6 +218,11 @@ class CapacityAgentRuntime:
         recover: Recover = read_agent_lifecycle_demand_observation,
         read_high_water: ReadHighWater = read_agent_reporter_high_water,
         protect_bootstrap: ProtectBootstrap = protect_executable_bootstrap,
+        converge_admission: ConvergeAdmission = converge_executable_admission,
+        abandon_admission: AbandonAdmission = abandon_executable_admission,
+        authorize_admission_publication: AuthorizeAdmissionPublication = (
+            authorize_executable_admission_publication
+        ),
     ) -> None:
         if not 1 <= max_attempts <= 10_000:
             raise ValueError("capacity capture bound must be between 1 and 10000")
@@ -158,9 +237,15 @@ class CapacityAgentRuntime:
         self._recover = recover
         self._read_high_water = read_high_water
         self._protect_bootstrap = protect_bootstrap
+        self._converge_admission = converge_admission
+        self._abandon_admission = abandon_admission
+        self._authorize_admission_publication = authorize_admission_publication
         self._high_water = 0
         self._pending: DemandSnapshotV1 | None = None
         self._pending_bootstrap: ProtectedExecutableBootstrapWork | None = None
+        self._pending_admission: ProtectedAdmissionPlanWork | None = None
+        self._pending_admission_cleanup: ProtectedAdmissionPlanCleanupWork | None = None
+        self._latest_observation: GuardLifecycleDemandObservationV2 | None = None
         self._initialized = False
         self.ready = False
 
@@ -184,13 +269,17 @@ class CapacityAgentRuntime:
                 else None
             )
         self._high_water = high_water
-        self._pending = (
-            build_lifecycle_demand_snapshot(observation, self._configuration)
-            if observation is not None
+        matches_configuration = (
+            observation is not None
             and observation.configuration_generation == self._configuration.configuration_generation
             and observation.deployment_generation == self._configuration.deployment_generation
             and observation.reporter_incarnation == self._configuration.reporter_incarnation
             and observation.candidate_digest == self._configuration.candidate_digest
+        )
+        self._latest_observation = observation if matches_configuration else None
+        self._pending = (
+            build_lifecycle_demand_snapshot(observation, self._configuration)
+            if matches_configuration and observation is not None
             else None
         )
         self._initialized = True
@@ -201,12 +290,51 @@ class CapacityAgentRuntime:
         if not self._initialized:
             raise CapacityAgentStoreError("capacity agent is not initialized")
         try:
+            if self._pending_admission_cleanup is not None:
+                await self._publisher.publish_executable_admission_closure_acknowledgement(
+                    self._pending_admission_cleanup.acknowledgement,
+                    idempotency_key=self._pending_admission_cleanup.idempotency_key,
+                )
+                self._pending_admission_cleanup = None
+                self.ready = True
+                return
+            if self._pending_admission is not None:
+                async with self._session_factory() as session, session.begin():
+                    authorized = await self._authorize_admission_publication(
+                        session,
+                        configuration=self._configuration,
+                        work=self._pending_admission,
+                    )
+                    await self._publisher.publish_executable_admission_acknowledgement(
+                        authorized.acknowledgement,
+                        idempotency_key=authorized.idempotency_key,
+                    )
+                self._pending_admission = None
+                self.ready = True
+                return
             if self._pending_bootstrap is not None:
                 await self._publisher.publish_executable_bootstrap_acknowledgement(
                     self._pending_bootstrap.acknowledgement,
                     idempotency_key=self._pending_bootstrap.idempotency_key,
                 )
                 self._pending_bootstrap = None
+                self.ready = True
+                return
+            admission_work = await self._publisher.next_executable_admission_plan()
+            if isinstance(admission_work, ExecutableAdmissionPlanClosureV2):
+                async with self._session_factory() as session, session.begin():
+                    cleanup = await self._abandon_admission(
+                        session,
+                        configuration=self._configuration,
+                        closure=admission_work,
+                        observation=self._latest_observation,
+                    )
+                self._pending_admission_cleanup = cleanup
+                await self._publisher.publish_executable_admission_closure_acknowledgement(
+                    cleanup.acknowledgement,
+                    idempotency_key=cleanup.idempotency_key,
+                )
+                self._pending_admission_cleanup = None
                 self.ready = True
                 return
             if self._pending is None:
@@ -218,25 +346,50 @@ class CapacityAgentRuntime:
                         max_attempts=self._max_attempts,
                     )
                 self._high_water = observation.sequence
+                self._latest_observation = observation
                 self._pending = build_lifecycle_demand_snapshot(
                     observation,
                     self._configuration,
                 )
             await self._publisher.publish(self._pending)
             self._pending = None
-            proposal = await self._publisher.next_executable_bootstrap()
-            if proposal is not None:
+            bootstrap_proposal = await self._publisher.next_executable_bootstrap()
+            if bootstrap_proposal is not None:
                 async with self._session_factory() as session, session.begin():
                     self._pending_bootstrap = await self._protect_bootstrap(
                         session,
                         configuration=self._configuration,
-                        proposal=proposal,
+                        proposal=bootstrap_proposal,
                     )
                 await self._publisher.publish_executable_bootstrap_acknowledgement(
                     self._pending_bootstrap.acknowledgement,
                     idempotency_key=self._pending_bootstrap.idempotency_key,
                 )
                 self._pending_bootstrap = None
+            if admission_work is not None:
+                if self._latest_observation is None:
+                    raise CapacityAgentStoreError(
+                        "capacity agent has no published lifecycle observation for admission"
+                    )
+                async with self._session_factory() as session, session.begin():
+                    protected_work = await self._converge_admission(
+                        session,
+                        configuration=self._configuration,
+                        proposal=admission_work,
+                        observation=self._latest_observation,
+                    )
+                self._pending_admission = protected_work
+                async with self._session_factory() as session, session.begin():
+                    authorized = await self._authorize_admission_publication(
+                        session,
+                        configuration=self._configuration,
+                        work=self._pending_admission,
+                    )
+                    await self._publisher.publish_executable_admission_acknowledgement(
+                        authorized.acknowledgement,
+                        idempotency_key=authorized.idempotency_key,
+                    )
+                self._pending_admission = None
         except BaseException:
             self.ready = False
             raise
