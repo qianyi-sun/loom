@@ -1262,7 +1262,7 @@ def test_release_loads_exact_images_and_verifies_all_scoped_resources() -> None:
         if payload == _external_supervisor_profile()
     )
     assert max(secret_readback_indexes) < policy_seed_index < validation_index < release_apply_index
-    assert len(validation_calls) == 2
+    assert len(validation_calls) == 3
     assert policy_seed_argv[policy_seed_argv.index("--container") + 1] == "migration"
     assert (
         f"LOOM_DB_URL=postgresql+psycopg://loom_rehearsal@127.0.0.1:5432/{plan.resources.database}"
@@ -1340,7 +1340,7 @@ def test_external_supervisor_validation_routes_gb10_controller_proof_remotely() 
         for command, _payload in calls
         if command[:4] == ("systemd-run", "--user", "--wait", "--collect")
     ]
-    assert len(validation_commands) == 2
+    assert len(validation_commands) == 3
     assert any(
         command[:2] == (artifact.supervisors[1].python_path, artifact.supervisors[1].script_path)
         and command[command.index("--pool-name") + 1] == "oldlab"
@@ -2399,6 +2399,7 @@ def test_cleanup_retires_only_exact_external_supervisor_validation_units() -> No
     assert set(service_names) == {
         "loom-autoscaler-gb10-staging.service",
         "loom-autoscaler-oldlab-staging.service",
+        "loom-task-image-builder-oldlab-staging.service",
     }
     validation_active = dict.fromkeys(validation_units, True)
     calls: list[tuple[str, ...]] = []

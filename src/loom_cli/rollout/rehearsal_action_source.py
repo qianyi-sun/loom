@@ -16,10 +16,8 @@ from loom_cli.rollout.admin_smoke_contract import (
     AdminSmokeAuthority as RehearsalSmokeAuthority,
 )
 from loom_cli.rollout.external_supervisor_readiness import (
-    SCRIPT_PATH as EXTERNAL_SUPERVISOR_SCRIPT_PATH,
-)
-from loom_cli.rollout.external_supervisor_readiness import (
     ExternalSupervisorArtifact,
+    protected_external_supervisor_script_paths_for_units,
 )
 from loom_cli.rollout.gb10_rehearsal import GB10RehearsalAuthority
 from loom_cli.rollout.image_readiness import ALL_BUILD_IMAGES, ImageArtifactSet
@@ -136,6 +134,12 @@ class RehearsalPlan:
         registry_digests = dict(self.registry_digests)
         supervisor_script_sha256 = dict(self.external_supervisor_script_sha256)
         supervisor_unit_sha256 = dict(self.external_supervisor_unit_sha256)
+        try:
+            expected_supervisor_script_paths = (
+                protected_external_supervisor_script_paths_for_units(supervisor_unit_sha256)
+            )
+        except ValueError as exc:
+            raise ValueError("rehearsal plan identity is invalid") from exc
         if (
             len(self.candidate_sha) not in {40, 64}
             or any(character not in "0123456789abcdef" for character in self.candidate_sha)
@@ -196,7 +200,7 @@ class RehearsalPlan:
                 not name or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
                 for name, digest in registry_digests.items()
             )
-            or set(supervisor_script_sha256) != {EXTERNAL_SUPERVISOR_SCRIPT_PATH}
+            or set(supervisor_script_sha256) != expected_supervisor_script_paths
             or not supervisor_unit_sha256
             or any(
                 _SHA256_RE.fullmatch(digest) is None for digest in supervisor_script_sha256.values()

@@ -26,6 +26,8 @@ from loom_cli.rollout.external_supervisor_predecessor import (
     load_predecessor_manifest,
 )
 from loom_cli.rollout.external_supervisor_readiness import (
+    PROTECTED_EXTERNAL_SUPERVISOR_UNIT_PREFIXES,
+    PROTECTED_EXTERNAL_SUPERVISOR_UNIT_RE,
     ExternalSupervisorArtifact,
     ExternalSupervisorIdentity,
 )
@@ -33,7 +35,6 @@ from loom_cli.rollout.external_supervisor_readiness import (
 PROTECTED_USER_UNIT_DIR = Path("/var/lib/loom-staging-rollout/.config/systemd/user")
 PROTECTED_USER_UNIT_ANCHOR = Path("/var/lib/loom-staging-rollout")
 
-_UNIT_RE = re.compile(r"^loom-autoscaler-[a-z0-9][a-z0-9-]{1,95}\.(?:service|timer)$")
 _COMPENSATION_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _COMPENSATION_PREFIX = ".loom-external-supervisor-compensation-"
 _COMPENSATION_FILE_RE = re.compile(
@@ -60,7 +61,7 @@ def _hash_json(value: object) -> str:
 def _unit_name(value: str, suffix: str | None = None) -> str:
     if (
         not isinstance(value, str)
-        or _UNIT_RE.fullmatch(value) is None
+        or PROTECTED_EXTERNAL_SUPERVISOR_UNIT_RE.fullmatch(value) is None
         or (suffix is not None and not value.endswith(suffix))
     ):
         raise ValueError("protected external supervisor unit name is invalid")
@@ -497,7 +498,7 @@ class ExternalSupervisorLiveObservation:
         if (
             not units
             or any(
-                _UNIT_RE.fullmatch(name) is None
+                PROTECTED_EXTERNAL_SUPERVISOR_UNIT_RE.fullmatch(name) is None
                 or (payload is not None and not isinstance(payload, bytes))
                 or (payload is not None and len(payload) > _MAX_UNIT_BYTES)
                 for name, payload in units.items()
@@ -783,8 +784,10 @@ class AtomicUserUnitStore:
             for entry in os.listdir(directory):
                 if entry.startswith("."):
                     continue
-                if entry.startswith("loom-autoscaler-") and entry.endswith((".service", ".timer")):
-                    if _UNIT_RE.fullmatch(entry) is None:
+                if entry.startswith(PROTECTED_EXTERNAL_SUPERVISOR_UNIT_PREFIXES) and entry.endswith(
+                    (".service", ".timer")
+                ):
+                    if PROTECTED_EXTERNAL_SUPERVISOR_UNIT_RE.fullmatch(entry) is None:
                         raise RuntimeError("protected external supervisor unit inventory drifted")
                     managed.append(entry)
             return tuple(sorted(managed))

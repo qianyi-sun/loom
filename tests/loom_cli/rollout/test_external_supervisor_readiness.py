@@ -30,6 +30,8 @@ _RUNTIME_ROOT = staging_runtime_root(_SHA)
 _WORKING_DIRECTORY = staging_working_directory(_SHA)
 _PYTHON_PATH = staging_python_path(_SHA)
 _SCRIPT_PATH = staging_script_path(_SHA)
+_TASK_IMAGE_BUILDER_SCRIPT = "scripts/ops/task_image_builder_autoscaler_external_once.py"
+_TASK_IMAGE_BUILDER_SCRIPT_PATH = f"{_WORKING_DIRECTORY}/{_TASK_IMAGE_BUILDER_SCRIPT}"
 
 
 @pytest.fixture(autouse=True)
@@ -47,6 +49,24 @@ def _isolate_external_acceptance_authority(
 @dataclass(frozen=True)
 class _Result:
     returncode: int
+
+
+def test_supervisor_script_paths_follow_protected_unit_families() -> None:
+    assert readiness.protected_external_supervisor_script_paths_for_units(
+        {
+            "loom-autoscaler-oldlab-staging.service",
+            "loom-autoscaler-oldlab-staging.timer",
+            "loom-task-image-builder-oldlab-staging.service",
+            "loom-task-image-builder-oldlab-staging.timer",
+        }
+    ) == frozenset({SCRIPT_PATH, _TASK_IMAGE_BUILDER_SCRIPT})
+
+
+def test_supervisor_script_paths_reject_units_outside_protected_families() -> None:
+    with pytest.raises(ValueError, match="unit name is invalid"):
+        readiness.protected_external_supervisor_script_paths_for_units(
+            {"loom-unbounded-oldlab-staging.service"}
+        )
 
 
 def _args(
@@ -98,6 +118,53 @@ def _args(
     if pool_name == "gb10":
         args.extend(["--db-secret-name", "loom-external-slurm-autoscaler-db"])
     return args
+
+
+def _task_image_builder_args(*, port: int = 15453) -> list[str]:
+    return [
+        "--environment",
+        "staging",
+        "--pool-name",
+        "task-image-builder-oldlab",
+        "--profile",
+        f"{_WORKING_DIRECTORY}/{PROFILE_PATH}",
+        "--image-tag",
+        _TAG,
+        "--env-config-version",
+        _TAG,
+        "--git-sha",
+        _SHA,
+        "--expected-slurm-cluster-name",
+        "trt-oldlab",
+        "--expected-slurm-controller-host",
+        "TRT-EAI-OLDLAB-1",
+        "--namespace",
+        "loom-staging",
+        "--kubeconfig",
+        STAGING_KUBECONFIG,
+        "--db-local-host",
+        "127.0.0.1",
+        "--db-local-port",
+        str(port),
+        "--db-service",
+        "service/loom-postgres-rw",
+        "--db-remote-port",
+        "5432",
+        "--db-port-forward-ready-timeout-sec",
+        "10",
+        "--db-port-forward-stop-timeout-sec",
+        "5",
+        "--db-connect-timeout-sec",
+        "10",
+        "--freshness-sec",
+        "120",
+        "--global-execution-witness-json",
+        "/etc/loom/credentials/global-execution/oldlab-witness.json",
+        "--manager-public-key",
+        "/etc/loom/credentials/global-execution/manager-ed25519.pub",
+        "--expected-manager-public-key-sha256-file",
+        "/etc/loom/credentials/global-execution/manager-ed25519.pub.sha256",
+    ]
 
 
 def _toml_string(value: str) -> str:
@@ -245,6 +312,59 @@ def test_artifact_binds_sources_exact_units_and_round_trips(tmp_path: Path) -> N
         supervisor.service_name: hashlib.sha256(supervisor.service_unit.encode()).hexdigest(),
         supervisor.timer_name: hashlib.sha256(supervisor.timer_unit.encode()).hexdigest(),
     }
+    assert ExternalSupervisorArtifact.from_bytes(artifact.to_bytes()) == artifact
+
+
+def test_artifact_binds_each_supervisor_kind_to_its_exact_executable(
+    tmp_path: Path,
+) -> None:
+    root = _candidate(
+        tmp_path,
+        supervisors=[
+            _supervisor(
+                name="oldlab-staging",
+                service_name="loom-autoscaler-oldlab-staging.service",
+                timer_name="loom-autoscaler-oldlab-staging.timer",
+                pool_name="oldlab",
+                port=15448,
+            ),
+            _supervisor(
+                name="task-image-builder-oldlab-staging",
+                service_name="loom-task-image-builder-oldlab-staging.service",
+                timer_name="loom-task-image-builder-oldlab-staging.timer",
+                pool_name="task-image-builder-oldlab",
+                execution_host="TRT-EAI-OLDLAB-1",
+                port=15453,
+                args=_task_image_builder_args(),
+                script_path=_TASK_IMAGE_BUILDER_SCRIPT_PATH,
+            ),
+        ],
+    )
+    builder_script = root / _TASK_IMAGE_BUILDER_SCRIPT
+    builder_script.write_text(
+        "#!/usr/bin/env python3\nprint('exact task-image builder candidate')\n",
+        encoding="utf-8",
+    )
+    builder_script.chmod(0o755)
+
+    artifact = _build(root)
+
+    assert [item.pool_name for item in artifact.supervisors] == [
+        "oldlab",
+        "task-image-builder-oldlab",
+    ]
+    assert artifact.script_sha256 == {
+        SCRIPT_PATH: hashlib.sha256((root / SCRIPT_PATH).read_bytes()).hexdigest(),
+        _TASK_IMAGE_BUILDER_SCRIPT: hashlib.sha256(builder_script.read_bytes()).hexdigest(),
+    }
+    commands = artifact.validation_argv(
+        "loom-rehearsal-abc123",
+        REHEARSAL_KUBECONFIG,
+    )
+    assert commands["task-image-builder-oldlab-staging"][:2] == (
+        _PYTHON_PATH,
+        _TASK_IMAGE_BUILDER_SCRIPT_PATH,
+    )
     assert ExternalSupervisorArtifact.from_bytes(artifact.to_bytes()) == artifact
 
 

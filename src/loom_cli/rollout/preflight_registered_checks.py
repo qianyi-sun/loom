@@ -32,6 +32,7 @@ from loom_cli.rollout.external_supervisor_predecessor import (
 )
 from loom_cli.rollout.external_supervisor_readiness import (
     build_external_supervisor_artifact,
+    protected_external_supervisor_script_paths_for_units,
     verify_external_supervisor_artifact,
 )
 from loom_cli.rollout.final_gate_readiness import (
@@ -2243,7 +2244,13 @@ def build_systemd_render_check(
             set(fixed.unit_sha256) & set(supervisor_artifact.unit_sha256)
             or any(
                 artifact.profile_sha256 != supervisor_artifact.profile_sha256
-                or dict(artifact.script_sha256) != dict(supervisor_artifact.script_sha256)
+                or dict(artifact.script_sha256)
+                != {
+                    path: supervisor_artifact.script_sha256[path]
+                    for path in protected_external_supervisor_script_paths_for_units(
+                        artifact.unit_sha256
+                    )
+                }
                 for artifact in controller_artifacts.values()
             )
             or {
@@ -2333,7 +2340,7 @@ def build_systemd_render_check(
             ),
             secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
         ),
-        implementation_version="v4",
+        implementation_version="v5",
         operations={CheckOperation.PROBE: probe},
     )
 

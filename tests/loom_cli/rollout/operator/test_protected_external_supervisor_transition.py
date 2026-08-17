@@ -47,7 +47,7 @@ def _artifact(
     shutil.copyfile(repository / "deploy/environment-state/staging.toml", profile)
     shutil.copyfile(repository / "scripts/ops/worker_pool_autoscaler_external_once.py", script)
     profile_text = profile.read_text(encoding="utf-8")
-    policy_marker = "\n# Task-image builders are a separate capacity class."
+    policy_marker = "\n[[task_image_builder_policies]]"
     policy_end = "\n[[gb10_worker_pool_desired_states]]"
     before_policies, separator, after_policy_marker = profile_text.partition(policy_marker)
     assert separator
@@ -56,7 +56,10 @@ def _artifact(
     )
     assert separator
     profile_text = before_policies + policy_end + after_policies
-    supervisor_marker = "\n# Builder supervisors are installed as disabled units."
+    supervisor_marker = (
+        "\n[[external_slurm_autoscaler_supervisors]]\n"
+        'name = "task-image-builder-gb10-staging"'
+    )
     profile_text, separator, _builder_supervisors = profile_text.partition(
         supervisor_marker
     )

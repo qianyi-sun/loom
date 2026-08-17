@@ -29,6 +29,8 @@ from loom_cli.rollout.external_supervisor_predecessor import (
     load_predecessor_manifest,
 )
 from loom_cli.rollout.external_supervisor_readiness import (
+    SCRIPT_PATH,
+    TASK_IMAGE_BUILDER_SCRIPT_PATH,
     ExternalSupervisorArtifact,
     build_external_supervisor_artifact,
 )
@@ -125,7 +127,7 @@ def _bound_single_artifact(tmp_path: Path):
     plan = _published_plan(tmp_path)
     candidate_root = tmp_path / "candidate"
     profile_target = candidate_root / "deploy/environment-state/staging.toml"
-    script_target = candidate_root / "scripts/ops/worker_pool_autoscaler_external_once.py"
+    script_target = candidate_root / SCRIPT_PATH
     profile_target.parent.mkdir(parents=True, exist_ok=True)
     script_target.parent.mkdir(parents=True, exist_ok=True)
     repository = Path(__file__).resolve().parents[4]
@@ -145,6 +147,26 @@ def _bound_single_artifact(tmp_path: Path):
             1,
         )
         profile_text = prefix + marker + oldlab_section
+    prefix, marker, builder_policy_section = profile_text.partition(
+        'pool_name = "task-image-builder-oldlab"',
+    )
+    if marker:
+        builder_policy_section = builder_policy_section.replace(
+            "enabled = true",
+            "enabled = false",
+            1,
+        )
+        profile_text = prefix + marker + builder_policy_section
+    prefix, marker, builder_section = profile_text.partition(
+        'name = "task-image-builder-oldlab-staging"',
+    )
+    if marker:
+        builder_section = builder_section.replace(
+            "enabled = true\nactive = true",
+            "enabled = false\nactive = false",
+            1,
+        )
+        profile_text = prefix + marker + builder_section
     profile_text = profile_text.replace(
         'pools = ["gb10", "oldlab"]',
         'pools = ["gb10"]',
@@ -152,7 +174,7 @@ def _bound_single_artifact(tmp_path: Path):
     )
     profile_target.write_text(profile_text, encoding="utf-8")
     shutil.copyfile(
-        repository / "scripts/ops/worker_pool_autoscaler_external_once.py",
+        repository / SCRIPT_PATH,
         script_target,
     )
     profile_target.chmod(0o600)
@@ -244,17 +266,23 @@ def _bound_multi_artifacts(tmp_path: Path):
     plan = _published_plan(tmp_path)
     candidate_root = tmp_path / "candidate"
     profile_target = candidate_root / "deploy/environment-state/staging.toml"
-    script_target = candidate_root / "scripts/ops/worker_pool_autoscaler_external_once.py"
+    script_target = candidate_root / SCRIPT_PATH
+    task_image_builder_script_target = candidate_root / TASK_IMAGE_BUILDER_SCRIPT_PATH
     profile_target.parent.mkdir(parents=True, exist_ok=True)
     script_target.parent.mkdir(parents=True, exist_ok=True)
     repository = Path(__file__).resolve().parents[4]
     shutil.copyfile(repository / "deploy/environment-state/staging.toml", profile_target)
     shutil.copyfile(
-        repository / "scripts/ops/worker_pool_autoscaler_external_once.py",
+        repository / SCRIPT_PATH,
         script_target,
+    )
+    shutil.copyfile(
+        repository / TASK_IMAGE_BUILDER_SCRIPT_PATH,
+        task_image_builder_script_target,
     )
     profile_target.chmod(0o600)
     script_target.chmod(0o700)
+    task_image_builder_script_target.chmod(0o700)
     full_artifact = _build_active_artifact(
         candidate_root,
         candidate_sha=plan.candidate_sha,
@@ -1516,6 +1544,26 @@ def test_fixed_transport_reports_unexpected_managed_unit_as_drift(tmp_path: Path
         )
         == "drifted"
     )
+
+
+def test_atomic_store_inventories_task_image_builder_units(tmp_path: Path) -> None:
+    unit_dir = tmp_path / "user"
+    unit_dir.mkdir(mode=0o700)
+    store = AtomicUserUnitStore(unit_dir=unit_dir, service_uid=os.geteuid())
+    builder_timer = "loom-task-image-builder-oldlab-staging.timer"
+    (unit_dir / builder_timer).write_bytes(b"stale\n")
+
+    assert store.list_units() == (builder_timer,)
+
+
+def test_atomic_store_rejects_malformed_task_image_builder_inventory(tmp_path: Path) -> None:
+    unit_dir = tmp_path / "user"
+    unit_dir.mkdir(mode=0o700)
+    store = AtomicUserUnitStore(unit_dir=unit_dir, service_uid=os.geteuid())
+    (unit_dir / "loom-task-image-builder-UPPER.timer").write_bytes(b"stale\n")
+
+    with pytest.raises(RuntimeError, match="unit inventory drifted"):
+        store.list_units()
 
 
 def test_atomic_store_publishes_exact_without_replacing_race(tmp_path: Path) -> None:

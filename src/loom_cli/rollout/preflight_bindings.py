@@ -12,6 +12,9 @@ from loom_cli.rollout.external_supervisor_predecessor import (
     EXTERNAL_SUPERVISOR_CONTROLLER_HOSTS,
     GB10_CANONICAL_UNIT_DIR,
 )
+from loom_cli.rollout.external_supervisor_readiness import (
+    protected_external_supervisor_script_paths_for_units,
+)
 from loom_cli.rollout.operator.backup_lease import BackupLease, component_set_digest
 from loom_cli.rollout.preflight_contract import (
     AttestationBindings,
@@ -288,6 +291,10 @@ def derive_attestation_bindings(
         controller_predecessor = controller_predecessors[host]
         controller_units = controller_target_units[host]
         controller_unit_set = controller_target_unit_sets[host]
+        controller_script_sha256 = {
+            path: target_script_sha256[path]
+            for path in protected_external_supervisor_script_paths_for_units(controller_units)
+        }
         predecessor_controller_units = controller_predecessor["units"]
         if (
             not isinstance(predecessor_controller_units, Mapping)
@@ -313,7 +320,7 @@ def derive_attestation_bindings(
             unit_directory=str(controller_predecessor["unit-directory"]),
             target_artifact_digest=controller_artifacts[host],
             target_profile_sha256=target_profile_sha256,
-            target_script_sha256=target_script_sha256,
+            target_script_sha256=controller_script_sha256,
             target_unit_sha256=controller_units,
             target_unit_set_digest=controller_unit_set,
         )
