@@ -582,6 +582,12 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
   git commit -m "feat(dev): observe personal management shadow status"
   ```
 
+  Post-review correction: the observer retains at most eight internally
+  consistent, immutable, successful terminal migration Job/Pod pairs as
+  historical evidence while still requiring the exact current trusted
+  migration. Malformed, failed, running, unpaired, or excess history blocks
+  readiness.
+
 ---
 
 ### Task 6: Exact shadow rehearsal and package documentation
@@ -604,7 +610,7 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
 - Contains no acceptance enablement, personal apply, Slurm query/mutation, or
   physical-capacity activation command.
 
-- [ ] **Step 1: Add failing documentation/package assertions**
+- [x] **Step 1: Add failing documentation/package assertions**
 
   Assert the runbook names exact commands and expected canonical status, never
   creates `loom-dev-shared`, never uses mutable image tags, never prints Secret
@@ -616,14 +622,14 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
   capacity rehearsal and states that both shadows must be ready before the
   later acceptance interlock can be considered.
 
-- [ ] **Step 2: Run and observe the missing-runbook failure**
+- [x] **Step 2: Run and observe the missing-runbook failure**
 
   ```bash
   PYTHONPATH=src:. /home/hongjian/loom/.venv/bin/python -m pytest -q \
     tests/ops/test_personal_dev_control_plane_package_boundary.py
   ```
 
-- [ ] **Step 3: Write the exact render/deploy/rollback procedure**
+- [x] **Step 3: Write the exact render/deploy/rollback procedure**
 
   The runbook creates an owner-only evidence directory, verifies the release
   file/digest, renders with the new CLI, records YAML SHA-256, performs
@@ -637,7 +643,7 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
   Rollback reapplies the previous reviewed shadow YAML, never deletes PVCs, and
   stops if any personal namespace exists.
 
-- [ ] **Step 4: Run docs/package/security checks**
+- [x] **Step 4: Run docs/package/security checks**
 
   ```bash
   PYTHONPATH=src:. /home/hongjian/loom/.venv/bin/python -m pytest -q \
@@ -650,7 +656,7 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
   git diff --check
   ```
 
-- [ ] **Step 5: Commit documentation**
+- [x] **Step 5: Commit documentation**
 
   ```bash
   git add deploy/dev-fleet/README.md docs/architecture/multi-dev-environments.md \

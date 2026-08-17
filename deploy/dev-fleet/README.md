@@ -32,6 +32,14 @@ service for them. Use the
 [pool-executor dry-run runbook](../../docs/runbooks/global-fleet-pool-executor-dry-run.md)
 for the implemented rehearsal and recovery procedure.
 
+The shared personal-management package has its own
+[shadow rehearsal](../../docs/runbooks/personal-dev-management-plane-shadow.md),
+separate from the
+[global-capacity zero-ceiling rehearsal](../../docs/runbooks/executable-global-capacity-bridge-rehearsal.md).
+Both the personal-management shadow and the global-capacity zero-ceiling shadow
+must report ready before the later acceptance interlock can be considered.
+Neither shadow readiness enables personal mutations or physical capacity.
+
 `personal-dev-activation-agent.yaml.example` is the operator template for the
 independently keyed stable-route activation agent. Replace its image and Secret
 placeholders with reviewed immutable values before an authorized apply. The

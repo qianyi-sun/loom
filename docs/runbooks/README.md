@@ -21,6 +21,11 @@ capacity workflow.
   development sandboxes.
 - **[Shared sandbox capacity](shared-sandbox-capacity-broker.md)** — disabled
   compatibility ledger, offline request/lease checks, and recovery evidence.
+- **[Personal-development management-plane shadow](personal-dev-management-plane-shadow.md)**
+  — exact render, deploy, readiness, rollback, and stop conditions for the
+  inert shared management foundation in `loom-dev`.
+- **[Executable global-capacity bridge rehearsal](executable-global-capacity-bridge-rehearsal.md)**
+  — separately gated zero-ceiling manager and two-pool preparation evidence.
 - **[Global fleet pool-executor dry run](global-fleet-pool-executor-dry-run.md)**
   — non-executable reservation, permit, inventory, journaling, fencing, and
   protected-release rehearsal for physical pool controllers.
