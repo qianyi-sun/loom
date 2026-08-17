@@ -695,7 +695,11 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
   because server-side apply does not prune stale resources. Immediately after
   each reviewed server-side diff and before each apply, it rechecks the exact
   artifact and kubeconfig bytes, absence of dynamic namespaces, read-only
-  kubeconfig safety, and the global manager's ready zero ceiling.
+  kubeconfig safety, and the global manager's ready zero ceiling. The same
+  identity interlock now covers forward apply: a first installation requires
+  no existing package-owned top-level objects, while an upgrade or rollback
+  requires the live, previous-reviewed, and new non-derived identity sets to
+  agree.
 
 ---
 

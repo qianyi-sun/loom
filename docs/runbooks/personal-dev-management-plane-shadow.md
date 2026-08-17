@@ -203,6 +203,154 @@ assert_current_shadow_artifacts() {
     "$profile" "$trusted_release" "$trusted_release_sha256"
 }
 
+render_identity_set() {
+  uv run --no-sync python - "$1" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+import yaml
+
+migration_name = re.compile(r"loom-personal-dev-migrate-[0-9a-f]{16}-[0-9a-f]{16}")
+documents = list(yaml.safe_load_all(Path(sys.argv[1]).read_text(encoding="utf-8")))
+identities = set()
+for document in documents:
+    if not isinstance(document, dict) or not isinstance(document.get("metadata"), dict):
+        raise SystemExit("manifest resource identity is invalid")
+    api_version = document.get("apiVersion")
+    kind = document.get("kind")
+    name = document["metadata"].get("name")
+    namespace = document["metadata"].get("namespace", "")
+    if not all(isinstance(value, str) and value for value in (api_version, kind, name)):
+        raise SystemExit("manifest resource identity is invalid")
+    if not isinstance(namespace, str):
+        raise SystemExit("manifest resource identity is invalid")
+    if kind == "Namespace" or (kind == "Job" and migration_name.fullmatch(name)):
+        continue
+    identity = (api_version, kind, namespace, name)
+    if identity in identities:
+        raise SystemExit("manifest resource identity is duplicated")
+    identities.add(identity)
+for identity in sorted(identities):
+    print(json.dumps(identity, separators=(",", ":"), ensure_ascii=True))
+PY
+}
+
+live_identity_set() {
+  uv run --no-sync python - "$1" "$2" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+managed_by = "loom-personal-dev-control-plane"
+migration_name = re.compile(r"loom-personal-dev-migrate-[0-9a-f]{16}-[0-9a-f]{16}")
+generated_pvc = re.compile(r"data-loom-dev-(?:postgres|minio)-0")
+derived_pod_controllers = {"Job", "ReplicaSet", "StatefulSet"}
+identities = set()
+for path_index, path_value in enumerate(sys.argv[1:]):
+    document = json.loads(Path(path_value).read_text(encoding="utf-8"))
+    items = document.get("items") if isinstance(document, dict) else None
+    if (
+        not isinstance(document, dict)
+        or not set(document).issubset({"apiVersion", "kind", "metadata", "items"})
+        or document.get("apiVersion") != "v1"
+        or document.get("kind") != "List"
+        or not isinstance(items, list)
+        or len(items) > 4096
+    ):
+        raise SystemExit("live resource inventory is invalid")
+    expected_namespace = "loom-dev" if path_index == 0 else ""
+    for item in items:
+        if not isinstance(item, dict) or not isinstance(item.get("metadata"), dict):
+            raise SystemExit("live resource identity is invalid")
+        metadata = item["metadata"]
+        api_version = item.get("apiVersion")
+        kind = item.get("kind")
+        name = metadata.get("name")
+        namespace = metadata.get("namespace", "")
+        labels = metadata.get("labels")
+        if (
+            not all(isinstance(value, str) and value for value in (api_version, kind, name))
+            or namespace != expected_namespace
+            or not isinstance(labels, dict)
+            or labels.get("app.kubernetes.io/managed-by") != managed_by
+        ):
+            raise SystemExit("live resource identity is invalid")
+        if kind == "Job" and migration_name.fullmatch(name):
+            continue
+        if kind == "PersistentVolumeClaim" and generated_pvc.fullmatch(name):
+            continue
+        owners = metadata.get("ownerReferences", [])
+        if kind == "Pod" and isinstance(owners, list) and any(
+            isinstance(owner, dict)
+            and owner.get("controller") is True
+            and owner.get("kind") in derived_pod_controllers
+            for owner in owners
+        ):
+            continue
+        identity = (api_version, kind, namespace, name)
+        if identity in identities:
+            raise SystemExit("live resource identity is duplicated")
+        identities.add(identity)
+for identity in sorted(identities):
+    print(json.dumps(identity, separators=(",", ":"), ensure_ascii=True))
+PY
+}
+
+assert_forward_identity_contract() {
+  local current_identities
+  local live_cluster_inventory
+  local live_identities
+  local live_namespaced_inventory
+  local previous_identities
+  current_identities="$(mktemp "$evidence_dir/forward-current-identities.XXXXXX.txt")"
+  previous_identities="$(mktemp "$evidence_dir/forward-previous-identities.XXXXXX.txt")"
+  live_identities="$(mktemp "$evidence_dir/forward-live-identities.XXXXXX.txt")"
+  live_namespaced_inventory="$(mktemp "$evidence_dir/forward-live-namespaced.XXXXXX.json")"
+  live_cluster_inventory="$(mktemp "$evidence_dir/forward-live-cluster.XXXXXX.json")"
+  render_identity_set "$shadow_render" > "$current_identities"
+  kubectl --kubeconfig "$kubeconfig" --request-timeout=10s get \
+    deployments.apps,statefulsets.apps,jobs.batch,persistentvolumeclaims,pods,\
+serviceaccounts,roles.rbac.authorization.k8s.io,\
+rolebindings.rbac.authorization.k8s.io,services,\
+ingresses.networking.k8s.io,networkpolicies.networking.k8s.io \
+    --namespace loom-dev \
+    --selector app.kubernetes.io/managed-by=loom-personal-dev-control-plane \
+    --output=json > "$live_namespaced_inventory"
+  kubectl --kubeconfig "$kubeconfig" --request-timeout=10s get \
+    clusterroles.rbac.authorization.k8s.io,\
+clusterrolebindings.rbac.authorization.k8s.io,\
+validatingadmissionpolicies.admissionregistration.k8s.io,\
+validatingadmissionpolicybindings.admissionregistration.k8s.io \
+    --selector app.kubernetes.io/managed-by=loom-personal-dev-control-plane \
+    --output=json > "$live_cluster_inventory"
+  for inventory in "$live_namespaced_inventory" "$live_cluster_inventory"; do
+    test "$(stat -c %s "$inventory")" -gt 0
+    test "$(stat -c %s "$inventory")" -le 4194304
+  done
+  live_identity_set "$live_namespaced_inventory" "$live_cluster_inventory" \
+    > "$live_identities"
+  chmod 0600 "$current_identities" "$previous_identities" "$live_identities" \
+    "$live_namespaced_inventory" "$live_cluster_inventory"
+  if test -e "$previous_shadow_render" || test -L "$previous_shadow_render"; then
+    test -f "$previous_shadow_render" && test ! -L "$previous_shadow_render"
+    test "$(stat -c %u "$previous_shadow_render")" = "$(id -u)"
+    test "$(stat -c %a "$previous_shadow_render")" = 600
+    test "$(stat -c %h "$previous_shadow_render")" = 1
+    test "$(sha256sum "$previous_shadow_render" | awk '{print $1}')" = \
+      "$previous_shadow_sha256"
+    render_identity_set "$previous_shadow_render" > "$previous_identities"
+    cmp -s "$current_identities" "$previous_identities"
+    cmp -s "$live_identities" "$previous_identities"
+  else
+    test ! -s "$live_identities"
+  fi
+  rm -f "$current_identities" "$previous_identities" "$live_identities" \
+    "$live_namespaced_inventory" "$live_cluster_inventory"
+}
+
 jq -e \
   --arg release "$trusted_release_sha256" \
   --arg yaml "$(sha256sum "$shadow_render" | awk '{print $1}')" \
@@ -275,7 +423,11 @@ private activation key remains isolated from the management Pod.
 Open and record the approved issue #1280 shadow window before the first apply.
 Review the complete server-side diff. Any deletion, PVC replacement, personal
 namespace, mutable image, enabled personal flag, nonzero activation replica,
-or capacity resource outside the reviewed shadow is a stop condition.
+or capacity resource outside the reviewed shadow is a stop condition. A first
+installation also requires no existing package-owned top-level resource. An
+upgrade requires the live, previous-reviewed, and new non-derived resource
+identity sets to match; any identity transition needs a separate cleanup plan
+because server-side apply does not prune absent objects.
 
 ```bash
 test ! -e "$evidence_dir/server-side-diff.txt"
@@ -288,6 +440,7 @@ test "$diff_status" -eq 0 || test "$diff_status" -eq 1
 chmod 0600 "$evidence_dir/server-side-diff.txt"
 
 assert_current_shadow_artifacts
+assert_forward_identity_contract
 assert_no_dynamic_namespaces
 assert_zero_capacity
 assert_reviewed_kubeconfig
@@ -392,9 +545,10 @@ historical Job.
 Server-side apply does not remove objects absent from the older manifest.
 Before mutation, the procedure therefore requires identical current and
 previous resource identity sets after excluding immutable migration Jobs,
-which are retained as bounded evidence. Any other identity difference requires
-a separately reviewed cleanup plan and is a rollback stop condition; this
-runbook never guesses which live object is safe to delete.
+which are retained as bounded evidence. The pre-apply interlock also requires
+the live top-level identity set to match both manifests. Any other identity
+difference requires a separately reviewed cleanup plan and is a rollback stop
+condition; this runbook never guesses which live object is safe to delete.
 
 ```bash
 test -f "$previous_shadow_render" && test ! -L "$previous_shadow_render"
@@ -455,37 +609,6 @@ rm -f "$previous_shadow_render_tmp" "$previous_render_evidence_tmp"
 
 current_identities_tmp="$(mktemp "$evidence_dir/rollback-current-identities.XXXXXX.txt")"
 previous_identities_tmp="$(mktemp "$evidence_dir/rollback-previous-identities.XXXXXX.txt")"
-render_identity_set() {
-  uv run --no-sync python - "$1" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-import yaml
-
-documents = list(yaml.safe_load_all(Path(sys.argv[1]).read_text(encoding="utf-8")))
-identities = set()
-for document in documents:
-    if not isinstance(document, dict) or not isinstance(document.get("metadata"), dict):
-        raise SystemExit("manifest resource identity is invalid")
-    api_version = document.get("apiVersion")
-    kind = document.get("kind")
-    name = document["metadata"].get("name")
-    namespace = document["metadata"].get("namespace", "")
-    if not all(isinstance(value, str) and value for value in (api_version, kind, name)):
-        raise SystemExit("manifest resource identity is invalid")
-    if not isinstance(namespace, str):
-        raise SystemExit("manifest resource identity is invalid")
-    if kind == "Job" and name.startswith("loom-personal-dev-migrate-"):
-        continue
-    identity = (api_version, kind, namespace, name)
-    if identity in identities:
-        raise SystemExit("manifest resource identity is duplicated")
-    identities.add(identity)
-for identity in sorted(identities):
-    print(json.dumps(identity, separators=(",", ":"), ensure_ascii=True))
-PY
-}
 if ! render_identity_set "$shadow_render" > "$current_identities_tmp"; then
   rm -f "$current_identities_tmp" "$previous_identities_tmp"
   exit 1
@@ -494,7 +617,6 @@ if ! render_identity_set "$previous_shadow_render" > "$previous_identities_tmp";
   rm -f "$current_identities_tmp" "$previous_identities_tmp"
   exit 1
 fi
-unset -f render_identity_set
 chmod 0600 "$current_identities_tmp" "$previous_identities_tmp"
 if ! cmp -s "$current_identities_tmp" "$previous_identities_tmp"; then
   rm -f "$current_identities_tmp" "$previous_identities_tmp"
@@ -517,7 +639,9 @@ kubectl --kubeconfig "$kubeconfig" diff --server-side \
   > "$evidence_dir/rollback-server-side-diff.txt" 2>&1 || rollback_diff_status=$?
 test "$rollback_diff_status" -eq 0 || test "$rollback_diff_status" -eq 1
 chmod 0600 "$evidence_dir/rollback-server-side-diff.txt"
+assert_current_shadow_artifacts
 assert_previous_shadow_artifacts
+assert_forward_identity_contract
 assert_no_dynamic_namespaces
 assert_zero_capacity
 assert_reviewed_kubeconfig

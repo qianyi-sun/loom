@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+import re
+import subprocess
+import sys
 from pathlib import Path
 
 from tests.unit.test_dev_instance_manifest import _immutable_config
@@ -127,7 +131,10 @@ def test_personal_management_shadow_runbook_has_exact_bounded_rehearsal() -> Non
     assert "render_identity_set" in runbook
     assert "rollback-current-identities" in runbook
     assert "rollback-previous-identities" in runbook
-    assert 'kind == "Job" and name.startswith("loom-personal-dev-migrate-")' in runbook
+    assert 'kind == "Job" and migration_name.fullmatch(name)' in runbook
+    assert "live_identity_set" in runbook
+    assert 'test ! -s "$live_identities"' in runbook
+    assert 'cmp -s "$live_identities" "$previous_identities"' in runbook
     assert 'cmp -s "$current_identities_tmp" "$previous_identities_tmp"' in runbook
     assert "rollback_diff_status=0" in runbook
     assert "|| rollback_diff_status=$?" in runbook
@@ -177,10 +184,149 @@ def test_personal_management_shadow_runbook_rechecks_interlocks_at_each_apply() 
 
     for interlock in (forward_interlock, rollback_interlock):
         assert "assert_reviewed_kubeconfig" in interlock
+        assert "assert_forward_identity_contract" in interlock
         assert "assert_no_dynamic_namespaces" in interlock
         assert "assert_zero_capacity" in interlock
     assert "assert_current_shadow_artifacts" in forward_interlock
     assert "assert_previous_shadow_artifacts" in rollback_interlock
+
+
+def test_personal_management_shadow_embedded_identity_tools_execute(
+    tmp_path: Path,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-management-plane-shadow.md")
+    programs = re.findall(r"<<'PY'\n(.*?)\nPY\n", runbook, flags=re.DOTALL)
+
+    assert len(programs) == 2
+    for program in programs:
+        compile(program, "personal-dev-management-plane-shadow.md", "exec")
+
+    manifest = tmp_path / "manifest.yaml"
+    manifest.write_text(
+        """\
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: loom-dev
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: loom-personal-dev-migrate-1111111111111111-2222222222222222
+  namespace: loom-dev
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loom-personal-dev-management
+  namespace: loom-dev
+""",
+        encoding="utf-8",
+    )
+    rendered = subprocess.run(
+        [sys.executable, "-", str(manifest)],
+        input=programs[0],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert rendered.stdout.splitlines() == [
+        '["apps/v1","Deployment","loom-dev","loom-personal-dev-management"]'
+    ]
+
+    managed_labels = {"app.kubernetes.io/managed-by": "loom-personal-dev-control-plane"}
+    namespaced = tmp_path / "namespaced.json"
+    namespaced.write_text(
+        json.dumps(
+            {
+                "apiVersion": "v1",
+                "kind": "List",
+                "items": [
+                    {
+                        "apiVersion": "apps/v1",
+                        "kind": "Deployment",
+                        "metadata": {
+                            "name": "loom-personal-dev-management",
+                            "namespace": "loom-dev",
+                            "labels": managed_labels,
+                        },
+                    },
+                    {
+                        "apiVersion": "batch/v1",
+                        "kind": "Job",
+                        "metadata": {
+                            "name": ("loom-personal-dev-migrate-1111111111111111-2222222222222222"),
+                            "namespace": "loom-dev",
+                            "labels": managed_labels,
+                        },
+                    },
+                    {
+                        "apiVersion": "v1",
+                        "kind": "PersistentVolumeClaim",
+                        "metadata": {
+                            "name": "data-loom-dev-postgres-0",
+                            "namespace": "loom-dev",
+                            "labels": managed_labels,
+                        },
+                    },
+                    {
+                        "apiVersion": "v1",
+                        "kind": "Pod",
+                        "metadata": {
+                            "name": "derived-pod",
+                            "namespace": "loom-dev",
+                            "labels": managed_labels,
+                            "ownerReferences": [{"controller": True, "kind": "ReplicaSet"}],
+                        },
+                    },
+                    {
+                        "apiVersion": "v1",
+                        "kind": "Pod",
+                        "metadata": {
+                            "name": "unexpected-top-level-pod",
+                            "namespace": "loom-dev",
+                            "labels": managed_labels,
+                        },
+                    },
+                ],
+            },
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+    cluster = tmp_path / "cluster.json"
+    cluster.write_text(
+        json.dumps(
+            {
+                "apiVersion": "v1",
+                "kind": "List",
+                "items": [
+                    {
+                        "apiVersion": "rbac.authorization.k8s.io/v1",
+                        "kind": "ClusterRole",
+                        "metadata": {
+                            "name": "loom-personal-dev-management-mutation",
+                            "labels": managed_labels,
+                        },
+                    }
+                ],
+            },
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+    live = subprocess.run(
+        [sys.executable, "-", str(namespaced), str(cluster)],
+        input=programs[1],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert live.stdout.splitlines() == [
+        '["apps/v1","Deployment","loom-dev","loom-personal-dev-management"]',
+        '["rbac.authorization.k8s.io/v1","ClusterRole","","loom-personal-dev-management-mutation"]',
+        '["v1","Pod","loom-dev","unexpected-top-level-pod"]',
+    ]
 
 
 def test_dev_fleet_readme_coordinates_both_shadow_readiness_gates() -> None:
