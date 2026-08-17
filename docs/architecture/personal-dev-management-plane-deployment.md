@@ -94,9 +94,11 @@ image and is installed only inside an activated personal namespace by the
 existing lifecycle.
 
 The builder RuntimeClass is an independently installed cluster capability. The
-package records its exact name and expected handler/profile digest but does not
-invent a runtime handler. Status fails until the observed RuntimeClass and the
-operator-owned profile digest match the activation plan.
+shadow package records its exact future name but sets builder preparation to
+false; it does not invent a runtime handler or claim an unmeasured scanner or
+runtime digest. The later acceptance plan binds the reviewed handler/profile,
+scanner, offline database, and policy digests. Acceptance status fails until
+those observed values match the plan.
 
 ## Configuration and immutable release binding
 

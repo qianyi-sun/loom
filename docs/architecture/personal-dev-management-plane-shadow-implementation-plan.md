@@ -64,7 +64,7 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
 - `images` has exactly `loom_service`, `personal_dev_builder`,
   `personal_dev_activation_agent`, `postgres`, and `minio`.
 
-- [ ] **Step 1: Write failing profile and release tests**
+- [x] **Step 1: Write failing profile and release tests**
 
   Add tests that load the checked-in profile and this exact canonical release
   fixture (write it with mode `0600` and no trailing newline):
@@ -105,7 +105,7 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
   zero/uppercase/short digests, wrong repositories for Loom images, and
   duplicate digest references.
 
-- [ ] **Step 2: Run the tests and observe the missing-module failure**
+- [x] **Step 2: Run the tests and observe the missing-module failure**
 
   Run:
 
@@ -117,7 +117,7 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
   Expected: collection fails because
   `loom.personal_dev_control_plane_config` does not exist.
 
-- [ ] **Step 3: Implement the minimal strict models and loaders**
+- [x] **Step 3: Implement the minimal strict models and loaders**
 
   Use frozen dataclasses for profile subobjects and Pydantic v2 models with
   `ConfigDict(extra="forbid", frozen=True)` for untrusted TOML/JSON input.
@@ -143,12 +143,14 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
   lowercase SHA-256 with `hmac.compare_digest`.
 
   The checked-in TOML contains no secrets and fixes all shadow values. It names
-  the three Secrets, management/service identities, scanner-cache PVC,
-  RuntimeClass, storage class and sizes, public origin, ingress class/issuer,
-  finite quotas, canonical protocol JSON, scanner/policy/profile identities,
-  and exact pool capabilities.
+  the three Secrets, management/service identities, scanner-cache PVC, future
+  RuntimeClass name, storage class and sizes, public origin, ingress
+  class/issuer, finite quotas, canonical protocol JSON, and exact pool
+  capabilities. Builder preparation is explicitly false; unmeasured runtime,
+  scanner, database, and policy digests belong only in the later acceptance
+  plan.
 
-- [ ] **Step 4: Run focused tests, format, lint, and type-check**
+- [x] **Step 4: Run focused tests, format, lint, and type-check**
 
   Run:
 
@@ -167,7 +169,7 @@ Kubernetes YAML, argparse, pytest, Ruff, mypy, GitHub protected image releases.
 
   Expected: all pass with no warnings.
 
-- [ ] **Step 5: Commit the configuration contract**
+- [x] **Step 5: Commit the configuration contract**
 
   ```bash
   git add src/loom/personal_dev_control_plane_config.py \
