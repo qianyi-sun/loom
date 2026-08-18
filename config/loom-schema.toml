@@ -1301,6 +1301,12 @@ python_type = "bool"
 default     = false
 description = "Disabled-by-default worker admission for the code-owned terminalgen-authoring@1 runtime. Enabling this flag alone grants no work: pool containment, immutable attempt grants, image contracts, provider bindings, and validation backend capabilities remain mandatory."
 
+[service_config.pipeline_runtime_secrets_dir]
+used_by     = ["worker"]
+python_type = "Path"
+default     = "/dev/shm"
+description = "Operator-provisioned tmpfs root for attempt-private Pipeline step-JWT directories. Gateway workers fail before registration unless this path is a writable, real directory backed by tmpfs."
+
 [service_config.require_cgroup_parent]
 used_by     = ["worker"]
 python_type = "bool"

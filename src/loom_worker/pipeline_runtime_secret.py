@@ -22,11 +22,64 @@ VISIBLE_DIRECTORY_MODE = 0o500
 PRIVATE_DIRECTORY_MODE = 0o700
 STEP_JWT_MODE = 0o400
 MAX_STEP_JWT_BYTES = 1_048_576
-PIPELINE_PROVIDER_STEP_IDS = frozenset({"offline_judge", "recovery_primitive"})
+PIPELINE_PROVIDER_STEP_IDS = frozenset(
+    {"offline_judge", "recovery_primitive"} | {f"generate_card_{index:02d}" for index in range(18)}
+)
 
 
 class RuntimeSecretError(RuntimeError):
     """The runtime secret boundary is malformed or cannot converge safely."""
+
+
+def require_runtime_secret_tmpfs(
+    root: Path,
+    *,
+    mountinfo_path: Path = Path("/proc/self/mountinfo"),
+) -> Path:
+    """Return an exact writable root only when its backing mount is tmpfs."""
+
+    try:
+        if root.is_symlink():
+            raise RuntimeSecretError("runtime secret root must not be a symlink")
+        resolved = root.resolve(strict=True)
+        info = resolved.lstat()
+        if not stat.S_ISDIR(info.st_mode):
+            raise RuntimeSecretError("runtime secret root must be a directory")
+        if not os.access(resolved, os.W_OK | os.X_OK):
+            raise RuntimeSecretError("runtime secret root is not writable")
+        mountinfo = mountinfo_path.read_text(encoding="utf-8")
+    except RuntimeSecretError:
+        raise
+    except OSError as exc:
+        raise RuntimeSecretError("runtime secret tmpfs cannot be observed") from exc
+
+    candidates: list[tuple[int, str]] = []
+    for line in mountinfo.splitlines():
+        fields = line.split(" ")
+        try:
+            separator = fields.index("-")
+        except ValueError:
+            continue
+        if separator + 1 >= len(fields) or len(fields) < 5:
+            continue
+        target = Path(_unescape_mountinfo(fields[4]))
+        try:
+            resolved.relative_to(target)
+        except ValueError:
+            continue
+        candidates.append((len(target.parts), fields[separator + 1]))
+    if not candidates or max(candidates, key=lambda item: item[0])[1] != "tmpfs":
+        raise RuntimeSecretError("runtime secret root is not backed by tmpfs")
+    return resolved
+
+
+def _unescape_mountinfo(value: str) -> str:
+    return (
+        value.replace("\\040", " ")
+        .replace("\\011", "\t")
+        .replace("\\012", "\n")
+        .replace("\\134", "\\")
+    )
 
 
 @dataclass(frozen=True)
@@ -119,6 +172,46 @@ class PipelineStepJwtRotator:
         await self.stop()
 
 
+@dataclass
+class AttemptRuntimeSecretLifecycle:
+    """Initialize, rotate, revoke, and remove one Attempt secret atomically."""
+
+    secret_mount: RuntimeSecretMount
+    rotator: PipelineStepJwtRotator
+    started: bool = False
+
+    async def start(self) -> None:
+        if self.started:
+            raise RuntimeSecretError("Attempt runtime secret is already started")
+        self.secret_mount.initialize()
+        try:
+            await self.rotator.start()
+        except BaseException:
+            self.secret_mount.teardown()
+            raise
+        self.started = True
+
+    async def teardown(self) -> None:
+        if not self.started:
+            if _path_lexists(self.secret_mount.root):
+                self.secret_mount.teardown()
+            return
+        rotation_error: BaseException | None = None
+        try:
+            await self.rotator.stop()
+        except BaseException as exc:
+            rotation_error = exc
+        finally:
+            self.secret_mount.teardown()
+            self.started = False
+        if rotation_error is not None:
+            raise RuntimeSecretError("Attempt JWT lifecycle failed") from rotation_error
+
+    @property
+    def absent(self) -> bool:
+        return not self.started and not _path_lexists(self.secret_mount.root)
+
+
 class RuntimeSecretMount:
     """Own exactly one ``step-jwt`` file below an Attempt-private directory.
 
@@ -157,15 +250,33 @@ class RuntimeSecretMount:
             if self._initialized:
                 self._validate_root()
                 return
+            created = False
             try:
                 self.root.mkdir(mode=PRIVATE_DIRECTORY_MODE, parents=False, exist_ok=False)
+                created = True
             except FileExistsError:
                 self._validate_root()
                 if any(self.root.iterdir()):
                     raise RuntimeSecretError("runtime secret directory is not empty") from None
             except OSError as exc:
                 raise RuntimeSecretError("cannot create runtime secret directory") from exc
-            os.chmod(self.root, VISIBLE_DIRECTORY_MODE, follow_symlinks=False)
+            try:
+                os.chown(
+                    self.root,
+                    self.container_uid,
+                    self.container_gid,
+                    follow_symlinks=False,
+                )
+                os.chmod(self.root, VISIBLE_DIRECTORY_MODE, follow_symlinks=False)
+            except OSError as exc:
+                if created:
+                    try:
+                        self.root.rmdir()
+                    except OSError:
+                        pass
+                raise RuntimeSecretError(
+                    "worker cannot prepare the runtime secret directory for the container identity"
+                ) from exc
             self._initialized = True
 
     def rotate(self, token: str | bytes) -> RuntimeSecretFileIdentity:
@@ -272,7 +383,7 @@ class RuntimeSecretMount:
         """Remove the exact secret tree, refusing unrelated entries."""
 
         with self._lock:
-            if not self.root.exists():
+            if not _path_lexists(self.root):
                 self._initialized = False
                 return
             self._validate_root()
@@ -296,6 +407,10 @@ class RuntimeSecretMount:
             raise RuntimeSecretError("runtime secret directory is missing") from exc
         if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
             raise RuntimeSecretError("runtime secret root must be a real directory")
+        if info.st_uid != self.container_uid or info.st_gid != self.container_gid:
+            raise RuntimeSecretError(
+                "runtime secret directory owner does not match the container identity"
+            )
         if stat.S_IMODE(info.st_mode) not in {VISIBLE_DIRECTORY_MODE, PRIVATE_DIRECTORY_MODE}:
             raise RuntimeSecretError("runtime secret directory mode is not private")
 
@@ -304,6 +419,10 @@ def _positive_id(value: int, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"{label} must be a positive non-root integer")
     return value
+
+
+def _path_lexists(path: Path) -> bool:
+    return os.path.lexists(path)
 
 
 def _write_all(descriptor: int, payload: bytes) -> None:

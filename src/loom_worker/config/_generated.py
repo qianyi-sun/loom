@@ -53,6 +53,7 @@ class WorkerSettings(BaseSettings):
     minio_read_timeout_sec: float = 120.0
     minio_region: str = "us-east-1"
     minio_secret_key: SecretStr
+    pipeline_runtime_secrets_dir: Path = Path("/dev/shm")
     pipeline_terminalgen_authoring_enabled: bool = False
     pool_name: str = "default"
     pre_start_heartbeat_interval_sec: float = 60.0

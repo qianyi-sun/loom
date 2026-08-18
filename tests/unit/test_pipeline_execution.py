@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ from loom.pipeline.work_protocol import ExecutionAttemptClaimV1, WorkerCleanupPr
 from loom_worker import main_loop as worker_main_loop
 from loom_worker.pipeline_container_runner import PipelineProcessFailedError
 from loom_worker.pipeline_execution import (
+    AttemptControlCancellation,
     HttpFinalOutputCommitter,
     PipelineAttemptPaths,
     PipelineCleanupJournal,
@@ -23,6 +25,12 @@ from loom_worker.pipeline_execution import (
     _require_terminalgen_claim,
     _validate_complete_marker,
     production_pipeline_enabled,
+)
+from loom_worker.pipeline_runtime_secret import (
+    AttemptRuntimeSecretLifecycle,
+    PipelineStepJwtRotator,
+    RuntimeSecretError,
+    RuntimeSecretMount,
 )
 from tests.pipeline_input_helpers import claim, scalar_artifact
 from tests.unit.test_pipeline_work_protocol import terminalgen_validation_claim
@@ -218,7 +226,7 @@ def test_stage1_runtime_registration_advertises_dedicated_claim_feature(
         ("terminalgen-plan-none", False, False),
         ("terminalgen-plan-none", True, True),
         ("terminalgen-package-none", True, True),
-        ("terminalgen-generate-gateway", True, False),
+        ("terminalgen-generate-gateway", True, True),
         ("terminalgen-validate-none", True, False),
     ],
 )
@@ -241,6 +249,7 @@ def test_terminalgen_registration_feature_is_disabled_by_default(
         sandbox_identity="terminalgen-authoring",
         candidate_sha="a" * 40,
         compose_project=f"loom-{pool_name}",
+        pipeline_runtime_secrets_dir=tmp_path,
     )
     seen_features: list[str] = []
     capability = SimpleNamespace(
@@ -268,6 +277,10 @@ def test_terminalgen_registration_feature_is_disabled_by_default(
     monkeypatch.setattr(worker_main_loop, "_host_cpu_arch", lambda: "x86_64")
     monkeypatch.setattr(worker_main_loop, "_host_memory_bytes", lambda: 64 << 30)
     monkeypatch.setattr(worker_main_loop, "validate_oldlab_cpu_allocation", lambda _env: None)
+    monkeypatch.setattr(
+        "loom_worker.pipeline_runtime_secret.require_runtime_secret_tmpfs",
+        lambda root: root,
+    )
 
     def _capability(**kwargs: Any) -> Any:
         seen_features.extend(kwargs["container_runtime_features"])
@@ -476,6 +489,120 @@ def test_cleanup_journal_reaps_only_exact_recorded_attempt(tmp_path: Path) -> No
     assert list((tmp_path / "journal").glob("*.json")) != []
     journal.clear(attempt_id)
     assert list((tmp_path / "journal").glob("*.json")) == []
+
+
+def test_cleanup_journal_reaps_exact_attempt_runtime_secret(tmp_path: Path) -> None:
+    execution = _claim()
+    attempt_id = execution.execution_attempt_id
+    secret_root = tmp_path / "secrets"
+    secret_root.mkdir()
+    uid = os.getuid() or 65_534
+    gid = os.getgid() or 65_534
+    secret_dir = secret_root / f"loom-pipeline-{attempt_id}"
+    secret = RuntimeSecretMount(secret_dir, container_uid=uid, container_gid=gid)
+    secret.initialize()
+    secret.rotate("loom_step_orphan")
+    journal = PipelineCleanupJournal(tmp_path / "journal")
+    journal.record(execution, container_id=None, runtime_secret_dir=secret_dir)
+
+    cleaned = journal.cleanup_orphans(
+        docker_client=SimpleNamespace(),
+        attempts_root=tmp_path / "attempts",
+        input_views_root=tmp_path / "input-views",
+        runtime_secrets_root=secret_root,
+        container_uid=uid,
+        container_gid=gid,
+    )
+
+    assert cleaned == [attempt_id]
+    assert not secret_dir.exists()
+
+
+def test_cleanup_journal_refuses_substituted_runtime_secret_symlink(tmp_path: Path) -> None:
+    execution = _claim()
+    attempt_id = execution.execution_attempt_id
+    secret_root = tmp_path / "secrets"
+    secret_root.mkdir()
+    target = secret_root / "unrelated"
+    target.mkdir()
+    secret_dir = secret_root / f"loom-pipeline-{attempt_id}"
+    secret_dir.symlink_to(target, target_is_directory=True)
+    journal = PipelineCleanupJournal(tmp_path / "journal")
+    journal.record(execution, container_id=None, runtime_secret_dir=secret_dir)
+
+    with pytest.raises(RuntimeSecretError, match="real directory"):
+        journal.cleanup_orphans(
+            docker_client=SimpleNamespace(),
+            attempts_root=tmp_path / "attempts",
+            input_views_root=tmp_path / "input-views",
+            runtime_secrets_root=secret_root,
+            container_uid=os.getuid() or 65_534,
+            container_gid=os.getgid() or 65_534,
+        )
+
+    assert target.exists()
+
+
+async def test_gateway_cancel_revokes_secret_before_acknowledgement(tmp_path: Path) -> None:
+    execution = _claim().model_copy(update={"network_profile": "gateway"})
+    uid = os.getuid() or 65_534
+    gid = os.getgid() or 65_534
+    secret_mount = RuntimeSecretMount(
+        tmp_path / "runtime-secret",
+        container_uid=uid,
+        container_gid=gid,
+    )
+
+    async def _mint(_attempt_id: UUID, _step_id: str, _ttl_seconds: int) -> str:
+        return "loom_step_cancel"
+
+    lifecycle = AttemptRuntimeSecretLifecycle(
+        secret_mount=secret_mount,
+        rotator=PipelineStepJwtRotator(
+            attempt_id=execution.execution_attempt_id,
+            step_id="generate_card_00",
+            ttl_seconds=600,
+            secret_mount=secret_mount,
+            mint=_mint,
+        ),
+    )
+    await lifecycle.start()
+    root = tmp_path / "attempt"
+    outputs = root / "outputs"
+    scratch = root / "scratch"
+    outputs.mkdir(parents=True)
+    scratch.mkdir()
+
+    class _ControlPlane:
+        payload: dict[str, Any] | None = None
+
+        async def acknowledge_execution_attempt_cancel(self, **kwargs: Any) -> None:
+            assert lifecycle.absent
+            self.payload = kwargs["payload"]
+
+    control_plane = _ControlPlane()
+    cancellation = AttemptControlCancellation(
+        claim=execution,
+        control_plane=control_plane,  # type: ignore[arg-type]
+        paths=PipelineAttemptPaths(
+            root=root,
+            inputs=tmp_path / "absent-inputs",
+            outputs=outputs,
+            scratch=scratch,
+        ),
+        runtime_secret=lifecycle,
+    )
+
+    await cancellation.acknowledge(
+        attempt_id=execution.execution_attempt_id,
+        forced=False,
+        teardown_observed=True,
+    )
+
+    assert lifecycle.absent
+    assert cancellation.acknowledged
+    assert control_plane.payload is not None
+    assert control_plane.payload["resources"]["step_jwt_revoked"] is True
 
 
 def test_complete_marker_binds_exact_final_output_inventory(tmp_path: Path) -> None:

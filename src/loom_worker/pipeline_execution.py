@@ -98,6 +98,12 @@ from loom_worker.pipeline_gpu_preflight import (
     build_gpu_container_preflight_plan,
 )
 from loom_worker.pipeline_live_preview import PipelineLivePreviewPublisher
+from loom_worker.pipeline_runtime_secret import (
+    AttemptRuntimeSecretLifecycle,
+    PipelineStepJwtRotator,
+    RuntimeSecretMount,
+    require_runtime_secret_tmpfs,
+)
 
 _STAGE1_POOLS = frozenset({"behavior-gpu-oldlab", "behavior-gpu-gb10"})
 _TERMINALGEN_POOLS = frozenset(TERMINALGEN_POOL_POLICIES)
@@ -405,13 +411,22 @@ class PipelineCleanupJournal:
     def __post_init__(self) -> None:
         self.root.mkdir(parents=True, mode=0o700, exist_ok=True)
 
-    def record(self, claim: ExecutionAttemptClaimV1, *, container_id: str | None) -> None:
+    def record(
+        self,
+        claim: ExecutionAttemptClaimV1,
+        *,
+        container_id: str | None,
+        runtime_secret_dir: Path | None = None,
+    ) -> None:
         value = {
-            "schema_version": "loom.pipeline-worker-cleanup.v1",
+            "schema_version": "loom.pipeline-worker-cleanup.v2",
             "attempt_id": str(claim.execution_attempt_id),
             "claim_id": str(claim.claim_id),
             "lease_epoch": claim.lease_epoch,
             "container_id": container_id,
+            "runtime_secret_dir": (
+                str(runtime_secret_dir.absolute()) if runtime_secret_dir is not None else None
+            ),
         }
         target = self.root / f"{claim.execution_attempt_id}.json"
         partial = self.root / f".{claim.execution_attempt_id}.tmp"
@@ -431,6 +446,9 @@ class PipelineCleanupJournal:
         docker_client: Any,
         attempts_root: Path,
         input_views_root: Path,
+        runtime_secrets_root: Path | None = None,
+        container_uid: int = _WORKER_UID,
+        container_gid: int = _WORKER_GID,
     ) -> list[UUID]:
         """Reap only exact journalled attempts left by an exited process."""
 
@@ -438,27 +456,36 @@ class PipelineCleanupJournal:
         for record in sorted(self.root.glob("*.json"), key=lambda item: item.name):
             try:
                 value = load_canonical_document(record, max_bytes=4096)
+                if not isinstance(value, dict):
+                    raise ValueError("cleanup journal record must be an object")
                 attempt_id = UUID(str(value["attempt_id"]))
                 claim_id = UUID(str(value["claim_id"]))
                 lease_epoch = value["lease_epoch"]
                 container_id = value["container_id"]
+                schema_version = value["schema_version"]
+                expected_fields = {
+                    "schema_version",
+                    "attempt_id",
+                    "claim_id",
+                    "lease_epoch",
+                    "container_id",
+                }
+                if schema_version == "loom.pipeline-worker-cleanup.v2":
+                    expected_fields.add("runtime_secret_dir")
+                    runtime_secret_dir = value["runtime_secret_dir"]
+                elif schema_version == "loom.pipeline-worker-cleanup.v1":
+                    runtime_secret_dir = None
+                else:
+                    raise ValueError("cleanup journal schema drift")
                 if (
-                    not isinstance(value, dict)
-                    or set(value)
-                    != {
-                        "schema_version",
-                        "attempt_id",
-                        "claim_id",
-                        "lease_epoch",
-                        "container_id",
-                    }
-                    or value["schema_version"] != "loom.pipeline-worker-cleanup.v1"
+                    set(value) != expected_fields
                     or record.stem != str(attempt_id)
                     or isinstance(lease_epoch, bool)
                     or not isinstance(lease_epoch, int)
                     or lease_epoch < 1
                     or not isinstance(claim_id, UUID)
                     or not (container_id is None or isinstance(container_id, str))
+                    or not (runtime_secret_dir is None or isinstance(runtime_secret_dir, str))
                 ):
                     raise ValueError("cleanup journal record drift")
             except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -474,6 +501,23 @@ class PipelineCleanupJournal:
                     if labels.get("loom.execution_attempt_id") != str(attempt_id):
                         raise RuntimeError("pipeline_orphan_container_identity_drift")
                     container.remove(force=True)
+            if isinstance(runtime_secret_dir, str):
+                if runtime_secrets_root is None:
+                    raise RuntimeError("pipeline_orphan_secret_root_unavailable")
+                resolved_parent = runtime_secrets_root.resolve()
+                secret_root = Path(runtime_secret_dir)
+                expected_secret = resolved_parent / f"loom-pipeline-{attempt_id}"
+                if (
+                    secret_root != expected_secret
+                    or secret_root.parent != resolved_parent
+                    or not secret_root.is_absolute()
+                ):
+                    raise RuntimeError("pipeline_orphan_secret_identity_drift")
+                RuntimeSecretMount(
+                    secret_root,
+                    container_uid=container_uid,
+                    container_gid=container_gid,
+                ).teardown()
             attempt_root = (attempts_root / str(attempt_id)).resolve()
             if attempt_root.parent == attempts_root.resolve() and attempt_root.exists():
                 shutil.rmtree(attempt_root)
@@ -539,6 +583,7 @@ class AttemptControlCancellation(ExecutionCancellation, CancellationSignal):
     claim: ExecutionAttemptClaimV1
     control_plane: HttpControlPlaneClient
     paths: PipelineAttemptPaths
+    runtime_secret: AttemptRuntimeSecretLifecycle | None = None
     backend: DockerPipelineBackend | None = None
     committer: HttpFinalOutputCommitter | None = None
     current_seq: int = 0
@@ -572,6 +617,8 @@ class AttemptControlCancellation(ExecutionCancellation, CancellationSignal):
     ) -> None:
         if attempt_id != self.claim.execution_attempt_id or not teardown_observed:
             raise RuntimeError("pipeline_cancellation_cleanup_not_observed")
+        if self.runtime_secret is not None and not self.runtime_secret.absent:
+            await self.runtime_secret.teardown()
         self.paths.remove_writable()
         input_absent = not self.paths.inputs.exists()
         container_absent = self.backend is None or self.backend.container_absent
@@ -581,12 +628,13 @@ class AttemptControlCancellation(ExecutionCancellation, CancellationSignal):
             else await self.backend.expected_process_group_present(attempt_id=attempt_id)
         )
         upload_absent = self.committer is None or self.committer.active_session_id is None
+        runtime_secret_absent = self.runtime_secret is None or self.runtime_secret.absent
         if (
-            self.claim.network_profile != "none"
-            or not input_absent
+            not input_absent
             or not container_absent
             or process_group_present
             or not upload_absent
+            or not runtime_secret_absent
             or self.paths.outputs.exists()
             or self.paths.scratch.exists()
         ):
@@ -1046,6 +1094,7 @@ class DockerPipelineBackend(PipelineContainerBackend):
     cleanup_journal: PipelineCleanupJournal
     cgroup_parent: str | None
     identity_labels: tuple[tuple[str, str], ...]
+    runtime_secret_dir: Path | None = None
     _client: Any | None = None
     _container: Any | None = None
     container_absent: bool = True
@@ -1100,6 +1149,7 @@ class DockerPipelineBackend(PipelineContainerBackend):
         self.cleanup_journal.record(
             self.claim,
             container_id=self._container_name(preflight=False),
+            runtime_secret_dir=self.runtime_secret_dir,
         )
         container = await asyncio.to_thread(
             self._docker().containers.create, **self._create_kwargs(spec)
@@ -1153,6 +1203,7 @@ class DockerPipelineBackend(PipelineContainerBackend):
         self.cleanup_journal.record(
             self.claim,
             container_id=self._container_name(preflight=True),
+            runtime_secret_dir=self.runtime_secret_dir,
         )
         container = await asyncio.to_thread(self._docker().containers.create, **values)
         try:
@@ -1177,7 +1228,11 @@ class DockerPipelineBackend(PipelineContainerBackend):
             )
         finally:
             await self._remove_exact_container(container)
-            self.cleanup_journal.record(self.claim, container_id=None)
+            self.cleanup_journal.record(
+                self.claim,
+                container_id=None,
+                runtime_secret_dir=self.runtime_secret_dir,
+            )
 
     async def terminate(self, *, attempt_id: UUID, grace_seconds: int) -> bool:
         del attempt_id
@@ -1218,6 +1273,7 @@ class PipelineWorkerRuntime:
     base: Path = field(init=False)
     journal: ArtifactInputJournal = field(init=False)
     cleanup_journal: PipelineCleanupJournal = field(init=False)
+    runtime_secrets_root: Path | None = field(init=False, default=None)
     worker_id: UUID | None = None
     _orphan_cleanup_done: bool = False
 
@@ -1231,6 +1287,10 @@ class PipelineWorkerRuntime:
             capacity_bytes=raw_bytes * 85 // 100,
         )
         self.cleanup_journal = PipelineCleanupJournal(self.base / "cleanup-journal")
+        if self.settings.pool_name == "terminalgen-generate-gateway":
+            self.runtime_secrets_root = require_runtime_secret_tmpfs(
+                self.settings.pipeline_runtime_secrets_dir
+            )
 
     def registration_cache_fields(self) -> dict[str, int]:
         self._cleanup_orphans()
@@ -1252,6 +1312,7 @@ class PipelineWorkerRuntime:
                     docker_client=client,
                     attempts_root=(self.base / "attempts").resolve(),
                     input_views_root=(self.base / "input-views").resolve(),
+                    runtime_secrets_root=self.runtime_secrets_root,
                 )
                 for attempt_id in cleaned:
                     self.journal.release_attempt(attempt_id)
@@ -1268,9 +1329,22 @@ class PipelineWorkerRuntime:
         if self.worker_id is None or not self._orphan_cleanup_done:
             raise RuntimeError("pipeline_runtime_not_bound")
         is_stage1 = _require_pipeline_claim(claim, self.settings)
-        self.cleanup_journal.record(claim, container_id=None)
+        runtime_secret = self._runtime_secret_lifecycle(claim)
+        runtime_secret_dir = (
+            runtime_secret.secret_mount.root if runtime_secret is not None else None
+        )
+        self.cleanup_journal.record(
+            claim,
+            container_id=None,
+            runtime_secret_dir=runtime_secret_dir,
+        )
         paths = PipelineAttemptPaths.create(self.base, claim.execution_attempt_id)
-        cancellation = AttemptControlCancellation(claim, self.control_plane, paths)
+        cancellation = AttemptControlCancellation(
+            claim,
+            self.control_plane,
+            paths,
+            runtime_secret=runtime_secret,
+        )
         materializer = ClaimArtifactMaterializer(
             claim,
             CasArtifactInputMaterializer(
@@ -1290,6 +1364,7 @@ class PipelineWorkerRuntime:
             cleanup_journal=self.cleanup_journal,
             cgroup_parent=_worker_cgroup_parent(self.settings),
             identity_labels=_runtime_identity_labels(self.settings),
+            runtime_secret_dir=runtime_secret_dir,
         )
         cancellation.backend = backend
         phase: list[HeartbeatPhase] = ["input_materializing"]
@@ -1301,7 +1376,13 @@ class PipelineWorkerRuntime:
         terminal_reported = False
         final_output_committed = False
         try:
-            spec = _container_spec(claim, paths)
+            if runtime_secret is not None:
+                await runtime_secret.start()
+            spec = _container_spec(
+                claim,
+                paths,
+                runtime_secret_dir=runtime_secret_dir,
+            )
             variant = claim.execution_spec_snapshot.execution_variant_id
             allocation = claim.slurm_gpu_allocation_evidence
             plan = (
@@ -1368,11 +1449,13 @@ class PipelineWorkerRuntime:
                 await asyncio.gather(execution, return_exceptions=True)
                 raise RuntimeError("pipeline_heartbeat_failed") from heartbeat_error
             result = await execution
-            phase[0] = "output_committing"
             session_id = result.commit.upload_session_id
             if session_id is None:
                 raise RuntimeError("final_output_upload_session_missing")
             final_output_committed = True
+            if runtime_secret is not None:
+                await runtime_secret.teardown()
+            phase[0] = "output_committing"
             complete = ExecutionCompleteV1(
                 exit_code=0,
                 stage_result=StageResultV1.model_validate(
@@ -1402,11 +1485,17 @@ class PipelineWorkerRuntime:
             if heartbeat is not None:
                 heartbeat.cancel()
                 await asyncio.gather(heartbeat, return_exceptions=True)
+            if runtime_secret is not None and not runtime_secret.absent:
+                try:
+                    await runtime_secret.teardown()
+                except Exception as secret_exc:
+                    exc = secret_exc
             proof = await _observed_cleanup_proof(
                 claim=claim,
                 paths=paths,
                 backend=backend,
                 committer=committer,
+                runtime_secret=runtime_secret,
             )
             failure = _execution_failure(exc, resources=proof)
             await self.control_plane.fail_execution_attempt(
@@ -1421,10 +1510,49 @@ class PipelineWorkerRuntime:
             if heartbeat is not None:
                 heartbeat.cancel()
                 await asyncio.gather(heartbeat, return_exceptions=True)
+            if runtime_secret is not None and not runtime_secret.absent:
+                await runtime_secret.teardown()
             paths.remove_writable()
             paths.remove_root_if_empty()
             if terminal_reported:
                 self.cleanup_journal.clear(claim.execution_attempt_id)
+
+    def _runtime_secret_lifecycle(
+        self,
+        claim: ExecutionAttemptClaimV1,
+    ) -> AttemptRuntimeSecretLifecycle | None:
+        if claim.network_profile == "none":
+            if self.runtime_secrets_root is not None:
+                raise RuntimeError("pipeline_offline_attempt_has_runtime_secret_authority")
+            return None
+        if self.runtime_secrets_root is None:
+            raise RuntimeError("pipeline_runtime_secret_tmpfs_unavailable")
+        secret_mount = RuntimeSecretMount(
+            self.runtime_secrets_root / f"loom-pipeline-{claim.execution_attempt_id}",
+            container_uid=_WORKER_UID,
+            container_gid=_WORKER_GID,
+        )
+
+        async def _mint(attempt_id: UUID, step_id: str, ttl_seconds: int) -> str:
+            return await self.control_plane.mint_execution_attempt_step_token(
+                team_id=claim.team_id,
+                execution_attempt_id=attempt_id,
+                step_id=step_id,
+                ttl_sec=ttl_seconds,
+                claim=_claim_headers(claim),
+            )
+
+        ttl_seconds = min(claim.timeout_seconds + 300, 30_000)
+        return AttemptRuntimeSecretLifecycle(
+            secret_mount=secret_mount,
+            rotator=PipelineStepJwtRotator(
+                attempt_id=claim.execution_attempt_id,
+                step_id=claim.node_key,
+                ttl_seconds=ttl_seconds,
+                secret_mount=secret_mount,
+                mint=_mint,
+            ),
+        )
 
     async def _heartbeat(
         self,
@@ -1453,7 +1581,12 @@ class PipelineWorkerRuntime:
             await asyncio.sleep(_HEARTBEAT_SECONDS)
 
 
-def _container_spec(claim: ExecutionAttemptClaimV1, paths: PipelineAttemptPaths) -> Any:
+def _container_spec(
+    claim: ExecutionAttemptClaimV1,
+    paths: PipelineAttemptPaths,
+    *,
+    runtime_secret_dir: Path | None = None,
+) -> Any:
     profile = claim.resource_profile_snapshot
     variant = next(
         item
@@ -1474,6 +1607,7 @@ def _container_spec(claim: ExecutionAttemptClaimV1, paths: PipelineAttemptPaths)
         memory_bytes=variant.container_memory_bytes_override or profile.memory_bytes,
         pids=profile.pids_limit or 4096,
         scratch_bytes=profile.scratch_bytes,
+        runtime_secret_dir=runtime_secret_dir,
         gpu_device_uuids=(
             claim.slurm_gpu_allocation_evidence.device_uuids
             if claim.slurm_gpu_allocation_evidence is not None
@@ -1513,6 +1647,7 @@ async def _observed_cleanup_proof(
     paths: PipelineAttemptPaths,
     backend: DockerPipelineBackend,
     committer: HttpFinalOutputCommitter,
+    runtime_secret: AttemptRuntimeSecretLifecycle | None = None,
 ) -> WorkerCleanupProofV1:
     """Return proof only after every attempt-local resource is observed absent."""
 
@@ -1521,13 +1656,13 @@ async def _observed_cleanup_proof(
         attempt_id=claim.execution_attempt_id
     )
     if (
-        claim.network_profile != "none"
-        or not backend.container_absent
+        not backend.container_absent
         or process_group_present
         or paths.inputs.exists()
         or paths.outputs.exists()
         or paths.scratch.exists()
         or committer.active_session_id is not None
+        or (runtime_secret is not None and not runtime_secret.absent)
     ):
         raise RuntimeError("pipeline_cleanup_proof_incomplete")
     return WorkerCleanupProofV1(
