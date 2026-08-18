@@ -344,6 +344,15 @@ async def test_drain_only_reconcile_bypasses_builder_credentials(
         def begin(self) -> _Transaction:
             return _Transaction()
 
+    class _Runner:
+        async def validate_builder_request(
+            self,
+            *,
+            node: str,
+            config: object,
+        ) -> None:
+            raise AssertionError("drain must not validate a builder request")
+
     async def validate(*_args: Any, **_kwargs: Any) -> None:
         raise AssertionError("drain must not depend on builder credentials")
 
@@ -373,7 +382,7 @@ async def test_drain_only_reconcile_bypasses_builder_credentials(
             env_file="/secure/builder.env",
             registry_docker_config_dir="/secure/registry-docker",
         ),
-        runner=object(),
+        runner=_Runner(),
         scale_up_allowed=False,
     )
 
@@ -397,6 +406,16 @@ async def test_scale_up_reconcile_validates_credentials_inside_transaction(
     class _Session:
         def begin(self) -> _Transaction:
             return _Transaction()
+
+    class _Runner:
+        async def validate_builder_request(
+            self,
+            *,
+            node: str,
+            config: object,
+        ) -> None:
+            assert node == "trt-gb10-1"
+            events.append("slurm-test")
 
     async def validate(*_args: Any, **_kwargs: Any) -> None:
         events.append("validate")
@@ -428,10 +447,11 @@ async def test_scale_up_reconcile_validates_credentials_inside_transaction(
     result = await module._reconcile_with_credentials(
         _Session(),
         config=SimpleNamespace(
+            allowed_nodes=("trt-gb10-1",),
             env_file="/secure/builder.env",
             registry_docker_config_dir="/secure/registry-docker",
         ),
-        runner=object(),
+        runner=_Runner(),
         scale_up_allowed=True,
     )
 
@@ -441,9 +461,48 @@ async def test_scale_up_reconcile_validates_credentials_inside_transaction(
         "materialize",
         "runtime",
         "validate",
+        "slurm-test",
         "reconcile",
         "commit",
     ]
+
+
+async def test_scale_up_reconcile_requires_activation_runner(
+    module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Transaction:
+        async def __aenter__(self) -> None:
+            return None
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    class _Session:
+        def begin(self) -> _Transaction:
+            return _Transaction()
+
+    async def validate(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(module, "_materialize_builder_env", lambda _config: None)
+    monkeypatch.setattr(module, "_validate_builder_runtime_files", lambda _config: None)
+    monkeypatch.setattr(module, "_validate_builder_credentials", validate)
+
+    with pytest.raises(
+        module.TaskImageBuilderPolicyError,
+        match="activation runner is unavailable",
+    ):
+        await module._reconcile_with_credentials(
+            _Session(),
+            config=SimpleNamespace(
+                allowed_nodes=("trt-gb10-1",),
+                env_file="/secure/builder.env",
+                registry_docker_config_dir="/secure/registry-docker",
+            ),
+            runner=None,
+            scale_up_allowed=True,
+        )
 
 
 def test_builder_env_is_atomically_derived_from_candidate_trial_env(

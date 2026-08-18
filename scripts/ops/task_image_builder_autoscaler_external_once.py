@@ -495,6 +495,12 @@ async def _reconcile_with_credentials(
                 env_file=config.env_file,
                 registry_docker_config_dir=config.registry_docker_config_dir,
             )
+            if runner is None:
+                raise TaskImageBuilderPolicyError(
+                    "task-image builder activation runner is unavailable"
+                )
+            for node in config.allowed_nodes:
+                await runner.validate_builder_request(node=node, config=config)
         if runner is None:
             return None
         return await reconcile_task_image_builder_autoscaler_once(
