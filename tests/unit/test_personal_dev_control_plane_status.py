@@ -644,6 +644,65 @@ def test_healthy_acceptance_returns_separate_readiness_facets_and_safe_commands(
         assert command[0] in {"config", "get", "--request-timeout=10s"}
 
 
+@pytest.mark.parametrize(
+    ("mutation", "blocker"),
+    [
+        ("cluster-role-aggregation", "cluster_resource_drift"),
+        ("admission-binding-match-resources", "cluster_resource_drift"),
+        ("default-deny-ingress", "resource_inventory_drift"),
+        ("management-host-network", "resource_inventory_drift"),
+        ("postgres-node-port", "resource_inventory_drift"),
+    ],
+)
+def test_acceptance_status_rejects_live_authority_or_exposure_widening(
+    tmp_path: Path,
+    mutation: str,
+    blocker: str,
+) -> None:
+    expected, plan, runner = _acceptance_healthy_fixture(tmp_path)
+
+    if mutation == "cluster-role-aggregation":
+        role = next(item for item in _items(runner, _CLUSTER) if item["kind"] == "ClusterRole")
+        role["aggregationRule"] = {
+            "clusterRoleSelectors": [{"matchLabels": {"loom.dev/aggregate": "true"}}]
+        }
+    elif mutation == "admission-binding-match-resources":
+        binding = next(
+            item
+            for item in _items(runner, _CLUSTER)
+            if item["kind"] == "ValidatingAdmissionPolicyBinding"
+        )
+        binding["spec"]["matchResources"] = {
+            "namespaceSelector": {"matchLabels": {"loom.dev/skip-policy": "false"}}
+        }
+    elif mutation == "default-deny-ingress":
+        policy = _item(
+            runner,
+            _NAMESPACED,
+            "NetworkPolicy",
+            "loom-personal-dev-default-deny",
+        )
+        policy["spec"]["ingress"] = [{}]
+    elif mutation == "management-host-network":
+        deployment = _item(
+            runner,
+            _NAMESPACED,
+            "Deployment",
+            "loom-personal-dev-management",
+        )
+        deployment["spec"]["template"]["spec"]["hostNetwork"] = True
+    elif mutation == "postgres-node-port":
+        service = _item(runner, _NAMESPACED, "Service", "loom-dev-postgres")
+        service["spec"]["type"] = "NodePort"
+    else:  # pragma: no cover - parameter table is exhaustive
+        raise AssertionError(mutation)
+
+    result = _observe_acceptance(expected, plan, runner)
+
+    assert result.ready is False
+    assert blocker in result.blockers
+
+
 def test_acceptance_queries_the_runtime_class_bound_by_the_plan(
     tmp_path: Path,
 ) -> None:

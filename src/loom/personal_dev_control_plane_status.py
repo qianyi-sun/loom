@@ -292,6 +292,88 @@ def _expected_subset(expected: object, actual: object) -> bool:
     return type(expected) is type(actual) and expected == actual
 
 
+def _security_boundary_matches(
+    expected: Mapping[str, Any],
+    actual: Mapping[str, Any],
+) -> bool:
+    """Reject live additions that can widen authority or network exposure."""
+
+    kind = expected.get("kind")
+    if kind == "ClusterRole" and actual.get("aggregationRule") != expected.get(
+        "aggregationRule"
+    ):
+        return False
+    if kind == "ValidatingAdmissionPolicyBinding":
+        expected_spec = expected.get("spec")
+        actual_spec = actual.get("spec")
+        if not isinstance(expected_spec, Mapping) or not isinstance(actual_spec, Mapping):
+            return False
+        if set(actual_spec) != set(expected_spec):
+            return False
+    if kind == "ValidatingAdmissionPolicy":
+        expected_spec = expected.get("spec")
+        actual_spec = actual.get("spec")
+        if not isinstance(expected_spec, Mapping) or not isinstance(actual_spec, Mapping):
+            return False
+        expected_constraints = expected_spec.get("matchConstraints")
+        actual_constraints = actual_spec.get("matchConstraints")
+        if not isinstance(expected_constraints, Mapping) or not isinstance(
+            actual_constraints, Mapping
+        ):
+            return False
+        if set(actual_constraints) - {"resourceRules", "matchPolicy"}:
+            return False
+        if actual_constraints.get("matchPolicy", "Equivalent") != "Equivalent":
+            return False
+    if kind == "NetworkPolicy":
+        expected_spec = expected.get("spec")
+        actual_spec = actual.get("spec")
+        if (
+            not isinstance(expected_spec, Mapping)
+            or not isinstance(actual_spec, Mapping)
+            or set(actual_spec) != set(expected_spec)
+        ):
+            return False
+    if kind == "Service":
+        expected_spec = expected.get("spec")
+        actual_spec = actual.get("spec")
+        if not isinstance(expected_spec, Mapping) or not isinstance(actual_spec, Mapping):
+            return False
+        expected_type = expected_spec.get("type", "ClusterIP")
+        if actual_spec.get("type", "ClusterIP") != expected_type:
+            return False
+        if (
+            actual_spec.get("externalName") not in {None, ""}
+            or actual_spec.get("loadBalancerClass") not in {None, ""}
+            or actual_spec.get("loadBalancerIP") not in {None, ""}
+        ):
+            return False
+        for field in ("externalIPs", "loadBalancerSourceRanges"):
+            value = actual_spec.get(field, [])
+            if not isinstance(value, list) or value:
+                return False
+        ports = actual_spec.get("ports")
+        if not isinstance(ports, list) or any(
+            isinstance(port, Mapping)
+            and type(port.get("nodePort")) is int
+            and port["nodePort"] > 0
+            for port in ports
+        ):
+            return False
+    if kind in {"Deployment", "StatefulSet", "Job"}:
+        spec = actual.get("spec")
+        template = spec.get("template") if isinstance(spec, Mapping) else None
+        pod_spec = template.get("spec") if isinstance(template, Mapping) else None
+        if not isinstance(pod_spec, Mapping):
+            return False
+        if any(
+            pod_spec.get(field) is True
+            for field in ("hostIPC", "hostNetwork", "hostPID", "shareProcessNamespace")
+        ) or pod_spec.get("hostUsers") is False:
+            return False
+    return True
+
+
 def _expected_documents(
     expected: RenderedPersonalDevControlPlane,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
@@ -1074,6 +1156,10 @@ def _observe_personal_dev_status(
             identity
             for identity, actual in live_expected.items()
             if not _expected_subset(expected_namespaced_index[identity], actual)
+            or not _security_boundary_matches(
+                expected_namespaced_index[identity],
+                actual,
+            )
         }
         generated_pvc_drift = any(
             identity not in live_namespaced
@@ -1264,6 +1350,10 @@ def _observe_personal_dev_status(
         cluster_observed = len(live_cluster)
         cluster_ok = set(live_cluster) == set(expected_cluster_index) and all(
             _expected_subset(expected_cluster_index[identity], live_cluster[identity])
+            and _security_boundary_matches(
+                expected_cluster_index[identity],
+                live_cluster[identity],
+            )
             for identity in expected_cluster_index
         )
         if not cluster_ok:
