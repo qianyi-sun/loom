@@ -566,6 +566,11 @@ async def _dispatch_execution_attempt_responses(
             status_code=409,
             detail="execution-attempt calls require fresh native Responses support",
         )
+    if row.pricing_source != "rate-card" or row.rate_card_provider != "openai":
+        raise HTTPException(
+            status_code=409,
+            detail="execution-attempt calls require configured OpenAI pricing",
+        )
     try:
         request_digest = canonical_digest(payload, persisted=False)
     except CanonicalizationError as exc:

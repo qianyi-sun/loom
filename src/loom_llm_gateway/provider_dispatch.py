@@ -521,6 +521,7 @@ def _validate_binding(
         or connection.id != provider_connection_id
         or connection.status != "valid"
         or connection.deleted_at is not None
+        or (connection.allowed_models is not None and model not in connection.allowed_models)
         or snapshot.get("provider_connection_id") != str(provider_connection_id)
         or snapshot.get("provider") != provider
         or snapshot.get("model") != model
