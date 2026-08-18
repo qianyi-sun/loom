@@ -22,8 +22,12 @@ from loom.db.schema import (
 from loom.pipeline.control_bindings import (
     JudgeExecutionProfileApplyV1,
     JudgeExecutionProfileV1,
+    RecipeProviderBindingApply,
     RecipeProviderBindingApplyV1,
+    RecipeProviderBindingSnapshot,
     RecipeProviderBindingV1,
+    TerminalGenProviderBindingApplyV2,
+    TerminalGenProviderBindingV2,
     control_snapshot_digest,
     snapshot_bytes,
     validate_registered_judge_adapter,
@@ -37,16 +41,17 @@ from loom.pipeline.spec import ProviderAttemptLimitsV1, RecipeIdentityV1
 from loom_service.pipeline_api_service import PipelineApiError
 
 _SLUG_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
-_PROFILE_NAME_RE = re.compile(
-    r"^(?:[a-z][a-z0-9_]{0,62}|behavior-judge-codex-gpt-5\.6-sol-v1)$"
-)
+_PROFILE_NAME_RE = re.compile(r"^(?:[a-z][a-z0-9_]{0,62}|behavior-judge-codex-gpt-5\.6-sol-v1)$")
+_TERMINALGEN_CONTROL_SLOTS = tuple(f"generate_card_{ordinal:02d}" for ordinal in range(18))
 
 
 def _profile_snapshot(value: dict[str, Any]) -> JudgeExecutionProfileV1:
     return JudgeExecutionProfileV1.model_validate_json(json.dumps(value))
 
 
-def _provider_snapshot(value: dict[str, Any]) -> RecipeProviderBindingV1:
+def _provider_snapshot(value: dict[str, Any]) -> RecipeProviderBindingSnapshot:
+    if value.get("schema_version") == "loom.recipe-provider-binding.v2":
+        return TerminalGenProviderBindingV2.model_validate_json(json.dumps(value))
     return RecipeProviderBindingV1.model_validate_json(json.dumps(value))
 
 
@@ -141,7 +146,9 @@ def _redacted_profile(snapshot: JudgeExecutionProfileV1) -> dict[str, Any]:
         "wire_api": snapshot.wire_api,
         "runner_lock_sha256": snapshot.runner_lock_sha256,
         "provider_asset_manifest_sha256": snapshot.provider_asset_manifest_sha256,
-        "provider_asset_locks": [item.model_dump(mode="json") for item in snapshot.provider_asset_locks],
+        "provider_asset_locks": [
+            item.model_dump(mode="json") for item in snapshot.provider_asset_locks
+        ],
         "mcp_server_locks": [item.model_dump(mode="json") for item in snapshot.mcp_server_locks],
         "provider_request_limit_per_attempt": snapshot.provider_request_limit_per_attempt,
         "provider_cost_limit_microusd_per_attempt": snapshot.provider_cost_limit_microusd_per_attempt,
@@ -155,7 +162,7 @@ def _redacted_profile(snapshot: JudgeExecutionProfileV1) -> dict[str, Any]:
     }
 
 
-def _redacted_binding(snapshot: RecipeProviderBindingV1) -> dict[str, Any]:
+def _redacted_binding(snapshot: RecipeProviderBindingSnapshot) -> dict[str, Any]:
     value = snapshot.model_dump(mode="json", exclude={"provider_connection_id"})
     value["snapshot_sha256"] = control_snapshot_digest(snapshot)
     return value
@@ -167,7 +174,7 @@ def _admin_profile(snapshot: JudgeExecutionProfileV1) -> dict[str, Any]:
     return value
 
 
-def _admin_binding(snapshot: RecipeProviderBindingV1) -> dict[str, Any]:
+def _admin_binding(snapshot: RecipeProviderBindingSnapshot) -> dict[str, Any]:
     value = snapshot.model_dump(mode="json")
     value["snapshot_sha256"] = control_snapshot_digest(snapshot)
     return value
@@ -293,16 +300,22 @@ async def apply_provider_binding(
     recipe_name: str,
     recipe_version: int,
     logical_name: str,
-    payload: RecipeProviderBindingApplyV1,
+    payload: RecipeProviderBindingApply,
     idempotency_key: str,
     create_only: bool,
     expected_version: int | None,
 ) -> tuple[dict[str, Any], bool]:
-    if (recipe_name, recipe_version, logical_name) != (
-        "behavior-recovery",
-        1,
-        "behavior_recovery_primitive",
-    ):
+    is_behavior = isinstance(payload, RecipeProviderBindingApplyV1) and (
+        recipe_name,
+        recipe_version,
+        logical_name,
+    ) == ("behavior-recovery", 1, "behavior_recovery_primitive")
+    is_terminalgen = isinstance(payload, TerminalGenProviderBindingApplyV2) and (
+        recipe_name == "terminalgen-authoring"
+        and recipe_version == 1
+        and re.fullmatch(r"generate_card_(?:0[0-9]|1[0-7])", logical_name) is not None
+    )
+    if not (is_behavior or is_terminalgen):
         raise PipelineApiError(422, "control_binding_incompatible", "Unsupported Recipe binding")
     connection = await session.get(ProviderConnection, payload.provider_connection_id)
     if connection is None or not _provider_matches(
@@ -310,6 +323,18 @@ async def apply_provider_binding(
     ):
         raise PipelineApiError(
             422, "provider_connection_unavailable", "Provider connection is unavailable"
+        )
+    if is_terminalgen and (
+        connection.pricing_source != "rate-card"
+        or connection.rate_card_provider != "openai"
+        or connection.responses_api_supported is not True
+        or connection.responses_api_probed_at is None
+        or datetime.now(UTC) - connection.responses_api_probed_at >= timedelta(hours=24)
+    ):
+        raise PipelineApiError(
+            422,
+            "provider_connection_unavailable",
+            "TerminalGen requires fresh native Responses support and configured pricing",
         )
     digest = canonical_digest(
         {
@@ -352,20 +377,38 @@ async def apply_provider_binding(
     version = current.version + 1 if current is not None else 1
     created_by = current.created_by if current is not None else actor_id
     created_at = current.created_at if current is not None else now
-    snapshot = RecipeProviderBindingV1(
-        schema_version="loom.recipe-provider-binding.v1",
-        binding_id=binding_id,
-        logical_name="behavior_recovery_primitive",
-        version=version,
-        recipe_name="behavior-recovery",
-        recipe_version=1,
-        node_key="recovery_primitive",
-        created_by=created_by,
-        created_at=created_at,
-        updated_by=actor_id,
-        updated_at=now,
-        **payload.model_dump(mode="python"),
-    )
+    if is_terminalgen:
+        assert isinstance(payload, TerminalGenProviderBindingApplyV2)
+        snapshot: RecipeProviderBindingSnapshot = TerminalGenProviderBindingV2(
+            schema_version="loom.recipe-provider-binding.v2",
+            binding_id=binding_id,
+            logical_name=logical_name,
+            version=version,
+            recipe_name="terminalgen-authoring",
+            recipe_version=1,
+            node_key=logical_name,
+            created_by=created_by,
+            created_at=created_at,
+            updated_by=actor_id,
+            updated_at=now,
+            **payload.model_dump(mode="python"),
+        )
+    else:
+        assert isinstance(payload, RecipeProviderBindingApplyV1)
+        snapshot = RecipeProviderBindingV1(
+            schema_version="loom.recipe-provider-binding.v1",
+            binding_id=binding_id,
+            logical_name="behavior_recovery_primitive",
+            version=version,
+            recipe_name="behavior-recovery",
+            recipe_version=1,
+            node_key="recovery_primitive",
+            created_by=created_by,
+            created_at=created_at,
+            updated_by=actor_id,
+            updated_at=now,
+            **payload.model_dump(mode="python"),
+        )
     if current is not None:
         current.is_current = False
     row = RecipeProviderBinding(
@@ -435,6 +478,76 @@ class SqlPipelineRecipeBindingResolver:
     ) -> ResolvedRecipeControlBindingsV1:
         if session is None:
             raise PipelineApiError(422, "binding_unavailable", "Transactional resolver required")
+        if (recipe_identity.name, recipe_identity.version) == ("terminalgen-authoring", 1):
+            if judge_profile_id is not None:
+                raise PipelineApiError(
+                    422,
+                    "judge_profile_incompatible",
+                    "TerminalGen does not accept a judge profile",
+                )
+            if logical_slots != _TERMINALGEN_CONTROL_SLOTS:
+                raise PipelineApiError(
+                    422,
+                    "control_binding_missing",
+                    "TerminalGen binding slots drifted",
+                )
+            rows = list(
+                (
+                    await session.execute(
+                        select(RecipeProviderBinding)
+                        .where(
+                            RecipeProviderBinding.recipe_name == recipe_identity.name,
+                            RecipeProviderBinding.recipe_version == recipe_identity.version,
+                            RecipeProviderBinding.logical_name.in_(logical_slots),
+                            RecipeProviderBinding.is_current.is_(True),
+                        )
+                        .with_for_update()
+                    )
+                ).scalars()
+            )
+            by_name = {row.logical_name: row for row in rows}
+            if len(by_name) != len(logical_slots):
+                raise PipelineApiError(
+                    422,
+                    "control_binding_missing",
+                    "TerminalGen provider bindings are incomplete",
+                )
+            items: list[ResolvedRecipeControlBindingV1] = []
+            for logical_name in logical_slots:
+                row = by_name[logical_name]
+                snapshot = _provider_snapshot(row.snapshot_json)
+                if (
+                    not isinstance(snapshot, TerminalGenProviderBindingV2)
+                    or row.status != "active"
+                    or snapshot.recipe_digest != recipe_identity.digest
+                    or (snapshot.allowed_team_ids and team_id not in snapshot.allowed_team_ids)
+                    or row.snapshot_sha256 != control_snapshot_digest(snapshot)
+                ):
+                    raise PipelineApiError(
+                        422,
+                        "control_binding_incompatible",
+                        "TerminalGen provider binding is incompatible",
+                    )
+                items.append(
+                    ResolvedRecipeControlBindingV1(
+                        logical_name=logical_name,
+                        kind="provider",
+                        node_key=logical_name,
+                        object_id=snapshot.binding_id,
+                        version=snapshot.version,
+                        snapshot_sha256=row.snapshot_sha256,
+                        provider_limits=ProviderAttemptLimitsV1(
+                            provider_request_limit_per_attempt=(
+                                snapshot.provider_request_limit_per_attempt
+                            ),
+                            provider_cost_limit_microusd_per_attempt=(
+                                snapshot.provider_cost_limit_microusd_per_attempt
+                            ),
+                            per_call_timeout_seconds=snapshot.per_call_timeout_seconds,
+                        ),
+                    )
+                )
+            return ResolvedRecipeControlBindingsV1(items=items)
         if judge_profile_id is None:
             raise PipelineApiError(422, "judge_profile_missing", "Judge profile is required")
         if logical_slots != ("behavior_offline_judge", "behavior_recovery_primitive"):

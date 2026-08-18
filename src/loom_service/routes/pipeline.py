@@ -29,7 +29,7 @@ from loom.pipeline.artifact_commit import PartReceiptV1
 from loom.pipeline.behavior_input_import import BehaviorInputImportManifestV1
 from loom.pipeline.control_bindings import (
     JudgeExecutionProfileApplyV1,
-    RecipeProviderBindingApplyV1,
+    RecipeProviderBindingApply,
 )
 from loom.pipeline.keys import canonical_digest
 from loom.pipeline.live_preview import LivePreviewMetadataV1, is_stage1_live_preview_eligible
@@ -310,7 +310,7 @@ async def put_admin_provider_binding(
     recipe_name: str,
     recipe_version: int,
     logical_name: str,
-    payload: RecipeProviderBindingApplyV1,
+    payload: RecipeProviderBindingApply,
     idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
     if_none_match: Annotated[str | None, Header(alias="If-None-Match")] = None,
     if_match_version: Annotated[int | None, Header(alias="If-Match-Version")] = None,

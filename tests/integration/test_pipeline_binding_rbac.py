@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
 from uuid import uuid4
@@ -21,8 +22,10 @@ from loom.db.schema import (
 from loom.pipeline.control_bindings import (
     JudgeExecutionProfileApplyV1,
     RecipeProviderBindingApplyV1,
+    TerminalGenProviderBindingApplyV2,
     registered_judge_adapter_digest,
 )
+from loom.pipeline.spec import RecipeIdentityV1
 from loom_service.pipeline_control_bindings import (
     SqlPipelineRecipeBindingResolver,
     apply_judge_profile,
@@ -249,3 +252,115 @@ async def test_admin_apply_is_versioned_idempotent_and_public_list_is_redacted(
                 await session.execute(delete(Team).where(Team.id == team_id))
         finally:
             await engine.dispose()
+
+
+async def test_terminalgen_resolver_requires_all_eighteen_fresh_priced_bindings(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    team_id, actor_id, connection_id = uuid4(), uuid4(), uuid4()
+    keys = tuple(f"generate_card_{ordinal:02d}" for ordinal in range(18))
+    try:
+        async with sessions() as session, session.begin():
+            session.add(Team(id=team_id, name=f"terminalgen-bindings-{team_id}"))
+            session.add(
+                User(
+                    id=actor_id,
+                    username=f"terminalgen-binding-admin-{actor_id}",
+                    username_normalized=f"terminalgen-binding-admin-{actor_id}",
+                    status="active",
+                    is_platform_admin=True,
+                )
+            )
+            await session.flush()
+            session.add(
+                ProviderConnection(
+                    id=connection_id,
+                    team_id=team_id,
+                    provider_type="openai-compatible",
+                    display_name=str(connection_id),
+                    base_url="https://provider.invalid/v1",
+                    upstream_host="provider.invalid",
+                    resolved_egress_ips=[],
+                    encrypted_api_key_ref="test://redacted",
+                    allowed_models=["gpt-5.6-sol"],
+                    status="valid",
+                    responses_api_supported=True,
+                    responses_api_probed_at=datetime.now(UTC),
+                    pricing_source="rate-card",
+                    rate_card_provider="openai",
+                    created_by="test",
+                )
+            )
+            await session.flush()
+            payload = TerminalGenProviderBindingApplyV2(
+                status="active",
+                recipe_digest=D,
+                environment="staging",
+                provider_connection_id=connection_id,
+                provider="openai",
+                model="gpt-5.6-sol",
+                wire_api="responses",
+                runtime_adapter="terminalgen_openai_responses_v1",
+                runtime_adapter_sha256=D,
+                runner_lock_sha256=D,
+                adapter_image_digest="registry.invalid/loom/terminalgen@sha256:" + "f" * 64,
+                request_schema_sha256=D,
+                response_schema_sha256=D,
+                provider_request_limit_per_attempt=1,
+                provider_cost_limit_microusd_per_attempt=1_000_000,
+                per_call_timeout_seconds=300,
+                allowed_team_ids=[team_id],
+            )
+            for key in keys:
+                created, replay = await apply_provider_binding(
+                    session,
+                    actor_id=actor_id,
+                    recipe_name="terminalgen-authoring",
+                    recipe_version=1,
+                    logical_name=key,
+                    payload=payload,
+                    idempotency_key=f"create-{key}",
+                    create_only=True,
+                    expected_version=None,
+                )
+                assert not replay
+                assert created["logical_name"] == key
+
+        resolver = SqlPipelineRecipeBindingResolver(sessions)
+        async with sessions() as session, session.begin():
+            resolved = await resolver.resolve(
+                team_id,
+                RecipeIdentityV1(name="terminalgen-authoring", version=1, digest=D),
+                None,
+                keys,
+                session=session,
+            )
+        assert tuple(item.logical_name for item in resolved.items) == keys
+        assert all(item.node_key == item.logical_name for item in resolved.items)
+        assert all(
+            item.provider_limits.provider_request_limit_per_attempt == 1 for item in resolved.items
+        )
+    finally:
+        async with sessions() as session, session.begin():
+            await session.execute(
+                delete(RecipeProviderBinding).where(
+                    RecipeProviderBinding.provider_connection_id == connection_id
+                )
+            )
+            await session.execute(
+                delete(ApiIdempotencyRecord).where(
+                    ApiIdempotencyRecord.team_id.is_(None),
+                    ApiIdempotencyRecord.endpoint == "provider_binding_apply",
+                    ApiIdempotencyRecord.idempotency_key.in_(
+                        tuple(f"create-{key}" for key in keys)
+                    ),
+                )
+            )
+            await session.execute(
+                delete(ProviderConnection).where(ProviderConnection.id == connection_id)
+            )
+            await session.execute(delete(User).where(User.id == actor_id))
+            await session.execute(delete(Team).where(Team.id == team_id))
+        await engine.dispose()

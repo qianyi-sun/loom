@@ -5,7 +5,13 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from loom.pipeline.control_bindings import RecipeProviderBindingApplyV1
+from loom.pipeline.control_bindings import (
+    ControlBindingSnapshotDocumentV1,
+    RecipeProviderBindingApplyV1,
+    TerminalGenProviderBindingApplyV2,
+    TerminalGenProviderBindingV2,
+    control_snapshot_digest,
+)
 
 D = "sha256:" + "c" * 64
 
@@ -66,6 +72,83 @@ def test_primitive_binding_requires_exact_mcp_and_limits() -> None:
             {**_payload(), "provider_cost_limit_microusd_per_attempt": 29_999_999}
         )
     with pytest.raises(ValidationError):
-        RecipeProviderBindingApplyV1.model_validate(
-            {**_payload(), "per_call_timeout_seconds": 599}
+        RecipeProviderBindingApplyV1.model_validate({**_payload(), "per_call_timeout_seconds": 599})
+
+
+def _terminalgen_payload() -> dict[str, object]:
+    return {
+        "status": "active",
+        "recipe_digest": D,
+        "environment": "staging",
+        "provider_connection_id": uuid4(),
+        "provider": "openai",
+        "model": "gpt-5.6-sol",
+        "wire_api": "responses",
+        "runtime_adapter": "terminalgen_openai_responses_v1",
+        "runtime_adapter_sha256": D,
+        "runner_lock_sha256": D,
+        "adapter_image_digest": "registry.invalid/loom/terminalgen@sha256:" + "d" * 64,
+        "request_schema_sha256": D,
+        "response_schema_sha256": D,
+        "provider_request_limit_per_attempt": 1,
+        "provider_cost_limit_microusd_per_attempt": 1_000_000,
+        "per_call_timeout_seconds": 300,
+        "allowed_team_ids": [],
+    }
+
+
+def test_terminalgen_binding_is_closed_and_bounded() -> None:
+    value = TerminalGenProviderBindingApplyV2.model_validate(_terminalgen_payload())
+    assert value.wire_api == "responses"
+    for field, invalid in (
+        ("provider", "anthropic"),
+        ("wire_api", "messages"),
+        ("runtime_adapter", "shell"),
+        ("provider_request_limit_per_attempt", 9),
+        ("provider_cost_limit_microusd_per_attempt", 10_000_001),
+        ("per_call_timeout_seconds", 601),
+    ):
+        with pytest.raises(ValidationError):
+            TerminalGenProviderBindingApplyV2.model_validate(
+                {**_terminalgen_payload(), field: invalid}
+            )
+    with pytest.raises(ValidationError, match="Extra inputs"):
+        TerminalGenProviderBindingApplyV2.model_validate(
+            {**_terminalgen_payload(), "api_key": "secret"}
+        )
+
+
+def test_terminalgen_binding_snapshot_requires_matching_card() -> None:
+    from datetime import UTC, datetime
+
+    payload = TerminalGenProviderBindingApplyV2.model_validate(_terminalgen_payload())
+    now = datetime.now(UTC)
+    value = TerminalGenProviderBindingV2(
+        schema_version="loom.recipe-provider-binding.v2",
+        binding_id=uuid4(),
+        logical_name="generate_card_17",
+        version=1,
+        recipe_name="terminalgen-authoring",
+        recipe_version=1,
+        node_key="generate_card_17",
+        created_by=uuid4(),
+        created_at=now,
+        updated_by=uuid4(),
+        updated_at=now,
+        **payload.model_dump(mode="python"),
+    )
+    assert control_snapshot_digest(value).startswith("sha256:")
+    document = ControlBindingSnapshotDocumentV1(
+        logical_name="generate_card_17",
+        kind="provider",
+        node_key="generate_card_17",
+        object_id=value.binding_id,
+        version=value.version,
+        snapshot_sha256=control_snapshot_digest(value),
+        snapshot=value,
+    )
+    assert document.snapshot == value
+    with pytest.raises(ValidationError):
+        TerminalGenProviderBindingV2.model_validate(
+            {**value.model_dump(mode="python"), "node_key": "generate_card_16"}
         )
