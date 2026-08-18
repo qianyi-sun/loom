@@ -157,6 +157,9 @@ def test_identity_probe_authenticates_and_parses_the_status_boundary(
     class _Response:
         status_code = 200
 
+        def __init__(self) -> None:
+            self.headers = {"content-encoding": ""}
+
         def __enter__(self) -> _Response:
             return self
 
@@ -195,6 +198,7 @@ def test_identity_probe_authenticates_and_parses_the_status_boundary(
                 or headers
                 != {
                     "Accept": "application/json",
+                    "Accept-Encoding": "identity",
                     "Authorization": "Bearer lifecycle-secret",
                 }
             ):
@@ -225,6 +229,79 @@ def test_identity_probe_authenticates_and_parses_the_status_boundary(
         )["observer_principal_id"]
         == "personal-dev-lifecycle"
     )
+
+
+def test_identity_probe_rejects_encoded_response_before_decompression(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token_file = tmp_path / "lifecycle-token"
+    token_file.write_text("lifecycle-secret", encoding="utf-8")
+    token_file.chmod(0o600)
+
+    class _Context:
+        def load_cert_chain(self, **_kwargs: object) -> None:
+            pass
+
+    class _Response:
+        status_code = 200
+
+        def __init__(self) -> None:
+            self.headers = {"content-encoding": "gzip"}
+
+        def __enter__(self) -> _Response:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def iter_bytes(self, *, chunk_size: int):
+            raise AssertionError("encoded response body must not be decompressed")
+            yield b""  # pragma: no cover - keep this a generator
+
+    class _Client:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> _Client:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def stream(
+            self,
+            method: str,
+            url: str,
+            *,
+            headers: dict[str, str] | None,
+        ) -> _Response:
+            assert method == "GET"
+            assert url == (
+                "https://loom-capacity-manager.loom-dev.svc.cluster.local:8443/v1/status"
+            )
+            assert headers is not None
+            assert headers["Accept-Encoding"] == "identity"
+            return _Response()
+
+    monkeypatch.setattr(
+        "loom_capacity_manager.health_probe.ssl.create_default_context",
+        lambda **_kwargs: _Context(),
+    )
+    monkeypatch.setattr(
+        "loom_capacity_manager.health_probe.httpx.Client",
+        _Client,
+    )
+
+    with pytest.raises(CapacityHealthProbeError, match="response encoding is invalid"):
+        probe_capacity_manager(
+            url="https://loom-capacity-manager.loom-dev.svc.cluster.local:8443/v1/status",
+            ca_file=tmp_path / "ca.pem",
+            certificate_file=tmp_path / "certificate.pem",
+            private_key_file=tmp_path / "private-key.pem",
+            bearer_token_file=token_file,
+            observe_identity=True,
+        )
 
 
 def test_identity_probe_rejects_noncanonical_url_before_reading_credentials(

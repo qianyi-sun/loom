@@ -295,12 +295,19 @@ def probe_capacity_manager(
                 {
                     "Authorization": f"Bearer {bearer_token}",
                     "Accept": "application/json",
+                    "Accept-Encoding": "identity",
                 }
                 if bearer_token is not None
                 else None
             )
             response_limit = 64 * 1024 if observe_identity else _MAX_HEALTH_BYTES
             with client.stream("GET", url, headers=headers) as response:
+                if observe_identity and response.headers.get(
+                    "content-encoding", ""
+                ).strip().lower() not in {"", "identity"}:
+                    raise CapacityHealthProbeError(
+                        "capacity health response encoding is invalid"
+                    )
                 payload = bytearray()
                 for chunk in response.iter_bytes(chunk_size=response_limit + 1):
                     payload.extend(chunk)
