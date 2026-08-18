@@ -1145,7 +1145,7 @@ def test_renderer_pins_images_credentials_security_and_runtime_commands() -> Non
         "/var/run/loom-capacity-manager/runtime/credentials/health-private-key.pem",
         "--server-certificate-file",
         "/var/run/loom-capacity-manager/runtime/credentials/server-certificate.pem",
-        "--observe",
+        "--allow-positive-ceiling",
     ]
     assert manager_container["startupProbe"]["exec"]["command"] == health_command
     assert manager_container["readinessProbe"]["exec"]["command"] == health_command
@@ -1161,8 +1161,9 @@ def test_manager_runtime_probes_observe_positive_activation_without_weakening_he
     readiness_command = container["readinessProbe"]["exec"]["command"]
 
     assert startup_command == readiness_command
-    assert startup_command[-1] == "--observe"
-    assert startup_command.count("--observe") == 1
+    assert startup_command[-1] == "--allow-positive-ceiling"
+    assert startup_command.count("--allow-positive-ceiling") == 1
+    assert "--observe" not in startup_command
     assert container["livenessProbe"]["tcpSocket"] == {"port": 8443}
 
 

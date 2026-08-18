@@ -1083,7 +1083,7 @@ def _manager_deployment(
         f"{_CREDENTIALS}/health-private-key.pem",
         "--server-certificate-file",
         f"{_CREDENTIALS}/server-certificate.pem",
-        "--observe",
+        "--allow-positive-ceiling",
     ]
     environment = [
         {"name": name, "value": value}

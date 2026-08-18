@@ -31,8 +31,14 @@ def capacity_health_probe_argv(
     credentials_directory: str = _DEFAULT_CREDENTIALS,
     *,
     observe: bool = False,
+    allow_positive_ceiling: bool = False,
 ) -> tuple[str, ...]:
-    """Return the fixed in-container zero-ceiling health-probe command."""
+    """Return one fixed in-container health-probe command."""
+
+    if type(observe) is not bool or type(allow_positive_ceiling) is not bool:
+        raise ValueError("capacity health probe mode is invalid")
+    if observe and allow_positive_ceiling:
+        raise ValueError("capacity health probe modes are mutually exclusive")
 
     command = (
         "python",
@@ -49,7 +55,11 @@ def capacity_health_probe_argv(
         "--server-certificate-file",
         f"{credentials_directory}/server-certificate.pem",
     )
-    return (*command, "--observe") if observe else command
+    if observe:
+        return (*command, "--observe")
+    if allow_positive_ceiling:
+        return (*command, "--allow-positive-ceiling")
+    return command
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -87,11 +97,17 @@ def parse_observed_capacity_health_response(
 def parse_capacity_health_response(
     status_code: int,
     payload: bytes,
+    *,
+    allow_positive_ceiling: bool = False,
 ) -> dict[str, object]:
     """Validate one bounded response without Python's bool/int coercion."""
 
+    if type(allow_positive_ceiling) is not bool:
+        raise CapacityHealthProbeError("capacity health probe mode is invalid")
     document = parse_observed_capacity_health_response(status_code, payload)
-    if document["status"] != "ready" or document["executable_new_capacity_ceiling"] != 0:
+    if document["status"] != "ready":
+        raise CapacityHealthProbeError("capacity manager is not ready")
+    if not allow_positive_ceiling and document["executable_new_capacity_ceiling"] != 0:
         raise CapacityHealthProbeError(
             "capacity manager did not prove the zero-execution readiness boundary"
         )
@@ -155,6 +171,7 @@ def probe_capacity_manager(
     server_certificate_file: Path,
     timeout_seconds: float = 3.0,
     observe: bool = False,
+    allow_positive_ceiling: bool = False,
 ) -> dict[str, object]:
     """Perform one bounded, server-verified, client-authenticated health request."""
 
@@ -174,6 +191,8 @@ def probe_capacity_manager(
         or not isinstance(timeout_seconds, (int, float))
         or not 0 < timeout_seconds <= 30
         or type(observe) is not bool
+        or type(allow_positive_ceiling) is not bool
+        or (observe and allow_positive_ceiling)
     ):
         raise CapacityHealthProbeError("capacity health timeout is invalid")
     _validate_server_certificate_identities(server_certificate_file)
@@ -201,8 +220,13 @@ def probe_capacity_manager(
         raise
     except (OSError, ValueError, ssl.SSLError, httpx.HTTPError) as exc:
         raise CapacityHealthProbeError("capacity health transport failed") from exc
-    parser = parse_observed_capacity_health_response if observe else parse_capacity_health_response
-    return parser(status_code, bytes(payload))
+    if observe:
+        return parse_observed_capacity_health_response(status_code, bytes(payload))
+    return parse_capacity_health_response(
+        status_code,
+        bytes(payload),
+        allow_positive_ceiling=allow_positive_ceiling,
+    )
 
 
 def main() -> None:
@@ -213,10 +237,16 @@ def main() -> None:
     parser.add_argument("--private-key-file", type=Path, required=True)
     parser.add_argument("--server-certificate-file", type=Path, required=True)
     parser.add_argument("--timeout-seconds", type=float, default=3.0)
-    parser.add_argument(
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument(
         "--observe",
         action="store_true",
         help="Emit an exact read-only health observation without requiring ceiling zero.",
+    )
+    modes.add_argument(
+        "--allow-positive-ceiling",
+        action="store_true",
+        help="Require ready while accepting an exact nonnegative executable ceiling.",
     )
     arguments = parser.parse_args()
     try:
@@ -228,6 +258,7 @@ def main() -> None:
             server_certificate_file=arguments.server_certificate_file,
             timeout_seconds=arguments.timeout_seconds,
             observe=arguments.observe,
+            allow_positive_ceiling=arguments.allow_positive_ceiling,
         )
     except CapacityHealthProbeError as exc:
         sys.stderr.write(f"error: {exc}\n")
