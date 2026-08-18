@@ -152,8 +152,12 @@ class ReadinessCandidate:
     gpu_backend_selection_json: dict[str, Any] | None
     gpu_backend_selection_digest: str | None
     fanout_item_json: dict[str, Any] | None = None
+    fanout_source_manifest_digest: str | None = None
+    fanout_item_digest: str | None = None
+    fanout_parameters_json: dict[str, Any] | None = None
     terminal_snapshot: FrozenTerminalSnapshot | None = None
     ordinary_input_bindings_json: list[dict[str, Any]] | None = None
+    control_binding_snapshots_json: list[dict[str, Any]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -721,9 +725,12 @@ class PipelineRepository:
                                stage.resource_profile_digest,
                                stage.image_runtime_contract_json,
                                stage.image_runtime_contract_digest,
-                               stage.fanout_item_json,
+                               stage.fanout_item_json, stage.fanout_item_digest,
+                               stage.fanout_parameters_json,
+                               expansion.source_manifest_digest AS fanout_source_manifest_digest,
                                run.recipe_digest, run.graph_spec_digest,
                                run.parameters_json, run.resolved_inputs_json,
+                               run.control_binding_snapshots_json,
                                run.official_submission_kind,
                                stage1.candidate_json AS authority_candidate_json,
                                gpu.selection_json AS gpu_backend_selection_json,
@@ -736,6 +743,8 @@ class PipelineRepository:
                             ON stage1.pipeline_run_id=run.id
                           LEFT JOIN pipeline_run_gpu_backend_selections gpu
                             ON gpu.pipeline_run_id=run.id AND gpu.scope='all_gpu_nodes'
+                          LEFT JOIN pipeline_fanout_expansions expansion
+                            ON expansion.id=stage.fanout_expansion_id
                          WHERE stage.pipeline_run_id=:run_id AND stage.node_kind='container'
                            AND (stage.state='blocked' OR (
                                stage.state='retry_wait'
@@ -844,8 +853,12 @@ class PipelineRepository:
                         gpu_backend_selection_json=row["gpu_backend_selection_json"],
                         gpu_backend_selection_digest=row["gpu_backend_selection_digest"],
                         fanout_item_json=row["fanout_item_json"],
+                        fanout_source_manifest_digest=row["fanout_source_manifest_digest"],
+                        fanout_item_digest=row["fanout_item_digest"],
+                        fanout_parameters_json=row["fanout_parameters_json"],
                         terminal_snapshot=terminal_snapshot,
                         ordinary_input_bindings_json=ordinary_bindings,
+                        control_binding_snapshots_json=row["control_binding_snapshots_json"],
                     )
                 )
             return tuple(candidates)

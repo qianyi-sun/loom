@@ -37,6 +37,7 @@ def _graph(*, slots_per_card: int = 500):
             packager=IMAGE,
         ),
         renderers=TerminalGenRendererLocksV1(
+            stage=DIGEST,
             plan_audit=DIGEST,
             card_finalize=DIGEST,
             global_finalize=DIGEST,
@@ -112,6 +113,7 @@ def test_graph_factory_rejects_local_concurrency_and_scales_bound_with_test_quot
                 packager=IMAGE,
             ),
             renderers=TerminalGenRendererLocksV1(
+                stage=DIGEST,
                 plan_audit=DIGEST,
                 card_finalize=DIGEST,
                 global_finalize=DIGEST,

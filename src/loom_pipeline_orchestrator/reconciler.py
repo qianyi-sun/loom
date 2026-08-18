@@ -70,7 +70,7 @@ class FanoutRuntimeV1(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
-class _PairedReadinessRuntime:
+class PairedReadinessRuntime:
     resolver: ReadinessResolverV1
     renderer: StageRequestRendererV1
 
@@ -143,7 +143,7 @@ class PipelineReconciler:
         if readiness_runtime is not None:
             self._readiness_runtime = readiness_runtime
         elif readiness_resolver is not None and request_renderer is not None:
-            self._readiness_runtime = _PairedReadinessRuntime(
+            self._readiness_runtime = PairedReadinessRuntime(
                 resolver=readiness_resolver,
                 renderer=request_renderer,
             )
