@@ -24,6 +24,7 @@ from loom.db.schema import (
     TeamMembership,
     Worker,
 )
+from loom.pipeline.artifact_access import artifact_read_allowed
 from loom.pipeline.artifact_commit import PartReceiptV1
 from loom.pipeline.behavior_input_import import BehaviorInputImportManifestV1
 from loom.pipeline.control_bindings import (
@@ -520,7 +521,11 @@ async def get_pipeline_run(sc: SessionAndCtx, run_id: UUID) -> dict[str, Any]:
             item["shard_key"].encode("utf-8"),
         ),
     )
-    body["artifacts"] = [_artifact_projection(item) for item in artifacts]
+    body["artifacts"] = [
+        _artifact_projection(item)
+        for item in artifacts
+        if _artifact_read_allowed_for_context(item, run=run, sc=sc)
+    ]
     body["budget"] = _budget_projection(ledger, run)
     return body
 
@@ -620,7 +625,11 @@ async def get_pipeline_stage_run(sc: SessionAndCtx, stage_run_id: UUID) -> dict[
         stage,
         topology=_graph_topology(run.graph_spec_json),
         run_state=run.state,
-        artifacts=artifacts,
+        artifacts=[
+            artifact
+            for artifact in artifacts
+            if _artifact_read_allowed_for_context(artifact, run=run, sc=sc)
+        ],
     )
 
 
@@ -1160,6 +1169,12 @@ async def download_pipeline_artifact(
             status_code=404,
             detail={"reason_code": "not_found", "message": "Pipeline Artifact was not found"},
         )
+    run = await sc[0].get(PipelineRun, artifact.pipeline_run_id)
+    if run is None or not _artifact_read_allowed_for_context(artifact, run=run, sc=sc):
+        raise HTTPException(
+            status_code=404,
+            detail={"reason_code": "not_found", "message": "Pipeline Artifact was not found"},
+        )
     upload = await sc[0].get(ArtifactUploadSession, artifact.artifact_upload_session_id)
     files = artifact.storage.get("files") if isinstance(artifact.storage, dict) else None
     if upload is None or not isinstance(files, list) or not files:
@@ -1204,11 +1219,14 @@ async def get_pipeline_artifact(
     stage_run_id: UUID,
     artifact_id: UUID,
 ) -> dict[str, Any]:
-    team_id, _ = _team_and_user(sc, mutation=False)
+    team_id, user_id = _team_and_user(sc, mutation=False)
     resolved = await resolve_public_artifact(
         sc[0],
         team_id=team_id,
         artifact_id=artifact_id,
+        user_id=user_id,
+        role=sc[1].role,
+        platform_admin=is_admin(sc[1]),
         run_id=run_id,
         stage_run_id=stage_run_id,
     )
@@ -1229,8 +1247,15 @@ async def _read_pipeline_artifact_file(
     if_none_match: Annotated[str | None, Header(alias="If-None-Match")] = None,
     if_range: Annotated[str | None, Header(alias="If-Range")] = None,
 ) -> Response:
-    team_id, _ = _team_and_user(sc, mutation=False)
-    resolved = await resolve_public_artifact(sc[0], team_id=team_id, artifact_id=artifact_id)
+    team_id, user_id = _team_and_user(sc, mutation=False)
+    resolved = await resolve_public_artifact(
+        sc[0],
+        team_id=team_id,
+        artifact_id=artifact_id,
+        user_id=user_id,
+        role=sc[1].role,
+        platform_admin=is_admin(sc[1]),
+    )
     return await stream_public_artifact_file(
         resolved,
         file_index=file_index,
@@ -1463,6 +1488,7 @@ def _artifact_projection(item: Artifact) -> dict[str, Any]:
         "safety_state": item.safety_state,
         "visibility": getattr(item, "visibility", "team"),
         "share_status": getattr(item, "share_status", "pending_scan"),
+        "access_class": getattr(item, "access_class", None) or "team_runtime",
         "download_path": f"/api/v1/pipeline-artifacts/{item.id}/download",
         "detail_path": (
             f"/pipelines/{pipeline_run_id}/stages/{pipeline_stage_run_id}/artifacts/{item.id}"
@@ -1474,6 +1500,21 @@ def _artifact_projection(item: Artifact) -> dict[str, Any]:
         else None,
         "producer_kind": getattr(item, "producer_kind", None),
     }
+
+
+def _artifact_read_allowed_for_context(
+    item: Artifact,
+    *,
+    run: PipelineRun,
+    sc: SessionAndCtx,
+) -> bool:
+    return artifact_read_allowed(
+        getattr(item, "access_class", None),
+        run_created_by_user_id=getattr(run, "created_by_user_id", None),
+        requesting_user_id=sc[1].user_id,
+        requesting_role=sc[1].role,
+        platform_admin=is_admin(sc[1]),
+    )
 
 
 def _counter(limit: int, reserved: int, settled: int) -> dict[str, int]:

@@ -26,6 +26,7 @@ from loom.db.schema import (
     PipelineRun,
     PipelineStageRun,
 )
+from loom.pipeline.artifact_access import pipeline_output_access_class
 from loom.pipeline.artifact_commit import (
     AcceptanceEvidenceProducerV1,
     ArtifactCommitError,
@@ -818,6 +819,7 @@ class CheckpointRouteService(FinalOutputRouteService):
                         visibility="team",
                         share_status="pending_scan",
                         safety_state="verified_internal",
+                        access_class="team_runtime",
                         artifact_upload_session_id=upload.id,
                         manifest_sha256=record["manifest_sha256"],
                         stored_size_bytes=sum(item["size_bytes"] for item in stored_files),
@@ -1095,12 +1097,15 @@ class ExecutionAttemptCompletionService:
         ).scalar_one_or_none()
         if upload is None or upload.state not in {"committed_ready", "committed"}:
             raise ArtifactCommitError("session_not_committed_ready")
-        _stage, manifest, producer_kind_by_id, committed_bytes = await self._validate_contract(
+        stage, manifest, producer_kind_by_id, committed_bytes = await self._validate_contract(
             attempt=attempt,
             report=report,
             upload=upload,
             session=session,
         )
+        run = await session.get(PipelineRun, stage.pipeline_run_id)
+        if run is None:
+            raise ArtifactCommitError("not_found")
         if upload.state == "committed":
             persisted = list(
                 (
@@ -1146,6 +1151,12 @@ class ExecutionAttemptCompletionService:
                     visibility="team",
                     share_status="pending_scan",
                     safety_state="verified_internal",
+                    access_class=pipeline_output_access_class(
+                        record.artifact_type,
+                        recipe_name=run.recipe_name,
+                        node_key=stage.node_key,
+                        artifact_name=record.artifact_name,
+                    ),
                     artifact_upload_session_id=upload.id,
                     manifest_sha256=record.manifest_sha256,
                     stored_size_bytes=sum(item.size_bytes for item in stored_files),
@@ -1269,6 +1280,11 @@ class SqlArtifactInputResolver:
                 or artifact.file_count != item.file_count
             ):
                 raise ArtifactCommitError("input_descriptor_drift")
+            if (
+                artifact.access_class == "authoring_restricted"
+                and artifact.pipeline_run_id != run.id
+            ):
+                raise KeyError(item.artifact_id)
             if artifact.safety_state != "verified_internal":
                 if (
                     artifact.producer_kind != "input_import"

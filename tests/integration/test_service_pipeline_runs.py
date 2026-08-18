@@ -49,7 +49,12 @@ class _Session:
         self.rollbacks += 1
 
 
-def _context(*, team_id: UUID | None = None, user_id: UUID | None = None) -> AuthContext:
+def _context(
+    *,
+    team_id: UUID | None = None,
+    user_id: UUID | None = None,
+    role: str = "member",
+) -> AuthContext:
     return AuthContext(
         token_hash=b"x" * 32,
         type="user",
@@ -57,7 +62,7 @@ def _context(*, team_id: UUID | None = None, user_id: UUID | None = None) -> Aut
         team_id=team_id or uuid4(),
         expires_at=None,
         user_id=user_id or uuid4(),
-        role="member",
+        role=role,
         auth_kind="session",
     )
 
@@ -96,9 +101,11 @@ def _submit_body() -> dict[str, object]:
 
 
 def _run(*, run_id: UUID | None = None, created_at: datetime | None = None) -> SimpleNamespace:
+    created_by_user_id = uuid4()
     return SimpleNamespace(
         id=run_id or uuid4(),
         team_id=uuid4(),
+        created_by_user_id=created_by_user_id,
         display_name="public smoke run",
         recipe_name="smoke",
         recipe_version=1,
@@ -288,6 +295,37 @@ async def test_get_run_projects_stages_artifacts_and_budget_without_internal_fie
     assert body["budget"]["max_provider_cost_usd"]["settled"] == 125_000
     assert "team_id" not in body
     assert "graph_spec_json" not in body
+
+
+async def test_get_run_hides_restricted_artifacts_from_unrelated_members() -> None:
+    run = _run()
+    restricted = SimpleNamespace(
+        id=uuid4(),
+        name="authoring",
+        artifact_type="terminalgen_corpus.v1",
+        content_hash="4" * 64,
+        manifest_sha256="5" * 64,
+        stored_size_bytes=256,
+        file_count=1,
+        safety_state="verified_internal",
+        access_class="authoring_restricted",
+    )
+    session = _Session(
+        _Result(run),
+        _Result([]),
+        _Result([restricted]),
+        get_result=None,
+    )
+    context = _context(team_id=run.team_id, user_id=uuid4(), role="member")
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(session, context)),
+        base_url="http://svc",
+    ) as client:
+        response = await client.get(f"/api/v1/pipeline-runs/{run.id}")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["artifacts"] == []
 
 
 async def test_list_run_pagination_returns_an_opaque_signed_cursor() -> None:

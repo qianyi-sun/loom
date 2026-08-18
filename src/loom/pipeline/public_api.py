@@ -307,6 +307,7 @@ class PipelineArtifactSummaryV1(PipelineReadModel):
     safety_state: str
     visibility: str
     share_status: str
+    access_class: Literal["team_runtime", "authoring_restricted", "sanitized_audit"]
     download_path: str
     pipeline_run_id: UUID | None
     pipeline_stage_run_id: UUID | None

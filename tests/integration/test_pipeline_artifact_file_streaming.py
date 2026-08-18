@@ -185,7 +185,8 @@ def _fixture():
         storage={"session_id": str(session_id), "files": [item.model_dump(mode="json") for item in stored]},
         created_at=datetime(2026, 8, 12, tzinfo=UTC),
     )
-    run = PipelineRun(id=run_id, team_id=team_id)
+    creator_user_id = uuid4()
+    run = PipelineRun(id=run_id, team_id=team_id, created_by_user_id=creator_user_id)
     stage = PipelineStageRun(id=stage_id, pipeline_run_id=run_id)
     rows = [
         ArtifactUploadFile(
@@ -234,6 +235,7 @@ def _fixture():
         store=_Store(objects),
         payloads=payloads,
         prefix=prefix,
+        creator_user_id=creator_user_id,
     )
 
 
@@ -335,11 +337,43 @@ async def test_projection_and_denials_never_expose_object_store_coordinates() ->
     assert case.prefix not in rendered
     assert "storage_key" not in rendered and "credentials" not in rendered
     assert projection["files"][0]["download_path"].endswith("/files/0")
+    assert projection["access_class"] == "team_runtime"
     with pytest.raises(HTTPException) as exc:
         await resolve_public_artifact(
             case.session, team_id=uuid4(), artifact_id=case.artifact_id
         )
     assert exc.value.status_code == 404
+
+
+async def test_authoring_restricted_artifact_requires_creator_owner_or_admin() -> None:
+    case = _fixture()
+    artifact = await case.session.get(Artifact, case.artifact_id)
+    artifact.access_class = "authoring_restricted"
+
+    with pytest.raises(HTTPException) as exc:
+        await resolve_public_artifact(
+            case.session,
+            team_id=case.team_id,
+            artifact_id=case.artifact_id,
+            user_id=uuid4(),
+            role="member",
+        )
+    assert exc.value.status_code == 404
+
+    for user_id, role, platform_admin in (
+        (case.creator_user_id, "member", False),
+        (uuid4(), "owner", False),
+        (uuid4(), "platform_admin", True),
+    ):
+        resolved = await resolve_public_artifact(
+            case.session,
+            team_id=case.team_id,
+            artifact_id=case.artifact_id,
+            user_id=user_id,
+            role=role,
+            platform_admin=platform_admin,
+        )
+        assert resolved.artifact.id == case.artifact_id
 
 
 async def test_sha_or_marker_drift_fails_before_any_response_body() -> None:
