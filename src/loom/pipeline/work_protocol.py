@@ -200,6 +200,9 @@ class Stage1SmokeGrantV1(PipelineModel):
 class TerminalTaskValidationGrantV1(PipelineModel):
     """Worker-owned dynamic-validation authority for one immutable task bundle."""
 
+    schema_version: Literal["loom.terminal-task-validation-grant.v1"] = (
+        "loom.terminal-task-validation-grant.v1"
+    )
     authorization_id: UUID
     pipeline_run_id: UUID
     stage_run_id: UUID
@@ -221,6 +224,9 @@ class TerminalTaskValidationGrantV1(PipelineModel):
 class TerminalGenAuthoringGrantV1(PipelineModel):
     """Server-owned admission proof for the disabled TerminalGen runtime."""
 
+    schema_version: Literal["loom.terminalgen-authoring-grant.v1"] = (
+        "loom.terminalgen-authoring-grant.v1"
+    )
     authorization_id: UUID
     pipeline_run_id: UUID
     stage_run_id: UUID
@@ -638,7 +644,8 @@ class ExecutionAttemptClaimV1(PipelineModel):
         if (
             capability.cpu_arch != variant.cpu_arch
             or capability.cpu_cores < self.resource_profile_snapshot.cpu_cores
-            or capability.memory_bytes < (
+            or capability.memory_bytes
+            < (
                 variant.container_memory_bytes_override
                 or self.resource_profile_snapshot.memory_bytes
             )
@@ -651,11 +658,9 @@ class ExecutionAttemptClaimV1(PipelineModel):
         ):
             raise ValueError("worker capability does not satisfy the ResourceProfile")
         image_contract = self.image_runtime_contract_snapshot
-        if (
-            image_contract.cpu_arch != variant.cpu_arch
-            or not set(self.resource_profile_snapshot.required_image_features)
-            <= set(image_contract.application_features)
-        ):
+        if image_contract.cpu_arch != variant.cpu_arch or not set(
+            self.resource_profile_snapshot.required_image_features
+        ) <= set(image_contract.application_features):
             raise ValueError("image runtime contract does not satisfy the selected variant")
         if variant.gpu_count_exact == 0:
             if (
@@ -700,9 +705,7 @@ class ExecutionAttemptClaimV1(PipelineModel):
                     raise ValueError("unified GPU memory does not satisfy the variant")
             else:
                 raise ValueError("GPU variant has no closed memory accounting kind")
-            expected_cluster = (
-                "gb10" if variant.variant_id == "gb10-shared-1gpu" else "oldlab"
-            )
+            expected_cluster = "gb10" if variant.variant_id == "gb10-shared-1gpu" else "oldlab"
             if evidence.slurm_cluster_id != expected_cluster:
                 raise ValueError("GPU variant and Slurm cluster drift")
             if spec.gpu_backend_selection_sha256 is None:
@@ -714,13 +717,11 @@ class ExecutionAttemptClaimV1(PipelineModel):
                 raise ValueError("GPU image contract has no minimum NVIDIA driver")
             minimum_parts = tuple(int(part) for part in minimum_driver.split("."))
             for device in devices:
-                actual_parts = tuple(
-                    int(part) for part in device.nvidia_driver_version.split(".")
-                )
+                actual_parts = tuple(int(part) for part in device.nvidia_driver_version.split("."))
                 width = max(len(actual_parts), len(minimum_parts))
-                if actual_parts + (0,) * (width - len(actual_parts)) < minimum_parts + (
-                    0,
-                ) * (width - len(minimum_parts)):
+                if actual_parts + (0,) * (width - len(actual_parts)) < minimum_parts + (0,) * (
+                    width - len(minimum_parts)
+                ):
                     raise ValueError("NVIDIA driver is below the image runtime minimum")
         if canonical_digest(self.input_bindings) != spec.resolved_input_bindings_digest:
             raise ValueError("input bindings digest drift")
@@ -745,10 +746,8 @@ class ExecutionAttemptClaimV1(PipelineModel):
             if self.acceptance_preflight is not None or (
                 stage1_grant.pipeline_run_id != self.pipeline_run_id
                 or stage1_grant.recipe_digest != self.recipe_digest
-                or stage1_grant.platform_child_digest
-                != spec.resolved_image_manifest_digest
-                or stage1_grant.image_runtime_contract_digest
-                != self.image_runtime_contract_digest
+                or stage1_grant.platform_child_digest != spec.resolved_image_manifest_digest
+                or stage1_grant.image_runtime_contract_digest != self.image_runtime_contract_digest
                 or stage1_grant.resolved_input_bindings_digest
                 != spec.resolved_input_bindings_digest
                 or stage1_grant.renderer_digest != renderer_digest
@@ -793,12 +792,10 @@ class ExecutionAttemptClaimV1(PipelineModel):
                     or validation.execution_attempt_id != self.execution_attempt_id
                     or validation.validator_image != self.image
                     or len(task_bundles) != 1
-                    or task_bundles[0].content_sha256
-                    != validation.task_bundle_content_sha256
+                    or task_bundles[0].content_sha256 != validation.task_bundle_content_sha256
                     or validation.cpu_cores > self.resource_profile_snapshot.cpu_cores
                     or validation.memory_bytes > self.resource_profile_snapshot.memory_bytes
-                    or validation.pids_limit
-                    > (self.resource_profile_snapshot.pids_limit or 0)
+                    or validation.pids_limit > (self.resource_profile_snapshot.pids_limit or 0)
                     or validation.timeout_seconds > self.timeout_seconds
                     or validation.network_profile != self.network_profile
                 ):
@@ -1103,13 +1100,9 @@ class CheckpointPrepareRequestV1(PipelineModel):
         if _canonical_sha256(self.checkpoint) != self.checkpoint_sha256:
             raise ValueError("checkpoint envelope digest drift")
         expected = {
-            item.relative_path: (item.size_bytes, item.sha256)
-            for item in self.checkpoint.files
+            item.relative_path: (item.size_bytes, item.sha256) for item in self.checkpoint.files
         }
-        actual = {
-            item.relative_path: (item.size_bytes, item.sha256)
-            for item in self.files
-        }
+        actual = {item.relative_path: (item.size_bytes, item.sha256) for item in self.files}
         if expected != actual:
             raise ValueError("checkpoint inventory drifts from outer envelope")
         return self

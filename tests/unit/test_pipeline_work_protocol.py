@@ -9,6 +9,7 @@ from uuid import UUID
 import pytest
 from pydantic import ValidationError
 
+from loom.integrations.terminalgen.authority import TERMINALGEN_RUNTIME_POLICY_DIGEST
 from loom.pipeline.keys import canonical_digest, canonical_document
 from loom.pipeline.state import RetryClass, StageResultV1
 from loom.pipeline.work_protocol import (
@@ -307,7 +308,7 @@ def terminalgen_validation_claim() -> dict[str, Any]:
         "resource_profile_digest": spec["resource_profile_digest"],
         "image_runtime_contract_digest": spec["image_runtime_contract_digest"],
         "resolved_input_bindings_digest": spec["resolved_input_bindings_digest"],
-        "runtime_policy_digest": D2,
+        "runtime_policy_digest": TERMINALGEN_RUNTIME_POLICY_DIGEST,
         "validation": {
             "authorization_id": UUID(int=41),
             "pipeline_run_id": RUN_ID,
@@ -502,7 +503,12 @@ def test_terminalgen_authoring_and_validation_grants_are_exact_and_fail_closed()
     value = terminalgen_validation_claim()
     parsed = ExecutionAttemptClaimV1.model_validate(value)
     assert parsed.terminalgen_authoring is not None
+    assert parsed.terminalgen_authoring.schema_version == "loom.terminalgen-authoring-grant.v1"
     assert parsed.terminalgen_authoring.validation is not None
+    assert (
+        parsed.terminalgen_authoring.validation.schema_version
+        == "loom.terminal-task-validation-grant.v1"
+    )
     assert parsed.terminalgen_authoring.validation.repeat_count == 2
 
     missing = deepcopy(value)

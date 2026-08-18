@@ -12,7 +12,6 @@ import contextlib
 import hashlib
 import json
 import os
-import re
 import shutil
 import stat
 import subprocess
@@ -30,6 +29,11 @@ from loom.integrations.behavior.stages.rollout import (
     RolloutGpuV1,
     RolloutRuntimeContractV1,
     validate_rollout_request,
+)
+from loom.integrations.terminalgen.authority import (
+    TERMINALGEN_POOL_POLICIES,
+    TERMINALGEN_RUNTIME_POLICY_DIGEST,
+    policy_for_pool,
 )
 from loom.pipeline.artifact_commit import (
     CommittedReadySessionV1,
@@ -96,28 +100,7 @@ from loom_worker.pipeline_gpu_preflight import (
 from loom_worker.pipeline_live_preview import PipelineLivePreviewPublisher
 
 _STAGE1_POOLS = frozenset({"behavior-gpu-oldlab", "behavior-gpu-gb10"})
-_TERMINALGEN_POOL_CONTRACTS = {
-    "terminalgen-generate-gateway": (
-        "terminalgen-generate-gateway@1",
-        "gateway",
-        r"generate_card_[0-9]{2}",
-    ),
-    "terminalgen-package-none": (
-        "terminalgen-package-none@1",
-        "none",
-        r"(?:package_(?:authoring|runtime)|publish_boundary)",
-    ),
-    "terminalgen-plan-none": (
-        "terminalgen-plan-none@1",
-        "none",
-        r"(?:plan_batch|plan_card_[0-9]{2}|plan_audit|finalize_card_[0-9]{2}|global_finalize)",
-    ),
-    "terminalgen-validate-none": (
-        "terminalgen-validate-none@1",
-        "none",
-        r"validate_card_[0-9]{2}",
-    ),
-}
+_TERMINALGEN_POOLS = frozenset(TERMINALGEN_POOL_POLICIES)
 _WORKER_UID = 65532
 _WORKER_GID = 65532
 _HEARTBEAT_SECONDS = 20.0
@@ -142,7 +125,7 @@ def production_pipeline_enabled(settings: WorkerSettings) -> bool:
 
     pool_name = settings.pool_name
     pool_enabled = pool_name in _STAGE1_POOLS or (
-        pool_name in _TERMINALGEN_POOL_CONTRACTS
+        pool_name in _TERMINALGEN_POOLS
         and getattr(settings, "pipeline_terminalgen_authoring_enabled", False)
     )
     return bool(
@@ -249,9 +232,7 @@ def _require_stage1_claim(
         raise RuntimeError("pipeline_stage1_authority_grant_drift")
     actual_bindings = [(item.binding_name, item.artifact_type) for item in bindings]
     if actual_bindings != list(_STAGE1_INPUTS) or any(
-        item.cardinality != "one"
-        or len(item.items) != 1
-        or item.items[0].item_key != "singleton"
+        item.cardinality != "one" or len(item.items) != 1 or item.items[0].item_key != "singleton"
         for item in bindings
     ):
         raise RuntimeError("pipeline_stage1_input_contract_drift")
@@ -265,8 +246,7 @@ def _require_stage1_claim(
         for value in (item.model_dump(mode="python") for item in node.inputs)
     ]
     if node_inputs != [
-        ("run_input", name, artifact_type, name)
-        for name, artifact_type in _STAGE1_INPUTS
+        ("run_input", name, artifact_type, name) for name, artifact_type in _STAGE1_INPUTS
     ]:
         raise RuntimeError("pipeline_stage1_graph_input_drift")
     if len(node.outputs) != 1 or (
@@ -281,9 +261,7 @@ def _require_stage1_claim(
     )
     validate_rollout_request(request)
     selected_image = (
-        claim.image.rsplit("@", maxsplit=1)[0]
-        + "@"
-        + spec.resolved_image_manifest_digest
+        claim.image.rsplit("@", maxsplit=1)[0] + "@" + spec.resolved_image_manifest_digest
     )
     if (
         request.run_id != claim.pipeline_run_id
@@ -292,8 +270,7 @@ def _require_stage1_claim(
         or request.inputs != bindings
         or request.orchestration is not None
         or request.provenance.recipe_digest != claim.recipe_digest
-        or request.provenance.resolved_input_bindings_digest
-        != spec.resolved_input_bindings_digest
+        or request.provenance.resolved_input_bindings_digest != spec.resolved_input_bindings_digest
         or request.provenance.execution_spec_digest != claim.execution_spec_digest
         or request.provenance.image_digest != selected_image
         or request.provenance.control_binding is not None
@@ -310,10 +287,11 @@ def _require_terminalgen_claim(
 ) -> None:
     """Reject any TerminalGen claim outside the code-owned node/pool contract."""
 
-    contract = _TERMINALGEN_POOL_CONTRACTS.get(settings.pool_name)
-    if contract is None or not production_pipeline_enabled(settings):
+    if settings.pool_name not in _TERMINALGEN_POOLS or not production_pipeline_enabled(settings):
         raise RuntimeError("pipeline_terminalgen_pool_not_enabled")
-    expected_profile, expected_network, node_pattern = contract
+    policy = policy_for_pool(settings.pool_name)
+    expected_profile = policy.resource_profile
+    expected_network = policy.network_profile
     spec = claim.execution_spec_snapshot
     node = spec.container_node
     selected_variant = next(
@@ -328,6 +306,7 @@ def _require_terminalgen_claim(
     has_control = bool(spec.control_binding_snapshots)
     if (
         grant is None
+        or grant.runtime_policy_digest != TERMINALGEN_RUNTIME_POLICY_DIGEST
         or selected_variant is None
         or selected_variant.pool_class != settings.pool_name
         or spec.execution_variant_id != "terminalgen-cpu-x86_64"
@@ -337,7 +316,7 @@ def _require_terminalgen_claim(
         != expected_profile
         or claim.network_profile != expected_network
         or node.network_profile != expected_network
-        or re.fullmatch(node_pattern, claim.node_key) is None
+        or not policy.matches_node(claim.node_key)
         or spec.node_key != claim.node_key
         or claim.stage1_smoke is not None
         or claim.acceptance_preflight is not None
@@ -601,9 +580,7 @@ class AttemptControlCancellation(ExecutionCancellation, CancellationSignal):
             if self.backend is None
             else await self.backend.expected_process_group_present(attempt_id=attempt_id)
         )
-        upload_absent = (
-            self.committer is None or self.committer.active_session_id is None
-        )
+        upload_absent = self.committer is None or self.committer.active_session_id is None
         if (
             self.claim.network_profile != "none"
             or not input_absent
@@ -658,7 +635,10 @@ class ClaimArtifactMaterializer(ArtifactInputMaterializer):
         if attempt_id != self.claim.execution_attempt_id:
             raise RuntimeError("pipeline_attempt_identity_drift")
         expected_bindings = [item.model_dump(mode="json") for item in self.claim.input_bindings]
-        if list(bindings) != expected_bindings or destination != self.materializer.attempt_input_root.resolve() / str(attempt_id):
+        if (
+            list(bindings) != expected_bindings
+            or destination != self.materializer.attempt_input_root.resolve() / str(attempt_id)
+        ):
             raise RuntimeError("pipeline_input_claim_drift")
         expected_request = (
             self.claim.stage_request.canonical_jcs_lf.encode("utf-8")
@@ -726,9 +706,7 @@ def _rollout_runtime_contract(
         "RTX 5080" if allocation.slurm_cluster_id == "oldlab" else "GB10"
     )
     expected_capability_model = (
-        "NVIDIA GeForce RTX 5080"
-        if allocation.slurm_cluster_id == "oldlab"
-        else "NVIDIA GB10"
+        "NVIDIA GeForce RTX 5080" if allocation.slurm_cluster_id == "oldlab" else "NVIDIA GB10"
     )
     devices: list[RolloutGpuV1] = []
     for logical_index, device in enumerate(capability.gpu_devices):
@@ -842,9 +820,7 @@ class HttpFinalOutputCommitter(ArtifactCommitter):
                 )
             )
             renewed_server_plans = sorted(renewed.files, key=lambda item: item.file_index)
-            renewed_plans = [
-                item for item in renewed_server_plans if item.producer == "container"
-            ]
+            renewed_plans = [item for item in renewed_server_plans if item.producer == "container"]
             if (
                 renewed.upload_session_id != session_id
                 or renewed_server_plans != server_plans
@@ -858,9 +834,7 @@ class HttpFinalOutputCommitter(ArtifactCommitter):
 
         session_terminal = False
         try:
-            for index, (plan, (descriptor, path)) in enumerate(
-                zip(plans, files, strict=True)
-            ):
+            for index, (plan, (descriptor, path)) in enumerate(zip(plans, files, strict=True)):
                 expected_role = (
                     "semantic_document"
                     if descriptor.relative_path.endswith("/artifact.json")
@@ -868,7 +842,9 @@ class HttpFinalOutputCommitter(ArtifactCommitter):
                 )
                 workspace_prefix = f"artifacts/{descriptor.output_name}/"
                 relative_path = descriptor.relative_path.removeprefix(workspace_prefix)
-                output_types = {item.name: item.artifact_type for item in prepare.stage_result.outputs}
+                output_types = {
+                    item.name: item.artifact_type for item in prepare.stage_result.outputs
+                }
                 if (
                     plan.artifact_name != descriptor.output_name
                     or plan.relative_path != relative_path
@@ -891,9 +867,7 @@ class HttpFinalOutputCommitter(ArtifactCommitter):
                         if not value and part_number > 0:
                             break
                         if self.cancellation is not None and await self.cancellation.requested():
-                            raise PipelineCancelledError(
-                                "Pipeline cancelled during output upload"
-                            )
+                            raise PipelineCancelledError("Pipeline cancelled during output upload")
                         part_number += 1
                         value_digest = digest_bytes(value)
                         await refresh_upload_token()
@@ -937,9 +911,7 @@ class HttpFinalOutputCommitter(ArtifactCommitter):
                             session_id=session_id,
                             file_index=index,
                             claim=_claim_headers(self.claim),
-                            request_id=_request_id(
-                                self.claim, f"final-output-file:{index}"
-                            ),
+                            request_id=_request_id(self.claim, f"final-output-file:{index}"),
                             upload_token=token,
                             payload=complete_file.model_dump(mode="json"),
                         )
@@ -1000,7 +972,9 @@ def _final_output_inventory(
     for output in sorted(artifacts.iterdir(), key=lambda item: item.name.encode()):
         if output.is_symlink() or not output.is_dir():
             raise RuntimeError("final_output_tree_invalid")
-        for path in sorted(output.rglob("*"), key=lambda item: item.relative_to(outputs_dir).as_posix().encode()):
+        for path in sorted(
+            output.rglob("*"), key=lambda item: item.relative_to(outputs_dir).as_posix().encode()
+        ):
             details = path.lstat()
             if stat.S_ISLNK(details.st_mode) or not (
                 stat.S_ISDIR(details.st_mode) or stat.S_ISREG(details.st_mode)
@@ -1042,10 +1016,7 @@ def _validate_complete_marker(outputs_dir: Path, *, stage_result_digest: str) ->
         raise RuntimeError("complete_marker_stage_result_digest_mismatch")
 
     inventory = _final_output_inventory(outputs_dir)
-    actual = {
-        descriptor.relative_path: descriptor
-        for descriptor, _path in inventory
-    }
+    actual = {descriptor.relative_path: descriptor for descriptor, _path in inventory}
     expected_paths: list[str] = []
     for output in complete.outputs:
         artifact_path = f"artifacts/{output.name}/artifact.json"
@@ -1469,9 +1440,7 @@ class PipelineWorkerRuntime:
                 phase=phase[0],
                 monotonic_runtime_seconds=max(0, int(time.monotonic() - started)),
                 active_upload_session_ids=(
-                    [committer.active_session_id]
-                    if committer.active_session_id is not None
-                    else []
+                    [committer.active_session_id] if committer.active_session_id is not None else []
                 ),
             )
             await self.control_plane.heartbeat_execution_attempt(
@@ -1585,7 +1554,11 @@ def _execution_failure(
         if isinstance(exc, (TimeoutError, ConnectionError))
         else RetryClass.INTERNAL_DEFECT
     )
-    reason = "container_exit_nonzero" if isinstance(exc, PipelineProcessFailedError) else "worker_execution_failed"
+    reason = (
+        "container_exit_nonzero"
+        if isinstance(exc, PipelineProcessFailedError)
+        else "worker_execution_failed"
+    )
     return ExecutionFailedV1(
         exit_code=exit_code,
         retry_class=retry_class,
