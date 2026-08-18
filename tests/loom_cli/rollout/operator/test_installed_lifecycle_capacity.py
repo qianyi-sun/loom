@@ -29,6 +29,8 @@ _BUNDLE = "d" * 64
 _RENDERED = "e" * 64
 _IMAGE_ID = "sha256:" + "f" * 64
 _MANIFEST_DIGEST = "sha256:" + "1" * 64
+_PLATFORM_MANIFEST_DIGEST = "sha256:" + "2" * 64
+_ATTESTATION_MANIFEST_DIGEST = "sha256:" + "3" * 64
 _TAG = "staging-aaaaaaa"
 _UID = "12345678-1234-1234-1234-123456789abc"
 
@@ -42,8 +44,9 @@ class _Store:
 
 
 class _Commands:
-    def __init__(self, capacity: dict[str, object]) -> None:
+    def __init__(self, capacity: dict[str, object], *, oci_index: bool = False) -> None:
         self.capacity = capacity
+        self.oci_index = oci_index
         self.calls: list[tuple[str, ...]] = []
         self.job_metadata: dict[str, object] = {}
 
@@ -62,10 +65,50 @@ class _Commands:
                 separators=(",", ":"),
             )
         elif command[:3] == ("docker", "manifest", "inspect"):
+            if self.oci_index:
+                stdout = json.dumps(
+                    [
+                        {
+                            "Descriptor": {
+                                "digest": _PLATFORM_MANIFEST_DIGEST,
+                                "platform": {"architecture": "amd64", "os": "linux"},
+                            }
+                        },
+                        {
+                            "Descriptor": {
+                                "digest": _ATTESTATION_MANIFEST_DIGEST,
+                                "platform": {"architecture": "unknown", "os": "unknown"},
+                            }
+                        },
+                    ]
+                )
+            else:
+                stdout = json.dumps(
+                    {
+                        "Descriptor": {"digest": _MANIFEST_DIGEST},
+                        "SchemaV2Manifest": {"config": {"digest": _IMAGE_ID}},
+                    }
+                )
+        elif command[:3] == ("docker", "buildx", "imagetools"):
             stdout = json.dumps(
                 {
-                    "Descriptor": {"digest": _MANIFEST_DIGEST},
-                    "SchemaV2Manifest": {"config": {"digest": _IMAGE_ID}},
+                    "schemaVersion": 2,
+                    "mediaType": "application/vnd.oci.image.index.v1+json",
+                    "digest": _IMAGE_ID,
+                    "manifests": [
+                        {
+                            "digest": _PLATFORM_MANIFEST_DIGEST,
+                            "platform": {"architecture": "amd64", "os": "linux"},
+                        },
+                        {
+                            "digest": _ATTESTATION_MANIFEST_DIGEST,
+                            "annotations": {
+                                "vnd.docker.reference.digest": _PLATFORM_MANIFEST_DIGEST,
+                                "vnd.docker.reference.type": "attestation-manifest",
+                            },
+                            "platform": {"architecture": "unknown", "os": "unknown"},
+                        },
+                    ],
                 }
             )
         elif "get" in command:
@@ -162,6 +205,7 @@ def _service(
     *,
     store: _Store | None = None,
     registry: bool = False,
+    oci_index: bool = False,
 ) -> tuple[InstalledLifecycleCapacityService, _Commands]:
     config = replace(
         _config(tmp_path),
@@ -172,7 +216,7 @@ def _service(
     )
     config.state_root.mkdir(mode=0o700)
     capacity, database = _capacity()
-    commands = _Commands(capacity)
+    commands = _Commands(capacity, oci_index=oci_index)
     rendered = render_manifests(
         ClusterConfig(
             runtime_environment="staging",
@@ -186,7 +230,7 @@ def _service(
     registry_digests = (
         {
             name: (
-                _MANIFEST_DIGEST
+                (_IMAGE_ID if oci_index else _MANIFEST_DIGEST)
                 if name == "loom-control-plane"
                 else "sha256:" + f"{index + 2:064x}"
             )
@@ -290,6 +334,25 @@ def test_registry_capacity_uses_preflight_digest_without_kind_or_republish(tmp_p
     with pytest.raises(InstalledLifecycleCapacityError, match="digest drifted"):
         inactive.prepare_apply(approved_plan_digest="0" * 64)
     assert not inactive.evidence_root.exists()
+
+
+def test_registry_capacity_accepts_exact_docker_provenance_index(tmp_path: Path) -> None:
+    service, commands = _service(tmp_path, registry=True, oci_index=True)
+    plan = service.inventory()
+    service.prepare_apply(approved_plan_digest=plan.plan_digest)
+
+    service.execute_claimed(plan)
+
+    assert (
+        "docker",
+        "buildx",
+        "imagetools",
+        "inspect",
+        f"localhost:5000/loom-control-plane:{_TAG}",
+        "--format",
+        "{{json .Manifest}}",
+    ) in commands.calls
+    assert plan.control_plane_image_id == plan.control_plane_registry_digest == _IMAGE_ID
 
 
 def test_claim_is_single_use_and_failed_execution_preserves_claim(tmp_path: Path) -> None:

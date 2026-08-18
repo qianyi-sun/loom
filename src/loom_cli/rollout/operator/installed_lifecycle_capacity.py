@@ -15,6 +15,7 @@ from typing import Protocol, cast
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
 from loom_cli.cluster_config import validate_container_registry_prefixes
 from loom_cli.rollout.credential_authority import read_trusted_file
+from loom_cli.rollout.image_readiness import _inspect_registry_manifest
 from loom_cli.rollout.preflight_artifact_store import LoadedPreflightArtifacts
 from loom_cli.rollout.readonly_database_authority import ReadonlyDatabaseEvidence
 
@@ -399,23 +400,13 @@ class InstalledLifecycleCapacityService:
         else:
             pull, push = self.registry_publication
             target = f"{push}/{image}"
-            manifest = _object(
-                _safe_command(
-                    self.commands.simple(
-                        ("docker", "manifest", "inspect", "--insecure", "--verbose", target)
-                    ),
-                    "exact capacity image publication readback",
-                ),
-                "exact capacity image publication readback",
+            observed_digest = _inspect_registry_manifest(
+                lambda argv, _cwd: self.commands.simple(argv),
+                target,
+                expected_image_id=plan.control_plane_image_id,
             )
-            schema = manifest.get("SchemaV2Manifest", manifest)
-            descriptor = manifest.get("Descriptor")
-            config = schema.get("config") if isinstance(schema, dict) else None
             if (
-                not isinstance(config, dict)
-                or config.get("digest") != plan.control_plane_image_id
-                or not isinstance(descriptor, dict)
-                or descriptor.get("digest") != plan.control_plane_registry_digest
+                observed_digest != plan.control_plane_registry_digest
                 or f"{pull}/loom-control-plane@{plan.control_plane_registry_digest}"
                 not in plan.job_manifest
             ):
