@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import re
+import subprocess
 from pathlib import Path
 
 PACKAGE_ROOT = Path("src/loom_capacity_pool_executor")
@@ -9,6 +12,9 @@ PREPARED_SERVICE = Path("deploy/dev-fleet/loom-capacity-pool-executor-prepared.s
 PREPARED_TIMER = Path("deploy/dev-fleet/loom-capacity-pool-executor-prepared.timer")
 ACTIVE_SERVICE = Path("deploy/dev-fleet/loom-capacity-pool-executor-active.service")
 ACTIVE_TIMER = Path("deploy/dev-fleet/loom-capacity-pool-executor-active.timer")
+REHEARSAL_RUNBOOK = Path(
+    "docs/runbooks/executable-global-capacity-bridge-rehearsal.md"
+)
 
 
 def test_pool_executor_observer_has_no_scheduler_mutation_surface() -> None:
@@ -163,3 +169,43 @@ def test_active_executor_service_and_timer_require_exact_positive_runtime_artifa
         "sacctmgr ",
     ):
         assert forbidden not in lowered
+
+
+def test_drain_only_runbook_gate_accepts_the_exact_safe_status_boundary() -> None:
+    runbook = REHEARSAL_RUNBOOK.read_text(encoding="utf-8")
+    drain_only_section = runbook.split(
+        'executor_status="$evidence_dir/drain-only-executors.json"', maxsplit=1
+    )[1].split('subject_statuses="$evidence_dir/drain-only-subjects.jsonl"', maxsplit=1)[0]
+    match = re.search(
+        r"jq -e '\n(?P<filter>.*?)\n' \"\$executor_status\"",
+        drain_only_section,
+        flags=re.DOTALL,
+    )
+    assert match is not None
+    payload = {
+        "execution_state": "drain-only",
+        "executable_new_capacity_ceiling": 0,
+        "blockers": ["manager-drain-only", "zero-executable-ceiling"],
+        "items": [
+            {
+                "pool_id": pool_id,
+                "blockers": [],
+                "retirement_safe": True,
+                "inventory_record_counts": {},
+                "inventory_digest": "a" * 64,
+                "inventory_observed_at": "2026-08-17T22:00:00Z",
+                "last_heartbeat_at": "2026-08-17T22:00:01Z",
+            }
+            for pool_id in ("gb10", "oldlab")
+        ],
+    }
+
+    result = subprocess.run(
+        ["jq", "-e", match.group("filter")],
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr

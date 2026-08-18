@@ -8,10 +8,12 @@ ledger can persist sealed executable allocation epochs and issue exact,
 short-lived launch permits after a fenced execution epoch is activated.
 
 The manager still has no worker-claim mutation or scheduler client. A v2 permit
-can be consumed only by the exact registered pool executor; the executor and
-protected admission paths that would turn it into physical capacity are
-separate activation blockers. The checked-in Package 5A deployment remains
-inert at an executable ceiling of zero.
+can be consumed only by the exact registered pool executor. The separately
+packaged controller-local executor and protected admission path can turn it
+into physical capacity only under the exact active execution context; their
+live installation, transport, and containment evidence remain activation
+blockers. The checked-in Package 5A deployment remains inert at an executable
+ceiling of zero.
 
 ## Authority boundary
 

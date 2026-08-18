@@ -649,7 +649,8 @@ curl --silent --show-error --fail-with-body \
 chmod 0600 "$executor_status"
 jq -e '
   .execution_state == "drain-only" and
-  .executable_new_capacity_ceiling == 0 and .blockers == [] and
+  .executable_new_capacity_ceiling == 0 and
+  .blockers == ["manager-drain-only", "zero-executable-ceiling"] and
   ([.items[].pool_id] == ["gb10", "oldlab"]) and
   all(.items[];
     .blockers == [] and .retirement_safe == true and
