@@ -651,6 +651,7 @@ def test_healthy_acceptance_returns_separate_readiness_facets_and_safe_commands(
         ("admission-binding-match-resources", "cluster_resource_drift"),
         ("default-deny-ingress", "resource_inventory_drift"),
         ("management-host-network", "resource_inventory_drift"),
+        ("management-pod-host-network", "resource_inventory_drift"),
         ("postgres-node-port", "resource_inventory_drift"),
     ],
 )
@@ -691,6 +692,14 @@ def test_acceptance_status_rejects_live_authority_or_exposure_widening(
             "loom-personal-dev-management",
         )
         deployment["spec"]["template"]["spec"]["hostNetwork"] = True
+    elif mutation == "management-pod-host-network":
+        pod = next(
+            item
+            for item in _items(runner, _NAMESPACED)
+            if item["kind"] == "Pod"
+            and item["metadata"]["labels"].get("app") == "loom-personal-dev-management"
+        )
+        pod["spec"]["hostNetwork"] = True
     elif mutation == "postgres-node-port":
         service = _item(runner, _NAMESPACED, "Service", "loom-dev-postgres")
         service["spec"]["type"] = "NodePort"

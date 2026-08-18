@@ -360,10 +360,13 @@ def _security_boundary_matches(
             for port in ports
         ):
             return False
-    if kind in {"Deployment", "StatefulSet", "Job"}:
+    if kind in {"Deployment", "StatefulSet", "Job", "Pod"}:
         spec = actual.get("spec")
-        template = spec.get("template") if isinstance(spec, Mapping) else None
-        pod_spec = template.get("spec") if isinstance(template, Mapping) else None
+        if kind == "Pod":
+            pod_spec = spec
+        else:
+            template = spec.get("template") if isinstance(spec, Mapping) else None
+            pod_spec = template.get("spec") if isinstance(template, Mapping) else None
         if not isinstance(pod_spec, Mapping):
             return False
         if any(
@@ -1196,7 +1199,10 @@ def _observe_personal_dev_status(
                 pod_drift = True
                 continue
             observed_pods[app].append(pod)
-            if not _expected_subset(expected_pod_templates[app][0], pod):
+            if not _expected_subset(
+                expected_pod_templates[app][0],
+                pod,
+            ) or not _security_boundary_matches({"kind": "Pod"}, pod):
                 pod_drift = True
         pod_drift = pod_drift or any(
             len(observed_pods[app]) != expected_count
