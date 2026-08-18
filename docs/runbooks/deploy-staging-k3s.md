@@ -27,11 +27,19 @@ The k3s control-plane host requires:
 - the public entry/TLS units installed by
   `scripts/ops/bootstrap_staging_k3s_entry_tls.sh`.
 
-The entry/TLS bootstrap is idempotent. It installs the host entry cutover,
-configures cert-manager for the host's working ACME egress path, applies the
-issuer and `loom-staging-tls` Certificate, and installs the private fleet
-forward units. Re-run it after a cert-manager reinstall because the
-`hostNetwork` setting is an imperative patch.
+The entry/TLS bootstrap is idempotent. It applies the dedicated
+`ingress-nginx/loom-staging-public-entry` NodePort Service and starts supervised
+host proxies on `18080/18443`. Each proxy connection enters the fixed
+`32080/32443` NodePort path, letting kube-proxy select any ready ingress
+endpoint without a host reference to kube-proxy's generated chains. A cutover
+unit verifies the Kubernetes routes and both end-to-end proxy paths, installs
+destination-scoped public DNAT, and removes obsolete kind-to-k3s rules. The
+bootstrap waits up to 60 seconds for this reconciliation before continuing. It
+also configures
+cert-manager for the host's working ACME egress path, applies the issuer and
+`loom-staging-tls` Certificate, and installs the private fleet forward units.
+Re-run it after a cert-manager reinstall because the `hostNetwork` setting is
+an imperative patch.
 
 Never put secret values in the cluster profile. The optional QA relay reads its
 API key from the Kubernetes Secret key declared by
@@ -98,7 +106,8 @@ rollout path. Database migrations are forward-only, so an incompatible schema
 requires the recorded database/object-store restore procedure rather than only
 rolling image tags back.
 
-Do not remove the public entry rules unless a separately verified replacement
-endpoint is ready. Do not treat a retired local cluster as a rollback target.
+Do not disable the public-entry proxies or delete their Service unless a
+separately verified replacement route is ready. Restore that route before
+removing the proxy path; the retired local cluster is not a rollback target.
 Preserve candidate, manifest, migration, and stateful-backend evidence before
 repairing a failed deployment.
