@@ -1,15 +1,16 @@
 """POST /admin/step-tokens (Plan 9 Task 4)."""
 
 import hashlib
+import json
 import os
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import jwt
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, delete, insert
+from sqlalchemy import create_engine, delete, insert, text
 from sqlalchemy.orm import sessionmaker
 
 from loom.auth import verify_step_jwt
@@ -22,6 +23,7 @@ from loom.db.schema import (
     Token,
     Trial,
 )
+from loom.pipeline.keys import canonical_digest, canonical_document
 from loom_control_plane.app import create_app
 from loom_control_plane.config import ControlPlaneSettings
 
@@ -301,6 +303,161 @@ def test_round_trip_with_jwt_can_be_decoded(app, seed):  # type: ignore[no-untyp
         assert claims["sub"] == "step-session"
         assert claims["step_id"] == "phase-2"
         assert claims["scopes"] == ["llm:call"]
+
+
+def test_execution_attempt_token_freezes_live_dispatch_authority(
+    app,
+    seed,
+    postgres_url,
+):  # type: ignore[no-untyped-def]
+    worker_id, run_id, stage_id, attempt_id, claim_id = (
+        uuid4(),
+        uuid4(),
+        uuid4(),
+        uuid4(),
+        uuid4(),
+    )
+    worker_hash = hashlib.sha256(seed["token"].encode()).digest()
+    lease_token = "lease-" + "x" * 40
+    binding_digest = "sha256:" + "b" * 64
+    execution_spec = {
+        "container_node": {
+            "network_profile": "gateway",
+            "timeout_seconds": 300,
+        },
+        "control_binding_snapshots": [{"snapshot_sha256": binding_digest}],
+    }
+    spec_digest = canonical_digest(execution_spec)
+    authorization = {"schema_version": "terminalgen.authoring-grant.v1"}
+    authorization_digest = canonical_digest(authorization)
+    engine = create_engine(postgres_url)
+    with engine.begin() as connection:
+        connection.execute(
+            text("""
+                INSERT INTO workers (
+                    id,hostname,version,capabilities,supported_work_kinds,
+                    auth_token_hash,registered_at,last_seen_at,status
+                ) VALUES (
+                    :id,'step-token-worker','test','[]'::jsonb,
+                    ARRAY['trial','execution_attempt']::text[],
+                    :token,now(),now(),'active'
+                )
+            """),
+            {"id": worker_id, "token": worker_hash},
+        )
+        connection.execute(
+            text("""
+                INSERT INTO pipeline_runs (
+                    id,team_id,submission_policy,recipe_name,recipe_version,recipe_digest,
+                    graph_spec_json,graph_spec_digest,parameters_json,parameters_digest,
+                    resolved_inputs_json,budget_json,request_digest,idempotency_key,state,started_at
+                ) VALUES (
+                    :id,:team,'ordinary','step-token-test',1,:digest,'{}'::jsonb,:digest,
+                    '{}'::jsonb,:digest,'[]'::jsonb,'{}'::jsonb,:digest,:key,'running',now()
+                )
+            """),
+            {
+                "id": run_id,
+                "team": seed["team_id"],
+                "digest": "sha256:" + "a" * 64,
+                "key": f"step-token-{run_id}",
+            },
+        )
+        connection.execute(
+            text("""
+                INSERT INTO pipeline_stage_runs (
+                    id,pipeline_run_id,node_key,shard_key,node_kind,state,
+                    resolved_execution_spec_json,resolved_execution_spec_bytes,
+                    execution_spec_digest,resolved_input_bindings_json,
+                    resolved_input_bindings_digest,resource_profile_json,
+                    resource_profile_digest,failure_policy,ready_at,claimed_at
+                ) VALUES (
+                    :id,:run,'generate_card_00','singleton','container','claimed',
+                    CAST(:spec AS jsonb),:spec_bytes,:spec_digest,'[]'::jsonb,
+                    :bindings_digest,'{}'::jsonb,:profile_digest,'fail_run',now(),now()
+                )
+            """),
+            {
+                "id": stage_id,
+                "run": run_id,
+                "spec": json.dumps(execution_spec),
+                "spec_bytes": canonical_document(execution_spec),
+                "spec_digest": spec_digest,
+                "bindings_digest": canonical_digest([]),
+                "profile_digest": "sha256:" + "c" * 64,
+            },
+        )
+        connection.execute(
+            text("""
+                INSERT INTO execution_attempts (
+                    id,stage_run_id,attempt_number,state,worker_id,claim_id,
+                    lease_epoch,lease_token_digest,lease_expires_at,
+                    execution_authorization_json,execution_authorization_bytes,
+                    execution_authorization_digest,queued_at,claimed_at
+                ) VALUES (
+                    :id,:stage,1,'claimed',:worker,:claim,4,:lease_digest,:expires,
+                    CAST(:authorization AS jsonb),:authorization_bytes,
+                    :authorization_digest,now(),now()
+                )
+            """),
+            {
+                "id": attempt_id,
+                "stage": stage_id,
+                "worker": worker_id,
+                "claim": claim_id,
+                "lease_digest": hashlib.sha256(lease_token.encode()).hexdigest(),
+                "expires": datetime.now(UTC) + timedelta(minutes=10),
+                "authorization": json.dumps(authorization),
+                "authorization_bytes": canonical_document(authorization),
+                "authorization_digest": authorization_digest,
+            },
+        )
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/admin/step-tokens",
+                headers={
+                    "Authorization": f"Bearer {seed['token']}",
+                    "X-Loom-Claim-Id": str(claim_id),
+                    "X-Loom-Lease-Epoch": "4",
+                    "X-Loom-Lease-Token": lease_token,
+                },
+                json={
+                    "team_id": str(seed["team_id"]),
+                    "execution_attempt_id": str(attempt_id),
+                    "step_id": "generate_card_00",
+                    "ttl_sec": 600,
+                },
+            )
+        assert response.status_code == 201, response.text
+        ctx = verify_step_jwt(
+            response.json()["token"],
+            signing_key=os.environ["LOOM_CP_STEP_JWT_SIGNING_KEY"],
+        )
+        assert ctx.execution_attempt_id == attempt_id
+        assert ctx.step_jwt_id is not None
+        assert ctx.execution_attempt_lease_epoch == 4
+        assert ctx.execution_spec_digest == spec_digest
+        assert ctx.control_binding_snapshot_digest == binding_digest
+        assert ctx.execution_authorization_digest == authorization_digest
+        assert ctx.provider_connection_id_bound is True
+        with engine.connect() as connection:
+            stored_jti = connection.execute(
+                text("SELECT step_jwt_id FROM execution_attempts WHERE id=:id"),
+                {"id": attempt_id},
+            ).scalar_one()
+        assert stored_jti == ctx.step_jwt_id
+    finally:
+        with engine.begin() as connection:
+            connection.execute(
+                text("DELETE FROM execution_attempts WHERE id=:id"), {"id": attempt_id}
+            )
+            connection.execute(
+                text("DELETE FROM pipeline_stage_runs WHERE id=:id"), {"id": stage_id}
+            )
+            connection.execute(text("DELETE FROM pipeline_runs WHERE id=:id"), {"id": run_id})
+            connection.execute(text("DELETE FROM workers WHERE id=:id"), {"id": worker_id})
+        engine.dispose()
 
 
 # ──────────────────────────────────────────────────────────────────────

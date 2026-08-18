@@ -244,6 +244,7 @@ async def responses(
             session,
             authorization,
             signing_key,
+            allow_execution_attempt=True,
         )
     assert ctx.team_id is not None
     assert ctx.token_subject is not None

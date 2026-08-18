@@ -906,7 +906,14 @@ async def report_attempt_started(
         attempt.container_id = payload.container_id
         attempt.runtime_started_at = payload.runtime_started_at
         attempt.input_view_digest = payload.input_view_digest
-        attempt.step_jwt_id = payload.step_jwt_id
+        # The step-token exchange durably rotates execution-attempt JWTs and
+        # writes their jti before the container reports started.  Older workers
+        # report no jti; do not let that compatibility shape erase the live
+        # Gateway revocation fence.
+        if attempt.step_jwt_id is None:
+            attempt.step_jwt_id = payload.step_jwt_id
+        elif payload.step_jwt_id not in {None, attempt.step_jwt_id}:
+            raise HTTPException(status_code=409, detail="step_jwt_rotated")
         if is_stage1_live_preview_eligible(stage.resolved_execution_spec_json):
             run = await session.get(PipelineRun, stage.pipeline_run_id)
             if run is None or attempt.worker_id is None:

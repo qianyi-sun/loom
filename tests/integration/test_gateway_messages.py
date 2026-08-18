@@ -8,7 +8,7 @@ Anthropic-shaped response. The route then records cost into llm_calls.
 import hashlib
 import json
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import httpx
@@ -19,6 +19,7 @@ from sqlalchemy.orm import sessionmaker
 
 from loom.auth import mint_step_jwt
 from loom.db.schema import LlmCall, RateCard, Team
+from loom.pipeline.keys import canonical_digest, canonical_document
 from loom_llm_gateway.app import create_app
 from loom_llm_gateway.config import GatewaySettings
 from loom_llm_gateway.rate_card import RateCardCache
@@ -182,20 +183,49 @@ async def test_messages_attributes_pipeline_jwt_to_execution_attempt(  # type: i
     postgres_url,
 ):
     app, _trial_jwt, team_id, _trial_id = gateway_setup
-    run_id, stage_id, attempt_id = uuid4(), uuid4(), uuid4()
+    run_id, stage_id, attempt_id, worker_id, claim_id, token_id = (
+        uuid4(),
+        uuid4(),
+        uuid4(),
+        uuid4(),
+        uuid4(),
+        uuid4(),
+    )
     digest = "sha256:" + "a" * 64
+    execution_spec = {
+        "container_node": {
+            "network_profile": "gateway",
+            "timeout_seconds": 300,
+        },
+        "control_binding_snapshots": [],
+    }
+    execution_spec_digest = canonical_digest(execution_spec)
+    lease_token = "lease-" + "x" * 40
     engine = create_engine(postgres_url)
     with engine.begin() as connection:
+        connection.execute(
+            text("""
+                INSERT INTO workers (
+                    id,hostname,version,capabilities,supported_work_kinds,
+                    auth_token_hash,registered_at,last_seen_at,status
+                ) VALUES (
+                    :id,'gateway-attempt-worker','test','[]'::jsonb,
+                    ARRAY['trial','execution_attempt']::text[],
+                    :token,now(),now(),'active'
+                )
+            """),
+            {"id": worker_id, "token": b"g" * 32},
+        )
         connection.execute(
             text("""
                 INSERT INTO pipeline_runs (
                     id,team_id,submission_policy,recipe_name,recipe_version,recipe_digest,
                     graph_spec_json,graph_spec_digest,parameters_json,parameters_digest,
-                    resolved_inputs_json,budget_json,request_digest,idempotency_key
+                    resolved_inputs_json,budget_json,request_digest,idempotency_key,state,started_at
                 ) VALUES (
                     :id,:team,'ordinary','messages-attribution',1,:digest,
                     '{}'::jsonb,:digest,'{}'::jsonb,:digest,'[]'::jsonb,'{}'::jsonb,
-                    :digest,:key
+                    :digest,:key,'running',now()
                 )
             """),
             {
@@ -209,20 +239,46 @@ async def test_messages_attributes_pipeline_jwt_to_execution_attempt(  # type: i
             text("""
                 INSERT INTO pipeline_stage_runs (
                     id,pipeline_run_id,node_key,shard_key,node_kind,state,
-                    resource_profile_json,resource_profile_digest,failure_policy
+                    resolved_execution_spec_json,resolved_execution_spec_bytes,
+                    execution_spec_digest,resolved_input_bindings_json,
+                    resolved_input_bindings_digest,resource_profile_json,
+                    resource_profile_digest,failure_policy,ready_at,claimed_at,started_at
                 ) VALUES (
-                    :id,:run,'recovery_primitive','singleton','container','blocked',
-                    '{}'::jsonb,:digest,'fail_run'
+                    :id,:run,'recovery_primitive','singleton','container','running',
+                    CAST(:spec AS jsonb),:spec_bytes,:spec_digest,'[]'::jsonb,
+                    :bindings_digest,'{}'::jsonb,:digest,'fail_run',now(),now(),now()
                 )
             """),
-            {"id": stage_id, "run": run_id, "digest": digest},
+            {
+                "id": stage_id,
+                "run": run_id,
+                "digest": digest,
+                "spec": json.dumps(execution_spec),
+                "spec_bytes": canonical_document(execution_spec),
+                "spec_digest": execution_spec_digest,
+                "bindings_digest": canonical_digest([]),
+            },
         )
         connection.execute(
             text("""
-                INSERT INTO execution_attempts (id,stage_run_id,attempt_number,state)
-                VALUES (:id,:stage,1,'fault_pending')
+                INSERT INTO execution_attempts (
+                    id,stage_run_id,attempt_number,state,worker_id,claim_id,
+                    lease_epoch,lease_token_digest,lease_expires_at,step_jwt_id,
+                    queued_at,claimed_at,started_at
+                ) VALUES (
+                    :id,:stage,1,'running',:worker,:claim,3,:lease_digest,:expires,
+                    :token_id,now(),now(),now()
+                )
             """),
-            {"id": attempt_id, "stage": stage_id},
+            {
+                "id": attempt_id,
+                "stage": stage_id,
+                "worker": worker_id,
+                "claim": claim_id,
+                "lease_digest": hashlib.sha256(lease_token.encode()).hexdigest(),
+                "expires": datetime.now(UTC) + timedelta(minutes=10),
+                "token_id": token_id,
+            },
         )
     step_jwt = mint_step_jwt(
         team_id=team_id,
@@ -230,6 +286,13 @@ async def test_messages_attributes_pipeline_jwt_to_execution_attempt(  # type: i
         step_id="recovery_primitive",
         ttl_sec=600,
         signing_key=app.state.settings.step_jwt_signing_key.get_secret_value(),
+        provider_connection_id=None,
+        provider_connection_id_bound=True,
+        step_jwt_id=token_id,
+        execution_attempt_lease_epoch=3,
+        execution_spec_digest=execution_spec_digest,
+        control_binding_snapshot_digest=None,
+        execution_authorization_digest=None,
     )
     try:
         transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
@@ -255,6 +318,29 @@ async def test_messages_attributes_pipeline_jwt_to_execution_attempt(  # type: i
         assert row.trial_id is None
         assert row.execution_attempt_id == attempt_id
         assert row.step_id == "recovery_primitive"
+
+        with engine.begin() as connection:
+            connection.execute(
+                text("""
+                    UPDATE execution_attempts
+                    SET cancellation_requested_at=now()
+                    WHERE id=:id
+                """),
+                {"id": attempt_id},
+            )
+        transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
+        async with httpx.AsyncClient(transport=transport, base_url="http://gw") as client:
+            cancelled = await client.post(
+                "/v1/messages",
+                headers={"Authorization": f"Bearer {step_jwt}"},
+                json={
+                    "model": "claude-opus-4-7",
+                    "max_tokens": 32,
+                    "messages": [{"role": "user", "content": "recover"}],
+                },
+            )
+        assert cancelled.status_code == 403
+        assert cancelled.json() == {"detail": "execution attempt dispatch forbidden"}
     finally:
         with engine.begin() as connection:
             connection.execute(
@@ -268,6 +354,7 @@ async def test_messages_attributes_pipeline_jwt_to_execution_attempt(  # type: i
                 text("DELETE FROM pipeline_stage_runs WHERE id=:id"), {"id": stage_id}
             )
             connection.execute(text("DELETE FROM pipeline_runs WHERE id=:id"), {"id": run_id})
+            connection.execute(text("DELETE FROM workers WHERE id=:id"), {"id": worker_id})
         engine.dispose()
 
 

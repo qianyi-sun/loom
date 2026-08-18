@@ -173,6 +173,11 @@ async def chat_completions(
             )
         if "llm:call" not in ctx.scopes:
             raise HTTPException(status_code=401, detail="not authorized")
+        if ctx.execution_attempt_id is not None:
+            raise HTTPException(
+                status_code=403,
+                detail="execution-attempt tokens are not supported by this route",
+            )
 
         # The token/JWT team is authoritative. A caller-supplied body team may
         # provide legacy attribution only for a team-less platform request; it

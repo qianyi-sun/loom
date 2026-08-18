@@ -27,7 +27,7 @@ import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
 from starlette.responses import StreamingResponse
 
-from loom.auth import AuthContext, verify_bearer_token
+from loom.auth import AuthContext
 from loom.models.types import ModelSpec
 from loom_llm_gateway.config import GatewaySettings
 from loom_llm_gateway.dialect import DIALECTS, TokenUsage
@@ -42,6 +42,7 @@ from loom_llm_gateway.retry import send_with_retry
 from loom_llm_gateway.routes._facade_common import (
     http_failure_category,
     redact_api_key,
+    verify_facade_auth,
 )
 
 router = APIRouter()
@@ -61,18 +62,14 @@ async def messages(
     signing_key = settings.step_jwt_signing_key.get_secret_value()
 
     async with request.app.state.session_factory() as session:
-        ctx = await verify_bearer_token(
+        ctx = await verify_facade_auth(
             session,
             authorization,
-            signing_key=signing_key,
+            signing_key,
+            allow_execution_attempt=True,
         )
-    if ctx is None or "llm:call" not in ctx.scopes:
-        raise HTTPException(status_code=401, detail="not authorized")
-    if ctx.token_subject is None or ctx.step_id is None or ctx.team_id is None:
-        raise HTTPException(
-            status_code=403,
-            detail="step-scoped token required (loom_step_<jwt>)",
-        )
+    assert ctx.team_id is not None
+    assert ctx.step_id is not None
     request.state.execution_attempt_id = ctx.execution_attempt_id
 
     if settings.anthropic_api_key is None:
