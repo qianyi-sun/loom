@@ -88,6 +88,9 @@ spec:
           app: loom-family-orchestrator
     - podSelector:
         matchLabels:
+          app: loom-pipeline-orchestrator
+    - podSelector:
+        matchLabels:
           app: loom-staging-data-lifecycle
     - podSelector:
         matchLabels:
@@ -602,6 +605,13 @@ spec:
           app: loom-pgbouncer
     ports:
     - port: 6432
+      protocol: TCP
+  - to:
+    - podSelector:
+        matchLabels:
+          app: loom-minio
+    ports:
+    - port: 9000
       protocol: TCP
   - to:
     - namespaceSelector:

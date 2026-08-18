@@ -65,6 +65,10 @@ class ReadinessRuntimeV1(ReadinessResolverV1, StageRequestRendererV1, Protocol):
     """One closed adapter owns support, readiness, and rendering for a recipe class."""
 
 
+class FanoutRuntimeV1(Protocol):
+    async def reconcile(self, lease: RunLease) -> int: ...
+
+
 @dataclass(frozen=True, slots=True)
 class _PairedReadinessRuntime:
     resolver: ReadinessResolverV1
@@ -125,6 +129,7 @@ class PipelineReconciler:
         readiness_runtime: ReadinessRuntimeV1 | None = None,
         readiness_resolver: ReadinessResolverV1 | None = None,
         request_renderer: StageRequestRendererV1 | None = None,
+        fanout_runtime: FanoutRuntimeV1 | None = None,
     ) -> None:
         if readiness_runtime is not None and (
             readiness_resolver is not None or request_renderer is not None
@@ -133,6 +138,7 @@ class PipelineReconciler:
         if (readiness_resolver is None) != (request_renderer is None):
             raise ValueError("readiness resolver and renderer must be injected together")
         self._repository = repository
+        self._fanout_runtime = fanout_runtime
         self._readiness_runtime: ReadinessRuntimeV1 | None
         if readiness_runtime is not None:
             self._readiness_runtime = readiness_runtime
@@ -149,6 +155,8 @@ class PipelineReconciler:
         if await self._repository.enforce_wall_deadline(lease):
             await self._repository.project_run_result(lease)
             return
+        if self._fanout_runtime is not None:
+            await self._fanout_runtime.reconcile(lease)
         await self._repository.reconcile_dependencies_and_gates(lease)
         if self._readiness_runtime is not None:
             candidates = await self._repository.readiness_candidates(lease)

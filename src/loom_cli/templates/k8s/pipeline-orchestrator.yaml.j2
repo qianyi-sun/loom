@@ -37,6 +37,22 @@ spec:
               value: "60"
             - name: LOOM_PIPELINE_ORCHESTRATOR_RENEW_SECONDS
               value: "10"
+            - name: LOOM_PIPELINE_ORCHESTRATOR_ARTIFACTS_BUCKET
+              value: artifacts
+            - name: LOOM_PIPELINE_ORCHESTRATOR_MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: minio-access-key
+            - name: LOOM_PIPELINE_ORCHESTRATOR_MINIO_ENDPOINT
+              value: http://loom-minio:9000
+            - name: LOOM_PIPELINE_ORCHESTRATOR_MINIO_REGION
+              value: us-east-1
+            - name: LOOM_PIPELINE_ORCHESTRATOR_MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: loom-secrets
+                  key: minio-secret-key
           ports:
             - { name: health, containerPort: 8092 }
           readinessProbe:

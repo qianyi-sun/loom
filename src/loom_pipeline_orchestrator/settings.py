@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -25,3 +25,8 @@ class PipelineOrchestratorSettings(BaseSettings):
     repo_root: Path = Path(".")
     resource_profiles_path: Path = Path("config/resource-profiles.toml")
     image_runtime_contracts_path: Path = Path("config/image-runtime-contracts.toml")
+    artifacts_bucket: str = "artifacts"
+    minio_endpoint: str = "http://loom-minio:9000"
+    minio_access_key: SecretStr
+    minio_secret_key: SecretStr
+    minio_region: str = "us-east-1"

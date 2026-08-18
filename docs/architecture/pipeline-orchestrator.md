@@ -113,12 +113,18 @@ Run locally against an already migrated database:
 ```bash
 LOOM_PIPELINE_ORCHESTRATOR_DB_URL='postgresql+psycopg://...' \
 LOOM_PIPELINE_ORCHESTRATOR_CONTROLLER_ID='controller-1' \
+LOOM_PIPELINE_ORCHESTRATOR_MINIO_ACCESS_KEY='...' \
+LOOM_PIPELINE_ORCHESTRATOR_MINIO_SECRET_KEY='...' \
 python -m loom_pipeline_orchestrator
 ```
 
 Configuration uses the `LOOM_PIPELINE_ORCHESTRATOR_` prefix. The picker batch
 is capped at 50; lease and renewal periods are fixed at 60 and 10 seconds. The
-process serves `/healthz` on port 8092.
+process serves `/healthz` on port 8092. The controller has read-only logical
+authority over committed Pipeline fan-out documents: it verifies the root
+manifest and committed marker, streams the bounded canonical fan-out manifest
+from the artifacts bucket, and only then commits expansion rows under the run
+lease. Containers never provide object-store locators or expansion IDs.
 
 `deploy/k8s/pipeline-orchestrator.yaml` and the cluster template intentionally
 set `replicas: 0`. The image is buildable and covered by conformance, scan, and

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 from uuid import uuid4
+
+from sqlalchemy import text
 
 from loom.db.schema import ArtifactUploadSession, ExecutionAttempt
 from loom.pipeline.artifact_commit import (
@@ -10,14 +13,16 @@ from loom.pipeline.artifact_commit import (
     UploadSessionGrantV1,
 )
 from loom.pipeline.keys import canonical_digest, canonical_document
-from loom.pipeline.spec import FanoutManifestV1, PlatformFanoutIndexV1
+from loom.pipeline.spec import FanoutManifestV1, PlatformFanoutIndexV1, RunGraphSpecV1
 from loom.pipeline.state import StageResultV1
-from loom.pipeline.work_protocol import FinalOutputPrepareRequestV1
+from loom.pipeline.work_protocol import ExecutionCompleteV1, FinalOutputPrepareRequestV1
 from loom.trajectory.storage import FakeObjectStore
 from loom_control_plane.artifact_commit_runtime import (
+    ExecutionAttemptCompletionService,
     FinalOutputRouteService,
     SqlArtifactCommitRepository,
 )
+from loom_pipeline_orchestrator.fanout_runtime import FanoutExpansionRuntime
 from loom_pipeline_orchestrator.repository import FrozenReadiness
 from tests.integration.pipeline_artifact_testkit import chunks, digest
 from tests.integration.pipeline_orchestrator_fixtures import DIGEST, OrchestratorSeed
@@ -27,9 +32,6 @@ async def test_platform_fanout_manifest_is_synthesized_inside_final_marker(
     orchestrator_seed: OrchestratorSeed,
 ) -> None:
     seed = orchestrator_seed
-    lease = (await seed.repository.claim_runs(controller_id="fanout-commit"))[0]
-    await seed.repository.initialize_run(lease)
-    candidate = (await seed.repository.readiness_candidates(lease))[0]
     node = {
         "node_kind": "container",
         "node_key": "root",
@@ -80,10 +82,81 @@ async def test_platform_fanout_manifest_is_synthesized_inside_final_marker(
         "max_attempts": 3,
         "failure_policy": "fail_run",
     }
+    consumer = {
+        "node_kind": "container",
+        "node_key": "consume",
+        "image": "registry.example.com/loom/pipeline@sha256:" + "b" * 64,
+        "argv": ["consume"],
+        "workdir": "/workspace",
+        "resource_profile": "pipeline-test-cpu-none@1",
+        "network_profile": "none",
+        "needs": ["root"],
+        "inputs": [
+            {
+                "source": "fanout_item",
+                "binding_name": "item",
+                "artifact_type": "example.item.v1",
+            }
+        ],
+        "outputs": [],
+        "request_renderer": None,
+        "checkpoint": None,
+        "fanout": {
+            "source": "stage_output",
+            "manifest_stage_key": "root",
+            "manifest_output_name": "manifest",
+            "items_pointer": "/items",
+            "shard_key_pointer": "/shard_key",
+            "item_binding_name": "item",
+            "item_artifact_type": "example.item.v1",
+            "max_items": 2,
+        },
+        "fanout_commit": None,
+        "timeout_seconds": 60,
+        "max_attempts": 3,
+        "failure_policy": "fail_run",
+    }
+    graph = RunGraphSpecV1.model_validate(
+        {
+            "schema_version": "loom.run-graph.v1",
+            "recipe": {"name": "orchestrator-fixture", "version": 1, "digest": DIGEST},
+            "inputs": [],
+            "parameters": {},
+            "budget": {
+                "max_provider_cost_usd": "0",
+                "max_gpu_seconds": 0,
+                "max_wall_seconds": 600,
+                "max_artifact_bytes": 100_000,
+                "max_stage_runs": 8,
+                "max_attempts_total": 8,
+            },
+            "nodes": [node, consumer],
+        }
+    )
+    async with seed.sessions() as db, db.begin():
+        await db.execute(
+            text("""
+                UPDATE pipeline_runs
+                   SET graph_spec_json=CAST(:graph AS jsonb),
+                       graph_spec_digest=:graph_digest,
+                       budget_json=CAST(:budget AS jsonb)
+                 WHERE id=:run_id
+            """),
+            {
+                "run_id": seed.run_id,
+                "graph": json.dumps(graph.model_dump(mode="json", exclude_none=False)),
+                "graph_digest": canonical_digest(graph),
+                "budget": json.dumps(graph.budget.model_dump(mode="json")),
+            },
+        )
+    lease = (await seed.repository.claim_runs(controller_id="fanout-commit"))[0]
+    assert await seed.repository.initialize_run(lease) == 1
+    candidate = (await seed.repository.readiness_candidates(lease))[0]
     spec = {
         "schema_version": "loom.execution-spec.v1",
         "recipe_digest": DIGEST,
         "container_node": node,
+        "resolved_image_manifest_digest": "sha256:" + "b" * 64,
     }
     frozen = FrozenReadiness(
         input_bindings_json=[],
@@ -253,4 +326,53 @@ async def test_platform_fanout_manifest_is_synthesized_inside_final_marker(
         records["out_a"].artifact_id,
         records["out_b"].artifact_id,
     ]
+    report = ExecutionCompleteV1(
+        exit_code=0,
+        stage_result=stage_result,
+        stage_result_sha256=canonical_digest(stage_result),
+        final_output_upload_session_id=grant.upload_session_id,
+    )
+    async with seed.sessions() as db, db.begin():
+        persisted_attempt = await db.get(ExecutionAttempt, attempt_id)
+        assert persisted_attempt is not None
+        committed_bytes = await ExecutionAttemptCompletionService().complete(
+            attempt=persisted_attempt,
+            report=report,
+            session=db,
+        )
+        await db.execute(
+            text("""
+                UPDATE pipeline_stage_runs
+                   SET state='succeeded', domain_outcome='generated',
+                       reason_code='generated', finished_at=clock_timestamp()
+                 WHERE id=:stage_id
+            """),
+            {"stage_id": candidate.stage_run_id},
+        )
+    assert committed_bytes["control"] == len(platform_bytes)
+    sources = await seed.repository.fanout_source_candidates(lease)
+    assert len(sources) == 1
+    assert sources[0].node_key == "consume"
+    assert sources[0].source_stage_run_id == candidate.stage_run_id
+    expanded = await FanoutExpansionRuntime(
+        repository=seed.repository,
+        store=store,
+        bucket="artifacts",
+    ).reconcile(lease)
+    assert expanded == 2
+    assert await seed.repository.fanout_source_candidates(lease) == ()
+    async with seed.sessions() as db:
+        child_keys = list(
+            (
+                await db.execute(
+                    text("""
+                        SELECT shard_key FROM pipeline_stage_runs
+                         WHERE pipeline_run_id=:run_id AND node_key='consume'
+                         ORDER BY shard_key
+                    """),
+                    {"run_id": seed.run_id},
+                )
+            ).scalars()
+        )
+    assert child_keys == ["a", "b"]
     await seed.repository.release(lease)
