@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 from uuid import UUID
 
 import pytest
@@ -25,6 +27,29 @@ from loom.pipeline.keys import canonical_document
 DIGEST = "sha256:" + "a" * 64
 IMAGE = "registry.example.invalid/loom/terminalgen@sha256:" + "b" * 64
 SLOT = "capability-00__same-domain-parametric__0001"
+
+
+def test_artifact_import_does_not_require_control_plane_dependencies() -> None:
+    script = """
+import sys
+from importlib.abc import MetaPathFinder
+
+class BlockSqlAlchemy(MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "sqlalchemy" or fullname.startswith("sqlalchemy."):
+            raise ModuleNotFoundError("blocked sqlalchemy")
+        return None
+
+sys.meta_path.insert(0, BlockSqlAlchemy())
+import loom.integrations.terminalgen.artifacts
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def _ref(index: int, artifact_type: str) -> ArtifactRefV1:

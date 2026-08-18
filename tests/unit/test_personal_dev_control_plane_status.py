@@ -415,7 +415,7 @@ def _acceptance_inputs(
         "source": {"commit": release.source_sha, "tree": release.source_tree},
         "storage": {
             "backup_restore_evidence_sha256": "b" * 64,
-            "schema_head": "0100",
+            "schema_head": "0101",
         },
         "window": {
             "expires_at": "2099-12-31T23:00:00Z",

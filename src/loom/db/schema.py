@@ -4326,6 +4326,15 @@ class ExecutionAttempt(Base):
             name="execution_attempts_result_group_check",
         ),
         CheckConstraint(
+            "(execution_authorization_json IS NULL "
+            "AND execution_authorization_bytes IS NULL "
+            "AND execution_authorization_digest IS NULL) OR "
+            "(execution_authorization_json IS NOT NULL "
+            "AND execution_authorization_bytes IS NOT NULL "
+            "AND execution_authorization_digest ~ '^sha256:[0-9a-f]{64}$')",
+            name="execution_attempts_authorization_group_check",
+        ),
+        CheckConstraint(
             "state != 'fault_pending' OR (worker_id IS NULL AND claim_id IS NULL "
             "AND lease_token_digest IS NULL AND lease_expires_at IS NULL "
             "AND queued_at IS NULL AND claimed_at IS NULL AND started_at IS NULL)",
@@ -4421,6 +4430,9 @@ class ExecutionAttempt(Base):
     stage_request_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     stage_request_bytes: Mapped[bytes | None] = mapped_column(LargeBinary)
     stage_request_digest: Mapped[str | None] = mapped_column(Text)
+    execution_authorization_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    execution_authorization_bytes: Mapped[bytes | None] = mapped_column(LargeBinary)
+    execution_authorization_digest: Mapped[str | None] = mapped_column(Text)
     exit_code: Mapped[int | None] = mapped_column(Integer)
     retry_class: Mapped[str | None] = mapped_column(Text)
     reason_code: Mapped[str | None] = mapped_column(Text)

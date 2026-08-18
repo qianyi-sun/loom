@@ -64,7 +64,8 @@ def test_production_pipeline_is_confined_to_closed_enabled_pools() -> None:
 
 
 def test_terminalgen_worker_admission_binds_pool_node_and_validation_backend() -> None:
-    parsed = ExecutionAttemptClaimV1.model_validate(terminalgen_validation_claim())
+    value = terminalgen_validation_claim()
+    parsed = ExecutionAttemptClaimV1.model_validate(value)
     settings = SimpleNamespace(
         pool_name="terminalgen-validate-none",
         pipeline_terminalgen_authoring_enabled=True,
@@ -86,6 +87,12 @@ def test_terminalgen_worker_admission_binds_pool_node_and_validation_backend() -
     settings.pipeline_terminalgen_authoring_enabled = False
     with pytest.raises(RuntimeError, match="pool_not_enabled"):
         _require_terminalgen_claim(parsed, settings)  # type: ignore[arg-type]
+
+    settings.pipeline_terminalgen_authoring_enabled = True
+    value["terminalgen_authoring"]["runtime_policy_digest"] = "sha256:" + "f" * 64
+    stale = ExecutionAttemptClaimV1.model_validate(value)
+    with pytest.raises(RuntimeError, match="claim_not_eligible"):
+        _require_terminalgen_claim(stale, settings)  # type: ignore[arg-type]
 
 
 def test_terminalgen_validation_pool_rejects_unattested_backend() -> None:

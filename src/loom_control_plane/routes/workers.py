@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -10,16 +11,22 @@ from fastapi import APIRouter, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from sqlalchemy import insert, null, text, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.auth import verify_bearer_token
 from loom.db.schema import Worker
+from loom.integrations.terminalgen.authority import (
+    TERMINALGEN_POOL_POLICIES,
+    TerminalGenAuthorityError,
+    build_terminalgen_authoring_grant,
+)
 from loom.models.capabilities import Capabilities
 from loom.models.result import FailureReason
 from loom.models.worker_capabilities import (
     SlurmGpuAllocationEvidenceV1,
     WorkerCapabilitySnapshotV1,
 )
-from loom.pipeline.keys import canonical_digest, digest_bytes
+from loom.pipeline.keys import canonical_digest, canonical_document, digest_bytes
 from loom.pipeline.stage1_smoke import (
     Stage1SmokeAuthorizationV1,
     Stage1SmokeCandidateV1,
@@ -32,6 +39,7 @@ from loom.pipeline.work_protocol import (
     ExecutionAttemptClaimV1,
     Stage1SmokeGrantV1,
     StageRequestGrantV1,
+    TerminalGenAuthoringGrantV1,
     TrialClaimV1,
     WorkClaimRequestV1,
     WorkClaimV1,
@@ -47,6 +55,93 @@ from loom_control_plane.scheduler.claim import (
 router = APIRouter()
 
 _WORKER_HEARTBEAT_STATUSES = {"active", "idle-exit", "shutting-down"}
+
+
+async def _terminalgen_authorization_for_claim(
+    session: AsyncSession,
+    *,
+    attempt_row: Mapping[str, Any],
+    spec: Mapping[str, Any],
+    node: Mapping[str, Any],
+) -> TerminalGenAuthoringGrantV1 | None:
+    profile = attempt_row["resource_profile_json"]
+    if not str(profile.get("name", "")).startswith("terminalgen-"):
+        return None
+
+    stored_json = attempt_row["execution_authorization_json"]
+    stored_bytes_value = attempt_row["execution_authorization_bytes"]
+    stored_digest = attempt_row["execution_authorization_digest"]
+    stored = (stored_json, stored_bytes_value, stored_digest)
+    if any(item is not None for item in stored) != all(item is not None for item in stored):
+        raise TerminalGenAuthorityError("terminalgen_authorization_snapshot_incomplete")
+
+    persisted: TerminalGenAuthoringGrantV1 | None = None
+    if stored_json is not None:
+        stored_bytes = bytes(stored_bytes_value)
+        try:
+            persisted = TerminalGenAuthoringGrantV1.model_validate_json(stored_bytes)
+        except ValidationError as exc:
+            raise TerminalGenAuthorityError("terminalgen_authorization_snapshot_invalid") from exc
+        if (
+            persisted.model_dump(mode="json") != stored_json
+            or canonical_document(stored_json) != stored_bytes
+            or digest_bytes(stored_bytes) != stored_digest
+        ):
+            raise TerminalGenAuthorityError("terminalgen_authorization_snapshot_drift")
+
+    expected = build_terminalgen_authoring_grant(
+        recipe_name=attempt_row["recipe_name"],
+        recipe_version=attempt_row["recipe_version"],
+        recipe_digest=attempt_row["recipe_digest"],
+        pipeline_run_id=attempt_row["pipeline_run_id"],
+        stage_run_id=attempt_row["stage_run_id"],
+        execution_attempt_id=attempt_row["id"],
+        node_key=attempt_row["node_key"],
+        resource_profile=f"{profile['name']}@{profile['version']}",
+        resource_profile_digest=attempt_row["resource_profile_digest"],
+        image_runtime_contract_digest=attempt_row["image_runtime_contract_digest"],
+        resolved_input_bindings_digest=spec["resolved_input_bindings_digest"],
+        network_profile=node["network_profile"],
+        provider_connection_ref=attempt_row["provider_connection_ref"],
+        validation=persisted.validation if persisted is not None else None,
+    )
+    if persisted is not None:
+        if persisted != expected:
+            raise TerminalGenAuthorityError("terminalgen_authorization_snapshot_stale")
+        return persisted
+
+    authorization_json = expected.model_dump(mode="json")
+    authorization_bytes = canonical_document(authorization_json)
+    authorization_digest = digest_bytes(authorization_bytes)
+    frozen = (
+        (
+            await session.execute(
+                text("""
+                    UPDATE execution_attempts
+                       SET execution_authorization_json=CAST(:authorization_json AS jsonb),
+                           execution_authorization_bytes=:authorization_bytes,
+                           execution_authorization_digest=:authorization_digest
+                     WHERE id=CAST(:attempt_id AS uuid)
+                       AND execution_authorization_json IS NULL
+                       AND execution_authorization_bytes IS NULL
+                       AND execution_authorization_digest IS NULL
+                 RETURNING id
+                """),
+                {
+                    "attempt_id": attempt_row["id"],
+                    "authorization_json": authorization_bytes.decode("utf-8"),
+                    "authorization_bytes": authorization_bytes,
+                    "authorization_digest": authorization_digest,
+                },
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if frozen is None:
+        raise TerminalGenAuthorityError("terminalgen_authorization_snapshot_race")
+    return expected
+
 
 _REQUEUE_TRIAL_RETRY_SQL = text("""
 UPDATE trials t
@@ -271,6 +366,9 @@ async def claim_any_work(
                         SELECT a.id, a.attempt_number, a.claim_id, a.lease_epoch,
                                a.lease_expires_at, a.stage_request_bytes,
                                a.stage_request_digest, a.resumed_checkpoint_artifact_id,
+                               a.execution_authorization_json,
+                               a.execution_authorization_bytes,
+                               a.execution_authorization_digest,
                                s.id AS stage_run_id, s.node_key, s.shard_key,
                                s.resolved_execution_spec_json, s.execution_spec_digest,
                                s.resource_profile_json, s.resource_profile_digest,
@@ -279,6 +377,7 @@ async def claim_any_work(
                                s.resolved_input_bindings_json,
                                s.request_renderer_json, s.provider_connection_ref,
                                s.secret_refs, r.id AS pipeline_run_id, r.team_id,
+                               r.recipe_name, r.recipe_version,
                                r.recipe_digest, r.graph_spec_digest,
                                p.authorization_id,
                                p.authorization_snapshot_sha256,
@@ -476,6 +575,16 @@ async def claim_any_work(
                     file_count=checkpoint_row["file_count"],
                 )
             try:
+                terminalgen_authoring = await _terminalgen_authorization_for_claim(
+                    session,
+                    attempt_row=attempt_row,
+                    spec=spec,
+                    node=node,
+                )
+            except (KeyError, TypeError, ValidationError, TerminalGenAuthorityError) as exc:
+                await session.rollback()
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            try:
                 claim_payload = ExecutionAttemptClaimV1(
                     execution_attempt_id=attempt_row["id"],
                     pipeline_run_id=attempt_row["pipeline_run_id"],
@@ -514,6 +623,7 @@ async def claim_any_work(
                     control_binding_snapshot=attempt_row["control_binding_snapshot"],
                     acceptance_preflight=acceptance,
                     stage1_smoke=stage1_smoke,
+                    terminalgen_authoring=terminalgen_authoring,
                     provider_connection_ref=attempt_row["provider_connection_ref"],
                     secret_refs=list(attempt_row["secret_refs"]),
                     resume_checkpoint=resume_checkpoint,
@@ -844,13 +954,7 @@ async def register_worker(
                 raise HTTPException(status_code=409, detail="gpu_worker_pool_contract_drift")
         elif raw_allocation_evidence is not None:
             raise HTTPException(status_code=400, detail="cpu_worker_has_gpu_allocation")
-        elif pool_name not in {
-            "behavior-cpu-data",
-            "terminalgen-generate-gateway",
-            "terminalgen-package-none",
-            "terminalgen-plan-none",
-            "terminalgen-validate-none",
-        }:
+        elif pool_name not in {"behavior-cpu-data", *TERMINALGEN_POOL_POLICIES}:
             raise HTTPException(status_code=409, detail="cpu_worker_pool_contract_drift")
         capability_identity = capability_snapshot.model_dump(mode="json")
     elif raw_allocation_evidence is not None:
