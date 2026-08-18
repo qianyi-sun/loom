@@ -169,6 +169,7 @@ class PipelineReconciler:
                         lease,
                         stage_run_id=candidate.stage_run_id,
                         frozen=frozen,
+                        terminal_snapshot=candidate.terminal_snapshot,
                     )
                 else:
                     if not all(

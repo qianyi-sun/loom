@@ -20,16 +20,25 @@ from loom.pipeline.budget import (
     TerminalCause,
 )
 from loom.pipeline.checkpoint import checkpoint_is_resume_compatible
+from loom.pipeline.closure import build_terminal_snapshot, descriptor_state
 from loom.pipeline.keys import canonical_digest, canonical_document, canonical_uuid5, digest_bytes
 from loom.pipeline.projection import StageTerminalProjection, project_pipeline_result
 from loom.pipeline.retry import retry_decision
 from loom.pipeline.spec import (
+    BindingItemV1,
+    BindingSetV1,
+    CommittedOutputDescriptorV1,
     ContainerNodeV1,
+    FanoutItemBindingV1,
+    FanoutManifestItemV1,
     FanoutManifestV1,
     OutcomeGateNodeV1,
     RunBudgetV1,
     RunGraphSpecV1,
+    RunInputBindingV1,
     StageOutputBindingV1,
+    TerminalOutputsBindingV1,
+    TerminalStageDescriptorV1,
     validate_fanout_manifest,
 )
 from loom.pipeline.state import PipelineStageRunState, RetryClass
@@ -142,6 +151,17 @@ class ReadinessCandidate:
     authority_candidate_json: dict[str, Any] | None
     gpu_backend_selection_json: dict[str, Any] | None
     gpu_backend_selection_digest: str | None
+    fanout_item_json: dict[str, Any] | None = None
+    terminal_snapshot: FrozenTerminalSnapshot | None = None
+    ordinary_input_bindings_json: list[dict[str, Any]] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class OrdinaryBindingAuthority:
+    artifacts_by_id: dict[UUID, dict[str, Any]]
+    artifacts_by_stage_output: dict[tuple[UUID, str, str], dict[str, Any]]
+    stages_by_id: dict[UUID, dict[str, Any]]
+    stages_by_node: dict[str, tuple[dict[str, Any], ...]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -690,7 +710,8 @@ class PipelineRepository:
                 (
                     await session.execute(
                         text("""
-                        SELECT run.id AS pipeline_run_id, stage.id, stage.node_key,
+                        SELECT run.id AS pipeline_run_id, run.team_id, run.submission_policy,
+                               stage.id, stage.node_key,
                                stage.shard_key, stage.state, stage.attempt_count,
                                run.graph_spec_json, stage.resolved_input_bindings_json,
                                stage.resolved_input_bindings_digest,
@@ -700,6 +721,7 @@ class PipelineRepository:
                                stage.resource_profile_digest,
                                stage.image_runtime_contract_json,
                                stage.image_runtime_contract_digest,
+                               stage.fanout_item_json,
                                run.recipe_digest, run.graph_spec_digest,
                                run.parameters_json, run.resolved_inputs_json,
                                run.official_submission_kind,
@@ -733,34 +755,679 @@ class PipelineRepository:
                 .mappings()
                 .all()
             )
-        return tuple(
-            ReadinessCandidate(
-                pipeline_run_id=row["pipeline_run_id"],
-                stage_run_id=row["id"],
-                node_key=row["node_key"],
-                shard_key=row["shard_key"],
-                state=row["state"],
-                attempt_count=row["attempt_count"],
-                graph_spec_json=row["graph_spec_json"],
-                resolved_input_bindings_json=row["resolved_input_bindings_json"],
-                resolved_input_bindings_digest=row["resolved_input_bindings_digest"],
-                resolved_execution_spec_json=row["resolved_execution_spec_json"],
-                resolved_execution_spec_bytes=row["resolved_execution_spec_bytes"],
-                execution_spec_digest=row["execution_spec_digest"],
-                resource_profile_json=row["resource_profile_json"],
-                resource_profile_digest=row["resource_profile_digest"],
-                image_runtime_contract_json=row["image_runtime_contract_json"],
-                image_runtime_contract_digest=row["image_runtime_contract_digest"],
-                recipe_digest=row["recipe_digest"],
-                graph_spec_digest=row["graph_spec_digest"],
-                parameters_json=row["parameters_json"],
-                resolved_inputs_json=row["resolved_inputs_json"],
-                official_submission_kind=row["official_submission_kind"],
-                authority_candidate_json=row["authority_candidate_json"],
-                gpu_backend_selection_json=row["gpu_backend_selection_json"],
-                gpu_backend_selection_digest=row["gpu_backend_selection_digest"],
+            candidates: list[ReadinessCandidate] = []
+            ordinary_authority: OrdinaryBindingAuthority | None = None
+            if any(
+                row["submission_policy"] == "ordinary"
+                and row["official_submission_kind"] is None
+                for row in rows
+            ):
+                extra_artifact_ids: set[UUID] = set()
+                for row in rows:
+                    if row["fanout_item_json"] is None:
+                        continue
+                    item = FanoutManifestItemV1.model_validate_json(
+                        canonical_document(row["fanout_item_json"])
+                    )
+                    extra_artifact_ids.update(
+                        value.artifact_id for value in item.artifact_bindings
+                    )
+                ordinary_authority = await self._ordinary_binding_authority(
+                    session,
+                    pipeline_run_id=lease.pipeline_run_id,
+                    team_id=rows[0]["team_id"],
+                    extra_artifact_ids=extra_artifact_ids,
+                )
+            for row in rows:
+                graph = RunGraphSpecV1.model_validate(row["graph_spec_json"])
+                node = next(item for item in graph.nodes if item.node_key == row["node_key"])
+                if not isinstance(node, ContainerNodeV1):
+                    raise ValueError("container readiness row has non-container graph authority")
+                terminal_snapshot: FrozenTerminalSnapshot | None = None
+                if node.request_renderer is not None and node.request_renderer.terminal_stage_keys:
+                    if row["state"] == "retry_wait":
+                        terminal_snapshot = await self._persisted_terminal_snapshot(
+                            session,
+                            stage_run_id=row["id"],
+                            renderer_digest=node.request_renderer.digest,
+                            run_graph_digest=row["graph_spec_digest"],
+                        )
+                    else:
+                        terminal_snapshot = await self._terminal_snapshot_candidate(
+                            session,
+                            lease=lease,
+                            graph=graph,
+                            graph_digest=row["graph_spec_digest"],
+                            consumer_stage_run_id=row["id"],
+                            renderer_digest=node.request_renderer.digest,
+                            terminal_stage_keys=node.request_renderer.terminal_stage_keys,
+                        )
+                    if terminal_snapshot is None:
+                        continue
+                ordinary_bindings: list[dict[str, Any]] | None = None
+                if row["submission_policy"] == "ordinary" and row["official_submission_kind"] is None:
+                    if ordinary_authority is None:
+                        raise ValueError("ordinary readiness authority is missing")
+                    ordinary_bindings = self._ordinary_input_bindings(
+                        node=node,
+                        authority=ordinary_authority,
+                        consumer_stage_run_id=row["id"],
+                        consumer_shard_key=row["shard_key"],
+                        run_inputs=row["resolved_inputs_json"],
+                        fanout_item_json=row["fanout_item_json"],
+                        terminal_snapshot=terminal_snapshot,
+                    )
+                candidates.append(
+                    ReadinessCandidate(
+                        pipeline_run_id=row["pipeline_run_id"],
+                        stage_run_id=row["id"],
+                        node_key=row["node_key"],
+                        shard_key=row["shard_key"],
+                        state=row["state"],
+                        attempt_count=row["attempt_count"],
+                        graph_spec_json=row["graph_spec_json"],
+                        resolved_input_bindings_json=row["resolved_input_bindings_json"],
+                        resolved_input_bindings_digest=row["resolved_input_bindings_digest"],
+                        resolved_execution_spec_json=row["resolved_execution_spec_json"],
+                        resolved_execution_spec_bytes=row["resolved_execution_spec_bytes"],
+                        execution_spec_digest=row["execution_spec_digest"],
+                        resource_profile_json=row["resource_profile_json"],
+                        resource_profile_digest=row["resource_profile_digest"],
+                        image_runtime_contract_json=row["image_runtime_contract_json"],
+                        image_runtime_contract_digest=row["image_runtime_contract_digest"],
+                        recipe_digest=row["recipe_digest"],
+                        graph_spec_digest=row["graph_spec_digest"],
+                        parameters_json=row["parameters_json"],
+                        resolved_inputs_json=row["resolved_inputs_json"],
+                        official_submission_kind=row["official_submission_kind"],
+                        authority_candidate_json=row["authority_candidate_json"],
+                        gpu_backend_selection_json=row["gpu_backend_selection_json"],
+                        gpu_backend_selection_digest=row["gpu_backend_selection_digest"],
+                        fanout_item_json=row["fanout_item_json"],
+                        terminal_snapshot=terminal_snapshot,
+                        ordinary_input_bindings_json=ordinary_bindings,
+                    )
+                )
+            return tuple(candidates)
+
+    @staticmethod
+    def _descriptor_item(value: dict[str, Any], *, item_key: str) -> BindingItemV1:
+        required = (
+            "artifact_id",
+            "content_sha256",
+            "manifest_sha256",
+            "stored_size_bytes",
+            "unpacked_size_bytes",
+            "file_count",
+        )
+        if any(value.get(key) is None for key in required):
+            raise ValueError("artifact binding descriptor is incomplete")
+        return BindingItemV1(
+            artifact_id=UUID(str(value["artifact_id"])),
+            content_sha256=value["content_sha256"],
+            file_count=value["file_count"],
+            item_key=item_key,
+            manifest_sha256=value["manifest_sha256"],
+            stored_size_bytes=value["stored_size_bytes"],
+            unpacked_size_bytes=value["unpacked_size_bytes"],
+        )
+
+    @staticmethod
+    def _artifact_row_item(value: dict[str, Any], *, item_key: str) -> BindingItemV1:
+        return PipelineRepository._descriptor_item(
+            {
+                "artifact_id": value["id"],
+                "content_sha256": value["content_hash"],
+                "manifest_sha256": value["manifest_sha256"],
+                "stored_size_bytes": value["stored_size_bytes"],
+                "unpacked_size_bytes": value["unpacked_size_bytes"],
+                "file_count": value["file_count"],
+            },
+            item_key=item_key,
+        )
+
+    @staticmethod
+    def _terminal_item_key(*, node_key: str, shard_key: str) -> str:
+        value = f"{node_key}/{shard_key}"
+        if len(value.encode("utf-8")) <= 128:
+            return value
+        return canonical_digest({"node_key": node_key, "shard_key": shard_key})
+
+    def _ordinary_input_bindings(
+        self,
+        *,
+        node: ContainerNodeV1,
+        authority: OrdinaryBindingAuthority,
+        consumer_stage_run_id: UUID,
+        consumer_shard_key: str,
+        run_inputs: list[dict[str, Any]],
+        fanout_item_json: dict[str, Any] | None,
+        terminal_snapshot: FrozenTerminalSnapshot | None,
+    ) -> list[dict[str, Any]]:
+        run_input_by_name = {str(item.get("input_name")): item for item in run_inputs}
+        result: list[BindingSetV1] = []
+        for binding in node.inputs:
+            if isinstance(binding, RunInputBindingV1):
+                descriptor = run_input_by_name.get(binding.input_name)
+                if (
+                    descriptor is None
+                    or descriptor.get("artifact_type") != binding.artifact_type
+                ):
+                    raise ValueError("ordinary run input binding drift")
+                result.append(
+                    BindingSetV1(
+                        binding_name=binding.binding_name,
+                        artifact_type=binding.artifact_type,
+                        cardinality="one",
+                        items=[self._descriptor_item(descriptor, item_key="singleton")],
+                    )
+                )
+                continue
+            if isinstance(binding, FanoutItemBindingV1):
+                if fanout_item_json is None:
+                    raise ValueError("expanded StageRun is missing fanout item authority")
+                item = FanoutManifestItemV1.model_validate_json(
+                    canonical_document(fanout_item_json)
+                )
+                if item.shard_key != consumer_shard_key:
+                    raise ValueError("fanout item shard identity drift")
+                item_authority = item.artifact_bindings[0]
+                if (
+                    item_authority.name != binding.binding_name
+                    or item_authority.artifact_type != binding.artifact_type
+                ):
+                    raise ValueError("fanout item binding drift")
+                artifact = authority.artifacts_by_id.get(item_authority.artifact_id)
+                if (
+                    artifact is None
+                    or artifact["artifact_type"] != binding.artifact_type
+                ):
+                    raise ValueError("committed fanout input Artifact is missing or drifted")
+                result.append(
+                    BindingSetV1(
+                        binding_name=binding.binding_name,
+                        artifact_type=binding.artifact_type,
+                        cardinality="one",
+                        items=[self._artifact_row_item(artifact, item_key="singleton")],
+                    )
+                )
+                continue
+            if isinstance(binding, TerminalOutputsBindingV1):
+                if terminal_snapshot is None:
+                    raise ValueError("terminal binding is missing its frozen snapshot")
+                selected: list[
+                    tuple[TerminalStageDescriptorV1, CommittedOutputDescriptorV1]
+                ] = []
+                for descriptor_value in terminal_snapshot.stages_json:
+                    terminal_descriptor = TerminalStageDescriptorV1.model_validate_json(
+                        canonical_document(descriptor_value)
+                    )
+                    if (
+                        terminal_descriptor.node_key not in binding.stage_keys
+                        or terminal_descriptor.terminal_state != "succeeded"
+                        or terminal_descriptor.domain_outcome not in binding.match_outcomes
+                    ):
+                        continue
+                    output = next(
+                        (
+                            value
+                            for value in terminal_descriptor.committed_outputs
+                            if value.name == binding.output_name
+                            and value.artifact_type == binding.artifact_type
+                        ),
+                        None,
+                    )
+                    if output is None:
+                        raise ValueError("selected terminal output is not committed")
+                    selected.append((terminal_descriptor, output))
+                items: list[BindingItemV1] = []
+                for terminal_descriptor, output in selected:
+                    selected_artifact = authority.artifacts_by_id.get(output.artifact_id)
+                    if (
+                        selected_artifact is None
+                        or selected_artifact["artifact_type"] != binding.artifact_type
+                    ):
+                        raise ValueError("committed terminal input Artifact is missing")
+                    items.append(
+                        self._artifact_row_item(
+                            selected_artifact,
+                            item_key=self._terminal_item_key(
+                                node_key=terminal_descriptor.node_key,
+                                shard_key=terminal_descriptor.shard_key,
+                            ),
+                        )
+                    )
+                result.append(
+                    BindingSetV1(
+                        binding_name=binding.binding_name,
+                        artifact_type=binding.artifact_type,
+                        cardinality="many",
+                        items=items,
+                    )
+                )
+                continue
+            assert isinstance(binding, StageOutputBindingV1)
+            if binding.shard_selection == "singleton":
+                source_rows = [
+                    item
+                    for item in authority.stages_by_node.get(binding.stage_key, ())
+                    if item["shard_key"] == "singleton"
+                ]
+            elif binding.shard_selection == "same_shard":
+                source_rows = [
+                    item
+                    for item in authority.stages_by_node.get(binding.stage_key, ())
+                    if item["shard_key"] == consumer_shard_key
+                ]
+            elif binding.shard_selection == "fanout_source_shard":
+                consumer = authority.stages_by_id.get(consumer_stage_run_id)
+                source_id = (
+                    consumer["source_stage_run_id"] if consumer is not None else None
+                )
+                if source_id is None:
+                    raise ValueError("fanout source StageRun binding is missing")
+                source = authority.stages_by_id.get(source_id)
+                source_rows = (
+                    [source]
+                    if source is not None and source["node_key"] == binding.stage_key
+                    else []
+                )
+            else:
+                source_rows = list(authority.stages_by_node.get(binding.stage_key, ()))
+            selected_rows = [
+                item
+                for item in source_rows
+                if item["state"] == "succeeded"
+                and (
+                    binding.match_outcomes is None
+                    or item["domain_outcome"] in binding.match_outcomes
+                )
+            ]
+            expected_count = None if binding.shard_selection == "all_shards" else 1
+            if expected_count is not None and len(selected_rows) != expected_count:
+                raise ValueError("scalar stage output selection is not exact")
+            stage_items: list[BindingItemV1] = []
+            for source in selected_rows:
+                selected_artifact = authority.artifacts_by_stage_output.get(
+                    (source["id"], binding.output_name, binding.artifact_type)
+                )
+                if selected_artifact is None:
+                    raise ValueError("committed stage input Artifact is missing")
+                stage_items.append(
+                    self._artifact_row_item(
+                        selected_artifact,
+                        item_key=(
+                            source["shard_key"]
+                            if binding.shard_selection == "all_shards"
+                            else "singleton"
+                        ),
+                    )
+                )
+            result.append(
+                BindingSetV1(
+                    binding_name=binding.binding_name,
+                    artifact_type=binding.artifact_type,
+                    cardinality=(
+                        "many" if binding.shard_selection == "all_shards" else "one"
+                    ),
+                    items=stage_items,
+                )
             )
-            for row in rows
+        return [item.model_dump(mode="json") for item in result]
+
+    async def _ordinary_binding_authority(
+        self,
+        session: AsyncSession,
+        *,
+        pipeline_run_id: UUID,
+        team_id: UUID,
+        extra_artifact_ids: set[UUID],
+    ) -> OrdinaryBindingAuthority:
+        stage_rows = (
+            (
+                await session.execute(
+                    text("""
+                        SELECT stage.id, stage.node_key, stage.shard_key, stage.state,
+                               stage.domain_outcome, expansion.source_stage_run_id
+                          FROM pipeline_stage_runs stage
+                          LEFT JOIN pipeline_fanout_expansions expansion
+                            ON expansion.id=stage.fanout_expansion_id
+                         WHERE stage.pipeline_run_id=:run_id
+                         ORDER BY stage.node_key, stage.shard_key
+                    """),
+                    {"run_id": pipeline_run_id},
+                )
+            )
+            .mappings()
+            .all()
+        )
+        artifact_rows = (
+            (
+                await session.execute(
+                    text("""
+                        SELECT artifact.pipeline_stage_run_id, artifact.id,
+                               artifact.name,
+                               artifact.artifact_type, artifact.content_hash,
+                               artifact.manifest_sha256, artifact.stored_size_bytes,
+                               artifact.unpacked_size_bytes, artifact.file_count
+                          FROM artifacts artifact
+                          JOIN artifact_upload_sessions upload
+                            ON upload.id=artifact.artifact_upload_session_id
+                         WHERE artifact.team_id=:team_id
+                           AND (
+                               (
+                                   artifact.pipeline_stage_run_id IN (
+                                       SELECT id FROM pipeline_stage_runs
+                                        WHERE pipeline_run_id=:run_id
+                                   )
+                                   AND artifact.producer_kind IN ('container','platform')
+                               )
+                               OR artifact.id=ANY(CAST(:artifact_ids AS uuid[]))
+                           )
+                           AND upload.state='committed'
+                    """),
+                    {
+                        "team_id": team_id,
+                        "run_id": pipeline_run_id,
+                        "artifact_ids": sorted(extra_artifact_ids, key=str),
+                    },
+                )
+            )
+            .mappings()
+            .all()
+        )
+        stages_by_id = {item["id"]: dict(item) for item in stage_rows}
+        stages_by_node: dict[str, list[dict[str, Any]]] = {}
+        for item in stage_rows:
+            stages_by_node.setdefault(item["node_key"], []).append(dict(item))
+        artifacts_by_id = {item["id"]: dict(item) for item in artifact_rows}
+        artifacts_by_stage_output: dict[tuple[UUID, str, str], dict[str, Any]] = {}
+        for item in artifact_rows:
+            if item["pipeline_stage_run_id"] is None:
+                continue
+            key = (
+                item["pipeline_stage_run_id"],
+                item["name"],
+                item["artifact_type"],
+            )
+            if key in artifacts_by_stage_output:
+                raise ValueError("committed stage Artifact identity is ambiguous")
+            artifacts_by_stage_output[key] = dict(item)
+        return OrdinaryBindingAuthority(
+            artifacts_by_id=artifacts_by_id,
+            artifacts_by_stage_output=artifacts_by_stage_output,
+            stages_by_id=stages_by_id,
+            stages_by_node={key: tuple(value) for key, value in stages_by_node.items()},
+        )
+
+    async def _persisted_terminal_snapshot(
+        self,
+        session: AsyncSession,
+        *,
+        stage_run_id: UUID,
+        renderer_digest: str,
+        run_graph_digest: str,
+    ) -> FrozenTerminalSnapshot:
+        row = (
+            (
+                await session.execute(
+                    text("""
+                        SELECT id, renderer_digest, run_graph_digest,
+                               terminal_stage_keys_json, stages_json,
+                               snapshot_json, snapshot_bytes, snapshot_digest
+                          FROM pipeline_terminal_snapshots
+                         WHERE consumer_stage_run_id=:stage_id
+                    """),
+                    {"stage_id": stage_run_id},
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if row is None:
+            raise ValueError("retry terminal renderer is missing its frozen snapshot")
+        if (
+            row["renderer_digest"] != renderer_digest
+            or row["run_graph_digest"] != run_graph_digest
+            or canonical_digest(row["snapshot_json"]) != row["snapshot_digest"]
+            or canonical_document(row["snapshot_json"]) != row["snapshot_bytes"]
+        ):
+            raise BudgetReservationConflictError("persisted terminal snapshot drift")
+        return FrozenTerminalSnapshot(
+            id=row["id"],
+            renderer_digest=row["renderer_digest"],
+            run_graph_digest=row["run_graph_digest"],
+            terminal_stage_keys_json=list(row["terminal_stage_keys_json"]),
+            stages_json=list(row["stages_json"]),
+            snapshot_json=dict(row["snapshot_json"]),
+            snapshot_bytes=row["snapshot_bytes"],
+            snapshot_digest=row["snapshot_digest"],
+        )
+
+    async def _closed_stage_rows(
+        self,
+        session: AsyncSession,
+        *,
+        pipeline_run_id: UUID,
+        graph: RunGraphSpecV1,
+        node_key: str,
+        visiting: frozenset[str] = frozenset(),
+    ) -> list[dict[str, Any]] | None:
+        if node_key in visiting:
+            raise ValueError("fanout closure recursion cycle")
+        node = next((item for item in graph.nodes if item.node_key == node_key), None)
+        if not isinstance(node, ContainerNodeV1):
+            raise ValueError("terminal closure key is not a container node")
+        rows = list(
+            (
+                await session.execute(
+                    text("""
+                        SELECT id, node_key, shard_key, state, domain_outcome,
+                               reason_code, attempt_count, fanout_expansion_id
+                          FROM pipeline_stage_runs
+                         WHERE pipeline_run_id=:run_id AND node_key=:node_key
+                         ORDER BY shard_key
+                    """),
+                    {"run_id": pipeline_run_id, "node_key": node_key},
+                )
+            )
+            .mappings()
+            .all()
+        )
+        if node.fanout is None:
+            if len(rows) != 1 or rows[0]["shard_key"] != "singleton":
+                return None
+        else:
+            expansions = list(
+                (
+                    await session.execute(
+                        text("""
+                            SELECT id, source_stage_run_id, item_count
+                              FROM pipeline_fanout_expansions
+                             WHERE pipeline_run_id=:run_id AND node_key=:node_key
+                        """),
+                        {"run_id": pipeline_run_id, "node_key": node_key},
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            if node.fanout.source == "run_input":
+                if len(expansions) != 1 or expansions[0]["source_stage_run_id"] is not None:
+                    return None
+            else:
+                source_rows = await self._closed_stage_rows(
+                    session,
+                    pipeline_run_id=pipeline_run_id,
+                    graph=graph,
+                    node_key=node.fanout.manifest_stage_key,
+                    visiting=visiting | {node_key},
+                )
+                if source_rows is None:
+                    return None
+                expected_sources = {
+                    item["id"] for item in source_rows if item["state"] == "succeeded"
+                }
+                observed_sources = {item["source_stage_run_id"] for item in expansions}
+                if observed_sources != expected_sources:
+                    return None
+            expansion_ids = {item["id"] for item in expansions}
+            if (
+                len(rows) != sum(item["item_count"] for item in expansions)
+                or any(item["fanout_expansion_id"] not in expansion_ids for item in rows)
+            ):
+                raise ValueError("fanout expansion child cardinality drift")
+        if any(item["state"] not in {"succeeded", "failed", "skipped"} for item in rows):
+            return None
+        return [dict(item) for item in rows]
+
+    async def _terminal_snapshot_candidate(
+        self,
+        session: AsyncSession,
+        *,
+        lease: RunLease,
+        graph: RunGraphSpecV1,
+        graph_digest: str,
+        consumer_stage_run_id: UUID,
+        renderer_digest: str,
+        terminal_stage_keys: list[str],
+    ) -> FrozenTerminalSnapshot | None:
+        ordered_rows: list[dict[str, Any]] = []
+        for node_key in terminal_stage_keys:
+            rows = await self._closed_stage_rows(
+                session,
+                pipeline_run_id=lease.pipeline_run_id,
+                graph=graph,
+                node_key=node_key,
+            )
+            if rows is None:
+                return None
+            ordered_rows.extend(rows)
+        stage_ids = [item["id"] for item in ordered_rows]
+        if stage_ids:
+            pending = (
+                await session.execute(
+                    text("""
+                        SELECT EXISTS (
+                            SELECT 1 FROM execution_attempts
+                             WHERE stage_run_id=ANY(CAST(:stage_ids AS uuid[]))
+                               AND (
+                                 state IN ('fault_pending','queued','claimed','running')
+                                 OR (state IN ('failed','cancelled','lost')
+                                     AND cleanup_acknowledged_at IS NULL)
+                               )
+                        )
+                    """),
+                    {"stage_ids": stage_ids},
+                )
+            ).scalar_one()
+            if pending:
+                return None
+        attempts: dict[UUID, dict[str, Any]] = {}
+        outputs: dict[UUID, list[CommittedOutputDescriptorV1]] = {
+            stage_id: [] for stage_id in stage_ids
+        }
+        if stage_ids:
+            attempt_rows = (
+                (
+                    await session.execute(
+                        text("""
+                            SELECT id, stage_run_id, attempt_number, result_manifest_digest
+                              FROM execution_attempts
+                             WHERE stage_run_id=ANY(CAST(:stage_ids AS uuid[]))
+                        """),
+                        {"stage_ids": stage_ids},
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            attempt_counts = {row["id"]: row["attempt_count"] for row in ordered_rows}
+            attempts = {
+                item["stage_run_id"]: dict(item)
+                for item in attempt_rows
+                if item["attempt_number"] == attempt_counts[item["stage_run_id"]]
+            }
+            artifact_rows = (
+                (
+                    await session.execute(
+                        text("""
+                            SELECT artifact.pipeline_stage_run_id, artifact.name,
+                                   artifact.producer_kind, artifact.id,
+                                   artifact.artifact_type, artifact.manifest_sha256
+                              FROM artifacts artifact
+                              JOIN artifact_upload_sessions upload
+                                ON upload.id=artifact.artifact_upload_session_id
+                             WHERE artifact.pipeline_stage_run_id=ANY(CAST(:stage_ids AS uuid[]))
+                               AND artifact.producer_kind IN ('container','platform')
+                               AND upload.state='committed'
+                             ORDER BY artifact.pipeline_stage_run_id, artifact.name
+                        """),
+                        {"stage_ids": stage_ids},
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            for item in artifact_rows:
+                if item["manifest_sha256"] is None:
+                    raise ValueError("terminal output is missing its committed manifest")
+                outputs[item["pipeline_stage_run_id"]].append(
+                    CommittedOutputDescriptorV1(
+                        name=item["name"],
+                        producer=item["producer_kind"],
+                        artifact_id=item["id"],
+                        artifact_type=item["artifact_type"],
+                        manifest_sha256=item["manifest_sha256"],
+                    )
+                )
+        descriptors: list[TerminalStageDescriptorV1] = []
+        for row in ordered_rows:
+            state = PipelineStageRunState(row["state"])
+            attempt = attempts.get(row["id"])
+            committed = outputs[row["id"]]
+            if state is not PipelineStageRunState.SUCCEEDED and committed:
+                raise ValueError("non-succeeded terminal stage has committed outputs")
+            descriptors.append(
+                TerminalStageDescriptorV1(
+                    node_key=row["node_key"],
+                    shard_key=row["shard_key"],
+                    stage_run_id=row["id"],
+                    terminal_state=descriptor_state(state),
+                    execution_attempt_id=attempt["id"] if attempt is not None else None,
+                    stage_result_sha256=(
+                        attempt["result_manifest_digest"] if attempt is not None else None
+                    ),
+                    domain_outcome=row["domain_outcome"],
+                    reason_code=row["reason_code"],
+                    committed_outputs=committed,
+                )
+            )
+        snapshot_id = canonical_uuid5(
+            lease.pipeline_run_id,
+            {
+                "kind": "pipeline_terminal_snapshot",
+                "consumer_stage_run_id": str(consumer_stage_run_id),
+                "renderer_digest": renderer_digest,
+                "run_graph_digest": graph_digest,
+            },
+        )
+        document, encoded, digest = build_terminal_snapshot(
+            pipeline_run_id=lease.pipeline_run_id,
+            run_graph_digest=graph_digest,
+            snapshot_id=snapshot_id,
+            terminal_stage_keys=terminal_stage_keys,
+            stages=descriptors,
+        )
+        return FrozenTerminalSnapshot(
+            id=snapshot_id,
+            renderer_digest=renderer_digest,
+            run_graph_digest=graph_digest,
+            terminal_stage_keys_json=list(terminal_stage_keys),
+            stages_json=[item.model_dump(mode="json") for item in descriptors],
+            snapshot_json=document.model_dump(mode="json"),
+            snapshot_bytes=encoded,
+            snapshot_digest=digest,
         )
 
     async def fanout_source_candidates(
@@ -1122,12 +1789,14 @@ class PipelineRepository:
                         INSERT INTO pipeline_stage_runs (
                             id, pipeline_run_id, node_key, shard_key, node_kind, state,
                             resource_profile_json, resource_profile_digest,
-                            fanout_parameters_json, fanout_item_digest, fanout_expansion_id,
+                            fanout_parameters_json, fanout_item_json, fanout_item_digest,
+                            fanout_expansion_id,
                             request_renderer_json, request_renderer_digest, failure_policy
                         ) VALUES (
                             :id, :run_id, :node_key, :shard_key, 'container', 'blocked',
                             CAST(:resource AS jsonb), :resource_digest,
-                            CAST(:parameters AS jsonb), :item_digest, :expansion_id,
+                            CAST(:parameters AS jsonb), CAST(:item AS jsonb),
+                            :item_digest, :expansion_id,
                             CAST(:renderer AS jsonb), :renderer_digest, :failure_policy
                         )
                     """),
@@ -1139,6 +1808,7 @@ class PipelineRepository:
                         "resource": _json_text(resource_json),
                         "resource_digest": canonical_digest(resource_json),
                         "parameters": _json_text(item.parameters),
+                        "item": _json_text(item.model_dump(mode="json")),
                         "item_digest": digest_bytes(canonical_document(item)),
                         "expansion_id": expansion_id,
                         "renderer": _json_text(renderer_json) if renderer_json else None,
