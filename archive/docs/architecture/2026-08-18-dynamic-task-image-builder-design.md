@@ -242,10 +242,37 @@ The guard has no remote listener and accepts only a bounded versioned request
 containing a grant ID; it never parses a task bundle or Dockerfile. Its systemd
 unit pins the executable and policy digests, limits memory/PIDs/requests,
 restricts filesystem writes to its runtime state, and limits network access to
-the exact control-plane projection endpoint. It retains only the host authority
-needed for peer/cgroup inspection, approved Loom-subtree management, and BPF
-attachment. Malformed or excessive local requests are rate-limited and audited
-without affecting `slurmd`.
+the exact control-plane projection and attestation endpoints. It retains only
+the host authority needed for peer/cgroup inspection, approved Loom-subtree
+management, and BPF attachment. Malformed or excessive local requests are
+rate-limited and audited without affecting `slurmd`.
+
+Network programs attach through cgroup `bpf_link` objects pinned with their maps
+under a root-only per-cluster/job/grant directory in bpffs. Pinning, rather than
+the guard process's file-descriptor lifetime, owns the attachment, so a guard
+crash cannot open an unfiltered interval. The guard also keeps a bounded
+root-owned active-job ledger containing the grant, cgroup inode, link/program/map
+IDs, policy digest, and last successful attestation. It periodically reconciles
+that ledger and the pinned objects against live Slurm jobs and durable grant
+bindings. It never detaches a live job's last deny-capable link merely because
+the control plane or guard restarted; cleanup requires a terminal Slurm job and
+an empty cgroup, otherwise the capability is quarantined.
+
+At a bounded interval, the guard sends a monotonic containment attestation
+directly to the control plane over its node mTLS channel. The attestation binds
+the grant, job/cgroup identity, ledger generation, link/program/map IDs, policy
+digest, and expiry. The supervisor references that generation in its session
+heartbeat but cannot create or extend it. Session extension and credential
+renewal require the control plane's matching fresh guard record. The reviewed
+profile fixes the attestation interval and expiry so the maximum interval plus
+clock-skew/jitter allowance is lower than both the expiry and credential-renewal
+safety margin. If the guard disappears, an attachment ID or map digest changes,
+or the attestation deadline expires, the pinned policy continues filtering
+while the supervisor stops new work, revokes credentials, terminates BuildKit,
+and exits the allocation. The restarted systemd service reconciles the ledger
+before accepting new projections. An orphaned or unexplainable pinned object
+remains fail-closed and quarantined for operator reconciliation rather than
+being automatically removed.
 
 ### Allocation supervisor and BuildKit executor
 
@@ -272,11 +299,32 @@ grace period, and garbage-collects partial or abandoned attempts.
 
 ### Trial scheduler and workers
 
-The scheduler carries the frozen task snapshot, exact component digests, and
-publication-statement digests in the trial execution grant. Service workers
-verify the bundle and statements and pull those image digests. A missing
-artifact after readiness is an infrastructure consistency failure; a trial
-worker never rebuilds it.
+The scheduler carries the frozen task snapshot, exact component digests, full
+immutable publication-statement envelopes, and their digests in a versioned
+trial execution grant. The database statement store, not an OCI referrer, is
+the envelope authority. The claim transaction binds the exact envelope set and
+current publication-revocation epoch into the execution-grant digest.
+
+Service workers verify the frozen bundle, canonical statements, signatures,
+key records, and exact image bindings before pulling. Immediately before the
+first task or sidecar container is created, a worker presents its trial claim
+epoch and execution-grant digest to the transactional
+`authorize_task_image_start` operation. That operation locks the claim,
+materialization generations, publication keys, and revocation epoch; rechecks
+that none is quarantined or revoked; and atomically records the start
+authorization. It returns a one-use, execution-grant-key-signed, short-lived
+`TaskImageStartAuthorizationV1` bound to the trial, claim epoch, worker,
+execution-grant digest, statement-digest set, revocation epoch, and
+`not_after` time. The worker verifies that authorization through the pinned
+control-plane trust root and must create the runtime before `not_after` or
+abandon/requeue the claim and obtain a new claim epoch before reauthorizing.
+
+The authorization transaction is the linearization point between compromise
+revocation and execution: a revocation that commits first rejects the start;
+an authorization that commits first classifies the trial as already starting
+and records it for incident handling. Merely delivering or locally validating
+a grant never crosses that boundary. A missing artifact after authorization is
+an infrastructure consistency failure; a trial worker never rebuilds it.
 
 ## Materialization identity and provenance
 
@@ -334,8 +382,9 @@ The output digest, not a mutable tag, is the only execution reference.
    remains visibly blocked on `task_image_materialization`, not failed.
 3. The capacity reconciler observes queued demand, journals a grant and
    submission intent, submits an ordinary Slurm builder job in held state with
-   the grant ID in its versioned comment, reconciles zero/one/multiple matches,
-   binds exactly one returned or discovered job ID, and then releases the job.
+   the grant ID in its versioned comment, and reconciles candidate state. It
+   binds and releases only one exact live held match; every retry after a zero,
+   terminal, or ambiguous result uses a newly issued grant ID.
 4. The allocation supervisor proves containment before it asks for a claim.
 5. The node-local guard authenticates the supervisor and its job cgroup,
    installs the job's network policy, and passes a sealed one-use memfd. The
@@ -353,8 +402,10 @@ The output digest, not a mutable tag, is the only execution reference.
     verifies the publication contract, signs its statement, and atomically marks
     the complete component set ready. A stale lease cannot perform this
     transition.
-11. A matching trial worker receives exact digests, pulls them, verifies the
-    frozen bundle, and only then starts trial execution and evidence creation.
+11. A matching trial worker receives exact digests, publication envelopes, and
+    the signed verification-key snapshot; verifies them and the frozen bundle;
+    obtains the transactionally fenced one-use start authorization; and only
+    then creates the trial runtime and evidence stream.
 12. One allocation may claim further rows sequentially. It exits after a short
     idle grace period and leaves no durable node-local state.
 
@@ -364,8 +415,10 @@ Builder jobs request a fixed, reviewed resource profile and render:
 
 - one node and one task;
 - native architecture and `loom_rootless_buildkit` capability constraints;
-- positive CPU, memory, PID, I/O, temporary-storage, and wall-time limits; and
-- zero builder-cgroup swap (`memory.swap.max=0`); and
+- positive CPU, memory, PID, I/O, temporary-storage, and wall-time limits;
+- positive network byte, packet, flow, and DNS-rate ceilings enforced by the
+  node guard;
+- zero builder-cgroup swap (`memory.swap.max=0`);
 - an overlapping shared-node builder partition with a higher `PriorityTier`
   than Loom trial-worker partitions; and
 - a dedicated builder QoS with bounded submitted/running job counts and a hard
@@ -383,28 +436,43 @@ comment `loom-task-builder-v1:grant=<grant-id>`. An allocation lost before or
 after projection terminates; replacement demand receives a new Slurm job and a
 new grant.
 
+The Slurm comment field is therefore not available for Loom's legacy
+`loom-cgroup-v1:pids=<N>` protocol. Builder jobs do not opt into that guard. The
+new task-builder node guard reads the positive PID and I/O ceilings from the
+durable grant resource profile after authenticating the live job, writes and
+reads back `pids.max` and the reviewed `io.max` controls beneath the exact batch
+task cgroup, and rejects any disagreement with the Slurm allocation. The legacy
+guard and comment grammar remain unchanged for ordinary trial-worker jobs.
+
 Submission is recoverable even when `sbatch` commits a job but its response is
 lost. Before invoking `sbatch`, the reconciler durably moves the grant from
 `issued` to `submitting` and records the cluster, submitting Unix identity,
-account, comment, and expected request digest. It never retries merely because
-the command result is ambiguous. Instead it inventories live jobs with `squeue`
-and recent terminal jobs with accounting by exact cluster, submitting identity,
-and versioned comment, then validates every candidate's immutable request
-fields:
+account, comment, and expected request digest. One grant authorizes exactly one
+`sbatch` invocation and is never returned to `issued`. The reconciler never
+retries that invocation merely because its result is ambiguous. Instead it
+inventories live jobs with `squeue` and recent terminal jobs with accounting by
+exact cluster, submitting identity, and versioned comment, then validates every
+candidate's immutable request fields and Slurm state:
 
-- zero matches after both inventories return an authoritative result moves the
-  same grant back to `issued`, from which one new held submission is allowed;
-- one match binds that job, regardless of whether the original `sbatch` response
-  was observed; and
-- multiple matches are never guessed between: all remain held, are cancelled
-  and confirmed terminal, the grant is revoked, and replacement demand receives
-  a new grant.
+- exactly one matching `PENDING` job that is still held for the submitting user,
+  with no terminal or other live match, may be bound and released;
+- zero matches after the controller inventory, accounting inventory, and
+  configured ambiguity-settle window all return authoritative results revokes
+  the old grant; replacement demand receives a new grant ID and makes one new
+  held submission;
+- one or more terminal matches revoke the grant; terminal jobs are recorded but
+  are never bound, released, or treated as cancellable held jobs; and
+- multiple matches or any live non-held match are a protocol violation. Every
+  cancellable live candidate is cancelled and confirmed terminal, the grant is
+  revoked, and replacement demand receives a new grant.
 
 An unavailable or incomplete inventory leaves the grant in `submitting` and
 raises an operator-visible reconciliation error; it does not submit again. A
-job with the comment but any mismatched request field is cancelled and audited,
-never adopted. These rules make a network timeout unable to create a running
-unbound builder.
+late job carrying a revoked old grant remains held, cannot project a credential,
+and is cancelled when discovered. A job with the comment but any mismatched
+request field is likewise cancelled and audited, never adopted. These rules
+make a network timeout unable to create a running unbound builder or bind a
+grant to a dead job.
 
 QoS priority is additive under Slurm's multifactor plugin and is therefore not
 the starvation fence. Strict ordering between Loom job classes comes from the
@@ -418,20 +486,62 @@ builder and backfill lower-tier work only when it will not delay that start.
 That is dynamic scheduler state, not a permanent named reservation. Running
 trials are never preempted by this policy.
 
-Long-lived trial worker jobs require an application-level starvation rule:
+Long-lived trial worker jobs require an application-level starvation rule. One
+durable `ArchitectureCapacityFence` row per `(environment, Slurm cluster,
+native architecture)` is the serialization authority for builder and trial
+capacity. It contains a monotonic epoch, builder-demand generation, state,
+bound builder grant/job when present, residual trial-admission TRES ceiling,
+and the selected trial-worker drain set. All materialization, admission, and
+arbiter writers take the same transaction-scoped advisory lock and lock that
+row before changing builder demand or either class's desired capacity.
 
-1. The reconciler submits and durably binds the held builder job before it
-   releases any new trial-capacity decision for that architecture.
-2. New builder demand immediately suppresses further trial-pool scale-up and
-   cancels enough pending, not-yet-running Loom trial-worker allocations to
-   remove conflicting queued capacity. No active trial is affected.
-3. When oldest queue age crosses a configured soft threshold, the capacity
-   arbiter marks enough reusable running trial workers to drain after their
-   current trial to satisfy the builder's resource profile.
-4. The claim service refuses new work to a draining worker. It exits normally
-   after its active trial or immediately when idle.
-5. Drain and admission pressure are released when the builder starts, its demand
-   disappears, or the builder job terminates without replacement demand.
+1. The transaction that first creates, requeues, or lease-recovers buildable
+   materialization demand takes the architecture lock, increments the demand
+   generation, and commits `open -> builder_pending` before returning. If a
+   builder is already running, it increments demand without reopening the
+   fence. The capacity arbiter therefore observes an existing durable fence
+   rather than discovering demand after a polling gap. The same transaction
+   sets the residual trial-admission ceiling to zero and marks conflicting
+   pending trial submissions for cancellation before any external provider
+   call.
+2. A trial-capacity writer must take the same lock and perform a final durable
+   epoch comparison immediately before journaling a submission. `open` permits
+   the normal ceiling; `builder_running` permits no more than its recorded
+   residual ceiling; every other state permits zero. The journal records the
+   fence epoch and approved TRES. A freshness-bounded, signed
+   `ArchitectureCapacityWitnessV1` carries the same values to the host-local
+   executor, which revalidates them immediately before `sbatch` and never acts
+   on a cached autoscaler decision.
+3. A trial submission that crossed its final check before the builder fence
+   committed is tagged with the older epoch. Reconciliation cancels it if still
+   pending. If it has already started, it cannot receive new trial claims once
+   selected for the fence's drain set and exits after its current trial.
+4. The provider journals, submits, binds, and releases the held builder job while
+   the durable fence remains `builder_pending`; external calls do not hold a
+   database transaction open. A provider or arbiter crash therefore leaves a
+   visible fail-closed fence that reconciliation can resume.
+5. When oldest queue age crosses a configured soft threshold, the arbiter locks
+   the fence and marks enough reusable running trial workers to drain after their
+   current trial to satisfy the builder's resource profile. The claim service
+   reads the same drain state in its claim transaction and refuses new work to
+   those workers.
+6. Starting the bound builder moves the fence to `builder_running` and a new
+   epoch. Because Slurm now owns the builder's allocated resources, the arbiter
+   records the observed residual TRES ceiling, signs the new witness, and may
+   release drain flags. Trial capacity remains limited to that residual. When
+   the builder terminates, the same locked reconciliation moves directly back
+   to `builder_pending` with a zero ceiling if demand remains, or to `open` with
+   the normal ceiling otherwise, before any trial-capacity decision. A stale or
+   ambiguous fence has no valid witness, suppresses new trial scale-up, and
+   alerts rather than reopening itself.
+
+The architecture witness uses the existing pinned-key, fail-closed capacity
+witness transport but a separate domain/schema. It binds the environment,
+cluster, architecture, epoch, state, residual TRES ceiling, request-policy
+digest, issue time, and expiry. The capacity executor pins the authority key and
+rejects a wrong scope, signature, policy digest, nonmonotonic epoch, or expired
+witness. This witness conveys an already serialized decision; it is not a
+second autoscaler.
 
 Therefore continuous new Loom trial arrivals and previously pending Loom
 trial-worker submissions cannot jump ahead of the builder. If every eligible
@@ -473,8 +583,10 @@ are true:
   enabled and probed rather than accepted through `auto` fallback;
 - the kernel and libc expose the pinned pidfd, sealed-memfd, and
   `clone3(CLONE_INTO_CGROUP)` behavior required by the launcher and guard;
-- the pinned node guard and its cgroup-v2 BPF programs are installed, the guard
-  socket is root-owned, and both IPv4 and IPv6 fail-closed probes pass;
+- the pinned node guard and its cgroup-v2 BPF connect, socket-lifecycle, and
+  ingress/egress programs are installed, bpffs link/map state is root-only, the
+  guard socket is root-owned, and IPv4/IPv6 authorization and rate-limit
+  fail-closed probes pass;
 - node-local scratch supports a hard per-job quota and deterministic cleanup;
   and
 - the restricted build-egress path is healthy.
@@ -559,7 +671,10 @@ On normal exit, cancellation, or signal, the supervisor stops claims, revokes
 credentials, terminates BuildKit, unmounts rootless filesystems, and requests
 job-storage cleanup. Slurm's epilog verifies that the allocation cgroup is
 empty, kills any survivor, removes the quota assignment and directory, and
-records cleanup evidence. Cleanup failure quarantines the node capability.
+records cleanup evidence. The guard removes the root-owned pinned links, maps,
+and active-job ledger entry only after observing both that terminal job state
+and empty-cgroup evidence; a failed or ambiguous cleanup leaves the deny policy
+pinned and quarantines the node capability.
 
 ## Storage and cache
 
@@ -598,9 +713,11 @@ A root-owned node guard enforces this policy with pinned cgroup-v2 BPF programs,
 not proxy environment variables alone. Before enabling the RootlessKit
 interface, it attaches `BPF_CGROUP_INET4_CONNECT`,
 `BPF_CGROUP_INET6_CONNECT`, `BPF_CGROUP_UDP4_SENDMSG`,
-`BPF_CGROUP_UDP6_SENDMSG`, and a `BPF_CGROUP_INET_EGRESS` packet backstop. The
-packet program covers non-connect, raw, forwarded, and translated traffic. The
-The `loom-builder` containment-root policy permits only the union of exact
+`BPF_CGROUP_UDP6_SENDMSG`, `BPF_CGROUP_INET_SOCK_CREATE`,
+`BPF_CGROUP_INET_SOCK_RELEASE`, `BPF_CGROUP_INET_INGRESS`, and
+`BPF_CGROUP_INET_EGRESS`. The packet programs cover
+non-connect, raw, forwarded, translated, and response traffic. The
+`loom-builder` containment-root policy permits only the union of exact
 trusted-service and build-egress destinations; the inherited `build-egress`
 child policy narrows that to the audited package/DNS gateway and exact registry
 endpoints needed for base-image reads and attempt publication. The
@@ -617,6 +734,20 @@ projection and terminates the job. A missing, replaced, or detached program
 during the job terminates the allocation and quarantines the node capability.
 Consequently a Dockerfile cannot bypass the policy by ignoring proxy variables,
 using IPv6 or UDP, or requesting real host networking.
+
+Destination authorization and network consumption are separate controls. The
+durable builder resource profile contains positive per-job ceilings for ingress
+and egress bytes per second, burst bytes, packets per second, concurrent flows,
+new flows per second, and DNS queries per second. RootlessKit and its
+`slirp4netns` helper run in `build-egress`, so their host sockets inherit the
+same cgroup packet hooks. Root-owned token-bucket maps enforce byte and packet
+ceilings in both directions; socket-lifecycle, connect, send, and packet hooks
+enforce concurrent/new-flow and DNS-request-rate ceilings. `trusted-service`
+has a separate smaller reviewed budget so control-plane heartbeats cannot be
+crowded out by build traffic. Counters and drops are charged to the exact grant
+and exported as evidence. Missing limiter state, counter overflow, or an
+unverifiable attachment fails closed, and the allocation cannot request a
+higher limit at runtime.
 
 The bootstrap protocol is exact rather than provider-defined:
 
@@ -672,7 +803,19 @@ The bootstrap protocol is exact rather than provider-defined:
    repository, or architecture is rejected. If registry caching is later
    enabled, cache import and export use separate credentials for a separate
    cache repository; neither credential authorizes an attempt repository.
-8. Job cancellation, epilog, or session expiry revokes the session and registry
+8. Registry credentials are renewable, not extended in place. After a
+   successful materialization heartbeat extends the same attempt and lease
+   epoch, the supervisor may request the next credential generation with a
+   fresh node-guard containment attestation. The broker re-derives the
+   repository set from durable state and rechecks the live job, session,
+   attempt, lease epoch, purpose, campaign, and current lease expiry. The
+   caller cannot request broader repositories or a later expiry. The
+   credential agent atomically switches generations before a safety margin;
+   the previous generation is revoked when supported and always expires after
+   a short bounded overlap. Loss of the lease or attestation permanently blocks
+   renewal for that attempt. Base-read and any future cache credentials use the
+   same fenced renewal protocol but remain distinct from publication authority.
+9. Job cancellation, epilog, or session expiry revokes the session and registry
    credentials. Closing an unconsumed memfd destroys its only allocation-side
    copy.
 
@@ -758,13 +901,31 @@ Workers and the readiness transaction reject an unknown key, noncanonical
 statement, digest mismatch, wrong domain/algorithm, bad signature, or a key used
 outside its activation interval.
 
+Distribution uses a bounded `PublicationVerificationKeysetV1` snapshot signed
+by Loom's distinct execution-grant key, whose public trust root is pinned in the
+worker release. The snapshot contains a monotonic keyset version, current
+publication-revocation epoch, issue/expiry times, and the public bytes, status,
+and activation interval of every key needed by the grant. The claim response
+contains the exact signed snapshot and full publication envelopes, and the
+execution-grant digest covers both. `TaskImageStartAuthorizationV1` covers the
+same keyset version, snapshot digest, and revocation epoch. Workers reject an
+expired snapshot, invalid execution-grant signature, lower or mismatched epoch,
+missing envelope/key, or any envelope obtained only from a registry referrer.
+Routine rotation must distribute a current snapshot containing the new key
+before the publisher may use it.
+
 `revoked` is reserved for compromise, not routine rotation. Revocation blocks
-new readiness and new trial grants for every affected statement, revokes
-unclaimed grants, records a `publication_quarantine` overlay on affected ready
-materializations, and starts a fenced rematerialization campaign with a
-nonrevoked key. The production eligibility query excludes that overlay while
-the underlying lifecycle row remains available for forensics. Running trials
-are not silently rewritten; they are recorded for incident handling. The
+new readiness and new trial grants for every affected statement. In one
+transaction it increments the publication-revocation epoch, records a
+`publication_quarantine` overlay on affected ready materializations, and
+revokes claimed execution grants that have no committed start authorization.
+The transaction takes the same publication and trial-claim locks as
+`authorize_task_image_start`, so their commit order determines the outcome
+without a check/use gap. It also starts a fenced rematerialization campaign
+with a nonrevoked key. The production eligibility query excludes the overlay
+while the underlying lifecycle row remains available for forensics. Trials
+whose start authorization committed first are not silently rewritten or
+retroactively revoked; they are recorded for incident handling. The
 compromised private key remains disabled while its public key and revocation
 record remain available to explain historical evidence.
 
@@ -790,6 +951,16 @@ Every mutation after claim includes the materialization ID, attempt ID, lease
 epoch, and expected current state. Heartbeats extend only the matching lease.
 A stale builder may record cleanup evidence but cannot replace publications or
 mark readiness.
+
+A trial claim epoch has at most one semantic task-image start authorization.
+The durable authorization is `authorized` or `expired`; an exact transport
+retry returns the same signed receipt, while changed fields are rejected. A
+revocation that wins the transaction race prevents an authorization row from
+being created. `authorized` is the revocation/execution boundary even if the
+worker has not yet reported the ordinary trial `running` transition. If its
+`not_after` passes first, the worker must abandon the claim; it cannot mint a
+second authorization under that claim epoch. Crash recovery may requeue the
+trial only by advancing the claim epoch, which invalidates the old receipt.
 
 Failures are typed:
 
@@ -825,16 +996,19 @@ Metrics and structured events include:
 - time from registration to ready and time in each lifecycle state;
 - build duration, bytes, cache hit/miss, and component count;
 - resource high-water marks and CPU/memory/PID/I/O/storage limit events;
+- ingress/egress bytes and packets, active/new-flow peaks, DNS-query rate, and
+  per-limit network throttle/drop counts;
 - containment preflight, runtime watcher, and cleanup results;
 - lease loss, retry class, final failure reason, and partial publications;
 - credential age/revocation and registry verification/GC outcomes; and
 - trials waiting on, released by, or terminally blocked by materialization.
 
 Alerts fire on excessive oldest queue age, no eligible nodes, repeated
-containment failure, cleanup residue, registry inconsistency, expiring
-credentials in use, or retention backlog. The operator view joins a task/trial
-to its materialization, attempt, Slurm job, publication digests, and typed
-failure without exposing secrets.
+containment failure, guard-attestation or pinned-link drift, network flood
+limits, cleanup residue, registry inconsistency, credential renewal failure,
+expiring credentials in use, stale architecture fences, or retention backlog.
+The operator view joins a task/trial to its materialization, attempt, Slurm job,
+publication digests, and typed failure without exposing secrets.
 
 ## Rollout and rollback
 
@@ -849,20 +1023,22 @@ bootstrap cycle but does not activate a builder or mutate a reservation.
 
 Provision cgroup enforcement, the dedicated builder OS identity and Slurm
 association, rootless runtime and exact snapshotter, storage quota, egress
-enforcement, the root-owned node guard and Unix socket, the repository-scoped
-registry credential broker, the publication-signing key lifecycle, the
-overlapping higher-tier builder partition, and the capped builder QoS. Add the
-evidence schema and run read-only conformance. The policies remain disabled and
-no node is certified for production claims yet.
+authorization and rate enforcement, the root-owned node guard and Unix socket,
+the repository-scoped renewable registry credential broker, the
+publication-signing and verification-keyset lifecycle, the overlapping
+higher-tier builder partition, and the capped builder QoS. Add the evidence
+schema and run read-only conformance. The policies remain disabled and no node
+is certified for production claims yet.
 
 ### Phase 2: inert provider and executor
 
 Add recoverable held-job/grant submission, the narrow Slurm environment
 provider, allocation supervisor, BuildKit executor, signed publication
-statements, tests, and disabled policies. Preserve the current task-scoped
-materialization identity and reference model. Certify eligible shared nodes only
-after the exact installed release passes conformance. The existing exclusive
-backend, prerequisites, and reservations remain unchanged.
+statements and keyset snapshots, the fenced trial-start authorization, tests,
+and disabled policies. Preserve the current task-scoped materialization identity
+and reference model. Certify eligible shared nodes only after the exact
+installed release passes conformance. The existing exclusive backend,
+prerequisites, and reservations remain unchanged.
 
 ### Phase 3: shadow canaries
 
@@ -885,11 +1061,11 @@ the two purposes.
 ### Phase 4: dynamic scheduling and gated production activation
 
 Enable strict builder/trial ordering, pending-trial cancellation, and worker
-draining under disabled/shadow evidence first. Then enable one architecture at
-a time with one builder allocation. New claims use the rootless backend; the
-exclusive backend stops new claims but remains available as a rollback
-candidate. Verify real registrations, submission backstops, registry retention,
-drain behavior, and scale-to-zero.
+draining through the durable architecture fence under disabled/shadow evidence
+first. Then enable one architecture at a time with one builder allocation. New
+claims use the rootless backend; the exclusive backend stops new claims but
+remains available as a rollback candidate. Verify real registrations,
+submission backstops, registry retention, drain behavior, and scale-to-zero.
 
 Locate the original run store for task/run `4139e767`, enqueue or retry its
 materialization through the production path, and run an end-to-end trial. The
@@ -963,30 +1139,43 @@ made explicitly non-deploying.
   `--hold`, `--no-requeue`, and the exact versioned grant comment, while
   omitting `--exclusive`, `--reservation`, `--nodelist`, Docker socket, and
   bearer secrets;
-- journal-before-submit and authoritative zero/one/multiple inventory recovery,
-  held-job binding, release, mismatched/orphan cancellation, and refusal to
-  retry while inventory is incomplete;
+- one-`sbatch`-invocation-per-grant journaling and authoritative inventory
+  recovery: only one exact live held job binds; zero or terminal results revoke
+  the old grant; mixed/multiple/live-nonheld results cancel live candidates and
+  revoke; incomplete inventory never resubmits;
 - node-guard `SO_PEERCRED`, Unix-identity, live-cgroup, job-field, executable,
   and memfd-seal validation, exact transport replay, semantic replay rejection,
-  expiry, and revocation;
-- BPF rendering and probes cover IPv4, IPv6, TCP, UDP, and packet egress, attach
-  before interface/credential release, and fail closed on missing programs or
+  expiry, revocation, pinned-link/ledger restart reconciliation, and fresh
+  containment attestations;
+- builder guard PID/I/O enforcement reads the durable resource profile, writes
+  and reads back `pids.max`/`io.max`, and does not depend on the legacy Slurm
+  comment grammar;
+- BPF rendering and probes cover IPv4, IPv6, TCP, UDP, packet ingress/egress,
+  byte/packet token buckets, flow/DNS ceilings, attach before
+  interface/credential release, and fail closed on missing limiter state or
   changed policy digests;
-- starvation control suppresses scale-up, cancels pending trial capacity,
+- starvation control serializes builder and trial decisions through the durable
+  architecture fence, rejects stale/forged/expired executor witnesses, enforces
+  zero or residual TRES ceilings by state, cancels pending trial capacity,
   verifies higher partition tier, drains reusable workers after the threshold,
-  prevents draining-worker claims, and releases pressure after builder start;
+  prevents draining-worker claims, and reopens only through a new epoch;
 - publication validation rejects digest, size, media-type, platform, component,
   attempt, lease, or statement-binding mismatches, and a `HEAD` result alone
   cannot mark readiness;
 - repository authorization rejects tag-prefix scoping and cross-attempt,
   cross-component, cache/publication, and shadow/production access;
+- credential renewal requires the same live attempt/lease epoch and fresh guard
+  attestation, never broadens repositories or expiry, and fails after lease
+  loss;
 - RFC 8785 and Ed25519 golden vectors cover canonicalization, domain separation,
   envelope validation, rotation, verification-key retention, and compromise
   revocation;
 - shadow queue, campaign, repository, publisher, readiness, scheduler, and
   retention queries cannot cross into production;
-- execution grants remain digest-only, include the matching publication
-  statement digests, and trial claims remain gated; and
+- execution grants use immutable image references rather than mutable tags and
+  include the exact full statement envelopes and signed keyset snapshot; start
+  authorization and compromise revocation serialize on the same locks and
+  epoch; and
 - rehearsal validation succeeds without future runtime artifacts, while
   post-materialization validation requires and verifies them.
 
@@ -998,8 +1187,13 @@ made explicitly non-deploying.
   authenticated manifest/config retrieval, signed publication statements, and
   atomic readiness;
 - killed `sbatch` response and accounting-delay tests prove that one committed
-  held job is adopted, zero is safely retried, multiple are all cancelled, and
-  incomplete inventory never causes a second submission;
+  held job is adopted; zero creates a replacement with a different grant ID;
+  terminal jobs are never bound; mixed/multiple candidates cancel only live
+  jobs and revoke; a late old-grant job cannot project; and incomplete inventory
+  never causes a second submission for that grant;
+- barrier-controlled races between materialization enqueue/requeue and trial
+  capacity submission prove one architecture-fence order, reject the stale
+  witness, and cancel or drain any older-epoch external job;
 - a held job cannot receive a projected grant before exact job binding; a peer
   outside the bound cgroup cannot use the guard socket; the valid peer receives
   only a sealed memfd; exact transport retries return the recorded response
@@ -1007,9 +1201,19 @@ made explicitly non-deploying.
 - direct IPv4/IPv6 TCP, UDP, raw-packet, loopback, metadata, and cluster-endpoint
   bypass attempts fail while the audited egress gateway and exact publication
   repositories remain usable;
+- allowed-endpoint ingress/egress floods, packet floods, connection churn, and
+  DNS floods converge at the configured per-job ceilings without degrading the
+  neighbor fixture beyond its acceptance bounds;
+- killing and restarting the node guard leaves the pinned deny/rate policy
+  attached, blocks credential renewal, terminates the allocation, and
+  reconciles or quarantines every ledger entry without an open-network window;
 - shadow publications cannot satisfy a production materialization even when
   task checksum, architecture, component, and output digest match;
-- lease loss during build and publication cannot mark ready;
+- a build spanning multiple default lease periods renews credentials only after
+  matching heartbeats, while lease loss during build/publication blocks renewal
+  and cannot mark ready;
+- a key-compromise revocation racing a claimed trial either rejects start or
+  durably classifies an already-authorized trial according to transaction order;
 - cancellation and timeout remove processes, mounts, runtime files, and
   credentials; and
 - expired or partial artifacts are collected without deleting a live digest.
@@ -1021,7 +1225,8 @@ whose source and image digests are part of the acceptance record:
 
 - `task-image-adversary-v1`: primary and sidecar Dockerfiles exercise CPU,
   memory, PIDs, I/O, bytes/inodes, daemonization, namespaces, forbidden mounts,
-  FUSE visibility, and IPv4/IPv6 TCP/UDP egress bypasses;
+  FUSE visibility, IPv4/IPv6 TCP/UDP egress bypasses, allowed-endpoint
+  ingress/egress saturation, packet and connection churn, and DNS floods;
 - `terminus2-neighbor-v1`: a normal Loom worker claim for a pinned Terminus-2
   benchmark/task snapshot, using the production execution path and controlled
   provider, must record at least three expected LLM calls and valid ATIF and
@@ -1056,14 +1261,21 @@ Evidence must additionally prove that:
 - direct IPv4/IPv6 and TCP/UDP/raw egress cannot bypass BPF policy by ignoring
   proxy variables, host loopback remains unreachable, and `/dev/fuse` is absent
   from Dockerfile processes even when the trusted snapshotter uses it;
+- allowed-destination byte, packet, concurrent/new-flow, and DNS floods remain
+  within their exact configured ceilings, with counters and drops attributed to
+  the builder grant rather than its neighbor;
+- a forced node-guard crash leaves every pinned link attached, opens no
+  unrestricted interval, prevents credential renewal, terminates the builder,
+  and reconciles or quarantines the ledger after restart;
 - the concurrent trial remains inside its own limits and meets the fixture
   thresholds above;
 - local state and mounts are absent after epilog, partial publications are
   retained only for the configured grace period, and the builder returns to
   scale zero;
 - under continuous synthetic Loom trial demand, conflicting pending trial
-  allocations are cancelled, no later Loom trial allocation jumps ahead of the
-  pending higher-tier builder, and reusable workers drain as designed; and
+  allocations are cancelled, stale architecture-fence epochs cannot submit or
+  claim, no later Loom trial allocation jumps ahead of the pending higher-tier
+  builder, and reusable workers drain as designed; and
 - rollback to the exclusive backend succeeds without changing ready trial
   digests.
 
@@ -1094,19 +1306,27 @@ For the original affected task/run, acceptance requires all of the following:
    host daemon performs the build.
 4. Dynamic builders use no permanent node reservation or exclusive allocation.
 5. Builders can wait behind active or external work but cannot be starved by
-   newly admitted or pending Loom trial-worker capacity.
+   newly admitted or pending Loom trial-worker capacity; one durable
+   architecture fence serializes both capacity writers.
 6. Only validated immutable digests with signed publication statements make a
    materialization ready.
-7. Lease loss prevents stale readiness, regardless of registry side effects.
+7. Lease loss blocks credential renewal and stale readiness, regardless of
+   registry side effects.
 8. Build input never receives control-plane or registry credentials.
 9. Local builder state is bounded and disposable; registry retention is
    reference-aware and fenced.
-10. Missing containment, credentials, registry consistency, or rollout
+10. Allowed network traffic is bounded by per-job byte, packet, flow, and DNS
+    ceilings in addition to destination policy.
+11. Missing containment, credentials, registry consistency, or rollout
     prerequisites fails closed before trial execution.
-11. No synchronous Slurm Prolog depends on Loom control-plane availability.
-12. One grant can bind at most one Slurm job; ambiguous submission never causes
-    an unobserved retry.
-13. Publication authority is repository-scoped, and cache, shadow, and
+12. A trial cannot create its runtime without a fresh, one-use start
+    authorization serialized against publication-key revocation.
+13. No synchronous Slurm Prolog depends on Loom control-plane availability.
+14. One grant authorizes one `sbatch` invocation and can bind at most one live
+    held Slurm job; a replacement always uses a new grant ID.
+15. Root-owned pinned BPF links remain fail-closed across a node-guard crash;
+    missing fresh guard attestation stops work and credential renewal.
+16. Publication authority is repository-scoped, and cache, shadow, and
     production credentials are mutually unusable.
-14. A shadow row, repository, or statement can never make a production
+17. A shadow row, repository, or statement can never make a production
     materialization ready.
