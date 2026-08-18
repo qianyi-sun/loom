@@ -164,6 +164,11 @@
     "default": "PydanticUndefined",
     "required": true
   },
+  "pipeline_terminalgen_authoring_enabled": {
+    "annotation": "<class 'bool'>",
+    "default": "False",
+    "required": false
+  },
   "pool_name": {
     "annotation": "<class 'str'>",
     "default": "'default'",
