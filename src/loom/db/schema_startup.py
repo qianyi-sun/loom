@@ -41,6 +41,12 @@ def _script_heads(alembic_ini: Path | None = None) -> set[str]:
     return set(ScriptDirectory.from_config(config).get_heads())
 
 
+def service_schema_heads(alembic_ini: Path | None = None) -> frozenset[str]:
+    """Return the immutable Alembic heads packaged with the service release."""
+
+    return frozenset(_script_heads(alembic_ini))
+
+
 async def _database_current_heads(engine: AsyncEngine) -> set[str]:
     async with engine.connect() as conn:
         return await conn.run_sync(_current_heads_sync)

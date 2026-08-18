@@ -348,3 +348,128 @@ def test_personal_shadow_runbook_is_indexed_and_architecture_linked() -> None:
     assert "personal-dev-management-plane-shadow.md" in runbook_index
     assert "personal-dev-management-plane-shadow.md" in architecture
     assert "personal-dev-management-plane-deployment.md" in architecture
+
+
+def test_zero_capacity_acceptance_runbook_has_exact_two_owner_workflow() -> None:
+    runbook = _read("docs/runbooks/personal-dev-zero-capacity-acceptance.md")
+    normalized = " ".join(runbook.split())
+
+    assert "set -euo pipefail" in runbook
+    assert "umask 077" in runbook
+    assert "personal-dev-trusted-release-run-<run>-attempt-<attempt>" in runbook
+    assert 'trusted_release="$trusted_release_artifact/trusted-release.json"' in runbook
+    assert 'acceptance_plan="<absolute-owner-only-acceptance-plan.json>"' in runbook
+    assert 'test "$(stat -c %a "$acceptance_plan")" = 600' in runbook
+    assert 'test "$(stat -c %h "$acceptance_plan")" = 1' in runbook
+    assert 'acceptance_plan_sha256="$(sha256sum "$acceptance_plan"' in runbook
+    assert "personal-dev-control-plane render-acceptance" in normalized
+    assert "personal-dev-control-plane status-acceptance" in normalized
+    assert runbook.count("personal-dev-control-plane status-acceptance") >= 3
+    assert '"application_ready":true' in runbook
+    assert '"capacity_publication_ready":true' in runbook
+    assert '"worker_available":false' in runbook
+    assert '"manager_ceiling":0' in runbook
+
+    assert 'owner_a_xdg="<absolute-mode-0700-owner-a-xdg-config-root>"' in runbook
+    assert 'owner_b_xdg="<absolute-mode-0700-owner-b-xdg-config-root>"' in runbook
+    assert 'owner_a_name="<owner-a-personal-name>"' in runbook
+    assert 'owner_b_name="<owner-b-personal-name>"' in runbook
+    assert 'XDG_CONFIG_HOME="$owner_a_xdg"' in runbook
+    assert 'XDG_CONFIG_HOME="$owner_b_xdg"' in runbook
+    assert runbook.count("loom auth whoami") == 2
+    assert "owner_a_deploy_pid=$!" in runbook
+    assert "owner_b_deploy_pid=$!" in runbook
+    assert "wait \"$owner_a_deploy_pid\"" in runbook
+    assert "wait \"$owner_b_deploy_pid\"" in runbook
+    assert "owner_a_update_pid=$!" in runbook
+    assert "owner_b_update_pid=$!" in runbook
+    assert runbook.count("--min-slots 0") >= 5
+    assert '--source-root "$owner_a_source_v1"' in normalized
+    assert '--source-root "$owner_b_source_v1"' in normalized
+    assert '--source-root "$owner_a_source_v2"' in normalized
+    assert '--source-root "$owner_b_source_v2"' in normalized
+    assert "expect_owner_rejection" in runbook
+    assert 'loom dev status "$owner_b_name"' in normalized
+    assert 'loom dev status "$owner_a_name"' in normalized
+    assert 'loom dev destroy "$owner_b_name" --no-wait' in normalized
+    assert 'loom dev destroy "$owner_a_name" --no-wait' in normalized
+    assert 'loom dev destroy "$owner_a_name" --format json' in normalized
+    assert 'loom dev destroy "$owner_b_name" --keep-data --format json' in normalized
+    assert 'loom service up --environment "dev-$owner_b_name"' in normalized
+    assert 'jq -e --arg previous "$retained_subject"' in normalized
+    assert ".subject_id != $previous" in runbook
+
+    assert 'shadow_render="$evidence_dir/reviewed-rollback-shadow.yaml"' in runbook
+    assert '.release.shadow_manifest_sha256' in runbook
+    assert 'cmp -s "$shadow_render_recheck" "$shadow_render"' in runbook
+    assert 'kubectl --kubeconfig "$kubeconfig" diff --server-side' in normalized
+    assert 'kubectl --kubeconfig "$kubeconfig" apply --server-side' in normalized
+    assert "--field-manager=loom-personal-dev-control-plane" in normalized
+
+
+def test_zero_capacity_acceptance_runbook_preserves_stop_and_authority_boundaries() -> None:
+    runbook = _read("docs/runbooks/personal-dev-zero-capacity-acceptance.md")
+    lowered = runbook.casefold()
+
+    for phrase in (
+        "credential or kubeconfig drift",
+        "acceptance window",
+        "runtimeclass or scanner drift",
+        "secret key inventory drift",
+        "migration or storage drift",
+        "manager identity, configuration-epoch regression, execution epoch/state, or",
+        "namespace ownership drift",
+        "personal worker deployment",
+    ):
+        assert phrase in lowered
+    assert "assert_pre_apply_interlocks" in runbook
+    assert "assert_live_acceptance" in runbook
+    assert "assert_rollback_interlocks" in runbook
+    assert "backup_restore_evidence_sha256" in runbook
+    assert "runtime_profile_sha256" in runbook
+    assert "scanner_finding_policy_sha256" in runbook
+    assert "approved secret channel" in lowered
+    assert "exact key inventory" in lowered
+    assert "two distinct authenticated owner sessions" in lowered
+    assert "arbitrary committed, modified, and untracked source" in lowered
+    assert "architecture-specific and architecture-neutral tasks are out of scope" in lowered
+    assert "issue #906" in lowered
+    assert "never delete pvcs" in lowered
+    assert "never delete a namespace directly" in lowered
+    assert "physical capacity remains unchanged" in lowered
+
+    assert "loom-dev-shared" not in runbook
+    assert "kubectl create secret" not in lowered
+    assert "--from-literal" not in lowered
+    assert "kubectl delete" not in lowered
+    assert "kubectl scale" not in lowered
+    assert "loom admin capacity-control-plane" not in lowered
+    assert "systemctl" not in lowered
+    for command in ("salloc", "sbatch", "scancel", "scontrol", "sinfo", "squeue"):
+        assert command not in lowered
+
+    forward_diff = runbook.index("acceptance_diff_status=0")
+    forward_apply = runbook.index(
+        'kubectl --kubeconfig "$kubeconfig" apply --server-side',
+        forward_diff,
+    )
+    assert "assert_pre_apply_interlocks" in runbook[forward_diff:forward_apply]
+    rollback_diff = runbook.index("rollback_diff_status=0")
+    rollback_apply = runbook.index(
+        'kubectl --kubeconfig "$kubeconfig" apply --server-side',
+        rollback_diff,
+    )
+    assert "assert_rollback_interlocks" in runbook[rollback_diff:rollback_apply]
+
+
+def test_zero_capacity_acceptance_runbook_is_indexed_and_current() -> None:
+    runbook_index = _read("docs/runbooks/README.md")
+    fleet = _read("deploy/dev-fleet/README.md")
+    architecture = _read("docs/architecture/multi-dev-environments.md")
+
+    for document in (runbook_index, fleet, architecture):
+        assert "personal-dev-zero-capacity-acceptance.md" in document
+    assert "render-acceptance" in fleet
+    assert "status-acceptance" in fleet
+    assert "two concurrent owners" in architecture.casefold()
+    assert "worker_available=false" in architecture

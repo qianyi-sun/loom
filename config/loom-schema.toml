@@ -158,6 +158,24 @@ used_by     = ["loom-service"]
 python_type = "bool"
 default     = false
 
+[service_config.personal_dev_acceptance_binding_json]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = "{}"
+description = "Canonical secret-free runtime binding for the exact zero-capacity personal-development acceptance window."
+
+[service_config.personal_dev_acceptance_plan_sha256]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = ""
+description = "Independent SHA-256 binding for the reviewed personal-development acceptance plan."
+
+[service_config.personal_dev_activation_public_key_sha256]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = ""
+description = "Expected SHA-256 of the exact activation-agent public verification key."
+
 [service_config.dev_instance_database_admin_url]
 used_by     = ["loom-service"]
 python_type = "PostgresDsn"

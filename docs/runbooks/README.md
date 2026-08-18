@@ -24,6 +24,9 @@ capacity workflow.
 - **[Personal-development management-plane shadow](personal-dev-management-plane-shadow.md)**
   — exact render, deploy, readiness, rollback, and stop conditions for the
   inert shared management foundation in `loom-dev`.
+- **[Personal-development zero-capacity acceptance](personal-dev-zero-capacity-acceptance.md)**
+  — plan-bound enablement, two-owner candidate lifecycle acceptance, exact
+  zero-ceiling observation, manager-first teardown, and byte-reviewed rollback.
 - **[Executable global-capacity bridge rehearsal](executable-global-capacity-bridge-rehearsal.md)**
   — separately gated zero-ceiling manager and two-pool preparation evidence.
 - **[Global fleet pool-executor dry run](global-fleet-pool-executor-dry-run.md)**

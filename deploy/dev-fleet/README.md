@@ -40,6 +40,14 @@ Both the personal-management shadow and the global-capacity zero-ceiling shadow
 must report ready before the later acceptance interlock can be considered.
 Neither shadow readiness enables personal mutations or physical capacity.
 
+After both shadows and one exact protected release are ready, use the
+[zero-capacity acceptance runbook](../../docs/runbooks/personal-dev-zero-capacity-acceptance.md).
+Its `render-acceptance` and `status-acceptance` commands bind the enabled
+management plane to an owner-only acceptance plan, exact global-manager
+execution identity, a monotonic configuration-epoch floor, ceiling zero,
+reviewed builder/scanner inputs, and an immutable rollback shadow. Repository
+assets alone do not authorize its live apply.
+
 `personal-dev-activation-agent.yaml.example` is the operator template for the
 independently keyed stable-route activation agent. Replace its image and Secret
 placeholders with reviewed immutable values before an authorized apply. The

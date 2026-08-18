@@ -3,21 +3,29 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 from loom.personal_dev_control_plane_config import (
+    PersonalDevAcceptancePlanError,
+    load_personal_dev_acceptance_plan,
     load_personal_dev_control_plane_profile,
     load_personal_dev_trusted_release,
 )
 from loom.personal_dev_control_plane_render import (
+    render_acceptance_personal_dev_control_plane,
     render_shadow_personal_dev_control_plane,
 )
+from loom.personal_dev_runtime import parse_personal_dev_acceptance_runtime_binding
 
 _ROOT = Path(__file__).resolve().parents[2]
 _PROFILE = _ROOT / "deploy/dev-fleet/personal-dev-control-plane.toml"
+_NOW = datetime(2026, 8, 17, 21, 0, tzinfo=UTC)
 _MANAGEMENT_FILES = {
     "admin-secrets.toml",
     "capacity-lifecycle-ca.pem",
@@ -78,6 +86,107 @@ def _render(tmp_path: Path):
     return profile, release, rendered, documents
 
 
+def _quota_value(profile: Any) -> dict[str, int]:
+    return {
+        "builder_global_concurrency": profile.limits.builder_global_concurrency,
+        "builder_per_owner_concurrency": profile.limits.builder_per_owner_concurrency,
+        "candidate_retained_bytes": profile.limits.candidate_retained_bytes,
+        "candidate_retained_count": profile.limits.candidate_retained_count,
+        "global_live_instances": profile.limits.global_live_instances,
+        "per_owner_aggregate_max_slots": profile.limits.per_owner_aggregate_max_slots,
+        "per_owner_aggregate_min_slots": profile.limits.per_owner_aggregate_min_slots,
+        "per_owner_live_instances": profile.limits.per_owner_live_instances,
+        "source_max_archive_bytes": profile.limits.source_max_archive_bytes,
+    }
+
+
+def _acceptance_render(tmp_path: Path):
+    profile, release = _inputs(tmp_path)
+    shadow = render_shadow_personal_dev_control_plane(profile, release)
+    release_sha256 = hashlib.sha256(release.canonical_bytes()).hexdigest()
+    protocol_sha256 = hashlib.sha256(
+        json.dumps(
+            dict(profile.protocol_versions),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+    ).hexdigest()
+    value = {
+        "acceptance_owners": [
+            {
+                "team_id": "00000000-0000-0000-0000-000000000201",
+                "user_id": "00000000-0000-0000-0000-000000000301",
+            },
+            {
+                "team_id": "00000000-0000-0000-0000-000000000202",
+                "user_id": "00000000-0000-0000-0000-000000000302",
+            },
+        ],
+        "activation": {
+            "key_id": "personal-dev-agent-v1",
+            "public_key_sha256": "c" * 64,
+        },
+        "builder": {
+            "protocol_map_sha256": protocol_sha256,
+            "publisher_identity": profile.builder.publisher_identity,
+            "registry_prefix": profile.builder.registry_prefix,
+            "runtime_class_name": profile.builder.runtime_class_name,
+            "runtime_handler": "runsc-personal-dev",
+            "runtime_profile_sha256": "d" * 64,
+            "scanner_binary_sha256": "f" * 64,
+            "scanner_database_sha256": "1" * 64,
+            "scanner_finding_policy_sha256": "3" * 64,
+            "scanner_java_database_sha256": "2" * 64,
+            "trusted_launcher_profile_sha256": "e" * 64,
+        },
+        "manager": {
+            "authority_incarnation": "00000000-0000-0000-0000-000000000101",
+            "configuration_epoch": 7,
+            "executable_new_capacity_ceiling": 0,
+            "execution_epoch": 0,
+            "execution_state": "shadow",
+        },
+        "principals": {
+            "lifecycle_principal_id": "personal-dev-lifecycle",
+            "reporter_principal_id": "personal-dev-reporter",
+        },
+        "quotas": _quota_value(profile),
+        "release": {
+            "images": release.canonical_value()["images"],
+            "release_evidence_sha256": release.release_evidence_sha256,
+            "shadow_manifest_sha256": hashlib.sha256(shadow.yaml_text.encode("utf-8")).hexdigest(),
+            "trusted_release_sha256": release_sha256,
+        },
+        "schema_version": 1,
+        "source": {"commit": release.source_sha, "tree": release.source_tree},
+        "storage": {
+            "backup_restore_evidence_sha256": "b" * 64,
+            "schema_head": "0098",
+        },
+        "window": {
+            "expires_at": "2026-08-17T23:00:00Z",
+            "rollback_expires_at": "2026-08-18T23:00:00Z",
+            "started_at": "2026-08-17T20:00:00Z",
+        },
+    }
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")
+    path = tmp_path / "acceptance-plan.json"
+    path.write_bytes(payload)
+    path.chmod(0o600)
+    plan = load_personal_dev_acceptance_plan(
+        path,
+        hashlib.sha256(payload).hexdigest(),
+    )
+    rendered = render_acceptance_personal_dev_control_plane(
+        profile,
+        release,
+        plan,
+        now=_NOW,
+    )
+    documents = [item for item in yaml.safe_load_all(rendered.yaml_text) if item]
+    return profile, release, plan, shadow, rendered, documents
+
+
 def _identity(document: dict[str, Any]) -> tuple[str, str, str]:
     metadata = document["metadata"]
     return (
@@ -109,6 +218,9 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
     ).hexdigest()
     assert rendered.input_sha256 == expected_input
     assert rendered.release_sha256 == hashlib.sha256(release.canonical_bytes()).hexdigest()
+    assert hashlib.sha256(rendered.yaml_text.encode("utf-8")).hexdigest() == (
+        "adb47ba3672e87513eb1501e507ea644fcc70e1781ba0328831d78d58cb99dc4"
+    )
 
     identities = {_identity(document) for document in documents}
     assert identities == {
@@ -172,6 +284,132 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
             assert template_metadata["annotations"]["loom.dev/trusted-release-sha256"] == (
                 rendered.release_sha256
             )
+
+
+def test_acceptance_render_is_deterministic_plan_bound_and_keeps_shadow_resources(
+    tmp_path: Path,
+) -> None:
+    profile, release, plan, shadow, rendered, documents = _acceptance_render(tmp_path)
+    repeated = render_acceptance_personal_dev_control_plane(
+        profile,
+        release,
+        plan,
+        now=_NOW,
+    )
+    shadow_documents = [item for item in yaml.safe_load_all(shadow.yaml_text) if item]
+
+    assert repeated == rendered
+    runtime_binding = parse_personal_dev_acceptance_runtime_binding(
+        plan.manager_runtime_json(),
+        plan.sha256,
+    )
+    assert runtime_binding.expected_manager.authority_incarnation == (
+        plan.manager.authority_incarnation
+    )
+    assert runtime_binding.expected_manager.observer_principal_id == (
+        plan.principals.lifecycle_principal_id
+    )
+    assert (
+        rendered.input_sha256
+        == hashlib.sha256(
+            b"loom-personal-dev-acceptance-render-v1\0"
+            + profile.canonical_bytes()
+            + release.canonical_bytes()
+            + plan.canonical_bytes()
+        ).hexdigest()
+    )
+    assert rendered.resource_count == shadow.resource_count == 33
+    assert {_identity(item) for item in documents if item["kind"] != "Job"} == {
+        _identity(item) for item in shadow_documents if item["kind"] != "Job"
+    }
+    assert sum(item["kind"] == "Job" for item in documents) == 1
+    assert {_identity(item) for item in documents if item["kind"] == "PersistentVolumeClaim"} == {
+        _identity(item) for item in shadow_documents if item["kind"] == "PersistentVolumeClaim"
+    }
+    images = {
+        container["image"]
+        for _, pod in _workload_pod_specs(documents)
+        for container in (*pod.get("initContainers", []), *pod["containers"])
+    }
+    shadow_images = {
+        container["image"]
+        for _, pod in _workload_pod_specs(shadow_documents)
+        for container in (*pod.get("initContainers", []), *pod["containers"])
+    }
+    assert images == shadow_images
+    for document in documents:
+        metadata = document["metadata"]
+        assert metadata["labels"]["loom.dev/acceptance-plan-sha256"] == plan.sha256[:32]
+        assert metadata["annotations"]["loom.dev/acceptance-plan-sha256"] == plan.sha256
+        if document["kind"] in {"Deployment", "StatefulSet", "Job"}:
+            template = document["spec"]["template"]["metadata"]
+            assert template["labels"]["loom.dev/acceptance-plan-sha256"] == plan.sha256[:32]
+            assert template["annotations"]["loom.dev/acceptance-plan-sha256"] == plan.sha256
+
+
+def test_acceptance_render_enables_only_personal_application_authorities(
+    tmp_path: Path,
+) -> None:
+    _profile, _release, plan, _shadow, _rendered, documents = _acceptance_render(tmp_path)
+    deployments = {
+        item["metadata"]["name"]: item for item in documents if item["kind"] == "Deployment"
+    }
+    management = deployments["loom-personal-dev-management"]
+    container = management["spec"]["template"]["spec"]["containers"][0]
+    env = {item["name"]: item.get("value") for item in container["env"] if "value" in item}
+    scanner_identity = (
+        f"trivy-bin-sha256:{plan.builder.scanner_binary_sha256}:"
+        f"db-sha256:{plan.builder.scanner_database_sha256}:"
+        f"java-db-sha256:{plan.builder.scanner_java_database_sha256}"
+    )
+
+    assert env["LOOM_SVC_DEV_INSTANCES_ENABLED"] == "true"
+    assert env["LOOM_SVC_PERSONAL_DEV_BUILDER_ENABLED"] == "true"
+    assert env["LOOM_SVC_K8S_WORKER_ENABLED"] == "false"
+    assert env["LOOM_SVC_PERSONAL_DEV_ACCEPTANCE_PLAN_SHA256"] == plan.sha256
+    assert env["LOOM_SVC_PERSONAL_DEV_ACCEPTANCE_BINDING_JSON"] == (plan.manager_runtime_json())
+    assert env["LOOM_SVC_PERSONAL_DEV_ACTIVATION_PUBLIC_KEY_SHA256"] == (
+        plan.activation.public_key_sha256
+    )
+    assert env["LOOM_SVC_PERSONAL_DEV_BUILDER_RUNTIME_CLASS_NAME"] == (
+        plan.builder.runtime_class_name
+    )
+    assert env["LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_IDENTITY"] == scanner_identity
+    assert env["LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_POLICY_SHA256"] == (
+        plan.builder.scanner_finding_policy_sha256
+    )
+    assert env["LOOM_SVC_PERSONAL_DEV_TRUSTED_LAUNCHER_PROFILE_SHA256"] == (
+        plan.builder.trusted_launcher_profile_sha256
+    )
+    assert not any("SLURM" in name for name in env)
+    assert (
+        management["spec"]["template"]["spec"]["containers"][0]["readinessProbe"]["httpGet"]["path"]
+        == "/api/v1/health/personal-dev-acceptance"
+    )
+    assert deployments["loom-personal-dev-activation-agent"]["spec"]["replicas"] == 1
+    workload_names = {
+        item["metadata"]["name"]
+        for item in documents
+        if item["kind"] in {"Deployment", "StatefulSet"}
+    }
+    assert "loom-worker" not in workload_names
+    assert "loom-capacity-manager" not in workload_names
+
+
+def test_acceptance_render_rejects_shadow_manifest_binding_drift(tmp_path: Path) -> None:
+    profile, release, plan, _shadow, _rendered, _documents = _acceptance_render(tmp_path)
+    drifted = replace(
+        plan,
+        release=replace(plan.release, shadow_manifest_sha256="0" * 64),
+    )
+
+    with pytest.raises(PersonalDevAcceptancePlanError):
+        render_acceptance_personal_dev_control_plane(
+            profile,
+            release,
+            drifted,
+            now=_NOW,
+        )
 
 
 def test_shared_namespace_uses_cross_package_operator_ownership(tmp_path: Path) -> None:
