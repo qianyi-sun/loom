@@ -23,6 +23,26 @@ LOOM_FIELD_NAMES = (
     "loom_requested_model",
     "loom_role",
 )
+# Terminus always talks to this gateway's OpenAI facade (/openai/v1), so Harbor
+# LiteLLM ids are ``openai/<name>`` even when the plan provider is Anthropic.
+# The HTTP body ``model`` field and model_switch_plans snapshots store the bare
+# ``<name>``. Strip only this LiteLLM dialect prefix; do not treat it as the
+# real upstream provider. Native /anthropic/v1 does not use this correlation.
+_OPENAI_COMPAT_PREFIX = "openai/"
+
+
+def canonical_facade_model_id(model: str) -> str:
+    """Map Harbor LiteLLM ``openai/<name>`` onto the OpenAI facade ``model`` id.
+
+    ``loom_requested_model`` is stamped from ``_harbor_model_name``
+    (always ``openai/`` + ``ModelSpec.name``). LiteLLM then POSTs
+    ``model: <name>`` to ``/openai/v1/chat/completions``. Exact string
+    equality of those two fields 400s a real student call; this helper
+    is the identity for that facade contract.
+    """
+    if model.startswith(_OPENAI_COMPAT_PREFIX):
+        return model[len(_OPENAI_COMPAT_PREFIX) :]
+    return model
 
 
 def extract_and_strip_loom_fields(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -105,7 +125,8 @@ async def persist_correlated_intent(
     role = str(extras["loom_role"])
     if role not in {"student", "teacher"}:
         raise HTTPException(status_code=400, detail="loom_role is invalid")
-    declared_model = str(extras["loom_requested_model"])
+    declared_model = canonical_facade_model_id(str(extras["loom_requested_model"]))
+    requested_model = canonical_facade_model_id(requested_model)
     if declared_model != requested_model:
         raise HTTPException(
             status_code=400,
@@ -132,8 +153,12 @@ async def persist_correlated_intent(
             detail="provider_connection_id does not match model_switch_plan",
         )
 
-    student_name = str((plan.student_model_snapshot or {}).get("name") or "")
-    teacher_name = str((plan.teacher_model_snapshot or {}).get("name") or "")
+    student_name = canonical_facade_model_id(
+        str((plan.student_model_snapshot or {}).get("name") or ""),
+    )
+    teacher_name = canonical_facade_model_id(
+        str((plan.teacher_model_snapshot or {}).get("name") or ""),
+    )
     allowed = {student_name, teacher_name} - {""}
     if requested_model not in allowed:
         raise HTTPException(

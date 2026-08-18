@@ -60,6 +60,9 @@ def _openai_gateway_base(gateway_url: str) -> str:
 
 
 def _harbor_model_name(model: ModelSpec) -> str:
+    # LiteLLM provider prefix for the OpenAI facade, not ModelSpec.provider.
+    # The gateway strips this ``openai/`` when correlating loom_requested_model
+    # against the HTTP body ``model`` field (see canonical_facade_model_id).
     return f"openai/{model.name}"
 
 
@@ -629,7 +632,10 @@ class LoomTerminus2Runtime:
             nonlocal bridge_error
             while not poll_stop.is_set():
                 try:
-                    await bridge.sync_trajectory_file(trajectory_path)
+                    await bridge.sync_trajectory_file(
+                        trajectory_path,
+                        allow_incomplete=True,
+                    )
                     await _write_episode_checkpoint()
                 except CheckpointBridgeError as exc:
                     bridge_error = exc
