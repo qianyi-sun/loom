@@ -156,16 +156,20 @@ rebound, or replay-equivocated assignment set.
 Admission acknowledgement does not bypass bootstrap protection. An intent
 becomes `launch-ready` only when its exact protected bootstrap and the complete
 batched admission plan are both acknowledged; `bootstrap-acknowledged` remains
-the launch barrier until the plan acknowledgement is stored. Public task-claim
-routes remain disconnected, no checked-in runtime bridges this proof to a
-public claim or physical launch, and global activation remains prohibited at
-the shipped executable ceiling of zero.
+the launch barrier until the plan acknowledgement is stored. PR #1425 completed
+the protected manager-plan, capacity-agent admission, exact-assignment, claim
+lifecycle, and release-acknowledgement mutation path. Public task-claim routes
+remain disconnected, and the shipped executable ceiling remains zero until an
+operator performs the protected activation sequence.
 
-This queue is executable authority, not scheduler actuation. No checked-in
-daemon calls Slurm from these routes, and the Package 5A renderer still exposes
-no apply, activation, or ceiling-changing command.
+This queue is executable authority, not scheduler actuation. The manager has
+no scheduler client and never calls Slurm from its HTTP routes. A separate
+controller-local active executor can consume those exact commands only under a
+matching activation artifact and manager execution context. The control-plane
+CLI still exposes no apply, start, or ceiling-changing command; activation,
+drain, and retirement are least-scope protected HTTP transitions.
 
-## Controller-local read-only Slurm inventory
+## Controller-local Slurm inventory and active execution
 
 The separate `loom_capacity_pool_executor` namespace in the Loom wheel can
 capture one controller-local Slurm 23.11 snapshot with only `scontrol show
@@ -195,12 +199,19 @@ allocation counters are reconciled against visible jobs, and any hidden
 residual or ambiguity becomes a quarantined node or full-pool charge. The
 subprocess runner owns fixed `/usr/bin` binaries, a digest-bound root-owned
 `/etc/loom/capacity/slurm.conf`, a minimal environment, bounded output and
-timeout, and cancellation-safe child reaping. Until signed ownership and
-terminal-release paths land, every foreign or ambiguous physical record is
-quarantined and therefore cannot authorize a capacity increase. The adapter is
-not imported by the dry-run executor package, has no scheduler-mutation
-command, is not installed as a daemon, and does not publish either report by
-itself.
+timeout, and cancellation-safe child reaping. Every foreign or ambiguous
+physical record is quarantined and therefore cannot authorize a capacity
+increase.
+
+The checked-in prepared systemd package uses that inventory path only at an
+effective ceiling of zero and cannot construct the scheduler backend. The
+separate active oneshot/timer requires an owner-only exact
+`ActivationRuntimeArtifactV2`, a positive approved profile-set digest, and the
+manager's exact active or drain-only context before constructing its fixed
+Slurm submit/cancel backend. Drain atomically zeros ceiling and rate while the
+active timers continue release cleanup and final inventory publication;
+retirement requires fresh retirement-safe checkpoints from both pools and
+every executable intent released.
 
 ## Dynamic personal subject projection
 
@@ -250,9 +261,14 @@ TLS authenticates the transport, hashed bearer principals bind the exact
 operator, reporter, manager, or pool-executor authority, and metric labels
 never contain subject IDs or dynamic environment names.
 
-The service has no task-claim admission, scheduler execution, Slurm mutation,
-or direct physical-release client. The packaged deployment continues to reject
-live readiness unless its executable ceiling is zero.
+The manager service has no scheduler client, Slurm mutation, or direct
+physical-release client. Protected claim admission and lifecycle convergence
+are mediated through exact manager plans, the capacity agent, and the personal
+guard mutation surface merged in PR #1425; they do not expose an ordinary
+public claim route. The packaged deployment's mTLS startup/readiness probe
+observes any exact ready nonnegative ceiling so the Service remains routable
+during activation and drain. The separate operator `status` command continues
+to require the exact zero-ceiling boundary.
 
 Run the checked-in offline proof without a live database or controller:
 
@@ -358,8 +374,9 @@ attestations at the recorded immutable subjects, and joins only those digests.
 It records the temporary manifest's creation digest once and performs registry
 validation, attestation, and attestation verification through that immutable
 digest. The official release SHA and branch tags move only after final
-verification succeeds. These controls publish the inert Package 5A image; they
-do not add apply, activation, runtime capacity authority, or execution.
+verification succeeds. These publication controls produce the inert Package
+5A image; by themselves they do not apply infrastructure, activate authority,
+or execute capacity.
 
 The Kubernetes namespace `loom-dev` is the shared infrastructure home, not the
 logical shared-development demand subject. The one authority accounts for all
@@ -399,23 +416,29 @@ migration head and manager image digest plus a digest of the canonical complete
 Job spec and exact head. Any immutable spec change therefore renders a new Job
 instead of colliding with an old template.
 
-The only operator commands are deterministic `render` and read-only `status`.
-The status path performs a real in-Pod mTLS probe. The probe first verifies
-that the mounted server certificate contains both the `127.0.0.1` IP SAN and
-the `loom-capacity-manager.loom-dev.svc.cluster.local` DNS SAN, then succeeds
-only for the exact canonical response
-`{"executable_new_capacity_ceiling":0,"status":"ready"}`. There is no apply,
-activate, external exposure, executor-daemon, Slurm, or ceiling-changing
-surface. Merging Package 5A does not authorize a live deployment; apply remains
-reserved for #906's explicit operator change window.
+The control-plane CLI commands are deterministic `render` and read-only
+`status`; executor rendering now includes separately artifact-bound active
+config and environment outputs. The status path performs a real in-Pod mTLS
+probe. The probe first verifies that the mounted server certificate contains
+both the `127.0.0.1` IP SAN and the
+`loom-capacity-manager.loom-dev.svc.cluster.local` DNS SAN, then succeeds only
+for the exact canonical response
+`{"executable_new_capacity_ceiling":0,"status":"ready"}`. The CLI has no
+apply, install, start, external-exposure, HTTP-transition, or ceiling-changing
+operation. Protected activation/drain/retire live on the manager API, and the
+separate controller-local active executor package owns Slurm actuation. Merging
+repository support does not authorize a live deployment; apply and activation
+remain reserved for #906's explicit operator change window.
 
 ## Current activation blockers
 
-There is intentionally no live global fleet manifest. Package 5A can render an
-inert management-authority release, but it cannot apply or activate it. The
-checked-in [fleet-state example](../../deploy/fleet-state/README.md) is
-synthetic. The diagnostic inventory of the current development, staging, and
-production environment copies reports these conflicts:
+There is intentionally no live global fleet manifest. Repository support can
+render the manager and prepared/active executor artifacts and exposes protected
+activation, drain, and retirement transitions, but it does not apply or start
+them. The checked-in
+[fleet-state example](../../deploy/fleet-state/README.md) is synthetic. The
+diagnostic inventory of the current development, staging, and production
+environment copies reports these conflicts:
 
 - `gb10`: allowed nodes, slot/job/concurrency ceilings, per-slot CPU and
   memory, requested/reserved resources, and resource-aware settings;
@@ -428,13 +451,15 @@ Those facts must be measured and reconciled into one reviewed immutable fleet
 generation. The manager must not choose an environment copy or merge node
 lists implicitly.
 
-The sealed executable allocation and manager work queue are implemented, but
-live activation remains blocked on protected task/claim bindings, real fenced
-OLDLAB and GB10 executors, personal lifecycle convergence, mixed-workload
-containment tracked by issue #896, GB10 health/capacity convergence, and the
-change-window evidence tracked by issue #906. Until those activation-boundary
-gates pass, the executable ceiling remains zero and existing environment-local
-autoscalers remain the live writers.
+The sealed allocation/work queue, protected claim/admission/lifecycle routing,
+atomic activation/drain/retire transitions, and active executor package are
+implemented. Live use remains blocked on reviewed real-fleet evidence, exact
+fenced OLDLAB and GB10 executor installation, live personal-lifecycle
+convergence, mixed-workload containment tracked by issue #896, GB10
+health/capacity convergence, and the evidence and explicit operator window
+tracked by issue #906. Until those activation-boundary gates pass, the global
+manager remains undeployed and inert at zero; existing environment-local
+OLDLAB and GB10 autoscalers remain the live writers.
 
 ## Verification
 
@@ -446,7 +471,7 @@ authority-first release replay, hostile-search-path safety, direct-SQL guards,
 and upgrade/downgrade/re-upgrade parity. Deployment tests separately prove the
 checked-in Package 5A remains at a zero executable ceiling.
 
-## Inert executable bridge package
+## Protected executable bridge package
 
 The executable-v2 package has one global manager spanning production, staging,
 shared development, and personal-development subjects, and exactly one
@@ -457,8 +482,10 @@ manager-owned. `loom-dev` is shared infrastructure; personal namespaces are
 `loom-dev-<owner>`, never `loom-dev-shared`.
 
 The checked-in executor profile has immutable images and an exact zero
-executable ceiling. Rendering and systemd validation are read-only; no merge
-authorizes activation or live infrastructure mutation. The manager's v2 status
-may report exact active physical Slurm-job intent, but only a matching fresh
-protected personal guard registration, with no later release/drain, can make a
-worker available. Scheduler evidence and pod readiness alone are insufficient.
+executable ceiling. A positive runtime is a separate owner-reviewed artifact
+bound to the exact active execution context and approved launch profiles.
+Rendering and systemd validation are non-installing; no merge authorizes
+activation or live infrastructure mutation. The manager's v2 status may report
+exact active physical Slurm-job intent, but only a matching fresh protected
+personal guard registration, with no later release/drain, can make a worker
+available. Scheduler evidence and pod readiness alone are insufficient.
