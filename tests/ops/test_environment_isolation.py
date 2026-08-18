@@ -146,35 +146,57 @@ def test_environment_isolation_rejects_shared_prod_secret_refs(tmp_path: Path) -
     assert "production: service_api_token_ref must start with" in completed.stderr
 
 
-def test_deploy_workflow_keeps_production_secrets_on_main_only() -> None:
-    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/deploy-environment.yml").read_text())
+def test_hosted_deploy_workflow_omits_protected_staging_authority() -> None:
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github/workflows/deploy-environment.yml").read_text()
+    )
+    triggers = workflow.get("on", workflow.get(True))
+    assert isinstance(triggers, dict)
+    dispatch = triggers["workflow_dispatch"]["inputs"]["environment"]
     jobs = workflow["jobs"]
 
+    assert dispatch["options"] == ["development", "production"]
+    assert set(jobs) == {"deploy-development", "deploy-production"}
+    assert "deploy-staging" not in jobs
+
     dev_job = jobs["deploy-development"]
-    staging_job = jobs["deploy-staging"]
     prod_job = jobs["deploy-production"]
-
     assert dev_job["environment"]["name"] == "development"
-    assert staging_job["environment"]["name"] == "staging"
-    assert prod_job["environment"]["name"] == "production"
-
     assert "refs/heads/dev" in dev_job["if"]
-    assert "refs/heads/dev" in staging_job["if"]
-    assert "production" not in dev_job["if"]
-    assert "production" not in staging_job["if"]
-
+    assert prod_job["environment"]["name"] == "production"
     assert "refs/heads/main" in prod_job["if"]
-    assert "refs/tags/" not in prod_job["if"]
-    assert "environment == 'production'" in prod_job["if"]
 
-    for secret_name in (
-        "LOOM_KUBECONFIG_B64",
-        "LOOM_CLUSTER_CONFIG_B64",
-        "LOOM_DEPLOY_TOKEN",
-    ):
-        assert dev_job["env"][secret_name] == f"${{{{ secrets.{secret_name} }}}}"
-        assert staging_job["env"][secret_name] == f"${{{{ secrets.{secret_name} }}}}"
-        assert prod_job["env"][secret_name] == f"${{{{ secrets.{secret_name} }}}}"
+
+def test_environment_validator_rejects_protected_staging_dispatch_option(
+    tmp_path: Path,
+) -> None:
+    workflow_path = tmp_path / "deploy-environment.yml"
+    workflow = (REPO_ROOT / ".github/workflows/deploy-environment.yml").read_text()
+    mutated = workflow.replace(
+        "          - development\n          - production",
+        "          - development\n          - staging\n          - production",
+        1,
+    )
+    assert mutated != workflow
+    workflow_path.write_text(mutated, encoding="utf-8")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "scripts/validate_environment_isolation.py",
+            "--profiles-dir",
+            "deploy/environments",
+            "--workflow",
+            str(workflow_path),
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert "workflow dispatch environment options must be" in completed.stderr
 
 
 def test_repository_checks_run_environment_isolation_tests() -> None:

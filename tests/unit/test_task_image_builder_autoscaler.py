@@ -10,6 +10,7 @@ from loom_control_plane.task_image_builder_autoscaler import (
     SubprocessTaskImageBuilderSlurmRunner,
     TaskImageBuilderPoolConfig,
     build_task_image_builder_sbatch_request,
+    build_task_image_builder_sbatch_test_request,
 )
 
 
@@ -109,14 +110,8 @@ def test_builder_sbatch_is_exclusive_and_runs_only_builder_entrypoint() -> None:
 
 
 def test_builder_sbatch_test_request_cannot_submit() -> None:
-    build_test_request = getattr(
-        autoscaler,
-        "build_task_image_builder_sbatch_test_request",
-        None,
-    )
-    assert build_test_request is not None
     live = build_task_image_builder_sbatch_request(_config(), node="gb10-1")
-    tested = build_test_request(_config(), node="gb10-1")
+    tested = build_task_image_builder_sbatch_test_request(_config(), node="gb10-1")
 
     assert tested.args[0] == live.args[0]
     assert tested.args[1] == "--test-only"

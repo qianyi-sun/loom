@@ -424,6 +424,22 @@ validate the migration graph, render and verify systemd units, and launch the
 browser runner against its report contract. These artifacts are immutable
 inputs to rehearsal and final rollout; final rollout does not rebuild them.
 
+Task-image builder rollout validation has four distinct phases. Candidate-static
+rehearsal reads the candidate policy, validates local Slurm authority, and hashes
+purely rendered requests; it does not read a release-specific builder
+environment, repository, token, registry configuration, or production database.
+After isolated rehearsal succeeds, the protected host-local oneshot atomically
+derives the exact release builder environment. The same oneshot then validates
+the materialized files, dedicated token scope, registry authorization, and an
+`sbatch --test-only` request for every policy-authorized node. Only after those
+checks does it call reconciliation. The protected supervisor transport starts
+that oneshot, requires its success, and only then enables and starts the timer.
+
+A failed post-materialization check therefore produces protected rollout
+failure evidence without submitting a builder or enabling periodic scale-up.
+Drain-only reconciliation remains available without live builder credentials,
+so a credential failure cannot prevent the system from reducing capacity.
+
 Manifest readiness is two independent checks backed by one apply contract.
 `manifests.server-schema` uses strict server-side dry-run with conflict forcing
 only inside that mutation-free request, so an existing field manager cannot

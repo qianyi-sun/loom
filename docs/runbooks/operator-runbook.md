@@ -27,6 +27,10 @@ uv run --no-sync python scripts/validate_environment_isolation.py \
   --dry-run-artifact release-evidence/environment-isolation-dry-run.json
 ```
 
+The generic `.github/workflows/deploy-environment.yml` deployment path owns
+development and production only. It rejects staging; validation of the staging
+profile here does not grant the hosted workflow staging mutation authority.
+
 Dry-run evidence may contain safe secret references, but never credentials,
 bearer tokens, signed URLs, object-store keys, or provider API keys.
 
@@ -53,6 +57,11 @@ the environment implicitly.
 > the complete rollout lifecycle. Unmerged pull-request refs, personal
 > checkouts, caller-supplied SHAs, and direct lower-level cluster mutations are
 > rejected.
+
+`loom-staging-rollout --env staging start` is the only staging mutation path.
+Hosted workflow dispatch cannot substitute for the installed authority's
+host-local secrets, shared lock, protected backup, isolated rehearsal, or final
+gate evidence.
 
 Use the installed client:
 
