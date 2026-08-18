@@ -108,6 +108,47 @@ def test_builder_sbatch_is_exclusive_and_runs_only_builder_entrypoint() -> None:
     )
 
 
+def test_builder_sbatch_test_request_cannot_submit() -> None:
+    build_test_request = getattr(
+        autoscaler,
+        "build_task_image_builder_sbatch_test_request",
+        None,
+    )
+    assert build_test_request is not None
+    live = build_task_image_builder_sbatch_request(_config(), node="gb10-1")
+    tested = build_test_request(_config(), node="gb10-1")
+
+    assert tested.args[0] == live.args[0]
+    assert tested.args[1] == "--test-only"
+    assert "--parsable" not in tested.args
+    assert tuple(item for item in live.args[1:] if item != "--parsable") == tested.args[2:]
+    assert tested.stdin == live.stdin
+
+
+async def test_subprocess_runner_validates_without_submission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[tuple[str, ...], str]] = []
+
+    async def run(
+        args: tuple[str, ...],
+        *,
+        stdin: str | None = None,
+        timeout: float,
+    ) -> SimpleNamespace:
+        calls.append((args, stdin or ""))
+        return SimpleNamespace(stdout="")
+
+    monkeypatch.setattr(autoscaler, "_run_command", run)
+    runner = SubprocessTaskImageBuilderSlurmRunner(_config())
+
+    await runner.validate_builder_request(node="gb10-1", config=_config())
+
+    assert len(calls) == 1
+    assert calls[0][0][1] == "--test-only"
+    assert "--parsable" not in calls[0][0]
+
+
 async def test_builder_job_query_falls_back_to_sacct_for_terminal_job(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
