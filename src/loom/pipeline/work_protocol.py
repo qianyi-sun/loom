@@ -197,6 +197,50 @@ class Stage1SmokeGrantV1(PipelineModel):
     renderer_digest: Digest
 
 
+class TerminalTaskValidationGrantV1(PipelineModel):
+    """Worker-owned dynamic-validation authority for one immutable task bundle."""
+
+    authorization_id: UUID
+    pipeline_run_id: UUID
+    stage_run_id: UUID
+    execution_attempt_id: UUID
+    task_bundle_content_sha256: Digest
+    validator_image: _ImageReference
+    task_base_image: _ImageReference
+    dependency_resolver_image: _ImageReference
+    policy_digest: Digest
+    dependency_allowlist_digest: Digest
+    repeat_count: Literal[2]
+    cpu_cores: PositiveSafeInt
+    memory_bytes: PositiveSafeInt
+    pids_limit: PositiveSafeInt
+    timeout_seconds: PositiveSafeInt
+    network_profile: Literal["none"]
+
+
+class TerminalGenAuthoringGrantV1(PipelineModel):
+    """Server-owned admission proof for the disabled TerminalGen runtime."""
+
+    authorization_id: UUID
+    pipeline_run_id: UUID
+    stage_run_id: UUID
+    execution_attempt_id: UUID
+    recipe_digest: Digest
+    node_key: BindingName
+    resource_profile_digest: Digest
+    image_runtime_contract_digest: Digest
+    resolved_input_bindings_digest: Digest
+    runtime_policy_digest: Digest
+    validation: TerminalTaskValidationGrantV1 | None
+
+    @model_validator(mode="after")
+    def validation_matches_node_kind(self) -> TerminalGenAuthoringGrantV1:
+        is_validation_node = re.fullmatch(r"validate_card_[0-9]{2}", self.node_key) is not None
+        if is_validation_node != (self.validation is not None):
+            raise ValueError("TerminalGen validation grant must match a validation node")
+        return self
+
+
 class ResourceDeviceRolesV1(PipelineModel):
     sim_gpu_index: NonNegativeSafeInt
     vla_gpu_index: NonNegativeSafeInt
@@ -219,6 +263,10 @@ class ResourceExecutionVariantV1(PipelineModel):
         "behavior-gpu-oldlab",
         "behavior-gpu-gb10",
         "pipeline-test-cpu",
+        "terminalgen-generate-gateway",
+        "terminalgen-package-none",
+        "terminalgen-plan-none",
+        "terminalgen-validate-none",
     ]
     device_roles: ResourceDeviceRolesV1 | None
 
@@ -240,7 +288,15 @@ class ResourceExecutionVariantV1(PipelineModel):
                 or self.memory_accounting_kind != "separate"
                 or self.container_memory_bytes_override is not None
                 or self.same_gpu_model_required
-                or self.pool_class not in {"behavior-cpu-data", "pipeline-test-cpu"}
+                or self.pool_class
+                not in {
+                    "behavior-cpu-data",
+                    "pipeline-test-cpu",
+                    "terminalgen-generate-gateway",
+                    "terminalgen-package-none",
+                    "terminalgen-plan-none",
+                    "terminalgen-validate-none",
+                }
             ):
                 raise ValueError("CPU execution variant cannot carry GPU requirements")
         else:
@@ -281,6 +337,10 @@ class ResourceProfileV1(PipelineModel):
     cpu_cores: PositiveSafeInt
     memory_bytes: PositiveSafeInt
     scratch_bytes: PositiveSafeInt
+    pids_limit: Annotated[
+        int | None,
+        Field(strict=True, ge=1, le=MAX_SAFE_INTEGER, exclude_if=lambda value: value is None),
+    ] = None
     timeout_seconds_max: PositiveSafeInt
     required_host_runtime_features: list[str]
     required_image_features: list[str]
@@ -306,6 +366,8 @@ class ResourceProfileV1(PipelineModel):
         has_gpu = any(item.gpu_count_exact > 0 for item in self.execution_variants)
         host_features = set(self.required_host_runtime_features)
         image_features = set(self.required_image_features)
+        if self.name.startswith("terminalgen-") and self.pids_limit is None:
+            raise ValueError("TerminalGen profiles require an explicit PID limit")
         if self.network_profile == "gateway":
             if "loom-secret-tmpfs-v1" not in host_features:
                 raise ValueError("gateway profiles require loom-secret-tmpfs-v1")
@@ -316,7 +378,14 @@ class ResourceProfileV1(PipelineModel):
                 raise ValueError("GPU profiles require NVIDIA runtime and EGL")
             if not {"isaac-sim-5.1", "omnigibson-3.8"} <= image_features:
                 raise ValueError("GPU profiles require the attested simulation image features")
-        elif image_features not in ({"behavior-cpu-data"}, {"pipeline-test-cpu"}):
+        elif image_features not in (
+            {"behavior-cpu-data"},
+            {"pipeline-test-cpu"},
+            {"terminalgen-generator"},
+            {"terminalgen-packager"},
+            {"terminalgen-planner"},
+            {"terminalgen-validator"},
+        ):
             raise ValueError("zero-GPU profiles require one exact CPU image feature")
         return self
 
@@ -443,6 +512,7 @@ class ExecutionAttemptClaimV1(PipelineModel):
     control_binding_snapshot: dict[str, object] | None = None
     acceptance_preflight: AcceptancePreflightGrantV1 | None
     stage1_smoke: Stage1SmokeGrantV1 | None = None
+    terminalgen_authoring: TerminalGenAuthoringGrantV1 | None = None
     provider_connection_ref: UUID | None
     secret_refs: list[_OpaqueReference]
     resume_checkpoint: ArtifactInputDescriptorV1 | None
@@ -689,6 +759,50 @@ class ExecutionAttemptClaimV1(PipelineModel):
                 or self.secret_refs
             ):
                 raise ValueError("Stage 1 smoke grant drift")
+        is_terminalgen_profile = self.resource_profile_snapshot.name.startswith("terminalgen-")
+        if is_terminalgen_profile != (self.terminalgen_authoring is not None):
+            raise ValueError("TerminalGen ResourceProfiles require their authoring grant")
+        if self.terminalgen_authoring is not None:
+            terminalgen_grant = self.terminalgen_authoring
+            if (
+                terminalgen_grant.pipeline_run_id != self.pipeline_run_id
+                or terminalgen_grant.stage_run_id != self.stage_run_id
+                or terminalgen_grant.execution_attempt_id != self.execution_attempt_id
+                or terminalgen_grant.recipe_digest != self.recipe_digest
+                or terminalgen_grant.node_key != self.node_key
+                or terminalgen_grant.resource_profile_digest != self.resource_profile_digest
+                or terminalgen_grant.image_runtime_contract_digest
+                != self.image_runtime_contract_digest
+                or terminalgen_grant.resolved_input_bindings_digest
+                != spec.resolved_input_bindings_digest
+                or self.stage1_smoke is not None
+                or self.acceptance_preflight is not None
+            ):
+                raise ValueError("TerminalGen authoring grant drift")
+            validation = terminalgen_grant.validation
+            if validation is not None:
+                task_bundles = [
+                    item
+                    for binding in self.input_bindings
+                    if binding.artifact_type == "terminalgen_task_bundle.v1"
+                    for item in binding.items
+                ]
+                if (
+                    validation.pipeline_run_id != self.pipeline_run_id
+                    or validation.stage_run_id != self.stage_run_id
+                    or validation.execution_attempt_id != self.execution_attempt_id
+                    or validation.validator_image != self.image
+                    or len(task_bundles) != 1
+                    or task_bundles[0].content_sha256
+                    != validation.task_bundle_content_sha256
+                    or validation.cpu_cores > self.resource_profile_snapshot.cpu_cores
+                    or validation.memory_bytes > self.resource_profile_snapshot.memory_bytes
+                    or validation.pids_limit
+                    > (self.resource_profile_snapshot.pids_limit or 0)
+                    or validation.timeout_seconds > self.timeout_seconds
+                    or validation.network_profile != self.network_profile
+                ):
+                    raise ValueError("TerminalGen validation authority drift")
         if self.network_profile == "none" and (
             self.provider_connection_ref is not None or self.secret_refs
         ):

@@ -16,6 +16,7 @@ from loom_worker.pipeline_execution import (
     HttpFinalOutputCommitter,
     PipelineAttemptPaths,
     PipelineCleanupJournal,
+    _container_spec,
     _execution_failure,
     _install_runtime_contract,
     _observed_cleanup_proof,
@@ -50,6 +51,42 @@ def test_production_pipeline_is_confined_to_two_behavior_gpu_pools() -> None:
     assert not production_pipeline_enabled(  # type: ignore[arg-type]
         SimpleNamespace(pool_name="behavior-gpu-oldlab")
     )
+
+
+def test_container_pid_limit_comes_from_the_frozen_resource_profile(tmp_path: Path) -> None:
+    attempt_id = UUID("00000000-0000-0000-0000-000000000173")
+    payload = SimpleNamespace(
+        execution_attempt_id=attempt_id,
+        resource_profile_snapshot=SimpleNamespace(
+            cpu_cores=2,
+            memory_bytes=1 << 30,
+            scratch_bytes=2 << 30,
+            pids_limit=173,
+            execution_variants=[
+                SimpleNamespace(
+                    variant_id="pipeline-test-cpu-x86_64",
+                    container_memory_bytes_override=None,
+                )
+            ],
+        ),
+        execution_spec_snapshot=SimpleNamespace(
+            execution_variant_id="pipeline-test-cpu-x86_64"
+        ),
+        image="registry.invalid/loom/test@sha256:" + "a" * 64,
+        argv=["python", "-m", "example"],
+        workdir="/workspace",
+        network_profile="none",
+        slurm_gpu_allocation_evidence=None,
+        resume_checkpoint=None,
+    )
+    root = tmp_path / "attempt"
+    inputs = tmp_path / "inputs"
+    outputs = root / "outputs"
+    scratch = root / "scratch"
+    for path in (inputs, outputs, scratch):
+        path.mkdir(parents=True, exist_ok=True)
+    paths = PipelineAttemptPaths(root=root, inputs=inputs, outputs=outputs, scratch=scratch)
+    assert _container_spec(payload, paths).limits.pids == 173  # type: ignore[arg-type]
 
 
 def test_stage1_runtime_registration_advertises_dedicated_claim_feature(

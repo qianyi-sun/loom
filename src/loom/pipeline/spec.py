@@ -722,7 +722,12 @@ class ExecutionSpecSnapshotV1(PipelineModel):
             raise ValueError("snapshot node_key must match container_node")
         if self.network_profile != self.container_node.network_profile:
             raise ValueError("snapshot network_profile must match container_node")
-        if (self.execution_variant_id == "cpu-data-x86_64") != (
+        cpu_variants = {
+            "cpu-data-x86_64",
+            "pipeline-test-cpu-x86_64",
+            "terminalgen-cpu-x86_64",
+        }
+        if (self.execution_variant_id in cpu_variants) != (
             self.gpu_backend_selection_sha256 is None
         ):
             raise ValueError("only the CPU variant may omit GPU backend selection evidence")

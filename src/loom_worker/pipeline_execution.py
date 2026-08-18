@@ -1389,7 +1389,7 @@ def _container_spec(claim: ExecutionAttemptClaimV1, paths: PipelineAttemptPaths)
         network_profile=claim.network_profile,
         cpus=profile.cpu_cores,
         memory_bytes=variant.container_memory_bytes_override or profile.memory_bytes,
-        pids=4096,
+        pids=profile.pids_limit or 4096,
         scratch_bytes=profile.scratch_bytes,
         gpu_device_uuids=(
             claim.slurm_gpu_allocation_evidence.device_uuids
