@@ -96,3 +96,59 @@ required_host_runtime_features = []
 required_image_features = ["pipeline-test-cpu"]
 network_profile = "none"
 input_cache_capacity_bytes_min = 0
+
+[[profiles]]
+name = "terminalgen-generate-gateway"
+version = 1
+execution_variants = [{ variant_id = "terminalgen-cpu-x86_64", cpu_arch = "x86_64", gpu_count_exact = 0, allowed_gpu_models = [], memory_accounting_kind = "separate", same_gpu_model_required = false, pool_class = "terminalgen-generate-gateway" }]
+cpu_cores = 4
+memory_bytes = 17179869184
+scratch_bytes = 343597383680
+pids_limit = 1024
+timeout_seconds_max = 3600
+required_host_runtime_features = ["loom-secret-tmpfs-v1"]
+required_image_features = ["terminalgen-generator"]
+network_profile = "gateway"
+input_cache_capacity_bytes_min = 107374182400
+
+[[profiles]]
+name = "terminalgen-package-none"
+version = 1
+execution_variants = [{ variant_id = "terminalgen-cpu-x86_64", cpu_arch = "x86_64", gpu_count_exact = 0, allowed_gpu_models = [], memory_accounting_kind = "separate", same_gpu_model_required = false, pool_class = "terminalgen-package-none" }]
+cpu_cores = 8
+memory_bytes = 34359738368
+scratch_bytes = 1374389534720
+pids_limit = 512
+timeout_seconds_max = 7200
+required_host_runtime_features = []
+required_image_features = ["terminalgen-packager"]
+network_profile = "none"
+input_cache_capacity_bytes_min = 1181116006400
+
+[[profiles]]
+name = "terminalgen-plan-none"
+version = 1
+execution_variants = [{ variant_id = "terminalgen-cpu-x86_64", cpu_arch = "x86_64", gpu_count_exact = 0, allowed_gpu_models = [], memory_accounting_kind = "separate", same_gpu_model_required = false, pool_class = "terminalgen-plan-none" }]
+cpu_cores = 2
+memory_bytes = 4294967296
+scratch_bytes = 21474836480
+pids_limit = 256
+timeout_seconds_max = 900
+required_host_runtime_features = []
+required_image_features = ["terminalgen-planner"]
+network_profile = "none"
+input_cache_capacity_bytes_min = 107374182400
+
+[[profiles]]
+name = "terminalgen-validate-none"
+version = 1
+execution_variants = [{ variant_id = "terminalgen-cpu-x86_64", cpu_arch = "x86_64", gpu_count_exact = 0, allowed_gpu_models = [], memory_accounting_kind = "separate", same_gpu_model_required = false, pool_class = "terminalgen-validate-none" }]
+cpu_cores = 4
+memory_bytes = 17179869184
+scratch_bytes = 343597383680
+pids_limit = 2048
+timeout_seconds_max = 7200
+required_host_runtime_features = ["loom-terminal-task-validator-v1"]
+required_image_features = ["terminalgen-validator"]
+network_profile = "none"
+input_cache_capacity_bytes_min = 429496729600

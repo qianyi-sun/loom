@@ -24,6 +24,8 @@ from loom.pipeline.work_protocol import (
     PipelineInputMaterializationEvidenceReportV1,
     Stage1SmokeGrantV1,
     StageRequestGrantV1,
+    TerminalGenAuthoringGrantV1,
+    TerminalTaskValidationGrantV1,
     WorkClaimRequestV1,
     WorkClaimV1,
     WorkerCleanupProofV1,
@@ -228,6 +230,102 @@ def attempt_claim() -> dict[str, Any]:
     }
 
 
+def terminalgen_validation_claim() -> dict[str, Any]:
+    value = attempt_claim()
+    task_binding = binding()
+    task_binding.update(
+        binding_name="task_bundle",
+        artifact_type="terminalgen_task_bundle.v1",
+    )
+    profile = resource_profile()
+    profile.update(
+        name="terminalgen-validate-none",
+        cpu_cores=4,
+        memory_bytes=16 << 30,
+        scratch_bytes=320 << 30,
+        pids_limit=2_048,
+        timeout_seconds_max=7_200,
+        required_host_runtime_features=["loom-terminal-task-validator-v1"],
+        required_image_features=["terminalgen-validator"],
+        input_cache_capacity_bytes_min=0,
+    )
+    profile["execution_variants"][0].update(
+        variant_id="terminalgen-cpu-x86_64",
+        pool_class="terminalgen-validate-none",
+    )
+    runtime = image_contract()
+    runtime["application_features"] = ["terminalgen-validator"]
+    capability = worker_capability()
+    capability.update(
+        cpu_cores=4,
+        memory_bytes=16 << 30,
+        scratch_bytes=320 << 30,
+        container_runtime_features=["loom-terminal-task-validator-v1"],
+    )
+    spec = execution_spec()
+    spec.update(
+        node_key="validate_card_00",
+        image_runtime_contract_digest=canonical_digest(runtime),
+        resource_profile_digest=canonical_digest(profile),
+        execution_variant_id="terminalgen-cpu-x86_64",
+        resolved_input_bindings_digest=canonical_digest([task_binding]),
+    )
+    spec["container_node"].update(
+        node_key="validate_card_00",
+        image=IMAGE,
+        argv=["python", "-m", "loom.integrations.terminalgen.cli", "run", "validate_card_00"],
+        resource_profile="terminalgen-validate-none@1",
+        timeout_seconds=7_200,
+    )
+    value.update(
+        node_key="validate_card_00",
+        execution_spec_snapshot=spec,
+        execution_spec_digest=canonical_digest(spec),
+        argv=spec["container_node"]["argv"],
+        resource_profile_snapshot=profile,
+        resource_profile_digest=spec["resource_profile_digest"],
+        image_runtime_contract_snapshot=runtime,
+        image_runtime_contract_digest=spec["image_runtime_contract_digest"],
+        worker_capability_snapshot=capability,
+        worker_capability_snapshot_digest=canonical_digest(capability),
+        input_bindings=[task_binding],
+        timeout_seconds=7_200,
+    )
+    value["terminalgen_authoring"] = {
+        "authorization_id": UUID(int=40),
+        "pipeline_run_id": RUN_ID,
+        "stage_run_id": STAGE_ID,
+        "execution_attempt_id": ATTEMPT_ID,
+        "recipe_digest": D0,
+        "node_key": "validate_card_00",
+        "resource_profile_digest": spec["resource_profile_digest"],
+        "image_runtime_contract_digest": spec["image_runtime_contract_digest"],
+        "resolved_input_bindings_digest": spec["resolved_input_bindings_digest"],
+        "runtime_policy_digest": D2,
+        "validation": {
+            "authorization_id": UUID(int=41),
+            "pipeline_run_id": RUN_ID,
+            "stage_run_id": STAGE_ID,
+            "execution_attempt_id": ATTEMPT_ID,
+            "task_bundle_content_sha256": D0,
+            "validator_image": IMAGE,
+            "task_base_image": "registry.example.com/loom/task-base@sha256:" + "5" * 64,
+            "dependency_resolver_image": (
+                "registry.example.com/loom/dependency-resolver@sha256:" + "6" * 64
+            ),
+            "policy_digest": D3,
+            "dependency_allowlist_digest": D1,
+            "repeat_count": 2,
+            "cpu_cores": 4,
+            "memory_bytes": 16 << 30,
+            "pids_limit": 2_048,
+            "timeout_seconds": 7_200,
+            "network_profile": "none",
+        },
+    }
+    return value
+
+
 def stage_result() -> StageResultV1:
     return StageResultV1.model_validate(
         {
@@ -392,6 +490,38 @@ def test_stage1_smoke_grant_is_closed_and_binds_the_selected_child() -> None:
     assert Stage1SmokeGrantV1.model_validate(value).policy_activation_epoch == 7
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         Stage1SmokeGrantV1.model_validate({**value, "raw_image_override": IMAGE})
+
+
+def test_terminalgen_authoring_and_validation_grants_are_exact_and_fail_closed() -> None:
+    value = terminalgen_validation_claim()
+    parsed = ExecutionAttemptClaimV1.model_validate(value)
+    assert parsed.terminalgen_authoring is not None
+    assert parsed.terminalgen_authoring.validation is not None
+    assert parsed.terminalgen_authoring.validation.repeat_count == 2
+
+    missing = deepcopy(value)
+    missing["terminalgen_authoring"] = None
+    with pytest.raises(ValidationError, match="require their authoring grant"):
+        ExecutionAttemptClaimV1.model_validate(missing)
+
+    wrong_bundle = deepcopy(value)
+    wrong_bundle["terminalgen_authoring"]["validation"]["task_bundle_content_sha256"] = D3
+    with pytest.raises(ValidationError, match="validation authority drift"):
+        ExecutionAttemptClaimV1.model_validate(wrong_bundle)
+
+    excessive_pids = deepcopy(value)
+    excessive_pids["terminalgen_authoring"]["validation"]["pids_limit"] = 2_049
+    with pytest.raises(ValidationError, match="validation authority drift"):
+        ExecutionAttemptClaimV1.model_validate(excessive_pids)
+
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        TerminalTaskValidationGrantV1.model_validate(
+            {**value["terminalgen_authoring"]["validation"], "docker_socket": "/var/run/docker.sock"}
+        )
+    with pytest.raises(ValidationError, match="must match a validation node"):
+        TerminalGenAuthoringGrantV1.model_validate(
+            {**value["terminalgen_authoring"], "node_key": "plan_batch"}
+        )
 
 
 def test_heartbeat_control_and_events_enforce_order_bounds_and_closed_fields() -> None:

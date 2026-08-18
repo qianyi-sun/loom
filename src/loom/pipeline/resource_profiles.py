@@ -36,6 +36,8 @@ _FORBIDDEN_USER_RESOURCE_KEYS = frozenset(
         "gpu_vendor",
         "min_nvidia_driver_version",
         "network_profile",
+        "pids",
+        "pids_limit",
         "pool_class",
         "required_host_runtime_features",
         "required_image_features",
@@ -160,17 +162,25 @@ def _validate_builtin_contract(registry: ResourceProfileRegistry) -> None:
         "behavior-sim-local-none@1",
         "pipeline-test-cpu-gateway@1",
         "pipeline-test-cpu-none@1",
+        "terminalgen-generate-gateway@1",
+        "terminalgen-package-none@1",
+        "terminalgen-plan-none@1",
+        "terminalgen-validate-none@1",
     )
     if identities != expected_identities:
         raise ResourceProfileRegistryError("built-in ResourceProfile set is not exact")
     expected_scalars = {
-        "behavior-export-io@1": (8, 64 << 30, 768 << 30, 7_200, "none"),
-        "behavior-offline-gateway@1": (8, 16 << 30, 50 << 30, 3_600, "gateway"),
-        "behavior-offline-none@1": (8, 16 << 30, 50 << 30, 3_600, "none"),
-        "behavior-sim-local-gateway@1": (16, 64 << 30, 150 << 30, 14_400, "gateway"),
-        "behavior-sim-local-none@1": (16, 64 << 30, 150 << 30, 14_400, "none"),
-        "pipeline-test-cpu-gateway@1": (2, 1 << 30, 2 << 30, 600, "gateway"),
-        "pipeline-test-cpu-none@1": (2, 1 << 30, 2 << 30, 600, "none"),
+        "behavior-export-io@1": (8, 64 << 30, 768 << 30, None, 7_200, "none"),
+        "behavior-offline-gateway@1": (8, 16 << 30, 50 << 30, None, 3_600, "gateway"),
+        "behavior-offline-none@1": (8, 16 << 30, 50 << 30, None, 3_600, "none"),
+        "behavior-sim-local-gateway@1": (16, 64 << 30, 150 << 30, None, 14_400, "gateway"),
+        "behavior-sim-local-none@1": (16, 64 << 30, 150 << 30, None, 14_400, "none"),
+        "pipeline-test-cpu-gateway@1": (2, 1 << 30, 2 << 30, None, 600, "gateway"),
+        "pipeline-test-cpu-none@1": (2, 1 << 30, 2 << 30, None, 600, "none"),
+        "terminalgen-generate-gateway@1": (4, 16 << 30, 320 << 30, 1_024, 3_600, "gateway"),
+        "terminalgen-package-none@1": (8, 32 << 30, 1_280 << 30, 512, 7_200, "none"),
+        "terminalgen-plan-none@1": (2, 4 << 30, 20 << 30, 256, 900, "none"),
+        "terminalgen-validate-none@1": (4, 16 << 30, 320 << 30, 2_048, 7_200, "none"),
     }
     cpu_variant = {
         "variant_id": "cpu-data-x86_64",
@@ -191,6 +201,21 @@ def _validate_builtin_contract(registry: ResourceProfileRegistry) -> None:
         **cpu_variant,
         "variant_id": "pipeline-test-cpu-x86_64",
         "pool_class": "pipeline-test-cpu",
+    }
+    terminalgen_pool_features = {
+        "terminalgen-generate-gateway@1": (
+            "terminalgen-generate-gateway",
+            "terminalgen-generator",
+        ),
+        "terminalgen-package-none@1": (
+            "terminalgen-package-none",
+            "terminalgen-packager",
+        ),
+        "terminalgen-plan-none@1": ("terminalgen-plan-none", "terminalgen-planner"),
+        "terminalgen-validate-none@1": (
+            "terminalgen-validate-none",
+            "terminalgen-validator",
+        ),
     }
     gpu_variants = [
         {
@@ -244,6 +269,16 @@ def _validate_builtin_contract(registry: ResourceProfileRegistry) -> None:
             ["pipeline-test-cpu"],
         ),
         "pipeline-test-cpu-none@1": ([], ["pipeline-test-cpu"]),
+        "terminalgen-generate-gateway@1": (
+            ["loom-secret-tmpfs-v1"],
+            ["terminalgen-generator"],
+        ),
+        "terminalgen-package-none@1": ([], ["terminalgen-packager"]),
+        "terminalgen-plan-none@1": ([], ["terminalgen-planner"]),
+        "terminalgen-validate-none@1": (
+            ["loom-terminal-task-validator-v1"],
+            ["terminalgen-validator"],
+        ),
     }
     for record in registry.list():
         profile = record.profile
@@ -251,6 +286,7 @@ def _validate_builtin_contract(registry: ResourceProfileRegistry) -> None:
             profile.cpu_cores,
             profile.memory_bytes,
             profile.scratch_bytes,
+            profile.pids_limit,
             profile.timeout_seconds_max,
             profile.network_profile,
         )
@@ -259,6 +295,15 @@ def _validate_builtin_contract(registry: ResourceProfileRegistry) -> None:
         expected_cache_capacity = (
             0
             if record.identity.startswith("pipeline-test-cpu-")
+            else (100 << 30)
+            if record.identity in {
+                "terminalgen-generate-gateway@1",
+                "terminalgen-plan-none@1",
+            }
+            else (400 << 30)
+            if record.identity == "terminalgen-validate-none@1"
+            else (1_100 << 30)
+            if record.identity == "terminalgen-package-none@1"
             else INPUT_CACHE_ALLOCATABLE_BYTES_MIN
         )
         if profile.input_cache_capacity_bytes_min != expected_cache_capacity:
@@ -274,6 +319,8 @@ def _validate_builtin_contract(registry: ResourceProfileRegistry) -> None:
             if record.identity.startswith("behavior-sim-local-")
             else ("pipeline-test-cpu-x86_64",)
             if record.identity.startswith("pipeline-test-cpu-")
+            else ("terminalgen-cpu-x86_64",)
+            if record.identity.startswith("terminalgen-")
             else ("cpu-data-x86_64",)
         )
         if variant_ids != expected_variants:
@@ -281,11 +328,21 @@ def _validate_builtin_contract(registry: ResourceProfileRegistry) -> None:
         actual_variants = [
             item.model_dump(mode="json") for item in profile.execution_variants
         ]
+        terminalgen_variant = None
+        if record.identity in terminalgen_pool_features:
+            pool_class, _image_feature = terminalgen_pool_features[record.identity]
+            terminalgen_variant = {
+                **cpu_variant,
+                "variant_id": "terminalgen-cpu-x86_64",
+                "pool_class": pool_class,
+            }
         if actual_variants != (
             gpu_variants
             if record.identity.startswith("behavior-sim-local-")
             else [pipeline_test_cpu_variant]
             if record.identity.startswith("pipeline-test-cpu-")
+            else [terminalgen_variant]
+            if terminalgen_variant is not None
             else [cpu_variant]
         ):
             raise ResourceProfileRegistryError(f"{record.identity} variant contract drift")

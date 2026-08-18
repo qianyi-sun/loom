@@ -26,6 +26,10 @@ def test_checked_in_profiles_are_exact_and_have_no_unsuffixed_alias() -> None:
         "behavior-sim-local-none@1",
         "pipeline-test-cpu-gateway@1",
         "pipeline-test-cpu-none@1",
+        "terminalgen-generate-gateway@1",
+        "terminalgen-package-none@1",
+        "terminalgen-plan-none@1",
+        "terminalgen-validate-none@1",
     ]
     assert INPUT_CACHE_ALLOCATABLE_BYTES_MIN == 1_649_267_441_664
     assert INPUT_CACHE_RAW_BYTES_MIN == 1_940_314_637_252
@@ -33,6 +37,11 @@ def test_checked_in_profiles_are_exact_and_have_no_unsuffixed_alias() -> None:
         record.profile.input_cache_capacity_bytes_min == INPUT_CACHE_ALLOCATABLE_BYTES_MIN
         for record in registry.list()
         if record.identity.startswith("behavior-")
+    )
+    assert all(
+        "pids_limit" not in record.profile.model_dump(mode="json")
+        for record in registry.list()
+        if not record.identity.startswith("terminalgen-")
     )
 
 
@@ -63,6 +72,46 @@ def test_pipeline_test_profiles_have_an_unprovisioned_non_behavior_pool() -> Non
         assert profile.input_cache_capacity_bytes_min == 0
 
 
+def test_terminalgen_profiles_are_closed_cpu_pools_with_profile_owned_pid_limits() -> None:
+    registry = load_resource_profiles()
+    expected = {
+        "terminalgen-generate-gateway@1": (
+            "terminalgen-generate-gateway",
+            "gateway",
+            "terminalgen-generator",
+            1_024,
+        ),
+        "terminalgen-package-none@1": (
+            "terminalgen-package-none",
+            "none",
+            "terminalgen-packager",
+            512,
+        ),
+        "terminalgen-plan-none@1": (
+            "terminalgen-plan-none",
+            "none",
+            "terminalgen-planner",
+            256,
+        ),
+        "terminalgen-validate-none@1": (
+            "terminalgen-validate-none",
+            "none",
+            "terminalgen-validator",
+            2_048,
+        ),
+    }
+    for identity, (pool, network, image_feature, pids) in expected.items():
+        profile = registry.get(identity).profile
+        assert profile.network_profile == network
+        assert profile.required_image_features == [image_feature]
+        assert profile.pids_limit == pids
+        assert len(profile.execution_variants) == 1
+        variant = profile.execution_variants[0]
+        assert variant.variant_id == "terminalgen-cpu-x86_64"
+        assert variant.pool_class == pool
+        assert variant.gpu_count_exact == 0
+
+
 def test_profiles_reject_network_and_memory_accounting_overrides() -> None:
     source = load_resource_profiles().get("behavior-sim-local-gateway@1").profile.model_dump()
     drift = deepcopy(source)
@@ -83,3 +132,5 @@ def test_user_parameters_cannot_select_variant_pool_device_or_network() -> None:
         )
     with pytest.raises(ResourceProfileRegistryError, match="network_profile"):
         reject_user_resource_overrides({"network_profile": "gateway"})
+    with pytest.raises(ResourceProfileRegistryError, match="pids_limit"):
+        reject_user_resource_overrides({"pids_limit": 65_536})
