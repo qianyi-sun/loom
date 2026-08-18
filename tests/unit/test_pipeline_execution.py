@@ -315,7 +315,7 @@ def test_complete_marker_binds_exact_final_output_inventory(tmp_path: Path) -> N
     (outputs / "COMPLETE.json").write_bytes(
         canonical_document(
             {
-                "schema_version": "behavior.attempt-complete.v1",
+                "schema_version": "loom.attempt-complete.v1",
                 "idempotency_key": "attempt:1",
                 "stage_result_sha256": digest_bytes(stage_result),
                 "outputs": [

@@ -24,7 +24,7 @@ from uuid import UUID
 from pydantic import Field, field_validator, model_validator
 
 from loom.integrations.behavior.canonical_json import load_canonical_document
-from loom.integrations.behavior.contracts import validate_artifact_document
+from loom.pipeline.artifact_validators import validate_official_artifact_document
 from loom.pipeline.keys import MAX_SAFE_INTEGER, canonical_digest, canonical_document, digest_bytes
 from loom.pipeline.spec import (
     ArtifactType,
@@ -79,7 +79,26 @@ class AttemptCompleteOutputV1(PipelineModel):
         return self
 
 
-class BehaviorAttemptCompleteV1(PipelineModel):
+class AttemptCompleteV1(PipelineModel):
+    schema_version: Literal["loom.attempt-complete.v1"]
+    idempotency_key: str
+    stage_result_sha256: Digest
+    outputs: list[AttemptCompleteOutputV1]
+
+    @field_validator("idempotency_key")
+    @classmethod
+    def validate_key(cls, value: str) -> str:
+        return _exact_nfc(value, "idempotency_key", max_bytes=512)
+
+    @model_validator(mode="after")
+    def validate_outputs(self) -> AttemptCompleteV1:
+        _require_bytewise_unique([item.name for item in self.outputs], "COMPLETE outputs")
+        return self
+
+
+class LegacyBehaviorAttemptCompleteV1(PipelineModel):
+    """Read-only compatibility for attempts committed before the generic marker."""
+
     schema_version: Literal["behavior.attempt-complete.v1"]
     idempotency_key: str
     stage_result_sha256: Digest
@@ -91,9 +110,19 @@ class BehaviorAttemptCompleteV1(PipelineModel):
         return _exact_nfc(value, "idempotency_key", max_bytes=512)
 
     @model_validator(mode="after")
-    def validate_outputs(self) -> BehaviorAttemptCompleteV1:
+    def validate_outputs(self) -> LegacyBehaviorAttemptCompleteV1:
         _require_bytewise_unique([item.name for item in self.outputs], "COMPLETE outputs")
         return self
+
+
+def parse_attempt_complete(
+    value: object,
+) -> AttemptCompleteV1 | LegacyBehaviorAttemptCompleteV1:
+    if not isinstance(value, dict):
+        raise ValueError("attempt COMPLETE marker must be an object")
+    if value.get("schema_version") == "loom.attempt-complete.v1":
+        return AttemptCompleteV1.model_validate(value)
+    return LegacyBehaviorAttemptCompleteV1.model_validate(value)
 
 
 class RecoveryTerminalCandidateV1(PipelineModel):
@@ -168,7 +197,7 @@ class BehaviorCheckpointCompleteV1(PipelineModel):
 class CommittedAttempt:
     root: Path
     stage_result: StageResultV1
-    complete: BehaviorAttemptCompleteV1
+    complete: AttemptCompleteV1 | LegacyBehaviorAttemptCompleteV1
 
 
 @dataclass(frozen=True)
@@ -352,8 +381,8 @@ class AttemptWorkspace:
         _atomic_write_new(self._output_dir / "stage_result.json", stage_bytes)
         self._crash("terminal_after_stage_result")
         self._crash("terminal_during_complete_inventory")
-        complete = BehaviorAttemptCompleteV1(
-            schema_version="behavior.attempt-complete.v1",
+        complete = AttemptCompleteV1(
+            schema_version="loom.attempt-complete.v1",
             idempotency_key=self.idempotency_key,
             stage_result_sha256=digest_bytes(stage_bytes),
             outputs=inventory,
@@ -527,7 +556,7 @@ class AttemptWorkspace:
             if result_types[name] == "loom.platform-fanout-index.v1":
                 PlatformFanoutIndexV1.model_validate(raw)
             else:
-                artifact = validate_artifact_document(raw)
+                artifact = validate_official_artifact_document(result_types[name], raw)
                 if getattr(artifact, "schema_version", None) != result_types[name]:
                     raise AttemptWorkspaceError("artifact.json schema does not match StageResult")
             files = _payload_inventory(root)
@@ -598,7 +627,7 @@ class AttemptWorkspace:
     def _validate_committed_attempt(self, *, expected_key: str | None) -> CommittedAttempt:
         complete_path = self._output_dir / "COMPLETE.json"
         raw = load_canonical_document(complete_path, max_bytes=MAX_COMPLETE_BYTES)
-        complete = BehaviorAttemptCompleteV1.model_validate(raw)
+        complete = parse_attempt_complete(raw)
         complete_bytes = _read_regular_file(complete_path, max_bytes=MAX_COMPLETE_BYTES)
         if complete_bytes != canonical_document(complete):
             raise AttemptWorkspaceError("COMPLETE bytes are not canonical")
