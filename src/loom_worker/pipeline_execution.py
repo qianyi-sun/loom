@@ -1,9 +1,8 @@
-"""Production Stage 1-only assembly for one claimed Pipeline attempt.
+"""Production closed-policy assembly for one claimed Pipeline attempt.
 
-The shared scheduler deliberately injects this callable only into the two
-controller-created BEHAVIOR GPU pools.  It turns the immutable claim into the
-existing strict worker seams; no user supplied Docker option, filesystem path,
-or Artifact locator crosses this boundary.
+The shared scheduler injects this callable only into controller-created pools.
+Each admitted recipe has its own exact claim validator; no user supplied Docker
+option, filesystem path, or Artifact locator crosses this boundary.
 """
 
 from __future__ import annotations
@@ -13,6 +12,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -95,7 +95,29 @@ from loom_worker.pipeline_gpu_preflight import (
 )
 from loom_worker.pipeline_live_preview import PipelineLivePreviewPublisher
 
-_PIPELINE_POOLS = frozenset({"behavior-gpu-oldlab", "behavior-gpu-gb10"})
+_STAGE1_POOLS = frozenset({"behavior-gpu-oldlab", "behavior-gpu-gb10"})
+_TERMINALGEN_POOL_CONTRACTS = {
+    "terminalgen-generate-gateway": (
+        "terminalgen-generate-gateway@1",
+        "gateway",
+        r"generate_card_[0-9]{2}",
+    ),
+    "terminalgen-package-none": (
+        "terminalgen-package-none@1",
+        "none",
+        r"(?:package_(?:authoring|runtime)|publish_boundary)",
+    ),
+    "terminalgen-plan-none": (
+        "terminalgen-plan-none@1",
+        "none",
+        r"(?:plan_batch|plan_card_[0-9]{2}|plan_audit|finalize_card_[0-9]{2}|global_finalize)",
+    ),
+    "terminalgen-validate-none": (
+        "terminalgen-validate-none@1",
+        "none",
+        r"validate_card_[0-9]{2}",
+    ),
+}
 _WORKER_UID = 65532
 _WORKER_GID = 65532
 _HEARTBEAT_SECONDS = 20.0
@@ -116,10 +138,15 @@ _STAGE1_INPUTS = (
 
 
 def production_pipeline_enabled(settings: WorkerSettings) -> bool:
-    """Only controller-created BEHAVIOR GPU workers run this assembly."""
+    """Admit only controller-contained Stage 1 or explicitly enabled authoring pools."""
 
+    pool_name = settings.pool_name
+    pool_enabled = pool_name in _STAGE1_POOLS or (
+        pool_name in _TERMINALGEN_POOL_CONTRACTS
+        and getattr(settings, "pipeline_terminalgen_authoring_enabled", False)
+    )
     return bool(
-        settings.pool_name in _PIPELINE_POOLS
+        pool_enabled
         and getattr(settings, "require_cgroup_parent", False)
         and str(getattr(settings, "cgroup_parent", "")).strip()
         and str(getattr(settings, "slurm_job_id", "")).strip()
@@ -275,6 +302,87 @@ def _require_stage1_claim(
     ):
         raise RuntimeError("pipeline_stage1_request_claim_drift")
     return request
+
+
+def _require_terminalgen_claim(
+    claim: ExecutionAttemptClaimV1,
+    settings: WorkerSettings,
+) -> None:
+    """Reject any TerminalGen claim outside the code-owned node/pool contract."""
+
+    contract = _TERMINALGEN_POOL_CONTRACTS.get(settings.pool_name)
+    if contract is None or not production_pipeline_enabled(settings):
+        raise RuntimeError("pipeline_terminalgen_pool_not_enabled")
+    expected_profile, expected_network, node_pattern = contract
+    spec = claim.execution_spec_snapshot
+    node = spec.container_node
+    selected_variant = next(
+        (
+            item
+            for item in claim.resource_profile_snapshot.execution_variants
+            if item.variant_id == spec.execution_variant_id
+        ),
+        None,
+    )
+    grant = claim.terminalgen_authoring
+    has_control = bool(spec.control_binding_snapshots)
+    if (
+        grant is None
+        or selected_variant is None
+        or selected_variant.pool_class != settings.pool_name
+        or spec.execution_variant_id != "terminalgen-cpu-x86_64"
+        or node.node_kind != "container"
+        or node.resource_profile != expected_profile
+        or f"{claim.resource_profile_snapshot.name}@{claim.resource_profile_snapshot.version}"
+        != expected_profile
+        or claim.network_profile != expected_network
+        or node.network_profile != expected_network
+        or re.fullmatch(node_pattern, claim.node_key) is None
+        or spec.node_key != claim.node_key
+        or claim.stage1_smoke is not None
+        or claim.acceptance_preflight is not None
+        or claim.resume_checkpoint is not None
+        or claim.checkpoint is not None
+        or claim.secret_refs
+        or (node.request_renderer is None) != (claim.stage_request is None)
+    ):
+        raise RuntimeError("pipeline_terminalgen_claim_not_eligible")
+    if expected_network == "gateway":
+        if (
+            claim.provider_connection_ref is None
+            or claim.control_binding_snapshot is None
+            or len(spec.control_binding_snapshots) != 1
+            or spec.control_binding_snapshots[0].kind != "provider"
+        ):
+            raise RuntimeError("pipeline_terminalgen_gateway_authority_missing")
+    elif (
+        claim.provider_connection_ref is not None
+        or claim.control_binding_snapshot is not None
+        or has_control
+    ):
+        raise RuntimeError("pipeline_terminalgen_offline_authority_drift")
+    if settings.pool_name == "terminalgen-validate-none":
+        if (
+            grant.validation is None
+            or "loom-terminal-task-validator-v1"
+            not in claim.worker_capability_snapshot.container_runtime_features
+        ):
+            raise RuntimeError("pipeline_terminalgen_validation_backend_missing")
+    elif grant.validation is not None:
+        raise RuntimeError("pipeline_terminalgen_validation_grant_drift")
+
+
+def _require_pipeline_claim(
+    claim: ExecutionAttemptClaimV1,
+    settings: WorkerSettings,
+) -> bool:
+    """Return true for Stage 1 GPU work and false for admitted TerminalGen CPU work."""
+
+    if settings.pool_name in _STAGE1_POOLS:
+        _require_stage1_claim(claim, settings)
+        return True
+    _require_terminalgen_claim(claim, settings)
+    return False
 
 
 @dataclass(slots=True)
@@ -1188,7 +1296,7 @@ class PipelineWorkerRuntime:
     async def run_claim(self, claim: ExecutionAttemptClaimV1) -> None:
         if self.worker_id is None or not self._orphan_cleanup_done:
             raise RuntimeError("pipeline_runtime_not_bound")
-        _require_stage1_claim(claim, self.settings)
+        is_stage1 = _require_pipeline_claim(claim, self.settings)
         self.cleanup_journal.record(claim, container_id=None)
         paths = PipelineAttemptPaths.create(self.base, claim.execution_attempt_id)
         cancellation = AttemptControlCancellation(claim, self.control_plane, paths)
@@ -1225,16 +1333,20 @@ class PipelineWorkerRuntime:
             spec = _container_spec(claim, paths)
             variant = claim.execution_spec_snapshot.execution_variant_id
             allocation = claim.slurm_gpu_allocation_evidence
-            if allocation is None:
-                raise RuntimeError("stage1_gpu_allocation_missing")
-            plan = build_gpu_container_preflight_plan(
-                profile=claim.resource_profile_snapshot,
-                variant_id=variant,
-                image_contract=claim.image_runtime_contract_snapshot,
-                capability=claim.worker_capability_snapshot,
-                allocation=allocation,
-                requires_vla=True,
+            plan = (
+                build_gpu_container_preflight_plan(
+                    profile=claim.resource_profile_snapshot,
+                    variant_id=variant,
+                    image_contract=claim.image_runtime_contract_snapshot,
+                    capability=claim.worker_capability_snapshot,
+                    allocation=allocation,
+                    requires_vla=True,
+                )
+                if is_stage1 and allocation is not None
+                else None
             )
+            if is_stage1 and plan is None:
+                raise RuntimeError("stage1_gpu_allocation_missing")
             preview = _preview_lifecycle(claim, paths, self.control_plane)
             runner = PipelineContainerRunner(
                 spec=spec,
@@ -1242,13 +1354,15 @@ class PipelineWorkerRuntime:
                 committer=committer,
                 cancellation=cancellation,
                 backend=backend,
-                preflight=AttestedGpuExecutionPreflight(
-                    plan, backend.observe_gpu_preflight
+                preflight=(
+                    AttestedGpuExecutionPreflight(plan, backend.observe_gpu_preflight)
+                    if plan is not None
+                    else None
                 ),
                 cancellation_grace_seconds=claim.cancellation_grace_seconds,
                 cancellation_poll_seconds=claim.cancellation_poll_seconds,
-                gpu_cluster=allocation.slurm_cluster_id,
-                gpu_lifecycle=PipelineGpuLifecycleTracker(),
+                gpu_cluster=allocation.slurm_cluster_id if allocation is not None else None,
+                gpu_lifecycle=PipelineGpuLifecycleTracker() if is_stage1 else None,
                 live_preview=preview,
             )
             heartbeat = asyncio.create_task(

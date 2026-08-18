@@ -245,7 +245,10 @@ def terminalgen_validation_claim() -> dict[str, Any]:
         scratch_bytes=320 << 30,
         pids_limit=2_048,
         timeout_seconds_max=7_200,
-        required_host_runtime_features=["loom-terminal-task-validator-v1"],
+        required_host_runtime_features=[
+            "loom-terminal-task-validator-v1",
+            "loom-terminalgen-authoring-worker-v1",
+        ],
         required_image_features=["terminalgen-validator"],
         input_cache_capacity_bytes_min=0,
     )
@@ -260,7 +263,10 @@ def terminalgen_validation_claim() -> dict[str, Any]:
         cpu_cores=4,
         memory_bytes=16 << 30,
         scratch_bytes=320 << 30,
-        container_runtime_features=["loom-terminal-task-validator-v1"],
+        container_runtime_features=[
+            "loom-terminal-task-validator-v1",
+            "loom-terminalgen-authoring-worker-v1",
+        ],
     )
     spec = execution_spec()
     spec.update(
@@ -516,7 +522,10 @@ def test_terminalgen_authoring_and_validation_grants_are_exact_and_fail_closed()
 
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         TerminalTaskValidationGrantV1.model_validate(
-            {**value["terminalgen_authoring"]["validation"], "docker_socket": "/var/run/docker.sock"}
+            {
+                **value["terminalgen_authoring"]["validation"],
+                "docker_socket": "/var/run/docker.sock",
+            }
         )
     with pytest.raises(ValidationError, match="must match a validation node"):
         TerminalGenAuthoringGrantV1.model_validate(

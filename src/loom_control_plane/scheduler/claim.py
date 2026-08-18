@@ -557,7 +557,13 @@ WITH candidates AS (
        )
      )
      AND (
-       w.pool_name <> 'behavior-cpu-data'
+       w.pool_name NOT IN (
+         'behavior-cpu-data',
+         'terminalgen-generate-gateway',
+         'terminalgen-package-none',
+         'terminalgen-plan-none',
+         'terminalgen-validate-none'
+       )
        OR EXISTS (
          SELECT 1
            FROM slurm_worker_jobs cpu_slurm_job

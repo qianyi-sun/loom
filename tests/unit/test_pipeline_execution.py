@@ -9,7 +9,7 @@ from uuid import UUID
 import pytest
 
 from loom.pipeline.keys import canonical_document, digest_bytes
-from loom.pipeline.work_protocol import WorkerCleanupProofV1
+from loom.pipeline.work_protocol import ExecutionAttemptClaimV1, WorkerCleanupProofV1
 from loom_worker import main_loop as worker_main_loop
 from loom_worker.pipeline_container_runner import PipelineProcessFailedError
 from loom_worker.pipeline_execution import (
@@ -20,10 +20,12 @@ from loom_worker.pipeline_execution import (
     _execution_failure,
     _install_runtime_contract,
     _observed_cleanup_proof,
+    _require_terminalgen_claim,
     _validate_complete_marker,
     production_pipeline_enabled,
 )
 from tests.pipeline_input_helpers import claim, scalar_artifact
+from tests.unit.test_pipeline_work_protocol import terminalgen_validation_claim
 
 
 def _claim():  # type: ignore[no-untyped-def]
@@ -31,7 +33,7 @@ def _claim():  # type: ignore[no-untyped-def]
     return claim(binding)
 
 
-def test_production_pipeline_is_confined_to_two_behavior_gpu_pools() -> None:
+def test_production_pipeline_is_confined_to_closed_enabled_pools() -> None:
     identity = {
         "require_cgroup_parent": True,
         "cgroup_parent": "loom-job-42.slice",
@@ -51,6 +53,51 @@ def test_production_pipeline_is_confined_to_two_behavior_gpu_pools() -> None:
     assert not production_pipeline_enabled(  # type: ignore[arg-type]
         SimpleNamespace(pool_name="behavior-gpu-oldlab")
     )
+    terminalgen = SimpleNamespace(
+        pool_name="terminalgen-validate-none",
+        pipeline_terminalgen_authoring_enabled=False,
+        **identity,
+    )
+    assert not production_pipeline_enabled(terminalgen)  # type: ignore[arg-type]
+    terminalgen.pipeline_terminalgen_authoring_enabled = True
+    assert production_pipeline_enabled(terminalgen)  # type: ignore[arg-type]
+
+
+def test_terminalgen_worker_admission_binds_pool_node_and_validation_backend() -> None:
+    parsed = ExecutionAttemptClaimV1.model_validate(terminalgen_validation_claim())
+    settings = SimpleNamespace(
+        pool_name="terminalgen-validate-none",
+        pipeline_terminalgen_authoring_enabled=True,
+        require_cgroup_parent=True,
+        cgroup_parent="loom-job-42.slice",
+        slurm_job_id="42",
+        sandbox_identity="terminalgen-authoring",
+        candidate_sha="a" * 40,
+        compose_project="loom-terminalgen-validate-none",
+    )
+
+    _require_terminalgen_claim(parsed, settings)  # type: ignore[arg-type]
+
+    settings.pool_name = "terminalgen-plan-none"
+    with pytest.raises(RuntimeError, match="claim_not_eligible"):
+        _require_terminalgen_claim(parsed, settings)  # type: ignore[arg-type]
+
+    settings.pool_name = "terminalgen-validate-none"
+    settings.pipeline_terminalgen_authoring_enabled = False
+    with pytest.raises(RuntimeError, match="pool_not_enabled"):
+        _require_terminalgen_claim(parsed, settings)  # type: ignore[arg-type]
+
+
+def test_terminalgen_validation_pool_rejects_unattested_backend() -> None:
+    value = terminalgen_validation_claim()
+    value["worker_capability_snapshot"]["container_runtime_features"] = [
+        "loom-terminalgen-authoring-worker-v1"
+    ]
+    value["worker_capability_snapshot_digest"] = digest_bytes(
+        canonical_document(value["worker_capability_snapshot"])
+    )
+    with pytest.raises(ValueError, match="worker capability does not satisfy"):
+        ExecutionAttemptClaimV1.model_validate(value)
 
 
 def test_container_pid_limit_comes_from_the_frozen_resource_profile(tmp_path: Path) -> None:
@@ -69,9 +116,7 @@ def test_container_pid_limit_comes_from_the_frozen_resource_profile(tmp_path: Pa
                 )
             ],
         ),
-        execution_spec_snapshot=SimpleNamespace(
-            execution_variant_id="pipeline-test-cpu-x86_64"
-        ),
+        execution_spec_snapshot=SimpleNamespace(execution_variant_id="pipeline-test-cpu-x86_64"),
         image="registry.invalid/loom/test@sha256:" + "a" * 64,
         argv=["python", "-m", "example"],
         workdir="/workspace",
@@ -160,6 +205,77 @@ def test_stage1_runtime_registration_advertises_dedicated_claim_feature(
     ]
 
 
+@pytest.mark.parametrize(
+    "pool_name,enabled,advertised",
+    [
+        ("terminalgen-plan-none", False, False),
+        ("terminalgen-plan-none", True, True),
+        ("terminalgen-package-none", True, True),
+        ("terminalgen-generate-gateway", True, False),
+        ("terminalgen-validate-none", True, False),
+    ],
+)
+def test_terminalgen_registration_feature_is_disabled_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    pool_name: str,
+    enabled: bool,
+    advertised: bool,
+) -> None:
+    settings = SimpleNamespace(
+        pool_name=pool_name,
+        max_concurrent=1,
+        trajectory_cache_dir=tmp_path,
+        pipeline_terminalgen_authoring_enabled=enabled,
+        require_cgroup_parent=True,
+        cgroup_parent="loom-job-42.slice",
+        slurm_job_id="42",
+        sandbox_identity="terminalgen-authoring",
+        candidate_sha="a" * 40,
+        compose_project=f"loom-{pool_name}",
+    )
+    seen_features: list[str] = []
+    capability = SimpleNamespace(
+        model_dump=lambda **_kwargs: {
+            "schema_version": "loom.worker-capabilities.v1",
+            "cpu_arch": "x86_64",
+            "cpu_cores": 8,
+            "memory_bytes": 64 << 30,
+            "scratch_bytes": 100 << 30,
+            "network_profiles": ["gateway", "none"],
+            "container_runtime_features": seen_features,
+            "gpu_devices": [],
+            "input_cache_capacity_bytes": 1,
+            "input_cache_reserved_bytes": 0,
+            "input_cache_ready_bytes": 0,
+        },
+        digest="sha256:" + "2" * 64,
+        cpu_arch="x86_64",
+        gpu_devices=(),
+        input_cache_capacity_bytes=1,
+        input_cache_reserved_bytes=0,
+        input_cache_ready_bytes=0,
+    )
+
+    monkeypatch.setattr(worker_main_loop, "_host_cpu_arch", lambda: "x86_64")
+    monkeypatch.setattr(worker_main_loop, "_host_memory_bytes", lambda: 64 << 30)
+    monkeypatch.setattr(worker_main_loop, "validate_oldlab_cpu_allocation", lambda _env: None)
+
+    def _capability(**kwargs: Any) -> Any:
+        seen_features.extend(kwargs["container_runtime_features"])
+        return capability
+
+    monkeypatch.setattr(worker_main_loop, "build_worker_capability_snapshot", _capability)
+
+    payload = worker_main_loop._pipeline_registration_payload(settings)  # type: ignore[arg-type]
+
+    assert (
+        "loom-terminalgen-authoring-worker-v1"
+        in payload["capability_snapshot"]["container_runtime_features"]
+    ) is advertised
+
+
 class _FinalOutputControlPlane:
     def __init__(self) -> None:
         self.prepared: dict[str, Any] | None = None
@@ -217,7 +333,7 @@ class _FinalOutputControlPlane:
                     "expected_max_bytes": 1024,
                     "expected_size": None,
                     "expected_sha256": None,
-                }
+                },
             ],
         }
 
