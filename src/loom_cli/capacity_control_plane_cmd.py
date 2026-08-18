@@ -48,8 +48,15 @@ def _non_nil_uuid_argument(value: str) -> UUID:
 def _render(args: argparse.Namespace) -> int:
     policy_path = args.execution_policy_file
     policy_sha256 = args.execution_policy_sha256
+    external_manager_client_cidrs = tuple(args.external_manager_client_cidrs)
     if (policy_path is None) != (policy_sha256 is None):
         sys.stderr.write("error: execution policy path and digest must be supplied together\n")
+        return 2
+    if (policy_path is not None) != bool(external_manager_client_cidrs):
+        sys.stderr.write(
+            "error: execution policy and external manager client CIDRs "
+            "must be supplied together\n"
+        )
         return 2
     try:
         profile = load_capacity_control_plane_profile(Path(args.file).resolve())
@@ -64,6 +71,7 @@ def _render(args: argparse.Namespace) -> int:
             authority_incarnation=args.authority_incarnation,
             execution_policy=execution_policy,
             execution_policy_sha256=policy_sha256,
+            external_manager_client_cidrs=external_manager_client_cidrs,
         )
     except ValidationError:
         sys.stderr.write("error: capacity control-plane render inputs are invalid\n")
@@ -215,6 +223,13 @@ def add_capacity_control_plane_subparser(subparsers: Any) -> None:
     render.add_argument(
         "--execution-policy-sha256",
         help="Required exact SHA-256 when an execution policy file is supplied.",
+    )
+    render.add_argument(
+        "--external-manager-client-cidr",
+        dest="external_manager_client_cidrs",
+        action="append",
+        default=[],
+        help="Reviewed external controller/operator source host CIDR; repeat up to eight times.",
     )
     render.set_defaults(handler=_render)
 

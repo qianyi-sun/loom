@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import re
 import tomllib
@@ -1240,7 +1241,11 @@ def _component_selector(*components: str) -> dict[str, Any]:
     }
 
 
-def _network_policies(profile: CapacityControlPlaneProfile) -> list[dict[str, Any]]:
+def _network_policies(
+    profile: CapacityControlPlaneProfile,
+    *,
+    external_manager_client_cidrs: tuple[str, ...] = (),
+) -> list[dict[str, Any]]:
     namespace = {
         "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": profile.namespace}}
     }
@@ -1345,6 +1350,10 @@ def _network_policies(profile: CapacityControlPlaneProfile) -> list[dict[str, An
                                     "matchLabels": profile.lifecycle_client.match_labels()
                                 }
                             },
+                            *(
+                                {"ipBlock": {"cidr": cidr}}
+                                for cidr in external_manager_client_cidrs
+                            ),
                         ],
                         "ports": [{"protocol": "TCP", "port": 8443}],
                     }
@@ -1361,6 +1370,7 @@ def render_capacity_control_plane_manifests(
     authority_incarnation: UUID,
     execution_policy: ExecutionPreparationPolicyV2 | None = None,
     execution_policy_sha256: str | None = None,
+    external_manager_client_cidrs: tuple[str, ...] = (),
 ) -> str:
     """Render one exact, cluster-internal, zero-execution authority release."""
 
@@ -1374,6 +1384,36 @@ def render_capacity_control_plane_manifests(
         raise ValueError("capacity authority incarnation must be non-nil")
     if (execution_policy is None) != (execution_policy_sha256 is None):
         raise ValueError("execution policy and digest must be supplied together")
+    if not isinstance(external_manager_client_cidrs, tuple):
+        raise TypeError("external manager client CIDRs must be a tuple")
+    if (execution_policy is not None) != bool(external_manager_client_cidrs):
+        raise ValueError(
+            "execution policy and external manager client CIDRs must be supplied together"
+        )
+    if len(external_manager_client_cidrs) > 8:
+        raise ValueError("external manager client CIDRs exceed the fixed bound")
+    canonical_external_cidrs: list[str] = []
+    for value in external_manager_client_cidrs:
+        if not isinstance(value, str):
+            raise TypeError("external manager client CIDRs must be strings")
+        try:
+            network = ipaddress.ip_network(value, strict=True)
+        except ValueError as exc:
+            raise ValueError("external manager client CIDRs must be canonical host routes") from exc
+        address = network.network_address
+        if (
+            network.prefixlen != network.max_prefixlen
+            or str(network) != value
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_multicast
+            or address.is_reserved
+            or address.is_unspecified
+        ):
+            raise ValueError("external manager client CIDRs must be safe canonical host routes")
+        canonical_external_cidrs.append(value)
+    if canonical_external_cidrs != sorted(set(canonical_external_cidrs)):
+        raise ValueError("external manager client CIDRs must be unique and canonical")
     execution_policy_document: dict[str, Any] | None = None
     execution_policy_config_map: str | None = None
     if execution_policy is not None:
@@ -1439,7 +1479,10 @@ def render_capacity_control_plane_manifests(
             execution_policy_config_map=execution_policy_config_map,
             execution_policy_sha256=execution_policy_sha256,
         ),
-        *_network_policies(profile),
+        *_network_policies(
+            profile,
+            external_manager_client_cidrs=tuple(canonical_external_cidrs),
+        ),
     ]
     return cast(
         str,

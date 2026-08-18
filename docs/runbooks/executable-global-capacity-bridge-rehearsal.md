@@ -83,6 +83,16 @@ the approved digest reference and non-nil authority UUID:
 ```bash
 manager_image='ghcr.io/qianyi-sun/loom-capacity-manager@sha256:<64-lowercase-hex>'
 authority_incarnation='<reviewed-non-nil-uuid>'
+mapfile -t external_manager_client_cidrs < <(
+  printf '%s\n' \
+    '<observed-oldlab-or-operator-source>/32' \
+    '<observed-gb10-source>/32' \
+  | sort -u
+)
+external_manager_client_args=()
+for cidr in "${external_manager_client_cidrs[@]}"; do
+  external_manager_client_args+=(--external-manager-client-cidr "$cidr")
+done
 
 uv run --no-sync loom admin capacity-control-plane render \
   --file deploy/dev-fleet/capacity-control-plane.toml \
@@ -90,6 +100,7 @@ uv run --no-sync loom admin capacity-control-plane render \
   --authority-incarnation "$authority_incarnation" \
   --execution-policy-file "$execution_policy" \
   --execution-policy-sha256 "$execution_policy_sha256" \
+  "${external_manager_client_args[@]}" \
   > "$manager_render"
 chmod 0600 "$manager_render"
 sha256sum "$manager_render" > "$manager_render.sha256"
@@ -102,10 +113,15 @@ grep -F "value: $execution_policy_sha256" "$manager_render"
 ```
 
 Supplying only one policy argument, a digest that differs from the canonical
-policy payload, an unsafe file, or a changed file fails before YAML is written.
-The rendered ConfigMap contains only canonical policy JSON. The pod init copies
-that projection into a memory-backed, manager-UID-owned mode-`0600` file; the
-manager mounts only the copied directory read-only.
+policy payload, missing external-client evidence, an unsafe file, or a changed
+file fails before YAML is written. External manager clients are 1–8 sorted,
+unique canonical host routes only (`/32` or `/128`), never a subnet. Derive
+them from #906 route/CNI evidence showing the effective source addresses of
+both controller services and the operator client path; do not substitute SSH
+destination addresses or guessed NAT addresses. The rendered ConfigMap
+contains only canonical policy JSON. The pod init copies that projection into
+a memory-backed, manager-UID-owned mode-`0600` file; the manager mounts only
+the copied directory read-only.
 
 ## 2. Shadow-deploy only inside the #906 window
 
@@ -178,7 +194,12 @@ identity is a different unbound `capacity:execution:abort` principal.
 
 Run the HTTP commands from the separately approved client path that can reach
 the cluster-internal manager Service. Replace `manager_origin` only with that
-reviewed endpoint.
+reviewed endpoint. Before preparation, prove the operator path and both
+controller-local service accounts resolve that name, validate the manager
+certificate, and complete an mTLS request through the reviewed route. The
+checked-in package does not create a cross-network tunnel or DNS override; that
+transport is explicit #906 evidence and must remain available through drain
+and retirement.
 
 ```bash
 manager_origin='https://loom-capacity-manager.loom-dev.svc.cluster.local:8443'

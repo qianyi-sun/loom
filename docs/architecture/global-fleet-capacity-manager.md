@@ -400,6 +400,13 @@ prepared runtime directory, read-only. A held projected-generation descriptor
 and pre-install rebinding check prevent a Kubernetes `..data` rotation from
 mixing credential generations.
 
+When an execution policy is rendered, the manager NetworkPolicy also requires
+1–8 explicit sorted external-client host routes. Only those reviewed `/32` or
+`/128` sources can reach mTLS port 8443 from the controller-local OLDLAB/GB10
+executors or the operator client path; broader, duplicate, special, missing,
+or policy-free CIDRs fail before YAML is emitted. Transport admission does not
+replace the independently bound mTLS and bearer principal scopes.
+
 The schema migration writes a canonical seed event beside its generated
 bootstrap authority UUID. A reviewed replacement requires that one pristine
 seed and writes an append-only binding event in the same locked transaction.

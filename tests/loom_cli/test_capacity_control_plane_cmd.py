@@ -149,6 +149,10 @@ def test_admin_render_loads_exact_execution_policy_without_partial_output(
             str(policy_file),
             "--execution-policy-sha256",
             digest,
+            "--external-manager-client-cidr",
+            "192.168.20.1/32",
+            "--external-manager-client-cidr",
+            "192.168.50.13/32",
         ]
     )
 
@@ -165,6 +169,38 @@ def test_admin_render_loads_exact_execution_policy_without_partial_output(
         if volume["name"] == "execution-policy-projected"
     )
     assert policy_source["configMap"]["name"] == config_map["metadata"]["name"]
+
+
+def test_admin_render_rejects_execution_policy_without_external_client_ingress(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    payload = canonical_executable_bytes(execution_policy())
+    policy_file = tmp_path / "execution-policy.json"
+    policy_file.write_bytes(payload)
+    policy_file.chmod(0o600)
+
+    result = dispatch(
+        [
+            "capacity-control-plane",
+            "render",
+            "--file",
+            str(_PROFILE),
+            "--manager-image",
+            _MANAGER_IMAGE,
+            "--authority-incarnation",
+            _AUTHORITY,
+            "--execution-policy-file",
+            str(policy_file),
+            "--execution-policy-sha256",
+            hashlib.sha256(payload).hexdigest(),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert captured.out == ""
+    assert "external manager client CIDRs" in captured.err
 
 
 @pytest.mark.parametrize(
@@ -221,6 +257,8 @@ def test_admin_render_redacts_rejected_execution_policy(
             str(policy_file),
             "--execution-policy-sha256",
             hashlib.sha256(policy_file.read_bytes()).hexdigest(),
+            "--external-manager-client-cidr",
+            "192.168.20.1/32",
         ]
     )
 

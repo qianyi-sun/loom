@@ -63,6 +63,7 @@ _EXECUTOR_PROFILE = _REPO_ROOT / "deploy/dev-fleet/capacity-pool-executor.toml.e
 _EXECUTOR_SERVICE = _REPO_ROOT / "deploy/dev-fleet/loom-capacity-pool-executor.service"
 _MANAGER_IMAGE = "ghcr.io/qianyi-sun/loom-capacity-manager@sha256:" + "a" * 64
 _AUTHORITY = UUID("00000000-0000-4000-8000-000000000901")
+_EXTERNAL_MANAGER_CLIENT_CIDRS = ("192.168.20.1/32", "192.168.50.13/32")
 
 
 def _active_manifest_sha256(
@@ -796,8 +797,58 @@ def _policy_enabled_documents(policy=None) -> list[dict[str, Any]]:
         authority_incarnation=_AUTHORITY,
         execution_policy=resolved,
         execution_policy_sha256=canonical_executable_digest(resolved),
+        external_manager_client_cidrs=_EXTERNAL_MANAGER_CLIENT_CIDRS,
     )
     return [document for document in yaml.safe_load_all(rendered) if document]
+
+
+def test_execution_policy_requires_explicit_external_manager_client_host_cidrs() -> None:
+    policy = execution_policy()
+    with pytest.raises(ValueError, match="external manager client CIDRs"):
+        render_capacity_control_plane_manifests(
+            load_capacity_control_plane_profile(_PROFILE),
+            manager_image=_MANAGER_IMAGE,
+            authority_incarnation=_AUTHORITY,
+            execution_policy=policy,
+            execution_policy_sha256=canonical_executable_digest(policy),
+        )
+
+
+def test_policy_enabled_manager_ingress_admits_only_exact_external_client_hosts() -> None:
+    policies = {
+        document["metadata"]["name"]: document["spec"]
+        for document in _policy_enabled_documents()
+        if document["kind"] == "NetworkPolicy"
+    }
+    peers = policies["capacity-manager-ingress"]["ingress"][0]["from"]
+    assert peers[-2:] == [
+        {"ipBlock": {"cidr": "192.168.20.1/32"}},
+        {"ipBlock": {"cidr": "192.168.50.13/32"}},
+    ]
+
+
+@pytest.mark.parametrize(
+    "cidrs",
+    (
+        ("192.168.20.0/24",),
+        ("127.0.0.1/32",),
+        ("192.168.20.1/32", "192.168.20.1/32"),
+        tuple(f"192.168.20.{index}/32" for index in range(1, 10)),
+    ),
+)
+def test_external_manager_client_ingress_rejects_broad_unsafe_or_unbounded_cidrs(
+    cidrs: tuple[str, ...],
+) -> None:
+    policy = execution_policy()
+    with pytest.raises(ValueError, match="external manager client CIDRs"):
+        render_capacity_control_plane_manifests(
+            load_capacity_control_plane_profile(_PROFILE),
+            manager_image=_MANAGER_IMAGE,
+            authority_incarnation=_AUTHORITY,
+            execution_policy=policy,
+            execution_policy_sha256=canonical_executable_digest(policy),
+            external_manager_client_cidrs=cidrs,
+        )
 
 
 def test_renderer_mounts_one_immutable_digest_addressed_execution_policy() -> None:
@@ -918,6 +969,7 @@ def test_renderer_rejects_execution_policy_digest_drift() -> None:
             authority_incarnation=_AUTHORITY,
             execution_policy=execution_policy(),
             execution_policy_sha256="f" * 64,
+            external_manager_client_cidrs=_EXTERNAL_MANAGER_CLIENT_CIDRS,
         )
 
 
@@ -941,6 +993,7 @@ def test_renderer_rejects_execution_policy_larger_than_config_map_data_limit() -
             authority_incarnation=_AUTHORITY,
             execution_policy=oversized,
             execution_policy_sha256=hashlib.sha256(payload).hexdigest(),
+            external_manager_client_cidrs=_EXTERNAL_MANAGER_CLIENT_CIDRS,
         )
 
 
@@ -1152,7 +1205,7 @@ def test_renderer_pins_images_credentials_security_and_runtime_commands() -> Non
     assert manager_container["livenessProbe"]["tcpSocket"] == {"port": 8443}
 
 
-def test_manager_runtime_probes_observe_positive_activation_without_weakening_health() -> None:
+def test_manager_runtime_probes_allow_positive_activation_without_weakening_health() -> None:
     """Runtime availability must not disappear solely because activation is positive."""
 
     manager = next(document for document in _documents() if document["kind"] == "Deployment")
