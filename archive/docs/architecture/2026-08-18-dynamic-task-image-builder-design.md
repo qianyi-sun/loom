@@ -1,7 +1,9 @@
 # Dynamic, allocation-contained task-image builders
 
-**Status:** Proposed permanent design  
-**Date:** 2026-08-18  
+**Status:** Proposed permanent design
+
+**Date:** 2026-08-18
+
 **Target branch:** `dev`
 
 ## Decision
@@ -81,6 +83,8 @@ privileged host daemon outside the allocation's process tree.
   model that includes kernel compromise requires a microVM environment
   provider.
 - Replacing Slurm or the registry.
+- Cross-task artifact deduplication or a normalized artifact/reference schema.
+  Those are independent storage optimizations, not containment prerequisites.
 - Treating a source key as proof of reproducibility when a Dockerfile downloads
   mutable external content. The published image digest is the execution
   authority.
@@ -93,7 +97,9 @@ Start a fresh, unprivileged BuildKit daemon directly in every builder
 allocation. User, mount, PID, and network namespaces isolate the build; the
 Slurm cgroup and job-scoped storage enforce resource limits. This is closest to
 Loom's existing Dockerfile behavior while removing the host Docker daemon from
-the build path.
+the build path. Because the rootless OCI worker's `network.host` is relative to
+its enclosing RootlessKit namespace, that namespace and its egress controls are
+part of the required executor rather than optional hardening.
 
 ### Rootless Podman or Buildah
 
@@ -192,13 +198,18 @@ provider contract. The provider owns only:
 - capability and containment validation;
 - allocation submission, inspection, cancellation, and observed state;
 - architecture and resource request rendering; and
-- delivery of a one-use job grant without exposing it in Slurm arguments or
-  exported environment metadata.
+- binding a nonsecret grant ID to one held Slurm job and releasing the job only
+  after that binding is durable.
 
 The initial `SlurmBuildEnvironmentProvider` submits ordinary jobs. A future
 microVM or Kubernetes provider can implement the same contract without changing
 materialization semantics. Loom does not need to adopt a broad external
 "environment provider" abstraction for trial execution to gain this boundary.
+
+The installed provider executor runs as a dedicated non-root builder Unix
+principal and submits only its own Slurm jobs. Its Slurm association permits the
+builder partition and capped QoS but not administrator operations. Trial-worker
+jobs run under a different Unix principal.
 
 ### Allocation supervisor and BuildKit executor
 
@@ -214,11 +225,14 @@ provenance. It does not own retry state, scheduling, or trial eligibility.
 
 ### Artifact publisher and retention controller
 
-Each pushed component is recorded immediately against the fenced attempt.
-Readiness is committed only after the registry independently confirms every
-immutable digest. The retention controller keeps referenced publications,
-retires unreferenced ones after a grace period, and garbage-collects partial or
-abandoned attempts.
+Each pushed component digest is recorded immediately as cleanup evidence
+against the fenced attempt. Cleanup evidence is not readiness evidence. The
+control-plane publisher fetches and validates the manifest and config by digest,
+then writes a signed publication statement bound to the task, component,
+architecture, build policy, attempt, and lease. Readiness is committed only
+after every component has that verified statement. The retention controller
+keeps referenced publications, retires unreferenced ones after a grace period,
+and garbage-collects partial or abandoned attempts.
 
 ### Trial scheduler and workers
 
@@ -229,45 +243,48 @@ failure; a trial worker never rebuilds it.
 
 ## Materialization identity and provenance
 
-The permanent identity is derived from the image-affecting input rather than
-from scheduling details:
+The containment migration preserves Loom's current task-scoped v1 identity:
 
 ```text
 SHA256(
-  canonical task snapshot and component build specifications,
-  task bundle checksum,
-  native CPU architecture,
-  explicit build-policy epoch
+  v1 domain,
+  task ID,
+  canonical task checksum,
+  native CPU architecture
 )
 ```
 
-The build-policy epoch is bumped deliberately when builder semantics or a
-security policy requires rematerialization. The exact BuildKit and helper
-binary digests are recorded as provenance but do not silently invalidate the
-entire catalog after every maintenance release.
+There remains one materialization row per `(task_id, task_checksum, cpu_arch)`.
+The existing task and trial reference model, uniqueness constraints, scheduler
+queries, execution grants, and retention logic remain authoritative. The
+rootless executor does not require a materialization-key migration or
+cross-task sharing.
 
-The first fenced resolver for a materialization records base-image references
-as immutable digests. Retries reuse that locked base set. Mutable downloads
-performed by arbitrary `RUN` instructions cannot generally be made
-reproducible; their consequence is captured in the immutable output digest and
-provenance rather than hidden behind a claim of source reproducibility.
+The builder records a reviewed build-policy version and the exact BuildKit and
+helper binary digests in publication provenance. When a security or policy
+change requires rebuilding already-ready materializations, an operator starts a
+fenced rematerialization campaign using the existing ready-to-queued retry
+transition. Previous output digests remain in publication history; active trial
+execution grants already bound to a digest do not change.
 
-Materialization identity may be shared by tasks with identical canonical build
-input. Task versions and trials link to the materialization instead of owning
-its artifact. Existing task-scoped rows can migrate without changing current
-execution grants: new rows use the new key version, and old rows remain readable
-until their references retire.
+Resolved base-image digests are recorded as observed provenance, but this design
+does not add a separate base-locking resolver. Mutable base tags and downloads
+performed by arbitrary `RUN` instructions mean a later retry can legitimately
+produce a different output digest. That digest is recorded as a new publication
+generation rather than hidden behind a claim of source reproducibility.
 
 Provenance records at least:
 
-- materialization key version and build-policy epoch;
+- v1 materialization key and reviewed build-policy version;
+- task ID, task checksum, and component identity;
 - task snapshot and bundle digests;
-- native platform and all resolved base-image digests;
+- native platform and observed resolved base-image digests;
 - builder release and BuildKit/helper binary digests;
 - Slurm cluster and job identifiers, without secrets;
 - network-policy version;
 - timestamps, attempt/lease epoch, and component output digests; and
-- containment-evidence version and result.
+- containment-evidence version and result; and
+- the control-plane-signed publication-statement digest.
 
 The output digest, not a mutable tag, is the only execution reference.
 
@@ -278,24 +295,27 @@ The output digest, not a mutable tag, is the only execution reference.
    creates `x86_64` and `arm64` intents.
 2. Trial submission idempotently ensures and links the same intents. The trial
    remains visibly blocked on `task_image_materialization`, not failed.
-3. The capacity reconciler observes queued demand and submits at most the
-   policy's bounded number of ordinary Slurm builder jobs.
+3. The capacity reconciler observes queued demand, creates a grant record,
+   submits an ordinary Slurm builder job in held state with only the nonsecret
+   grant ID, binds the returned job ID, and then releases the job.
 4. The allocation supervisor proves containment before it asks for a claim.
-5. The supervisor exchanges its one-use job grant for a short-lived
-   `task-image:build` control-plane credential and an attempt-scoped registry
-   push credential.
-6. The builder claims a matching architecture row with a lease epoch, fetches
+5. The node-local projector and supervisor exchange the Slurm-bound one-use
+   grant for a short-lived `task-image:build` control-plane session.
+6. The builder claims a matching architecture row with a lease epoch.
+7. Only after claim, the builder obtains a registry credential scoped to that
+   attempt and lease, fetches
    the frozen bundle through a time-limited object URL, and verifies its digest.
-7. Base references are locked if this is the first attempt. BuildKit builds
-   every Dockerfile-backed component using the native platform and restricted
-   policy.
-8. Each component is pushed to an attempt-specific staging reference. The
-   returned manifest digest and provenance are appended immediately.
-9. The control plane verifies the registry manifests and atomically marks the
-   complete component set ready. A stale lease cannot perform this transition.
-10. A matching trial worker receives exact digests, pulls them, verifies the
+8. BuildKit builds every Dockerfile-backed component using the native platform
+   and restricted policy, recording resolved base digests as provenance.
+9. Each component is pushed to an attempt-specific staging reference. The
+   returned digest is appended immediately as cleanup evidence.
+10. The control-plane publisher fetches the manifest and config by digest,
+    verifies the publication contract, signs its statement, and atomically marks
+    the complete component set ready. A stale lease cannot perform this
+    transition.
+11. A matching trial worker receives exact digests, pulls them, verifies the
     frozen bundle, and only then starts trial execution and evidence creation.
-11. One allocation may claim further rows sequentially. It exits after a short
+12. One allocation may claim further rows sequentially. It exits after a short
     idle grace period and leaves no durable node-local state.
 
 ## Dynamic Slurm scheduling and starvation policy
@@ -305,7 +325,10 @@ Builder jobs request a fixed, reviewed resource profile and render:
 - one node and one task;
 - native architecture and `loom_rootless_buildkit` capability constraints;
 - positive CPU, memory, PID, I/O, temporary-storage, and wall-time limits; and
-- a dedicated builder QoS with bounded submitted and running job counts.
+- an overlapping shared-node builder partition with a higher `PriorityTier`
+  than Loom trial-worker partitions; and
+- a dedicated builder QoS with bounded submitted/running job counts and a hard
+  aggregate TRES ceiling.
 
 They do not render:
 
@@ -314,26 +337,44 @@ They do not render:
 - `--nodelist` or a permanent `allowed_nodes` pin; or
 - access to `/var/run/docker.sock` or another host runtime.
 
-The builder QoS gives pending builders priority over newly submitted trial
-capacity but does not preempt running trials. Slurm's scheduler may make a
-temporary earliest-start plan for a pending builder; that is normal dynamic
-scheduling, not a permanent named reservation.
+They do render `--hold` for grant binding and `--no-requeue`. An allocation
+lost before or after projection terminates; replacement demand receives a new
+Slurm job and a new grant.
+
+QoS priority is additive under Slurm's multifactor plugin and is therefore not
+the starvation fence. Strict ordering between Loom job classes comes from the
+overlapping builder partition's higher `PriorityTier`, certified scheduler
+configuration, and Loom admission control. The partition contains the same
+shared nodes as the trial partitions; it reserves no node. The builder QoS
+limits resource consumption but does not provide ordering.
+
+Slurm may make a temporary earliest-start plan for a pending higher-tier
+builder and backfill lower-tier work only when it will not delay that start.
+That is dynamic scheduler state, not a permanent named reservation. Running
+trials are never preempted by this policy.
 
 Long-lived trial worker jobs require an application-level starvation rule:
 
-1. New builder demand immediately suppresses further trial-pool scale-up on
-   that architecture.
-2. When oldest queue age crosses a soft threshold, the capacity arbiter marks
-   enough reusable trial workers to drain after their current trial to satisfy
-   the builder's resource profile.
-3. Draining workers receive no new trial claim and exit normally; active trials
-   are not cancelled.
-4. Drain pressure is released when the builder starts or demand disappears.
+1. The reconciler submits and durably binds the held builder job before it
+   releases any new trial-capacity decision for that architecture.
+2. New builder demand immediately suppresses further trial-pool scale-up and
+   cancels enough pending, not-yet-running Loom trial-worker allocations to
+   remove conflicting queued capacity. No active trial is affected.
+3. When oldest queue age crosses a configured soft threshold, the capacity
+   arbiter marks enough reusable running trial workers to drain after their
+   current trial to satisfy the builder's resource profile.
+4. The claim service refuses new work to a draining worker. It exits normally
+   after its active trial or immediately when idle.
+5. Drain and admission pressure are released when the builder starts, its demand
+   disappears, or the builder job terminates without replacement demand.
 
-Therefore continuous new trial arrivals cannot keep a long-lived worker alive
-forever ahead of the builder. If every eligible resource is occupied by active
-trials, the builder still waits for one to finish. A hard start-time bound would
-require a later, explicit preemption or reservation policy.
+Therefore continuous new Loom trial arrivals and previously pending Loom
+trial-worker submissions cannot jump ahead of the builder. If every eligible
+resource is occupied by active trials, the builder still waits for one to
+finish. Jobs outside Loom's admission authority, or jobs in an equal/higher
+operator-defined partition tier, may also delay it. A cluster-wide hard
+start-time bound would require a later, explicit preemption or reservation
+policy.
 
 Builder concurrency is capped in the other direction so a registration burst
 cannot starve trials. The initial production policy is one builder allocation
@@ -353,6 +394,13 @@ are true:
   available to a dedicated builder operating-system identity;
 - pinned RootlessKit, BuildKit, snapshotter, and network helpers are installed
   from the trusted release;
+- the cluster policy names an exact snapshotter rather than `auto`: either
+  unprivileged kernel `overlayfs` after a successful probe, or
+  `fuse-overlayfs`; when FUSE is selected, the allocation may open `/dev/fuse`
+  but the Dockerfile execution mount namespace cannot see that device;
+- the cluster policy names the exact RootlessKit network driver and release:
+  `gvisor-tap-vsock`, or an explicitly accepted `slirp4netns` fallback, with
+  host loopback disabled;
 - node-local scratch supports a hard per-job quota and deterministic cleanup;
   and
 - the restricted build-egress path is healthy.
@@ -381,10 +429,19 @@ Before claiming work, the supervisor must prove:
 7. a probe build places BuildKit, its executor, every `RUN` process, the
    snapshotter, and network helpers beneath the allocation cgroup.
 
-BuildKit runs with user, mount, PID, and network namespaces, a restrictive
-seccomp profile, `no_new_privileges`, and no privileged entitlements. Loom
-forbids host networking, `security.insecure`, device passthrough, SSH-agent
-forwarding, arbitrary host binds, and unpinned remote Dockerfile frontends.
+The trusted launcher first uses the pinned `newuidmap` and `newgidmap` helpers
+to establish the approved subordinate-ID mapping. Only after that mapping
+exists does the OCI executor apply `no_new_privileges` to Dockerfile execution
+processes. The launcher and helpers have their own narrow AppArmor/seccomp
+policy; a node-wide unconfined profile is not an acceptable substitute.
+
+RootlessKit starts with the certified isolated network driver and
+`--disable-host-loopback`. BuildKit uses only the rootless OCI worker with
+process sandboxing enabled. Its insecure-entitlement list is empty. Loom
+forbids `security.insecure`, real host networking, CDI/device injection,
+SSH-agent forwarding, arbitrary host binds, and unpinned remote Dockerfile
+frontends. If `fuse-overlayfs` is selected, only the trusted snapshotter mount
+namespace receives `/dev/fuse`; Dockerfile `RUN` processes do not.
 
 The trusted supervisor remains outside BuildKit's PID namespace but inside the
 same allocation cgroup so it can monitor the whole delegated subtree. It
@@ -427,29 +484,101 @@ do not grow without a reference-aware retention policy.
 
 ## Network and credentials
 
-Dockerfile `RUN` traffic uses a job-specific network namespace and controlled
-egress proxy. The policy blocks host, RFC1918/cluster, link-local, metadata,
-control-plane, Slurm-controller, and credential endpoints. Approved public
-package and source traffic can be allowed and audited by policy. Host networking
-is never an escape hatch.
+Dockerfile `RUN` traffic uses the job-specific RootlessKit network namespace.
+Although BuildKit calls this OCI-worker mode `network.host`, the "host" is that
+isolated namespace, never the node namespace. `gvisor-tap-vsock` is preferred;
+`slirp4netns` is allowed only when its exact release passes the same evidence.
+Host loopback is disabled.
 
-The supervisor receives only a one-use bootstrap grant. Raw secrets must not be
-placed in `sbatch` arguments, Slurm-exported environment metadata, build
-arguments, labels, logs, or a shared Docker config directory. An
-authority-installed grant projector or equivalent workload-identity mechanism
-delivers the bootstrap secret through a job-private channel.
+A root-owned cgroup/network policy blocks direct traffic to the host,
+RFC1918/cluster, link-local, metadata, control-plane, Slurm-controller, and
+credential endpoints before packets leave the allocation. Approved public
+package and source traffic flows through an authenticated, audited egress
+policy. A Dockerfile cannot bypass the policy by ignoring proxy environment
+variables, and real host networking is never an escape hatch.
 
-The control plane exchanges the grant for:
+The bootstrap protocol is exact rather than provider-defined:
 
-- a short-lived token limited to task-image claim, heartbeat, publication, and
-  failure endpoints; and
-- a short-lived registry credential limited to the attempt's staging and cache
-  namespaces.
+1. Before submission, the capacity reconciler creates a `BuilderJobGrant`
+   containing a random nonsecret ID, pool, architecture, builder release,
+   resource profile, expiry, and state `issued`.
+2. The provider submits the job with `--hold`. Only the grant ID is carried in
+   job metadata; no bearer secret is passed to `sbatch` or `--export`.
+3. After `sbatch` returns, the reconciler atomically binds the grant to the exact
+   Slurm cluster and job ID. It then releases the held job. An unbound held job
+   is cancelled by reconciliation and can never obtain a credential.
+4. A root-owned `slurmd` `Prolog` projector authenticates to the control plane
+   with a node-specific mTLS identity. It submits the grant ID plus the observed
+   job ID, Unix identity, account, QoS, partition, architecture, resource shape,
+   and builder release. The control plane compares every field with the durable
+   binding and atomically moves `issued -> projected`. User-run `TaskProlog` or
+   job-script code is not trusted to perform projection.
+5. The control plane returns a one-use random bootstrap secret over that mTLS
+   channel. The projector writes it to a node-local tmpfs file beneath
+   `/run/loom-task-image-builder/<job-id>/`, owned by the dedicated builder user
+   with mode `0400`. Trial workers use a different Unix identity.
+6. Before starting RootlessKit, the trusted supervisor opens the file with
+   `O_NOFOLLOW|O_CLOEXEC`, verifies its owner and mode, unlinks it, and exchanges
+   the secret once. The control plane atomically moves `projected -> exchanged`
+   and returns a short-lived session limited to claim, start, heartbeat,
+   publication, and failure operations for that pool and architecture.
+7. After a materialization claim creates an attempt and lease epoch, the
+   supervisor requests a registry credential limited to that attempt's staging
+   and cache paths. Its expiry is no later than either the job/session expiry or
+   lease expiry. A different attempt, lease epoch, repository, or architecture
+   is rejected.
+8. Job cancellation, epilog, or session expiry revokes the session and registry
+   credential. The epilog removes any unconsumed tmpfs projection.
 
-Credentials live in job-private memory-backed state. The trusted BuildKit
-client may use registry authentication through its session, but Dockerfile
-processes receive neither the credential files nor environment variables.
-Every credential is revoked or expires when the allocation/lease ends.
+Projection and exchange use canonical idempotency keys and stored encrypted
+response receipts. An exact retry after an ambiguous transport failure returns
+the same still-valid response. A changed field, different node/job, different
+idempotency key, expired grant, second semantic exchange, or attempt/lease
+rebinding is rejected and audited. Because builder jobs use `--no-requeue`, a
+replacement allocation never inherits a projected grant.
+
+The node projector is a Slurm-administrator-installed prerequisite with only
+grant-projection authority; it cannot claim materializations or push images.
+Its mTLS key is root-owned and never enters the allocation. This concrete
+projector is the initial `SlurmBuildEnvironmentProvider` mechanism; replacing
+it later requires a separately reviewed provider contract.
+
+Raw secrets must not appear in Slurm arguments or exported metadata, build
+arguments, labels, logs, a shared Docker config directory, or persistent disk.
+The short-lived session and registry credential live in job-private
+memory-backed state. The trusted BuildKit client may use registry authentication
+through its session, but Dockerfile processes receive neither credential files
+nor environment variables.
+
+## Publication verification contract
+
+A registry `HEAD` request is a liveness probe only. It cannot grant readiness.
+For each reported component digest, the control-plane publisher:
+
+1. performs an authenticated `GET` by digest and recomputes the digest over the
+   exact returned manifest bytes;
+2. accepts only reviewed OCI image or Docker schema-2 media types and enforces
+   configured manifest/config/layer count and byte limits;
+3. if the top level is an index, requires exactly one runnable image descriptor
+   for the expected `linux/<native-architecture>` platform and permits only
+   explicitly recognized non-runnable provenance descriptors;
+4. fetches the runnable manifest and config by digest, verifies every descriptor
+   binding, recomputes the config digest, checks each layer's registry existence
+   and declared size, and requires the config OS and architecture to match the
+   materialization;
+5. checks that the registry repository is the attempt-scoped destination and
+   that the component name is one expected by the frozen task snapshot;
+6. creates a canonical publication statement containing the materialization
+   key, task checksum, component, platform, attempt ID, lease epoch, Slurm job,
+   build-policy version, builder release, observed base digests, containment
+   evidence digest, and output digest; and
+7. signs and stores that statement with the control plane's publication key.
+
+Image labels and mutable tags are diagnostic only; an untrusted Dockerfile may
+set them. The verified descriptor plus the signed control-plane statement is the
+readiness authority. Completion rechecks the current lease and requires one
+verified statement for every expected component in the same attempt. Observed
+but unverified digests remain only in cleanup history.
 
 ## State, fencing, and failure handling
 
@@ -515,23 +644,32 @@ failure without exposing secrets.
 
 ## Rollout and rollback
 
-### Phase 0: inert implementation
+### Phase 0: rollout validation correction
 
-Add the provider/executor boundary, versioned schema fields, rootless builder
-release, tests, and disabled policies. The existing exclusive backend,
-prerequisites, and reservations remain unchanged; this phase does not assume
-that its protected rollout has completed or that it is serving demand. No
-reservation is removed.
+Split side-effect-free rehearsal validation from post-materialization runtime
+validation and remove or make explicitly non-deploying the misleading generic
+hosted-runner staging path. This phase removes the current protected-rollout
+bootstrap cycle but does not activate a builder or mutate a reservation.
 
 ### Phase 1: cluster prerequisites and certification
 
-Provision cgroup enforcement, builder OS identity, rootless runtime, storage
-quota, egress, workload credential projection, and ordinary builder QoS. Run
-read-only conformance first, then certify eligible shared nodes with the Slurm
-feature. Certification is architecture-independent but recorded per node and
-release.
+Provision cgroup enforcement, the dedicated builder OS identity and Slurm
+association, rootless runtime and exact snapshotter, storage quota, egress
+enforcement, the root-owned `slurmd` projector, the attempt-scoped registry
+credential broker, the overlapping higher-tier builder partition, and the
+capped builder QoS. Add the evidence schema and run read-only conformance. The
+policies remain disabled and no node is certified for production claims yet.
 
-### Phase 2: shadow canaries
+### Phase 2: inert provider and executor
+
+Add the held-job/grant binding, narrow Slurm environment provider, allocation
+supervisor, BuildKit executor, signed publication statements, tests, and
+disabled policies. Preserve the current task-scoped materialization identity and
+reference model. Certify eligible shared nodes only after the exact installed
+release passes conformance. The existing exclusive backend, prerequisites, and
+reservations remain unchanged.
+
+### Phase 3: shadow canaries
 
 Submit rootless non-exclusive builds for controlled canary task sets on each
 architecture without making their publications authoritative for production
@@ -539,19 +677,21 @@ trials. Verify functionality and provenance; do not require byte-identical
 digests from Dockerfiles with mutable external downloads. Run adversarial builds
 beside representative trials and host services.
 
-### Phase 3: gated production activation
+### Phase 4: dynamic scheduling and gated production activation
 
-Enable one architecture at a time with one builder allocation. New claims use
-the rootless backend; the exclusive backend stops new claims but remains
-available as a rollback candidate. Verify real registrations, submission
-backstops, registry retention, drain behavior, and scale-to-zero.
+Enable strict builder/trial ordering, pending-trial cancellation, and worker
+draining under disabled/shadow evidence first. Then enable one architecture at
+a time with one builder allocation. New claims use the rootless backend; the
+exclusive backend stops new claims but remains available as a rollback
+candidate. Verify real registrations, submission backstops, registry retention,
+drain behavior, and scale-to-zero.
 
 Locate the original run store for task/run `4139e767`, enqueue or retry its
 materialization through the production path, and run an end-to-end trial. The
 incident is not considered unblocked until the rerun performs LLM calls and
 produces valid evidence.
 
-### Phase 4: soak and retire compensation
+### Phase 5: soak and retire compensation
 
 After both architectures pass acceptance and a production soak, retire the
 legacy `--exclusive`, fixed-node, host-Docker, and reservation policy and code
@@ -570,22 +710,14 @@ digests remain valid; no database rollback or trial rebuild is required.
 This architecture is intentionally broader than one reviewable change. It is
 delivered as separately planned, tested, and merged increments:
 
-1. **Rollout validation correction:** split rehearsal validation from
-   post-materialization runtime validation and remove the misleading generic
-   hosted-runner deployment path. This is the first increment because it also
-   removes the current protected-rollout bootstrap cycle.
-2. **Containment prerequisites and evidence:** define the node conformance
-   contract, evidence schema, rootless runtime release, storage quota, network
-   boundary, and workload-grant projection. This remains inert.
-3. **Rootless executor and provider:** add the narrow environment-provider
-   boundary, allocation supervisor, BuildKit executor, publication provenance,
-   and disabled policies.
-4. **Dynamic scheduling and starvation control:** render ordinary non-exclusive
-   requests and integrate builder pressure with trial-worker draining.
-5. **Cluster canary and activation:** certify nodes, run adversarial acceptance,
-   activate one architecture at a time, and perform the incident rerun.
-6. **Legacy retirement:** after soak and explicit approval, remove the
-   host-Docker exclusive path and then the exact named reservations.
+1. **Rollout validation correction:** Phase 0.
+2. **Containment prerequisites and evidence:** Phase 1.
+3. **Inert rootless provider and executor:** Phase 2.
+4. **Shadow canary and adversarial acceptance:** Phase 3.
+5. **Dynamic scheduling and gated activation:** Phase 4, including the incident
+   rerun after both native paths are proven.
+6. **Legacy retirement:** Phase 5, including separate approval before deleting
+   either exact named reservation.
 
 Each increment uses its own implementation plan and PR, passes CI, and is
 squash-merged before the next protected rollout step. An increment must not
@@ -617,23 +749,37 @@ made explicitly non-deploying.
 
 ### Unit and contract tests
 
-- versioned materialization identity, native architecture expansion, and
+- preserved v1 task-scoped materialization identity, native architecture
+  expansion, and
   idempotent registration/submission linkage;
 - lease fencing, heartbeat recovery, retry budgets, partial publication, and
   reference-aware GC;
-- Slurm rendering contains resource/capability/QoS constraints and omits
-  `--exclusive`, `--reservation`, `--nodelist`, Docker socket, and secret values;
-- starvation signals suppress scale-up, drain reusable workers after the soft
-  threshold, and release pressure after builder start;
+- held Slurm rendering contains partition/resource/capability/QoS constraints
+  and a nonsecret grant ID, while omitting `--exclusive`, `--reservation`,
+  `--nodelist`, Docker socket, and bearer secrets;
+- held-job binding, release, orphan cancellation, `--no-requeue`, projector
+  field validation, exact transport replay, semantic replay rejection, expiry,
+  and revocation;
+- starvation control suppresses scale-up, cancels pending trial capacity,
+  verifies higher partition tier, drains reusable workers after the threshold,
+  prevents draining-worker claims, and releases pressure after builder start;
+- publication validation rejects digest, size, media-type, platform, component,
+  attempt, lease, or statement-binding mismatches, and a `HEAD` result alone
+  cannot mark readiness;
 - execution grants remain digest-only and trial claims remain gated; and
 - rehearsal validation succeeds without future runtime artifacts, while
   post-materialization validation requires and verifies them.
 
 ### Integration tests
 
-- direct rootless BuildKit startup under a test allocation cgroup;
-- primary and sidecar builds, base locking, native platform verification,
-  staged publication, registry `HEAD` verification, and atomic readiness;
+- direct rootless BuildKit startup under a test allocation cgroup with the
+  certified network driver, process sandbox, and snapshotter;
+- primary and sidecar builds, observed-base provenance, staged publication,
+  authenticated manifest/config retrieval, signed publication statements, and
+  atomic readiness;
+- a held job cannot receive a projected grant before exact job binding; exact
+  transport retries return the recorded response while changed or semantic
+  replays fail;
 - lease loss during build and publication cannot mark ready;
 - cancellation and timeout remove processes, mounts, runtime files, and
   credentials; and
@@ -652,13 +798,17 @@ Evidence must prove that:
   surviving process after cancellation;
 - forbidden host paths, container sockets, node-local/cluster endpoints, and
   registry/control-plane credentials are inaccessible;
+- direct egress cannot bypass policy by ignoring proxy variables, host loopback
+  remains unreachable, and `/dev/fuse` is absent from Dockerfile processes even
+  when the trusted snapshotter uses it;
 - the concurrent trial remains inside its own limits and host services remain
   healthy;
 - local state and mounts are absent after epilog, partial publications are
   retained only for the configured grace period, and the builder returns to
   scale zero;
-- under continuous synthetic trial demand, no later trial allocation jumps
-  ahead of the pending builder and reusable workers drain as designed; and
+- under continuous synthetic Loom trial demand, conflicting pending trial
+  allocations are cancelled, no later Loom trial allocation jumps ahead of the
+  pending higher-tier builder, and reusable workers drain as designed; and
 - rollback to the exclusive backend succeeds without changing ready trial
   digests.
 
@@ -672,8 +822,9 @@ For the original affected task/run, acceptance requires all of the following:
 
 - the correct run store and task materialization are located;
 - registration/submission creates or reuses the expected native build;
-- the dynamic rootless builder publishes and the registry verifies every
-  component digest;
+- the dynamic rootless builder publishes every component and the control-plane
+  publisher validates its manifest/config and signs the exact publication
+  statement;
 - the trial transitions from waiting to claimable without a manual image copy;
 - execution pulls the exact recorded digest;
 - at least one expected LLM call is recorded; and
@@ -687,9 +838,10 @@ For the original affected task/run, acceptance requires all of the following:
 3. Every build process is a descendant of the allocation cgroup; no pre-existing
    host daemon performs the build.
 4. Dynamic builders use no permanent node reservation or exclusive allocation.
-5. Builders can wait behind active work but cannot be starved by newly admitted
-   trial work.
-6. Only verified immutable digests make a materialization ready.
+5. Builders can wait behind active or external work but cannot be starved by
+   newly admitted or pending Loom trial-worker capacity.
+6. Only validated immutable digests with signed publication statements make a
+   materialization ready.
 7. Lease loss prevents stale readiness, regardless of registry side effects.
 8. Build input never receives control-plane or registry credentials.
 9. Local builder state is bounded and disposable; registry retention is
