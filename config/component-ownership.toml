@@ -167,6 +167,41 @@ runtime_policy = "start"
 rollout_role = "none"
 
 [[components]]
+id = "capacity-executor"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.capacity-executor"
+build_context = "."
+source_paths = [
+  ".dockerignore",
+  "README.md",
+  "deploy/Dockerfile.capacity-executor",
+  "deploy/dev-fleet/loom-capacity-executor.tmpfiles",
+  "deploy/dev-fleet/loom-capacity-pool-executor.service",
+  "deploy/dev-fleet/loom-capacity-pool-executor-prepared.service",
+  "deploy/dev-fleet/loom-capacity-pool-executor-prepared.timer",
+  "deploy/dev-fleet/loom-capacity-pool-executor-active.service",
+  "deploy/dev-fleet/loom-capacity-pool-executor-active.timer",
+  "pyproject.toml",
+  "scripts/ops/capacity_executor_release.py",
+  "scripts/ops/global_fleet_pool_executor_once.py",
+  "scripts/ops/install_capacity_executor.py",
+  "src/loom/**",
+  "src/loom_capacity_agent/**",
+  "src/loom_capacity_executor/**",
+  "src/loom_capacity_guard/**",
+  "src/loom_capacity_manager/**",
+  "src/loom_capacity_pool_controller/**",
+  "src/loom_capacity_pool_executor/**",
+  "uv.lock",
+]
+smoke_owner = "staging-smoke"
+scan_owner = "images"
+attestation_owner = "release-provenance"
+release_digest = "loom-capacity-executor"
+runtime_policy = "conformance"
+rollout_role = "none"
+
+[[components]]
 id = "personal-dev-builder"
 kind = "release-image"
 dockerfile = "deploy/Dockerfile.personal-dev-builder"

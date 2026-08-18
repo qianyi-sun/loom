@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+import scripts.component_ownership as component_ownership
 from scripts.ops.capacity_executor_release import (
     CapacityExecutorReleaseError,
     record_release,
@@ -13,6 +14,7 @@ from scripts.ops.capacity_executor_release import (
 )
 
 _SOURCE_SHA = "1" * 40
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _payload(root: Path) -> Path:
@@ -116,3 +118,34 @@ def test_verify_rejects_the_wrong_release_identity(
             expected_source_sha=expected_source_sha,
             expected_architecture=expected_architecture,
         )
+
+
+def test_component_authority_publishes_the_executor_installation_artifact() -> None:
+    manifest = component_ownership.load_manifest(_REPO_ROOT / "config/component-ownership.toml")
+    components = {component.id: component for component in manifest.components}
+
+    component = components["capacity-executor"]
+    assert component.kind == "release-image"
+    assert component.dockerfile == "deploy/Dockerfile.capacity-executor"
+    assert component.build_context == "."
+    assert component.release_digest == "loom-capacity-executor"
+    assert component.runtime_policy == "conformance"
+    assert component.rollout_role == "none"
+    for path in (
+        "deploy/dev-fleet/loom-capacity-executor.tmpfiles",
+        "scripts/ops/install_capacity_executor.py",
+        "src/loom/models/capabilities.py",
+        "src/loom_capacity_executor/runtime.py",
+        "src/loom_capacity_pool_controller/runtime.py",
+        "src/loom_capacity_pool_executor/slurm_inventory.py",
+        "scripts/ops/global_fleet_pool_executor_once.py",
+        "scripts/ops/capacity_executor_release.py",
+        "deploy/dev-fleet/loom-capacity-pool-executor-prepared.service",
+    ):
+        assert component in manifest.component_owners_for_path(path)
+
+
+def test_executor_runtime_directory_policy_is_exact_and_nonactivating() -> None:
+    assert (_REPO_ROOT / "deploy/dev-fleet/loom-capacity-executor.tmpfiles").read_bytes() == (
+        b"d /run/loom-capacity-executor 0700 loom_capacity_executor loom_capacity_executor -\n"
+    )

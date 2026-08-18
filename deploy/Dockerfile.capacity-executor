@@ -1,0 +1,91 @@
+FROM python:3.12-slim AS builder
+
+ARG TARGETARCH
+ARG LOOM_BUILD_SHA=unknown
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_RETRIES=10 PIP_DEFAULT_TIMEOUT=60
+WORKDIR /build
+
+COPY pyproject.toml uv.lock README.md ./
+COPY src/loom ./src/loom
+COPY src/loom_capacity_agent ./src/loom_capacity_agent
+COPY src/loom_capacity_executor ./src/loom_capacity_executor
+COPY src/loom_capacity_guard ./src/loom_capacity_guard
+COPY src/loom_capacity_manager ./src/loom_capacity_manager
+COPY src/loom_capacity_pool_controller ./src/loom_capacity_pool_controller
+COPY src/loom_capacity_pool_executor ./src/loom_capacity_pool_executor
+COPY scripts/ops/capacity_executor_release.py /release-tools/capacity_executor_release.py
+COPY scripts/ops/capacity_executor_release.py /release-inputs/installer/capacity_executor_release.py
+COPY scripts/ops/install_capacity_executor.py /release-inputs/installer/install_capacity_executor.py
+COPY deploy/dev-fleet/loom-capacity-pool-executor.service /release-inputs/units/
+COPY deploy/dev-fleet/loom-capacity-pool-executor-prepared.service /release-inputs/units/
+COPY deploy/dev-fleet/loom-capacity-pool-executor-prepared.timer /release-inputs/units/
+COPY deploy/dev-fleet/loom-capacity-pool-executor-active.service /release-inputs/units/
+COPY deploy/dev-fleet/loom-capacity-pool-executor-active.timer /release-inputs/units/
+COPY deploy/dev-fleet/loom-capacity-executor.tmpfiles /release-inputs/tmpfiles/
+
+RUN python - "$TARGETARCH" <<'PY'
+import hashlib
+import pathlib
+import sys
+import tarfile
+import urllib.request
+
+architecture = sys.argv[1]
+digests = {
+    "amd64": "6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0",
+    "arm64": "befa1a59c91e96eb601b0fd9a97c03dd666f17baba644b2b4db9c59a767e387e",
+}
+triples = {
+    "amd64": "x86_64-unknown-linux-gnu",
+    "arm64": "aarch64-unknown-linux-gnu",
+}
+if architecture not in digests:
+    raise SystemExit(f"unsupported capacity-executor architecture: {architecture}")
+triple = triples[architecture]
+archive = pathlib.Path("/tmp/uv.tar.gz")
+url = f"https://github.com/astral-sh/uv/releases/download/0.11.26/uv-{triple}.tar.gz"
+with urllib.request.urlopen(url, timeout=60) as response, archive.open("wb") as output:
+    while chunk := response.read(1024 * 1024):
+        output.write(chunk)
+if hashlib.sha256(archive.read_bytes()).hexdigest() != digests[architecture]:
+    raise SystemExit("downloaded uv archive digest differs from the pinned release")
+with tarfile.open(archive, "r:gz") as bundle:
+    member = bundle.getmember(f"uv-{triple}/uv")
+    member.name = "uv"
+    bundle.extract(member, "/usr/local/bin", filter="data")
+pathlib.Path("/usr/local/bin/uv").chmod(0o555)
+PY
+
+RUN uv export --frozen --no-dev --no-emit-project --format requirements-txt \
+      --output-file /release-inputs/requirements.lock && \
+    python -m pip download --only-binary=:all: --require-hashes \
+      --dest /release-inputs/wheelhouse \
+      --requirement /release-inputs/requirements.lock && \
+    python -m pip download --only-binary=:all: --no-deps \
+      --dest /tmp/build-requirements setuptools==79.0.1 && \
+    printf '%s  %s\n' \
+      'e147c0549f27767ba362f9da434eab9c5dc0045d5304feb602a0af001089fc51' \
+      '/tmp/build-requirements/setuptools-79.0.1-py3-none-any.whl' \
+      | sha256sum --check && \
+    python -m pip install --no-index --no-deps \
+      /tmp/build-requirements/setuptools-79.0.1-py3-none-any.whl && \
+    python -m pip wheel --no-build-isolation --no-deps \
+      --wheel-dir /release-inputs/wheelhouse .
+
+RUN install -d -m 0555 /opt/loom-capacity-executor-release/payload && \
+    cp -a /release-inputs/. /opt/loom-capacity-executor-release/payload/ && \
+    find /opt/loom-capacity-executor-release/payload -type d -exec chmod 0555 {} + && \
+    find /opt/loom-capacity-executor-release/payload -type f -exec chmod 0444 {} + && \
+    python /release-tools/capacity_executor_release.py record \
+      --release-root /opt/loom-capacity-executor-release \
+      --source-sha "$LOOM_BUILD_SHA" \
+      --architecture "$TARGETARCH"
+
+FROM python:3.12-slim
+
+ARG LOOM_BUILD_SHA=unknown
+LABEL org.opencontainers.image.revision="${LOOM_BUILD_SHA}"
+COPY --from=builder --chown=0:0 /opt/loom-capacity-executor-release \
+  /opt/loom-capacity-executor-release
+USER 65532:65532
+CMD ["python", "-c", "from pathlib import Path; assert Path('/opt/loom-capacity-executor-release/release-manifest.json').is_file()"]

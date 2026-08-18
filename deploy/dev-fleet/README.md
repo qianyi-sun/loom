@@ -62,6 +62,26 @@ exactly zero and the systemd unit only validates configuration. It has no
 install target and must never be started or enabled from this package. See the
 [executable bridge rehearsal](../../docs/runbooks/executable-global-capacity-bridge-rehearsal.md).
 
+The controller runtime is installed only from the reviewed immutable executor
+image, using the same command on OLDLAB and Docker-group GB10 hosts:
+
+```bash
+executor_source_sha=1111111111111111111111111111111111111111
+executor_image="ghcr.io/qianyi-sun/loom-capacity-executor@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+docker run --rm --user 0:0 --privileged --pid=host --network=none --read-only \
+  --tmpfs /tmp:rw,nosuid,nodev,noexec,size=64m,mode=0700 \
+  --mount type=bind,src=/,dst=/host,bind-propagation=rslave \
+  --entrypoint /usr/local/bin/python "$executor_image" \
+  /opt/loom-capacity-executor-release/payload/installer/install_capacity_executor.py \
+  --host-root /host --image "$executor_image" --source-sha "$executor_source_sha"
+```
+
+The digest-pinned helper verifies the OCI and extracted artifact, installs the
+offline venv and root-owned unit files, and exits with every service inactive
+and timer disabled. It deliberately installs no credentials, rendered inputs,
+or positive-capacity authority. The rehearsal runbook contains the required
+post-install evidence checks and is authoritative for any later staging.
+
 The separate `loom-capacity-pool-executor-prepared.service` and `.timer` run
 only the prepared zero-ceiling inventory path. The oneshot validates one exact
 controller-local config and digest-pinned inventory policy, registers its

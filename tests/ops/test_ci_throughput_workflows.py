@@ -165,6 +165,7 @@ def test_native_image_publish_jobs_stay_on_architecture_matched_github_hosts() -
     jobs = _workflow(".github/workflows/images.yml")["jobs"]
 
     build_runs_on = jobs["build"]["runs-on"]
+    assert "matrix.image == 'capacity-executor'" in build_runs_on
     assert "matrix.image == 'capacity-manager'" in build_runs_on
     assert "matrix.image == 'personal-dev-activation-agent'" in build_runs_on
     assert "matrix.image == 'personal-dev-builder'" in build_runs_on
@@ -197,6 +198,8 @@ def test_hosted_only_amd64_builds_bypass_live_lease_routes(tmp_path: Path) -> No
             **os.environ,
             "NATIVE_BUILDS": json.dumps(
                 [
+                    {"image": "capacity-executor", "architecture": "amd64"},
+                    {"image": "capacity-executor", "architecture": "arm64"},
                     {"image": "capacity-manager", "architecture": "amd64"},
                     {"image": "capacity-manager", "architecture": "arm64"},
                     {"image": "pipeline-core-fixture", "architecture": "amd64"},
@@ -233,6 +236,8 @@ def test_hosted_only_image_matrix_requires_no_live_lease_route(tmp_path: Path) -
             **os.environ,
             "NATIVE_BUILDS": json.dumps(
                 [
+                    {"image": "capacity-executor", "architecture": "amd64"},
+                    {"image": "capacity-executor", "architecture": "arm64"},
                     {"image": "capacity-manager", "architecture": "amd64"},
                     {"image": "capacity-manager", "architecture": "arm64"},
                     {"image": "pipeline-core-fixture", "architecture": "amd64"},
@@ -829,9 +834,10 @@ def test_images_required_unowned_runtime_path_selects_all_images(tmp_path: Path)
     matrix = json.loads(_github_output_value(output, "images"))
     native_matrix = json.loads(_github_output_value(output, "native_builds"))
     assert _github_output_value(output, "required") == "true"
-    assert len(matrix) == 16
+    assert len(matrix) == 17
     assert {entry["image"] for entry in matrix} == {
         "agent-sandbox",
+        "capacity-executor",
         "capacity-manager",
         "control-plane",
         "egress-xds",
@@ -849,7 +855,7 @@ def test_images_required_unowned_runtime_path_selects_all_images(tmp_path: Path)
         "worker",
     }
     assert all(set(entry) == {"image", "image_name", "dockerfile", "context"} for entry in matrix)
-    assert len(native_matrix) == 32
+    assert len(native_matrix) == 34
     assert {(entry["architecture"], entry["platform"]) for entry in native_matrix} == {
         ("amd64", "linux/amd64"),
         ("arm64", "linux/arm64"),
@@ -868,6 +874,7 @@ def test_images_mixed_known_and_unowned_paths_select_all_images(tmp_path: Path) 
     matrix = json.loads(_github_output_value(output, "images"))
     assert {entry["image"] for entry in matrix} == {
         "agent-sandbox",
+        "capacity-executor",
         "capacity-manager",
         "worker",
         "service",
@@ -917,6 +924,7 @@ def test_manifest_owned_markdown_build_input_requires_images(tmp_path: Path) -> 
     assert _github_output_value(output, "required") == "true"
     matrix = json.loads(_github_output_value(output, "images"))
     assert {entry["image"] for entry in matrix} == {
+        "capacity-executor",
         "capacity-manager",
         "control-plane",
         "family-orchestrator",

@@ -14,7 +14,7 @@ EnvironmentFile=/etc/loom-capacity-executor/service.env
 ExecCondition=/usr/bin/test -f /etc/loom-capacity-executor/service.env
 ExecCondition=/usr/bin/test ! -L /etc/loom-capacity-executor/service.env
 ExecCondition=/usr/bin/test ${LOOM_CAPACITY_EXECUTOR_EXECUTABLE_CEILING} = 0
-ExecStart=/opt/loom-capacity-executor/venv/bin/python -I -B -m loom_capacity_executor --config ${LOOM_CAPACITY_EXECUTOR_CONFIG} --expected-manifest-sha256 ${LOOM_CAPACITY_EXECUTOR_EXPECTED_MANIFEST_SHA256} --pool ${LOOM_CAPACITY_EXECUTOR_POOL} --prepared-only --inventory-policy ${LOOM_CAPACITY_EXECUTOR_INVENTORY_POLICY} --expected-inventory-policy-sha256 ${LOOM_CAPACITY_EXECUTOR_EXPECTED_INVENTORY_POLICY_SHA256}
+ExecStart=/opt/loom-capacity-executor/venv/bin/python -I -B -m loom_capacity_pool_controller --config ${LOOM_CAPACITY_EXECUTOR_CONFIG} --expected-manifest-sha256 ${LOOM_CAPACITY_EXECUTOR_EXPECTED_MANIFEST_SHA256} --pool ${LOOM_CAPACITY_EXECUTOR_POOL} --prepared-only --inventory-policy ${LOOM_CAPACITY_EXECUTOR_INVENTORY_POLICY} --expected-inventory-policy-sha256 ${LOOM_CAPACITY_EXECUTOR_EXPECTED_INVENTORY_POLICY_SHA256}
 TimeoutStartSec=240
 NoNewPrivileges=yes
 PrivateDevices=yes

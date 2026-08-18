@@ -8,13 +8,12 @@ import subprocess
 from pathlib import Path
 
 PACKAGE_ROOT = Path("src/loom_capacity_pool_executor")
+INERT_SERVICE = Path("deploy/dev-fleet/loom-capacity-pool-executor.service")
 PREPARED_SERVICE = Path("deploy/dev-fleet/loom-capacity-pool-executor-prepared.service")
 PREPARED_TIMER = Path("deploy/dev-fleet/loom-capacity-pool-executor-prepared.timer")
 ACTIVE_SERVICE = Path("deploy/dev-fleet/loom-capacity-pool-executor-active.service")
 ACTIVE_TIMER = Path("deploy/dev-fleet/loom-capacity-pool-executor-active.timer")
-REHEARSAL_RUNBOOK = Path(
-    "docs/runbooks/executable-global-capacity-bridge-rehearsal.md"
-)
+REHEARSAL_RUNBOOK = Path("docs/runbooks/executable-global-capacity-bridge-rehearsal.md")
 
 
 def test_pool_executor_observer_has_no_scheduler_mutation_surface() -> None:
@@ -44,6 +43,18 @@ def test_pool_executor_observer_is_not_imported_by_the_dry_run_package() -> None
         "loom_capacity_pool_executor" in source.read_text(encoding="utf-8")
         for source in dry_run_sources
     )
+
+
+def test_inert_executor_service_uses_supported_regular_file_guards() -> None:
+    directives = "\n".join(
+        line
+        for line in INERT_SERVICE.read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith("#")
+    )
+
+    assert "ConditionPathIsRegular" not in directives
+    assert "ExecCondition=/usr/bin/test -f /etc/loom-capacity-executor/service.env" in directives
+    assert "ExecCondition=/usr/bin/test ! -L /etc/loom-capacity-executor/service.env" in directives
 
 
 def test_prepared_executor_service_and_timer_are_read_only_nonoverlapping_packages() -> None:
@@ -121,10 +132,7 @@ def test_active_executor_service_and_timer_require_exact_positive_runtime_artifa
     assert "User=loom_capacity_executor" in service_directives
     assert "Group=loom_capacity_executor" in service_directives
     assert "UMask=0077" in service_directives
-    assert (
-        "EnvironmentFile=/etc/loom-capacity-executor/active-service.env"
-        in service_directives
-    )
+    assert "EnvironmentFile=/etc/loom-capacity-executor/active-service.env" in service_directives
     for path in (
         "/etc/loom-capacity-executor/active-service.env",
         "${LOOM_CAPACITY_EXECUTOR_CONFIG}",
@@ -134,12 +142,11 @@ def test_active_executor_service_and_timer_require_exact_positive_runtime_artifa
         assert f"ExecCondition=/usr/bin/test ! -L {path}" in service_directives
     assert (
         "ExecStart=/opt/loom-capacity-executor/venv/bin/python -I -B "
-        "-m loom_capacity_executor --config ${LOOM_CAPACITY_EXECUTOR_CONFIG} "
+        "-m loom_capacity_pool_controller --config ${LOOM_CAPACITY_EXECUTOR_CONFIG} "
         "--expected-manifest-sha256 "
         "${LOOM_CAPACITY_EXECUTOR_EXPECTED_MANIFEST_SHA256} "
         "--pool ${LOOM_CAPACITY_EXECUTOR_POOL} --activation-runtime-artifact "
-        "${LOOM_CAPACITY_EXECUTOR_ACTIVATION_RUNTIME_ARTIFACT}"
-        in service_directives
+        "${LOOM_CAPACITY_EXECUTOR_ACTIVATION_RUNTIME_ARTIFACT}" in service_directives
     )
     assert "NoNewPrivileges=yes" in service_directives
     assert "ProtectSystem=strict" in service_directives

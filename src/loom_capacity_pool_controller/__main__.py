@@ -1,4 +1,4 @@
-"""Module entry point for controller-local zero-ceiling executor validation."""
+"""Run one explicit controller-local capacity executor mode."""
 
 from loom_capacity_pool_controller.runtime import main
 
