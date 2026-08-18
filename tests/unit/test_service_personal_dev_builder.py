@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +15,7 @@ from loom_service.personal_dev_builder import build_personal_dev_builder_runtime
 from loom_service.personal_dev_candidate_gc import build_personal_dev_artifact_collector
 
 _FILE_OWNER_UID = os.geteuid()
+_ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.fixture(autouse=True)
@@ -312,6 +315,39 @@ def test_builder_runtime_revalidates_release_bound_scanner_cache(
             settings,  # type: ignore[arg-type]
             minio_client=object(),
         )
+
+
+def test_scanner_binary_hash_rejects_fifo_without_blocking(tmp_path: Path) -> None:
+    scanner = tmp_path / "trivy"
+    os.mkfifo(scanner)
+    command = [
+        sys.executable,
+        "-c",
+        (
+            "from pathlib import Path\n"
+            "from loom_service.personal_dev_builder import _regular_file_sha256\n"
+            "import sys\n"
+            "try:\n"
+            "    _regular_file_sha256(\n"
+            "        Path(sys.argv[1]), label='scanner executable', maximum_bytes=1024,\n"
+            "    )\n"
+            "except RuntimeError:\n"
+            "    raise SystemExit(0)\n"
+            "raise SystemExit(1)\n"
+        ),
+        str(scanner),
+    ]
+    environment = {
+        **os.environ,
+        "PYTHONPATH": f"{_ROOT / 'src'}:{_ROOT}",
+    }
+
+    try:
+        result = subprocess.run(command, env=environment, timeout=2, check=False)
+    except subprocess.TimeoutExpired:
+        pytest.fail("scanner binary FIFO blocked before type validation")
+
+    assert result.returncode == 0
 
 
 def test_artifact_collector_is_wired_only_for_personal_lifecycle(tmp_path: Path) -> None:

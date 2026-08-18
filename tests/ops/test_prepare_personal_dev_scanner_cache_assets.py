@@ -4,6 +4,9 @@ import hashlib
 import json
 import os
 import stat
+import subprocess
+import sys
+import tracemalloc
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -331,6 +334,41 @@ def test_asset_verifier_revalidates_transport_without_downloading(
     assert case.trivy_log.read_bytes() == original_log
 
 
+def test_asset_verifier_streams_database_fingerprints_with_bounded_memory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = _case(tmp_path, monkeypatch)
+    prepare_personal_dev_scanner_cache_assets(case.lock, case.trivy, case.output)
+    database_bytes = b"d" * (8 * 1024 * 1024)
+    java_database_bytes = b"j" * (8 * 1024 * 1024)
+    database_path = case.output / "db/trivy.db"
+    java_database_path = case.output / "java-db/trivy-java.db"
+    evidence_path = case.output / "scanner-cache-evidence.json"
+    for path, payload in (
+        (database_path, database_bytes),
+        (java_database_path, java_database_bytes),
+    ):
+        path.chmod(0o644)
+        path.write_bytes(payload)
+        path.chmod(0o444)
+    evidence = json.loads(evidence_path.read_bytes())
+    evidence["database"]["sha256"] = hashlib.sha256(database_bytes).hexdigest()
+    evidence["java_database"]["sha256"] = hashlib.sha256(java_database_bytes).hexdigest()
+    evidence_path.chmod(0o644)
+    evidence_path.write_bytes(_canonical(evidence) + b"\n")
+    evidence_path.chmod(0o444)
+
+    tracemalloc.start()
+    try:
+        verify_personal_dev_scanner_cache_assets(case.lock, case.output)
+        _, peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert peak_bytes < 4 * 1024 * 1024
+
+
 @pytest.mark.parametrize("problem", ["changed", "extra", "evidence"])
 def test_asset_verifier_rejects_transport_drift(
     tmp_path: Path,
@@ -373,6 +411,46 @@ def test_materializer_requires_absent_destination(
     assert not case.trivy_log.exists()
     if existing == "nonempty":
         assert (case.output / "owned").read_bytes() == b"do not replace"
+
+
+def test_materializer_rejects_fifo_trivy_without_blocking(tmp_path: Path) -> None:
+    trivy = tmp_path / "trivy"
+    os.mkfifo(trivy)
+    output = tmp_path / "assets"
+    command = [
+        sys.executable,
+        "-c",
+        (
+            "from pathlib import Path\n"
+            "from scripts.prepare_personal_dev_scanner_cache_assets import (\n"
+            "    prepare_personal_dev_scanner_cache_assets,\n"
+            ")\n"
+            "from loom.personal_dev_scanner_cache import PersonalDevScannerCacheError\n"
+            "import sys\n"
+            "try:\n"
+            "    prepare_personal_dev_scanner_cache_assets(\n"
+            "        Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]),\n"
+            "    )\n"
+            "except PersonalDevScannerCacheError:\n"
+            "    raise SystemExit(0)\n"
+            "raise SystemExit(1)\n"
+        ),
+        str(_LOCK),
+        str(trivy),
+        str(output),
+    ]
+    environment = {
+        **os.environ,
+        "PYTHONPATH": f"{_ROOT / 'src'}:{_ROOT}",
+    }
+
+    try:
+        result = subprocess.run(command, env=environment, timeout=2, check=False)
+    except subprocess.TimeoutExpired:
+        pytest.fail("scanner cache Trivy FIFO blocked before type validation")
+
+    assert result.returncode == 0
+    assert not output.exists()
 
 
 def test_materializer_leaves_no_partial_output_on_command_failure(

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -150,3 +152,35 @@ def test_scanner_cache_lock_rejects_unstable_or_unbounded_file(
 
     with pytest.raises(PersonalDevScannerCacheError, match="lock is invalid"):
         load_personal_dev_scanner_cache_lock(path)
+
+
+def test_scanner_cache_lock_rejects_fifo_without_blocking(tmp_path: Path) -> None:
+    path = tmp_path / "scanner-cache-lock.json"
+    os.mkfifo(path)
+    command = [
+        sys.executable,
+        "-c",
+        (
+            "from pathlib import Path\n"
+            "from loom.personal_dev_scanner_cache import (\n"
+            "    PersonalDevScannerCacheError, load_personal_dev_scanner_cache_lock,\n"
+            ")\n"
+            "try:\n"
+            "    load_personal_dev_scanner_cache_lock(Path(__import__('sys').argv[1]))\n"
+            "except PersonalDevScannerCacheError:\n"
+            "    raise SystemExit(0)\n"
+            "raise SystemExit(1)\n"
+        ),
+        str(path),
+    ]
+    environment = {
+        **os.environ,
+        "PYTHONPATH": f"{_ROOT / 'src'}:{_ROOT}",
+    }
+
+    try:
+        result = subprocess.run(command, env=environment, timeout=2, check=False)
+    except subprocess.TimeoutExpired:
+        pytest.fail("scanner cache lock FIFO blocked before type validation")
+
+    assert result.returncode == 0

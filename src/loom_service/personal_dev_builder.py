@@ -121,7 +121,7 @@ def _regular_file_sha256(
     maximum_bytes: int | None = None,
 ) -> str:
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        descriptor = os.open(path, _FILE_OPEN_FLAGS)
     except OSError:
         raise RuntimeError(f"personal-dev {label} is unavailable") from None
     try:

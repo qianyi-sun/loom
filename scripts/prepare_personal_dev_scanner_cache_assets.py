@@ -16,7 +16,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from loom.personal_dev_scanner_cache import (
     PersonalDevScannerCacheError,
@@ -64,6 +64,10 @@ class _FileSnapshot:
     metadata: os.stat_result
 
 
+class _DigestSink(Protocol):
+    def update(self, payload: bytes, /) -> None: ...
+
+
 def _failure() -> PersonalDevScannerCacheError:
     return PersonalDevScannerCacheError("scanner cache preparation failed")
 
@@ -97,7 +101,12 @@ def _same_directory(before: os.stat_result, after: os.stat_result) -> bool:
     )
 
 
-def _hash_descriptor(descriptor: int, *, maximum_bytes: int) -> _FileSnapshot:
+def _hash_descriptor(
+    descriptor: int,
+    *,
+    maximum_bytes: int,
+    framed_payload: _DigestSink | None = None,
+) -> _FileSnapshot:
     before = os.fstat(descriptor)
     if (
         not stat.S_ISREG(before.st_mode)
@@ -107,12 +116,16 @@ def _hash_descriptor(descriptor: int, *, maximum_bytes: int) -> _FileSnapshot:
         raise _failure()
     os.lseek(descriptor, 0, os.SEEK_SET)
     digest = hashlib.sha256()
+    if framed_payload is not None:
+        framed_payload.update(before.st_size.to_bytes(8, "big"))
     byte_count = 0
     while chunk := os.read(descriptor, min(1024 * 1024, maximum_bytes + 1 - byte_count)):
         byte_count += len(chunk)
         if byte_count > maximum_bytes:
             raise _failure()
         digest.update(chunk)
+        if framed_payload is not None:
+            framed_payload.update(chunk)
     after = os.fstat(descriptor)
     if byte_count != before.st_size or not _stable(before, after):
         raise _failure()
@@ -120,17 +133,31 @@ def _hash_descriptor(descriptor: int, *, maximum_bytes: int) -> _FileSnapshot:
 
 
 def _open_regular(path: Path) -> int:
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     try:
         return os.open(path, flags)
     except OSError:
         raise _failure() from None
 
 
-def _hash_regular(path: Path, *, maximum_bytes: int) -> _FileSnapshot:
+def _hash_regular(
+    path: Path,
+    *,
+    maximum_bytes: int,
+    framed_payload: _DigestSink | None = None,
+) -> _FileSnapshot:
     descriptor = _open_regular(path)
     try:
-        snapshot = _hash_descriptor(descriptor, maximum_bytes=maximum_bytes)
+        snapshot = _hash_descriptor(
+            descriptor,
+            maximum_bytes=maximum_bytes,
+            framed_payload=framed_payload,
+        )
         os.fsync(descriptor)
         return snapshot
     except OSError:
@@ -470,13 +497,26 @@ def verify_personal_dev_scanner_cache_assets(lock_path: Path, output: Path) -> s
         }
         fingerprint = hashlib.sha256(b"loom-scanner-cache-build-context-v1\0")
         for relative, (expected_digest, maximum_bytes, metadata_version) in paths.items():
-            payload, snapshot = _read_regular(output / relative, maximum_bytes=maximum_bytes)
+            fingerprint.update(relative.encode("ascii") + b"\0")
+            if metadata_version is None:
+                payload = None
+                snapshot = _hash_regular(
+                    output / relative,
+                    maximum_bytes=maximum_bytes,
+                    framed_payload=fingerprint,
+                )
+            else:
+                payload, snapshot = _read_regular(
+                    output / relative,
+                    maximum_bytes=maximum_bytes,
+                )
+                fingerprint.update(len(payload).to_bytes(8, "big") + payload)
             if snapshot.digest != expected_digest:
                 raise _failure()
             if metadata_version is not None:
+                if payload is None:
+                    raise _failure()
                 _validate_metadata(payload, version=metadata_version)
-            fingerprint.update(relative.encode("ascii") + b"\0")
-            fingerprint.update(len(payload).to_bytes(8, "big") + payload)
         fingerprint.update(evidence_bytes)
         return fingerprint.hexdigest()
     except PersonalDevScannerCacheError:

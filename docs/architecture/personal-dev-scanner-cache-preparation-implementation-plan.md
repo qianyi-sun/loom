@@ -10,7 +10,7 @@ usable from one exact trusted release before the restricted builder can start.
 
 **Architecture:** Protected CI materializes digest-pinned Trivy databases into
 one immutable scanner-cache image and binds all file hashes into trusted release
-version 2. A non-root, networkless init container atomically publishes and
+version 2. A non-root, network-independent init container atomically publishes and
 revalidates a generation on the existing RWO PVC; the management service uses
 that exact generation and independently verifies its scanner binding.
 
@@ -26,8 +26,8 @@ PyYAML, pytest, Ruff, and mypy.
   queries or mutates Slurm and never creates a worker.
 - Trivy is exactly `v0.70.0`; upstream DB sources are the two immutable OCI
   manifests in `deploy/dev-fleet/personal-dev-scanner-cache-lock.json`.
-- Runtime preparation has no network, Secret, service-account token, hostPath,
-  node path, `kubectl cp`, or mutable image.
+- Runtime preparation performs no network operation and has no Secret,
+  service-account token, hostPath, node path, `kubectl cp`, or mutable image.
 - Cache protected files are owned by UID `65531`; management UID `65532` mounts
   only the exact generation subPath, and a bounded `scanner-fanal` emptyDir is
   the only writable scanner-cache surface.

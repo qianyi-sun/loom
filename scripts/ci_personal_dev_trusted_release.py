@@ -11,7 +11,7 @@ import os
 import re
 import stat
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -120,7 +120,14 @@ def _file_identity(metadata: os.stat_result) -> tuple[int, ...]:
     )
 
 
-def _read_bounded_file(path: Path, label: str, limit: int) -> bytes:
+def _read_bounded_file(
+    path: Path,
+    label: str,
+    limit: int,
+    *,
+    consumer: Callable[[bytes], object] | None = None,
+    capture: bool = True,
+) -> bytes:
     descriptor: int | None = None
     try:
         path_before = path.lstat()
@@ -142,20 +149,25 @@ def _read_bounded_file(path: Path, label: str, limit: int) -> bytes:
         opened = os.fstat(descriptor)
         if _file_identity(opened) != _file_identity(path_before):
             raise TrustedReleaseError(f"{label} is invalid")
-        payload = bytearray()
-        while len(payload) <= limit:
-            chunk = os.read(descriptor, min(64 * 1024, limit + 1 - len(payload)))
+        payload = bytearray() if capture else None
+        total = 0
+        while total <= limit:
+            chunk = os.read(descriptor, min(64 * 1024, limit + 1 - total))
             if not chunk:
                 break
-            payload.extend(chunk)
+            total += len(chunk)
+            if consumer is not None:
+                consumer(chunk)
+            if payload is not None:
+                payload.extend(chunk)
         if (
-            len(payload) != opened.st_size
-            or len(payload) > limit
+            total != opened.st_size
+            or total > limit
             or _file_identity(os.fstat(descriptor)) != _file_identity(opened)
             or _file_identity(path.lstat()) != _file_identity(path_before)
         ):
             raise TrustedReleaseError(f"{label} is invalid")
-        return bytes(payload)
+        return bytes(payload) if payload is not None else b""
     except TrustedReleaseError:
         raise
     except OSError:
@@ -163,6 +175,18 @@ def _read_bounded_file(path: Path, label: str, limit: int) -> bytes:
     finally:
         if descriptor is not None:
             os.close(descriptor)
+
+
+def _bounded_file_sha256(path: Path, label: str, limit: int) -> str:
+    digest = hashlib.sha256()
+    _read_bounded_file(
+        path,
+        label,
+        limit,
+        consumer=digest.update,
+        capture=False,
+    )
+    return digest.hexdigest()
 
 
 def _read_json(path: Path, label: str) -> tuple[object, bytes]:
@@ -466,20 +490,16 @@ def assemble_personal_dev_trusted_release(
     scanner_evidence_value, _scanner_evidence_bytes = _read_canonical_json(
         scanner_cache_evidence_file, "scanner cache evidence"
     )
-    scanner_binary_amd64_sha256 = hashlib.sha256(
-        _read_bounded_file(
-            scanner_binary_amd64_file,
-            "AMD64 scanner binary",
-            _MAX_SCANNER_BINARY_BYTES,
-        )
-    ).hexdigest()
-    scanner_binary_arm64_sha256 = hashlib.sha256(
-        _read_bounded_file(
-            scanner_binary_arm64_file,
-            "ARM64 scanner binary",
-            _MAX_SCANNER_BINARY_BYTES,
-        )
-    ).hexdigest()
+    scanner_binary_amd64_sha256 = _bounded_file_sha256(
+        scanner_binary_amd64_file,
+        "AMD64 scanner binary",
+        _MAX_SCANNER_BINARY_BYTES,
+    )
+    scanner_binary_arm64_sha256 = _bounded_file_sha256(
+        scanner_binary_arm64_file,
+        "ARM64 scanner binary",
+        _MAX_SCANNER_BINARY_BYTES,
+    )
     scanner, scanner_evidence = _scanner_binding(
         evidence_value=scanner_evidence_value,
         lock=scanner_lock,

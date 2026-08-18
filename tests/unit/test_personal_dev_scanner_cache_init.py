@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -95,6 +96,34 @@ def _identity_bytes(binding: PersonalDevScannerCacheBinding) -> bytes:
         sort_keys=True,
         separators=(",", ":"),
     ).encode("ascii")
+
+
+def _install_command(
+    source: Path,
+    destination: Path,
+    binding: PersonalDevScannerCacheBinding,
+) -> list[str]:
+    return [
+        sys.executable,
+        "-m",
+        "loom.personal_dev_scanner_cache_init",
+        "--source-root",
+        str(source),
+        "--destination-root",
+        str(destination),
+        "--cache-identity-sha256",
+        binding.cache_identity_sha256,
+        "--scanner-binary-sha256",
+        binding.scanner_binary_sha256,
+        "--database-sha256",
+        binding.files.database_sha256,
+        "--database-metadata-sha256",
+        binding.files.database_metadata_sha256,
+        "--java-database-sha256",
+        binding.files.java_database_sha256,
+        "--java-database-metadata-sha256",
+        binding.files.java_database_metadata_sha256,
+    ]
 
 
 def test_installer_publishes_exact_protected_generation(tmp_path: Path) -> None:
@@ -208,33 +237,81 @@ def test_installer_removes_one_old_interrupted_staging_directory(tmp_path: Path)
     assert (generations / binding.cache_identity_sha256).is_dir()
 
 
+def test_installer_removes_one_recent_orphaned_staging_directory(tmp_path: Path) -> None:
+    source = _source(tmp_path, "source")
+    destination = _destination(tmp_path)
+    generations = destination / "generations"
+    generations.mkdir(mode=0o755)
+    staging = generations / _STAGING_NAME
+    (staging / "db").mkdir(parents=True, mode=0o700)
+    staging.chmod(0o700)
+    (staging / "db/partial").write_bytes(b"partial")
+    binding = _binding(source)
+
+    install_personal_dev_scanner_cache(source, destination, expected=binding)
+
+    assert not staging.exists()
+    assert (generations / binding.cache_identity_sha256).is_dir()
+
+
+def test_installer_refuses_a_concurrent_destination_lock(tmp_path: Path) -> None:
+    source = _source(tmp_path, "source")
+    destination = _destination(tmp_path)
+    binding = _binding(source)
+    lock_path = destination / ".loom-scanner-cache-installer.lock"
+    lock_path.touch(mode=0o600)
+    with lock_path.open("r+b") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        result = subprocess.run(
+            _install_command(source, destination, binding),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == "error: personal-dev scanner cache installation failed\n"
+    assert not (destination / "active-generation").exists()
+    assert not (destination / "generations" / binding.cache_identity_sha256).exists()
+
+
+def test_installer_detects_destination_lock_path_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source(tmp_path, "source")
+    destination = _destination(tmp_path)
+    binding = _binding(source)
+    lock_path = destination / ".loom-scanner-cache-installer.lock"
+    displaced_lock = destination / "displaced-lock"
+    original_flock = scanner_init.fcntl.flock
+
+    def replace_lock_after_acquisition(descriptor: int, operation: int) -> None:
+        original_flock(descriptor, operation)
+        lock_path.rename(displaced_lock)
+        lock_path.touch(mode=0o600)
+
+    monkeypatch.setattr(scanner_init.fcntl, "flock", replace_lock_after_acquisition)
+
+    with pytest.raises(PersonalDevScannerCacheInstallError, match="installation failed"):
+        install_personal_dev_scanner_cache(source, destination, expected=binding)
+
+    assert not (destination / "active-generation").exists()
+    assert not (destination / "generations").exists()
+
+
 def test_module_entrypoint_installs_the_generation(tmp_path: Path) -> None:
     source = _source(tmp_path, "source")
     destination = _destination(tmp_path)
     binding = _binding(source)
-    command = [
-        sys.executable,
-        "-m",
-        "loom.personal_dev_scanner_cache_init",
-        "--source-root",
-        str(source),
-        "--destination-root",
-        str(destination),
-        "--cache-identity-sha256",
-        binding.cache_identity_sha256,
-        "--scanner-binary-sha256",
-        binding.scanner_binary_sha256,
-        "--database-sha256",
-        binding.files.database_sha256,
-        "--database-metadata-sha256",
-        binding.files.database_metadata_sha256,
-        "--java-database-sha256",
-        binding.files.java_database_sha256,
-        "--java-database-metadata-sha256",
-        binding.files.java_database_metadata_sha256,
-    ]
-
-    result = subprocess.run(command, text=True, capture_output=True, check=False)
+    result = subprocess.run(
+        _install_command(source, destination, binding),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
 
     assert result.returncode == 0, result.stderr
     assert result.stdout == ""

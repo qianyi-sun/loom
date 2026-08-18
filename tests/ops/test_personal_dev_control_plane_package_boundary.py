@@ -524,3 +524,13 @@ def test_release_bound_scanner_cache_is_architecture_linked_and_inert() -> None:
         management.casefold().split()
     )
     assert "remain separate operational gates" in " ".join(fleet.casefold().split())
+
+
+def test_scanner_cache_design_states_the_pod_scoped_network_boundary() -> None:
+    design = _read("docs/architecture/personal-dev-scanner-cache-preparation.md")
+    normalized = " ".join(design.split())
+
+    assert "Kubernetes NetworkPolicy is Pod-scoped" in normalized
+    assert "does not have a separate network namespace" in normalized
+    assert "performs no runtime network operation" in normalized
+    assert "no network authority" not in design

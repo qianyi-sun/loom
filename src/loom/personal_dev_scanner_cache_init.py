@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -10,7 +11,6 @@ import re
 import secrets
 import stat
 import sys
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -27,7 +27,6 @@ _MAX_TOTAL_SOURCE_BYTES = 8 * 1024 * 1024 * 1024
 _MAX_DELETE_BYTES = 16 * 1024 * 1024 * 1024
 _MAX_DELETE_ENTRIES = 100_000
 _MAX_GENERATION_ENTRIES = 16
-_STALE_STAGING_SECONDS = 60 * 60
 _GENERATION_RE = re.compile(r"[0-9a-f]{64}")
 _STAGING_RE = re.compile(r"[.]loom-scanner-cache-staging-[0-9a-f]{24}")
 _ACTIVE_STAGING_RE = re.compile(r"[.]active-generation-[0-9a-f]{24}")
@@ -78,6 +77,7 @@ _STABLE_FIELDS = (
     "st_ctime_ns",
 )
 _GENERATION_ROOT_ENTRIES = frozenset({"db", "fanal", "identity.json", "java-db"})
+_INSTALLER_LOCK = ".loom-scanner-cache-installer.lock"
 _SOURCE_ROOT_ENTRIES = frozenset({"db", "java-db"})
 _DATABASE_FILES = frozenset({"metadata.json", "trivy.db"})
 _JAVA_DATABASE_FILES = frozenset({"metadata.json", "trivy-java.db"})
@@ -417,6 +417,61 @@ def _open_generations(destination: int) -> int:
     return descriptor
 
 
+def _acquire_installer_lock(destination: int) -> int:
+    flags = (
+        os.O_RDWR
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    created = False
+    try:
+        try:
+            descriptor = os.open(
+                _INSTALLER_LOCK,
+                flags | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=destination,
+            )
+            created = True
+        except FileExistsError:
+            descriptor = os.open(_INSTALLER_LOCK, flags, dir_fd=destination)
+        try:
+            if created:
+                os.fchmod(descriptor, 0o600)
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_nlink != 1
+                or metadata.st_uid != os.geteuid()
+                or metadata.st_gid != os.getegid()
+                or metadata.st_size != 0
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+            ):
+                raise _invalid()
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = os.fstat(descriptor)
+            named = os.stat(
+                _INSTALLER_LOCK,
+                dir_fd=destination,
+                follow_symlinks=False,
+            )
+            if (
+                _file_identity(locked) != _file_identity(metadata)
+                or _file_identity(named) != _file_identity(locked)
+            ):
+                raise _invalid()
+            if created:
+                os.fsync(descriptor)
+                os.fsync(destination)
+            return descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
+    except (BlockingIOError, OSError):
+        raise _invalid() from None
+
+
 def _classify_generation_entries(generations: int) -> tuple[set[str], set[str]]:
     names = set(os.listdir(generations))
     if len(names) > _MAX_GENERATION_ENTRIES:
@@ -496,10 +551,9 @@ def _delete_tree(parent: int, name: str) -> None:
     os.rmdir(name, dir_fd=parent)
 
 
-def _cleanup_stale_staging(generations: int, names: set[str]) -> None:
+def _cleanup_orphaned_staging(generations: int, names: set[str]) -> None:
     total = [0]
     entries = [0]
-    now_ns = time.time_ns()
     for name in sorted(names):
         metadata = os.stat(name, dir_fd=generations, follow_symlinks=False)
         if (
@@ -507,7 +561,6 @@ def _cleanup_stale_staging(generations: int, names: set[str]) -> None:
             or metadata.st_uid != os.geteuid()
             or metadata.st_gid != os.getegid()
             or stat.S_IMODE(metadata.st_mode) != 0o700
-            or now_ns - metadata.st_mtime_ns < _STALE_STAGING_SECONDS * 1_000_000_000
         ):
             raise _invalid()
         _preflight_delete_tree(generations, name, total=total, entries=entries)
@@ -961,14 +1014,16 @@ def install_personal_dev_scanner_cache(
 
     source: _SourceSnapshot | None = None
     destination: int | None = None
+    installer_lock: int | None = None
     generations: int | None = None
     try:
         _validate_binding(expected)
         destination, _ = _open_path_directory(destination_root)
+        installer_lock = _acquire_installer_lock(destination)
         _cleanup_active_staging(destination)
         generations = _open_generations(destination)
         generation_names, staging_names = _classify_generation_entries(generations)
-        _cleanup_stale_staging(generations, staging_names)
+        _cleanup_orphaned_staging(generations, staging_names)
         generation_names, remaining_staging = _classify_generation_entries(generations)
         if remaining_staging:
             raise _invalid()
@@ -1009,6 +1064,8 @@ def install_personal_dev_scanner_cache(
             source.close()
         if generations is not None:
             os.close(generations)
+        if installer_lock is not None:
+            os.close(installer_lock)
         if destination is not None:
             os.close(destination)
 

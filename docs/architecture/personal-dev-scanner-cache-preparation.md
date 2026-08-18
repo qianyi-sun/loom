@@ -15,11 +15,11 @@ that no reviewed component consumed. The implemented release-bound image and
 init path closes that gap. Live application acceptance is still a separate
 controlled operation and executable capacity remains zero.
 
-This design adds a release-bound, networkless cache image and a management init
-container. The init container verifies every protected cache file and publishes
-one immutable generation on the existing PVC before the management process
-starts. It neither enables personal lifecycle operations nor changes physical
-capacity.
+This design adds a release-bound, network-independent cache image and a
+management init container. The init container verifies every protected cache
+file and publishes one immutable generation on the existing PVC before the
+management process starts. It neither enables personal lifecycle operations
+nor changes physical capacity.
 
 ## Requirements
 
@@ -58,9 +58,17 @@ binds its image digest and the hashes of all four protected files. A restricted
 init container publishes the files to the PVC.
 
 This is the selected approach. It gives Kubernetes an ordinary immutable image
-transport, needs no runtime network or credentials, co-mounts the RWO volume in
-the management Pod, and leaves the general `loom-service` image free of roughly
-one gigabyte of scanner data.
+transport, performs no runtime network operation, needs no credentials,
+co-mounts the RWO volume in the management Pod, and leaves the general
+`loom-service` image free of roughly one gigabyte of scanner data.
+
+Kubernetes NetworkPolicy is Pod-scoped, so the init container inherits the
+management Pod's allowlisted egress policy and does not have a separate network
+namespace. The enforced boundary is that its exact digest-pinned program has no
+network operation, environment, Secret, service-account token, or credential
+mount. This design does not claim per-container network isolation; obtaining
+that would require a separately scheduled PVC preparer or a measured
+node-installed syscall profile, either of which is a separate rollout design.
 
 The init container alone mounts the PVC root. After it publishes the requested
 generation, Kubernetes starts the management container with that exact
@@ -237,9 +245,10 @@ For a missing generation the installer:
 
 If the exact generation already exists, the installer revalidates it and exits
 without rewriting it. A mismatched existing digest-named generation is a hard
-failure; the installer never deletes or repairs it automatically. Stale
-installer staging directories are bounded by name, owner, age, and count and
-are removed only before a new publication.
+failure; the installer never deletes or repairs it automatically. The
+installer holds one destination-local exclusive advisory lock for its whole
+transaction. Orphaned staging directories are bounded by name, owner, and
+count and are removed only after that lock proves no other installer is active.
 
 An atomically replaced `active-generation` file records the last successfully
 selected digest for retention only; the management service still uses its
@@ -248,8 +257,9 @@ installer retains that generation and the previously active valid generation,
 then removes other installer-owned generations through descriptor-relative,
 no-follow traversal. It refuses more than 16 entries, any unknown entry shape,
 or a deletion set above 16 GiB. A crash before cleanup is repaired by the next
-identical init. At steady state the PVC therefore contains at most two complete
-generations, preserving one quick rollback while bounding disk use.
+identical init without an age-based quarantine. At steady state the PVC
+therefore contains at most two complete generations, preserving one quick
+rollback while bounding disk use.
 
 The installer requires the PVC-side `fanal` mountpoint to remain empty. The
 management process runs as UID/GID `65532` against a disposable `emptyDir`
@@ -339,9 +349,10 @@ Configuration and trusted-release tests reject schema drift, mutable database
 sources, image-set drift, platform mismatch, and any plan/release scanner
 disagreement. Renderer tests assert the exact init container, node selector,
 generation path, security context, resources, volume ownership, no token or
-Secret, no network authority, unchanged resource count, and inert shadow
-flags. CI package-boundary tests build and inspect the cache image contract and
-prove the runbook contains no local archive or copy path.
+Secret, no runtime network operation, the documented Pod-scoped policy
+boundary, unchanged resource count, and inert shadow flags. CI package-boundary
+tests build and inspect the cache image contract and prove the runbook contains
+no local archive or copy path.
 
 Before merge, the focused personal-management, release-evidence, component
 ownership, workflow, image-contract, secret-scan, Ruff, and mypy suites run.

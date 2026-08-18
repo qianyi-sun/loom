@@ -4,6 +4,7 @@ import hashlib
 import json
 import subprocess
 import sys
+import tracemalloc
 from pathlib import Path
 from typing import Any
 
@@ -356,6 +357,37 @@ def test_assembly_binds_exact_internal_external_and_release_evidence(
     )
     assert _canonical(repeated_release) == _canonical(release)
     assert _canonical(repeated_evidence) == _canonical(evidence)
+
+
+def test_assembly_streams_scanner_binary_hashes_with_bounded_memory(
+    tmp_path: Path,
+) -> None:
+    records, manifests, external, _references = _write_inputs(tmp_path)
+    paths = _scanner_paths(tmp_path)
+    amd64_binary = b"a" * (8 * 1024 * 1024)
+    arm64_binary = b"b" * (8 * 1024 * 1024)
+    paths["scanner_binary_amd64_file"].write_bytes(amd64_binary)
+    paths["scanner_binary_arm64_file"].write_bytes(arm64_binary)
+    lock = json.loads(paths["scanner_cache_lock_file"].read_bytes())
+    lock["binary_sha256"] = {
+        "linux/amd64": hashlib.sha256(amd64_binary).hexdigest(),
+        "linux/arm64": hashlib.sha256(arm64_binary).hexdigest(),
+    }
+    lock_bytes = _canonical(lock) + b"\n"
+    paths["scanner_cache_lock_file"].write_bytes(lock_bytes)
+    evidence = json.loads(paths["scanner_cache_evidence_file"].read_bytes())
+    evidence["binary_sha256"] = lock["binary_sha256"]["linux/amd64"]
+    evidence["lock_sha256"] = hashlib.sha256(lock_bytes).hexdigest()
+    paths["scanner_cache_evidence_file"].write_bytes(_canonical(evidence) + b"\n")
+
+    tracemalloc.start()
+    try:
+        _assemble_inputs(records, manifests, external)
+        _, peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert peak_bytes < 4 * 1024 * 1024
 
 
 @pytest.mark.parametrize(
