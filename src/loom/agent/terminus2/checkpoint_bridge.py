@@ -63,6 +63,7 @@ class HarborCheckpointBridge:
         self._seq = 0
         self._seq_lock = asyncio.Lock()
         self._seen_step_ids: set[int] = set()
+        self._bridged_agent_episodes = 0
         self._provenance_emitted = False
 
     def _next_seq(self) -> int:
@@ -95,6 +96,7 @@ class HarborCheckpointBridge:
         path: Path,
         *,
         completeness: str = "full",
+        allow_incomplete: bool = False,
     ) -> int:
         if not path.is_file():
             return 0
@@ -121,7 +123,19 @@ class HarborCheckpointBridge:
             if source != "agent":
                 self._seen_step_ids.add(step_id)
                 continue
-            await self._bridge_agent_step(step, completeness=completeness)
+            try:
+                await self._bridge_agent_step(
+                    step,
+                    completeness=completeness,
+                    episode=self._bridged_agent_episodes + 1,
+                )
+            except CheckpointBridgeError:
+                # The 0.5s poller can see Harbor's agent step before the
+                # matching llm_calls row is visible. Leave it unseen.
+                if allow_incomplete:
+                    break
+                raise
+            self._bridged_agent_episodes += 1
             self._seen_step_ids.add(step_id)
             synced += 1
         return synced
@@ -147,6 +161,7 @@ class HarborCheckpointBridge:
         step: dict[str, Any],
         *,
         completeness: str,
+        episode: int,
     ) -> None:
         metrics = step.get("metrics") or {}
         if not metrics:
@@ -159,9 +174,13 @@ class HarborCheckpointBridge:
                 "real gateway_request_id joins",
             )
 
+        # Harbor ATIF step_id counts user + agent rows (initial prompt is
+        # step 1, first agent turn is 2). loom_episode / llm_calls.episode
+        # count Harbor agent loops. Join on the nth bridged agent step,
+        # not Harbor step_id.
         llm_row = self._gateway_ledger.resolve_for_metrics(
             metrics,
-            episode=int(step.get("step_id") or 0) or None,
+            episode=episode,
         )
         gateway_request_id = str(llm_row["id"])
         turn_id = str(uuid4())
