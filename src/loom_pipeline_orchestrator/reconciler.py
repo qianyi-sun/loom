@@ -30,12 +30,23 @@ class GateProjection:
 @dataclass(frozen=True, slots=True)
 class RenderedAttempt:
     attempt_id: UUID
-    stage_request_json: dict[str, object]
-    stage_request_bytes: bytes
-    stage_request_digest: str
+    stage_request_json: dict[str, object] | None
+    stage_request_bytes: bytes | None
+    stage_request_digest: str | None
     reservations: tuple[AttemptReservationSpec, ...]
     provider_budget: AttemptProviderBudgetSpec | None = None
     fault_pending: bool = False
+
+    def __post_init__(self) -> None:
+        request_group = (
+            self.stage_request_json,
+            self.stage_request_bytes,
+            self.stage_request_digest,
+        )
+        if any(value is None for value in request_group) and not all(
+            value is None for value in request_group
+        ):
+            raise ValueError("StageRequest snapshot group is incomplete")
 
 
 class ReadinessResolverV1(Protocol):
@@ -50,6 +61,60 @@ class StageRequestRendererV1(Protocol):
     ) -> RenderedAttempt: ...
 
 
+class ReadinessRuntimeV1(ReadinessResolverV1, StageRequestRendererV1, Protocol):
+    """One closed adapter owns support, readiness, and rendering for a recipe class."""
+
+
+@dataclass(frozen=True, slots=True)
+class _PairedReadinessRuntime:
+    resolver: ReadinessResolverV1
+    renderer: StageRequestRendererV1
+
+    def supports(self, candidate: ReadinessCandidate) -> bool:
+        return self.resolver.supports(candidate)
+
+    async def resolve(self, candidate: ReadinessCandidate) -> FrozenReadiness:
+        return await self.resolver.resolve(candidate)
+
+    def render(
+        self, candidate: ReadinessCandidate, frozen: FrozenReadiness
+    ) -> RenderedAttempt:
+        return self.renderer.render(candidate, frozen)
+
+
+class CompositeReadinessRuntime:
+    """Fail closed unless exactly one code-owned runtime supports a candidate."""
+
+    def __init__(self, adapters: tuple[ReadinessRuntimeV1, ...]) -> None:
+        if not adapters:
+            raise ValueError("at least one readiness runtime is required")
+        self._adapters = adapters
+
+    def _select(self, candidate: ReadinessCandidate) -> ReadinessRuntimeV1:
+        supported = tuple(adapter for adapter in self._adapters if adapter.supports(candidate))
+        if len(supported) != 1:
+            raise ValueError(
+                "readiness candidate must match exactly one code-owned runtime adapter"
+            )
+        return supported[0]
+
+    def supports(self, candidate: ReadinessCandidate) -> bool:
+        supported = sum(adapter.supports(candidate) for adapter in self._adapters)
+        if supported > 1:
+            raise ValueError(
+                "readiness candidate matches multiple code-owned runtime adapters"
+            )
+        return supported == 1
+
+    async def resolve(self, candidate: ReadinessCandidate) -> FrozenReadiness:
+        return await self._select(candidate).resolve(candidate)
+
+    def render(
+        self, candidate: ReadinessCandidate, frozen: FrozenReadiness
+    ) -> RenderedAttempt:
+        return self._select(candidate).render(candidate, frozen)
+
+
 class PipelineReconciler:
     """Coordinates transaction phases while injected boundary work stays outside them."""
 
@@ -57,14 +122,27 @@ class PipelineReconciler:
         self,
         repository: PipelineRepository,
         *,
+        readiness_runtime: ReadinessRuntimeV1 | None = None,
         readiness_resolver: ReadinessResolverV1 | None = None,
         request_renderer: StageRequestRendererV1 | None = None,
     ) -> None:
+        if readiness_runtime is not None and (
+            readiness_resolver is not None or request_renderer is not None
+        ):
+            raise ValueError("inject a readiness runtime or the legacy resolver/renderer pair")
         if (readiness_resolver is None) != (request_renderer is None):
             raise ValueError("readiness resolver and renderer must be injected together")
         self._repository = repository
-        self._readiness_resolver = readiness_resolver
-        self._request_renderer = request_renderer
+        self._readiness_runtime: ReadinessRuntimeV1 | None
+        if readiness_runtime is not None:
+            self._readiness_runtime = readiness_runtime
+        elif readiness_resolver is not None and request_renderer is not None:
+            self._readiness_runtime = _PairedReadinessRuntime(
+                resolver=readiness_resolver,
+                renderer=request_renderer,
+            )
+        else:
+            self._readiness_runtime = None
 
     async def reconcile(self, lease: RunLease) -> None:
         await self._repository.initialize_run(lease)
@@ -72,13 +150,13 @@ class PipelineReconciler:
             await self._repository.project_run_result(lease)
             return
         await self._repository.reconcile_dependencies_and_gates(lease)
-        if self._readiness_resolver is not None and self._request_renderer is not None:
+        if self._readiness_runtime is not None:
             candidates = await self._repository.readiness_candidates(lease)
             for candidate in candidates:
-                if not self._readiness_resolver.supports(candidate):
+                if not self._readiness_runtime.supports(candidate):
                     continue
                 if candidate.state == "blocked":
-                    frozen = await self._readiness_resolver.resolve(candidate)
+                    frozen = await self._readiness_runtime.resolve(candidate)
                     await self._repository.freeze_readiness(
                         lease,
                         stage_run_id=candidate.stage_run_id,
@@ -110,7 +188,7 @@ class PipelineReconciler:
                         secret_refs=(),
                     )
                 try:
-                    rendered = self._request_renderer.render(candidate, frozen)
+                    rendered = self._readiness_runtime.render(candidate, frozen)
                 except (TypeError, ValueError):
                     await self._repository.fail_renderer(
                         lease,

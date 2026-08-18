@@ -112,7 +112,7 @@ class AttemptRecord:
     stage_run_id: UUID
     attempt_number: int
     state: str
-    stage_request_digest: str
+    stage_request_digest: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1408,14 +1408,25 @@ class PipelineRepository:
         *,
         stage_run_id: UUID,
         attempt_id: UUID,
-        stage_request_json: dict[str, Any],
-        stage_request_bytes: bytes,
-        stage_request_digest: str,
+        stage_request_json: dict[str, Any] | None,
+        stage_request_bytes: bytes | None,
+        stage_request_digest: str | None,
         reservations: tuple[AttemptReservationSpec, ...],
         provider_budget: AttemptProviderBudgetSpec | None = None,
         fault_pending: bool = False,
     ) -> AttemptRecord:
         """Phase 2: one fenced Attempt, all counters, reservations, and event."""
+
+        request_group = (stage_request_json, stage_request_bytes, stage_request_digest)
+        if any(value is None for value in request_group) and not all(
+            value is None for value in request_group
+        ):
+            raise ValueError("StageRequest snapshot group is incomplete")
+        if stage_request_json is not None and (
+            stage_request_bytes != canonical_document(stage_request_json)
+            or stage_request_digest != canonical_digest(stage_request_json)
+        ):
+            raise ValueError("StageRequest bytes or digest drift")
 
         exhausted: TerminalCause | None = None
         record: AttemptRecord | None = None
@@ -1664,7 +1675,9 @@ class PipelineRepository:
                         "stage_id": stage_run_id,
                         "number": attempt_number,
                         "state": state,
-                        "request": _json_text(stage_request_json),
+                        "request": (
+                            None if stage_request_json is None else _json_text(stage_request_json)
+                        ),
                         "request_bytes": stage_request_bytes,
                         "request_digest": stage_request_digest,
                         "checkpoint_artifact_id": resumed_checkpoint_artifact_id,

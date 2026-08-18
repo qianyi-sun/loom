@@ -7,7 +7,11 @@ import pytest
 from sqlalchemy import text
 
 from loom.pipeline.keys import canonical_digest, canonical_document
-from loom_pipeline_orchestrator.reconciler import PipelineReconciler, RenderedAttempt
+from loom_pipeline_orchestrator.reconciler import (
+    CompositeReadinessRuntime,
+    PipelineReconciler,
+    RenderedAttempt,
+)
 from loom_pipeline_orchestrator.repository import FrozenReadiness
 
 if TYPE_CHECKING:
@@ -43,6 +47,26 @@ class Renderer:
             stage_request_digest=canonical_digest(request),
             reservations=(),
         )
+
+
+class RequestlessRenderer(Renderer):
+    def render(self, _candidate: object, _frozen: FrozenReadiness) -> RenderedAttempt:
+        return RenderedAttempt(
+            attempt_id=self.attempt_id,
+            stage_request_json=None,
+            stage_request_bytes=None,
+            stage_request_digest=None,
+            reservations=(),
+        )
+
+
+class RuntimeAdapter(Resolver, Renderer):
+    def __init__(self, *, supported: bool) -> None:
+        Renderer.__init__(self)
+        self._supported = supported
+
+    def supports(self, _candidate: object) -> bool:
+        return self._supported
 
 
 @pytest.mark.asyncio
@@ -82,3 +106,59 @@ async def test_phase_one_and_phase_two_create_exactly_one_attempt(
     assert row["attempts"] == 1
     assert row["attempts_created"] == 1
     await seed.repository.release(lease)
+
+
+@pytest.mark.asyncio
+async def test_requestless_ordinary_attempt_persists_sql_null_group(
+    orchestrator_seed: OrchestratorSeed,
+) -> None:
+    seed = orchestrator_seed
+    renderer = RequestlessRenderer()
+    reconciler = PipelineReconciler(
+        seed.repository,
+        readiness_resolver=Resolver(),
+        request_renderer=renderer,
+    )
+    lease = (await seed.repository.claim_runs(controller_id="controller-a"))[0]
+    await reconciler.reconcile(lease)
+
+    async with seed.sessions() as session:
+        row = (
+            await session.execute(
+                text("""
+                    SELECT stage_request_json, stage_request_bytes, stage_request_digest
+                      FROM execution_attempts
+                     WHERE id=:attempt_id
+                """),
+                {"attempt_id": renderer.attempt_id},
+            )
+        ).mappings().one()
+    assert row == {
+        "stage_request_json": None,
+        "stage_request_bytes": None,
+        "stage_request_digest": None,
+    }
+    await seed.repository.release(lease)
+
+
+def test_rendered_attempt_rejects_partial_request_group() -> None:
+    with pytest.raises(ValueError, match="snapshot group is incomplete"):
+        RenderedAttempt(
+            attempt_id=uuid4(),
+            stage_request_json=None,
+            stage_request_bytes=b"{}\n",
+            stage_request_digest=None,
+            reservations=(),
+        )
+
+
+def test_composite_runtime_requires_exactly_one_adapter() -> None:
+    candidate = object()
+    none = CompositeReadinessRuntime((RuntimeAdapter(supported=False),))
+    assert not none.supports(candidate)  # type: ignore[arg-type]
+
+    ambiguous = CompositeReadinessRuntime(
+        (RuntimeAdapter(supported=True), RuntimeAdapter(supported=True))
+    )
+    with pytest.raises(ValueError, match="multiple code-owned"):
+        ambiguous.supports(candidate)  # type: ignore[arg-type]
