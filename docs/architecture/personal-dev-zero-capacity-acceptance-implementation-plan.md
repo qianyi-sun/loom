@@ -591,7 +591,7 @@ pytest, Ruff, mypy.
 - Contains no Secret values, kubeconfig payload, physical activation command,
   or destructive cleanup shortcut.
 
-- [ ] **Step 1: Write failing runbook contract tests**
+- [x] **Step 1: Write failing runbook contract tests**
 
   Assert exact use of the trusted-release artifact, owner-only acceptance plan,
   pre/post status, manager identity/ceiling checks, two distinct authenticated
@@ -601,7 +601,7 @@ pytest, Ruff, mypy.
   RuntimeClass/scanner, Secret key, migration, manager, namespace, and worker
   drift.
 
-- [ ] **Step 2: Run the ops tests and observe the missing runbook**
+- [x] **Step 2: Run the ops tests and observe the missing runbook**
 
   Run:
 
@@ -610,7 +610,7 @@ pytest, Ruff, mypy.
     tests/ops/test_personal_dev_control_plane_package_boundary.py
   ```
 
-- [ ] **Step 3: Write the exact runbook and update indexes**
+- [x] **Step 3: Write the exact runbook and update indexes**
 
   Every mutable command is preceded by immutable artifact, kubeconfig identity,
   no-worker, and manager-ceiling assertions. Use `kubectl diff --server-side`
@@ -618,7 +618,7 @@ pytest, Ruff, mypy.
   Rollback reapplies exact shadow bytes and never deletes storage or changes the
   global manager. Record acceptance results as owner-only canonical JSON.
 
-- [ ] **Step 4: Verify and commit operational documentation**
+- [x] **Step 4: Verify and commit operational documentation**
 
   Run the package-boundary and secret-scan suites, then:
 
