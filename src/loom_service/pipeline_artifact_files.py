@@ -26,6 +26,7 @@ from loom.db.schema import (
     PipelineRun,
     PipelineStageRun,
 )
+from loom.pipeline.artifact_access import artifact_read_allowed
 from loom.pipeline.artifact_commit import (
     ArtifactCommitManifestV1,
     ArtifactCommitMarkerV1,
@@ -93,6 +94,9 @@ async def resolve_public_artifact(
     *,
     team_id: UUID,
     artifact_id: UUID,
+    user_id: UUID | None = None,
+    role: str | None = None,
+    platform_admin: bool = False,
     run_id: UUID | None = None,
     stage_run_id: UUID | None = None,
 ) -> PublicArtifact:
@@ -126,6 +130,14 @@ async def resolve_public_artifact(
         or upload.canonical_manifest_json is None
         or upload.manifest_sha256 is None
         or upload.committed_marker_sha256 is None
+    ):
+        raise _not_found()
+    if not artifact_read_allowed(
+        getattr(artifact, "access_class", None),
+        run_created_by_user_id=getattr(run, "created_by_user_id", None),
+        requesting_user_id=user_id,
+        requesting_role=role,
+        platform_admin=platform_admin,
     ):
         raise _not_found()
     try:
@@ -252,6 +264,7 @@ def public_artifact_projection(resolved: PublicArtifact) -> dict[str, Any]:
         "safety_state": artifact.safety_state,
         "visibility": artifact.visibility,
         "share_status": artifact.share_status,
+        "access_class": getattr(artifact, "access_class", None) or "team_runtime",
         "download_path": f"/api/v1/pipeline-artifacts/{artifact.id}/download",
         "detail_path": (
             f"/pipelines/{artifact.pipeline_run_id}/stages/"

@@ -5757,10 +5757,15 @@ class Artifact(Base):
             "((control_producer_kind IS NULL) = (control_producer_id IS NULL)))",
             name="artifacts_control_producer_group_check",
         ),
+        CheckConstraint(
+            "access_class IN ('team_runtime','authoring_restricted','sanitized_audit')",
+            name="artifacts_access_class_check",
+        ),
         Index("artifacts_team_type_idx", "team_id", "artifact_type"),
         Index("artifacts_batch_idx", "batch_id"),
         Index("artifacts_trial_idx", "trial_id"),
         Index("artifacts_policy_idx", "visibility", "share_status", "safety_state"),
+        Index("artifacts_team_access_class_idx", "team_id", "access_class", "created_at", "id"),
         Index(
             "artifacts_pipeline_stage_output_uidx",
             "pipeline_stage_run_id",
@@ -5889,6 +5894,12 @@ class Artifact(Base):
         nullable=False,
         server_default=text("'unknown'"),
         default="unknown",
+    )
+    access_class: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'team_runtime'"),
+        default="team_runtime",
     )
     blocked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     retention: Mapped[dict[str, Any]] = mapped_column(
