@@ -252,6 +252,11 @@ def probe_capacity_manager(
         or parsed.username is not None
         or parsed.password is not None
         or parsed.path != ("/v1/status" if observe_identity else "/healthz")
+        or (
+            observe_identity
+            and url
+            != "https://loom-capacity-manager.loom-dev.svc.cluster.local:8443/v1/status"
+        )
         or parsed.query
         or parsed.fragment
     ):

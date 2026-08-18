@@ -227,6 +227,20 @@ def test_identity_probe_authenticates_and_parses_the_status_boundary(
     )
 
 
+def test_identity_probe_rejects_noncanonical_url_before_reading_credentials(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(CapacityHealthProbeError, match="URL is invalid"):
+        probe_capacity_manager(
+            url="https://attacker.example/v1/status",
+            ca_file=tmp_path / "missing-ca.pem",
+            certificate_file=tmp_path / "missing-certificate.pem",
+            private_key_file=tmp_path / "missing-private-key.pem",
+            bearer_token_file=tmp_path / "missing-token",
+            observe_identity=True,
+        )
+
+
 @pytest.mark.parametrize(
     ("status_code", "payload"),
     [
