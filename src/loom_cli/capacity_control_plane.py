@@ -9,6 +9,7 @@ import re
 import tomllib
 from pathlib import Path
 from typing import Any, Literal, cast
+from urllib.parse import urlsplit
 from uuid import UUID
 
 import yaml  # type: ignore[import-untyped]
@@ -51,6 +52,16 @@ _EXECUTION_POLICY_FILENAME = "execution-policy.json"
 _EXECUTION_POLICY_PATH = f"{_EXECUTION_POLICY_DIRECTORY}/{_EXECUTION_POLICY_FILENAME}"
 _EXECUTION_POLICY_PROJECTED_VOLUME = "execution-policy-projected"
 _EXECUTION_POLICY_RUNTIME_VOLUME = "execution-policy-runtime"
+_MANAGER_SERVICE_ORIGIN = "https://loom-capacity-manager.loom-dev.svc.cluster.local:8443"
+_MANAGER_ROUTER_NAMESPACE = "loom-capacity-router"
+_MANAGER_ROUTER_NAME = "loom-capacity-manager-router"
+_MANAGER_ROUTER_HOST = "192.168.50.103"
+_MANAGER_ROUTER_NODE = "trt-eai-oldlab-1"
+_MANAGER_ROUTER_PORT = 31443
+_PRIVATE_IPV4_NETWORKS = tuple(
+    ipaddress.ip_network(value) for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+)
+_PRIVATE_IPV6_NETWORK = ipaddress.ip_network("fc00::/7")
 
 
 class _StrictModel(BaseModel):
@@ -309,7 +320,7 @@ class CapacityPoolExecutorProfile(_StrictModel):
     execution_epoch: int = Field(gt=0)
     execution_manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     trusted_fleet_release_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    manager_origin: Literal["https://loom-capacity-manager.loom-dev.svc.cluster.local:8443"]
+    manager_origin: str
     pools: tuple[CapacityPoolExecutorBinding, CapacityPoolExecutorBinding]
 
     @field_validator("pools", mode="before")
@@ -335,6 +346,41 @@ class CapacityPoolExecutorProfile(_StrictModel):
             raise ValueError("capacity authority must be a canonical UUID") from exc
         if authority.int == 0 or str(authority) != value:
             raise ValueError("capacity authority must be a canonical non-nil UUID")
+        return value
+
+    @field_validator("manager_origin")
+    @classmethod
+    def _internal_manager_origin(cls, value: str) -> str:
+        if value == _MANAGER_SERVICE_ORIGIN:
+            return value
+        try:
+            parsed = urlsplit(value)
+            port = parsed.port
+            address = ipaddress.ip_address(parsed.hostname or "")
+        except ValueError as exc:
+            raise ValueError("manager origin must be one canonical internal HTTPS origin") from exc
+        private = (
+            any(address in network for network in _PRIVATE_IPV4_NETWORKS)
+            if isinstance(address, ipaddress.IPv4Address)
+            else address in _PRIVATE_IPV6_NETWORK
+        )
+        canonical_host = (
+            address.compressed
+            if isinstance(address, ipaddress.IPv4Address)
+            else f"[{address.compressed}]"
+        )
+        if (
+            not private
+            or parsed.scheme != "https"
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+            or port != _MANAGER_ROUTER_PORT
+            or value != f"https://{canonical_host}:{_MANAGER_ROUTER_PORT}"
+        ):
+            raise ValueError("manager origin must be one canonical internal HTTPS origin")
         return value
 
     @model_validator(mode="after")
@@ -1055,6 +1101,110 @@ def _manager_service() -> dict[str, Any]:
     }
 
 
+def _router_metadata(name: str) -> dict[str, Any]:
+    return {
+        "name": name,
+        "namespace": _MANAGER_ROUTER_NAMESPACE,
+        "labels": dict(_MANAGED_LABELS),
+    }
+
+
+def _manager_router_namespace() -> dict[str, Any]:
+    return {
+        "apiVersion": "v1",
+        "kind": "Namespace",
+        "metadata": {
+            "name": _MANAGER_ROUTER_NAMESPACE,
+            "labels": {
+                **_MANAGED_LABELS,
+                "pod-security.kubernetes.io/enforce": "privileged",
+                "pod-security.kubernetes.io/audit": "restricted",
+                "pod-security.kubernetes.io/audit-version": "latest",
+                "pod-security.kubernetes.io/warn": "restricted",
+                "pod-security.kubernetes.io/warn-version": "latest",
+            },
+        },
+    }
+
+
+def _manager_router_deployment(
+    profile: CapacityControlPlaneProfile,
+    *,
+    manager_image: str,
+    external_manager_client_cidrs: tuple[str, ...],
+) -> dict[str, Any]:
+    labels = _pod_labels(_MANAGER_ROUTER_NAME, "router")
+    allowed_client_arguments = [
+        item
+        for cidr in external_manager_client_cidrs
+        for item in (
+            "--allowed-client-ip",
+            ipaddress.ip_network(cidr).network_address.compressed,
+        )
+    ]
+    return {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": _router_metadata(_MANAGER_ROUTER_NAME),
+        "spec": {
+            "replicas": 1,
+            "revisionHistoryLimit": 2,
+            "strategy": {"type": "Recreate"},
+            "selector": {"matchLabels": labels},
+            "template": {
+                "metadata": {"labels": labels},
+                "spec": {
+                    "automountServiceAccountToken": False,
+                    "nodeSelector": {"kubernetes.io/hostname": _MANAGER_ROUTER_NODE},
+                    "securityContext": _pod_security(65532),
+                    "containers": [
+                        {
+                            "name": "router",
+                            "image": manager_image,
+                            "imagePullPolicy": "IfNotPresent",
+                            "command": [
+                                "python",
+                                "-m",
+                                "loom_capacity_manager.tcp_proxy",
+                            ],
+                            "args": allowed_client_arguments,
+                            "ports": [
+                                {
+                                    "name": "manager-tls",
+                                    "containerPort": _MANAGER_ROUTER_PORT,
+                                    "hostPort": _MANAGER_ROUTER_PORT,
+                                    "hostIP": _MANAGER_ROUTER_HOST,
+                                    "protocol": "TCP",
+                                }
+                            ],
+                            "startupProbe": {
+                                "tcpSocket": {"port": _MANAGER_ROUTER_PORT},
+                                "periodSeconds": 2,
+                                "failureThreshold": 30,
+                                "timeoutSeconds": 1,
+                            },
+                            "readinessProbe": {
+                                "tcpSocket": {"port": _MANAGER_ROUTER_PORT},
+                                "periodSeconds": 5,
+                                "failureThreshold": 3,
+                                "timeoutSeconds": 1,
+                            },
+                            "livenessProbe": {
+                                "tcpSocket": {"port": _MANAGER_ROUTER_PORT},
+                                "periodSeconds": 10,
+                                "failureThreshold": 3,
+                                "timeoutSeconds": 1,
+                            },
+                            "securityContext": _container_security(read_only_root=True),
+                            "resources": profile.manager_resources.kubernetes(),
+                        }
+                    ],
+                },
+            },
+        },
+    }
+
+
 def _manager_deployment(
     profile: CapacityControlPlaneProfile,
     *,
@@ -1086,6 +1236,8 @@ def _manager_deployment(
         f"{_CREDENTIALS}/server-certificate.pem",
         "--allow-positive-ceiling",
     ]
+    if execution_policy_config_map is not None:
+        health_command.extend(["--required-server-ip-san", _MANAGER_ROUTER_HOST])
     environment = [
         {"name": name, "value": value}
         for name, value in (
@@ -1351,12 +1503,108 @@ def _network_policies(
                                 }
                             },
                             *(
-                                {"ipBlock": {"cidr": cidr}}
-                                for cidr in external_manager_client_cidrs
+                                (
+                                    {
+                                        "namespaceSelector": {
+                                            "matchLabels": {
+                                                "kubernetes.io/metadata.name": (
+                                                    _MANAGER_ROUTER_NAMESPACE
+                                                )
+                                            }
+                                        },
+                                        "podSelector": {
+                                            "matchLabels": {
+                                                "app.kubernetes.io/name": (_MANAGER_ROUTER_NAME)
+                                            }
+                                        },
+                                    },
+                                )
+                                if external_manager_client_cidrs
+                                else ()
                             ),
                         ],
                         "ports": [{"protocol": "TCP", "port": 8443}],
                     }
+                ],
+            },
+        },
+    ]
+
+
+def _manager_router_network_policies(
+    profile: CapacityControlPlaneProfile,
+    *,
+    external_manager_client_cidrs: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    router_selector = {"matchLabels": {"app.kubernetes.io/name": _MANAGER_ROUTER_NAME}}
+    return [
+        {
+            "apiVersion": "networking.k8s.io/v1",
+            "kind": "NetworkPolicy",
+            "metadata": _router_metadata("capacity-manager-router-default-deny"),
+            "spec": {
+                "podSelector": {},
+                "policyTypes": ["Ingress", "Egress"],
+            },
+        },
+        {
+            "apiVersion": "networking.k8s.io/v1",
+            "kind": "NetworkPolicy",
+            "metadata": _router_metadata("capacity-manager-router-ingress"),
+            "spec": {
+                "podSelector": router_selector,
+                "policyTypes": ["Ingress"],
+                "ingress": [
+                    {
+                        "from": [
+                            {"ipBlock": {"cidr": cidr}} for cidr in external_manager_client_cidrs
+                        ],
+                        "ports": [{"protocol": "TCP", "port": _MANAGER_ROUTER_PORT}],
+                    }
+                ],
+            },
+        },
+        {
+            "apiVersion": "networking.k8s.io/v1",
+            "kind": "NetworkPolicy",
+            "metadata": _router_metadata("capacity-manager-router-egress"),
+            "spec": {
+                "podSelector": router_selector,
+                "policyTypes": ["Egress"],
+                "egress": [
+                    {
+                        "to": [
+                            {
+                                "namespaceSelector": {
+                                    "matchLabels": {
+                                        "kubernetes.io/metadata.name": profile.namespace
+                                    }
+                                },
+                                "podSelector": {
+                                    "matchLabels": {
+                                        "app.kubernetes.io/name": "loom-capacity-manager"
+                                    }
+                                },
+                            }
+                        ],
+                        "ports": [{"protocol": "TCP", "port": 8443}],
+                    },
+                    {
+                        "to": [
+                            {
+                                "namespaceSelector": {
+                                    "matchLabels": {
+                                        "kubernetes.io/metadata.name": profile.dns.namespace
+                                    }
+                                },
+                                "podSelector": {"matchLabels": profile.dns.match_labels()},
+                            }
+                        ],
+                        "ports": [
+                            {"protocol": "UDP", "port": profile.dns.port},
+                            {"protocol": "TCP", "port": profile.dns.port},
+                        ],
+                    },
                 ],
             },
         },
@@ -1372,7 +1620,7 @@ def render_capacity_control_plane_manifests(
     execution_policy_sha256: str | None = None,
     external_manager_client_cidrs: tuple[str, ...] = (),
 ) -> str:
-    """Render one exact, cluster-internal, zero-execution authority release."""
+    """Render one exact, zero-execution authority release."""
 
     if not isinstance(profile, CapacityControlPlaneProfile):
         raise TypeError("capacity control-plane profile is invalid")
@@ -1401,9 +1649,15 @@ def render_capacity_control_plane_manifests(
         except ValueError as exc:
             raise ValueError("external manager client CIDRs must be canonical host routes") from exc
         address = network.network_address
+        private_address = (
+            any(address in private for private in _PRIVATE_IPV4_NETWORKS)
+            if isinstance(address, ipaddress.IPv4Address)
+            else address in _PRIVATE_IPV6_NETWORK
+        )
         if (
             network.prefixlen != network.max_prefixlen
             or str(network) != value
+            or not private_address
             or address.is_loopback
             or address.is_link_local
             or address.is_multicast
@@ -1443,6 +1697,7 @@ def render_capacity_control_plane_manifests(
         }
     image_digest = manager_image.rsplit("@sha256:", 1)[1]
     migration_head = _capacity_head()
+    router_enabled = execution_policy_document is not None
     documents = [
         {
             "apiVersion": "v1",
@@ -1461,6 +1716,7 @@ def render_capacity_control_plane_manifests(
                 },
             },
         },
+        *((_manager_router_namespace(),) if router_enabled else ()),
         *(() if execution_policy_document is None else (execution_policy_document,)),
         _postgres_service(),
         _postgres_statefulset(profile),
@@ -1479,9 +1735,28 @@ def render_capacity_control_plane_manifests(
             execution_policy_config_map=execution_policy_config_map,
             execution_policy_sha256=execution_policy_sha256,
         ),
+        *(
+            (
+                _manager_router_deployment(
+                    profile,
+                    manager_image=manager_image,
+                    external_manager_client_cidrs=tuple(canonical_external_cidrs),
+                ),
+            )
+            if router_enabled
+            else ()
+        ),
         *_network_policies(
             profile,
             external_manager_client_cidrs=tuple(canonical_external_cidrs),
+        ),
+        *(
+            _manager_router_network_policies(
+                profile,
+                external_manager_client_cidrs=tuple(canonical_external_cidrs),
+            )
+            if router_enabled
+            else ()
         ),
     ]
     return cast(

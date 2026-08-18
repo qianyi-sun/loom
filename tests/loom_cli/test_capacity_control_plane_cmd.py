@@ -294,7 +294,7 @@ def test_admin_render_executor_writes_only_one_complete_inert_pool_config(
     assert captured.err == ""
     assert payload["pool_id"] == "gb10"
     assert payload["executor_id"].startswith("gb10-")
-    assert payload["manager_origin"].endswith(".loom-dev.svc.cluster.local:8443")
+    assert payload["manager_origin"] == "https://192.168.50.103:31443"
 
 
 def test_admin_render_executor_service_environment_is_nonsecret_and_zero_ceiling(

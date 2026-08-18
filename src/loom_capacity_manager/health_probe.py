@@ -197,7 +197,11 @@ def parse_observed_capacity_manager_identity_response(
     }
 
 
-def _validate_server_certificate_identities(path: Path) -> None:
+def _validate_server_certificate_identities(
+    path: Path,
+    *,
+    required_ip_address: ipaddress.IPv4Address | ipaddress.IPv6Address | None = None,
+) -> None:
     try:
         descriptor = os.open(
             path,
@@ -241,7 +245,11 @@ def _validate_server_certificate_identities(path: Path) -> None:
         ) from exc
     dns_names = set(identities.get_values_for_type(x509.DNSName))
     ip_addresses = set(identities.get_values_for_type(x509.IPAddress))
-    if _MANAGER_SERVICE_DNS not in dns_names or _LOOPBACK_IP not in ip_addresses:
+    if (
+        _MANAGER_SERVICE_DNS not in dns_names
+        or _LOOPBACK_IP not in ip_addresses
+        or (required_ip_address is not None and required_ip_address not in ip_addresses)
+    ):
         raise CapacityHealthProbeError("capacity manager server certificate identities are invalid")
 
 
@@ -252,6 +260,7 @@ def probe_capacity_manager(
     certificate_file: Path,
     private_key_file: Path,
     server_certificate_file: Path | None = None,
+    required_server_ip_san: str | None = None,
     bearer_token_file: Path | None = None,
     timeout_seconds: float = 3.0,
     observe: bool = False,
@@ -287,10 +296,27 @@ def probe_capacity_manager(
         or (observe_identity and bearer_token_file is None)
         or (not observe_identity and bearer_token_file is not None)
         or (not observe_identity and server_certificate_file is None)
+        or (required_server_ip_san is not None and server_certificate_file is None)
     ):
         raise CapacityHealthProbeError("capacity health timeout is invalid")
     if server_certificate_file is not None:
-        _validate_server_certificate_identities(server_certificate_file)
+        if required_server_ip_san is None:
+            _validate_server_certificate_identities(server_certificate_file)
+        else:
+            try:
+                required_ip_address = ipaddress.ip_address(required_server_ip_san)
+            except ValueError as exc:
+                raise CapacityHealthProbeError(
+                    "capacity manager server certificate identities are invalid"
+                ) from exc
+            if required_server_ip_san != required_ip_address.compressed:
+                raise CapacityHealthProbeError(
+                    "capacity manager server certificate identities are invalid"
+                )
+            _validate_server_certificate_identities(
+                server_certificate_file,
+                required_ip_address=required_ip_address,
+            )
     try:
         bearer_token = (
             read_owner_only_bearer_token(bearer_token_file)
@@ -357,6 +383,7 @@ def main() -> None:
     parser.add_argument("--certificate-file", type=Path, required=True)
     parser.add_argument("--private-key-file", type=Path, required=True)
     parser.add_argument("--server-certificate-file", type=Path)
+    parser.add_argument("--required-server-ip-san")
     parser.add_argument("--bearer-token-file", type=Path)
     parser.add_argument("--timeout-seconds", type=float, default=3.0)
     modes = parser.add_mutually_exclusive_group()
@@ -383,6 +410,7 @@ def main() -> None:
             certificate_file=arguments.certificate_file,
             private_key_file=arguments.private_key_file,
             server_certificate_file=arguments.server_certificate_file,
+            required_server_ip_san=arguments.required_server_ip_san,
             bearer_token_file=arguments.bearer_token_file,
             timeout_seconds=arguments.timeout_seconds,
             observe=arguments.observe,

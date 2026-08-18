@@ -115,13 +115,29 @@ grep -F "value: $execution_policy_sha256" "$manager_render"
 Supplying only one policy argument, a digest that differs from the canonical
 policy payload, missing external-client evidence, an unsafe file, or a changed
 file fails before YAML is written. External manager clients are 1–8 sorted,
-unique canonical host routes only (`/32` or `/128`), never a subnet. Derive
-them from #906 route/CNI evidence showing the effective source addresses of
-both controller services and the operator client path; do not substitute SSH
-destination addresses or guessed NAT addresses. The rendered ConfigMap
+unique canonical private host routes only (`/32` or `/128`), never a subnet.
+Derive them from #906 route/CNI evidence showing the effective source addresses
+of both controller services and the operator client path; do not substitute
+SSH destination addresses or guessed NAT addresses. The rendered ConfigMap
 contains only canonical policy JSON. The pod init copies that projection into
 a memory-backed, manager-UID-owned mode-`0600` file; the manager mounts only
 the copied directory read-only.
+
+The policy-enabled render also creates one `loom-capacity-router` namespace and
+one TLS-pass-through Deployment pinned to OLDLAB1. Verify the rendered host IP
+and port and require the manager certificate to contain that IP SAN:
+
+```bash
+grep -F 'name: loom-capacity-router' "$manager_render"
+grep -F 'hostIP: 192.168.50.103' "$manager_render"
+grep -F 'hostPort: 31443' "$manager_render"
+```
+
+The manager Service remains `ClusterIP`. The dedicated namespace is the narrow
+Pod Security exception required for the host port; it is default-deny, and the
+router container is non-root, read-only, capability-free, and admits the exact
+source IPs again before opening an upstream connection. It passes TLS bytes
+unchanged, so the manager still terminates mTLS and checks bearer scope.
 
 ## 2. Shadow-deploy only inside the #906 window
 
@@ -154,6 +170,8 @@ kubectl --kubeconfig "$kubeconfig" -n loom-dev wait \
   job -l app.kubernetes.io/managed-by=loom-capacity-control-plane
 kubectl --kubeconfig "$kubeconfig" -n loom-dev rollout status \
   deployment/loom-capacity-manager --timeout=300s
+kubectl --kubeconfig "$kubeconfig" -n loom-capacity-router rollout status \
+  deployment/loom-capacity-manager-router --timeout=300s
 
 uv run --no-sync loom admin capacity-control-plane status \
   --namespace loom-dev --kubeconfig "$kubeconfig"
@@ -192,17 +210,15 @@ process listings. The prepare identity has unbound
 `capacity:execution:prepare`; the read identity has `capacity:read`; the abort
 identity is a different unbound `capacity:execution:abort` principal.
 
-Run the HTTP commands from the separately approved client path that can reach
-the cluster-internal manager Service. Replace `manager_origin` only with that
-reviewed endpoint. Before preparation, prove the operator path and both
-controller-local service accounts resolve that name, validate the manager
-certificate, and complete an mTLS request through the reviewed route. The
-checked-in package does not create a cross-network tunnel or DNS override; that
-transport is explicit #906 evidence and must remain available through drain
+Run the HTTP commands from the separately approved client path through the
+rendered private router. Before preparation, prove the operator path and both
+controller-local service accounts can reach the exact origin, validate the
+manager certificate including its `192.168.50.103` IP SAN, and complete an
+mTLS request through the route. The router must remain available through drain
 and retirement.
 
 ```bash
-manager_origin='https://loom-capacity-manager.loom-dev.svc.cluster.local:8443'
+manager_origin='https://192.168.50.103:31443'
 prepare_curl_config=/absolute/owner-only/path/prepare.curl
 read_curl_config=/absolute/owner-only/path/read.curl
 abort_curl_config=/absolute/owner-only/path/abort.curl
@@ -797,7 +813,13 @@ jq -e '
 ' "$evidence_dir/post-retirement-readiness.json"
 uv run --no-sync loom admin capacity-control-plane status \
   --namespace loom-dev --kubeconfig "$kubeconfig"
+kubectl --kubeconfig "$kubeconfig" delete namespace loom-capacity-router \
+  --wait --timeout=300s
 ```
+
+Deleting the dedicated namespace after the final routed check removes the
+host-port exception. Stop if deletion does not complete; do not leave an
+unmanaged router behind after a retired rehearsal.
 
 ### Prepared-only abort branch
 
@@ -832,13 +854,16 @@ chmod 0600 "$abort_response"
 jq -e --argjson epoch "$execution_epoch" '
   .execution_epoch == $epoch and .replayed == false
 ' "$abort_response"
+kubectl --kubeconfig "$kubeconfig" delete namespace loom-capacity-router \
+  --wait --timeout=300s
 ```
 
 Abort is valid only for the exact current prepared epoch while no executable
 intent exists. It append-only retires preparation and restores shadow at zero,
 with the increase freeze retained. Retry only the same bytes and idempotency
 UUID. The #906 operator decision determines whether frozen legacy writers
-remain stopped or are restored after abort or retirement.
+remain stopped or are restored after abort or retirement. The router namespace
+is deleted only after the routed abort response is verified.
 
 Finally hash all retained evidence without changing any journal:
 
