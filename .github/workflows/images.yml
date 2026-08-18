@@ -2259,9 +2259,10 @@ jobs:
       needs.publish-manifest.result == 'success' &&
       contains(needs.plan.outputs.images, '"image":"service"') &&
       contains(needs.plan.outputs.images, '"image":"personal-dev-builder"') &&
-      contains(needs.plan.outputs.images, '"image":"personal-dev-activation-agent"')
+      contains(needs.plan.outputs.images, '"image":"personal-dev-activation-agent"') &&
+      contains(needs.plan.outputs.images, '"image":"personal-dev-scanner-cache"')
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     permissions:
       actions: read
       attestations: read
@@ -2308,7 +2309,25 @@ jobs:
           name: image-release-record-personal-dev-activation-agent-arm64-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
           path: /tmp/loom-personal-dev-release-records
 
-      - name: Read back six immutable image indexes
+      - name: Download exact personal-dev-scanner-cache AMD64 architecture evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: image-release-record-personal-dev-scanner-cache-amd64-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: /tmp/loom-personal-dev-release-records
+
+      - name: Download exact personal-dev-scanner-cache ARM64 architecture evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: image-release-record-personal-dev-scanner-cache-arm64-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: /tmp/loom-personal-dev-release-records
+
+      - name: Download exact scanner-cache assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: personal-dev-scanner-cache-assets-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: /tmp/loom-personal-dev-scanner-cache-assets
+
+      - name: Read back seven immutable image indexes
         shell: bash
         env:
           GHCR_ACTOR: ${{ github.actor }}
@@ -2324,7 +2343,8 @@ jobs:
           for binding in \
             service=loom-service \
             personal-dev-builder=loom-personal-dev-builder \
-            personal-dev-activation-agent=loom-personal-dev-activation-agent; do
+            personal-dev-activation-agent=loom-personal-dev-activation-agent \
+            personal-dev-scanner-cache=loom-personal-dev-scanner-cache; do
             component=${binding%%=*}
             image_name=${binding#*=}
             subject="ghcr.io/${owner_lower}/${image_name}"
@@ -2352,6 +2372,92 @@ jobs:
             }
           done
 
+      - name: Read back exact scanner cache and service binaries
+        shell: bash
+        env:
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          asset_root=/tmp/loom-personal-dev-scanner-cache-assets
+          asset_evidence="$asset_root/scanner-cache-evidence.json"
+          lock=deploy/dev-fleet/personal-dev-scanner-cache-lock.json
+          expected_fingerprint=$(PYTHONPATH=src:. python3 \
+            scripts/prepare_personal_dev_scanner_cache_assets.py \
+            --lock "$lock" --verify-output "$asset_root")
+          readback_root=/tmp/loom-personal-dev-scanner-readback
+          mkdir -m 0700 "$readback_root"
+          owner_lower=$(printf '%s' "$REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+          service_subject="ghcr.io/${owner_lower}/loom-service"
+          cache_subject="ghcr.io/${owner_lower}/loom-personal-dev-scanner-cache"
+          containers=()
+          images=()
+          cleanup_scanner_readback() {
+            for container in "${containers[@]}"; do
+              docker rm -f "$container" >/dev/null 2>&1 || true
+            done
+            for image in "${images[@]}"; do
+              docker image rm "$image" >/dev/null 2>&1 || true
+            done
+          }
+          trap cleanup_scanner_readback EXIT
+          for architecture in amd64 arm64; do
+            platform="linux/${architecture}"
+            service_record="/tmp/loom-personal-dev-release-records/service-${architecture}.json"
+            cache_record="/tmp/loom-personal-dev-release-records/personal-dev-scanner-cache-${architecture}.json"
+            service_digest=$(jq -er \
+              '.subject.digest | select(test("^sha256:[0-9a-f]{64}$"))' \
+              "$service_record")
+            cache_digest=$(jq -er \
+              '.subject.digest | select(test("^sha256:[0-9a-f]{64}$"))' \
+              "$cache_record")
+            service_reference="${service_subject}@${service_digest}"
+            cache_reference="${cache_subject}@${cache_digest}"
+            images+=("$service_reference" "$cache_reference")
+            docker pull --quiet --platform "$platform" "$service_reference" >/dev/null
+            docker pull --quiet --platform "$platform" "$cache_reference" >/dev/null
+
+            service_container="loom-trivy-${architecture}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            cache_container="loom-scanner-cache-${architecture}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            containers+=("$service_container" "$cache_container")
+            docker create --name "$service_container" "$service_reference" >/dev/null
+            docker create --name "$cache_container" "$cache_reference" >/dev/null
+            docker cp "${service_container}:/usr/local/bin/trivy" \
+              "$readback_root/trivy-linux-${architecture}"
+            cache_root="$readback_root/cache-linux-${architecture}"
+            mkdir -m 0700 "$cache_root"
+            docker cp \
+              "${cache_container}:/opt/loom-personal-dev-scanner-cache/assets/." \
+              "$cache_root"
+            test "$(find "$cache_root" -mindepth 1 -printf '%P\n' | sort)" = "$(printf '%s\n' \
+              db \
+              db/metadata.json \
+              db/trivy.db \
+              java-db \
+              java-db/metadata.json \
+              java-db/trivy-java.db | sort)"
+            test ! -e "$cache_root/scanner-cache-evidence.json"
+            cp --no-preserve=mode,ownership -- "$asset_evidence" \
+              "$cache_root/scanner-cache-evidence.json"
+            chmod 0444 "$cache_root/scanner-cache-evidence.json"
+            observed_fingerprint=$(PYTHONPATH=src:. python3 \
+              scripts/prepare_personal_dev_scanner_cache_assets.py \
+              --lock "$lock" --verify-output "$cache_root")
+            test "$observed_fingerprint" = "$expected_fingerprint"
+            docker rm "$service_container" "$cache_container" >/dev/null
+          done
+          for relative in \
+            db/metadata.json \
+            db/trivy.db \
+            java-db/metadata.json \
+            java-db/trivy-java.db; do
+            cmp --silent \
+              "$readback_root/cache-linux-amd64/$relative" \
+              "$readback_root/cache-linux-arm64/$relative"
+          done
+          test "$(PYTHONPATH=src:. python3 \
+            scripts/prepare_personal_dev_scanner_cache_assets.py \
+            --lock "$lock" --verify-output "$asset_root")" = "$expected_fingerprint"
+
       - name: Assemble canonical personal-development release
         shell: bash
         env:
@@ -2360,10 +2466,14 @@ jobs:
         run: |
           set -euo pipefail
           tree_sha=$(git rev-parse "${HEAD_SHA}^{tree}")
-          python3 scripts/ci_personal_dev_trusted_release.py assemble \
+          PYTHONPATH=src:. python3 scripts/ci_personal_dev_trusted_release.py assemble \
             --records-dir /tmp/loom-personal-dev-release-records \
             --manifests-dir /tmp/loom-personal-dev-release-manifests \
             --external-images-file deploy/dev-fleet/personal-dev-external-images.json \
+            --scanner-cache-lock-file deploy/dev-fleet/personal-dev-scanner-cache-lock.json \
+            --scanner-cache-evidence-file /tmp/loom-personal-dev-scanner-cache-assets/scanner-cache-evidence.json \
+            --scanner-binary-amd64-file /tmp/loom-personal-dev-scanner-readback/trivy-linux-amd64 \
+            --scanner-binary-arm64-file /tmp/loom-personal-dev-scanner-readback/trivy-linux-arm64 \
             --repository "$GITHUB_REPOSITORY" \
             --ref-name "$REF_NAME" \
             --source-sha "$HEAD_SHA" \
@@ -2376,7 +2486,7 @@ jobs:
             --runner-environment "$RUNNER_ENVIRONMENT" \
             --output-dir /tmp/loom-personal-dev-trusted-release
 
-      - name: Verify three protected Loom manifest attestations
+      - name: Verify four protected Loom manifest attestations
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -2386,7 +2496,7 @@ jobs:
           set -euo pipefail
           tree_sha=$(git rev-parse "${HEAD_SHA}^{tree}")
           evidence=/tmp/loom-personal-dev-trusted-release/trusted-release-evidence.json
-          for component in service personal-dev-builder personal-dev-activation-agent; do
+          for component in service personal-dev-builder personal-dev-activation-agent personal-dev-scanner-cache; do
             case "$component" in
               service)
                 image_name=loom-service
@@ -2399,6 +2509,10 @@ jobs:
               personal-dev-activation-agent)
                 image_name=loom-personal-dev-activation-agent
                 dockerfile=deploy/Dockerfile.personal-dev-activation-agent
+                ;;
+              personal-dev-scanner-cache)
+                image_name=loom-personal-dev-scanner-cache
+                dockerfile=deploy/Dockerfile.personal-dev-scanner-cache
                 ;;
               *) exit 1 ;;
             esac
@@ -2467,10 +2581,14 @@ jobs:
           set -euo pipefail
           tree_sha=$(git rev-parse "${HEAD_SHA}^{tree}")
           output=/tmp/loom-personal-dev-trusted-release
-          python3 scripts/ci_personal_dev_trusted_release.py validate \
+          PYTHONPATH=src:. python3 scripts/ci_personal_dev_trusted_release.py validate \
             --records-dir /tmp/loom-personal-dev-release-records \
             --manifests-dir /tmp/loom-personal-dev-release-manifests \
             --external-images-file deploy/dev-fleet/personal-dev-external-images.json \
+            --scanner-cache-lock-file deploy/dev-fleet/personal-dev-scanner-cache-lock.json \
+            --scanner-cache-evidence-file /tmp/loom-personal-dev-scanner-cache-assets/scanner-cache-evidence.json \
+            --scanner-binary-amd64-file /tmp/loom-personal-dev-scanner-readback/trivy-linux-amd64 \
+            --scanner-binary-arm64-file /tmp/loom-personal-dev-scanner-readback/trivy-linux-arm64 \
             --repository "$GITHUB_REPOSITORY" \
             --ref-name "$REF_NAME" \
             --source-sha "$HEAD_SHA" \
