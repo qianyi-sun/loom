@@ -206,9 +206,38 @@ docker compose --project-name "$LOOM_WORKER_COMPOSE_PROJECT" \
     return SbatchRequest(args=tuple(args), stdin=stdin)
 
 
+def build_task_image_builder_sbatch_test_request(
+    config: TaskImageBuilderPoolConfig,
+    *,
+    node: str,
+) -> SbatchRequest:
+    request = build_task_image_builder_sbatch_request(config, node=node)
+    return SbatchRequest(
+        args=(
+            request.args[0],
+            "--test-only",
+            *(item for item in request.args[1:] if item != "--parsable"),
+        ),
+        stdin=request.stdin,
+    )
+
+
 class SubprocessTaskImageBuilderSlurmRunner:
     def __init__(self, config: TaskImageBuilderPoolConfig) -> None:
         self.config = config
+
+    async def validate_builder_request(
+        self,
+        *,
+        node: str,
+        config: TaskImageBuilderPoolConfig,
+    ) -> None:
+        request = build_task_image_builder_sbatch_test_request(config, node=node)
+        await _run_command(
+            request.args,
+            stdin=request.stdin,
+            timeout=config.command_timeout_seconds,
+        )
 
     async def submit_builder(
         self,

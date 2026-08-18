@@ -38,6 +38,7 @@ from loom_control_plane.global_execution_fence import (  # noqa: E402
 from loom_control_plane.task_image_builder_autoscaler import (  # noqa: E402
     SubprocessTaskImageBuilderSlurmRunner,
     TaskImageBuilderPoolConfig,
+    build_task_image_builder_sbatch_request,
     reconcile_task_image_builder_autoscaler_once,
 )
 
@@ -344,6 +345,70 @@ def _validate_builder_runtime_files(config: TaskImageBuilderPoolConfig) -> None:
         )
 
 
+def _usable_registry_auth(value: object) -> bool:
+    return isinstance(value, dict) and any(
+        isinstance(value.get(key), str) and value[key]
+        for key in ("auth", "identitytoken")
+    )
+
+
+def _builder_registry_auths(registry_docker_config_dir: str) -> dict[str, object]:
+    directory = Path(registry_docker_config_dir)
+    try:
+        metadata = directory.lstat()
+    except OSError as exc:
+        raise TaskImageBuilderPolicyError(
+            "task-image builder registry credentials are unavailable"
+        ) from exc
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) & 0o077
+    ):
+        raise TaskImageBuilderPolicyError(
+            "task-image builder registry credential metadata is unsafe"
+        )
+    payload = _read_private_builder_input(
+        directory / "config.json",
+        label="registry credential",
+        max_bytes=64 * 1024,
+    )
+    try:
+        docker_config = json.loads(payload.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise TaskImageBuilderPolicyError(
+            "task-image builder registry credentials are invalid"
+        ) from exc
+    auths = docker_config.get("auths") if isinstance(docker_config, dict) else None
+    if not isinstance(auths, dict):
+        raise TaskImageBuilderPolicyError(
+            "task-image builder registry credentials are invalid"
+        )
+    return auths
+
+
+async def _validate_builder_token(session: Any, raw_token: str) -> bytes:
+    token_hash = hashlib.sha256(raw_token.encode("utf-8")).digest()
+    result = await session.execute(
+        select(Token.type, Token.scopes, Token.expires_at, Token.revoked_at).where(
+            Token.token_hash == token_hash,
+        )
+    )
+    row = result.one_or_none()
+    if row is None:
+        raise TaskImageBuilderPolicyError("task-image builder token is unknown")
+    token_type, scopes, expires_at, revoked_at = row
+    if token_type != "worker" or set(scopes or ()) != {"task-image:build"}:
+        raise TaskImageBuilderPolicyError(
+            "task-image builder token requires the dedicated task-image:build scope",
+        )
+    now = datetime.now(UTC)
+    if revoked_at is not None or (expires_at is not None and expires_at <= now):
+        raise TaskImageBuilderPolicyError("task-image builder token is not active")
+    return token_hash
+
+
 async def _validate_builder_credentials(
     session: Any,
     *,
@@ -363,22 +428,7 @@ async def _validate_builder_credentials(
     if not registry_repo:
         raise TaskImageBuilderPolicyError("task-image builder registry is missing")
     registry_host = registry_repo.split("/", 1)[0]
-    docker_config_file = Path(registry_docker_config_dir) / "config.json"
-    try:
-        if docker_config_file.stat().st_size > 64 * 1024:
-            raise TaskImageBuilderPolicyError(
-                "task-image builder registry credentials are invalid"
-            )
-        docker_config = json.loads(docker_config_file.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise TaskImageBuilderPolicyError(
-            "task-image builder registry credentials are unavailable"
-        ) from exc
-    auths = docker_config.get("auths") if isinstance(docker_config, dict) else None
-    if not isinstance(auths, dict):
-        raise TaskImageBuilderPolicyError(
-            "task-image builder registry credentials are invalid"
-        )
+    auths = _builder_registry_auths(registry_docker_config_dir)
 
     def normalized_registry(value: str) -> str:
         normalized = value.removeprefix("https://").removeprefix("http://").rstrip("/")
@@ -392,30 +442,131 @@ async def _validate_builder_credentials(
         ),
         None,
     )
-    if not isinstance(matching_auth, dict) or not any(
-        isinstance(matching_auth.get(key), str) and matching_auth[key]
-        for key in ("auth", "identitytoken")
-    ):
+    if not _usable_registry_auth(matching_auth):
         raise TaskImageBuilderPolicyError(
             "task-image builder registry credentials do not authorize the configured registry"
         )
-    token_hash = hashlib.sha256(raw_token.encode("utf-8")).digest()
-    result = await session.execute(
-        select(Token.type, Token.scopes, Token.expires_at, Token.revoked_at).where(
-            Token.token_hash == token_hash,
+    await _validate_builder_token(session, raw_token)
+
+
+def _rehearsal_registry_credentials(
+    registry_docker_config_dir: str,
+) -> tuple[str, ...]:
+    auths = _builder_registry_auths(registry_docker_config_dir)
+    authorized_hosts = tuple(
+        sorted(
+            key
+            for key, value in auths.items()
+            if isinstance(key, str)
+            and key
+            and _usable_registry_auth(value)
         )
     )
-    row = result.one_or_none()
-    if row is None:
-        raise TaskImageBuilderPolicyError("task-image builder token is unknown")
-    token_type, scopes, expires_at, revoked_at = row
-    if token_type != "worker" or set(scopes or ()) != {"task-image:build"}:
+    if not authorized_hosts:
         raise TaskImageBuilderPolicyError(
-            "task-image builder token requires the dedicated task-image:build scope",
+            "task-image builder registry credentials are invalid"
         )
-    now = datetime.now(UTC)
-    if revoked_at is not None or (expires_at is not None and expires_at <= now):
-        raise TaskImageBuilderPolicyError("task-image builder token is not active")
+    return authorized_hosts
+
+
+async def _validate_builder_rehearsal_credentials(
+    session: Any,
+    *,
+    config: TaskImageBuilderPoolConfig,
+) -> dict[str, object]:
+    token_payload = _read_private_builder_input(
+        Path(config.builder_token_file),
+        label="token file",
+        max_bytes=64 * 1024,
+    )
+    try:
+        raw_token = token_payload.strip().decode("ascii")
+    except UnicodeError as exc:
+        raise TaskImageBuilderPolicyError(
+            "task-image builder token file is invalid"
+        ) from exc
+    if not raw_token or any(character.isspace() for character in raw_token):
+        raise TaskImageBuilderPolicyError("task-image builder token file is invalid")
+    authorized_hosts = _rehearsal_registry_credentials(
+        config.registry_docker_config_dir,
+    )
+    token_hash = await _validate_builder_token(session, raw_token)
+    return {
+        "credentials_valid": True,
+        "credential_evidence_sha256": hashlib.sha256(
+            json.dumps(
+                {
+                    "pool_name": config.pool_name,
+                    "registry_hosts": authorized_hosts,
+                    "token_sha256": token_hash.hex(),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+    }
+
+
+async def _rehearsal_validation_evidence(
+    config: TaskImageBuilderPoolConfig,
+) -> dict[str, object]:
+    runner = SubprocessTaskImageBuilderSlurmRunner(config)
+    for node in config.allowed_nodes:
+        await runner.validate_builder_request(node=node, config=config)
+    requests = {
+        node: build_task_image_builder_sbatch_request(config, node=node)
+        for node in config.allowed_nodes
+    }
+    request_digests = {
+        node: hashlib.sha256(
+            json.dumps(
+                {"args": list(request.args), "stdin": request.stdin},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        for node, request in requests.items()
+    }
+    request_set_sha256 = hashlib.sha256(
+        json.dumps(
+            request_digests,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        "request_nodes": sorted(request_digests),
+        "request_set_sha256": request_set_sha256,
+    }
+
+
+async def _validate_rehearsal_credentials_once(
+    args: argparse.Namespace,
+    config: TaskImageBuilderPoolConfig,
+) -> dict[str, object]:
+    port_forward = transport._database_port_forward_config(args)
+    db_connect_timeout_sec = transport._validated_timeout(
+        args.db_connect_timeout_sec,
+        "--db-connect-timeout-sec",
+        maximum=transport._MAX_PORT_FORWARD_READY_TIMEOUT_SEC,
+    )
+    db_url = transport._load_cp_db_url(args, timeout_sec=db_connect_timeout_sec)
+    url = transport._preflight_database_url(db_url, port_forward=port_forward)
+    with transport._database_port_forward(port_forward):
+        engine = create_async_engine(url, pool_pre_ping=True)
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with session_factory() as session:
+                async with asyncio.timeout(db_connect_timeout_sec):
+                    try:
+                        return await _validate_builder_rehearsal_credentials(
+                            session,
+                            config=config,
+                        )
+                    finally:
+                        await session.rollback()
+        finally:
+            await engine.dispose()
 
 
 async def _reconcile_with_credentials(
@@ -452,7 +603,25 @@ async def _main_async(args: argparse.Namespace) -> None:
         raise TaskImageBuilderPolicyError(
             "local Slurm authority does not match the builder policy",
         )
-    scale_up_allowed = args.validate_only or _global_execution_scale_up_allowed(
+    if args.validate_only:
+        evidence = await _rehearsal_validation_evidence(config)
+        credential_evidence = await _validate_rehearsal_credentials_once(args, config)
+        print(
+            json.dumps(
+                {
+                    "mode": "validate-only",
+                    "pool_name": config.pool_name,
+                    "cpu_arch": config.cpu_arch,
+                    "exclusive": config.exclusive,
+                    "requested_concurrency": config.requested_concurrency,
+                    **evidence,
+                    **credential_evidence,
+                },
+                sort_keys=True,
+            )
+        )
+        return
+    scale_up_allowed = _global_execution_scale_up_allowed(
         args,
         slurm_cluster_id=config.slurm_cluster_id,
     )
@@ -469,27 +638,6 @@ async def _main_async(args: argparse.Namespace) -> None:
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
             async with session_factory() as session:
-                if args.validate_only:
-                    async with asyncio.timeout(db_connect_timeout_sec):
-                        await _reconcile_with_credentials(
-                            session,
-                            config=config,
-                            runner=None,
-                            scale_up_allowed=True,
-                        )
-                    print(
-                        json.dumps(
-                            {
-                                "mode": "validate-only",
-                                "pool_name": config.pool_name,
-                                "cpu_arch": config.cpu_arch,
-                                "exclusive": config.exclusive,
-                                "requested_concurrency": config.requested_concurrency,
-                            },
-                            sort_keys=True,
-                        )
-                    )
-                    return
                 runner = SubprocessTaskImageBuilderSlurmRunner(config)
                 result = await _reconcile_with_credentials(
                     session,
