@@ -14,12 +14,6 @@ from types import SimpleNamespace
 from uuid import UUID, uuid5
 
 import pytest
-from scripts.ops import global_fleet_pool_executor_once as once
-from scripts.ops.global_fleet_pool_executor_once import (
-    ExecutorConfigError,
-    run_daemon_once,
-    run_executor_once,
-)
 from tests.support.fake_slurm import FakeSlurm
 from tests.unit.test_capacity_executor_config import executor_files
 from tests.unit.test_capacity_executor_executable import executor_fixture
@@ -35,6 +29,12 @@ from loom_capacity_manager.executable_contracts import (
     ExecutionContextV2,
     canonical_executable_bytes,
     canonical_executable_digest,
+)
+from loom_capacity_pool_controller import runtime as once
+from loom_capacity_pool_controller.runtime import (
+    ExecutorConfigError,
+    run_daemon_once,
+    run_executor_once,
 )
 from loom_capacity_pool_executor.slurm_inventory import SlurmInventoryPolicy
 

@@ -920,7 +920,7 @@ def test_release_image_matrix_is_derived_from_all_release_components() -> None:
 
     matrix = component_ownership.release_image_matrix(manifest)
 
-    assert len(matrix) == 17
+    assert len(matrix) == 18
     assert {entry["image_name"] for entry in matrix} == {
         component.release_digest for component in manifest.release_components()
     }

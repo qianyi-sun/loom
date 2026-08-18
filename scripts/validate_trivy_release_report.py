@@ -47,6 +47,7 @@ _POSTGRES_PERL_PACKAGES = (
     "perl-modules-5.36",
 )
 _PERL_BASE_COMPONENTS = (
+    "capacity-executor",
     "capacity-manager",
     "control-plane",
     "egress-xds",

@@ -241,6 +241,58 @@ live controller profile.
 
 ## 4. Render and stage each prepared-only controller
 
+Install the reviewed executor release before rendering controller-local inputs,
+so the new `loom_capacity_executor` UID is one of the observed values bound by
+the profile and inventory policy. Use the same digest-pinned helper on OLDLAB
+and GB10; this is the only supported Docker-group privileged installation path.
+It creates the system identity and empty `/etc`, `/run`, and `/var/lib`
+directories, installs a root-owned immutable offline venv and units, and leaves
+every service inactive and every timer disabled. It does not install a
+credential, controller config, policy, runtime artifact, or capacity authority.
+
+```bash
+executor_source_sha=1111111111111111111111111111111111111111
+executor_image="ghcr.io/qianyi-sun/loom-capacity-executor@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+printf '%s\n' "$executor_source_sha" | grep -Eq '^[0-9a-f]{40}$'
+printf '%s\n' "$executor_image" | grep -Eq \
+  '^ghcr[.]io/qianyi-sun/loom-capacity-executor@sha256:[0-9a-f]{64}$'
+
+docker run --rm \
+  --user 0:0 \
+  --privileged \
+  --pid=host \
+  --network=none \
+  --read-only \
+  --tmpfs /tmp:rw,nosuid,nodev,noexec,size=64m,mode=0700 \
+  --mount type=bind,src=/,dst=/host,bind-propagation=rslave \
+  --entrypoint /usr/local/bin/python \
+  "$executor_image" \
+  /opt/loom-capacity-executor-release/payload/installer/install_capacity_executor.py \
+  --host-root /host \
+  --image "$executor_image" \
+  --source-sha "$executor_source_sha"
+
+for unit in \
+  loom-capacity-pool-executor.service \
+  loom-capacity-pool-executor-prepared.service \
+  loom-capacity-pool-executor-active.service; do
+  test "$(systemctl is-active "$unit")" = inactive
+done
+for timer in \
+  loom-capacity-pool-executor-prepared.timer \
+  loom-capacity-pool-executor-active.timer; do
+  test "$(systemctl is-active "$timer")" = inactive
+  test "$(systemctl is-enabled "$timer")" = disabled
+done
+```
+
+The helper verifies the exact GHCR repository digest, OCI revision label,
+controller architecture, extracted release manifest, complete offline install,
+root-only runtime authority, systemd syntax, and quiescent unit state before it
+prints `"status":"installed-inert"`. Any mismatch is a stop condition. Record
+the canonical output, `id loom_capacity_executor`, and the absolute target of
+`/opt/loom-capacity-executor` in controller-local evidence.
+
 Create an owner-only live copy of
 `deploy/dev-fleet/capacity-pool-executor.toml.example`. Replace every
 shape-valid example with reviewed controller-local facts and the exact

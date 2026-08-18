@@ -11,7 +11,7 @@
  */
 
 import { useQueryClient } from "@tanstack/react-query";
-import { fireEvent, screen } from "@testing-library/react";
+import { fireEvent, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -347,6 +347,7 @@ function mockEndpoints(opts: {
   requireActiveTeamProviderScope?: boolean;
   switchTeamId?: string;
   honorActiveTeamProviderAvailability?: boolean;
+  providerConnectionsDelayMs?: number;
   /**
    * Override for `POST /api/v1/tasks/count`. When set, the count
    * endpoint returns this value regardless of body. Used by the
@@ -403,13 +404,16 @@ function mockEndpoints(opts: {
     .spyOn(globalThis, "fetch")
     .mockImplementation((input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : String(input);
-      const json = (b: unknown, status = 200) =>
-        Promise.resolve(
-          new Response(JSON.stringify(b), {
-            status,
-            headers: { "Content-Type": "application/json" },
-          }),
-        );
+      const json = (b: unknown, status = 200, delayMs = 0) => {
+        const response = new Response(JSON.stringify(b), {
+          status,
+          headers: { "Content-Type": "application/json" },
+        });
+        if (delayMs === 0) return Promise.resolve(response);
+        return new Promise<Response>((resolve) => {
+          setTimeout(() => resolve(response), delayMs);
+        });
+      };
       if (url.includes("/api/v1/auth/team")) {
         const teamId = opts.switchTeamId ?? ACTIVE_TEAM_ID;
         return json({
@@ -447,7 +451,11 @@ function mockEndpoints(opts: {
         ) {
           return json(FOREIGN_PROVIDER_CONNECTIONS_RESPONSE);
         }
-        return json(PROVIDER_CONNECTIONS_RESPONSE);
+        return json(
+          PROVIDER_CONNECTIONS_RESPONSE,
+          200,
+          opts.providerConnectionsDelayMs,
+        );
       }
       if (url.includes("/api/v1/models?view=raw")) return json(RAW_MODELS_RESPONSE);
       if (url.includes("/api/v1/models")) return json(MODELS_RESPONSE);
@@ -597,12 +605,16 @@ async function pickOracleAgent(
 async function pickDefaultModel(
   user: ReturnType<typeof userEvent.setup>,
 ): Promise<void> {
+  const providerSelect = await screen.findByLabelText(/^Provider connection$/i);
+  await within(providerSelect).findByRole("option", { name: /^Lab vLLM/i });
   await user.selectOptions(
-    await screen.findByLabelText(/^Provider connection$/i),
+    providerSelect,
     "11111111-1111-4111-8111-111111111111",
   );
+  const modelSelect = await screen.findByLabelText(/^Model$/i);
+  await within(modelSelect).findByRole("option", { name: /^deepseek-chat/i });
   await user.selectOptions(
-    await screen.findByLabelText(/^Model$/i),
+    modelSelect,
     "openai|deepseek-chat|11111111-1111-4111-8111-111111111111",
   );
 }
@@ -931,7 +943,7 @@ describe("NewBatch", () => {
   });
 
   it("unchecking the specific agent restores the default model runner with the current model", async () => {
-    mockEndpoints({ matchingTasks: 12 });
+    mockEndpoints({ matchingTasks: 12, providerConnectionsDelayMs: 250 });
     const user = userEvent.setup();
     renderWithProviders(<NewBatch />);
     await waitForNewBatchReady();
