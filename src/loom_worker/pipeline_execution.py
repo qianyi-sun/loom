@@ -70,7 +70,7 @@ from loom_worker.control_plane_client import (
 )
 from loom_worker.pipeline_attempt_workspace import (
     MAX_COMPLETE_BYTES,
-    BehaviorAttemptCompleteV1,
+    parse_attempt_complete,
 )
 from loom_worker.pipeline_container_runner import (
     ArtifactCommitResult,
@@ -914,7 +914,7 @@ def _validate_complete_marker(outputs_dir: Path, *, stage_result_digest: str) ->
         complete_path,
         max_bytes=MAX_COMPLETE_BYTES,
     )
-    complete = BehaviorAttemptCompleteV1.model_validate(complete_document)
+    complete = parse_attempt_complete(complete_document)
     if complete.stage_result_sha256 != stage_result_digest:
         raise RuntimeError("complete_marker_stage_result_digest_mismatch")
 
