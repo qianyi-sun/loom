@@ -37,6 +37,7 @@ from loom_capacity_manager.models import (
     CapacityAuthorityState,
     CapacityCandidate,
     CapacityExecutableIntent,
+    CapacityExecutableTranche,
     CapacityExecutionEpoch,
     CapacityExecutionExecutor,
     CapacityPoolReporter,
@@ -1844,6 +1845,23 @@ async def test_prepared_abort_rejects_any_existing_executable_intent(
                 input_valid_until=text("clock_timestamp() + interval '1 minute'"),
                 sealed=True,
                 allocation_count=0,
+            )
+        )
+        await capacity_session.execute(
+            insert(CapacityExecutableTranche).values(
+                tranche_id=UUID(int=13153),
+                execution_epoch=prepared.execution_epoch,
+                execution_manifest_sha256=prepared.execution_manifest_sha256,
+                configuration_epoch=prepared.configuration_epoch,
+                allocation_epoch=13151,
+                executor_id=executor.executor_id,
+                executor_incarnation=executor.executor_incarnation,
+                pool_id=executor.pool_id,
+                pool_generation=executor.pool_generation,
+                subject_id=subject.subject_id,
+                subject_incarnation=subject.subject_incarnation,
+                proposal_digest="b" * 64,
+                proposal_payload={},
             )
         )
         await capacity_session.execute(

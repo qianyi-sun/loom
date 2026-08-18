@@ -914,7 +914,20 @@ class CapacityExecutionStore:
                                 current,
                                 command_sequence=context.executor.command_high_water + 1,
                             )
-                        continue
+                        if (
+                            authority.execution_state == "drain-only"
+                            and current.state in {"observed", "terminal"}
+                        ):
+                            return await self._new_close(
+                                session,
+                                current,
+                                command_sequence=context.executor.command_high_water + 1,
+                            )
+                        if (
+                            authority.execution_state != "drain-only"
+                            or current.state != "closing"
+                        ):
+                            continue
                     increase_allowed = (
                         authority.execution_state == "active"
                         and authority.executable_new_capacity_ceiling > 0
@@ -1754,20 +1767,6 @@ class CapacityExecutionStore:
                 latest = await self._locked_latest_sealed_allocation_epoch(
                     session, context.epoch
                 )
-                if (
-                    latest is None
-                    or latest.allocation_epoch
-                    != acknowledgement.binding.execution.allocation_epoch
-                    or latest.input_valid_until is None
-                    or latest.input_valid_until <= now
-                    or acknowledgement.binding.execution
-                    != self._fence_from_rows(
-                        context.authority,
-                        context.epoch,
-                        allocation_epoch=latest.allocation_epoch,
-                    )
-                ):
-                    raise ExecutionConflictError("bootstrap allocation changed or expired")
             reporter = await self._exact_subject_reporter(
                 session,
                 subject_id=acknowledgement.binding.subject_id,
@@ -1802,6 +1801,29 @@ class CapacityExecutionStore:
                 raise ExecutionConflictError("bootstrap acknowledgement binding changed")
             if row.state != "accepted":
                 raise ExecutionConflictError("bootstrap acknowledgement intent is not accepted")
+            superseded_cleanup = (
+                context.authority.execution_state == "active"
+                and latest is not None
+                and latest.allocation_epoch > row.allocation_epoch
+            )
+            if (
+                not retained_drain
+                and not superseded_cleanup
+                and (
+                    latest is None
+                    or latest.allocation_epoch
+                    != acknowledgement.binding.execution.allocation_epoch
+                    or latest.input_valid_until is None
+                    or latest.input_valid_until <= now
+                    or acknowledgement.binding.execution
+                    != self._fence_from_rows(
+                        context.authority,
+                        context.epoch,
+                        allocation_epoch=latest.allocation_epoch,
+                    )
+                )
+            ):
+                raise ExecutionConflictError("bootstrap allocation changed or expired")
             if reporter.subject_id != row.subject_id:
                 raise ExecutionConflictError("bootstrap acknowledgement reporter changed")
             try:
@@ -1836,7 +1858,7 @@ class CapacityExecutionStore:
             ):
                 raise ExecutionConflictError("bootstrap proposal changed or expired")
             admission_acknowledged: CapacityExecutableAdmissionAcknowledgement | None = None
-            if not retained_drain:
+            if not retained_drain and not superseded_cleanup:
                 assert latest is not None
                 admission_proposal = await self._ensure_admission_proposal(
                     session,

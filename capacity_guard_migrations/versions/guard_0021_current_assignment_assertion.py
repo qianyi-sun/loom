@@ -30,6 +30,21 @@ PREPARE_EXCLUSION_TRIGGER = "prepared_admission_plans_never_converged_exclusion"
 UNCLAIMED_PLAN_FUNCTION = "assert_inert_admission_plan_unclaimed(uuid)"
 WITHDRAWAL_GUARD_FUNCTION = "enforce_inert_admission_plan_withdrawal_claim_safety()"
 WITHDRAWAL_GUARD_TRIGGER = "attempt_lifecycle_events_claim_safe_withdrawal"
+CAPTURE_FUNCTIONS = (
+    "capture_demand_observation_v1_legacy(uuid,bigint,integer)",
+    "capture_lifecycle_demand_observation_v2_queued(uuid,bigint,integer)",
+)
+CANDIDATE_DIGEST_PAYLOAD_CLAUSE = (
+    "'candidate_digest', v_registration.candidate_digest,"
+)
+EXACT_CANDIDATE_PAYLOAD_CLAUSE = (
+    "'candidate_digest', v_registration.candidate_digest,\n"
+    "            'candidate_identity_algorithm', "
+    "v_registration.candidate_identity_algorithm,\n"
+    "            'candidate_identity', v_registration.candidate_identity,\n"
+    "            'candidate_publication_sha256', "
+    "v_registration.candidate_publication_sha256,"
+)
 
 
 def _agent_role() -> str:
@@ -37,6 +52,45 @@ def _agent_role() -> str:
     if not isinstance(role, str) or not role:
         raise RuntimeError("current-assignment migration is missing the validated agent role")
     return op.get_bind().dialect.identifier_preparer.quote(role)
+
+
+def _replace_function_clause(function: str, old: str, new: str) -> None:
+    escaped_old = old.replace("'", "''")
+    escaped_new = new.replace("'", "''")
+    op.execute(
+        f"""
+        DO $$
+        DECLARE
+          v_definition text;
+        BEGIN
+          SELECT pg_get_functiondef(
+            '{SCHEMA}.{function}'::regprocedure
+          ) INTO v_definition;
+          IF position('{escaped_old}' in v_definition) = 0 THEN
+            RAISE EXCEPTION 'current-assignment function clause not found: {function}';
+          END IF;
+          EXECUTE replace(v_definition, '{escaped_old}', '{escaped_new}');
+        END $$;
+        """
+    )
+
+
+def _patch_capture_candidate_provenance() -> None:
+    for function in CAPTURE_FUNCTIONS:
+        _replace_function_clause(
+            function,
+            CANDIDATE_DIGEST_PAYLOAD_CLAUSE,
+            EXACT_CANDIDATE_PAYLOAD_CLAUSE,
+        )
+
+
+def _unpatch_capture_candidate_provenance() -> None:
+    for function in CAPTURE_FUNCTIONS:
+        _replace_function_clause(
+            function,
+            EXACT_CANDIDATE_PAYLOAD_CLAUSE,
+            CANDIDATE_DIGEST_PAYLOAD_CLAUSE,
+        )
 
 
 def _install_current_assignment_assertion() -> None:
@@ -871,6 +925,7 @@ def _install_closure_dispositions() -> None:
 
 def upgrade() -> None:
     quoted_agent = _agent_role()
+    _patch_capture_candidate_provenance()
     _create_abandonment_table()
     _install_closure_dispositions()
     _install_current_plan_assertion()
@@ -920,6 +975,7 @@ def downgrade() -> None:
     ).scalar_one():
         raise RuntimeError("cannot downgrade guard_0021 with closure disposition evidence")
     quoted_agent = _agent_role()
+    _unpatch_capture_candidate_provenance()
     op.execute(f"REVOKE EXECUTE ON FUNCTION {SCHEMA}.{FUNCTION} FROM {quoted_agent}")
     op.execute(f"DROP FUNCTION {SCHEMA}.{FUNCTION}")
     op.execute(f"REVOKE EXECUTE ON FUNCTION {SCHEMA}.{PLAN_FUNCTION} FROM {quoted_agent}")

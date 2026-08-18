@@ -10,7 +10,7 @@ import re
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
 from uuid import UUID, uuid5
@@ -31,11 +31,9 @@ from loom_capacity_agent.admission import (
     ExecutableReleaseRequestV2,
     ExecutableWorkerRegistrationV2,
     PhysicalJobBindingV2,
-    PreparedAdmissionPlanV1,
-    PreparedPlacementAllowanceV1,
-    PreparedWorkerShapeV1,
     PublishableExecutableProtectedReleaseV2,
 )
+from loom_capacity_agent.admission_convergence import ProtectedAdmissionPlanCoordinator
 from loom_capacity_agent.claim_guard import (
     ExecutableClaimProposalV2,
     InertAttemptTransitionV1,
@@ -44,6 +42,7 @@ from loom_capacity_agent.client import DemandPublishError, DemandReporterClient
 from loom_capacity_agent.contracts import (
     AgentPoolCapabilityV1,
     AgentRegistrationV1,
+    GuardLifecycleDemandObservationV2,
     ReporterConfigurationV1,
 )
 from loom_capacity_agent.executable_admission import ExecutableAdmissionStore
@@ -54,8 +53,11 @@ from loom_capacity_agent.executable_release_reporter import (
     ExecutableProtectedReleaseReporterRuntime,
 )
 from loom_capacity_agent.lifecycle_store import CapacityAttemptLifecycleStore
-from loom_capacity_agent.prepared_store import CapacityPreparedAdmissionStore
-from loom_capacity_agent.store import CapacityAgentStore, read_next_executable_protected_release
+from loom_capacity_agent.store import (
+    CapacityAgentStore,
+    capture_lifecycle_demand_observation,
+    read_next_executable_protected_release,
+)
 from loom_capacity_executor.bootstrap_handoff import (
     BootstrapHandoffStore,
 )
@@ -100,7 +102,6 @@ from loom_capacity_guard.contracts import (
     canonical_digest as canonical_guard_digest,
 )
 from loom_capacity_guard.store import CapacityGuardStore
-from loom_capacity_manager.allocator import ExecutableEpochV2
 from loom_capacity_manager.api import create_app
 from loom_capacity_manager.auth import CapacityPrincipalVerifier
 from loom_capacity_manager.config import CapacityManagerSettings
@@ -128,6 +129,8 @@ from loom_capacity_manager.contracts import (
 )
 from loom_capacity_manager.executable_contracts import (
     CandidateBindingV2,
+    ExecutableAdmissionPlanClosureV2,
+    ExecutableAdmissionPlanProposalV2,
     ExecutableBootstrapRegistrationV2,
     ExecutableExecutorHeartbeatV2,
     ExecutableExecutorInventoryV2,
@@ -617,6 +620,8 @@ class OwnerHandle:
     demand_kind: Literal["x86", "arm", "neutral", "zero"] = "zero"
     demand_count: int = 0
     active: bool = True
+    lifecycle_observation_sequence: int = 0
+    latest_lifecycle_observation: GuardLifecycleDemandObservationV2 | None = None
     attempts: list[_Attempt] = field(default_factory=list)
 
     @property
@@ -1238,7 +1243,13 @@ class ExecutableCapacityHarness:
                         ),
                     ),
                     compatible_domain_ids=(domain_id,),
-                    capabilities=("cpu",),
+                    capabilities=(
+                        "cpu",
+                        f"cpu_arch.{architectures[pool_id]}",
+                        "gpu_vendor.none",
+                        "network.public",
+                        "os.linux",
+                    ),
                     warm_approved=True,
                 )
                 for slots in (1, 2)
@@ -2733,9 +2744,11 @@ class ExecutableCapacityHarness:
         pool_id: str,
         binding: ExecutableIntentBindingV2,
     ) -> ProtectedDrainEvidence:
-        result = await self.pools[pool_id].tick()
-        if result.status != "draining" or result.operation_id != binding.intent_id:
-            raise RuntimeError(f"prepared intent did not drain through revocation: {result}")
+        result = await self._tick_through_inventory(
+            self.pools[pool_id],
+            expected_status="draining",
+            expected_operation_id=binding.intent_id,
+        )
         owner = self._owners_by_subject[binding.subject_id]
         publication = await self._pending_protected_release(owner)
         row = await self._manager_intent_row(binding.intent_id)
@@ -2754,15 +2767,17 @@ class ExecutableCapacityHarness:
     ) -> ProtectedDrainEvidence:
         pool = self.pools[pool_id]
         pool.use_current_clock()
-        cleanup = await pool.tick()
-        if cleanup.status != "bootstrap-proposed" or cleanup.operation_id != binding.intent_id:
-            raise RuntimeError(f"accepted intent did not propose cleanup bootstrap: {cleanup}")
+        await self._tick_through_inventory(
+            pool,
+            expected_status="bootstrap-proposed",
+            expected_operation_id=binding.intent_id,
+        )
         await self._protect_and_acknowledge_bootstrap(binding)
-        result = await pool.tick()
-        if result.status != "draining" or result.operation_id != binding.intent_id:
-            raise RuntimeError(
-                f"cleanup-prepared intent did not drain through revocation: {result}"
-            )
+        result = await self._tick_through_inventory(
+            pool,
+            expected_status="draining",
+            expected_operation_id=binding.intent_id,
+        )
         owner = self._owners_by_subject[binding.subject_id]
         publication = await self._pending_protected_release(owner)
         row = await self._manager_intent_row(binding.intent_id)
@@ -2780,19 +2795,24 @@ class ExecutableCapacityHarness:
         binding: ExecutableIntentBindingV2,
         job_id: str,
     ) -> ProtectedDrainEvidence:
-        result = await self.pools[pool_id].tick()
-        if result.status != "pending-cancelled" or result.operation_id != binding.intent_id:
-            raise RuntimeError(f"unregistered intent did not cancel pending job: {result}")
-        self.pools[pool_id].fake.terminalize_job(job_id)
-        await self.pools[pool_id].heartbeat()
-        terminal_inventory = await self.pools[pool_id].tick()
+        pool = self.pools[pool_id]
+        result = await self._tick_through_inventory(
+            pool,
+            expected_status="pending-cancelled",
+            expected_operation_id=binding.intent_id,
+        )
+        pool.fake.terminalize_job(job_id)
+        await pool.heartbeat()
+        terminal_inventory = await pool.tick()
         if terminal_inventory.status != "inventory-published":
             raise RuntimeError(
                 f"terminal accounting inventory was not published: {terminal_inventory}"
             )
-        terminal_close = await self.pools[pool_id].tick()
-        if terminal_close.status != "draining" or terminal_close.operation_id != binding.intent_id:
-            raise RuntimeError(f"terminal intent did not close centrally: {terminal_close}")
+        await self._tick_through_inventory(
+            pool,
+            expected_status="draining",
+            expected_operation_id=binding.intent_id,
+        )
         owner = self._owners_by_subject[binding.subject_id]
         publication = await self._pending_protected_release(owner)
         row = await self._manager_intent_row(binding.intent_id)
@@ -2898,14 +2918,51 @@ class ExecutableCapacityHarness:
         binding: ExecutableIntentBindingV2,
     ) -> ExecutorTickResult:
         pool = self.pools[pool_id]
-        result = await pool.tick()
-        if result.status != "released":
-            raise RuntimeError(f"intent did not release centrally: {result}")
+        result = await self._tick_through_inventory(
+            pool,
+            expected_status="released",
+            expected_operation_id=binding.intent_id,
+        )
         if await self.manager_commitments() == ():
             for final_pool_id in self.pools:
                 await self.publish_retirement_safe_executor_evidence(final_pool_id)
             await self._retire_exact()
         return result
+
+    async def _tick_through_inventory(
+        self,
+        pool: PoolHarness,
+        *,
+        expected_status: str,
+        expected_operation_id: UUID,
+    ) -> ExecutorTickResult:
+        """Advance a pool only across durable inventory publications."""
+
+        for _ in range(4):
+            result = await pool.tick()
+            if (
+                result.status == expected_status
+                and result.operation_id == expected_operation_id
+            ):
+                return result
+            if (
+                result.status == "released"
+                and expected_status == "released"
+                and result.operation_id is None
+                and (await self._manager_intent_row(expected_operation_id)).state
+                == "released"
+            ):
+                return result
+            if result.status != "inventory-published":
+                raise RuntimeError(
+                    f"pool {pool.pool_id} did not reach {expected_status} for "
+                    f"{expected_operation_id}: {result}"
+                )
+            await pool.heartbeat()
+        raise RuntimeError(
+            f"pool {pool.pool_id} did not reach {expected_status} for "
+            f"{expected_operation_id} after inventory publication"
+        )
 
     async def publish_retirement_safe_executor_evidence(self, pool_id: str) -> None:
         pool = self.pools[pool_id]
@@ -2989,7 +3046,68 @@ class ExecutableCapacityHarness:
                 protected.acknowledgement,
                 idempotency_key=protected.idempotency_key,
             )
+            await self._protect_and_acknowledge_admission(owner, configuration, client)
             self.pools[binding.pool_id].use_deterministic_clock()
+        finally:
+            await engine.dispose()
+
+    async def _capture_owner_lifecycle_observation(
+        self,
+        owner: OwnerHandle,
+    ) -> GuardLifecycleDemandObservationV2:
+        engine = create_async_engine(
+            make_url(_database_value(owner.database, "agent_url")),
+            isolation_level="SERIALIZABLE",
+        )
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session, session.begin():
+                observation = await capture_lifecycle_demand_observation(
+                    session,
+                    registration=owner.registration,
+                    expected_high_water=owner.lifecycle_observation_sequence,
+                    max_attempts=10_000,
+                )
+        finally:
+            await engine.dispose()
+        owner.lifecycle_observation_sequence = observation.sequence
+        owner.latest_lifecycle_observation = observation
+        return owner.latest_lifecycle_observation
+
+    async def _protect_and_acknowledge_admission(
+        self,
+        owner: OwnerHandle,
+        configuration: ReporterConfigurationV1,
+        client: DemandReporterClient,
+    ) -> None:
+        proposal = await client.next_executable_admission_plan()
+        if proposal is None:
+            return
+        if isinstance(proposal, ExecutableAdmissionPlanClosureV2):
+            raise RuntimeError("subject agent received admission closure before acknowledgement")
+        if not isinstance(proposal, ExecutableAdmissionPlanProposalV2):
+            raise RuntimeError("subject agent received invalid admission work")
+        observation = await self._capture_owner_lifecycle_observation(owner)
+        engine = create_async_engine(
+            make_url(_database_value(owner.database, "agent_url")),
+            isolation_level="SERIALIZABLE",
+        )
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session, session.begin():
+                protected = await ProtectedAdmissionPlanCoordinator(
+                    session,
+                    configuration=configuration,
+                ).converge(proposal, observation)
+            async with factory() as session, session.begin():
+                authorized = await ProtectedAdmissionPlanCoordinator(
+                    session,
+                    configuration=configuration,
+                ).authorize_publication(protected)
+                await client.publish_executable_admission_acknowledgement(
+                    authorized.acknowledgement,
+                    idempotency_key=authorized.idempotency_key,
+                )
         finally:
             await engine.dispose()
 
@@ -3412,181 +3530,46 @@ class ExecutableCapacityHarness:
         owner: OwnerHandle,
         scheduled: tuple[tuple[_Attempt, _Worker, int], ...],
     ) -> dict[UUID, _AttemptAssignment]:
-        if self._session_factory is None:
-            raise RuntimeError("manager session factory is unavailable")
-        by_pool: dict[str, list[tuple[_Attempt, _Worker, int]]] = {}
-        for attempt, worker, shape_slot_index in scheduled:
-            by_pool.setdefault(worker.binding.pool_id, []).append(
-                (attempt, worker, shape_slot_index)
-            )
+        observation = await self._capture_owner_lifecycle_observation(owner)
+        observed = {item.protected_attempt_id: item for item in observation.attempts}
+        scheduled_ids = {attempt.protected_attempt_id for attempt, _, _ in scheduled}
+        if len(scheduled_ids) != len(scheduled) or set(observed) != scheduled_ids:
+            raise RuntimeError("protected lifecycle capture differs from scheduled claims")
 
         assignments: dict[UUID, _AttemptAssignment] = {}
-        template = cast(
-            DevelopmentSubjectTemplateV1,
-            self.fleet.development_subject_template,
-        )
-        for raw_pool_id, items in by_pool.items():
-            if raw_pool_id not in _POOL_ORDER:
-                raise RuntimeError("claim assignment references an unknown pool")
-            pool_id = cast(Literal["gb10", "oldlab"], raw_pool_id)
-            binding = items[0][1].binding
-            profile = next(item for item in template.profiles if item.pool_id == pool_id)
-            prepared_shapes: list[PreparedWorkerShapeV1] = []
-            seen_intents: set[UUID] = set()
-            for _attempt, worker, _shape_slot_index in items:
-                item = worker.binding
-                if (
-                    item.execution != binding.execution
-                    or item.pool_id != binding.pool_id
-                    or item.pool_generation != binding.pool_generation
-                    or item.profile_id != binding.profile_id
-                    or item.profile_generation != binding.profile_generation
-                    or item.profile_digest != binding.profile_digest
-                ):
-                    raise RuntimeError("claim assignments do not share one manager plan")
-                if item.intent_id in seen_intents:
-                    continue
-                seen_intents.add(item.intent_id)
-                worker_shape = next(
-                    shape for shape in profile.worker_shapes if shape.shape_id == item.shape_id
-                )
-                if (
-                    worker_shape.concurrency_slots != item.concurrency_slots
-                    or worker_shape.total_resources != item.resources
-                ):
-                    raise RuntimeError("claim assignment differs from its manager worker shape")
-                prepared_shapes.append(
-                    PreparedWorkerShapeV1(
-                        shape_instance_id=item.shape_instance_id,
-                        submission_intent_id=item.intent_id,
-                        pool_id=pool_id,
-                        pool_generation=item.pool_generation,
-                        profile_id=item.profile_id,
-                        profile_generation=item.profile_generation,
-                        profile_digest=item.profile_digest,
-                        protocol_generation=profile.protocol_generation,
-                        protocol_digest=profile.protocol_digest,
-                        worker_shape=worker_shape,
-                        worker_shape_digest=canonical_digest(worker_shape),
-                        bootstrap_registration_epoch=(
-                            worker.registration.bootstrap_registration_epoch
-                        ),
-                    )
-                )
-
-            plan_id = _uuid(
-                f"claim-plan:{owner.subject_id}:{binding.execution.allocation_epoch}:{pool_id}"
-            )
-            admission_incarnation = _uuid(
-                f"claim-admission:{owner.subject_id}:{binding.execution.allocation_epoch}:{pool_id}"
-            )
-            allowances = tuple(
-                PreparedPlacementAllowanceV1(
-                    allowance_id=_uuid(
-                        "claim-allowance:"
-                        f"{binding.execution.allocation_epoch}:{attempt.protected_attempt_id}"
-                    ),
-                    protected_attempt_id=attempt.protected_attempt_id,
-                    execution_generation=attempt.execution_generation,
-                    requirements_digest=attempt.requirements_digest,
-                    pool_id=pool_id,
-                    shape_instance_id=worker.binding.shape_instance_id,
-                    shape_slot_index=shape_slot_index,
-                    submission_intent_id=worker.binding.intent_id,
-                )
-                for attempt, worker, shape_slot_index in items
-            )
-            async with self._session_factory() as session:
-                allocation_row = (
-                    await session.execute(
-                        select(CapacityAllocationEpoch).where(
-                            CapacityAllocationEpoch.allocation_epoch
-                            == binding.execution.allocation_epoch,
-                            CapacityAllocationEpoch.execution_epoch
-                            == binding.execution.execution_epoch,
-                            CapacityAllocationEpoch.execution_manifest_sha256
-                            == binding.execution.execution_manifest_sha256,
-                            CapacityAllocationEpoch.status == "executable",
-                        )
-                    )
-                ).scalar_one()
-            allocation = ExecutableEpochV2.model_validate_json(
-                json.dumps(allocation_row.complete_payload)
-            )
+        for attempt, worker, shape_slot_index in scheduled:
+            assigned = observed[attempt.protected_attempt_id]
+            binding = worker.binding
             if (
-                allocation.execution != binding.execution
-                or allocation.input_digest != allocation_row.input_digest
+                assigned.lifecycle_state != "assigned"
+                or assigned.lifecycle_sequence != 1
+                or assigned.execution_generation != attempt.execution_generation
+                or assigned.requirements_digest != attempt.requirements_digest
+                or assigned.pool_id != binding.pool_id
+                or assigned.pool_generation != binding.pool_generation
+                or assigned.profile_id != binding.profile_id
+                or assigned.profile_generation != binding.profile_generation
+                or assigned.profile_digest != binding.profile_digest
+                or assigned.shape_id != binding.shape_id
+                or assigned.shape_instance_id != binding.shape_instance_id
+                or assigned.submission_intent_id != binding.intent_id
+                or assigned.manager_allocation_epoch != binding.execution.allocation_epoch
+                or assigned.allowance_id is None
+                or assigned.plan_id is None
+                or assigned.admission_incarnation is None
             ):
-                raise RuntimeError("claim assignment differs from its committed allocation")
-            plan = PreparedAdmissionPlanV1(
-                **owner.registration.model_dump(mode="python"),
-                plan_id=plan_id,
-                admission_incarnation=admission_incarnation,
-                manager_authority_incarnation=binding.execution.authority_incarnation,
-                manager_writer_epoch=binding.execution.writer_epoch,
-                manager_allocation_epoch=binding.execution.allocation_epoch,
-                manager_input_digest=allocation_row.input_digest,
-                manager_allocation_digest=canonical_executable_digest(allocation),
-                pool_id=pool_id,
-                pool_generation=binding.pool_generation,
-                profile_id=binding.profile_id,
-                profile_generation=binding.profile_generation,
-                profile_digest=binding.profile_digest,
-                protocol_generation=profile.protocol_generation,
-                protocol_digest=profile.protocol_digest,
-                lease_not_after=datetime.now(UTC) + timedelta(hours=1),
-                worker_shapes=tuple(prepared_shapes),
-                placement_allowances=allowances,
+                raise RuntimeError("protected lifecycle assignment differs from scheduled worker")
+            if shape_slot_index >= binding.concurrency_slots:
+                raise RuntimeError("claim assignment exceeds scheduled worker capacity")
+            assignments[attempt.protected_attempt_id] = _AttemptAssignment(
+                allowance_id=assigned.allowance_id,
+                plan_id=assigned.plan_id,
+                admission_incarnation=assigned.admission_incarnation,
+                manager_allocation_epoch=assigned.manager_allocation_epoch,
+                pool_id=assigned.pool_id,
+                shape_instance_id=assigned.shape_instance_id,
+                submission_intent_id=assigned.submission_intent_id,
             )
-            engine = create_async_engine(make_url(_database_value(owner.database, "agent_url")))
-            factory = async_sessionmaker(engine, expire_on_commit=False)
-            try:
-                async with factory() as session, session.begin():
-                    await CapacityPreparedAdmissionStore(
-                        session,
-                        registration=owner.registration,
-                    ).prepare_plan(plan)
-                    lifecycle = CapacityAttemptLifecycleStore(
-                        session,
-                        registration=owner.registration,
-                    )
-                    for allowance in allowances:
-                        await lifecycle.apply_transition(
-                            InertAttemptTransitionV1(
-                                **owner.registration.model_dump(mode="python"),
-                                transition_id=_uuid(
-                                    "claim-assignment:"
-                                    f"{binding.execution.allocation_epoch}:"
-                                    f"{allowance.protected_attempt_id}"
-                                ),
-                                protected_attempt_id=allowance.protected_attempt_id,
-                                execution_generation=allowance.execution_generation,
-                                requirements_digest=allowance.requirements_digest,
-                                expected_transition_sequence=0,
-                                operation="assign",
-                                expected_state="pending-unassigned",
-                                target_state="assigned",
-                                allowance_id=allowance.allowance_id,
-                                plan_id=plan.plan_id,
-                                admission_incarnation=plan.admission_incarnation,
-                                manager_allocation_epoch=plan.manager_allocation_epoch,
-                                pool_id=plan.pool_id,
-                                shape_instance_id=allowance.shape_instance_id,
-                                submission_intent_id=allowance.submission_intent_id,
-                                transition_reason="manager-placement",
-                            )
-                        )
-                        assignments[allowance.protected_attempt_id] = _AttemptAssignment(
-                            allowance_id=allowance.allowance_id,
-                            plan_id=plan.plan_id,
-                            admission_incarnation=plan.admission_incarnation,
-                            manager_allocation_epoch=plan.manager_allocation_epoch,
-                            pool_id=plan.pool_id,
-                            shape_instance_id=allowance.shape_instance_id,
-                            submission_intent_id=allowance.submission_intent_id,
-                        )
-            finally:
-                await engine.dispose()
         return assignments
 
     async def claim_all(self) -> None:
@@ -3729,17 +3712,24 @@ class ExecutableCapacityHarness:
         completed_claims = False
         for intent_id, pool_id, _rank in rows:
             pool = self.pools[pool_id]
-            first = await pool.tick()
-            if first.status == "inventory-published" and intent_id not in self._workers:
+            if intent_id not in self._workers:
+                first = await pool.tick()
+                if first.status != "inventory-published":
+                    raise RuntimeError(f"prepared-unused intent did not publish inventory: {first}")
                 binding = await self._binding(intent_id)
                 owner = self._owners_by_subject[binding.subject_id]
                 await self.publish_next_protected_release_with_replay(owner)
-                released = await pool.tick()
-                if released.status != "released":
-                    raise RuntimeError(f"prepared-unused intent did not release: {released}")
+                await self._tick_through_inventory(
+                    pool,
+                    expected_status="released",
+                    expected_operation_id=intent_id,
+                )
                 continue
-            if first.status not in {"draining", "pending-cancelled"}:
-                raise RuntimeError(f"intent did not enter protected drain: {first}")
+            first = await self._tick_through_inventory(
+                pool,
+                expected_status="draining",
+                expected_operation_id=intent_id,
+            )
             if not completed_claims:
                 await self.complete_all_claims()
                 completed_claims = True
@@ -3789,9 +3779,11 @@ class ExecutableCapacityHarness:
                 raise RuntimeError(
                     "protected release reporter published a stale or mismatched release"
                 )
-            released = await pool.tick()
-            if released.status != "released":
-                raise RuntimeError(f"intent did not release: {released}")
+            await self._tick_through_inventory(
+                pool,
+                expected_status="released",
+                expected_operation_id=intent_id,
+            )
         for pool_id in _POOL_ORDER:
             pool = self.pools[pool_id]
             await pool.heartbeat()

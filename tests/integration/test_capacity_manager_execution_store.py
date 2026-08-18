@@ -1956,6 +1956,82 @@ async def test_newer_sealed_epoch_turns_an_old_permit_into_close(
     assert work.binding.intent_id == permit.binding.intent_id
 
 
+async def test_superseded_accepted_bootstrap_acknowledgement_is_cleanup_only(
+    capacity_session: AsyncSession,
+) -> None:
+    """A stale accepted intent must gain revocation evidence without reopening launch."""
+
+    store = CapacityExecutionStore()
+    active, sealed_epoch = await _active_plan(capacity_session)
+    executor = executor_binding("gb10")
+    await _heartbeat(store, capacity_session, active, pool_id="gb10")
+    reservation = await store.next_pool_work(capacity_session, executor)
+    assert isinstance(reservation, ExecutableReservationProposalV2)
+    await store.accept_reservation(
+        capacity_session,
+        ExecutableReservationAcceptanceV2(
+            execution=reservation.execution,
+            tranche_id=reservation.tranche_id,
+            proposal_digest=store.contract_digest(reservation),
+            pool_id=executor.pool_id,
+            pool_generation=executor.pool_generation,
+            executor_id=executor.executor_id,
+            executor_incarnation=executor.executor_incarnation,
+            command_sequence=1,
+        ),
+    )
+    await _clone_sealed_epoch(
+        capacity_session,
+        allocation_epoch=sealed_epoch,
+        input_valid_until=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    close = await store.next_pool_work(capacity_session, executor)
+    assert isinstance(close, ExecutableIntentCloseV2)
+    assert close.bootstrap_registration_epoch is None
+    bootstrap = ExecutableBootstrapProposalV2(
+        binding=close.binding,
+        command_sequence=close.command_sequence,
+        proposal_epoch=1,
+        bootstrap_sha256="7" * 64,
+        expires_at=datetime.now(UTC) + timedelta(minutes=1),
+    )
+    await store.propose_bootstrap(capacity_session, bootstrap)
+
+    await store.acknowledge_bootstrap(
+        capacity_session,
+        ExecutableBootstrapAcknowledgementV2(
+            binding=close.binding,
+            proposal_epoch=bootstrap.proposal_epoch,
+            proposal_digest=store.contract_digest(bootstrap),
+            reporter_incarnation=demand_snapshot().reporter_incarnation,
+            bootstrap_registration_epoch=1,
+            bootstrap_evidence_sha256="8" * 64,
+            protected_admission_sha256="3" * 64,
+        ),
+        actor="development",
+        idempotency_key=UUID(int=1004),
+    )
+
+    row = (
+        await capacity_session.execute(
+            select(CapacityExecutableIntent).where(
+                CapacityExecutableIntent.intent_id == close.binding.intent_id
+            )
+        )
+    ).scalar_one()
+    assert row.state == "bootstrap-acknowledged"
+    assert row.launch_ready_at is None
+    assert (
+        await capacity_session.execute(
+            select(func.count(CapacityExecutableAdmissionProposal.id))
+        )
+    ).scalar_one() == 0
+    successor = await store.next_pool_work(capacity_session, executor)
+    assert isinstance(successor, ExecutableIntentCloseV2)
+    assert successor.bootstrap_registration_epoch == 1
+    assert successor.bootstrap_evidence_sha256 == "8" * 64
+
+
 async def test_acceptance_cannot_claim_another_executor_proposal(
     capacity_session: AsyncSession,
 ) -> None:
@@ -7765,7 +7841,7 @@ async def test_drain_only_writer_transition_allows_retained_intent_close(
     assert result.intent_id == close.binding.intent_id
 
 
-async def test_drain_only_transition_emits_close_for_observed_worker(
+async def test_drain_only_transition_emits_close_for_superseded_observed_worker(
     capacity_session: AsyncSession,
 ) -> None:
     store = CapacityExecutionStore(
@@ -7825,6 +7901,11 @@ async def test_drain_only_transition_emits_close_for_observed_worker(
                 ),
             ),
         ),
+    )
+    await _clone_sealed_epoch(
+        capacity_session,
+        allocation_epoch=binding.execution.allocation_epoch,
+        input_valid_until=datetime.now(UTC) + timedelta(minutes=5),
     )
     await CapacityManagementStore().register_writer(
         capacity_session,
