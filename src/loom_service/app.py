@@ -480,6 +480,9 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
 
     app = FastAPI(title="Loom Service", version="0.0.1", lifespan=lifespan)
     app.state.personal_dev_builder_available = False
+    app.state.personal_dev_acceptance_required = (
+        settings.dev_instances_enabled and settings.personal_dev_builder_enabled
+    )
     stage1_candidate_authority = build_stage1_candidate_authority_from_environment(
         repo_root=Path(__file__).resolve().parents[2]
     )

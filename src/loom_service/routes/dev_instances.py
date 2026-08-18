@@ -64,6 +64,8 @@ ProvisionerFactory = Callable[[InstanceStore], DevInstanceProvisioner]
 
 
 async def _assert_personal_dev_acceptance(request: Request) -> None:
+    if getattr(request.app.state, "personal_dev_acceptance_required", False) is not True:
+        return
     interlock = getattr(request.app.state, "personal_dev_acceptance_interlock", None)
     assert_ready = getattr(interlock, "assert_ready", None)
     if not callable(assert_ready):

@@ -258,6 +258,7 @@ def _request(
         async def assert_ready(self, *, now: datetime) -> None:
             assert now.tzinfo == UTC
 
+    app.state.personal_dev_acceptance_required = True
     app.state.personal_dev_acceptance_interlock = _ReadyInterlock()
 
     async def access_factory(_session, ctx):
@@ -754,7 +755,7 @@ async def test_activation_intent_read_rejects_before_database_when_interlock_dri
     assert exc.value.detail == "personal-dev acceptance capacity-manager-binding-drift"
 
 
-async def test_activation_intent_route_requires_agent_signature_and_returns_exact_binding(
+async def test_ordinary_activation_intent_route_requires_signature_without_acceptance_interlock(
     monkeypatch,
 ) -> None:
     private_key = bytes(range(32))
@@ -794,6 +795,8 @@ async def test_activation_intent_route_requires_agent_signature_and_returns_exac
             return None
 
     request = _request(_Store(), configured=False)
+    request.app.state.personal_dev_acceptance_required = False
+    del request.app.state.personal_dev_acceptance_interlock
     request.app.state.personal_dev_activation_verifier = verifier
     request.app.state.session_factory = lambda: _SessionContext()
 
