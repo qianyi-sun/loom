@@ -969,6 +969,86 @@ class ArtifactCommitService:
         await self._repository.save(session)
         return file_state.verified
 
+    async def read_verified_file(
+        self,
+        *,
+        session_id: UUID,
+        file_index: int,
+        auth: UploadAuthV1,
+        max_bytes: int,
+    ) -> bytes:
+        """Read one already verified session file for a server-owned derivation."""
+
+        session = await self._authorized(session_id, auth)
+        if max_bytes <= 0 or not 0 <= file_index < len(session.files):
+            raise ArtifactCommitError("file_not_found")
+        state = session.files[file_index]
+        if state.verified is None or state.verified.size_bytes > max_bytes:
+            raise ArtifactCommitError("file_not_verified")
+        payload = bytearray()
+        async for chunk in self._store.stream_object(
+            bucket=self._bucket,
+            key=_data_object_key(session, state),
+            chunk_size=min(MAX_APPLICATION_BUFFER_BYTES, max_bytes),
+        ):
+            if not chunk or len(payload) + len(chunk) > max_bytes:
+                raise ArtifactCommitError("object_store_chunk_too_large")
+            payload.extend(chunk)
+        value = bytes(payload)
+        if len(value) != state.verified.size_bytes or not hmac.compare_digest(
+            digest_bytes(value), state.verified.sha256
+        ):
+            raise ArtifactCommitError("object_readback_mismatch")
+        return value
+
+    async def commit_platform_document(
+        self,
+        *,
+        session_id: UUID,
+        file_index: int,
+        value: Any,
+        auth: UploadAuthV1,
+    ) -> VerifiedFileV1:
+        """Commit one canonical platform-owned document inside an open session."""
+
+        session = await self._authorized(session_id, auth)
+        if not 0 <= file_index < len(session.files):
+            raise ArtifactCommitError("file_not_found")
+        state = session.files[file_index]
+        plan = state.plan
+        if (
+            plan.producer != "platform"
+            or plan.role != "semantic_document"
+            or plan.archive_format != "none"
+        ):
+            raise ArtifactCommitError("platform_file_plan_invalid")
+        payload = canonical_document(value)
+        payload_digest = digest_bytes(payload)
+        if not payload or len(payload) > plan.expected_max_bytes:
+            raise ArtifactCommitError("platform_document_size_invalid")
+        if state.verified is not None:
+            if (
+                state.verified.size_bytes != len(payload)
+                or not hmac.compare_digest(state.verified.sha256, payload_digest)
+            ):
+                raise ArtifactCommitError("platform_document_replay_drift")
+            return state.verified
+        receipt = await self.write_part(
+            session_id=session_id,
+            file_index=file_index,
+            part_number=1,
+            content_length=len(payload),
+            content_sha256=payload_digest,
+            body=_one_chunk(payload),
+            auth=auth,
+        )
+        return await self.complete_file(
+            session_id=session_id,
+            file_index=file_index,
+            ordered_parts=[receipt],
+            auth=auth,
+        )
+
     async def _put_canonical(
         self, *, key: str, value: Any, commit_kind: CommitKind
     ) -> str:

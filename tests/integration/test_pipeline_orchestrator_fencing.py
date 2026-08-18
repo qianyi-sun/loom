@@ -70,6 +70,34 @@ async def test_atomic_zero_one_many_fanout_and_mirrored_gates(
         "parameters_contract": {"name": "case_params", "version": 1, "digest": DIGEST},
         "max_items": 3,
     }
+    node["outputs"] = [
+        {
+            "name": "result",
+            "artifact_type": "behavior.result.v1",
+            "required": True,
+            "role": "artifact",
+            "producer": "container",
+            "max_bytes": 1024,
+        }
+    ]
+    finalize = container("finalize", needs=["fanout"])
+    finalize["inputs"] = [
+        {
+            "source": "terminal_outputs",
+            "binding_name": "results",
+            "artifact_type": "behavior.result.v1",
+            "stage_keys": ["fanout"],
+            "output_name": "result",
+            "match_outcomes": ["selected"],
+        }
+    ]
+    finalize["request_renderer"] = {
+        "name": "fanout_finalize",
+        "version": 1,
+        "digest": DIGEST,
+        "max_bytes": 65_536,
+        "terminal_stage_keys": ["fanout"],
+    }
     graph_value = {
         "schema_version": "loom.run-graph.v1",
         "recipe": {"name": "fanout-fixture", "version": 1, "digest": DIGEST},
@@ -96,6 +124,7 @@ async def test_atomic_zero_one_many_fanout_and_mirrored_gates(
                 "matched_targets": [],
                 "unmatched_targets": [],
             },
+            finalize,
         ],
     }
     graph = RunGraphSpecV1.model_validate(graph_value)
@@ -154,7 +183,7 @@ async def test_atomic_zero_one_many_fanout_and_mirrored_gates(
             )
     lease = (await seed.repository.claim_runs(controller_id="fanout-controller"))[0]
     try:
-        assert await seed.repository.initialize_run(lease) == 0
+        assert await seed.repository.initialize_run(lease) == 1
         assert await seed.repository.expand_fanout(
             lease,
             node_key="fanout",
@@ -182,12 +211,18 @@ async def test_atomic_zero_one_many_fanout_and_mirrored_gates(
                                (SELECT count(*) FROM pipeline_stage_runs
                                  WHERE pipeline_run_id=:id),
                                (SELECT stage_runs_created FROM pipeline_budget_ledgers
-                                 WHERE pipeline_run_id=:id)
+                                 WHERE pipeline_run_id=:id),
+                               (SELECT count(*) FROM pipeline_stage_dependencies d
+                                  JOIN pipeline_stage_runs downstream
+                                    ON downstream.id=d.downstream_stage_run_id
+                                 WHERE d.pipeline_run_id=:id
+                                   AND downstream.node_key='finalize'
+                                   AND d.dependency_kind='terminal_barrier')
                     """),
                     {"id": seed.run_id},
                 )
             ).one()
-        assert values == (1, item_count * 2, item_count * 2)
+        assert values == (1, item_count * 2 + 1, item_count * 2 + 1, item_count)
     finally:
         await seed.repository.release(lease)
 

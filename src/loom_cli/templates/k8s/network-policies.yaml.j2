@@ -169,6 +169,7 @@ spec:
         - podSelector: { matchLabels: { app: loom-llm-gateway } }
         - podSelector: { matchLabels: { app: loom-minio } }
         - podSelector: { matchLabels: { app: loom-family-orchestrator } }
+        - podSelector: { matchLabels: { app: loom-pipeline-orchestrator } }
         - podSelector: { matchLabels: { app: loom-staging-data-lifecycle } }
         # External workers reach the object store privately through
         # loom-minio-router (hostPort 30900 → loom-minio:9000), mirroring
@@ -630,8 +631,8 @@ spec:
 
 ---
 # #1212 pipeline controller: disabled by default and restricted to its durable
-# database plus health probes. It has no worker/provider or artifact-store
-# network authority; those remain behind the downstream attempt contracts.
+# database, immutable artifact reads, and health probes. It has no worker or
+# provider network authority; those remain behind downstream attempt contracts.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -657,6 +658,10 @@ spec:
       ports:
         - { port: 6432, protocol: TCP }
 {% endif %}
+    - to:
+        - podSelector: { matchLabels: { app: loom-minio } }
+      ports:
+        - { port: 9000, protocol: TCP }
     - to:
         - namespaceSelector:
             matchLabels:

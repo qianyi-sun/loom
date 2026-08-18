@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from uuid import UUID, uuid5
 
 from loom.pipeline.spec import ARTIFACT_TYPE_PATTERN, NAME_PATTERN
@@ -13,6 +14,7 @@ def synthesize_fanout_manifest(
     *,
     namespace: UUID,
     item_binding_name: str,
+    artifact_ids_by_output: Mapping[str, UUID] | None = None,
 ) -> dict[str, object]:
     if not re.fullmatch(NAME_PATTERN, item_binding_name):
         raise ValueError("invalid item binding name")
@@ -25,7 +27,13 @@ def synthesize_fanout_manifest(
             ARTIFACT_TYPE_PATTERN, artifact_type
         ):
             raise ValueError("invalid fanout output identity")
-        artifact_id = uuid5(namespace, f"{shard_key}\x00{output_name}\x00{artifact_type}")
+        artifact_id = (
+            uuid5(namespace, f"{shard_key}\x00{output_name}\x00{artifact_type}")
+            if artifact_ids_by_output is None
+            else artifact_ids_by_output.get(output_name)
+        )
+        if artifact_id is None:
+            raise ValueError("fanout output has no preallocated Artifact identity")
         result.append(
             {
                 "shard_key": shard_key,

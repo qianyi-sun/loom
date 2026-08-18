@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
@@ -29,6 +29,7 @@ from loom.pipeline.spec import (
     OutcomeGateNodeV1,
     RunBudgetV1,
     RunGraphSpecV1,
+    StageOutputBindingV1,
     validate_fanout_manifest,
 )
 from loom.pipeline.state import PipelineStageRunState, RetryClass
@@ -112,7 +113,7 @@ class AttemptRecord:
     stage_run_id: UUID
     attempt_number: int
     state: str
-    stage_request_digest: str
+    stage_request_digest: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +142,23 @@ class ReadinessCandidate:
     authority_candidate_json: dict[str, Any] | None
     gpu_backend_selection_json: dict[str, Any] | None
     gpu_backend_selection_digest: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class FanoutSourceCandidate:
+    node_key: str
+    source_kind: Literal["run_input", "stage_output"]
+    source_stage_run_id: UUID | None
+    source_artifact_id: UUID
+    source_manifest_digest: str
+    source_file_key: str
+    source_file_size: int
+    source_file_sha256: str
+    root_manifest_key: str
+    root_manifest_sha256: str
+    committed_marker_key: str
+    committed_marker_sha256: str
+    parameters_contract_digest: str | None
 
 
 _COUNTERS: dict[BudgetKind, tuple[str, str, str, TerminalCause]] = {
@@ -745,6 +763,176 @@ class PipelineRepository:
             for row in rows
         )
 
+    async def fanout_source_candidates(
+        self, lease: RunLease
+    ) -> tuple[FanoutSourceCandidate, ...]:
+        """Return committed, not-yet-expanded fanout documents with immutable locators."""
+
+        async with self._sessions() as session, session.begin():
+            await self._lock_fence(session, lease)
+            run = (
+                (
+                    await session.execute(
+                        text("""
+                            SELECT team_id, graph_spec_json, resolved_inputs_json
+                              FROM pipeline_runs WHERE id=:run_id
+                        """),
+                        {"run_id": lease.pipeline_run_id},
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            graph = RunGraphSpecV1.model_validate(run["graph_spec_json"])
+            inputs = {
+                str(value.get("input_name")): value
+                for value in cast(list[dict[str, Any]], run["resolved_inputs_json"])
+            }
+            candidates: list[FanoutSourceCandidate] = []
+            for node in sorted(graph.nodes, key=lambda item: item.node_key.encode()):
+                if not isinstance(node, ContainerNodeV1) or node.fanout is None:
+                    continue
+                rows: list[Any]
+                parameters_contract_digest: str | None = None
+                if node.fanout.source == "run_input":
+                    descriptor = inputs.get(node.fanout.manifest_input_name)
+                    if descriptor is None:
+                        raise ValueError("run-input fanout source is absent")
+                    parameters_contract_digest = node.fanout.parameters_contract.digest
+                    rows = list(
+                        (
+                            await session.execute(
+                                text("""
+                                    SELECT artifact.id AS artifact_id, artifact.artifact_type,
+                                           artifact.content_hash, artifact.storage,
+                                           artifact.manifest_sha256, artifact.team_id,
+                                           upload.prefix, upload.manifest_sha256 AS root_manifest_sha256,
+                                           upload.committed_marker_sha256
+                                      FROM artifacts artifact
+                                      JOIN artifact_upload_sessions upload
+                                        ON upload.id=artifact.artifact_upload_session_id
+                                     WHERE artifact.id=:artifact_id
+                                       AND artifact.team_id=:team_id
+                                       AND upload.state='committed'
+                                       AND NOT EXISTS (
+                                           SELECT 1 FROM pipeline_fanout_expansions expansion
+                                            WHERE expansion.pipeline_run_id=:run_id
+                                              AND expansion.node_key=:node_key
+                                              AND expansion.source_artifact_id=artifact.id
+                                       )
+                                """),
+                                {
+                                    "artifact_id": UUID(str(descriptor.get("artifact_id"))),
+                                    "team_id": run["team_id"],
+                                    "run_id": lease.pipeline_run_id,
+                                    "node_key": node.node_key,
+                                },
+                            )
+                        )
+                        .mappings()
+                        .all()
+                    )
+                    for row in rows:
+                        if (
+                            row["artifact_type"] != "loom.fanout-manifest.v1"
+                            or row["content_hash"] != descriptor.get("content_sha256")
+                            or row["manifest_sha256"] != descriptor.get("manifest_sha256")
+                        ):
+                            raise ValueError("run-input fanout source descriptor drift")
+                else:
+                    rows = list(
+                        (
+                            await session.execute(
+                                text("""
+                                    SELECT source.id AS source_stage_run_id,
+                                           source.shard_key AS source_shard_key,
+                                           artifact.id AS artifact_id, artifact.artifact_type,
+                                           artifact.content_hash, artifact.storage,
+                                           artifact.manifest_sha256, artifact.team_id,
+                                           upload.prefix, upload.manifest_sha256 AS root_manifest_sha256,
+                                           upload.committed_marker_sha256
+                                      FROM pipeline_stage_runs source
+                                      JOIN artifacts artifact
+                                        ON artifact.pipeline_stage_run_id=source.id
+                                       AND artifact.name=:output_name
+                                       AND artifact.producer_kind='platform'
+                                      JOIN artifact_upload_sessions upload
+                                        ON upload.id=artifact.artifact_upload_session_id
+                                     WHERE source.pipeline_run_id=:run_id
+                                       AND source.node_key=:source_node_key
+                                       AND source.state='succeeded'
+                                       AND artifact.team_id=:team_id
+                                       AND upload.state='committed'
+                                       AND NOT EXISTS (
+                                           SELECT 1 FROM pipeline_fanout_expansions expansion
+                                            WHERE expansion.pipeline_run_id=:run_id
+                                              AND expansion.node_key=:node_key
+                                              AND expansion.source_artifact_id=artifact.id
+                                       )
+                                     ORDER BY source.shard_key
+                                """),
+                                {
+                                    "output_name": node.fanout.manifest_output_name,
+                                    "run_id": lease.pipeline_run_id,
+                                    "source_node_key": node.fanout.manifest_stage_key,
+                                    "team_id": run["team_id"],
+                                    "node_key": node.node_key,
+                                },
+                            )
+                        )
+                        .mappings()
+                        .all()
+                    )
+                for row in rows:
+                    storage = cast(dict[str, Any], row["storage"])
+                    files = cast(list[dict[str, Any]], storage.get("files", []))
+                    semantic = [item for item in files if item.get("role") == "semantic_document"]
+                    if (
+                        row["artifact_type"] != "loom.fanout-manifest.v1"
+                        or row["team_id"] != run["team_id"]
+                        or row["manifest_sha256"] is None
+                        or row["root_manifest_sha256"] is None
+                        or row["committed_marker_sha256"] is None
+                        or len(semantic) != 1
+                        or semantic[0].get("sha256") != row["content_hash"]
+                    ):
+                        raise ValueError("fanout source Artifact storage drift")
+                    relative_path = str(semantic[0].get("relative_path"))
+                    size_bytes = semantic[0].get("size_bytes")
+                    if (
+                        not relative_path
+                        or relative_path.startswith("/")
+                        or ".." in relative_path.split("/")
+                        or not isinstance(size_bytes, int)
+                        or isinstance(size_bytes, bool)
+                        or size_bytes < 1
+                    ):
+                        raise ValueError("fanout source Artifact path drift")
+                    prefix = str(row["prefix"])
+                    artifact_id = cast(UUID, row["artifact_id"])
+                    candidates.append(
+                        FanoutSourceCandidate(
+                            node_key=node.node_key,
+                            source_kind=node.fanout.source,
+                            source_stage_run_id=row.get("source_stage_run_id"),
+                            source_artifact_id=artifact_id,
+                            source_manifest_digest=cast(str, row["content_hash"]),
+                            source_file_key=(
+                                f"{prefix}artifacts/{artifact_id}/{relative_path}"
+                            ),
+                            source_file_size=size_bytes,
+                            source_file_sha256=cast(str, semantic[0]["sha256"]),
+                            root_manifest_key=prefix + "_manifest.json",
+                            root_manifest_sha256=cast(str, row["root_manifest_sha256"]),
+                            committed_marker_key=prefix + "_COMMITTED",
+                            committed_marker_sha256=cast(
+                                str, row["committed_marker_sha256"]
+                            ),
+                            parameters_contract_digest=parameters_contract_digest,
+                        )
+                    )
+            return tuple(candidates)
+
     async def expand_fanout(
         self,
         lease: RunLease,
@@ -961,10 +1149,38 @@ class PipelineRepository:
                     },
                 )
                 for need_key in node.needs:
-                    upstream = (
-                        (
-                            await session.execute(
-                                text("""
+                    source_shard_binding = any(
+                        isinstance(binding, StageOutputBindingV1)
+                        and binding.stage_key == need_key
+                        and binding.shard_selection == "fanout_source_shard"
+                        for binding in node.inputs
+                    )
+                    if source_shard_binding and source_stage_run_id is not None:
+                        upstream = (
+                            (
+                                await session.execute(
+                                    text("""
+                                    SELECT id, node_kind
+                                      FROM pipeline_stage_runs
+                                     WHERE id=:source_stage_id
+                                       AND pipeline_run_id=:run_id
+                                       AND node_key=:need_key
+                                """),
+                                    {
+                                        "run_id": lease.pipeline_run_id,
+                                        "need_key": need_key,
+                                        "source_stage_id": source_stage_run_id,
+                                    },
+                                )
+                            )
+                            .mappings()
+                            .one_or_none()
+                        )
+                    else:
+                        upstream = (
+                            (
+                                await session.execute(
+                                    text("""
                                 SELECT id, node_kind
                                   FROM pipeline_stage_runs
                                  WHERE pipeline_run_id=:run_id AND node_key=:need_key
@@ -977,11 +1193,11 @@ class PipelineRepository:
                                     "need_key": need_key,
                                     "shard_key": item.shard_key,
                                 },
+                                )
                             )
+                            .mappings()
+                            .one_or_none()
                         )
-                        .mappings()
-                        .one_or_none()
-                    )
                     if upstream is None:
                         continue
                     dependency_kind = "required"
@@ -1015,6 +1231,49 @@ class PipelineRepository:
                             "selected": (None if dependency_kind.startswith("gate_") else True),
                         },
                     )
+                for downstream in graph.nodes:
+                    if (
+                        not isinstance(downstream, ContainerNodeV1)
+                        or downstream.fanout is not None
+                        or node_key not in downstream.needs
+                    ):
+                        continue
+                    downstream_id = (
+                        await session.execute(
+                            text("""
+                                SELECT id FROM pipeline_stage_runs
+                                 WHERE pipeline_run_id=:run_id
+                                   AND node_key=:node_key AND shard_key='singleton'
+                            """),
+                            {
+                                "run_id": lease.pipeline_run_id,
+                                "node_key": downstream.node_key,
+                            },
+                        )
+                    ).scalar_one_or_none()
+                    if downstream_id is None:
+                        continue
+                    dependency_kind = (
+                        "terminal_barrier"
+                        if downstream.request_renderer is not None
+                        and node_key in downstream.request_renderer.terminal_stage_keys
+                        else "required"
+                    )
+                    await session.execute(
+                        text("""
+                            INSERT INTO pipeline_stage_dependencies (
+                                pipeline_run_id, upstream_stage_run_id,
+                                downstream_stage_run_id, dependency_kind, selected
+                            ) VALUES (:run_id, :upstream, :downstream, :kind, true)
+                            ON CONFLICT DO NOTHING
+                        """),
+                        {
+                            "run_id": lease.pipeline_run_id,
+                            "upstream": stage_id,
+                            "downstream": downstream_id,
+                            "kind": dependency_kind,
+                        },
+                    )
                 for gate in gates:
                     gate_id = canonical_uuid5(
                         lease.pipeline_run_id,
@@ -1042,6 +1301,48 @@ class PipelineRepository:
                             "subject_id": stage_id,
                         },
                     )
+                    for downstream in graph.nodes:
+                        if (
+                            not isinstance(downstream, ContainerNodeV1)
+                            or downstream.fanout is not None
+                            or gate.node_key not in downstream.needs
+                        ):
+                            continue
+                        downstream_id = (
+                            await session.execute(
+                                text("""
+                                    SELECT id FROM pipeline_stage_runs
+                                     WHERE pipeline_run_id=:run_id
+                                       AND node_key=:node_key AND shard_key='singleton'
+                                """),
+                                {
+                                    "run_id": lease.pipeline_run_id,
+                                    "node_key": downstream.node_key,
+                                },
+                            )
+                        ).scalar_one_or_none()
+                        if downstream_id is None:
+                            continue
+                        dependency_kind = (
+                            "gate_matched"
+                            if downstream.node_key in gate.matched_targets
+                            else "gate_unmatched"
+                        )
+                        await session.execute(
+                            text("""
+                                INSERT INTO pipeline_stage_dependencies (
+                                    pipeline_run_id, upstream_stage_run_id,
+                                    downstream_stage_run_id, dependency_kind, selected
+                                ) VALUES (:run_id, :upstream, :downstream, :kind, NULL)
+                                ON CONFLICT DO NOTHING
+                            """),
+                            {
+                                "run_id": lease.pipeline_run_id,
+                                "upstream": gate_id,
+                                "downstream": downstream_id,
+                                "kind": dependency_kind,
+                            },
+                        )
                     await session.execute(
                         text("""
                             INSERT INTO pipeline_stage_dependencies (
@@ -1408,14 +1709,25 @@ class PipelineRepository:
         *,
         stage_run_id: UUID,
         attempt_id: UUID,
-        stage_request_json: dict[str, Any],
-        stage_request_bytes: bytes,
-        stage_request_digest: str,
+        stage_request_json: dict[str, Any] | None,
+        stage_request_bytes: bytes | None,
+        stage_request_digest: str | None,
         reservations: tuple[AttemptReservationSpec, ...],
         provider_budget: AttemptProviderBudgetSpec | None = None,
         fault_pending: bool = False,
     ) -> AttemptRecord:
         """Phase 2: one fenced Attempt, all counters, reservations, and event."""
+
+        request_group = (stage_request_json, stage_request_bytes, stage_request_digest)
+        if any(value is None for value in request_group) and not all(
+            value is None for value in request_group
+        ):
+            raise ValueError("StageRequest snapshot group is incomplete")
+        if stage_request_json is not None and (
+            stage_request_bytes != canonical_document(stage_request_json)
+            or stage_request_digest != canonical_digest(stage_request_json)
+        ):
+            raise ValueError("StageRequest bytes or digest drift")
 
         exhausted: TerminalCause | None = None
         record: AttemptRecord | None = None
@@ -1664,7 +1976,9 @@ class PipelineRepository:
                         "stage_id": stage_run_id,
                         "number": attempt_number,
                         "state": state,
-                        "request": _json_text(stage_request_json),
+                        "request": (
+                            None if stage_request_json is None else _json_text(stage_request_json)
+                        ),
                         "request_bytes": stage_request_bytes,
                         "request_digest": stage_request_digest,
                         "checkpoint_artifact_id": resumed_checkpoint_artifact_id,
