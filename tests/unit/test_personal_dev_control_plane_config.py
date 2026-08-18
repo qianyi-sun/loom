@@ -21,9 +21,25 @@ _ROOT = Path(__file__).resolve().parents[2]
 _PROFILE = _ROOT / "deploy/dev-fleet/personal-dev-control-plane.toml"
 
 
+def _scanner() -> dict[str, Any]:
+    return {
+        "binary_platform": "linux/amd64",
+        "binary_sha256": "b" * 64,
+        "cache_identity_sha256": (
+            "b1c136b8577f3813c62588d6930db21b0f2343b7f70278836741387c43c33761"
+        ),
+        "database_metadata_sha256": "c" * 64,
+        "database_sha256": "d" * 64,
+        "java_database_metadata_sha256": "e" * 64,
+        "java_database_sha256": "f" * 64,
+        "lock_sha256": "1" * 64,
+        "trivy_version": "v0.70.0",
+    }
+
+
 def _release() -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "source_sha": "1" * 40,
         "source_tree": "2" * 40,
         "images": {
@@ -34,10 +50,14 @@ def _release() -> dict[str, Any]:
             "personal_dev_activation_agent": (
                 "ghcr.io/qianyi-sun/loom-personal-dev-activation-agent@sha256:" + "5" * 64
             ),
+            "personal_dev_scanner_cache": (
+                "ghcr.io/qianyi-sun/loom-personal-dev-scanner-cache@sha256:" + "a" * 64
+            ),
             "postgres": "docker.io/library/postgres@sha256:" + "6" * 64,
             "minio": "quay.io/minio/minio@sha256:" + "7" * 64,
             "minio_client": "quay.io/minio/mc@sha256:" + "9" * 64,
         },
+        "scanner": _scanner(),
         "release_evidence_sha256": "8" * 64,
     }
 
@@ -244,9 +264,21 @@ def test_trusted_release_loads_exact_owner_only_canonical_bytes(tmp_path: Path) 
     assert release.images.loom_service == ("ghcr.io/qianyi-sun/loom-service@sha256:" + "3" * 64)
     assert release.images.personal_dev_builder.endswith("4" * 64)
     assert release.images.personal_dev_activation_agent.endswith("5" * 64)
+    assert release.images.personal_dev_scanner_cache.endswith("a" * 64)
     assert release.images.postgres.endswith("6" * 64)
     assert release.images.minio.endswith("7" * 64)
     assert release.images.minio_client.endswith("9" * 64)
+    assert release.scanner.binary_platform == "linux/amd64"
+    assert release.scanner.binary_sha256 == "b" * 64
+    assert release.scanner.cache_identity_sha256 == (
+        "b1c136b8577f3813c62588d6930db21b0f2343b7f70278836741387c43c33761"
+    )
+    assert release.scanner.database_metadata_sha256 == "c" * 64
+    assert release.scanner.database_sha256 == "d" * 64
+    assert release.scanner.java_database_metadata_sha256 == "e" * 64
+    assert release.scanner.java_database_sha256 == "f" * 64
+    assert release.scanner.lock_sha256 == "1" * 64
+    assert release.scanner.trivy_version == "v0.70.0"
     assert release.release_evidence_sha256 == "8" * 64
     assert release.canonical_bytes() == path.read_bytes()
 
@@ -256,7 +288,8 @@ def test_trusted_release_loads_exact_owner_only_canonical_bytes(tmp_path: Path) 
     [
         (lambda value: {**value, "unknown": True}, None),
         (lambda value: {key: item for key, item in value.items() if key != "source_tree"}, None),
-        (lambda value: {**value, "schema_version": 2}, None),
+        (lambda value: {key: item for key, item in value.items() if key != "scanner"}, None),
+        (lambda value: {**value, "schema_version": 1}, None),
         (lambda value: {**value, "source_sha": "1" * 39}, None),
         (lambda value: {**value, "source_tree": "A" * 40}, None),
         (lambda value: {**value, "release_evidence_sha256": "0" * 64}, None),
@@ -271,6 +304,17 @@ def test_trusted_release_loads_exact_owner_only_canonical_bytes(tmp_path: Path) 
             lambda value: {
                 **value,
                 "images": {key: item for key, item in value["images"].items() if key != "minio"},
+            },
+            None,
+        ),
+        (
+            lambda value: {
+                **value,
+                "images": {
+                    key: item
+                    for key, item in value["images"].items()
+                    if key != "personal_dev_scanner_cache"
+                },
             },
             None,
         ),
@@ -338,6 +382,31 @@ def test_trusted_release_loads_exact_owner_only_canonical_bytes(tmp_path: Path) 
             },
             None,
         ),
+        (
+            lambda value: {
+                **value,
+                "images": {
+                    **value["images"],
+                    "personal_dev_scanner_cache": (
+                        "ghcr.io/other/loom-personal-dev-scanner-cache@sha256:" + "a" * 64
+                    ),
+                },
+            },
+            None,
+        ),
+        (
+            lambda value: {
+                **value,
+                "images": {
+                    **value["images"],
+                    "personal_dev_scanner_cache": (
+                        "ghcr.io/qianyi-sun/loom-personal-dev-scanner-cache@sha256:"
+                        + "3" * 64
+                    ),
+                },
+            },
+            None,
+        ),
     ],
 )
 def test_trusted_release_rejects_invalid_contract(
@@ -353,12 +422,49 @@ def test_trusted_release_rejects_invalid_contract(
         )
 
 
+@pytest.mark.parametrize("field", list(_scanner()))
+def test_trusted_release_requires_every_scanner_field(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    value = _release()
+    value["scanner"].pop(field)
+    path, digest = _write_release(tmp_path, value)
+
+    with pytest.raises(PersonalDevTrustedReleaseError, match="trusted release is invalid"):
+        load_personal_dev_trusted_release(path, digest)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda scanner: scanner.update(unexpected=True),
+        lambda scanner: scanner.update(binary_platform="linux/arm64"),
+        lambda scanner: scanner.update(trivy_version="v0.70.1"),
+        lambda scanner: scanner.update(binary_sha256="B" * 64),
+        lambda scanner: scanner.update(lock_sha256="0" * 64),
+        lambda scanner: scanner.update(database_sha256="0" * 64),
+        lambda scanner: scanner.update(cache_identity_sha256="f" * 64),
+    ],
+)
+def test_trusted_release_rejects_scanner_drift(
+    tmp_path: Path,
+    mutate: Callable[[dict[str, Any]], object],
+) -> None:
+    value = _release()
+    mutate(value["scanner"])
+    path, digest = _write_release(tmp_path, value)
+
+    with pytest.raises(PersonalDevTrustedReleaseError, match="trusted release is invalid"):
+        load_personal_dev_trusted_release(path, digest)
+
+
 @pytest.mark.parametrize(
     "payload",
     [
         _canonical(_release()) + b"\n",
         json.dumps(_release(), indent=2).encode("ascii"),
-        b'{"schema_version":1,"schema_version":1}',
+        b'{"schema_version":2,"schema_version":2}',
         b"not-json",
     ],
 )

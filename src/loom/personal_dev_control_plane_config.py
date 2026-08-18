@@ -30,6 +30,7 @@ REQUIRED_IMAGE_KEYS = {
     "loom_service",
     "personal_dev_builder",
     "personal_dev_activation_agent",
+    "personal_dev_scanner_cache",
     "postgres",
     "minio",
     "minio_client",
@@ -397,6 +398,7 @@ class _ImagesInput(_StrictModel):
     loom_service: str
     personal_dev_builder: str
     personal_dev_activation_agent: str
+    personal_dev_scanner_cache: str
     postgres: str
     minio: str
     minio_client: str
@@ -408,6 +410,9 @@ class _ImagesInput(_StrictModel):
             "personal_dev_builder": "ghcr.io/qianyi-sun/loom-personal-dev-builder",
             "personal_dev_activation_agent": (
                 "ghcr.io/qianyi-sun/loom-personal-dev-activation-agent"
+            ),
+            "personal_dev_scanner_cache": (
+                "ghcr.io/qianyi-sun/loom-personal-dev-scanner-cache"
             ),
             "postgres": "docker.io/library/postgres",
             "minio": "quay.io/minio/minio",
@@ -428,11 +433,56 @@ class _ImagesInput(_StrictModel):
         return self
 
 
+class _TrustedScannerInput(_StrictModel):
+    binary_platform: Literal["linux/amd64"]
+    binary_sha256: str
+    cache_identity_sha256: str
+    database_metadata_sha256: str
+    database_sha256: str
+    java_database_metadata_sha256: str
+    java_database_sha256: str
+    lock_sha256: str
+    trivy_version: Literal["v0.70.0"]
+
+    @field_validator(
+        "binary_sha256",
+        "cache_identity_sha256",
+        "database_metadata_sha256",
+        "database_sha256",
+        "java_database_metadata_sha256",
+        "java_database_sha256",
+        "lock_sha256",
+    )
+    @classmethod
+    def _scanner_digest_is_exact(cls, value: str) -> str:
+        return _nonzero_digest(value, "trusted scanner digest")
+
+    @model_validator(mode="after")
+    def _cache_identity_is_exact(self) -> _TrustedScannerInput:
+        without_identity = {
+            "binary_platform": self.binary_platform,
+            "binary_sha256": self.binary_sha256,
+            "database_metadata_sha256": self.database_metadata_sha256,
+            "database_sha256": self.database_sha256,
+            "java_database_metadata_sha256": self.java_database_metadata_sha256,
+            "java_database_sha256": self.java_database_sha256,
+            "lock_sha256": self.lock_sha256,
+            "trivy_version": self.trivy_version,
+        }
+        expected = hashlib.sha256(
+            b"loom-personal-dev-scanner-cache-v1\0" + _canonical_json(without_identity)
+        ).hexdigest()
+        if not hmac.compare_digest(self.cache_identity_sha256, expected):
+            raise ValueError("trusted scanner cache identity is invalid")
+        return self
+
+
 class _TrustedReleaseInput(_StrictModel):
-    schema_version: Literal[1]
+    schema_version: Literal[2]
     source_sha: str
     source_tree: str
     images: _ImagesInput
+    scanner: _TrustedScannerInput
     release_evidence_sha256: str
 
     @field_validator("source_sha", "source_tree")
@@ -546,8 +596,11 @@ class _AcceptanceBuilderInput(_StrictModel):
     runtime_profile_sha256: str
     trusted_launcher_profile_sha256: str
     scanner_binary_sha256: str
+    scanner_cache_identity_sha256: str
     scanner_database_sha256: str
+    scanner_database_metadata_sha256: str
     scanner_java_database_sha256: str
+    scanner_java_database_metadata_sha256: str
     scanner_finding_policy_sha256: str
     publisher_identity: str
     registry_prefix: str
@@ -571,8 +624,11 @@ class _AcceptanceBuilderInput(_StrictModel):
         "runtime_profile_sha256",
         "trusted_launcher_profile_sha256",
         "scanner_binary_sha256",
+        "scanner_cache_identity_sha256",
         "scanner_database_sha256",
+        "scanner_database_metadata_sha256",
         "scanner_java_database_sha256",
+        "scanner_java_database_metadata_sha256",
         "scanner_finding_policy_sha256",
         "protocol_map_sha256",
     )
@@ -845,9 +901,23 @@ class PersonalDevTrustedImages:
     loom_service: str
     personal_dev_builder: str
     personal_dev_activation_agent: str
+    personal_dev_scanner_cache: str
     postgres: str
     minio: str
     minio_client: str
+
+
+@dataclass(frozen=True, slots=True)
+class PersonalDevTrustedScanner:
+    binary_platform: str
+    binary_sha256: str
+    cache_identity_sha256: str
+    database_metadata_sha256: str
+    database_sha256: str
+    java_database_metadata_sha256: str
+    java_database_sha256: str
+    lock_sha256: str
+    trivy_version: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -856,12 +926,14 @@ class PersonalDevTrustedRelease:
     source_sha: str
     source_tree: str
     images: PersonalDevTrustedImages
+    scanner: PersonalDevTrustedScanner
     release_evidence_sha256: str
 
     def canonical_value(self) -> dict[str, Any]:
         return {
             "images": _dataclass_value(self.images),
             "release_evidence_sha256": self.release_evidence_sha256,
+            "scanner": _dataclass_value(self.scanner),
             "schema_version": self.schema_version,
             "source_sha": self.source_sha,
             "source_tree": self.source_tree,
@@ -904,8 +976,11 @@ class PersonalDevAcceptanceBuilder:
     runtime_profile_sha256: str
     trusted_launcher_profile_sha256: str
     scanner_binary_sha256: str
+    scanner_cache_identity_sha256: str
     scanner_database_sha256: str
+    scanner_database_metadata_sha256: str
     scanner_java_database_sha256: str
+    scanner_java_database_metadata_sha256: str
     scanner_finding_policy_sha256: str
     publisher_identity: str
     registry_prefix: str
@@ -1260,6 +1335,7 @@ def load_personal_dev_trusted_release(
         source_sha=parsed.source_sha,
         source_tree=parsed.source_tree,
         images=PersonalDevTrustedImages(**parsed.images.model_dump()),
+        scanner=PersonalDevTrustedScanner(**parsed.scanner.model_dump()),
         release_evidence_sha256=parsed.release_evidence_sha256,
     )
     if release.canonical_bytes() != payload:
@@ -1402,6 +1478,16 @@ def validate_personal_dev_acceptance_plan(
             or plan.builder.registry_prefix != profile.builder.registry_prefix
             or plan.builder.protocol_map_sha256
             != hashlib.sha256(_canonical_json(dict(profile.protocol_versions))).hexdigest()
+            or plan.builder.scanner_binary_sha256 != release.scanner.binary_sha256
+            or plan.builder.scanner_cache_identity_sha256
+            != release.scanner.cache_identity_sha256
+            or plan.builder.scanner_database_sha256 != release.scanner.database_sha256
+            or plan.builder.scanner_database_metadata_sha256
+            != release.scanner.database_metadata_sha256
+            or plan.builder.scanner_java_database_sha256
+            != release.scanner.java_database_sha256
+            or plan.builder.scanner_java_database_metadata_sha256
+            != release.scanner.java_database_metadata_sha256
         ):
             raise ValueError
         if plan.quotas != profile.limits:
@@ -1449,6 +1535,7 @@ __all__ = [
     "PersonalDevTrustedImages",
     "PersonalDevTrustedRelease",
     "PersonalDevTrustedReleaseError",
+    "PersonalDevTrustedScanner",
     "PoolCapability",
     "ResourceEnvelope",
     "load_personal_dev_acceptance_plan",
