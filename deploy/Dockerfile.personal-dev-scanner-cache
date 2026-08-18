@@ -1,0 +1,17 @@
+FROM python:3.11-slim@sha256:9c900dea9e8fb7e16277c179b555cc72d29a352dbc33cff48ad5a0412fd5bfc7
+
+WORKDIR /opt/loom-personal-dev-scanner-cache
+COPY src/loom/__init__.py ./loom/__init__.py
+COPY src/loom/personal_dev_scanner_cache.py ./loom/personal_dev_scanner_cache.py
+COPY src/loom/personal_dev_scanner_cache_init.py ./loom/personal_dev_scanner_cache_init.py
+WORKDIR /opt/loom-personal-dev-scanner-cache/assets/db
+WORKDIR /opt/loom-personal-dev-scanner-cache/assets/java-db
+WORKDIR /opt/loom-personal-dev-scanner-cache
+COPY --from=personal-dev-scanner-cache --chown=65531:65532 --chmod=0444 db/metadata.json /opt/loom-personal-dev-scanner-cache/assets/db/metadata.json
+COPY --from=personal-dev-scanner-cache --chown=65531:65532 --chmod=0444 db/trivy.db /opt/loom-personal-dev-scanner-cache/assets/db/trivy.db
+COPY --from=personal-dev-scanner-cache --chown=65531:65532 --chmod=0444 java-db/metadata.json /opt/loom-personal-dev-scanner-cache/assets/java-db/metadata.json
+COPY --from=personal-dev-scanner-cache --chown=65531:65532 --chmod=0444 java-db/trivy-java.db /opt/loom-personal-dev-scanner-cache/assets/java-db/trivy-java.db
+
+USER 65531:65532
+ENV PYTHONPATH=/opt/loom-personal-dev-scanner-cache
+ENTRYPOINT ["python", "-m", "loom.personal_dev_scanner_cache_init"]

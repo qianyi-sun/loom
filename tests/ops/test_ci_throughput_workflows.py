@@ -169,6 +169,7 @@ def test_native_image_publish_jobs_stay_on_architecture_matched_github_hosts() -
     assert "matrix.image == 'capacity-manager'" in build_runs_on
     assert "matrix.image == 'personal-dev-activation-agent'" in build_runs_on
     assert "matrix.image == 'personal-dev-builder'" in build_runs_on
+    assert "matrix.image == 'personal-dev-scanner-cache'" in build_runs_on
     assert "matrix.image == 'pipeline-core-fixture'" in build_runs_on
     assert "matrix.image == 'pipeline-orchestrator'" in build_runs_on
     assert "ubuntu-24.04" in build_runs_on
@@ -640,7 +641,12 @@ def test_images_builds_use_planner_selection() -> None:
     required_output = jobs["plan"]["outputs"]["required"]
     assert "steps.plan.outputs.required" in required_output
     assert "steps.event.outputs.required" in required_output
-    assert set(jobs["build"]["needs"]) == {"plan", "image-route", "trivy-binary"}
+    assert set(jobs["build"]["needs"]) == {
+        "plan",
+        "image-route",
+        "trivy-binary",
+        "personal-dev-scanner-cache-assets",
+    }
     assert "needs.plan.outputs.required == 'true'" in jobs["build"]["if"]
 
 
@@ -697,7 +703,12 @@ def test_images_workflow_uses_path_aware_matrix_plan() -> None:
     assert "native_builds" in jobs["plan"]["outputs"]
     assert "stage1_images" in jobs["plan"]["outputs"]
     build = jobs["build"]
-    assert set(build["needs"]) == {"plan", "image-route", "trivy-binary"}
+    assert set(build["needs"]) == {
+        "plan",
+        "image-route",
+        "trivy-binary",
+        "personal-dev-scanner-cache-assets",
+    }
     assert build["strategy"]["matrix"]["include"] == (
         "${{ fromJSON(needs.plan.outputs.native_builds) }}"
     )
@@ -834,7 +845,7 @@ def test_images_required_unowned_runtime_path_selects_all_images(tmp_path: Path)
     matrix = json.loads(_github_output_value(output, "images"))
     native_matrix = json.loads(_github_output_value(output, "native_builds"))
     assert _github_output_value(output, "required") == "true"
-    assert len(matrix) == 17
+    assert len(matrix) == 18
     assert {entry["image"] for entry in matrix} == {
         "agent-sandbox",
         "capacity-executor",
@@ -848,6 +859,7 @@ def test_images_required_unowned_runtime_path_selects_all_images(tmp_path: Path)
         "llm-gateway-sandbox",
         "personal-dev-activation-agent",
         "personal-dev-builder",
+        "personal-dev-scanner-cache",
         "rehearsal-postgres",
         "service",
         "staging-admin-browser-smoke",
@@ -855,7 +867,7 @@ def test_images_required_unowned_runtime_path_selects_all_images(tmp_path: Path)
         "worker",
     }
     assert all(set(entry) == {"image", "image_name", "dockerfile", "context"} for entry in matrix)
-    assert len(native_matrix) == 34
+    assert len(native_matrix) == 36
     assert {(entry["architecture"], entry["platform"]) for entry in native_matrix} == {
         ("amd64", "linux/amd64"),
         ("arm64", "linux/arm64"),
@@ -885,6 +897,7 @@ def test_images_mixed_known_and_unowned_paths_select_all_images(tmp_path: Path) 
         "pipeline-core-fixture",
         "personal-dev-activation-agent",
         "personal-dev-builder",
+        "personal-dev-scanner-cache",
         "llm-gateway",
         "staging-admin-browser-smoke",
         "web",
@@ -1048,7 +1061,11 @@ def test_trusted_publisher_rebuilds_without_candidate_resolution() -> None:
     names = [step.get("name") for step in publish["steps"]]
 
     assert "resolve-candidate" not in jobs
-    assert publish["needs"] == ["plan", "trivy-binary"]
+    assert publish["needs"] == [
+        "plan",
+        "trivy-binary",
+        "personal-dev-scanner-cache-assets",
+    ]
     assert publish["strategy"]["matrix"]["include"] == (
         "${{ fromJSON(needs.plan.outputs.native_builds) }}"
     )
@@ -1088,8 +1105,17 @@ def test_release_images_are_scanned_attested_and_verified_before_manifest_join()
     assert upload["with"]["name"] == (
         "trivy-binaries-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}"
     )
-    assert build["needs"] == ["plan", "image-route", "trivy-binary"]
-    assert publish["needs"] == ["plan", "trivy-binary"]
+    assert build["needs"] == [
+        "plan",
+        "image-route",
+        "trivy-binary",
+        "personal-dev-scanner-cache-assets",
+    ]
+    assert publish["needs"] == [
+        "plan",
+        "trivy-binary",
+        "personal-dev-scanner-cache-assets",
+    ]
 
     build_step_names = [step.get("name") for step in build["steps"]]
     build_script = next(

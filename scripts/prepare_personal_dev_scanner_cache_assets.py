@@ -387,6 +387,104 @@ def _cleanup_staging(path: Path | None) -> None:
         pass
 
 
+def verify_personal_dev_scanner_cache_assets(lock_path: Path, output: Path) -> str:
+    """Revalidate one transported asset tree and return its framed fingerprint."""
+
+    try:
+        lock = load_personal_dev_scanner_cache_lock(lock_path)
+        metadata = output.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise _failure()
+        root_entries = {entry.name: entry for entry in os.scandir(output)}
+        if root_entries.keys() != {"db", "java-db", "scanner-cache-evidence.json"}:
+            raise _failure()
+        expected_files = {
+            "db": {"metadata.json", "trivy.db"},
+            "java-db": {"metadata.json", "trivy-java.db"},
+        }
+        for directory_name, names in expected_files.items():
+            directory_entry = root_entries[directory_name]
+            if not directory_entry.is_dir(follow_symlinks=False):
+                raise _failure()
+            entries = {entry.name: entry for entry in os.scandir(output / directory_name)}
+            if entries.keys() != names or any(
+                not entry.is_file(follow_symlinks=False) for entry in entries.values()
+            ):
+                raise _failure()
+        evidence_bytes, _ = _read_regular(
+            output / "scanner-cache-evidence.json",
+            maximum_bytes=_MAX_METADATA_BYTES,
+        )
+        evidence = json.loads(evidence_bytes, object_pairs_hook=_unique_object)
+        if (
+            not isinstance(evidence, dict)
+            or evidence.keys()
+            != {
+                "binary_platform",
+                "binary_sha256",
+                "database",
+                "java_database",
+                "lock_sha256",
+                "schema_version",
+                "trivy_version",
+            }
+            or _canonical_json(evidence) + b"\n" != evidence_bytes
+            or evidence.get("schema_version") != 1
+            or evidence.get("trivy_version") != lock.trivy_version
+            or evidence.get("lock_sha256") != lock.sha256
+        ):
+            raise _failure()
+        binary_platform = evidence.get("binary_platform")
+        if (
+            not isinstance(binary_platform, str)
+            or evidence.get("binary_sha256") != lock.binary_sha256.get(binary_platform)
+        ):
+            raise _failure()
+        database = evidence.get("database")
+        java_database = evidence.get("java_database")
+        expected_record_keys = {"image", "layer_sha256", "metadata_sha256", "sha256"}
+        if (
+            not isinstance(database, dict)
+            or database.keys() != expected_record_keys
+            or database.get("image") != lock.database.image
+            or database.get("layer_sha256") != lock.database.layer_sha256
+            or not isinstance(java_database, dict)
+            or java_database.keys() != expected_record_keys
+            or java_database.get("image") != lock.java_database.image
+            or java_database.get("layer_sha256") != lock.java_database.layer_sha256
+        ):
+            raise _failure()
+        paths = {
+            "db/metadata.json": (database.get("metadata_sha256"), _MAX_METADATA_BYTES, 2),
+            "db/trivy.db": (database.get("sha256"), _MAX_DATABASE_BYTES, None),
+            "java-db/metadata.json": (
+                java_database.get("metadata_sha256"),
+                _MAX_METADATA_BYTES,
+                1,
+            ),
+            "java-db/trivy-java.db": (
+                java_database.get("sha256"),
+                _MAX_DATABASE_BYTES,
+                None,
+            ),
+        }
+        fingerprint = hashlib.sha256(b"loom-scanner-cache-build-context-v1\0")
+        for relative, (expected_digest, maximum_bytes, metadata_version) in paths.items():
+            payload, snapshot = _read_regular(output / relative, maximum_bytes=maximum_bytes)
+            if snapshot.digest != expected_digest:
+                raise _failure()
+            if metadata_version is not None:
+                _validate_metadata(payload, version=metadata_version)
+            fingerprint.update(relative.encode("ascii") + b"\0")
+            fingerprint.update(len(payload).to_bytes(8, "big") + payload)
+        fingerprint.update(evidence_bytes)
+        return fingerprint.hexdigest()
+    except PersonalDevScannerCacheError:
+        raise PersonalDevScannerCacheError("scanner cache asset verification failed") from None
+    except (KeyError, OSError, TypeError, UnicodeError, ValueError):
+        raise PersonalDevScannerCacheError("scanner cache asset verification failed") from None
+
+
 def prepare_personal_dev_scanner_cache_assets(
     lock_path: Path,
     trivy: Path,
@@ -523,15 +621,28 @@ def prepare_personal_dev_scanner_cache_assets(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--lock", type=Path, required=True)
-    parser.add_argument("--trivy", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--trivy", type=Path)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--output", type=Path)
+    mode.add_argument("--verify-output", type=Path)
     arguments = parser.parse_args()
     try:
-        prepare_personal_dev_scanner_cache_assets(
-            arguments.lock,
-            arguments.trivy,
-            arguments.output,
-        )
+        if arguments.verify_output is not None:
+            if arguments.trivy is not None:
+                raise PersonalDevScannerCacheError("scanner cache asset verification failed")
+            fingerprint = verify_personal_dev_scanner_cache_assets(
+                arguments.lock,
+                arguments.verify_output,
+            )
+            sys.stdout.write(fingerprint + "\n")
+        else:
+            if arguments.trivy is None or arguments.output is None:
+                raise PersonalDevScannerCacheError("scanner cache preparation failed")
+            prepare_personal_dev_scanner_cache_assets(
+                arguments.lock,
+                arguments.trivy,
+                arguments.output,
+            )
     except PersonalDevScannerCacheError:
         sys.stderr.write("error: scanner cache preparation failed\n")
         raise SystemExit(1) from None
@@ -541,4 +652,7 @@ if __name__ == "__main__":
     main()
 
 
-__all__ = ["prepare_personal_dev_scanner_cache_assets"]
+__all__ = [
+    "prepare_personal_dev_scanner_cache_assets",
+    "verify_personal_dev_scanner_cache_assets",
+]

@@ -287,9 +287,9 @@ def _source_snapshot(source_root: Path) -> _SourceSnapshot:
             directory, metadata = _open_directory_at(root, directory_name)
             directories[directory_name] = directory
             if (
-                metadata.st_uid != os.geteuid()
-                or metadata.st_gid != os.getegid()
-                or metadata.st_mode & 0o222
+                metadata.st_mode & 0o022
+                or (metadata.st_uid == os.geteuid() and metadata.st_mode & 0o200)
+                or metadata.st_uid not in {0, os.geteuid()}
                 or set(os.listdir(directory)) != names
             ):
                 raise _invalid()

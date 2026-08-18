@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 from scripts.prepare_personal_dev_scanner_cache_assets import (
     prepare_personal_dev_scanner_cache_assets,
+    verify_personal_dev_scanner_cache_assets,
 )
 
 from loom.personal_dev_scanner_cache import PersonalDevScannerCacheError
@@ -303,6 +304,55 @@ def test_materializer_publishes_exact_verified_inventory(
     assert (case.output / "scanner-cache-evidence.json").read_bytes() == (
         _canonical(evidence) + b"\n"
     )
+
+
+def test_asset_verifier_revalidates_transport_without_downloading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = _case(tmp_path, monkeypatch)
+    prepare_personal_dev_scanner_cache_assets(case.lock, case.trivy, case.output)
+    original_log = case.trivy_log.read_bytes()
+    expected = hashlib.sha256(b"loom-scanner-cache-build-context-v1\0")
+    for relative in (
+        "db/metadata.json",
+        "db/trivy.db",
+        "java-db/metadata.json",
+        "java-db/trivy-java.db",
+    ):
+        payload = (case.output / relative).read_bytes()
+        expected.update(relative.encode("ascii") + b"\0")
+        expected.update(len(payload).to_bytes(8, "big") + payload)
+    expected.update((case.output / "scanner-cache-evidence.json").read_bytes())
+
+    observed = verify_personal_dev_scanner_cache_assets(case.lock, case.output)
+
+    assert observed == expected.hexdigest()
+    assert case.trivy_log.read_bytes() == original_log
+
+
+@pytest.mark.parametrize("problem", ["changed", "extra", "evidence"])
+def test_asset_verifier_rejects_transport_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    problem: str,
+) -> None:
+    case = _case(tmp_path, monkeypatch)
+    prepare_personal_dev_scanner_cache_assets(case.lock, case.trivy, case.output)
+    if problem == "changed":
+        target = case.output / "db/trivy.db"
+        target.chmod(0o644)
+        target.write_bytes(b"changed")
+    elif problem == "extra":
+        case.output.chmod(0o755)
+        (case.output / "extra").write_bytes(b"x")
+    else:
+        target = case.output / "scanner-cache-evidence.json"
+        target.chmod(0o644)
+        target.write_bytes(target.read_bytes() + b"\n")
+
+    with pytest.raises(PersonalDevScannerCacheError, match="verification failed"):
+        verify_personal_dev_scanner_cache_assets(case.lock, case.output)
 
 
 @pytest.mark.parametrize("existing", ["empty", "nonempty"])

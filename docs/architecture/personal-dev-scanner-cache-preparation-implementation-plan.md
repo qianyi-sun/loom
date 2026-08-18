@@ -300,8 +300,13 @@ PyYAML, pytest, Ruff, and mypy.
 - Modify: `config/component-ownership.toml`
 - Modify: `.github/workflows/images.yml`
 - Create: `tests/ops/test_personal_dev_scanner_cache_image.py`
+- Create: `tests/integration/test_personal_dev_scanner_cache_image.py`
+- Modify: `scripts/prepare_personal_dev_scanner_cache_assets.py`
+- Modify: `scripts/validate_trivy_release_report.py`
 - Modify: `tests/ops/test_ci_throughput_workflows.py`
-- Modify: `tests/ops/test_component_ownership.py`
+- Modify: `tests/ops/test_component_ownership_manifest.py`
+- Modify: `tests/ops/test_prepare_personal_dev_scanner_cache_assets.py`
+- Modify: `tests/ops/test_validate_trivy_release_report.py`
 
 **Interfaces:**
 
@@ -347,7 +352,10 @@ PyYAML, pytest, Ruff, and mypy.
 
 - [ ] **Step 3: Add the minimal cache image**
 
-  The Dockerfile contains no `RUN` instruction:
+  The Dockerfile contains no `RUN` instruction. Explicit `WORKDIR` directives
+  create traversable root-owned asset directories before the four individual
+  `0444` copies; relying on `COPY --chmod=0444` to create their parents would
+  make the directories non-traversable:
 
   ```dockerfile
   FROM python:3.11-slim@sha256:9c900dea9e8fb7e16277c179b555cc72d29a352dbc33cff48ad5a0412fd5bfc7
@@ -355,8 +363,13 @@ PyYAML, pytest, Ruff, and mypy.
   COPY src/loom/__init__.py ./loom/__init__.py
   COPY src/loom/personal_dev_scanner_cache.py ./loom/personal_dev_scanner_cache.py
   COPY src/loom/personal_dev_scanner_cache_init.py ./loom/personal_dev_scanner_cache_init.py
-  COPY --from=personal-dev-scanner-cache --chown=65531:65532 db ./assets/db
-  COPY --from=personal-dev-scanner-cache --chown=65531:65532 java-db ./assets/java-db
+  WORKDIR /opt/loom-personal-dev-scanner-cache/assets/db
+  WORKDIR /opt/loom-personal-dev-scanner-cache/assets/java-db
+  WORKDIR /opt/loom-personal-dev-scanner-cache
+  COPY --from=personal-dev-scanner-cache --chown=65531:65532 --chmod=0444 db/metadata.json /opt/loom-personal-dev-scanner-cache/assets/db/metadata.json
+  COPY --from=personal-dev-scanner-cache --chown=65531:65532 --chmod=0444 db/trivy.db /opt/loom-personal-dev-scanner-cache/assets/db/trivy.db
+  COPY --from=personal-dev-scanner-cache --chown=65531:65532 --chmod=0444 java-db/metadata.json /opt/loom-personal-dev-scanner-cache/assets/java-db/metadata.json
+  COPY --from=personal-dev-scanner-cache --chown=65531:65532 --chmod=0444 java-db/trivy-java.db /opt/loom-personal-dev-scanner-cache/assets/java-db/trivy-java.db
   USER 65531:65532
   ENV PYTHONPATH=/opt/loom-personal-dev-scanner-cache
   ENTRYPOINT ["python", "-m", "loom.personal_dev_scanner_cache_init"]
@@ -380,13 +393,18 @@ PyYAML, pytest, Ruff, and mypy.
   )
   ```
 
-  Re-run the materializer immediately before and after the build only as hash
-  checks; never redownload inside a platform job.
+  Add
+  `verify_personal_dev_scanner_cache_assets(lock_path: Path, output: Path) -> str`
+  to the materializer module. It revalidates canonical evidence, source-lock
+  binding, exact inventory, metadata, and all four file hashes without network
+  access, then returns a framed tree fingerprint. Run it immediately before and
+  after each cache-image build; never redownload inside a platform job.
 
 - [ ] **Step 5: Build a tiny fixture image locally**
 
-  Add a pytest case that creates the four small real fixture files under its
-  `tmp_path`, invokes this exact command through `subprocess.run`, and checks
+  Add a Docker-marked integration pytest case in the repository's
+  `integration-docker` lane. It creates the four small real fixture files under
+  its `tmp_path`, invokes this exact command through `subprocess.run`, and checks
   the result:
 
   ```python
@@ -404,7 +422,9 @@ PyYAML, pytest, Ruff, and mypy.
   ```
 
   Create a container without starting it, copy the four files out, and require
-  byte equality with the fixture.
+  byte equality with the fixture. Run a networkless, read-only container as the
+  image's default UID and require `_source_snapshot` to accept the real image
+  ownership and modes.
 
 - [ ] **Step 6: Verify and commit the image path**
 
