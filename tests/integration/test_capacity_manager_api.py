@@ -56,17 +56,22 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableReservationAcceptanceV2,
     ExecutableSubmissionRecoveryV2,
     ExecutionActivationV2,
+    ExecutionAuthorityV2,
     ExecutionContextV2,
+    ExecutionDrainV2,
     ExecutionFenceV2,
     ExecutionPreparationAbortV2,
     ExecutionPreparationPolicyV2,
     ExecutionPreparationV2,
+    ExecutionRetirementExecutorCheckpointV2,
+    ExecutionRetirementV2,
     ProtectedAdmissionAssignmentV2,
     canonical_executable_bytes,
     canonical_executable_digest,
     canonical_inventory_confirmation_journal_head,
 )
 from loom_capacity_manager.execution_store import (
+    CapacityExecutionStore,
     ProposedExecutableBootstrap,
     RegisteredExecutableAdmissionPlan,
     RegisteredExecutableAdmissionPlanClosure,
@@ -80,7 +85,11 @@ from loom_capacity_manager.models import (
     CapacityAuthorityState,
 )
 from loom_capacity_manager.ownership import public_key_fingerprint
-from loom_capacity_manager.preparation_readiness import PreparedExecutionReadinessV2
+from loom_capacity_manager.preparation_readiness import (
+    PreparedExecutionReadinessV2,
+    canonical_prepared_readiness_digest,
+    load_prepared_execution_readiness,
+)
 from loom_capacity_manager.reconciler import (
     ReconciliationFailurePersistenceError,
     reconcile_shadow_once,
@@ -124,6 +133,9 @@ OLDLAB_EXECUTOR_TOKEN = "oldlab-executor-secret"
 OLDLAB_V2_EXECUTOR_TOKEN = "oldlab-v2-executor-secret"
 EXECUTION_PREPARE_TOKEN = "execution-prepare-secret"
 EXECUTION_ABORT_TOKEN = "execution-abort-secret"
+EXECUTION_ACTIVATE_TOKEN = "execution-activate-secret"
+EXECUTION_DRAIN_TOKEN = "execution-drain-secret"
+EXECUTION_RETIRE_TOKEN = "execution-retire-secret"
 EXECUTION_READ_TOKEN = "execution-read-secret"
 GB10_V2_EXECUTOR_TOKEN = "gb10-v2-executor-secret"
 OLDLAB_EXECUTOR_INCARNATION = UUID("00000000-0000-4000-8000-000000000601")
@@ -1001,6 +1013,21 @@ async def execution_preparation_api_context(
                         ["capacity:execution:abort"],
                     ),
                     _principal(
+                        "execution-activator",
+                        EXECUTION_ACTIVATE_TOKEN,
+                        ["capacity:execution:activate"],
+                    ),
+                    _principal(
+                        "execution-drainer",
+                        EXECUTION_DRAIN_TOKEN,
+                        ["capacity:execution:drain"],
+                    ),
+                    _principal(
+                        "execution-retirer",
+                        EXECUTION_RETIRE_TOKEN,
+                        ["capacity:execution:retire"],
+                    ),
+                    _principal(
                         "execution-reader",
                         EXECUTION_READ_TOKEN,
                         ["capacity:read"],
@@ -1077,6 +1104,164 @@ def _v2_executor_headers(pool_id: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+def _prepared_readiness_response(
+    response,  # type: ignore[no-untyped-def]
+) -> tuple[PreparedExecutionReadinessV2, str]:
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    readiness_sha256 = payload.pop("readiness_sha256")
+    readiness = PreparedExecutionReadinessV2.model_validate_json(json.dumps(payload))
+    assert readiness_sha256 == canonical_prepared_readiness_digest(readiness)
+    return readiness, readiness_sha256
+
+
+def _prepare_ready_execution(
+    client: TestClient,
+    request: ExecutionPreparationV2,
+    policy: ExecutionPreparationPolicyV2,
+    *,
+    key_base: int,
+) -> tuple[ExecutionContextV2, PreparedExecutionReadinessV2, str]:
+    prepared_response = client.post(
+        "/v2/execution-preparations",
+        headers={
+            "Authorization": f"Bearer {EXECUTION_PREPARE_TOKEN}",
+            "Idempotency-Key": str(UUID(int=key_base)),
+        },
+        json=request.model_dump(mode="json"),
+    )
+    assert prepared_response.status_code == 200, prepared_response.text
+    prepared = ExecutionContextV2.model_validate_json(prepared_response.content)
+    for index, pool_id in enumerate(("gb10", "oldlab"), start=1):
+        registration = _execution_registration(prepared, policy, pool_id=pool_id)
+        headers = _v2_executor_headers(pool_id)
+        registered = client.put(
+            f"/v2/executors/{pool_id}/registration",
+            headers=headers | {"Idempotency-Key": str(UUID(int=key_base + index))},
+            json=registration.model_dump(mode="json"),
+        )
+        assert registered.status_code == 200, registered.text
+        heartbeat = ExecutableExecutorHeartbeatV2(
+            execution=prepared,
+            executor_id=registration.executor_id,
+            executor_incarnation=registration.executor_incarnation,
+            pool_id=pool_id,
+            pool_generation=registration.pool_generation,
+            heartbeat_sequence=1,
+            journal_sequence=0,
+            journal_digest="0" * 64,
+        )
+        first_heartbeat = client.put(
+            f"/v2/executors/{pool_id}/heartbeat",
+            headers=headers,
+            json=heartbeat.model_dump(mode="json"),
+        )
+        assert first_heartbeat.status_code == 200, first_heartbeat.text
+        inventory = ExecutableExecutorInventoryV2(
+            execution=prepared,
+            executor_id=registration.executor_id,
+            executor_incarnation=registration.executor_incarnation,
+            pool_id=pool_id,
+            pool_generation=registration.pool_generation,
+            inventory_sequence=1,
+            journal_sequence=0,
+            journal_digest="0" * 64,
+            records=(),
+        )
+        inventoried = client.put(
+            f"/v2/executors/{pool_id}/inventory",
+            headers=headers,
+            json=inventory.model_dump(mode="json"),
+        )
+        assert inventoried.status_code == 200, inventoried.text
+        confirmation_sequence, confirmation_digest = (
+            canonical_inventory_confirmation_journal_head(inventory)
+        )
+        confirmed = client.put(
+            f"/v2/executors/{pool_id}/heartbeat",
+            headers=headers,
+            json=heartbeat.model_copy(
+                update={
+                    "heartbeat_sequence": 2,
+                    "journal_sequence": confirmation_sequence,
+                    "journal_digest": confirmation_digest,
+                }
+            ).model_dump(mode="json"),
+        )
+        assert confirmed.status_code == 200, confirmed.text
+    readiness, readiness_sha256 = _prepared_readiness_response(
+        client.get(
+            "/v2/status/execution-preparation",
+            headers={"Authorization": f"Bearer {EXECUTION_READ_TOKEN}"},
+        )
+    )
+    assert readiness.ready is True
+    assert readiness.execution == prepared
+    return prepared, readiness, readiness_sha256
+
+
+async def _store_activation_request(
+    session: AsyncSession,
+    fixture,  # type: ignore[no-untyped-def]
+    prepared: ExecutionContextV2,
+) -> ExecutionActivationV2:
+    execution_store = CapacityExecutionStore()
+    for binding in fixture.request.executors:
+        common = {
+            "execution": prepared,
+            "executor_id": binding.executor_id,
+            "executor_incarnation": binding.executor_incarnation,
+            "pool_id": binding.pool_id,
+            "pool_generation": binding.pool_generation,
+        }
+        heartbeat = ExecutableExecutorHeartbeatV2(
+            **common,
+            heartbeat_sequence=1,
+            journal_sequence=0,
+            journal_digest="0" * 64,
+        )
+        await execution_store.heartbeat_executor(session, heartbeat)
+        inventory = ExecutableExecutorInventoryV2(
+            **common,
+            inventory_sequence=1,
+            journal_sequence=0,
+            journal_digest="0" * 64,
+            records=(),
+        )
+        await execution_store.ingest_executor_inventory(session, inventory)
+        confirmation_sequence, confirmation_digest = (
+            canonical_inventory_confirmation_journal_head(inventory)
+        )
+        await execution_store.heartbeat_executor(
+            session,
+            heartbeat.model_copy(
+                update={
+                    "heartbeat_sequence": 2,
+                    "journal_sequence": confirmation_sequence,
+                    "journal_digest": confirmation_digest,
+                }
+            ),
+        )
+    policy = fixture.store.execution_policy
+    assert policy is not None
+    readiness = await load_prepared_execution_readiness(
+        session,
+        execution_policy=policy,
+        execution_policy_sha256=canonical_executable_digest(policy),
+        freshness_seconds=120,
+    )
+    assert readiness.ready is True
+    return ExecutionActivationV2(
+        authority_incarnation=prepared.authority_incarnation,
+        expected_writer_epoch=prepared.writer_epoch,
+        execution_epoch=prepared.execution_epoch,
+        execution_manifest_sha256=prepared.execution_manifest_sha256,
+        prepared_readiness_sha256=canonical_prepared_readiness_digest(readiness),
+        executable_new_capacity_ceiling=fixture.request.requested_ceiling,
+        executable_new_capacity_rate_per_minute=fixture.request.requested_rate_per_minute,
+    )
+
+
 @contextmanager
 def hold_reconciliation_open(
     client: TestClient,
@@ -1134,6 +1319,9 @@ def _assert_exact_approved_routes(app: FastAPI) -> None:
         ("/v2/execution-preparations", ("POST",)),
         ("/v2/executors/{pool_id}/registration", ("PUT",)),
         ("/v2/execution-preparations/{execution_epoch}/abort", ("POST",)),
+        ("/v2/execution-preparations/{execution_epoch}/activate", ("POST",)),
+        ("/v2/execution-epochs/{execution_epoch}/drain", ("POST",)),
+        ("/v2/execution-epochs/{execution_epoch}/retire", ("POST",)),
         ("/v2/executors/{pool_id}/heartbeat", ("PUT",)),
         ("/v2/executors/{pool_id}/checkpoint", ("GET",)),
         ("/v2/executors/{pool_id}/context", ("GET",)),
@@ -1357,7 +1545,7 @@ def test_execution_preparation_and_registration_routes_are_exact_and_replayable(
     assert reused.json() == {"detail": "capacity state conflict"}
 
 
-def test_execution_preparation_abort_is_exact_and_keeps_active_routes_absent(
+def test_execution_preparation_abort_is_exact_and_replayable(
     execution_preparation_api_context: tuple[
         TestClient,
         FastAPI,
@@ -1475,6 +1663,425 @@ def test_execution_preparation_abort_is_exact_and_keeps_active_routes_absent(
         assert replacement_client.get("/healthz").status_code == 200
 
 
+def test_execution_activation_route_is_least_scope_atomic_and_exactly_replayable(
+    execution_preparation_api_context: tuple[
+        TestClient,
+        FastAPI,
+        CapacityManagerSettings,
+        ExecutionPreparationV2,
+        ExecutionPreparationPolicyV2,
+    ],
+) -> None:
+    """Only the scoped operator can activate the exact readiness digest once."""
+
+    client, _app, _settings, request, policy = execution_preparation_api_context
+    prepared, _readiness, readiness_sha256 = _prepare_ready_execution(
+        client,
+        request,
+        policy,
+        key_base=15120,
+    )
+    activation = ExecutionActivationV2(
+        authority_incarnation=prepared.authority_incarnation,
+        expected_writer_epoch=prepared.writer_epoch,
+        execution_epoch=prepared.execution_epoch,
+        execution_manifest_sha256=prepared.execution_manifest_sha256,
+        prepared_readiness_sha256=readiness_sha256,
+        executable_new_capacity_ceiling=request.requested_ceiling,
+        executable_new_capacity_rate_per_minute=request.requested_rate_per_minute,
+    )
+    path = f"/v2/execution-preparations/{prepared.execution_epoch}/activate"
+    headers = {"Authorization": f"Bearer {EXECUTION_ACTIVATE_TOKEN}"}
+    activation_key = UUID(int=15123)
+
+    assert client.post(path, json=activation.model_dump(mode="json")).status_code == 401
+    assert (
+        client.post(
+            path,
+            headers={"Authorization": f"Bearer {EXECUTION_READ_TOKEN}"},
+            json=activation.model_dump(mode="json"),
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post(path, headers=headers, json=activation.model_dump(mode="json")).status_code
+        == 422
+    )
+    malformed = client.post(
+        path,
+        headers=headers | {"Idempotency-Key": str(UUID(int=15124))},
+        json={},
+    )
+    assert malformed.status_code == 422
+    assert malformed.json() == {"detail": "invalid capacity contract"}
+    crossed = client.post(
+        f"/v2/execution-preparations/{prepared.execution_epoch + 1}/activate",
+        headers=headers | {"Idempotency-Key": str(UUID(int=15125))},
+        json=activation.model_dump(mode="json"),
+    )
+    assert crossed.status_code == 403
+    assert crossed.json() == {"detail": "forbidden"}
+
+    stale_digest = client.post(
+        path,
+        headers=headers | {"Idempotency-Key": str(UUID(int=15127))},
+        json=activation.model_copy(
+            update={"prepared_readiness_sha256": "f" * 64}
+        ).model_dump(mode="json"),
+    )
+    assert stale_digest.status_code == 409
+    assert stale_digest.json() == {"detail": "capacity state conflict"}
+    premature_drain = ExecutionDrainV2(
+        authority_incarnation=prepared.authority_incarnation,
+        expected_writer_epoch=prepared.writer_epoch,
+        execution_epoch=prepared.execution_epoch,
+        execution_manifest_sha256=prepared.execution_manifest_sha256,
+        expected_executable_new_capacity_ceiling=request.requested_ceiling,
+        expected_executable_new_capacity_rate_per_minute=request.requested_rate_per_minute,
+    )
+    rejected_drain = client.post(
+        f"/v2/execution-epochs/{prepared.execution_epoch}/drain",
+        headers={
+            "Authorization": f"Bearer {EXECUTION_DRAIN_TOKEN}",
+            "Idempotency-Key": str(UUID(int=15128)),
+        },
+        json=premature_drain.model_dump(mode="json"),
+    )
+    assert rejected_drain.status_code == 409
+    assert rejected_drain.json() == {"detail": "capacity state conflict"}
+
+    activated = client.post(
+        path,
+        headers=headers | {"Idempotency-Key": str(activation_key)},
+        json=activation.model_dump(mode="json"),
+    )
+    assert activated.status_code == 200, activated.text
+    active = ExecutionAuthorityV2.model_validate_json(activated.content)
+    assert active.execution_state == "active"
+    assert active.executable_new_capacity_ceiling == request.requested_ceiling
+    replay = client.post(
+        path,
+        headers=headers | {"Idempotency-Key": str(activation_key)},
+        json=activation.model_dump(mode="json"),
+    )
+    assert replay.status_code == 200
+    assert replay.json() == activated.json()
+    changed = client.post(
+        path,
+        headers=headers | {"Idempotency-Key": str(activation_key)},
+        json=activation.model_copy(
+            update={"prepared_readiness_sha256": "f" * 64}
+        ).model_dump(mode="json"),
+    )
+    assert changed.status_code == 409
+    assert changed.json() == {"detail": "capacity state conflict"}
+
+    abort = ExecutionPreparationAbortV2(
+        authority_incarnation=prepared.authority_incarnation,
+        expected_writer_epoch=prepared.writer_epoch,
+        execution_epoch=prepared.execution_epoch,
+        execution_manifest_sha256=prepared.execution_manifest_sha256,
+    )
+    opposite = client.post(
+        f"/v2/execution-preparations/{prepared.execution_epoch}/abort",
+        headers={
+            "Authorization": f"Bearer {EXECUTION_ABORT_TOKEN}",
+            "Idempotency-Key": str(UUID(int=15126)),
+        },
+        json=abort.model_dump(mode="json"),
+    )
+    assert opposite.status_code == 409
+    assert opposite.json() == {"detail": "capacity state conflict"}
+
+
+def test_execution_drain_and_retirement_routes_require_exact_final_evidence(
+    execution_preparation_api_context: tuple[
+        TestClient,
+        FastAPI,
+        CapacityManagerSettings,
+        ExecutionPreparationV2,
+        ExecutionPreparationPolicyV2,
+    ],
+) -> None:
+    """Drain is immediate; retirement waits for both exact final pool receipts."""
+
+    client, app, _settings, request, policy = execution_preparation_api_context
+    prepared, readiness, readiness_sha256 = _prepare_ready_execution(
+        client,
+        request,
+        policy,
+        key_base=15140,
+    )
+    activation = ExecutionActivationV2(
+        authority_incarnation=prepared.authority_incarnation,
+        expected_writer_epoch=prepared.writer_epoch,
+        execution_epoch=prepared.execution_epoch,
+        execution_manifest_sha256=prepared.execution_manifest_sha256,
+        prepared_readiness_sha256=readiness_sha256,
+        executable_new_capacity_ceiling=request.requested_ceiling,
+        executable_new_capacity_rate_per_minute=request.requested_rate_per_minute,
+    )
+    activated = client.post(
+        f"/v2/execution-preparations/{prepared.execution_epoch}/activate",
+        headers={
+            "Authorization": f"Bearer {EXECUTION_ACTIVATE_TOKEN}",
+            "Idempotency-Key": str(UUID(int=15143)),
+        },
+        json=activation.model_dump(mode="json"),
+    )
+    assert activated.status_code == 200, activated.text
+    active = ExecutionAuthorityV2.model_validate_json(activated.content)
+    drain = ExecutionDrainV2(
+        authority_incarnation=active.authority_incarnation,
+        expected_writer_epoch=active.writer_epoch,
+        execution_epoch=active.execution_epoch,
+        execution_manifest_sha256=active.execution_manifest_sha256,
+        expected_executable_new_capacity_ceiling=(active.executable_new_capacity_ceiling),
+        expected_executable_new_capacity_rate_per_minute=(
+            active.executable_new_capacity_rate_per_minute
+        ),
+    )
+    drain_path = f"/v2/execution-epochs/{active.execution_epoch}/drain"
+    drain_headers = {"Authorization": f"Bearer {EXECUTION_DRAIN_TOKEN}"}
+    drain_key = UUID(int=15144)
+
+    assert client.post(drain_path, json=drain.model_dump(mode="json")).status_code == 401
+    assert (
+        client.post(
+            drain_path,
+            headers={"Authorization": f"Bearer {EXECUTION_ACTIVATE_TOKEN}"},
+            json=drain.model_dump(mode="json"),
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post(drain_path, headers=drain_headers, json=drain.model_dump(mode="json"))
+        .status_code
+        == 422
+    )
+    malformed_drain = client.post(
+        drain_path,
+        headers=drain_headers | {"Idempotency-Key": str(UUID(int=15145))},
+        json={},
+    )
+    assert malformed_drain.status_code == 422
+    assert malformed_drain.json() == {"detail": "invalid capacity contract"}
+    crossed_drain = client.post(
+        f"/v2/execution-epochs/{active.execution_epoch + 1}/drain",
+        headers=drain_headers | {"Idempotency-Key": str(UUID(int=15146))},
+        json=drain.model_dump(mode="json"),
+    )
+    assert crossed_drain.status_code == 403
+    assert crossed_drain.json() == {"detail": "forbidden"}
+
+    drained_response = client.post(
+        drain_path,
+        headers=drain_headers | {"Idempotency-Key": str(drain_key)},
+        json=drain.model_dump(mode="json"),
+    )
+    assert drained_response.status_code == 200, drained_response.text
+    drained = ExecutionAuthorityV2.model_validate_json(drained_response.content)
+    assert drained.execution_state == "drain-only"
+    assert drained.executable_new_capacity_ceiling == 0
+    assert drained.executable_new_capacity_rate_per_minute == 0
+    drain_replay = client.post(
+        drain_path,
+        headers=drain_headers | {"Idempotency-Key": str(drain_key)},
+        json=drain.model_dump(mode="json"),
+    )
+    assert drain_replay.status_code == 200
+    assert drain_replay.json() == drained_response.json()
+    changed_drain = client.post(
+        drain_path,
+        headers=drain_headers | {"Idempotency-Key": str(drain_key)},
+        json=drain.model_copy(
+            update={
+                "expected_executable_new_capacity_ceiling": (
+                    drain.expected_executable_new_capacity_ceiling + 1
+                )
+            }
+        ).model_dump(mode="json"),
+    )
+    assert changed_drain.status_code == 409
+    assert changed_drain.json() == {"detail": "capacity state conflict"}
+
+    unsafe_checkpoints = tuple(
+        ExecutionRetirementExecutorCheckpointV2(
+            executor_id=item.expected_executor_id,
+            executor_incarnation=item.expected_executor_incarnation,
+            pool_id=item.pool_id,
+            pool_generation=item.expected_pool_generation,
+            heartbeat_sequence=item.heartbeat_sequence + 1,
+            command_sequence=0,
+            journal_sequence=item.journal_sequence,
+            journal_digest=item.journal_digest,
+            inventory_sequence=item.inventory_sequence,
+            inventory_digest=item.inventory_digest or "0" * 64,
+        )
+        for item in readiness.executors
+    )
+    unsafe_retirement = ExecutionRetirementV2(
+        authority_incarnation=drained.authority_incarnation,
+        expected_writer_epoch=drained.writer_epoch,
+        execution_epoch=drained.execution_epoch,
+        execution_manifest_sha256=drained.execution_manifest_sha256,
+        executor_checkpoints=unsafe_checkpoints,
+    )
+    retire_path = f"/v2/execution-epochs/{drained.execution_epoch}/retire"
+    retire_headers = {"Authorization": f"Bearer {EXECUTION_RETIRE_TOKEN}"}
+    too_early = client.post(
+        retire_path,
+        headers=retire_headers | {"Idempotency-Key": str(UUID(int=15147))},
+        json=unsafe_retirement.model_dump(mode="json"),
+    )
+    assert too_early.status_code == 409
+    assert too_early.json() == {"detail": "capacity state conflict"}
+
+    readiness_by_pool = {item.pool_id: item for item in readiness.executors}
+    for pool_id in ("gb10", "oldlab"):
+        item = readiness_by_pool[pool_id]
+        headers = _v2_executor_headers(pool_id)
+        final_inventory = ExecutableExecutorInventoryV2(
+            execution=active,
+            executor_id=item.expected_executor_id,
+            executor_incarnation=item.expected_executor_incarnation,
+            pool_id=pool_id,
+            pool_generation=item.expected_pool_generation,
+            inventory_sequence=item.inventory_sequence + 1,
+            journal_sequence=item.journal_sequence,
+            journal_digest=item.journal_digest,
+            journal_checkpoint_sequence=item.journal_sequence,
+            journal_checkpoint_digest=item.journal_digest,
+            records=(),
+        )
+        inventoried = client.put(
+            f"/v2/executors/{pool_id}/inventory",
+            headers=headers,
+            json=final_inventory.model_dump(mode="json"),
+        )
+        assert inventoried.status_code == 200, inventoried.text
+        confirmation_sequence, confirmation_digest = (
+            canonical_inventory_confirmation_journal_head(final_inventory)
+        )
+        final_heartbeat = ExecutableExecutorHeartbeatV2(
+            execution=active,
+            executor_id=item.expected_executor_id,
+            executor_incarnation=item.expected_executor_incarnation,
+            pool_id=pool_id,
+            pool_generation=item.expected_pool_generation,
+            heartbeat_sequence=item.heartbeat_sequence + 1,
+            journal_sequence=confirmation_sequence,
+            journal_digest=confirmation_digest,
+            journal_checkpoint_sequence=item.journal_sequence,
+            journal_checkpoint_digest=item.journal_digest,
+        )
+        heartbeated = client.put(
+            f"/v2/executors/{pool_id}/heartbeat",
+            headers=headers,
+            json=final_heartbeat.model_dump(mode="json"),
+        )
+        assert heartbeated.status_code == 200, heartbeated.text
+
+    executor_status = client.get(
+        "/v2/status/executors",
+        headers={"Authorization": f"Bearer {EXECUTION_READ_TOKEN}"},
+    )
+    assert executor_status.status_code == 200, executor_status.text
+    items = executor_status.json()["items"]
+    assert [item["pool_id"] for item in items] == ["gb10", "oldlab"]
+    assert all(item["retirement_safe"] is True for item in items)
+    final_checkpoints = tuple(
+            ExecutionRetirementExecutorCheckpointV2(
+                executor_id=item["executor_id"],
+                executor_incarnation=UUID(item["executor_incarnation"]),
+            pool_id=item["pool_id"],
+            pool_generation=item["pool_generation"],
+            heartbeat_sequence=item["heartbeat_sequence"],
+            command_sequence=item["command_sequence"],
+            journal_sequence=item["journal_sequence"],
+            journal_digest=item["journal_digest"],
+            inventory_sequence=item["inventory_sequence"],
+            inventory_digest=item["inventory_digest"],
+        )
+        for item in items
+    )
+    retirement = unsafe_retirement.model_copy(
+        update={"executor_checkpoints": final_checkpoints}
+    )
+    assert client.post(retire_path, json=retirement.model_dump(mode="json")).status_code == 401
+    assert (
+        client.post(
+            retire_path,
+            headers={"Authorization": f"Bearer {EXECUTION_DRAIN_TOKEN}"},
+            json=retirement.model_dump(mode="json"),
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post(
+            retire_path,
+            headers=retire_headers,
+            json=retirement.model_dump(mode="json"),
+        ).status_code
+        == 422
+    )
+    malformed_retirement = client.post(
+        retire_path,
+        headers=retire_headers | {"Idempotency-Key": str(UUID(int=15148))},
+        json={},
+    )
+    assert malformed_retirement.status_code == 422
+    assert malformed_retirement.json() == {"detail": "invalid capacity contract"}
+    crossed_retirement = client.post(
+        f"/v2/execution-epochs/{drained.execution_epoch + 1}/retire",
+        headers=retire_headers | {"Idempotency-Key": str(UUID(int=15149))},
+        json=retirement.model_dump(mode="json"),
+    )
+    assert crossed_retirement.status_code == 403
+    assert crossed_retirement.json() == {"detail": "forbidden"}
+
+    retirement_key = UUID(int=15150)
+    retired = client.post(
+        retire_path,
+        headers=retire_headers | {"Idempotency-Key": str(retirement_key)},
+        json=retirement.model_dump(mode="json"),
+    )
+    assert retired.status_code == 200, retired.text
+    assert retired.json()["execution_epoch"] == drained.execution_epoch
+    assert retired.json()["replayed"] is False
+    assert app.state.writer == WriterFence(
+        authority_incarnation=drained.authority_incarnation,
+        writer_epoch=drained.writer_epoch,
+    )
+    retirement_replay = client.post(
+        retire_path,
+        headers=retire_headers | {"Idempotency-Key": str(retirement_key)},
+        json=retirement.model_dump(mode="json"),
+    )
+    assert retirement_replay.status_code == 200
+    assert retirement_replay.json() == retired.json() | {"replayed": True}
+    changed_retirement = client.post(
+        retire_path,
+        headers=retire_headers | {"Idempotency-Key": str(retirement_key)},
+        json=retirement.model_copy(
+            update={
+                "executor_checkpoints": (
+                    final_checkpoints[0].model_copy(
+                        update={
+                            "heartbeat_sequence": (
+                                final_checkpoints[0].heartbeat_sequence + 1
+                            )
+                        }
+                    ),
+                    final_checkpoints[1],
+                )
+            }
+        ).model_dump(mode="json"),
+    )
+    assert changed_retirement.status_code == 409
+    assert changed_retirement.json() == {"detail": "capacity state conflict"}
+
+
 def test_execution_preparation_status_requires_complete_fresh_two_pool_evidence(
     execution_preparation_api_context: tuple[
         TestClient,
@@ -1493,9 +2100,9 @@ def test_execution_preparation_status_requires_complete_fresh_two_pool_evidence(
     assert client.get(status_path, headers=_v2_executor_headers("gb10")).status_code == 403
 
     shadow_response = client.get(status_path, headers=read_headers)
-    assert shadow_response.status_code == 200
-    shadow = PreparedExecutionReadinessV2.model_validate_json(shadow_response.content)
+    shadow, shadow_digest = _prepared_readiness_response(shadow_response)
     assert shadow.ready is False
+    assert len(shadow_digest) == 64
     assert shadow.policy_sha256 == settings.execution_policy_sha256
     assert shadow.blockers == ("manager-shadow",)
 
@@ -1509,8 +2116,8 @@ def test_execution_preparation_status_requires_complete_fresh_two_pool_evidence(
     )
     assert prepared_response.status_code == 200, prepared_response.text
     prepared = ExecutionContextV2.model_validate_json(prepared_response.content)
-    incomplete = PreparedExecutionReadinessV2.model_validate_json(
-        client.get(status_path, headers=read_headers).content
+    incomplete, _incomplete_digest = _prepared_readiness_response(
+        client.get(status_path, headers=read_headers)
     )
     assert incomplete.ready is False
     assert incomplete.blockers == ("executor-registration-missing",)
@@ -1526,8 +2133,8 @@ def test_execution_preparation_status_requires_complete_fresh_two_pool_evidence(
             json=registration.model_dump(mode="json"),
         )
         assert response.status_code == 200, response.text
-    registered = PreparedExecutionReadinessV2.model_validate_json(
-        client.get(status_path, headers=read_headers).content
+    registered, _registered_digest = _prepared_readiness_response(
+        client.get(status_path, headers=read_headers)
     )
     assert registered.ready is False
     assert registered.blockers == ("executor-inventory-missing", "executor-lease-expired")
@@ -1585,9 +2192,9 @@ def test_execution_preparation_status_requires_complete_fresh_two_pool_evidence(
         assert response.status_code == 200, response.text
 
     ready_response = client.get(status_path, headers=read_headers)
-    assert ready_response.status_code == 200
-    ready = PreparedExecutionReadinessV2.model_validate_json(ready_response.content)
+    ready, ready_digest = _prepared_readiness_response(ready_response)
     assert ready.ready is True
+    assert ready_digest != "0" * 64
     assert ready.blockers == ()
     assert ready.execution == prepared
     assert tuple(item.pool_id for item in ready.executors) == ("gb10", "oldlab")
@@ -1607,8 +2214,9 @@ def test_execution_preparation_status_reports_disabled_policy(
     )
 
     assert response.status_code == 200
-    readiness = PreparedExecutionReadinessV2.model_validate_json(response.content)
+    readiness, readiness_digest = _prepared_readiness_response(response)
     assert settings.execution_policy_file is None
+    assert readiness_digest == canonical_prepared_readiness_digest(readiness)
     assert readiness.ready is False
     assert readiness.policy_mode == "disabled"
     assert readiness.policy_sha256 is None
@@ -1696,6 +2304,100 @@ def test_execution_transition_route_rejects_an_injected_bound_principal(
             json=request.model_copy(
                 update={"expected_writer_epoch": app.state.writer.writer_epoch}
             ).model_dump(mode="json"),
+        )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "forbidden"}
+
+
+@pytest.mark.parametrize(
+    ("scope", "route_kind"),
+    (
+        ("capacity:execution:activate", "activate"),
+        ("capacity:execution:drain", "drain"),
+        ("capacity:execution:retire", "retire"),
+    ),
+)
+def test_active_execution_transition_routes_reject_injected_bound_principals(
+    execution_preparation_api_context: tuple[
+        TestClient,
+        FastAPI,
+        CapacityManagerSettings,
+        ExecutionPreparationV2,
+        ExecutionPreparationPolicyV2,
+    ],
+    scope: str,
+    route_kind: str,
+) -> None:
+    """Even a scoped verifier result cannot attach a transition to a subject."""
+
+    _client, _app, settings, request, policy = execution_preparation_api_context
+    verifier = StaticPrincipalVerifier(
+        CapacityPrincipal(
+            principal_id=f"injected-subject-{route_kind}",
+            scopes=frozenset({scope}),  # type: ignore[arg-type]
+            subject_id=SUBJECT_ID,
+            subject_incarnation=SUBJECT_INCARNATION,
+            demand_reporter_incarnation=DEMAND_REPORTER_ID,
+            pool_id=None,
+            pool_reporter_incarnation=None,
+            executor_id=None,
+            executor_incarnation=None,
+            executor_pool_generation=None,
+        )
+    )
+    app = create_app(settings, verifier=verifier)
+    with TestClient(app) as client:
+        writer_epoch = app.state.writer.writer_epoch
+        common = {
+            "authority_incarnation": request.authority_incarnation,
+            "expected_writer_epoch": writer_epoch,
+            "execution_epoch": 1,
+            "execution_manifest_sha256": "1" * 64,
+        }
+        if route_kind == "activate":
+            value = ExecutionActivationV2(
+                **common,
+                prepared_readiness_sha256="2" * 64,
+                executable_new_capacity_ceiling=1,
+                executable_new_capacity_rate_per_minute=1,
+            )
+            path = "/v2/execution-preparations/1/activate"
+        elif route_kind == "drain":
+            value = ExecutionDrainV2(
+                **common,
+                expected_executable_new_capacity_ceiling=1,
+                expected_executable_new_capacity_rate_per_minute=1,
+            )
+            path = "/v2/execution-epochs/1/drain"
+        else:
+            checkpoints = tuple(
+                ExecutionRetirementExecutorCheckpointV2(
+                    executor_id=binding.executor_id,
+                    executor_incarnation=binding.executor_incarnation,
+                    pool_id=binding.pool_id,
+                    pool_generation=binding.pool_generation,
+                    heartbeat_sequence=1,
+                    command_sequence=0,
+                    journal_sequence=0,
+                    journal_digest="0" * 64,
+                    inventory_sequence=1,
+                    inventory_digest="2" * 64,
+                )
+                for binding in policy.executors
+            )
+            value = ExecutionRetirementV2(
+                **common,
+                executor_checkpoints=checkpoints,
+            )
+            path = "/v2/execution-epochs/1/retire"
+        response = client.post(
+            path,
+            headers={
+                "Authorization": "Bearer injected",
+                "Idempotency-Key": str(UUID(int=15301)),
+            },
+            json=value.model_dump(mode="json"),
         )
 
     assert response.status_code == 403
@@ -1861,16 +2563,14 @@ async def test_injected_management_store_is_exact_and_default_remains_disabled(
                     idempotency_key=UUID(int=12301),
                 )
                 await register_execution_executors(capacity_session, fixture, prepared)
+                activation_request = await _store_activation_request(
+                    capacity_session,
+                    fixture,
+                    prepared,
+                )
                 active = await injected_store.activate_execution_epoch(
                     capacity_session,
-                    ExecutionActivationV2(
-                        authority_incarnation=prepared.authority_incarnation,
-                        expected_writer_epoch=prepared.writer_epoch,
-                        execution_epoch=prepared.execution_epoch,
-                        execution_manifest_sha256=prepared.execution_manifest_sha256,
-                        executable_new_capacity_ceiling=1,
-                        executable_new_capacity_rate_per_minute=1,
-                    ),
+                    activation_request,
                     actor="activation-operator",
                     idempotency_key=UUID(int=12302),
                 )
@@ -1960,16 +2660,14 @@ async def test_v2_executor_context_returns_public_execution_context_exactly(
                     idempotency_key=UUID(int=12321),
                 )
                 await register_execution_executors(capacity_session, fixture, prepared)
+                activation_request = await _store_activation_request(
+                    capacity_session,
+                    fixture,
+                    prepared,
+                )
                 active = await injected_store.activate_execution_epoch(
                     capacity_session,
-                    ExecutionActivationV2(
-                        authority_incarnation=prepared.authority_incarnation,
-                        expected_writer_epoch=prepared.writer_epoch,
-                        execution_epoch=prepared.execution_epoch,
-                        execution_manifest_sha256=prepared.execution_manifest_sha256,
-                        executable_new_capacity_ceiling=1,
-                        executable_new_capacity_rate_per_minute=1,
-                    ),
+                    activation_request,
                     actor="activation-operator",
                     idempotency_key=UUID(int=12322),
                 )
@@ -3038,13 +3736,10 @@ async def test_allocation_activation_during_shadow_commit_retries_as_executable(
         idempotency_key=UUID(int=883),
     )
     await register_execution_executors(capacity_session, fixture, prepared)
-    activation = ExecutionActivationV2(
-        authority_incarnation=AUTHORITY_ID,
-        expected_writer_epoch=fixture.writer.writer_epoch,
-        execution_epoch=prepared.execution_epoch,
-        execution_manifest_sha256=prepared.execution_manifest_sha256,
-        executable_new_capacity_ceiling=1,
-        executable_new_capacity_rate_per_minute=1,
+    activation = await _store_activation_request(
+        capacity_session,
+        fixture,
+        prepared,
     )
     session_factory = async_sessionmaker(
         bind=capacity_session.bind,
@@ -3079,16 +3774,10 @@ async def test_allocation_reconcile_commits_fresh_plan_under_active_execution_fe
         idempotency_key=UUID(int=880),
     )
     await register_execution_executors(capacity_session, fixture, prepared)
+    activation = await _store_activation_request(capacity_session, fixture, prepared)
     active = await fixture.store.activate_execution_epoch(
         capacity_session,
-        ExecutionActivationV2(
-            authority_incarnation=AUTHORITY_ID,
-            expected_writer_epoch=fixture.writer.writer_epoch,
-            execution_epoch=prepared.execution_epoch,
-            execution_manifest_sha256=prepared.execution_manifest_sha256,
-            executable_new_capacity_ceiling=1,
-            executable_new_capacity_rate_per_minute=1,
-        ),
+        activation,
         actor="activation-operator",
         idempotency_key=UUID(int=881),
     )
@@ -3312,16 +4001,10 @@ async def _active_execution_fixture(capacity_session: AsyncSession):  # type: ig
         idempotency_key=uuid4(),
     )
     await register_execution_executors(capacity_session, fixture, prepared)
+    activation = await _store_activation_request(capacity_session, fixture, prepared)
     active = await fixture.store.activate_execution_epoch(
         capacity_session,
-        ExecutionActivationV2(
-            authority_incarnation=AUTHORITY_ID,
-            expected_writer_epoch=fixture.writer.writer_epoch,
-            execution_epoch=prepared.execution_epoch,
-            execution_manifest_sha256=prepared.execution_manifest_sha256,
-            executable_new_capacity_ceiling=1,
-            executable_new_capacity_rate_per_minute=1,
-        ),
+        activation,
         actor="activation-operator",
         idempotency_key=uuid4(),
     )

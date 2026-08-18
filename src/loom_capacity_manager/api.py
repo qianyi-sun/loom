@@ -63,9 +63,12 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableProtectedReleaseV2,
     ExecutableReservationAcceptanceV2,
     ExecutableSubmissionRecoveryV2,
+    ExecutionActivationV2,
     ExecutionContextV2,
+    ExecutionDrainV2,
     ExecutionPreparationAbortV2,
     ExecutionPreparationV2,
+    ExecutionRetirementV2,
     PreparedExecutorBindingV2,
     canonical_executable_admission_work_bytes,
     canonical_executable_digest,
@@ -120,6 +123,7 @@ from loom_capacity_manager.models import (
 )
 from loom_capacity_manager.ownership import OwnershipKeyring
 from loom_capacity_manager.preparation_readiness import (
+    canonical_prepared_readiness_digest,
     load_prepared_execution_readiness,
 )
 from loom_capacity_manager.reconciler import (
@@ -410,12 +414,13 @@ def create_app(
                 cast(str, settings.execution_policy_sha256),
             )
         )
+        if execution_policy is not None:
+            resolved_execution_policy_sha256 = cast(str, settings.execution_policy_sha256)
         resolved_management_store = CapacityManagementStore(
             freshness_seconds=settings.freshness_seconds,
             execution_policy=execution_policy,
+            execution_policy_sha256=resolved_execution_policy_sha256,
         )
-        if execution_policy is not None:
-            resolved_execution_policy_sha256 = cast(str, settings.execution_policy_sha256)
     else:
         resolved_management_store = management_store
     ownership_keyring = OwnershipKeyring()
@@ -547,6 +552,9 @@ def create_app(
     execution_preparation_body = contract_body(ExecutionPreparationV2)
     execution_registration_body = contract_body(ExecutableExecutorRegistrationV2)
     execution_abort_body = contract_body(ExecutionPreparationAbortV2)
+    execution_activation_body = contract_body(ExecutionActivationV2)
+    execution_drain_body = contract_body(ExecutionDrainV2)
+    execution_retirement_body = contract_body(ExecutionRetirementV2)
     executable_acceptance_body = contract_body(ExecutableReservationAcceptanceV2)
     executable_bootstrap_proposal_body = contract_body(ExecutableBootstrapProposalV2)
     executable_bootstrap_acknowledgement_body = contract_body(
@@ -962,6 +970,78 @@ def create_app(
                         authority_incarnation=value.authority_incarnation,
                         writer_epoch=value.expected_writer_epoch + 1,
                     )
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.post("/v2/execution-preparations/{execution_epoch}/activate")
+    async def activate_execution_preparation(
+        execution_epoch: int,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:execution:activate")),
+        value: ExecutionActivationV2 = Depends(execution_activation_body),
+        idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    ) -> Any:
+        assert_unbound_execution_actor(actor)
+        if value.execution_epoch != execution_epoch:
+            raise HTTPException(status_code=403, detail="forbidden")
+        session_factory, store, _writer = runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await store.activate_execution_epoch(
+                    session,
+                    value,
+                    actor=actor.principal_id,
+                    idempotency_key=idempotency_key,
+                )
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.post("/v2/execution-epochs/{execution_epoch}/drain")
+    async def drain_execution_epoch(
+        execution_epoch: int,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:execution:drain")),
+        value: ExecutionDrainV2 = Depends(execution_drain_body),
+        idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    ) -> Any:
+        assert_unbound_execution_actor(actor)
+        if value.execution_epoch != execution_epoch:
+            raise HTTPException(status_code=403, detail="forbidden")
+        session_factory, store, _writer = runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await store.begin_execution_drain(
+                    session,
+                    value,
+                    actor=actor.principal_id,
+                    idempotency_key=idempotency_key,
+                )
+            return jsonable_encoder(result)
+        except CapacityStoreError as exc:
+            raise _store_error(exc) from exc
+
+    @app.post("/v2/execution-epochs/{execution_epoch}/retire")
+    async def retire_execution_epoch(
+        execution_epoch: int,
+        request: Request,
+        actor: CapacityPrincipal = Depends(require("capacity:execution:retire")),
+        value: ExecutionRetirementV2 = Depends(execution_retirement_body),
+        idempotency_key: UUID = Header(alias="Idempotency-Key"),
+    ) -> Any:
+        assert_unbound_execution_actor(actor)
+        if value.execution_epoch != execution_epoch:
+            raise HTTPException(status_code=403, detail="forbidden")
+        session_factory, store, _writer = runtime(request)
+        try:
+            async with session_factory() as session:
+                result = await store.retire_execution_epoch(
+                    session,
+                    value,
+                    actor=actor.principal_id,
+                    idempotency_key=idempotency_key,
+                )
             return jsonable_encoder(result)
         except CapacityStoreError as exc:
             raise _store_error(exc) from exc
@@ -1924,7 +2004,9 @@ def create_app(
                     execution_policy_sha256=policy_sha256,
                     freshness_seconds=settings.freshness_seconds,
                 )
-            return jsonable_encoder(result)
+            return jsonable_encoder(result) | {
+                "readiness_sha256": canonical_prepared_readiness_digest(result)
+            }
         except ValueError as exc:
             raise HTTPException(
                 status_code=503,

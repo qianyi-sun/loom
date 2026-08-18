@@ -362,9 +362,17 @@ class ExecutionActivationV2(StrictV2Model):
     expected_writer_epoch: PositiveQuantity
     execution_epoch: PositiveQuantity
     execution_manifest_sha256: Digest
+    prepared_readiness_sha256: Digest
     executable_new_capacity_ceiling: PositiveQuantity
     executable_new_capacity_rate_per_minute: PositiveQuantity
     executable: Literal[True] = True
+
+    @field_validator("prepared_readiness_sha256")
+    @classmethod
+    def _nonzero_prepared_readiness_digest(cls, value: str) -> str:
+        if value == _EMPTY_JOURNAL_DIGEST:
+            raise ValueError("prepared readiness digest must be nonzero")
+        return value
 
 
 class ExecutionPreparationAbortV2(StrictV2Model):
