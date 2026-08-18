@@ -219,7 +219,7 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
     assert rendered.input_sha256 == expected_input
     assert rendered.release_sha256 == hashlib.sha256(release.canonical_bytes()).hexdigest()
     assert hashlib.sha256(rendered.yaml_text.encode("utf-8")).hexdigest() == (
-        "adb47ba3672e87513eb1501e507ea644fcc70e1781ba0328831d78d58cb99dc4"
+        "009cc10cd2de5657644f10b1aa7d0d64f08a0c3aff0389af2b9d1ba27a0f0db9"
     )
 
     identities = {_identity(document) for document in documents}
@@ -757,7 +757,7 @@ def test_rbac_uses_dynamic_rolebindings_and_fail_closed_principal_policies(
             "apiGroups": ["*"],
             "apiVersions": ["*"],
             "operations": ["CREATE", "UPDATE", "DELETE", "CONNECT"],
-            "resources": ["*", "*/*"],
+            "resources": ["*/*"],
         }
     ]
     assert "loom-personal-dev-managed-namespace" in resource_policy
