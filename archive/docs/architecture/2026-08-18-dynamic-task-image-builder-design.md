@@ -125,8 +125,8 @@ Trusted components are:
 
 - the pinned Loom builder release and its installed launcher;
 - the pinned rootless BuildKit, RootlessKit, snapshotter, and network helpers;
-- the Slurm controller, cgroup/prolog/epilog configuration, and the narrow
-  build-environment provider;
+- the Slurm controller, cgroup/epilog configuration, root-owned node guard, and
+  the narrow build-environment provider;
 - the Loom control plane and its materialization state machine; and
 - the registry authentication, immutability, and retention controls.
 
@@ -159,22 +159,26 @@ Task registration / trial submission
                 |
                 | ordinary architecture-constrained sbatch
                 v
-+---------- shared Slurm node / allocation cgroup ----------+
-| allocation supervisor                                     |
-|  +-- containment and release validation                   |
-|  +-- rootless BuildKit daemon                             |
-|  +-- Dockerfile RUN processes and helpers                 |
-|  +-- job-scoped storage, network, and credentials         |
-+----------------------------+-------------------------------+
-                             | staged push
-                             v
-                  immutable registry digest
-                             |
-                             v
-                   materialization ready
-                             |
-                             v
-              trial worker pulls exact digest
++---------------------- shared Slurm node ----------------------+
+| root-owned node guard: peer/cgroup auth + BPF attachment      |
+|                    | Unix socket + sealed memfd                |
+|  +-----------------v-- Slurm allocation cgroup -------------+ |
+|  | allocation supervisor                                   | |
+|  |  +-- containment and release validation                 | |
+|  |  +-- rootless BuildKit daemon                           | |
+|  |  +-- Dockerfile RUN processes and helpers               | |
+|  |  +-- job-scoped storage, network, and credentials       | |
+|  +-----------------------------+----------------------------+ |
++--------------------------------+------------------------------+
+                                 | per-attempt repository push
+                                 v
+                      immutable registry digest
+                                 |
+                                 v
+                       materialization ready
+                                 |
+                                 v
+                  trial worker pulls exact digest
 ```
 
 ### Materialization service
@@ -198,7 +202,8 @@ provider contract. The provider owns only:
 - capability and containment validation;
 - allocation submission, inspection, cancellation, and observed state;
 - architecture and resource request rendering; and
-- binding a nonsecret grant ID to one held Slurm job and releasing the job only
+- journaling each submission intent, reconciling ambiguous submissions, binding
+  a nonsecret grant ID to exactly one held Slurm job, and releasing the job only
   after that binding is durable.
 
 The initial `SlurmBuildEnvironmentProvider` submits ordinary jobs. A future
@@ -210,6 +215,37 @@ The installed provider executor runs as a dedicated non-root builder Unix
 principal and submits only its own Slurm jobs. Its Slurm association permits the
 builder partition and capped QoS but not administrator operations. Trial-worker
 jobs run under a different Unix principal.
+
+### Node-local guard
+
+Each eligible node runs a small root-owned `loom-task-builder-node-guard`
+daemon installed by the cluster authority. It is not a Slurm Prolog, and its
+availability does not control `slurmd`'s Prolog result or drain a node. Its
+narrow responsibilities are to authenticate a local builder allocation, attach
+the reviewed network programs, project a one-use bootstrap credential, and
+quarantine the builder capability when containment or cleanup fails.
+
+The guard listens on a root-owned Unix `SOCK_SEQPACKET` socket. It authenticates
+the connecting supervisor with `SO_PEERCRED`, immediately pins it with a pidfd,
+and verifies that it is the live batch-step leader, runs the pinned supervisor
+executable, has the dedicated Unix identity, and occupies the expected Slurm
+job cgroup. The submitted batch script contains only `exec` of that supervisor.
+The guard compares the cgroup-derived job ID, node-configured cluster ID, and
+live job attributes with the durable grant while holding the pidfd through the
+exchange. It passes the credential only as an
+`MFD_CLOEXEC|MFD_ALLOW_SEALING` memfd over `SCM_RIGHTS`. The memfd is sealed
+against write, growth, shrink, and further seal changes before transfer; no
+bootstrap secret is written to a path. The guard's node-specific mTLS key
+remains root-only and cannot be requested over the local protocol.
+
+The guard has no remote listener and accepts only a bounded versioned request
+containing a grant ID; it never parses a task bundle or Dockerfile. Its systemd
+unit pins the executable and policy digests, limits memory/PIDs/requests,
+restricts filesystem writes to its runtime state, and limits network access to
+the exact control-plane projection endpoint. It retains only the host authority
+needed for peer/cgroup inspection, approved Loom-subtree management, and BPF
+attachment. Malformed or excessive local requests are rate-limited and audited
+without affecting `slurmd`.
 
 ### Allocation supervisor and BuildKit executor
 
@@ -228,18 +264,19 @@ provenance. It does not own retry state, scheduling, or trial eligibility.
 Each pushed component digest is recorded immediately as cleanup evidence
 against the fenced attempt. Cleanup evidence is not readiness evidence. The
 control-plane publisher fetches and validates the manifest and config by digest,
-then writes a signed publication statement bound to the task, component,
-architecture, build policy, attempt, and lease. Readiness is committed only
-after every component has that verified statement. The retention controller
-keeps referenced publications, retires unreferenced ones after a grace period,
-and garbage-collects partial or abandoned attempts.
+then writes a canonical, signed publication statement bound to the task,
+component, architecture, build policy, attempt, and lease. Readiness is
+committed only after every component has that verified statement. The retention
+controller keeps referenced publications, retires unreferenced ones after a
+grace period, and garbage-collects partial or abandoned attempts.
 
 ### Trial scheduler and workers
 
-The scheduler carries the frozen task snapshot and exact component digests in
-the trial execution grant. Service workers verify the bundle and pull those
-digests. A missing artifact after readiness is an infrastructure consistency
-failure; a trial worker never rebuilds it.
+The scheduler carries the frozen task snapshot, exact component digests, and
+publication-statement digests in the trial execution grant. Service workers
+verify the bundle and statements and pull those image digests. A missing
+artifact after readiness is an infrastructure consistency failure; a trial
+worker never rebuilds it.
 
 ## Materialization identity and provenance
 
@@ -282,7 +319,7 @@ Provenance records at least:
 - builder release and BuildKit/helper binary digests;
 - Slurm cluster and job identifiers, without secrets;
 - network-policy version;
-- timestamps, attempt/lease epoch, and component output digests; and
+- timestamps, attempt/lease epoch, and component output digests;
 - containment-evidence version and result; and
 - the control-plane-signed publication-statement digest.
 
@@ -295,19 +332,22 @@ The output digest, not a mutable tag, is the only execution reference.
    creates `x86_64` and `arm64` intents.
 2. Trial submission idempotently ensures and links the same intents. The trial
    remains visibly blocked on `task_image_materialization`, not failed.
-3. The capacity reconciler observes queued demand, creates a grant record,
-   submits an ordinary Slurm builder job in held state with only the nonsecret
-   grant ID, binds the returned job ID, and then releases the job.
+3. The capacity reconciler observes queued demand, journals a grant and
+   submission intent, submits an ordinary Slurm builder job in held state with
+   the grant ID in its versioned comment, reconciles zero/one/multiple matches,
+   binds exactly one returned or discovered job ID, and then releases the job.
 4. The allocation supervisor proves containment before it asks for a claim.
-5. The node-local projector and supervisor exchange the Slurm-bound one-use
-   grant for a short-lived `task-image:build` control-plane session.
+5. The node-local guard authenticates the supervisor and its job cgroup,
+   installs the job's network policy, and passes a sealed one-use memfd. The
+   supervisor exchanges it for a short-lived `task-image:build` session.
 6. The builder claims a matching architecture row with a lease epoch.
-7. Only after claim, the builder obtains a registry credential scoped to that
-   attempt and lease, fetches
-   the frozen bundle through a time-limited object URL, and verifies its digest.
+7. Only after claim, the builder obtains registry credentials scoped to the
+   exact per-component attempt repositories and lease, fetches the frozen bundle
+   through a time-limited object URL, and verifies its digest. Any cache
+   credential is separate.
 8. BuildKit builds every Dockerfile-backed component using the native platform
    and restricted policy, recording resolved base digests as provenance.
-9. Each component is pushed to an attempt-specific staging reference. The
+9. Each component is pushed to its own attempt-specific repository. The
    returned digest is appended immediately as cleanup evidence.
 10. The control-plane publisher fetches the manifest and config by digest,
     verifies the publication contract, signs its statement, and atomically marks
@@ -325,6 +365,7 @@ Builder jobs request a fixed, reviewed resource profile and render:
 - one node and one task;
 - native architecture and `loom_rootless_buildkit` capability constraints;
 - positive CPU, memory, PID, I/O, temporary-storage, and wall-time limits; and
+- zero builder-cgroup swap (`memory.swap.max=0`); and
 - an overlapping shared-node builder partition with a higher `PriorityTier`
   than Loom trial-worker partitions; and
 - a dedicated builder QoS with bounded submitted/running job counts and a hard
@@ -337,9 +378,33 @@ They do not render:
 - `--nodelist` or a permanent `allowed_nodes` pin; or
 - access to `/var/run/docker.sock` or another host runtime.
 
-They do render `--hold` for grant binding and `--no-requeue`. An allocation
-lost before or after projection terminates; replacement demand receives a new
-Slurm job and a new grant.
+They render `--hold` for grant binding, `--no-requeue`, and the exact nonsecret
+comment `loom-task-builder-v1:grant=<grant-id>`. An allocation lost before or
+after projection terminates; replacement demand receives a new Slurm job and a
+new grant.
+
+Submission is recoverable even when `sbatch` commits a job but its response is
+lost. Before invoking `sbatch`, the reconciler durably moves the grant from
+`issued` to `submitting` and records the cluster, submitting Unix identity,
+account, comment, and expected request digest. It never retries merely because
+the command result is ambiguous. Instead it inventories live jobs with `squeue`
+and recent terminal jobs with accounting by exact cluster, submitting identity,
+and versioned comment, then validates every candidate's immutable request
+fields:
+
+- zero matches after both inventories return an authoritative result moves the
+  same grant back to `issued`, from which one new held submission is allowed;
+- one match binds that job, regardless of whether the original `sbatch` response
+  was observed; and
+- multiple matches are never guessed between: all remain held, are cancelled
+  and confirmed terminal, the grant is revoked, and replacement demand receives
+  a new grant.
+
+An unavailable or incomplete inventory leaves the grant in `submitting` and
+raises an operator-visible reconciliation error; it does not submit again. A
+job with the comment but any mismatched request field is cancelled and audited,
+never adopted. These rules make a network timeout unable to create a running
+unbound builder.
 
 QoS priority is additive under Slurm's multifactor plugin and is therefore not
 the starvation fence. Strict ordering between Loom job classes comes from the
@@ -388,8 +453,13 @@ are true:
 - cgroup v2 is active;
 - Slurm uses `task/cgroup` and `proctrack/cgroup`;
 - CPU, memory, device, and swap constraints are enabled and proven;
+- the builder profile can enforce `memory.swap.max=0`, disable core dumps, and
+  provide the small locked-memory allowance required for credentials;
 - delegated `pids` and `io` controllers can enforce limits beneath the job
   cgroup without permitting movement into its parent;
+- a conformance job can create the Loom subtree beneath the Slurm batch-task
+  cgroup, move only its batch leader into it, and still be fully observed by
+  Slurm accounting, cancellation, and epilog cleanup;
 - unprivileged user namespaces and approved subordinate UID/GID mappings are
   available to a dedicated builder operating-system identity;
 - pinned RootlessKit, BuildKit, snapshotter, and network helpers are installed
@@ -398,9 +468,13 @@ are true:
   unprivileged kernel `overlayfs` after a successful probe, or
   `fuse-overlayfs`; when FUSE is selected, the allocation may open `/dev/fuse`
   but the Dockerfile execution mount namespace cannot see that device;
-- the cluster policy names the exact RootlessKit network driver and release:
-  `gvisor-tap-vsock`, or an explicitly accepted `slirp4netns` fallback, with
-  host loopback disabled;
+- the cluster policy pins `slirp4netns` and a RootlessKit release that supports
+  `--disable-host-loopback`, IPv6, sandbox mode, and seccomp mode; all four are
+  enabled and probed rather than accepted through `auto` fallback;
+- the kernel and libc expose the pinned pidfd, sealed-memfd, and
+  `clone3(CLONE_INTO_CGROUP)` behavior required by the launcher and guard;
+- the pinned node guard and its cgroup-v2 BPF programs are installed, the guard
+  socket is root-owned, and both IPv4 and IPv6 fail-closed probes pass;
 - node-local scratch supports a hard per-job quota and deterministic cleanup;
   and
 - the restricted build-egress path is healthy.
@@ -418,7 +492,8 @@ read back successfully before either cluster is eligible.
 Before claiming work, the supervisor must prove:
 
 1. its process belongs to the expected Slurm job cgroup;
-2. requested CPU, memory, device, PID, and I/O limits are effective;
+2. requested CPU, memory, device, PID, and I/O limits and zero-swap policy are
+   effective;
 3. its writable delegated subtree cannot move a process to the allocation
    parent or another job;
 4. job storage is empty, local, quota-limited, and inaccessible to the build
@@ -427,7 +502,9 @@ Before claiming work, the supervisor must prove:
    unsafe host mount is visible;
 6. installed executables match the pinned release manifest; and
 7. a probe build places BuildKit, its executor, every `RUN` process, the
-   snapshotter, and network helpers beneath the allocation cgroup.
+   snapshotter, and network helpers beneath the allocation cgroup; and
+8. the node guard has authenticated this peer and attached the exact reviewed
+   network-policy program and map digests before releasing a credential.
 
 The trusted launcher first uses the pinned `newuidmap` and `newgidmap` helpers
 to establish the approved subordinate-ID mapping. Only after that mapping
@@ -435,18 +512,43 @@ exists does the OCI executor apply `no_new_privileges` to Dockerfile execution
 processes. The launcher and helpers have their own narrow AppArmor/seccomp
 policy; a node-wide unconfined profile is not an acceptable substitute.
 
-RootlessKit starts with the certified isolated network driver and
-`--disable-host-loopback`. BuildKit uses only the rootless OCI worker with
+RootlessKit starts with pinned `slirp4netns`, `--disable-host-loopback`,
+`--ipv6`, `--slirp4netns-sandbox=true`, and
+`--slirp4netns-seccomp=true`. BuildKit uses only the rootless OCI worker with
 process sandboxing enabled. Its insecure-entitlement list is empty. Loom
 forbids `security.insecure`, real host networking, CDI/device injection,
 SSH-agent forwarding, arbitrary host binds, and unpinned remote Dockerfile
 frontends. If `fuse-overlayfs` is selected, only the trusted snapshotter mount
 namespace receives `/dev/fuse`; Dockerfile `RUN` processes do not.
 
+The current `gvisor-tap-vsock` RootlessKit driver is not a production fallback:
+it is experimental, does not support IPv6 routing, and does not implement the
+required host-loopback disablement. `pasta` is also experimental in the pinned
+RootlessKit line. Adding or changing a network driver requires a new reviewed
+policy version and full two-architecture acceptance; runtime auto-selection is
+forbidden.
+
 The trusted supervisor remains outside BuildKit's PID namespace but inside the
 same allocation cgroup so it can monitor the whole delegated subtree. It
 continuously verifies that expected processes remain in that subtree. Kernel
 cgroup membership, not parent-PID inspection alone, is authoritative.
+
+Within the exact Slurm batch-task cgroup, the node guard creates a root-owned
+`loom-builder` containment root with `trusted-service` and `build-egress`
+children. It attaches policy while all three are empty, then moves only the
+pidfd-pinned supervisor into `trusted-service`. It never moves `slurmstepd` or
+attaches Loom policy to a Slurm daemon cgroup. The whole Loom subtree remains a
+descendant of the Slurm task hierarchy, so its CPU, memory, PIDs, I/O, device,
+and accounting controls are inherited and Slurm cleanup still observes it.
+
+The guard delegates only the process-creation and controller files needed below
+`loom-builder`; no allocation process can move to an ancestor or sibling. The
+trusted supervisor uses `clone3(CLONE_INTO_CGROUP)` to start the pinned
+RootlessKit launcher directly in `build-egress`; RootlessKit starts BuildKit and
+its pinned `slirp4netns` helper as normal descendants. No process can open an
+egress socket in that subtree before inheriting the attached policy, and the
+guard never executes a Dockerfile process, network helper, or BuildKit daemon.
+Dockerfile traffic therefore cannot race policy installation.
 
 BuildKit may parallelize layers internally, but the supervisor submits only one
 materialization at a time. An OOM, PID exhaustion, disk-quota event, I/O limit,
@@ -465,9 +567,11 @@ Node-local BuildKit state is disposable and has a hard per-job byte and inode
 quota. It is always deleted at allocation exit. Loom never relies on a local
 image or layer surviving for correctness.
 
-Cross-job acceleration uses an optional, content-addressed registry cache in a
-separate namespace. Cache import is verified by digest and scoped to the build
-policy; cache data never grants publication readiness. Cache objects have a
+Cross-job registry caching is disabled by default. A later explicit policy may
+enable an optional content-addressed cache in a separate repository namespace.
+Cache import is verified by digest and scoped to the build policy; cache data
+never grants publication readiness. Cache read and write credentials are
+separate from publication credentials and from each other. Cache objects have a
 short TTL and free-space backstop. Disabling the cache changes performance, not
 correctness.
 
@@ -486,49 +590,91 @@ do not grow without a reference-aware retention policy.
 
 Dockerfile `RUN` traffic uses the job-specific RootlessKit network namespace.
 Although BuildKit calls this OCI-worker mode `network.host`, the "host" is that
-isolated namespace, never the node namespace. `gvisor-tap-vsock` is preferred;
-`slirp4netns` is allowed only when its exact release passes the same evidence.
-Host loopback is disabled.
+isolated namespace, never the node namespace. Loom uses the exact certified
+`slirp4netns` release with sandbox, seccomp, host-loopback disablement, and IPv6
+enabled. No alternate driver is selected at runtime.
 
-A root-owned cgroup/network policy blocks direct traffic to the host,
-RFC1918/cluster, link-local, metadata, control-plane, Slurm-controller, and
-credential endpoints before packets leave the allocation. Approved public
-package and source traffic flows through an authenticated, audited egress
-policy. A Dockerfile cannot bypass the policy by ignoring proxy environment
-variables, and real host networking is never an escape hatch.
+A root-owned node guard enforces this policy with pinned cgroup-v2 BPF programs,
+not proxy environment variables alone. Before enabling the RootlessKit
+interface, it attaches `BPF_CGROUP_INET4_CONNECT`,
+`BPF_CGROUP_INET6_CONNECT`, `BPF_CGROUP_UDP4_SENDMSG`,
+`BPF_CGROUP_UDP6_SENDMSG`, and a `BPF_CGROUP_INET_EGRESS` packet backstop. The
+packet program covers non-connect, raw, forwarded, and translated traffic. The
+The `loom-builder` containment-root policy permits only the union of exact
+trusted-service and build-egress destinations; the inherited `build-egress`
+child policy narrows that to the audited package/DNS gateway and exact registry
+endpoints needed for base-image reads and attempt publication. The
+`trusted-service` child permits only the exact control-plane, object-store,
+registry, and revocation endpoints. No program is attached to a Slurm daemon's
+cgroup.
+
+Both IPv4 and IPv6 default to deny. Loopback outside the namespace,
+RFC1918/ULA cluster ranges except explicit endpoint addresses, link-local,
+metadata, Slurm-controller, credential, and node-management destinations are
+denied. Program, map-schema, and policy-input digests are release evidence;
+maps are root-writable only. Attach or probe failure prevents credential
+projection and terminates the job. A missing, replaced, or detached program
+during the job terminates the allocation and quarantines the node capability.
+Consequently a Dockerfile cannot bypass the policy by ignoring proxy variables,
+using IPv6 or UDP, or requesting real host networking.
 
 The bootstrap protocol is exact rather than provider-defined:
 
 1. Before submission, the capacity reconciler creates a `BuilderJobGrant`
-   containing a random nonsecret ID, pool, architecture, builder release,
-   resource profile, expiry, and state `issued`.
-2. The provider submits the job with `--hold`. Only the grant ID is carried in
-   job metadata; no bearer secret is passed to `sbatch` or `--export`.
-3. After `sbatch` returns, the reconciler atomically binds the grant to the exact
-   Slurm cluster and job ID. It then releases the held job. An unbound held job
-   is cancelled by reconciliation and can never obtain a credential.
-4. A root-owned `slurmd` `Prolog` projector authenticates to the control plane
-   with a node-specific mTLS identity. It submits the grant ID plus the observed
-   job ID, Unix identity, account, QoS, partition, architecture, resource shape,
-   and builder release. The control plane compares every field with the durable
-   binding and atomically moves `issued -> projected`. User-run `TaskProlog` or
-   job-script code is not trusted to perform projection.
-5. The control plane returns a one-use random bootstrap secret over that mTLS
-   channel. The projector writes it to a node-local tmpfs file beneath
-   `/run/loom-task-image-builder/<job-id>/`, owned by the dedicated builder user
-   with mode `0400`. Trial workers use a different Unix identity.
-6. Before starting RootlessKit, the trusted supervisor opens the file with
-   `O_NOFOLLOW|O_CLOEXEC`, verifies its owner and mode, unlinks it, and exchanges
-   the secret once. The control plane atomically moves `projected -> exchanged`
-   and returns a short-lived session limited to claim, start, heartbeat,
-   publication, and failure operations for that pool and architecture.
+   containing a random nonsecret ID, purpose (`production` or `shadow`), optional
+   shadow campaign ID, pool, architecture, builder release, resource profile,
+   expiry, and state `issued`.
+2. The provider journals `submitting`, then calls `sbatch --hold --no-requeue`
+   with `--comment=loom-task-builder-v1:grant=<grant-id>`. Only the grant ID is
+   carried in job metadata; no bearer secret is passed to `sbatch` or
+   `--export`. Ambiguous results follow the inventory procedure in the
+   scheduling section; only one matching held job can become bound.
+3. The reconciler atomically binds the grant to the exact Slurm cluster and job
+   ID, then releases that job. An unbound held job is cancelled by
+   reconciliation and can never obtain a credential.
+4. Once running, the supervisor connects to the node guard's Unix socket and
+   sends the nonsecret grant ID. The guard uses `SO_PEERCRED` and the peer's
+   live cgroup to derive the job identity; it does not trust job-script
+   environment variables. With its node-specific mTLS identity it submits the
+   derived cluster/job ID, Unix identity, account, QoS, partition, architecture,
+   resource shape, and builder release. The control plane compares every field
+   with the durable binding and returns a one-use attachment challenge without
+   changing the grant state or releasing a credential.
+5. The guard creates the empty Loom cgroup subtree, attaches and probes the
+   exact BPF policy, moves the pidfd-pinned supervisor into `trusted-service`,
+   and returns the challenge with the observed program, map, policy, and cgroup
+   digests. The control plane rechecks the binding and atomically moves
+   `bound -> projected`, returning a one-use random bootstrap secret over mTLS.
+   The guard places it in a sealed memfd and transfers only that descriptor to
+   the still-authenticated peer. Trial workers use a different Unix identity
+   and cannot connect successfully.
+6. Before starting RootlessKit, the supervisor verifies all required memfd
+   seals with `F_GET_SEALS`, copies the bounded payload exactly once into an
+   `mlock`ed, non-dumpable buffer, closes the descriptor, and exchanges the
+   secret. The guard retains its own locked mapping until that exchange is
+   acknowledged, then closes it. The control plane atomically moves
+   `projected -> exchanged` and returns a short-lived session limited to claim,
+   start, heartbeat, publication, and failure operations for that pool and
+   architecture and the grant's exact purpose/campaign. A shadow session cannot
+   call the production claim or publication transitions.
 7. After a materialization claim creates an attempt and lease epoch, the
-   supervisor requests a registry credential limited to that attempt's staging
-   and cache paths. Its expiry is no later than either the job/session expiry or
-   lease expiry. A different attempt, lease epoch, repository, or architecture
-   is rejected.
+   supervisor requests a publication credential. For production, the broker
+   derives the exact set of repositories as
+   `loom-task-image-attempts/<architecture>/<attempt-id>/<component>`; for
+   shadow, it derives
+   `loom-task-image-shadow/<campaign-id>/<architecture>/<attempt-id>/<component>`.
+   The caller never supplies an arbitrary repository root. Credentials contain
+   only the push/pull actions required for that attempt. Component names are
+   normalized from the frozen snapshot before authorization. Registry
+   authorization is repository-scoped: tag prefixes are never treated as a
+   security boundary. Expiry is no later than either the job/session expiry or
+   lease expiry. A different purpose, campaign, attempt, lease epoch,
+   repository, or architecture is rejected. If registry caching is later
+   enabled, cache import and export use separate credentials for a separate
+   cache repository; neither credential authorizes an attempt repository.
 8. Job cancellation, epilog, or session expiry revokes the session and registry
-   credential. The epilog removes any unconsumed tmpfs projection.
+   credentials. Closing an unconsumed memfd destroys its only allocation-side
+   copy.
 
 Projection and exchange use canonical idempotency keys and stored encrypted
 response receipts. An exact retry after an ambiguous transport failure returns
@@ -537,18 +683,24 @@ idempotency key, expired grant, second semantic exchange, or attempt/lease
 rebinding is rejected and audited. Because builder jobs use `--no-requeue`, a
 replacement allocation never inherits a projected grant.
 
-The node projector is a Slurm-administrator-installed prerequisite with only
-grant-projection authority; it cannot claim materializations or push images.
-Its mTLS key is root-owned and never enters the allocation. This concrete
-projector is the initial `SlurmBuildEnvironmentProvider` mechanism; replacing
-it later requires a separately reviewed provider contract.
+The node guard is a cluster-administrator-installed prerequisite with only
+grant-projection, network-attachment, and capability-quarantine authority; it
+cannot claim materializations or push images. Its mTLS key is root-owned and
+never enters the allocation. This concrete guard is the initial
+`SlurmBuildEnvironmentProvider` mechanism; replacing it later requires a
+separately reviewed provider contract.
 
 Raw secrets must not appear in Slurm arguments or exported metadata, build
 arguments, labels, logs, a shared Docker config directory, or persistent disk.
-The short-lived session and registry credential live in job-private
-memory-backed state. The trusted BuildKit client may use registry authentication
+The short-lived session and repository credentials live in job-private
+memory. The supervisor's credential agent holds authoritative copies in locked
+buffers; all trusted processes are non-dumpable and non-ptraceable, and the
+builder cgroup cannot swap. Buffers are zeroized on expiry or revocation; any
+unavoidable transient copy inside the pinned BuildKit registry client dies with
+the allocation. The trusted BuildKit client may use registry authentication
 through its session, but Dockerfile processes receive neither credential files
-nor environment variables.
+nor environment variables. Registry and cache clients use distinct in-memory
+credential helpers, so a cache challenge cannot receive a publication token.
 
 ## Publication verification contract
 
@@ -569,10 +721,52 @@ For each reported component digest, the control-plane publisher:
 5. checks that the registry repository is the attempt-scoped destination and
    that the component name is one expected by the frozen task snapshot;
 6. creates a canonical publication statement containing the materialization
-   key, task checksum, component, platform, attempt ID, lease epoch, Slurm job,
-   build-policy version, builder release, observed base digests, containment
-   evidence digest, and output digest; and
+   key, task checksum, component, platform, purpose (`production` or `shadow`),
+   attempt ID, lease epoch, Slurm job, build-policy version, builder release,
+   observed base digests, containment evidence digest, output digest, and
+   signer-issued `issued_at` timestamp; and
 7. signs and stores that statement with the control plane's publication key.
+
+The statement schema is `loom.task-image-publication/v1`. It contains only
+integers, booleans, strings, arrays, and objects; timestamps are UTC RFC 3339
+strings and digests use normalized lowercase algorithm/hex form. The exact
+statement object is encoded with RFC 8785 JSON Canonicalization Scheme. The
+signature preimage is the ASCII domain separator
+`loom-task-image-publication-v1`, one NUL byte, and those canonical bytes. The
+publisher computes SHA-256 over the canonical bytes and asks the publication
+signer for an Ed25519 signature.
+
+The immutable signature envelope stores the schema, `key_id`, fixed algorithm
+`Ed25519`, statement digest, canonical statement bytes, and base64url signature.
+It is inserted in the control-plane publication store in the same transaction
+that associates it with the fenced component generation; an optional OCI
+referrer is only a replica, never the database authority. The publication key
+is distinct from bootstrap, registry, and execution-grant keys. Its private key
+is non-exportable from the configured KMS/HSM or equivalent host signing
+service, and the signer accepts only this domain and schema.
+The signing service also requires the statement's `issued_at` to be within the
+configured clock-skew window of its own clock and within the selected key's
+active interval; the publisher cannot backdate a statement into a retired key.
+
+Key records have `active`, `verify_only`, or `revoked` status and activation and
+retirement timestamps. Routine rotation creates and distributes a new active
+public key before use, moves the previous key to `verify_only`, and never
+invalidates an existing statement. A verification key cannot be deleted while
+any publication statement or retained audit record names it; because lifecycle
+evidence is durable, those public keys are archived for the same duration.
+Workers and the readiness transaction reject an unknown key, noncanonical
+statement, digest mismatch, wrong domain/algorithm, bad signature, or a key used
+outside its activation interval.
+
+`revoked` is reserved for compromise, not routine rotation. Revocation blocks
+new readiness and new trial grants for every affected statement, revokes
+unclaimed grants, records a `publication_quarantine` overlay on affected ready
+materializations, and starts a fenced rematerialization campaign with a
+nonrevoked key. The production eligibility query excludes that overlay while
+the underlying lifecycle row remains available for forensics. Running trials
+are not silently rewritten; they are recorded for incident handling. The
+compromised private key remains disabled while its public key and revocation
+record remain available to explain historical evidence.
 
 Image labels and mutable tags are diagnostic only; an untrusted Dockerfile may
 set them. The verified descriptor plus the signed control-plane statement is the
@@ -655,27 +849,38 @@ bootstrap cycle but does not activate a builder or mutate a reservation.
 
 Provision cgroup enforcement, the dedicated builder OS identity and Slurm
 association, rootless runtime and exact snapshotter, storage quota, egress
-enforcement, the root-owned `slurmd` projector, the attempt-scoped registry
-credential broker, the overlapping higher-tier builder partition, and the
-capped builder QoS. Add the evidence schema and run read-only conformance. The
-policies remain disabled and no node is certified for production claims yet.
+enforcement, the root-owned node guard and Unix socket, the repository-scoped
+registry credential broker, the publication-signing key lifecycle, the
+overlapping higher-tier builder partition, and the capped builder QoS. Add the
+evidence schema and run read-only conformance. The policies remain disabled and
+no node is certified for production claims yet.
 
 ### Phase 2: inert provider and executor
 
-Add the held-job/grant binding, narrow Slurm environment provider, allocation
-supervisor, BuildKit executor, signed publication statements, tests, and
-disabled policies. Preserve the current task-scoped materialization identity and
-reference model. Certify eligible shared nodes only after the exact installed
-release passes conformance. The existing exclusive backend, prerequisites, and
-reservations remain unchanged.
+Add recoverable held-job/grant submission, the narrow Slurm environment
+provider, allocation supervisor, BuildKit executor, signed publication
+statements, tests, and disabled policies. Preserve the current task-scoped
+materialization identity and reference model. Certify eligible shared nodes only
+after the exact installed release passes conformance. The existing exclusive
+backend, prerequisites, and reservations remain unchanged.
 
 ### Phase 3: shadow canaries
 
-Submit rootless non-exclusive builds for controlled canary task sets on each
-architecture without making their publications authoritative for production
-trials. Verify functionality and provenance; do not require byte-identical
-digests from Dockerfiles with mutable external downloads. Run adversarial builds
-beside representative trials and host services.
+Shadow work uses a separate `TaskImageShadowCampaign` and shadow-attempt queue,
+not production `TaskImageMaterialization` rows. Its jobs carry a shadow campaign
+ID, its credentials authorize only
+`loom-task-image-shadow/<campaign-id>/<architecture>/<attempt-id>/<component>`,
+and its statements carry `purpose=shadow`. Production publishers reject that
+repository root and purpose; the production readiness transaction, scheduler,
+execution-grant query, and retention roots never read shadow rows. Conversely,
+shadow credentials cannot write production attempt repositories.
+
+Submit rootless non-exclusive builds for controlled canary task snapshots on
+each architecture through that isolated path. Verify functionality and
+provenance; do not require byte-identical digests from Dockerfiles with mutable
+external downloads. Run adversarial builds beside the concrete trial and host
+service fixtures. Shadow cache remains disabled so cache state cannot bridge
+the two purposes.
 
 ### Phase 4: dynamic scheduling and gated production activation
 
@@ -754,19 +959,34 @@ made explicitly non-deploying.
   idempotent registration/submission linkage;
 - lease fencing, heartbeat recovery, retry budgets, partial publication, and
   reference-aware GC;
-- held Slurm rendering contains partition/resource/capability/QoS constraints
-  and a nonsecret grant ID, while omitting `--exclusive`, `--reservation`,
-  `--nodelist`, Docker socket, and bearer secrets;
-- held-job binding, release, orphan cancellation, `--no-requeue`, projector
-  field validation, exact transport replay, semantic replay rejection, expiry,
-  and revocation;
+- held Slurm rendering contains partition/resource/capability/QoS constraints,
+  `--hold`, `--no-requeue`, and the exact versioned grant comment, while
+  omitting `--exclusive`, `--reservation`, `--nodelist`, Docker socket, and
+  bearer secrets;
+- journal-before-submit and authoritative zero/one/multiple inventory recovery,
+  held-job binding, release, mismatched/orphan cancellation, and refusal to
+  retry while inventory is incomplete;
+- node-guard `SO_PEERCRED`, Unix-identity, live-cgroup, job-field, executable,
+  and memfd-seal validation, exact transport replay, semantic replay rejection,
+  expiry, and revocation;
+- BPF rendering and probes cover IPv4, IPv6, TCP, UDP, and packet egress, attach
+  before interface/credential release, and fail closed on missing programs or
+  changed policy digests;
 - starvation control suppresses scale-up, cancels pending trial capacity,
   verifies higher partition tier, drains reusable workers after the threshold,
   prevents draining-worker claims, and releases pressure after builder start;
 - publication validation rejects digest, size, media-type, platform, component,
   attempt, lease, or statement-binding mismatches, and a `HEAD` result alone
   cannot mark readiness;
-- execution grants remain digest-only and trial claims remain gated; and
+- repository authorization rejects tag-prefix scoping and cross-attempt,
+  cross-component, cache/publication, and shadow/production access;
+- RFC 8785 and Ed25519 golden vectors cover canonicalization, domain separation,
+  envelope validation, rotation, verification-key retention, and compromise
+  revocation;
+- shadow queue, campaign, repository, publisher, readiness, scheduler, and
+  retention queries cannot cross into production;
+- execution grants remain digest-only, include the matching publication
+  statement digests, and trial claims remain gated; and
 - rehearsal validation succeeds without future runtime artifacts, while
   post-materialization validation requires and verifies them.
 
@@ -777,9 +997,18 @@ made explicitly non-deploying.
 - primary and sidecar builds, observed-base provenance, staged publication,
   authenticated manifest/config retrieval, signed publication statements, and
   atomic readiness;
-- a held job cannot receive a projected grant before exact job binding; exact
-  transport retries return the recorded response while changed or semantic
-  replays fail;
+- killed `sbatch` response and accounting-delay tests prove that one committed
+  held job is adopted, zero is safely retried, multiple are all cancelled, and
+  incomplete inventory never causes a second submission;
+- a held job cannot receive a projected grant before exact job binding; a peer
+  outside the bound cgroup cannot use the guard socket; the valid peer receives
+  only a sealed memfd; exact transport retries return the recorded response
+  while changed or semantic replays fail;
+- direct IPv4/IPv6 TCP, UDP, raw-packet, loopback, metadata, and cluster-endpoint
+  bypass attempts fail while the audited egress gateway and exact publication
+  repositories remain usable;
+- shadow publications cannot satisfy a production materialization even when
+  task checksum, architecture, component, and output digest match;
 - lease loss during build and publication cannot mark ready;
 - cancellation and timeout remove processes, mounts, runtime files, and
   credentials; and
@@ -787,8 +1016,34 @@ made explicitly non-deploying.
 
 ### Real-cluster adversarial acceptance
 
-Run on certified OLDLAB and GB10 shared nodes beside a representative trial.
-Evidence must prove that:
+Run on certified OLDLAB and GB10 shared nodes with these versioned fixtures,
+whose source and image digests are part of the acceptance record:
+
+- `task-image-adversary-v1`: primary and sidecar Dockerfiles exercise CPU,
+  memory, PIDs, I/O, bytes/inodes, daemonization, namespaces, forbidden mounts,
+  FUSE visibility, and IPv4/IPv6 TCP/UDP egress bypasses;
+- `terminus2-neighbor-v1`: a normal Loom worker claim for a pinned Terminus-2
+  benchmark/task snapshot, using the production execution path and controlled
+  provider, must record at least three expected LLM calls and valid ATIF and
+  verifier evidence; and
+- `host-services-neighbor-v1`: continuous probes cover `slurmd.service`,
+  `munge.service`, the certified SSH unit (`sshd.service` or `ssh.service`), and
+  `nvidia-persistenced.service` where it is in the node baseline, plus controller
+  `scontrol ping`, control-plane `/healthz`, and an authenticated registry
+  `/v2/`. The certificate records the exact unit set so a missing expected unit
+  is a failure rather than a skipped probe.
+
+Each architecture runs five warm `terminus2-neighbor-v1` trials alone and five
+with the adversarial build. All ten must succeed. The colocated median trial
+wall time may be at most 120% of the solo median and no colocated trial may
+exceed 150% of the solo maximum. Host probes must have zero failed samples,
+restarts, OOM kills outside the builder cgroup, or node `DRAIN`/`DOWN`
+transitions; their p95 latency must remain below both 500 ms and twice the solo
+baseline. `MemAvailable` must remain above the certified reserve (at least 2048
+MiB), I/O `full avg10` below 50, and D-state processes at or below 32; any
+stricter cluster profile wins.
+
+Evidence must additionally prove that:
 
 - every supervisor, BuildKit, `RUN`, snapshotter, and network-helper PID remains
   in the allocation cgroup;
@@ -798,11 +1053,11 @@ Evidence must prove that:
   surviving process after cancellation;
 - forbidden host paths, container sockets, node-local/cluster endpoints, and
   registry/control-plane credentials are inaccessible;
-- direct egress cannot bypass policy by ignoring proxy variables, host loopback
-  remains unreachable, and `/dev/fuse` is absent from Dockerfile processes even
-  when the trusted snapshotter uses it;
-- the concurrent trial remains inside its own limits and host services remain
-  healthy;
+- direct IPv4/IPv6 and TCP/UDP/raw egress cannot bypass BPF policy by ignoring
+  proxy variables, host loopback remains unreachable, and `/dev/fuse` is absent
+  from Dockerfile processes even when the trusted snapshotter uses it;
+- the concurrent trial remains inside its own limits and meets the fixture
+  thresholds above;
 - local state and mounts are absent after epilog, partial publications are
   retained only for the configured grace period, and the builder returns to
   scale zero;
@@ -848,3 +1103,10 @@ For the original affected task/run, acceptance requires all of the following:
    reference-aware and fenced.
 10. Missing containment, credentials, registry consistency, or rollout
     prerequisites fails closed before trial execution.
+11. No synchronous Slurm Prolog depends on Loom control-plane availability.
+12. One grant can bind at most one Slurm job; ambiguous submission never causes
+    an unobserved retry.
+13. Publication authority is repository-scoped, and cache, shadow, and
+    production credentials are mutually unusable.
+14. A shadow row, repository, or statement can never make a production
+    materialization ready.
