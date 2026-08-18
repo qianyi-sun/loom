@@ -148,7 +148,7 @@ def test_runtime_classification_fails_closed_when_desired_state_drifts() -> None
     assert component.classify_runtime(_plan()).state is ComponentState.DRIFTED
 
 
-def test_http_transport_binds_profile_token_and_fixed_cp_paths(
+def test_http_transport_binds_profile_token_and_requests_only_active_slurm_jobs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -199,6 +199,8 @@ def test_http_transport_binds_profile_token_and_fixed_cp_paths(
                 },
             )
         if request.url.path.endswith("slurm-worker-jobs/status"):
+            assert request.url.params.get("active_only") == "true"
+            assert len(request.url.params) == 1
             return httpx.Response(200, json={"jobs": []})
         raise AssertionError(request.url)
 

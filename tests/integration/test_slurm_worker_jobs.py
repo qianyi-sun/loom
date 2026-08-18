@@ -262,3 +262,54 @@ def test_reconcile_marks_missing_active_jobs_stale(
 
     assert body["jobs"][0]["state"] == "stale"
     assert "not reported" in body["jobs"][0]["pending_reason"]
+
+
+def test_status_active_only_excludes_terminal_job_history(app) -> None:
+    with TestClient(app) as client:
+        completed = client.post(
+            "/admin/slurm-worker-jobs",
+            headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
+            json=_record_payload(job_id="401"),
+        )
+        assert completed.status_code == 201, completed.text
+
+        reconciled = client.post(
+            "/admin/slurm-worker-jobs/reconcile",
+            headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
+            json={
+                "stale_after_seconds": 300,
+                "observations": [
+                    {
+                        "job_id": "401",
+                        "slurm_state": "COMPLETED",
+                        "nodelist": "oldlab-1",
+                        "pending_reason": None,
+                        "worker_id": None,
+                    },
+                ],
+            },
+        )
+        assert reconciled.status_code == 200, reconciled.text
+
+        pending = client.post(
+            "/admin/slurm-worker-jobs",
+            headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
+            json=_record_payload(job_id="402"),
+        )
+        assert pending.status_code == 201, pending.text
+
+        full_status = client.get(
+            "/admin/slurm-worker-jobs/status",
+            headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
+        )
+        assert full_status.status_code == 200, full_status.text
+
+        active_status = client.get(
+            "/admin/slurm-worker-jobs/status?active_only=true",
+            headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
+        )
+        assert active_status.status_code == 200, active_status.text
+
+    assert {job["job_id"] for job in full_status.json()["jobs"]} == {"401", "402"}
+    assert [job["job_id"] for job in active_status.json()["jobs"]] == ["402"]
+    assert active_status.json()["summary"][0]["pending_jobs"] == 1

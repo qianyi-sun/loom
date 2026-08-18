@@ -527,21 +527,24 @@ def slurm_worker_job_to_dict(job: SlurmWorkerJob) -> dict[str, object]:
 
 async def fetch_slurm_worker_job_status(
     session: AsyncSession,
+    *,
+    active_only: bool = False,
 ) -> tuple[SlurmWorkerCapacitySummary, list[dict[str, object]]]:
-    rows = (
-        await session.execute(
-            select(
-                SlurmWorkerJob,
-                Worker.status.label("worker_status"),
-            )
-            .outerjoin(Worker, SlurmWorkerJob.worker_id == Worker.id)
-            .order_by(
-                SlurmWorkerJob.environment,
-                SlurmWorkerJob.pool_name,
-                SlurmWorkerJob.created_at,
-            ),
+    stmt = (
+        select(
+            SlurmWorkerJob,
+            Worker.status.label("worker_status"),
         )
-    ).all()
+        .outerjoin(Worker, SlurmWorkerJob.worker_id == Worker.id)
+        .order_by(
+            SlurmWorkerJob.environment,
+            SlurmWorkerJob.pool_name,
+            SlurmWorkerJob.created_at,
+        )
+    )
+    if active_only:
+        stmt = stmt.where(SlurmWorkerJob.state.not_in(TERMINAL_STATES))
+    rows = (await session.execute(stmt)).all()
     summary_rows: list[dict[str, Any]] = []
     jobs: list[dict[str, object]] = []
     for job, worker_status in rows:
