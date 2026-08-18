@@ -65,6 +65,7 @@ def _signed_certificate(
     server: bool,
     include_service_dns: bool = True,
     include_loopback_ip: bool = True,
+    include_router_ip: bool = True,
 ) -> tuple[rsa.RSAPrivateKey, x509.Certificate]:
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     now = datetime.now(UTC)
@@ -89,6 +90,8 @@ def _signed_certificate(
             identities.append(x509.DNSName("loom-capacity-manager.loom-dev.svc.cluster.local"))
         if include_loopback_ip:
             identities.append(x509.IPAddress(ipaddress.ip_address("127.0.0.1")))
+        if include_router_ip:
+            identities.append(x509.IPAddress(ipaddress.ip_address("192.168.50.103")))
         builder = builder.add_extension(
             x509.SubjectAlternativeName(identities),
             critical=False,
@@ -178,6 +181,13 @@ async def test_real_server_rejects_missing_and_untrusted_client_certificates(
         server=True,
         include_service_dns=False,
     )
+    _, missing_router_ip_certificate = _signed_certificate(
+        "localhost",
+        ca_key,
+        ca_certificate,
+        server=True,
+        include_router_ip=False,
+    )
     ca_path = _write(tmp_path / "ca.pem", ca_certificate.public_bytes(serialization.Encoding.PEM))
     server_cert_path = _write(
         tmp_path / "server.pem",
@@ -200,6 +210,10 @@ async def test_real_server_rejects_missing_and_untrusted_client_certificates(
     incomplete_server_cert_path = _write(
         tmp_path / "incomplete-server.pem",
         incomplete_server_certificate.public_bytes(serialization.Encoding.PEM),
+    )
+    missing_router_ip_cert_path = _write(
+        tmp_path / "missing-router-ip-server.pem",
+        missing_router_ip_certificate.public_bytes(serialization.Encoding.PEM),
     )
     linked_server_cert_path = tmp_path / "linked-server.pem"
     linked_server_cert_path.symlink_to(server_cert_path)
@@ -286,6 +300,28 @@ async def test_real_server_rejects_missing_and_untrusted_client_certificates(
             "status": "ready",
             "executable_new_capacity_ceiling": 0,
         }
+        assert (
+            probe_capacity_manager(
+                url=url,
+                ca_file=ca_path,
+                certificate_file=client_cert_path,
+                private_key_file=client_key_path,
+                server_certificate_file=server_cert_path,
+                required_server_ip_san="192.168.50.103",
+                timeout_seconds=2,
+            )["status"]
+            == "ready"
+        )
+        with pytest.raises(CapacityHealthProbeError, match="identities"):
+            probe_capacity_manager(
+                url=url,
+                ca_file=ca_path,
+                certificate_file=client_cert_path,
+                private_key_file=client_key_path,
+                server_certificate_file=missing_router_ip_cert_path,
+                required_server_ip_san="192.168.50.103",
+                timeout_seconds=2,
+            )
         with pytest.raises(CapacityHealthProbeError, match="transport"):
             probe_capacity_manager(
                 url=url,

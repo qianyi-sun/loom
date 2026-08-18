@@ -97,9 +97,10 @@ start, or enablement.
 `capacity-control-plane.toml` is the reviewed, non-secret render source for
 only the one global management authority: its independent PostgreSQL database,
 migration/bootstrap Job, capacity-manager Deployment and internal Service, and
-least-access NetworkPolicies. It does not render the shared application
-fixture, any personal application, a pool executor, a scheduler-facing daemon,
-or an activation operation.
+least-access NetworkPolicies. A policy-enabled render also includes the
+OLDLAB1-pinned TLS-pass-through router described below. It does not render the
+shared application fixture, any personal application, a pool executor, a
+scheduler-facing daemon, or an activation operation.
 
 Trusted image CI must first publish the exact manager image digest for the
 commit being reviewed. Capture deterministic render evidence with a reviewed,
@@ -156,8 +157,17 @@ volume; only that copied directory reaches the manager read-only. Supplying
 only one policy argument, missing external-client evidence, unsafe
 ownership/mode, changed bytes, a noncanonical payload, or the wrong digest
 fails closed. The repeated external-client values are 1–8 sorted, unique,
-reviewed `/32` or `/128` effective source routes for the controller/operator
-paths; broader or guessed routes are rejected.
+reviewed private `/32` or `/128` effective source routes for the
+controller/operator paths; broader, public, or guessed routes are rejected.
+Only a policy-enabled render creates the dedicated `loom-capacity-router`
+namespace and the single router Deployment. Its host port is fixed to
+`192.168.50.103:31443`; the same immutable manager image admits the exact
+source IPs again in-process and passes TLS bytes unchanged to the internal
+manager Service. The manager, not the router, terminates mTLS and enforces the
+bearer scope. The dedicated namespace is required because Restricted Pod
+Security correctly rejects host ports in `loom-dev`; it is otherwise
+default-deny, and the rendered pod remains non-root, read-only,
+capability-free, and service-account-token-free.
 
 The referenced `loom-capacity-manager` Kubernetes Secret is not rendered or
 created. It must already contain exactly the keys consumed by this release:
@@ -212,8 +222,10 @@ Success is exactly one canonical line:
 Any other output or nonzero exit status is a failed readiness/evidence check.
 The command performs an mTLS probe inside the manager Pod. Readiness also
 requires the mounted server certificate to contain the `127.0.0.1` IP SAN and
-the `loom-capacity-manager.loom-dev.svc.cluster.local` DNS SAN. The command does
-not expose the manager or copy Secret contents through command arguments.
+the `loom-capacity-manager.loom-dev.svc.cluster.local` DNS SAN. A policy-enabled
+render also refuses readiness unless that certificate contains the
+`192.168.50.103` IP SAN used by both controller executors. The command does not
+copy Secret contents through command arguments.
 
 ## Activation
 

@@ -187,9 +187,8 @@ patch release, and data-parser identity match the protected policy and node
 document. Every protected node must retain its exact CPU, memory, GPU, and
 partition envelope. The adapter maps OLDLAB's uppercase controller names back
 to canonical fleet IDs. The protected policy, rather than a compiled range,
-selects GB10 nodes; the current safe set is 1 through 9 and 11 through 15.
-Node 10 remains outside that set until it has the accepted partition envelope,
-while physical node 16 remains outside Loom authority.
+selects GB10 nodes; the current canonical safe set is 1 through 15. Physical
+node 16 remains outside Loom authority.
 
 One accepted snapshot produces both `PoolObservationV1` and
 `ExecutableExecutorInventoryV2`. Healthy busy nodes remain visible; current
@@ -402,12 +401,19 @@ prepared runtime directory, read-only. A held projected-generation descriptor
 and pre-install rebinding check prevent a Kubernetes `..data` rotation from
 mixing credential generations.
 
-When an execution policy is rendered, the manager NetworkPolicy also requires
-1–8 explicit sorted external-client host routes. Only those reviewed `/32` or
-`/128` sources can reach mTLS port 8443 from the controller-local OLDLAB/GB10
-executors or the operator client path; broader, duplicate, special, missing,
-or policy-free CIDRs fail before YAML is emitted. Transport admission does not
-replace the independently bound mTLS and bearer principal scopes.
+When an execution policy is rendered, the same immutable manager image also
+runs a byte-transparent TCP router pinned to OLDLAB1. It binds only
+`192.168.50.103:31443` and forwards to the still-ClusterIP-only manager Service;
+the router never terminates TLS. The one host-port exception lives in a
+dedicated namespace because the manager namespace retains Restricted Pod
+Security. That router namespace is default-deny, and the pod remains non-root,
+read-only, capability-free, and without a service-account token. Both its
+NetworkPolicy and the proxy process admit only the 1–8 explicit sorted private
+client host routes supplied with the execution policy. The manager admits the
+router pod on port 8443, not those source IPs directly. Broader, public,
+duplicate, special, missing, or policy-free CIDRs fail before YAML is emitted.
+Transport admission does not replace manager-terminated mTLS and independently
+bound bearer principal scopes.
 
 The schema migration writes a canonical seed event beside its generated
 bootstrap authority UUID. A reviewed replacement requires that one pristine
@@ -429,11 +435,12 @@ The control-plane CLI commands are deterministic `render` and read-only
 `status`; executor rendering now includes separately artifact-bound active
 config and environment outputs. The status path performs a real in-Pod mTLS
 probe. The probe first verifies that the mounted server certificate contains
-both the `127.0.0.1` IP SAN and the
-`loom-capacity-manager.loom-dev.svc.cluster.local` DNS SAN, then succeeds only
-for the exact canonical response
+the `127.0.0.1` IP SAN and the
+`loom-capacity-manager.loom-dev.svc.cluster.local` DNS SAN. A policy-enabled
+release additionally requires the router endpoint `192.168.50.103` as an IP
+SAN. The probe then succeeds only for the exact canonical response
 `{"executable_new_capacity_ceiling":0,"status":"ready"}`. The CLI has no
-apply, install, start, external-exposure, HTTP-transition, or ceiling-changing
+apply, install, start, public-exposure, HTTP-transition, or ceiling-changing
 operation. Protected activation/drain/retire live on the manager API, and the
 separate controller-local active executor package owns Slurm actuation. Merging
 repository support does not authorize a live deployment; apply and activation

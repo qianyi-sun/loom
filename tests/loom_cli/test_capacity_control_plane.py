@@ -64,6 +64,7 @@ _EXECUTOR_SERVICE = _REPO_ROOT / "deploy/dev-fleet/loom-capacity-pool-executor.s
 _MANAGER_IMAGE = "ghcr.io/qianyi-sun/loom-capacity-manager@sha256:" + "a" * 64
 _AUTHORITY = UUID("00000000-0000-4000-8000-000000000901")
 _EXTERNAL_MANAGER_CLIENT_CIDRS = ("192.168.20.1/32", "192.168.50.13/32")
+_ROUTER_ORIGIN = "https://192.168.50.103:31443"
 
 
 def _active_manifest_sha256(
@@ -260,6 +261,7 @@ def test_checked_in_executor_profile_is_inert_and_pool_complete() -> None:
     assert len({pool.executor_id for pool in profile.pools}) == 2
     assert len({pool.state_directory for pool in profile.pools}) == 2
     assert len({pool.bearer_token_file for pool in profile.pools}) == 2
+    assert profile.manager_origin == _ROUTER_ORIGIN
     rendered = render_capacity_pool_executor_configs(profile)
     assert tuple(rendered) == ("gb10", "oldlab")
     assert all(value.endswith("\n") for value in rendered.values())
@@ -673,6 +675,49 @@ def test_executor_profile_rejects_live_or_cross_pool_inputs(mutation, message: s
         CapacityPoolExecutorProfile.model_validate(payload)
 
 
+@pytest.mark.parametrize(
+    "manager_origin",
+    (
+        "https://loom-capacity-manager.loom-dev.svc.cluster.local:8443",
+        _ROUTER_ORIGIN,
+        "https://10.0.0.8:31443",
+        "https://[fd00::8]:31443",
+    ),
+)
+def test_executor_profile_accepts_only_canonical_internal_manager_origins(
+    manager_origin: str,
+) -> None:
+    payload = load_capacity_pool_executor_profile(_EXECUTOR_PROFILE).model_dump(mode="json")
+    payload["manager_origin"] = manager_origin
+
+    assert CapacityPoolExecutorProfile.model_validate(payload).manager_origin == manager_origin
+
+
+@pytest.mark.parametrize(
+    "manager_origin",
+    (
+        "http://192.168.50.103:31443",
+        "https://192.168.50.103:8443",
+        "https://192.168.50.103:31443/",
+        "https://user@192.168.50.103:31443",
+        "https://127.0.0.1:31443",
+        "https://169.254.1.1:31443",
+        "https://224.0.0.1:31443",
+        "https://8.8.8.8:31443",
+        "https://manager.example:31443",
+        "https://[fd00:0:0:0:0:0:0:8]:31443",
+    ),
+)
+def test_executor_profile_rejects_mutable_public_or_unsafe_manager_origins(
+    manager_origin: str,
+) -> None:
+    payload = load_capacity_pool_executor_profile(_EXECUTOR_PROFILE).model_dump(mode="json")
+    payload["manager_origin"] = manager_origin
+
+    with pytest.raises(ValidationError, match="manager origin"):
+        CapacityPoolExecutorProfile.model_validate(payload)
+
+
 def test_checked_in_capacity_control_plane_profile_is_strict_and_immutable() -> None:
     profile = load_capacity_control_plane_profile(_PROFILE)
 
@@ -820,11 +865,146 @@ def test_policy_enabled_manager_ingress_admits_only_exact_external_client_hosts(
         for document in _policy_enabled_documents()
         if document["kind"] == "NetworkPolicy"
     }
-    peers = policies["capacity-manager-ingress"]["ingress"][0]["from"]
-    assert peers[-2:] == [
+    router_ingress = policies["capacity-manager-router-ingress"]["ingress"][0]
+    assert router_ingress["ports"] == [{"protocol": "TCP", "port": 31443}]
+    assert router_ingress["from"] == [
         {"ipBlock": {"cidr": "192.168.20.1/32"}},
         {"ipBlock": {"cidr": "192.168.50.13/32"}},
     ]
+    manager_peers = policies["capacity-manager-ingress"]["ingress"][0]["from"]
+    assert manager_peers[-1] == {
+        "namespaceSelector": {
+            "matchLabels": {"kubernetes.io/metadata.name": "loom-capacity-router"}
+        },
+        "podSelector": {"matchLabels": {"app.kubernetes.io/name": "loom-capacity-manager-router"}},
+    }
+    assert not any("ipBlock" in peer for peer in manager_peers)
+
+
+def test_policy_enabled_router_is_one_restricted_private_hostport_workload() -> None:
+    documents = _policy_enabled_documents()
+    namespace = next(
+        document
+        for document in documents
+        if document["kind"] == "Namespace"
+        and document["metadata"]["name"] == "loom-capacity-router"
+    )
+    assert namespace["metadata"]["labels"] == {
+        "app.kubernetes.io/managed-by": "loom-capacity-control-plane",
+        "app.kubernetes.io/part-of": "loom",
+        "pod-security.kubernetes.io/enforce": "privileged",
+        "pod-security.kubernetes.io/audit": "restricted",
+        "pod-security.kubernetes.io/audit-version": "latest",
+        "pod-security.kubernetes.io/warn": "restricted",
+        "pod-security.kubernetes.io/warn-version": "latest",
+    }
+    router = next(
+        document
+        for document in documents
+        if document["kind"] == "Deployment"
+        and document["metadata"]["name"] == "loom-capacity-manager-router"
+    )
+    assert router["metadata"]["namespace"] == "loom-capacity-router"
+    assert router["spec"]["replicas"] == 1
+    assert router["spec"]["strategy"] == {"type": "Recreate"}
+    pod = router["spec"]["template"]["spec"]
+    assert pod["automountServiceAccountToken"] is False
+    assert pod["nodeSelector"] == {"kubernetes.io/hostname": "trt-eai-oldlab-1"}
+    assert pod["securityContext"] == {
+        "runAsNonRoot": True,
+        "runAsUser": 65532,
+        "runAsGroup": 65532,
+        "fsGroup": 65532,
+        "fsGroupChangePolicy": "OnRootMismatch",
+        "seccompProfile": {"type": "RuntimeDefault"},
+    }
+    container = pod["containers"][0]
+    assert container["image"] == _MANAGER_IMAGE
+    assert container["command"] == [
+        "python",
+        "-m",
+        "loom_capacity_manager.tcp_proxy",
+    ]
+    assert container["args"] == [
+        "--allowed-client-ip",
+        "192.168.20.1",
+        "--allowed-client-ip",
+        "192.168.50.13",
+    ]
+    assert container["ports"] == [
+        {
+            "name": "manager-tls",
+            "containerPort": 31443,
+            "hostPort": 31443,
+            "hostIP": "192.168.50.103",
+            "protocol": "TCP",
+        }
+    ]
+    assert container["securityContext"] == {
+        "allowPrivilegeEscalation": False,
+        "capabilities": {"drop": ["ALL"]},
+        "readOnlyRootFilesystem": True,
+    }
+
+
+def test_policy_enabled_router_network_is_default_deny_with_exact_egress() -> None:
+    policies = {
+        (document["metadata"]["namespace"], document["metadata"]["name"]): document["spec"]
+        for document in _policy_enabled_documents()
+        if document["kind"] == "NetworkPolicy"
+    }
+    assert policies[("loom-capacity-router", "capacity-manager-router-default-deny")] == {
+        "podSelector": {},
+        "policyTypes": ["Ingress", "Egress"],
+    }
+    egress = policies[("loom-capacity-router", "capacity-manager-router-egress")]
+    assert egress["podSelector"] == {
+        "matchLabels": {"app.kubernetes.io/name": "loom-capacity-manager-router"}
+    }
+    assert egress["policyTypes"] == ["Egress"]
+    assert egress["egress"] == [
+        {
+            "to": [
+                {
+                    "namespaceSelector": {
+                        "matchLabels": {"kubernetes.io/metadata.name": "loom-dev"}
+                    },
+                    "podSelector": {
+                        "matchLabels": {"app.kubernetes.io/name": "loom-capacity-manager"}
+                    },
+                }
+            ],
+            "ports": [{"protocol": "TCP", "port": 8443}],
+        },
+        {
+            "to": [
+                {
+                    "namespaceSelector": {
+                        "matchLabels": {"kubernetes.io/metadata.name": "kube-system"}
+                    },
+                    "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}},
+                }
+            ],
+            "ports": [
+                {"protocol": "UDP", "port": 53},
+                {"protocol": "TCP", "port": 53},
+            ],
+        },
+    ]
+
+
+def test_policy_enabled_manager_readiness_requires_router_ip_certificate_san() -> None:
+    manager = next(
+        document
+        for document in _policy_enabled_documents()
+        if document["kind"] == "Deployment"
+        and document["metadata"]["name"] == "loom-capacity-manager"
+    )
+    command = manager["spec"]["template"]["spec"]["containers"][0]["readinessProbe"]["exec"][
+        "command"
+    ]
+
+    assert command[-2:] == ["--required-server-ip-san", "192.168.50.103"]
 
 
 @pytest.mark.parametrize(
@@ -832,6 +1012,7 @@ def test_policy_enabled_manager_ingress_admits_only_exact_external_client_hosts(
     (
         ("192.168.20.0/24",),
         ("127.0.0.1/32",),
+        ("8.8.8.8/32",),
         ("192.168.20.1/32", "192.168.20.1/32"),
         tuple(f"192.168.20.{index}/32" for index in range(1, 10)),
     ),
