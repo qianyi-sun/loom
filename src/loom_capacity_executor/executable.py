@@ -814,12 +814,51 @@ class ExecutablePoolExecutor:
         replayed = await self._replay_central_request(checkpoint)
         if replayed is not None:
             return replayed
+        replayed_inventory = await self._replay_inventory_request(checkpoint)
+        if replayed_inventory is not None:
+            return replayed_inventory
         if self.registration.execution.execution_state == "prepared":
             return await self._publish_inventory(checkpoint)
         work = await self.client.next_executable_work(checkpoint.command_sequence)
         if work is None:
             return await self._publish_inventory(checkpoint)
         return await self._apply_one(work, checkpoint)
+
+    async def _replay_inventory_request(
+        self,
+        checkpoint: ExecutableCheckpointReceiptV2,
+    ) -> ExecutorTickResult | None:
+        records = tuple(
+            record
+            for record in self.journal.pending_requests()
+            if record.event_kind == "inventory-publish-requested"
+        )
+        if not records:
+            return None
+        if len(records) != 1:
+            raise JournalRegressionError("multiple inventory requests remain unresolved")
+        record = records[0]
+        payload = record.durable_payload()
+        if payload is None:
+            raise JournalRegressionError("inventory request is absent from journal")
+        try:
+            inventory = ExecutableExecutorInventoryV2.model_validate_json(payload)
+        except ValueError as exc:
+            raise JournalRegressionError("inventory request is invalid") from exc
+        if (
+            record.object_kind != "inventory"
+            or record.object_id != str(inventory.executor_incarnation)
+            or record.payload_digest != canonical_executable_digest(inventory)
+            or payload != canonical_executable_bytes(inventory)
+        ):
+            raise JournalRegressionError("inventory request binding changed")
+        self._assert_inventory_binding(inventory)
+        if checkpoint.inventory_sequence not in {
+            inventory.inventory_sequence - 1,
+            inventory.inventory_sequence,
+        }:
+            raise JournalRegressionError("inventory replay high-water changed")
+        return await self._send_inventory(inventory)
 
     async def tick_drain_only(self) -> ExecutorTickResult:
         """Apply one structurally drain-only operation without new capacity work."""
@@ -833,6 +872,9 @@ class ExecutablePoolExecutor:
         replayed = await self._replay_drain_only_central_request(checkpoint)
         if replayed is not None:
             return replayed
+        replayed_inventory = await self._replay_inventory_request(checkpoint)
+        if replayed_inventory is not None:
+            return replayed_inventory
         work = await self.client.next_executable_work(checkpoint.command_sequence)
         if work is None:
             return await self._publish_inventory(checkpoint)
@@ -2294,23 +2336,10 @@ class ExecutablePoolExecutor:
         jobs: tuple[SlurmJobObservationV2, ...] | None = None,
         quarantine_all: bool = False,
     ) -> ExecutorTickResult:
+        replayed = await self._replay_inventory_request(checkpoint)
+        if replayed is not None:
+            return replayed
         inventory_object_id = str(self.registration.executor_incarnation)
-        latest_inventory = self.journal.latest("inventory", inventory_object_id)
-        if (
-            latest_inventory is not None
-            and latest_inventory.event_kind == "inventory-publish-requested"
-        ):
-            payload = latest_inventory.durable_payload()
-            if payload is None:
-                raise JournalRegressionError("inventory request is absent from journal")
-            inventory = ExecutableExecutorInventoryV2.model_validate_json(payload)
-            self._assert_inventory_binding(inventory)
-            if checkpoint.inventory_sequence not in {
-                inventory.inventory_sequence - 1,
-                inventory.inventory_sequence,
-            }:
-                raise JournalRegressionError("inventory replay high-water changed")
-            return await self._send_inventory(inventory)
         observed = await self.slurm.inventory() if jobs is None else jobs
         proofs: dict[str, SignedExecutableOwnershipProofV2] = {}
         terminal_proofs: dict[str, SignedExecutableOwnershipProofV2] = {}

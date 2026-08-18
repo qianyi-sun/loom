@@ -27,7 +27,7 @@ from loom_capacity_executor.executable import (
     ExecutablePoolExecutor,
     ProtectedIntentObservationV2,
 )
-from loom_capacity_executor.journal import ExecutorJournal
+from loom_capacity_executor.journal import ExecutorJournal, JournalRegressionError
 from loom_capacity_executor.launch_renderer import (
     OperatorGenericTresMappingV2,
     OperatorLaunchProfileV2,
@@ -1236,6 +1236,131 @@ async def test_inventory_publish_is_journaled_and_replayed_exactly_after_timeout
 
     assert result.status == "inventory-published"
     assert manager.inventories[1] == manager.inventories[0]
+    journal.close()
+
+
+# Production break caught: activation could reject an exact prepared inventory
+# request that was durably journaled before the executor received active authority.
+async def test_prepared_inventory_request_replays_exactly_after_activation(
+    tmp_path: Path,
+) -> None:
+    executor, journal, manager, _admission, _slurm, _launch = executor_fixture(
+        tmp_path,
+        work=None,
+    )
+    active_registration = executor.registration
+    prepared_registration = active_registration.model_copy(
+        update={
+            "execution": active_registration.execution.model_copy(
+                update={
+                    "execution_state": "prepared",
+                    "executable_new_capacity_ceiling": 0,
+                    "executable_new_capacity_rate_per_minute": 0,
+                }
+            )
+        }
+    )
+    executor.registration = prepared_registration
+    manager.registration = prepared_registration
+    manager.inventory_failure = ExecutorTransportError("transport failed")
+
+    with pytest.raises(ExecutorTransportError):
+        await executor.tick()
+
+    manager.inventory_failure = None
+    manager.reject_work_fetch = True
+    executor.registration = active_registration
+    manager.registration = active_registration
+
+    result = await executor.tick()
+
+    assert result.status == "inventory-published"
+    assert len(manager.inventories) == 2
+    assert manager.inventories[1] == manager.inventories[0]
+    assert manager.inventories[1].execution.execution_state == "prepared"
+    journal.close()
+
+
+# Production break caught: rotating the executor incarnation at activation must
+# expose the unresolved prepared inventory instead of bypassing it for new work.
+async def test_prepared_inventory_request_rejects_changed_activation_incarnation(
+    tmp_path: Path,
+) -> None:
+    executor, journal, manager, _admission, _slurm, _launch = executor_fixture(
+        tmp_path,
+        work=None,
+    )
+    active_registration = executor.registration
+    prepared_registration = active_registration.model_copy(
+        update={
+            "execution": active_registration.execution.model_copy(
+                update={
+                    "execution_state": "prepared",
+                    "executable_new_capacity_ceiling": 0,
+                    "executable_new_capacity_rate_per_minute": 0,
+                }
+            )
+        }
+    )
+    executor.registration = prepared_registration
+    manager.registration = prepared_registration
+    manager.inventory_failure = ExecutorTransportError("transport failed")
+
+    with pytest.raises(ExecutorTransportError):
+        await executor.tick()
+
+    changed_registration = active_registration.model_copy(
+        update={"executor_incarnation": UUID(int=999)}
+    )
+    manager.inventory_failure = None
+    manager.reject_work_fetch = True
+    executor.registration = changed_registration
+    manager.registration = changed_registration
+
+    with pytest.raises(JournalRegressionError, match="binding changed"):
+        await executor.tick()
+
+    journal.close()
+
+
+# Production break caught: drain-only recovery could fetch a close command before
+# replaying the exact active inventory request already durable in its journal.
+async def test_active_inventory_request_replays_exactly_after_drain_transition(
+    tmp_path: Path,
+) -> None:
+    executor, journal, manager, _admission, _slurm, _launch = executor_fixture(
+        tmp_path,
+        work=None,
+    )
+    active_registration = executor.registration
+    manager.inventory_failure = ExecutorTransportError("transport failed")
+
+    with pytest.raises(ExecutorTransportError):
+        await executor.tick()
+
+    drain_registration = active_registration.model_copy(
+        update={
+            "execution": active_registration.execution.model_copy(
+                update={
+                    "writer_epoch": active_registration.execution.writer_epoch + 1,
+                    "execution_state": "drain-only",
+                    "executable_new_capacity_ceiling": 0,
+                    "executable_new_capacity_rate_per_minute": 0,
+                }
+            )
+        }
+    )
+    manager.inventory_failure = None
+    manager.reject_work_fetch = True
+    executor.registration = drain_registration
+    manager.registration = drain_registration
+
+    result = await executor.tick_drain_only()
+
+    assert result.status == "inventory-published"
+    assert len(manager.inventories) == 2
+    assert manager.inventories[1] == manager.inventories[0]
+    assert manager.inventories[1].execution.execution_state == "active"
     journal.close()
 
 
