@@ -9,7 +9,7 @@ from typing import Any, cast
 from uuid import UUID, uuid4
 
 from pydantic import TypeAdapter
-from sqlalchemy import select
+from sqlalchemy import null, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom.db.schema import (
@@ -50,7 +50,13 @@ from loom.pipeline.artifact_commit import (
 )
 from loom.pipeline.budget import checkpoint_artifact_reservation_key
 from loom.pipeline.keys import canonical_digest, canonical_document, digest_bytes
-from loom.pipeline.spec import BindingItemV1, BindingSetV1
+from loom.pipeline.platform_fanout_commit import synthesize_fanout_manifest
+from loom.pipeline.spec import (
+    BindingItemV1,
+    BindingSetV1,
+    FanoutManifestV1,
+    PlatformFanoutIndexV1,
+)
 from loom.pipeline.state import StageResultInputV1, StageResultProvenanceV1
 from loom.pipeline.work_protocol import (
     CheckpointPrepareRequestV1,
@@ -84,7 +90,7 @@ def _session_values(state: _SessionState) -> dict[str, Any]:
         "expires_at": state.token_expires_at,
         "created_at": state.created_at,
         "updated_at": state.updated_at,
-        "canonical_manifest_json": None
+        "canonical_manifest_json": null()
         if state.manifest is None
         else state.manifest.model_dump(mode="json"),
         "manifest_sha256": state.manifest_sha256,
@@ -92,8 +98,13 @@ def _session_values(state: _SessionState) -> dict[str, Any]:
         "committed_ready_at": state.updated_at if state.state == "committed_ready" else None,
         "committed_at": state.updated_at if state.state == "committed" else None,
         "aborted_at": state.updated_at if state.state == "aborted" else None,
-        "checkpoint_envelope_json": state.checkpoint_envelope_json,
+        "checkpoint_envelope_json": (
+            null()
+            if state.checkpoint_envelope_json is None
+            else state.checkpoint_envelope_json
+        ),
         "checkpoint_envelope_digest": state.checkpoint_envelope_digest,
+        "stage_result_json": null(),
     }
     if isinstance(producer, FinalOutputProducerV1 | CheckpointProducerV1):
         values.update(
@@ -193,6 +204,10 @@ class SqlArtifactCommitRepository(ArtifactCommitRepositoryV1):
     async def add(self, state: _SessionState) -> None:
         async with self._session_factory() as db:
             db.add(ArtifactUploadSession(**_session_values(state)))
+            # These models intentionally have no mutable ORM relationship.
+            # Flush the fenced parent explicitly so PostgreSQL observes the FK
+            # authority before the independently persisted file-plan rows.
+            await db.flush()
             for item in state.files:
                 db.add(
                     ArtifactUploadFile(
@@ -314,7 +329,9 @@ class SqlArtifactCommitRepository(ArtifactCommitRepositoryV1):
                 ArtifactManifestV1,
             )
 
-            state.manifest = ArtifactCommitManifestV1.model_validate(row.canonical_manifest_json)
+            state.manifest = ArtifactCommitManifestV1.model_validate_json(
+                canonical_document(row.canonical_manifest_json)
+            )
             for record in state.manifest.artifacts:
                 # Per-item immutable facts can be reconstructed from the root;
                 # lineage is identical for every item in this v1 session.
@@ -487,7 +504,11 @@ class FinalOutputRouteService:
 
     async def _producer_and_outputs(
         self, attempt: ExecutionAttempt, request: FinalOutputPrepareRequestV1
-    ) -> tuple[FinalOutputProducerV1, dict[str, dict[str, Any]]]:
+    ) -> tuple[
+        FinalOutputProducerV1,
+        dict[str, dict[str, Any]],
+        dict[str, Any] | None,
+    ]:
         async with self._session_factory() as db:
             stage = await db.get(PipelineStageRun, attempt.stage_run_id)
             if stage is None:
@@ -502,6 +523,10 @@ class FinalOutputRouteService:
             str(item["name"]): item
             for item in cast(list[dict[str, Any]], frozen_spec["container_node"]["outputs"])
         }
+        fanout_commit = cast(
+            dict[str, Any] | None,
+            frozen_spec["container_node"].get("fanout_commit"),
+        )
         bindings = [
             BindingSetV1.model_validate_json(canonical_document(item))
             for item in (stage.resolved_input_bindings_json or [])
@@ -523,17 +548,31 @@ class FinalOutputRouteService:
                 item.manifest_sha256 for binding in bindings for item in binding.items
             ],
         )
-        return producer, outputs
+        return producer, outputs, fanout_commit
 
     async def prepare(self, **kwargs: Any) -> dict[str, Any]:
         attempt = cast(ExecutionAttempt, kwargs["attempt"])
         request = cast(FinalOutputPrepareRequestV1, kwargs["request"])
-        producer, outputs = await self._producer_and_outputs(attempt, request)
-        artifact_ids = {name: uuid4() for name in outputs}
+        producer, outputs, fanout_commit = await self._producer_and_outputs(attempt, request)
+        actual_outputs = {item.name: item for item in request.stage_result.outputs}
+        if len(actual_outputs) != len(request.stage_result.outputs):
+            raise ArtifactCommitError("invalid_stage_result")
+        template_name = (
+            None if fanout_commit is None else cast(str, fanout_commit["item_binding_name"])
+        )
+        artifact_ids = {name: uuid4() for name in actual_outputs}
         files: list[UploadFilePlanV1] = []
         for index, item in enumerate(request.files):
             declaration = outputs.get(item.output_name)
-            if declaration is None or declaration.get("producer") != "container":
+            if declaration is None and template_name is not None:
+                declaration = outputs.get(template_name)
+            actual = actual_outputs.get(item.output_name)
+            if (
+                declaration is None
+                or actual is None
+                or declaration.get("producer") != "container"
+                or declaration.get("artifact_type") != actual.artifact_type
+            ):
                 raise ArtifactCommitError("invalid_stage_result")
             relative_path = item.relative_path
             workspace_prefix = f"artifacts/{item.output_name}/"
@@ -554,6 +593,31 @@ class FinalOutputRouteService:
                     expected_max_bytes=cast(int, declaration["max_bytes"]),
                     expected_sha256=item.sha256,
                     expected_size=item.size_bytes,
+                )
+            )
+        if fanout_commit is not None:
+            manifest_name = cast(str, fanout_commit["manifest_output_name"])
+            declaration = outputs.get(manifest_name)
+            if (
+                declaration is None
+                or declaration.get("producer") != "platform"
+                or declaration.get("artifact_type") != "loom.fanout-manifest.v1"
+            ):
+                raise ArtifactCommitError("invalid_stage_result")
+            files.append(
+                UploadFilePlanV1(
+                    file_index=len(files),
+                    preallocated_artifact_id=uuid4(),
+                    relative_path="artifact.json",
+                    artifact_name=manifest_name,
+                    artifact_type="loom.fanout-manifest.v1",
+                    producer="platform",
+                    media_type="application/json",
+                    role="semantic_document",
+                    archive_format="none",
+                    expected_max_bytes=cast(int, declaration["max_bytes"]),
+                    expected_sha256=None,
+                    expected_size=None,
                 )
             )
         grant = await self._service.prepare_session(
@@ -595,11 +659,150 @@ class FinalOutputRouteService:
         return result.model_dump(mode="json")
 
     async def commit(self, **kwargs: Any) -> dict[str, Any]:
+        session_id = cast(UUID, kwargs["session_id"])
+        auth = UploadAuthV1(upload_token=kwargs["upload_token"])
+        await self._commit_platform_fanout_document(
+            attempt=cast(ExecutionAttempt, kwargs["attempt"]),
+            session_id=session_id,
+            auth=auth,
+        )
         result = await self._service.commit_session(
-            session_id=kwargs["session_id"],
-            auth=UploadAuthV1(upload_token=kwargs["upload_token"]),
+            session_id=session_id,
+            auth=auth,
         )
         return result.model_dump(mode="json")
+
+    async def _commit_platform_fanout_document(
+        self,
+        *,
+        attempt: ExecutionAttempt,
+        session_id: UUID,
+        auth: UploadAuthV1,
+    ) -> None:
+        async with self._session_factory() as db:
+            stage = await db.get(PipelineStageRun, attempt.stage_run_id)
+            upload = await db.get(ArtifactUploadSession, session_id)
+            if (
+                stage is None
+                or upload is None
+                or upload.execution_attempt_id != attempt.id
+                or upload.commit_kind != "final_output"
+                or stage.resolved_execution_spec_json is None
+            ):
+                raise ArtifactCommitError("completion_identity_drift")
+            node = cast(
+                dict[str, Any], stage.resolved_execution_spec_json.get("container_node")
+            )
+            fanout = cast(dict[str, Any] | None, node.get("fanout_commit"))
+            if fanout is None:
+                return
+            rows = list(
+                (
+                    await db.execute(
+                        select(ArtifactUploadFile)
+                        .where(ArtifactUploadFile.session_id == session_id)
+                        .order_by(ArtifactUploadFile.file_index)
+                    )
+                ).scalars()
+            )
+            index_name = cast(str, fanout["index_output_name"])
+            manifest_name = cast(str, fanout["manifest_output_name"])
+            index_row = next(
+                (
+                    row
+                    for row in rows
+                    if row.artifact_name == index_name
+                    and row.relative_path == "artifact.json"
+                    and row.role == "semantic_document"
+                    and row.producer == "container"
+                ),
+                None,
+            )
+            platform_row = next(
+                (
+                    row
+                    for row in rows
+                    if row.artifact_name == manifest_name
+                    and row.relative_path == "artifact.json"
+                    and row.role == "semantic_document"
+                    and row.producer == "platform"
+                ),
+                None,
+            )
+            if index_row is None or platform_row is None:
+                raise ArtifactCommitError("platform_fanout_plan_missing")
+            artifact_ids_by_output: dict[str, UUID] = {}
+            artifact_types_by_output: dict[str, str] = {}
+            result = cast(dict[str, Any], upload.stage_result_json)
+            for output in cast(list[dict[str, Any]], result.get("outputs", [])):
+                name = cast(str, output["name"])
+                artifact_types_by_output[name] = cast(str, output["artifact_type"])
+            for row in rows:
+                name = row.artifact_name
+                if row.producer != "container" or name not in artifact_types_by_output:
+                    continue
+                existing = artifact_ids_by_output.setdefault(
+                    name, row.preallocated_artifact_id
+                )
+                if existing != row.preallocated_artifact_id:
+                    raise ArtifactCommitError("committed_output_drift")
+            index_declaration = next(
+                (
+                    value
+                    for value in cast(list[dict[str, Any]], node.get("outputs", []))
+                    if value["name"] == index_name
+                ),
+                None,
+            )
+            if index_declaration is None:
+                raise ArtifactCommitError("platform_fanout_plan_missing")
+            index_max_bytes = cast(int, index_declaration["max_bytes"])
+            index_file_index = index_row.file_index
+            platform_file_index = platform_row.file_index
+        index_bytes = await self._service.read_verified_file(
+            session_id=session_id,
+            file_index=index_file_index,
+            auth=auth,
+            max_bytes=index_max_bytes,
+        )
+        if canonical_document(PlatformFanoutIndexV1.model_validate_json(index_bytes)) != index_bytes:
+            raise ArtifactCommitError("platform_fanout_index_noncanonical")
+        index = PlatformFanoutIndexV1.model_validate_json(index_bytes)
+        if len(index.items) > cast(int, fanout["max_items"]):
+            raise ArtifactCommitError("platform_fanout_index_too_large")
+        item_binding_name = cast(str, fanout["item_binding_name"])
+        template = next(
+            (
+                value
+                for value in cast(list[dict[str, Any]], node.get("outputs", []))
+                if value["name"] == item_binding_name
+            ),
+            None,
+        )
+        if template is None:
+            raise ArtifactCommitError("platform_fanout_plan_missing")
+        item_artifact_type = cast(str, template["artifact_type"])
+        triples: list[tuple[str, str, str]] = []
+        for item in index.items:
+            if artifact_types_by_output.get(item.output_name) != item_artifact_type:
+                raise ArtifactCommitError("platform_fanout_item_type_drift")
+            triples.append((item.shard_key, item.output_name, item_artifact_type))
+        manifest_value = FanoutManifestV1.model_validate_json(
+            canonical_document(
+                synthesize_fanout_manifest(
+                    triples,
+                    namespace=attempt.id,
+                    item_binding_name=item_binding_name,
+                    artifact_ids_by_output=artifact_ids_by_output,
+                )
+            )
+        )
+        await self._service.commit_platform_document(
+            session_id=session_id,
+            file_index=platform_file_index,
+            value=manifest_value,
+            auth=auth,
+        )
 
     async def abort(self, **kwargs: Any) -> dict[str, Any]:
         attempt = cast(ExecutionAttempt, kwargs["attempt"])
@@ -1019,7 +1222,7 @@ class ExecutionAttemptCompletionService:
             ).scalars()
         )
         producer_kind_by_id = {row.preallocated_artifact_id: row.producer for row in file_rows}
-        if any(value != "container" for value in producer_kind_by_id.values()):
+        if any(value not in {"container", "platform"} for value in producer_kind_by_id.values()):
             raise ArtifactCommitError("final_output_producer_invalid")
         observed_files = {
             (
@@ -1056,19 +1259,40 @@ class ExecutionAttemptCompletionService:
         if observed_files != expected_files or len(observed_files) != len(file_rows):
             raise ArtifactCommitError("committed_output_drift")
         records_by_name = {record.artifact_name: record for record in manifest.artifacts}
-        if len(records_by_name) != len(manifest.artifacts) or set(records_by_name) != set(
-            actual_outputs
+        platform_outputs = {
+            name
+            for name, declaration in declarations.items()
+            if declaration.get("producer") == "platform"
+        }
+        if (
+            len(records_by_name) != len(manifest.artifacts)
+            or set(records_by_name) != set(actual_outputs) | platform_outputs
         ):
             raise ArtifactCommitError("committed_output_drift")
         committed_bytes = {"final_output": 0, "control": 0}
         for name, record in records_by_name.items():
-            output = actual_outputs[name]
-            if (
-                record.artifact_type != output.artifact_type
-                or producer_kind_by_id.get(record.artifact_id) != "container"
-            ):
-                raise ArtifactCommitError("committed_output_drift")
-            committed_bytes["final_output"] += sum(item.size_bytes for item in record.stored_files)
+            actual_output = actual_outputs.get(name)
+            if actual_output is not None:
+                if (
+                    record.artifact_type != actual_output.artifact_type
+                    or producer_kind_by_id.get(record.artifact_id) != "container"
+                ):
+                    raise ArtifactCommitError("committed_output_drift")
+                committed_bytes["final_output"] += sum(
+                    item.size_bytes for item in record.stored_files
+                )
+            else:
+                declaration = declarations.get(name)
+                if (
+                    declaration is None
+                    or declaration.get("producer") != "platform"
+                    or record.artifact_type != declaration.get("artifact_type")
+                    or producer_kind_by_id.get(record.artifact_id) != "platform"
+                ):
+                    raise ArtifactCommitError("committed_output_drift")
+                committed_bytes["control"] += sum(
+                    item.size_bytes for item in record.stored_files
+                )
         expected_lineage = [item.artifact_id for item in expected_inputs]
         expected_lineage_digests = [item.manifest_sha256 for item in expected_inputs]
         if (

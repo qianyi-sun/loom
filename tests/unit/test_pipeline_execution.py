@@ -132,6 +132,33 @@ class _FinalOutputControlPlane:
 
     async def prepare_final_output(self, **kwargs: Any) -> dict[str, Any]:
         self.prepared = kwargs
+        container_files = [
+            {
+                "file_index": index,
+                "preallocated_artifact_id": str(UUID(int=index + 100)),
+                "artifact_name": item["output_name"],
+                "artifact_type": "behavior_rollout_bundle.v1",
+                "producer": "container",
+                "media_type": (
+                    "application/json"
+                    if item["relative_path"].endswith("/artifact.json")
+                    else "application/octet-stream"
+                ),
+                "relative_path": item["relative_path"].removeprefix(
+                    f"artifacts/{item['output_name']}/"
+                ),
+                "role": (
+                    "semantic_document"
+                    if item["relative_path"].endswith("/artifact.json")
+                    else "payload"
+                ),
+                "archive_format": "none",
+                "expected_max_bytes": 1024,
+                "expected_size": item["size_bytes"],
+                "expected_sha256": item["sha256"],
+            }
+            for index, item in enumerate(kwargs["payload"]["files"])
+        ]
         return {
             "schema_version": "loom.upload-session-grant.v1",
             "upload_session_id": str(self.session_id),
@@ -139,31 +166,21 @@ class _FinalOutputControlPlane:
             "upload_token": "u" * 48,
             "token_expires_at": (datetime.now(UTC) + timedelta(minutes=15)).isoformat(),
             "files": [
+                *container_files,
                 {
-                    "file_index": index,
-                    "preallocated_artifact_id": str(UUID(int=index + 100)),
-                    "artifact_name": item["output_name"],
-                    "artifact_type": "behavior_rollout_bundle.v1",
-                    "producer": "container",
-                    "media_type": (
-                        "application/json"
-                        if item["relative_path"].endswith("/artifact.json")
-                        else "application/octet-stream"
-                    ),
-                    "relative_path": item["relative_path"].removeprefix(
-                        f"artifacts/{item['output_name']}/"
-                    ),
-                    "role": (
-                        "semantic_document"
-                        if item["relative_path"].endswith("/artifact.json")
-                        else "payload"
-                    ),
+                    "file_index": len(container_files),
+                    "preallocated_artifact_id": str(UUID(int=999)),
+                    "artifact_name": "platform_manifest",
+                    "artifact_type": "loom.fanout-manifest.v1",
+                    "producer": "platform",
+                    "media_type": "application/json",
+                    "relative_path": "artifact.json",
+                    "role": "semantic_document",
                     "archive_format": "none",
                     "expected_max_bytes": 1024,
-                    "expected_size": item["size_bytes"],
-                    "expected_sha256": item["sha256"],
+                    "expected_size": None,
+                    "expected_sha256": None,
                 }
-                for index, item in enumerate(kwargs["payload"]["files"])
             ],
         }
 

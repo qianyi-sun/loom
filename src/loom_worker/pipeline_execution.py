@@ -709,12 +709,19 @@ class HttpFinalOutputCommitter(ArtifactCommitter):
         session_id = grant.upload_session_id
         self.active_session_id = session_id
         token = grant.upload_token
-        plans = sorted(grant.files, key=lambda item: item.file_index)
+        server_plans = sorted(grant.files, key=lambda item: item.file_index)
+        plans = [item for item in server_plans if item.producer == "container"]
         if [item.file_index for item in plans] != list(range(len(files))):
+            raise RuntimeError("final_output_upload_plan_drift")
+        if any(
+            item.producer != "platform" or item.file_index < len(files)
+            for item in server_plans
+            if item.producer != "container"
+        ):
             raise RuntimeError("final_output_upload_plan_drift")
 
         async def refresh_upload_token() -> None:
-            nonlocal grant, plans, token
+            nonlocal grant, plans, server_plans, token
             if grant.token_expires_at > datetime.now(UTC) + timedelta(minutes=2):
                 return
             renewed = UploadSessionGrantV1.model_validate_json(
@@ -726,11 +733,19 @@ class HttpFinalOutputCommitter(ArtifactCommitter):
                     )
                 )
             )
-            renewed_plans = sorted(renewed.files, key=lambda item: item.file_index)
-            if renewed.upload_session_id != session_id or renewed_plans != plans:
+            renewed_server_plans = sorted(renewed.files, key=lambda item: item.file_index)
+            renewed_plans = [
+                item for item in renewed_server_plans if item.producer == "container"
+            ]
+            if (
+                renewed.upload_session_id != session_id
+                or renewed_server_plans != server_plans
+                or renewed_plans != plans
+            ):
                 raise RuntimeError("final_output_token_renewal_drift")
             grant = renewed
             plans = renewed_plans
+            server_plans = renewed_server_plans
             token = renewed.upload_token
 
         session_terminal = False
