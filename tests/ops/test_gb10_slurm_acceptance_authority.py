@@ -61,22 +61,7 @@ def test_authority_is_fixed_to_service_identity_and_real_slurm_partition() -> No
     assert authority.SLURM_QOS == "loom-staging"
     assert authority.CLUSTER_NAME == "trt-gb10"
     assert authority.CONTROLLER_HOST == "gx10-01c7"
-    assert authority.SLURM_NODES == (
-        "trt-gb10-1",
-        "trt-gb10-2",
-        "trt-gb10-3",
-        "trt-gb10-4",
-        "trt-gb10-5",
-        "trt-gb10-6",
-        "trt-gb10-7",
-        "trt-gb10-8",
-        "trt-gb10-9",
-        "trt-gb10-11",
-        "trt-gb10-12",
-        "trt-gb10-13",
-        "trt-gb10-14",
-        "trt-gb10-15",
-    )
+    assert authority.SLURM_NODES == tuple(f"trt-gb10-{number}" for number in range(1, 16))
     assert authority.LEGACY_AGENT_NODES == tuple(f"trt-gb10-{number}" for number in range(1, 16))
 
 
@@ -97,7 +82,7 @@ pool_name = "gb10"
 actuator = "slurm"
 enabled = true
 min_slots = 0
-max_slots = 140
+max_slots = 150
 
 [worker_pool_autoscaler_policies.actuator_config]
 slurm_cluster_name = "trt-gb10"
@@ -107,11 +92,11 @@ external_runner = true
 slurm_account = "loom-staging"
 qos_normal = "loom-staging"
 candidate_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-max_jobs = 14
+max_jobs = 15
 allowed_nodes = [
   "trt-gb10-1", "trt-gb10-2", "trt-gb10-3", "trt-gb10-4",
   "trt-gb10-5", "trt-gb10-6", "trt-gb10-7", "trt-gb10-8",
-  "trt-gb10-9", "trt-gb10-11", "trt-gb10-12", "trt-gb10-13",
+  "trt-gb10-9", "trt-gb10-10", "trt-gb10-11", "trt-gb10-12", "trt-gb10-13",
   "trt-gb10-14", "trt-gb10-15",
 ]
 repo_dir = "/shared_work2/loom-staging-rollout/worker-repos/exact"
@@ -207,7 +192,7 @@ def test_candidate_contract_rejects_job_ceiling_beyond_accepted_nodes(
     profile.parent.mkdir(parents=True)
     payload = Path("deploy/environment-state/staging.toml").read_text(encoding="utf-8")
     profile.write_text(
-        payload.replace("max_jobs = 14", "max_jobs = 15", 1),
+        payload.replace("max_jobs = 15", "max_jobs = 16", 1),
         encoding="utf-8",
     )
     monkeypatch.setattr(authority, "CANDIDATE_ROOT", tmp_path)

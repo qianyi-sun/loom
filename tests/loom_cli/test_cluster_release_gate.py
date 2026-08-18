@@ -27,10 +27,7 @@ from loom_cli.cluster_release_gate import (
 from loom_cli.cluster_release_manifest import build_release_manifest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-STAGING_GB10_NODES = [
-    *[f"trt-gb10-{index}" for index in range(1, 10)],
-    *[f"trt-gb10-{index}" for index in range(11, 16)],
-]
+STAGING_GB10_NODES = [f"trt-gb10-{index}" for index in range(1, 16)]
 
 
 class _Spec:
@@ -331,6 +328,7 @@ def test_release_gate_accepts_exact_candidate_partition_node_authority() -> None
         "trt-gb10-7",
         "trt-gb10-8",
         "trt-gb10-9",
+        "trt-gb10-10",
         "trt-gb10-11",
         "trt-gb10-12",
         "trt-gb10-13",
@@ -359,9 +357,9 @@ def test_release_gate_accepts_exact_candidate_partition_node_authority() -> None
                 "qos": "loom-staging",
             },
             "nodes": partition_nodes,
-            "node_count": 14,
+            "node_count": 15,
             "probed_nodes": partition_nodes[1:],
-            "probed_node_count": 13,
+            "probed_node_count": 14,
             "deferred_busy_nodes": ["trt-gb10-1"],
             "generated_at": generated_at.isoformat(),
             "expires_at": (generated_at + timedelta(minutes=15)).isoformat(),
@@ -405,7 +403,7 @@ def test_release_gate_rejects_malformed_partition_node_inventory() -> None:
     manifest = _manifest(external_workers=_external_gb10_workers(enabled=True))
     manifest["external_workers"]["slurm_pools"][0]["allowed_nodes"] = [
         {"node": "trt-gb10-1"}
-    ] * 14
+    ] * 15
 
     check = _external_slurm_acceptance_check(manifest)
 
@@ -418,8 +416,8 @@ def test_release_gate_rejects_malformed_partition_node_inventory() -> None:
     ("field", "value"),
     [
         ("schema_version", True),
-        ("node_count", 14.0),
-        ("probed_node_count", 13.0),
+        ("node_count", 15.0),
+        ("probed_node_count", 14.0),
     ],
 )
 def test_release_gate_rejects_non_integer_authority_counts(
@@ -461,9 +459,9 @@ def test_release_gate_rejects_authority_with_forged_node_inventory() -> None:
             "qos": "loom-staging",
         },
         "nodes": [*STAGING_GB10_NODES[:-1], "trt-gb10-16"],
-        "node_count": 14,
+        "node_count": 15,
         "probed_nodes": STAGING_GB10_NODES[:-1],
-        "probed_node_count": 13,
+        "probed_node_count": 14,
         "deferred_busy_nodes": ["trt-gb10-16"],
         "generated_at": generated_at.isoformat(),
         "expires_at": (generated_at + timedelta(minutes=15)).isoformat(),
@@ -497,7 +495,7 @@ def test_release_gate_rejects_unprobed_or_malformed_authority_coverage() -> None
             "qos": "loom-staging",
         },
         "nodes": STAGING_GB10_NODES,
-        "node_count": 14,
+        "node_count": 15,
         "probed_nodes": [],
         "probed_node_count": 0,
         "deferred_busy_nodes": [{"node": "trt-gb10-1"}],
