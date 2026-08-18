@@ -5101,6 +5101,123 @@ class ExecutionAttemptProviderBudget(Base):
     version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
 
 
+class PipelineProviderDispatch(Base):
+    """Durable pre-dispatch identity and post-dispatch accounting outcome."""
+
+    __tablename__ = "pipeline_provider_dispatches"
+    __table_args__ = (
+        UniqueConstraint(
+            "execution_attempt_id",
+            "provider_request_id",
+            name="pipeline_provider_dispatches_attempt_request_uidx",
+        ),
+        UniqueConstraint(
+            "reservation_id",
+            name="pipeline_provider_dispatches_reservation_uidx",
+        ),
+        CheckConstraint(
+            "binding_snapshot_sha256 ~ '^sha256:[0-9a-f]{64}$' "
+            "AND request_digest ~ '^sha256:[0-9a-f]{64}$' "
+            "AND (response_digest IS NULL OR response_digest ~ '^sha256:[0-9a-f]{64}$')",
+            name="pipeline_provider_dispatches_digest_check",
+        ),
+        CheckConstraint(
+            "provider <> '' AND model <> '' AND wire_api IN ('responses','messages')",
+            name="pipeline_provider_dispatches_text_check",
+        ),
+        CheckConstraint(
+            "reserved_cost_microusd >= 0 "
+            "AND (actual_cost_microusd IS NULL OR actual_cost_microusd >= 0) "
+            "AND upstream_attempt_count BETWEEN 0 AND 1 AND version >= 0",
+            name="pipeline_provider_dispatches_amount_check",
+        ),
+        CheckConstraint(
+            "state IN ('reserved','dispatched','settled') "
+            "AND (outcome IS NULL OR outcome IN "
+            "('not_dispatched','succeeded','failed','uncertain'))",
+            name="pipeline_provider_dispatches_state_check",
+        ),
+        CheckConstraint(
+            "(state = 'reserved' AND outcome IS NULL AND actual_cost_microusd IS NULL "
+            "AND upstream_attempt_count = 0 AND response_digest IS NULL "
+            "AND llm_call_id IS NULL AND dispatched_at IS NULL "
+            "AND outcome_at IS NULL AND settled_at IS NULL) OR "
+            "(state = 'dispatched' AND outcome IS NULL AND actual_cost_microusd IS NULL "
+            "AND upstream_attempt_count = 1 AND response_digest IS NULL "
+            "AND llm_call_id IS NULL AND dispatched_at IS NOT NULL "
+            "AND outcome_at IS NULL AND settled_at IS NULL) OR "
+            "(state = 'settled' AND actual_cost_microusd IS NOT NULL "
+            "AND outcome_at IS NOT NULL AND settled_at IS NOT NULL "
+            "AND ((outcome = 'not_dispatched' AND actual_cost_microusd = 0 "
+            "AND upstream_attempt_count = 0 AND llm_call_id IS NULL "
+            "AND dispatched_at IS NULL AND response_digest IS NULL) OR "
+            "(outcome IN ('succeeded','failed','uncertain') "
+            "AND upstream_attempt_count = 1 AND llm_call_id IS NOT NULL "
+            "AND dispatched_at IS NOT NULL AND ((outcome = 'succeeded' "
+            "AND response_digest IS NOT NULL) OR "
+            "(outcome <> 'succeeded' AND response_digest IS NULL)))))",
+            name="pipeline_provider_dispatches_lifecycle_check",
+        ),
+        Index(
+            "pipeline_provider_dispatches_attempt_state_idx",
+            "execution_attempt_id",
+            "state",
+            "created_at",
+            "id",
+        ),
+        Index(
+            "pipeline_provider_dispatches_unsettled_idx",
+            "state",
+            "dispatched_at",
+            "id",
+            postgresql_where=text("state <> 'settled'"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    execution_attempt_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("execution_attempts.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    provider_request_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    reservation_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("pipeline_budget_reservations.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    binding_snapshot_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    request_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    provider_connection_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("provider_connections.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    model: Mapped[str] = mapped_column(Text, nullable=False)
+    wire_api: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'reserved'"))
+    outcome: Mapped[str | None] = mapped_column(Text)
+    reserved_cost_microusd: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    actual_cost_microusd: Mapped[int | None] = mapped_column(BigInteger)
+    upstream_attempt_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    response_digest: Mapped[str | None] = mapped_column(Text)
+    llm_call_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("llm_calls.id", ondelete="RESTRICT"),
+        unique=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+    dispatched_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    outcome_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    settled_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+
+
 class PipelineCancellationOutbox(Base):
     """Idempotent cancellation command and runtime acknowledgement interface."""
 

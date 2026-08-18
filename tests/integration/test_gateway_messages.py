@@ -178,7 +178,7 @@ async def test_messages_native_passthrough_records_llm_call(  # type: ignore[no-
     assert float(row["cost_usd"]) == pytest.approx(0.00567, abs=1e-6)
 
 
-async def test_messages_attributes_pipeline_jwt_to_execution_attempt(  # type: ignore[no-untyped-def]
+async def test_messages_rejects_pipeline_jwt_outside_fenced_responses_route(  # type: ignore[no-untyped-def]
     gateway_setup,
     postgres_url,
 ):
@@ -200,6 +200,8 @@ async def test_messages_attributes_pipeline_jwt_to_execution_attempt(  # type: i
         "control_binding_snapshots": [],
     }
     execution_spec_digest = canonical_digest(execution_spec)
+    execution_authorization = {"schema_version": "loom.terminalgen-authoring-grant.v1"}
+    execution_authorization_digest = canonical_digest(execution_authorization)
     lease_token = "lease-" + "x" * 40
     engine = create_engine(postgres_url)
     with engine.begin() as connection:
@@ -263,11 +265,14 @@ async def test_messages_attributes_pipeline_jwt_to_execution_attempt(  # type: i
             text("""
                 INSERT INTO execution_attempts (
                     id,stage_run_id,attempt_number,state,worker_id,claim_id,
-                    lease_epoch,lease_token_digest,lease_expires_at,step_jwt_id,
-                    queued_at,claimed_at,started_at
-                ) VALUES (
-                    :id,:stage,1,'running',:worker,:claim,3,:lease_digest,:expires,
-                    :token_id,now(),now(),now()
+                        lease_epoch,lease_token_digest,lease_expires_at,step_jwt_id,
+                        execution_authorization_json,execution_authorization_bytes,
+                        execution_authorization_digest,
+                        queued_at,claimed_at,started_at
+                    ) VALUES (
+                        :id,:stage,1,'running',:worker,:claim,3,:lease_digest,:expires,
+                        :token_id,CAST(:authorization AS jsonb),:authorization_bytes,
+                        :authorization_digest,now(),now(),now()
                 )
             """),
             {
@@ -277,7 +282,10 @@ async def test_messages_attributes_pipeline_jwt_to_execution_attempt(  # type: i
                 "claim": claim_id,
                 "lease_digest": hashlib.sha256(lease_token.encode()).hexdigest(),
                 "expires": datetime.now(UTC) + timedelta(minutes=10),
-                "token_id": token_id,
+                    "token_id": token_id,
+                    "authorization": json.dumps(execution_authorization),
+                    "authorization_bytes": canonical_document(execution_authorization),
+                    "authorization_digest": execution_authorization_digest,
             },
         )
     step_jwt = mint_step_jwt(
@@ -292,7 +300,7 @@ async def test_messages_attributes_pipeline_jwt_to_execution_attempt(  # type: i
         execution_attempt_lease_epoch=3,
         execution_spec_digest=execution_spec_digest,
         control_binding_snapshot_digest=None,
-        execution_authorization_digest=None,
+        execution_authorization_digest=execution_authorization_digest,
     )
     try:
         transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
@@ -306,18 +314,19 @@ async def test_messages_attributes_pipeline_jwt_to_execution_attempt(  # type: i
                     "messages": [{"role": "user", "content": "recover"}],
                 },
             )
-        assert response.status_code == 200, response.text
+        assert response.status_code == 403, response.text
+        assert response.json() == {
+            "detail": "execution-attempt tokens are restricted to the fenced Responses route"
+        }
         with engine.connect() as connection:
-            row = connection.execute(
+            call_count = connection.execute(
                 text("""
-                    SELECT trial_id,execution_attempt_id,step_id
+                    SELECT count(*)
                     FROM llm_calls WHERE execution_attempt_id=:attempt
                 """),
                 {"attempt": attempt_id},
-            ).one()
-        assert row.trial_id is None
-        assert row.execution_attempt_id == attempt_id
-        assert row.step_id == "recovery_primitive"
+            ).scalar_one()
+        assert call_count == 0
 
         with engine.begin() as connection:
             connection.execute(
