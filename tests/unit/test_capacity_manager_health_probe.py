@@ -169,6 +169,26 @@ def test_identity_response_returns_only_exact_manager_binding() -> None:
         b'"observer_principal_id":"reader","observer_principal_id":"other",'
         b'"configuration_epoch":7,"execution_state":"shadow","execution_epoch":0,'
         b'"executable_new_capacity_ceiling":0}',
+        b'{"authority_incarnation":"00000000-0000-0000-0000-000000000000",'
+        b'"observer_principal_id":"reader","configuration_epoch":7,'
+        b'"execution_state":"shadow","execution_epoch":0,'
+        b'"executable_new_capacity_ceiling":0}',
+        b'{"authority_incarnation":"00000000-0000-0000-0000-000000000101",'
+        b'"observer_principal_id":"reader","configuration_epoch":0,'
+        b'"execution_state":"shadow","execution_epoch":0,'
+        b'"executable_new_capacity_ceiling":0}',
+        b'{"authority_incarnation":"00000000-0000-0000-0000-000000000101",'
+        b'"observer_principal_id":"reader","configuration_epoch":7,'
+        b'"execution_state":"shadow","execution_epoch":1,'
+        b'"executable_new_capacity_ceiling":0}',
+        b'{"authority_incarnation":"00000000-0000-0000-0000-000000000101",'
+        b'"observer_principal_id":"reader","configuration_epoch":7,'
+        b'"execution_state":"prepared","execution_epoch":0,'
+        b'"executable_new_capacity_ceiling":0}',
+        b'{"authority_incarnation":"00000000-0000-0000-0000-000000000101",'
+        b'"observer_principal_id":"reader","configuration_epoch":7,'
+        b'"execution_state":"active","execution_epoch":1,'
+        b'"executable_new_capacity_ceiling":0}',
     ],
 )
 def test_identity_response_rejects_ambiguous_manager_binding(payload: bytes) -> None:

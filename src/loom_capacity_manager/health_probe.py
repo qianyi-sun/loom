@@ -17,8 +17,8 @@ from uuid import UUID
 import httpx
 from cryptography import x509
 
-from loom.personal_dev_capacity import PersonalDevCapacityManagerBinding
-from loom_capacity_agent.client import read_owner_only_bearer_token
+from loom_capacity_manager.auth import MAX_BEARER_TOKEN_BYTES
+from loom_capacity_manager.config import read_owner_only_bytes
 
 _MAX_HEALTH_BYTES = 1024
 _MAX_SERVER_CERTIFICATE_BYTES = 64 * 1024
@@ -107,6 +107,23 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return value
 
 
+def _read_owner_only_bearer_token(path: Path) -> str:
+    payload = read_owner_only_bytes(path, max_bytes=MAX_BEARER_TOKEN_BYTES)
+    try:
+        value = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("capacity bearer credential is not UTF-8") from exc
+    if value.endswith("\n"):
+        value = value[:-1]
+    if (
+        not value
+        or value != value.strip()
+        or any(character in value for character in ("\r", "\n", "\x00"))
+    ):
+        raise ValueError("capacity bearer credential must contain one exact nonempty line")
+    return value
+
+
 def parse_observed_capacity_health_response(
     status_code: int,
     payload: bytes,
@@ -171,14 +188,29 @@ def parse_observed_capacity_manager_identity_response(
         principal = document["observer_principal_id"]
         if not isinstance(principal, str) or _PRINCIPAL_ID.fullmatch(principal) is None:
             raise ValueError
-        binding = PersonalDevCapacityManagerBinding(
-            authority_incarnation=authority,
-            observer_principal_id=principal,
-            configuration_epoch=document["configuration_epoch"],
-            execution_state=document["execution_state"],
-            execution_epoch=document["execution_epoch"],
-            executable_new_capacity_ceiling=document["executable_new_capacity_ceiling"],
-        )
+        configuration_epoch = document["configuration_epoch"]
+        execution_state = document["execution_state"]
+        execution_epoch = document["execution_epoch"]
+        ceiling = document["executable_new_capacity_ceiling"]
+        if (
+            authority.int == 0
+            or type(configuration_epoch) is not int
+            or configuration_epoch <= 0
+            or execution_state not in {"shadow", "prepared", "active", "drain-only"}
+            or type(execution_epoch) is not int
+            or execution_epoch < 0
+            or type(ceiling) is not int
+            or ceiling < 0
+        ):
+            raise ValueError
+        if execution_state == "shadow":
+            coherent = execution_epoch == 0 and ceiling == 0
+        elif execution_state in {"prepared", "drain-only"}:
+            coherent = execution_epoch > 0 and ceiling == 0
+        else:
+            coherent = execution_epoch > 0 and ceiling > 0
+        if not coherent:
+            raise ValueError
     except (
         CapacityHealthProbeError,
         UnicodeDecodeError,
@@ -188,12 +220,12 @@ def parse_observed_capacity_manager_identity_response(
     ) as exc:
         raise CapacityHealthProbeError("capacity manager identity observation is invalid") from exc
     return {
-        "authority_incarnation": str(binding.authority_incarnation),
-        "configuration_epoch": binding.configuration_epoch,
-        "executable_new_capacity_ceiling": binding.executable_new_capacity_ceiling,
-        "execution_epoch": binding.execution_epoch,
-        "execution_state": binding.execution_state,
-        "observer_principal_id": binding.observer_principal_id,
+        "authority_incarnation": str(authority),
+        "configuration_epoch": configuration_epoch,
+        "executable_new_capacity_ceiling": ceiling,
+        "execution_epoch": execution_epoch,
+        "execution_state": execution_state,
+        "observer_principal_id": principal,
     }
 
 
@@ -319,7 +351,7 @@ def probe_capacity_manager(
             )
     try:
         bearer_token = (
-            read_owner_only_bearer_token(bearer_token_file)
+            _read_owner_only_bearer_token(bearer_token_file)
             if bearer_token_file is not None
             else None
         )

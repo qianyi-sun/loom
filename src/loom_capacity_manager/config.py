@@ -47,8 +47,8 @@ class CapacityManagerSettings(BaseSettings):
         return self
 
 
-def read_owner_only_secret(path: Path, *, max_bytes: int = 16 * 1024) -> str:
-    """Read a small current-UID-owned 0600 regular file without following links."""
+def read_owner_only_bytes(path: Path, *, max_bytes: int = 16 * 1024) -> bytes:
+    """Read a bounded current-UID-owned 0600 regular file without following links."""
 
     if type(max_bytes) is not int or max_bytes <= 0:
         raise ValueError("max_bytes must be a positive integer")
@@ -84,6 +84,13 @@ def read_owner_only_secret(path: Path, *, max_bytes: int = 16 * 1024) -> str:
     payload = b"".join(chunks)
     if len(payload) > max_bytes:
         raise ValueError("secret file exceeds maximum byte size")
+    return payload
+
+
+def read_owner_only_secret(path: Path, *, max_bytes: int = 16 * 1024) -> str:
+    """Read one nonempty UTF-8 line from an owner-only regular file."""
+
+    payload = read_owner_only_bytes(path, max_bytes=max_bytes)
     try:
         value = payload.decode("utf-8").strip()
     except UnicodeDecodeError as exc:
@@ -110,5 +117,6 @@ def build_uvicorn_kwargs(settings: CapacityManagerSettings) -> dict[str, object]
 __all__ = [
     "CapacityManagerSettings",
     "build_uvicorn_kwargs",
+    "read_owner_only_bytes",
     "read_owner_only_secret",
 ]
