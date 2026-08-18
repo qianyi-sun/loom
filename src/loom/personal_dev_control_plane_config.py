@@ -451,11 +451,7 @@ class _TrustedReleaseInput(_StrictModel):
 
 
 def _nonzero_digest(value: str, label: str) -> str:
-    if (
-        not isinstance(value, str)
-        or _DIGEST.fullmatch(value) is None
-        or value == "0" * 64
-    ):
+    if not isinstance(value, str) or _DIGEST.fullmatch(value) is None or value == "0" * 64:
         raise ValueError(f"{label} is invalid")
     return value
 
@@ -983,9 +979,7 @@ class PersonalDevAcceptancePlan:
             "storage": _dataclass_value(self.storage),
             "window": {
                 "expires_at": _format_timestamp(self.window.expires_at),
-                "rollback_expires_at": _format_timestamp(
-                    self.window.rollback_expires_at
-                ),
+                "rollback_expires_at": _format_timestamp(self.window.rollback_expires_at),
                 "started_at": _format_timestamp(self.window.started_at),
             },
         }
@@ -996,6 +990,28 @@ class PersonalDevAcceptancePlan:
     @property
     def sha256(self) -> str:
         return hashlib.sha256(self.canonical_bytes()).hexdigest()
+
+    def manager_runtime_json(self) -> str:
+        """Return the canonical secret-free service interlock binding."""
+
+        return _canonical_json(
+            {
+                "acceptance_plan_sha256": self.sha256,
+                "expires_at": _format_timestamp(self.window.expires_at),
+                "manager": {
+                    "authority_incarnation": str(self.manager.authority_incarnation),
+                    "configuration_epoch": self.manager.configuration_epoch,
+                    "executable_new_capacity_ceiling": (
+                        self.manager.executable_new_capacity_ceiling
+                    ),
+                    "execution_epoch": self.manager.execution_epoch,
+                    "execution_state": self.manager.execution_state,
+                    "observer_principal_id": (self.principals.lifecycle_principal_id),
+                },
+                "schema_version": 1,
+                "started_at": _format_timestamp(self.window.started_at),
+            }
+        ).decode("ascii")
 
 
 class PersonalDevTrustedReleaseError(ValueError):
@@ -1207,10 +1223,7 @@ def _read_trusted_release(path: Path) -> bytes:
         len(payload) != before.st_size
         or len(payload) > MAX_TRUSTED_RELEASE_BYTES
         or any(getattr(before, field) != getattr(after, field) for field in stable_fields)
-        or any(
-            getattr(before_path, field) != getattr(after_path, field)
-            for field in stable_fields
-        )
+        or any(getattr(before_path, field) != getattr(after_path, field) for field in stable_fields)
     ):
         raise _invalid_release()
     return payload
@@ -1308,9 +1321,7 @@ def load_personal_dev_acceptance_plan(
                 configuration_epoch=parsed.manager.configuration_epoch,
                 execution_state=parsed.manager.execution_state,
                 execution_epoch=parsed.manager.execution_epoch,
-                executable_new_capacity_ceiling=(
-                    parsed.manager.executable_new_capacity_ceiling
-                ),
+                executable_new_capacity_ceiling=(parsed.manager.executable_new_capacity_ceiling),
             ),
             principals=PersonalDevAcceptancePrincipals(**parsed.principals.model_dump()),
             quotas=PersonalDevControlPlaneLimits(**parsed.quotas.model_dump()),
@@ -1327,9 +1338,7 @@ def load_personal_dev_acceptance_plan(
             window=PersonalDevAcceptanceWindow(
                 started_at=_parse_acceptance_timestamp(parsed.window.started_at),
                 expires_at=_parse_acceptance_timestamp(parsed.window.expires_at),
-                rollback_expires_at=_parse_acceptance_timestamp(
-                    parsed.window.rollback_expires_at
-                ),
+                rollback_expires_at=_parse_acceptance_timestamp(parsed.window.rollback_expires_at),
             ),
         )
     except (RecursionError, UnicodeError, ValueError):
@@ -1370,20 +1379,16 @@ def validate_personal_dev_acceptance_plan(
             or type(profile.activation_agent_replicas) is not int
             or profile.activation_agent_replicas != 0
             or len(profile.pools) != len(REQUIRED_POOLS)
-            or {item.pool_id: item.architecture for item in profile.pools}
-            != REQUIRED_POOLS
+            or {item.pool_id: item.architecture for item in profile.pools} != REQUIRED_POOLS
         ):
             raise ValueError
-        shadow_yaml_sha256 = _nonzero_digest(
-            shadow_yaml_sha256, "shadow manifest digest"
-        )
+        shadow_yaml_sha256 = _nonzero_digest(shadow_yaml_sha256, "shadow manifest digest")
         if (
             plan.source.commit != release.source_sha
             or plan.source.tree != release.source_tree
             or plan.release.trusted_release_sha256
             != hashlib.sha256(release.canonical_bytes()).hexdigest()
-            or plan.release.release_evidence_sha256
-            != release.release_evidence_sha256
+            or plan.release.release_evidence_sha256 != release.release_evidence_sha256
             or plan.release.shadow_manifest_sha256 != shadow_yaml_sha256
             or plan.release.images != release.images
         ):
@@ -1396,23 +1401,14 @@ def validate_personal_dev_acceptance_plan(
             or plan.builder.publisher_identity != profile.builder.publisher_identity
             or plan.builder.registry_prefix != profile.builder.registry_prefix
             or plan.builder.protocol_map_sha256
-            != hashlib.sha256(
-                _canonical_json(dict(profile.protocol_versions))
-            ).hexdigest()
+            != hashlib.sha256(_canonical_json(dict(profile.protocol_versions))).hexdigest()
         ):
             raise ValueError
         if plan.quotas != profile.limits:
             raise ValueError
-        if (
-            plan.manager.executable_new_capacity_ceiling
-            != profile.executable_new_capacity_ceiling
-        ):
+        if plan.manager.executable_new_capacity_ceiling != profile.executable_new_capacity_ceiling:
             raise ValueError
-        if (
-            not isinstance(now, datetime)
-            or now.tzinfo is None
-            or now.utcoffset() is None
-        ):
+        if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
             raise ValueError
         observed_at = now.astimezone(UTC)
         if not (

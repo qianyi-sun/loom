@@ -443,7 +443,7 @@ pytest, Ruff, mypy.
 - Acceptance render-input hash domain is
   `b"loom-personal-dev-acceptance-render-v1\0" + profile + release + plan`.
 
-- [ ] **Step 1: Write failing deterministic acceptance render tests**
+- [x] **Step 1: Write failing deterministic acceptance render tests**
 
   Assert the same storage/PVC identities and immutable images as shadow; exact
   flags `true/true`, activation replicas `1`, readiness path
@@ -453,7 +453,7 @@ pytest, Ruff, mypy.
   Assert rendered builder/scanner/profile/protocol/public-key/manager settings
   exactly equal the plan and that shadow YAML bytes remain unchanged.
 
-- [ ] **Step 2: Run render tests and confirm acceptance rendering is absent**
+- [x] **Step 2: Run render tests and confirm acceptance rendering is absent**
 
   Run:
 
@@ -462,7 +462,7 @@ pytest, Ruff, mypy.
     tests/unit/test_personal_dev_control_plane_render.py
   ```
 
-- [ ] **Step 3: Refactor one private mode-aware renderer and add acceptance mode**
+- [x] **Step 3: Refactor one private mode-aware renderer and add acceptance mode**
 
   Keep public wrappers narrow. The mode-aware management environment sets:
 
@@ -483,7 +483,7 @@ pytest, Ruff, mypy.
   verify the plan's shadow manifest digest against the exact shadow bytes
   before emitting acceptance YAML.
 
-- [ ] **Step 4: Verify and commit acceptance rendering**
+- [x] **Step 4: Verify and commit acceptance rendering**
 
   Run focused tests, Ruff, and mypy on renderer/config, then:
 

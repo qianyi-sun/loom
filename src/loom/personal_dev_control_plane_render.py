@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -12,9 +13,11 @@ import yaml  # type: ignore[import-untyped]
 
 from loom.dev_instance import INGRESS_HOST
 from loom.personal_dev_control_plane_config import (
+    PersonalDevAcceptancePlan,
     PersonalDevControlPlaneProfile,
     PersonalDevTrustedRelease,
     ResourceEnvelope,
+    validate_personal_dev_acceptance_plan,
 )
 
 _MANAGED_BY = "loom-personal-dev-control-plane"
@@ -50,20 +53,27 @@ class RenderedPersonalDevControlPlane:
 class _RenderContext:
     input_sha256: str
     release_sha256: str
+    acceptance_plan_sha256: str | None = None
 
     def labels(self) -> dict[str, str]:
-        return {
+        value = {
             "app.kubernetes.io/managed-by": _MANAGED_BY,
             "app.kubernetes.io/part-of": "loom",
             "loom.dev/render-input": self.input_sha256[:32],
             "loom.dev/trusted-release": self.release_sha256[:32],
         }
+        if self.acceptance_plan_sha256 is not None:
+            value["loom.dev/acceptance-plan-sha256"] = self.acceptance_plan_sha256[:32]
+        return value
 
     def annotations(self) -> dict[str, str]:
-        return {
+        value = {
             "loom.dev/render-input-sha256": self.input_sha256,
             "loom.dev/trusted-release-sha256": self.release_sha256,
         }
+        if self.acceptance_plan_sha256 is not None:
+            value["loom.dev/acceptance-plan-sha256"] = self.acceptance_plan_sha256
+        return value
 
 
 def _metadata(
@@ -1235,6 +1245,7 @@ def _migration(
 def _management_env(
     profile: PersonalDevControlPlaneProfile,
     release: PersonalDevTrustedRelease,
+    plan: PersonalDevAcceptancePlan | None = None,
 ) -> list[dict[str, Any]]:
     secret = profile.identities.management_secret
     capabilities = json.dumps(
@@ -1259,6 +1270,40 @@ def _management_env(
         separators=(",", ":"),
         ensure_ascii=True,
     )
+    acceptance_env: list[dict[str, Any]] = []
+    scanner_identity = ""
+    scanner_policy_sha256 = ""
+    launcher_profile_sha256 = ""
+    runtime_class_name = profile.builder.runtime_class_name
+    registry_prefix = profile.builder.registry_prefix
+    publisher_identity = profile.builder.publisher_identity
+    activation_key_id = "personal-dev-agent-v1"
+    if plan is not None:
+        scanner_identity = (
+            f"trivy-bin-sha256:{plan.builder.scanner_binary_sha256}:"
+            f"db-sha256:{plan.builder.scanner_database_sha256}:"
+            f"java-db-sha256:{plan.builder.scanner_java_database_sha256}"
+        )
+        scanner_policy_sha256 = plan.builder.scanner_finding_policy_sha256
+        launcher_profile_sha256 = plan.builder.trusted_launcher_profile_sha256
+        runtime_class_name = plan.builder.runtime_class_name
+        registry_prefix = plan.builder.registry_prefix
+        publisher_identity = plan.builder.publisher_identity
+        activation_key_id = plan.activation.key_id
+        acceptance_env = [
+            _literal_env(
+                "LOOM_SVC_PERSONAL_DEV_ACCEPTANCE_BINDING_JSON",
+                plan.manager_runtime_json(),
+            ),
+            _literal_env(
+                "LOOM_SVC_PERSONAL_DEV_ACCEPTANCE_PLAN_SHA256",
+                plan.sha256,
+            ),
+            _literal_env(
+                "LOOM_SVC_PERSONAL_DEV_ACTIVATION_PUBLIC_KEY_SHA256",
+                plan.activation.public_key_sha256,
+            ),
+        ]
     return [
         _literal_env("LOOM_ENV", "dev"),
         _literal_env("LOOM_NAMESPACE", "loom-dev"),
@@ -1269,8 +1314,12 @@ def _management_env(
         _literal_env("LOOM_SVC_CONTROL_PLANE_URL", "http://127.0.0.1:9"),
         _literal_env("LOOM_SVC_GATEWAY_URL", "http://127.0.0.1:9"),
         _literal_env("LOOM_SVC_K8S_WORKER_ENABLED", "false"),
-        _literal_env("LOOM_SVC_DEV_INSTANCES_ENABLED", "false"),
-        _literal_env("LOOM_SVC_PERSONAL_DEV_BUILDER_ENABLED", "false"),
+        _literal_env("LOOM_SVC_DEV_INSTANCES_ENABLED", "true" if plan is not None else "false"),
+        _literal_env(
+            "LOOM_SVC_PERSONAL_DEV_BUILDER_ENABLED",
+            "true" if plan is not None else "false",
+        ),
+        *acceptance_env,
         _literal_env("LOOM_SVC_DEV_INSTANCE_KUBE_CONTEXT", ""),
         _literal_env("LOOM_SVC_DEV_INSTANCE_KUBECTL_PATH", "/usr/local/bin/kubectl"),
         _literal_env(
@@ -1302,11 +1351,11 @@ def _management_env(
             "LOOM_SVC_PERSONAL_DEV_ACTIVATION_PUBLIC_KEY_FILE",
             "/run/loom-personal-dev/activation-public/files/public-key",
         ),
-        _literal_env("LOOM_SVC_PERSONAL_DEV_ACTIVATION_KEY_ID", "personal-dev-agent-v1"),
+        _literal_env("LOOM_SVC_PERSONAL_DEV_ACTIVATION_KEY_ID", activation_key_id),
         _literal_env("LOOM_SVC_PERSONAL_DEV_BUILDER_IMAGE", release.images.personal_dev_builder),
         _literal_env(
             "LOOM_SVC_PERSONAL_DEV_BUILDER_RUNTIME_CLASS_NAME",
-            profile.builder.runtime_class_name,
+            runtime_class_name,
         ),
         _literal_env(
             "LOOM_SVC_PERSONAL_DEV_BUILDER_REGISTRY_AUTH_FILE",
@@ -1314,19 +1363,25 @@ def _management_env(
         ),
         _literal_env(
             "LOOM_SVC_PERSONAL_DEV_BUILDER_REGISTRY_PREFIX",
-            profile.builder.registry_prefix,
+            registry_prefix,
         ),
         _literal_env(
             "LOOM_SVC_PERSONAL_DEV_BUILDER_PUBLISHER_IDENTITY",
-            profile.builder.publisher_identity,
+            publisher_identity,
         ),
         _literal_env(
             "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_CACHE_DIR",
             "/var/lib/loom-personal-dev-scanner",
         ),
-        _literal_env("LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_IDENTITY", ""),
-        _literal_env("LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_POLICY_SHA256", ""),
-        _literal_env("LOOM_SVC_PERSONAL_DEV_TRUSTED_LAUNCHER_PROFILE_SHA256", ""),
+        _literal_env("LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_IDENTITY", scanner_identity),
+        _literal_env(
+            "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_POLICY_SHA256",
+            scanner_policy_sha256,
+        ),
+        _literal_env(
+            "LOOM_SVC_PERSONAL_DEV_TRUSTED_LAUNCHER_PROFILE_SHA256",
+            launcher_profile_sha256,
+        ),
         _literal_env(
             "LOOM_SVC_PERSONAL_DEV_BUILDER_GLOBAL_CONCURRENCY",
             str(profile.limits.builder_global_concurrency),
@@ -1476,6 +1531,7 @@ def _management_deployment(
     context: _RenderContext,
     profile: PersonalDevControlPlaneProfile,
     release: PersonalDevTrustedRelease,
+    plan: PersonalDevAcceptancePlan | None = None,
 ) -> dict[str, Any]:
     labels = {"app": "loom-personal-dev-management"}
     projected_management = [{"key": filename, "path": filename} for filename in _MANAGEMENT_FILES]
@@ -1524,10 +1580,17 @@ def _management_deployment(
                             "name": "management",
                             "image": release.images.loom_service,
                             "imagePullPolicy": "IfNotPresent",
-                            "env": _management_env(profile, release),
+                            "env": _management_env(profile, release, plan),
                             "ports": [{"name": "http", "containerPort": 8090}],
                             "readinessProbe": {
-                                "httpGet": {"path": "/api/v1/health", "port": "http"},
+                                "httpGet": {
+                                    "path": (
+                                        "/api/v1/health/personal-dev-acceptance"
+                                        if plan is not None
+                                        else "/api/v1/health"
+                                    ),
+                                    "port": "http",
+                                },
                                 "periodSeconds": 5,
                                 "timeoutSeconds": 3,
                                 "failureThreshold": 12,
@@ -1646,6 +1709,7 @@ def _activation_deployment(
     context: _RenderContext,
     profile: PersonalDevControlPlaneProfile,
     release: PersonalDevTrustedRelease,
+    plan: PersonalDevAcceptancePlan | None = None,
 ) -> dict[str, Any]:
     labels = {"app": "loom-personal-dev-activation-agent"}
     init = _credential_init(
@@ -1666,7 +1730,7 @@ def _activation_deployment(
             namespace="loom-dev",
         ),
         "spec": {
-            "replicas": profile.activation_agent_replicas,
+            "replicas": 1 if plan is not None else profile.activation_agent_replicas,
             "revisionHistoryLimit": 2,
             "strategy": {"type": "Recreate"},
             "selector": {"matchLabels": labels},
@@ -1694,7 +1758,11 @@ def _activation_deployment(
                                 ),
                                 _literal_env(
                                     "LOOM_PERSONAL_DEV_ACTIVATION_KEY_ID",
-                                    "personal-dev-agent-v1",
+                                    (
+                                        plan.activation.key_id
+                                        if plan is not None
+                                        else "personal-dev-agent-v1"
+                                    ),
                                 ),
                                 _literal_env(
                                     "LOOM_PERSONAL_DEV_ACTIVATION_PRIVATE_KEY_FILE",
@@ -1971,6 +2039,50 @@ def _sort_key(document: dict[str, Any]) -> tuple[int, str, str, str, str]:
     )
 
 
+def _render_documents(
+    context: _RenderContext,
+    profile: PersonalDevControlPlaneProfile,
+    release: PersonalDevTrustedRelease,
+    plan: PersonalDevAcceptancePlan | None = None,
+) -> RenderedPersonalDevControlPlane:
+    shared_role, shared_binding = _shared_role(context)
+    documents = [
+        _namespace(context),
+        _management_mutation_role(context),
+        _management_mutation_binding(context),
+        _managed_namespace_role(context),
+        _activation_role(context),
+        *_management_namespace_admission(context),
+        *_management_resource_admission(context),
+        *_activation_admission(context, profile),
+        _service_account(context, profile.identities.management_service_account),
+        _service_account(context, profile.identities.activation_service_account),
+        shared_role,
+        shared_binding,
+        *_postgres(context, profile, release),
+        *_minio(context, profile, release),
+        _scanner_cache(context, profile),
+        _migration(context, profile, release),
+        _management_deployment(context, profile, release, plan),
+        *_management_service_and_ingress(context, profile),
+        _activation_deployment(context, profile, release, plan),
+        *_network_policies(context, profile),
+    ]
+    documents.sort(key=_sort_key)
+    yaml_text = yaml.safe_dump_all(
+        documents,
+        explicit_start=False,
+        sort_keys=False,
+        default_flow_style=False,
+    )
+    return RenderedPersonalDevControlPlane(
+        yaml_text=yaml_text,
+        input_sha256=context.input_sha256,
+        release_sha256=context.release_sha256,
+        resource_count=len(documents),
+    )
+
+
 def render_shadow_personal_dev_control_plane(
     profile: PersonalDevControlPlaneProfile,
     release: PersonalDevTrustedRelease,
@@ -2001,45 +2113,44 @@ def render_shadow_personal_dev_control_plane(
         input_sha256=input_sha256,
         release_sha256=release_sha256,
     )
-    shared_role, shared_binding = _shared_role(context)
-    documents = [
-        _namespace(context),
-        _management_mutation_role(context),
-        _management_mutation_binding(context),
-        _managed_namespace_role(context),
-        _activation_role(context),
-        *_management_namespace_admission(context),
-        *_management_resource_admission(context),
-        *_activation_admission(context, profile),
-        _service_account(context, profile.identities.management_service_account),
-        _service_account(context, profile.identities.activation_service_account),
-        shared_role,
-        shared_binding,
-        *_postgres(context, profile, release),
-        *_minio(context, profile, release),
-        _scanner_cache(context, profile),
-        _migration(context, profile, release),
-        _management_deployment(context, profile, release),
-        *_management_service_and_ingress(context, profile),
-        _activation_deployment(context, profile, release),
-        *_network_policies(context, profile),
-    ]
-    documents.sort(key=_sort_key)
-    yaml_text = yaml.safe_dump_all(
-        documents,
-        explicit_start=False,
-        sort_keys=False,
-        default_flow_style=False,
+    return _render_documents(context, profile, release)
+
+
+def render_acceptance_personal_dev_control_plane(
+    profile: PersonalDevControlPlaneProfile,
+    release: PersonalDevTrustedRelease,
+    plan: PersonalDevAcceptancePlan,
+    *,
+    now: datetime,
+) -> RenderedPersonalDevControlPlane:
+    """Render the reviewed personal application acceptance without capacity."""
+
+    if not isinstance(plan, PersonalDevAcceptancePlan):
+        raise TypeError("personal-dev acceptance plan is invalid")
+    shadow = render_shadow_personal_dev_control_plane(profile, release)
+    validate_personal_dev_acceptance_plan(
+        profile,
+        release,
+        hashlib.sha256(shadow.yaml_text.encode("utf-8")).hexdigest(),
+        plan,
+        now=now,
     )
-    return RenderedPersonalDevControlPlane(
-        yaml_text=yaml_text,
+    input_sha256 = hashlib.sha256(
+        b"loom-personal-dev-acceptance-render-v1\0"
+        + profile.canonical_bytes()
+        + release.canonical_bytes()
+        + plan.canonical_bytes()
+    ).hexdigest()
+    context = _RenderContext(
         input_sha256=input_sha256,
-        release_sha256=release_sha256,
-        resource_count=len(documents),
+        release_sha256=hashlib.sha256(release.canonical_bytes()).hexdigest(),
+        acceptance_plan_sha256=plan.sha256,
     )
+    return _render_documents(context, profile, release, plan)
 
 
 __all__ = [
     "RenderedPersonalDevControlPlane",
+    "render_acceptance_personal_dev_control_plane",
     "render_shadow_personal_dev_control_plane",
 ]
