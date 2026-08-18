@@ -16,7 +16,7 @@ pool_name = "gb10"
 actuator = "slurm"
 enabled = true
 min_slots = 0
-max_slots = 140
+max_slots = 150
 scale_up_threshold_slots = 1
 scale_down_idle_seconds = 600
 scale_up_cooldown_seconds = 60
@@ -40,6 +40,7 @@ allowed_nodes = [
   "trt-gb10-7",
   "trt-gb10-8",
   "trt-gb10-9",
+  "trt-gb10-10",
   "trt-gb10-11",
   "trt-gb10-12",
   "trt-gb10-13",
@@ -62,7 +63,7 @@ container_cpus = 2.0
 container_memory_mib = 11500
 container_pids = 512
 job_pids_max = 5120
-max_jobs = 14
+max_jobs = 15
 pending_job_cap = 2
 # The physical gb10 partition advertises MaxTime=1-00:00:00. Slurm rejects
 # longer requests before allocation, so keep every autoscaled worker lease at

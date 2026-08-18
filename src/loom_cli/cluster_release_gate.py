@@ -48,6 +48,9 @@ _STAGING_GB10_HOST_INTENTS = {
 _STAGING_GB10_RETIRED_HOST_INTENTS = {
     f"trt-gb10-{index}": "stopped" for index in range(1, 16)
 }
+_STAGING_GB10_CANONICAL_NODES = [
+    f"trt-gb10-{index}" for index in range(1, 16)
+]
 _STAGING_GB10_POOL_NAME = "gb10"
 _STAGING_GB10_MAX_CONCURRENT = 10
 _STAGING_GB10_TARGET_SLOTS = 150
@@ -871,9 +874,7 @@ def _external_slurm_acceptance_check(
     expected_nodes = (
         raw_expected_nodes
         if isinstance(raw_expected_nodes, list)
-        and len(raw_expected_nodes) == 14
-        and all(isinstance(node, str) and node for node in raw_expected_nodes)
-        and len(set(raw_expected_nodes)) == 14
+        and raw_expected_nodes == _STAGING_GB10_CANONICAL_NODES
         else []
     )
     authority_matches = False
