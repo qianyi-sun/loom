@@ -184,3 +184,35 @@ def test_execution_attempt_subject_round_trips_without_trial_identity() -> None:
     assert ctx.execution_attempt_id == attempt_id
     assert ctx.token_subject is not None
     assert ctx.token_subject.kind == "execution_attempt"
+
+
+def test_execution_attempt_dispatch_authority_round_trips() -> None:
+    attempt_id = uuid4()
+    token_id = uuid4()
+    spec_digest = "sha256:" + "a" * 64
+    binding_digest = "sha256:" + "b" * 64
+    authorization_digest = "sha256:" + "c" * 64
+    token = mint_step_jwt(
+        team_id=uuid4(),
+        execution_attempt_id=attempt_id,
+        step_id="generate_card_00",
+        ttl_sec=600,
+        signing_key=_KEY,
+        provider_connection_id=None,
+        provider_connection_id_bound=True,
+        step_jwt_id=token_id,
+        execution_attempt_lease_epoch=7,
+        execution_spec_digest=spec_digest,
+        control_binding_snapshot_digest=binding_digest,
+        execution_authorization_digest=authorization_digest,
+    )
+
+    ctx = verify_step_jwt(token, signing_key=_KEY)
+
+    assert ctx.execution_attempt_id == attempt_id
+    assert ctx.step_jwt_id == token_id
+    assert ctx.execution_attempt_lease_epoch == 7
+    assert ctx.execution_spec_digest == spec_digest
+    assert ctx.control_binding_snapshot_digest == binding_digest
+    assert ctx.execution_authorization_digest == authorization_digest
+    assert ctx.provider_connection_id_bound is True

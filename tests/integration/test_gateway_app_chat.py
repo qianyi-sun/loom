@@ -1200,6 +1200,44 @@ def test_chat_byo_shared_connection_uses_jwt_authority_and_target_attribution(
     assert row["step_id"] == "family-evolver"
 
 
+def test_chat_rejects_execution_attempt_token_before_dispatch(
+    app_with_byo,
+    seed_data,
+):  # type: ignore[no-untyped-def]
+    app, _ = app_with_byo
+    team_id, _ = seed_data
+    pool = _CapturingEgressPool()
+    with TestClient(app) as client:
+        app.state.egress_client_pool = pool
+        settings: GatewaySettings = app.state.settings
+        step_jwt = mint_step_jwt(
+            team_id=team_id,
+            execution_attempt_id=uuid4(),
+            step_id="generate_card_00",
+            ttl_sec=60,
+            signing_key=settings.step_jwt_signing_key.get_secret_value(),
+        )
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {step_jwt}"},
+            json={
+                "model": "openai/some-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "loom": {
+                    "team_id": str(team_id),
+                    "trial_id": str(uuid4()),
+                    "step_id": "main",
+                },
+            },
+        )
+
+    assert response.status_code == 403
+    assert response.json() == {
+        "detail": "execution-attempt tokens are not supported by this route"
+    }
+    assert pool.connection_ids == []
+
+
 def test_chat_byo_jwt_rejects_conflicting_body_before_lookup(
     app_with_byo,
     seed_data,

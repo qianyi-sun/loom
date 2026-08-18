@@ -91,6 +91,15 @@ class AuthContext:
     # bearer to the platform route and must not be overridden by a header/body
     # connection id. Older JWTs with no claim keep the legacy fallback path.
     provider_connection_id_bound: bool = False
+    # Pipeline execution-attempt step JWTs are additionally bound to the
+    # durable claim generation and every immutable dispatch authority the
+    # Gateway must re-check before contacting an upstream provider.  Trial
+    # JWTs and pre-upgrade attempt JWTs leave these fields unset.
+    step_jwt_id: UUID | None = None
+    execution_attempt_lease_epoch: int | None = None
+    execution_spec_digest: str | None = None
+    control_binding_snapshot_digest: str | None = None
+    execution_authorization_digest: str | None = None
     # Browser-session principal fields (#326). They stay None for
     # bearer/worker/step auth so the existing token path remains stable.
     user_id: UUID | None = None
@@ -133,6 +142,11 @@ def mint_step_jwt(
     signing_key: str,
     provider_connection_id: UUID | None = None,
     provider_connection_id_bound: bool = False,
+    step_jwt_id: UUID | None = None,
+    execution_attempt_lease_epoch: int | None = None,
+    execution_spec_digest: str | None = None,
+    control_binding_snapshot_digest: str | None = None,
+    execution_authorization_digest: str | None = None,
 ) -> str:
     """Mint a step-scoped JWT carrying `(team_id, trial_id, step_id)`
     and optionally `provider_connection_id` (cluster-deploy.md /
@@ -167,6 +181,17 @@ def mint_step_jwt(
         assert execution_attempt_id is not None
         payload["execution_attempt_id"] = str(execution_attempt_id)
         payload["subject_kind"] = "execution_attempt"
+        if step_jwt_id is not None:
+            payload["jti"] = str(step_jwt_id)
+        if execution_attempt_lease_epoch is not None:
+            payload["execution_attempt_lease_epoch"] = execution_attempt_lease_epoch
+        if execution_spec_digest is not None:
+            payload["execution_spec_digest"] = execution_spec_digest
+        # Presence is significant for nullable bindings/authorizations: an
+        # explicit null is still a frozen assertion that the DB value is null.
+        if step_jwt_id is not None:
+            payload["control_binding_snapshot_digest"] = control_binding_snapshot_digest
+            payload["execution_authorization_digest"] = execution_authorization_digest
     if provider_connection_id is not None or provider_connection_id_bound:
         payload["provider_connection_id"] = (
             str(provider_connection_id) if provider_connection_id is not None else None
@@ -196,6 +221,17 @@ def verify_step_jwt(token: str, *, signing_key: str) -> AuthContext:
     raw_execution_attempt_id = payload.get("execution_attempt_id")
     if (raw_trial_id is None) == (raw_execution_attempt_id is None):
         raise jwt.InvalidTokenError("step JWT must carry exactly one subject")
+    try:
+        step_jwt_id = UUID(payload["jti"]) if isinstance(payload.get("jti"), str) else None
+        execution_attempt_lease_epoch = payload.get("execution_attempt_lease_epoch")
+        if execution_attempt_lease_epoch is not None and (
+            not isinstance(execution_attempt_lease_epoch, int)
+            or isinstance(execution_attempt_lease_epoch, bool)
+            or execution_attempt_lease_epoch <= 0
+        ):
+            raise ValueError("invalid execution attempt lease epoch")
+    except (TypeError, ValueError) as exc:
+        raise jwt.InvalidTokenError("invalid execution-attempt JWT authority") from exc
     return AuthContext(
         token_hash=b"",  # synthetic — no DB row
         type="step_session",
@@ -211,6 +247,23 @@ def verify_step_jwt(token: str, *, signing_key: str) -> AuthContext:
         step_id=payload["step_id"],
         provider_connection_id=provider_connection_id,
         provider_connection_id_bound=provider_connection_id_bound,
+        step_jwt_id=step_jwt_id,
+        execution_attempt_lease_epoch=execution_attempt_lease_epoch,
+        execution_spec_digest=(
+            payload.get("execution_spec_digest")
+            if isinstance(payload.get("execution_spec_digest"), str)
+            else None
+        ),
+        control_binding_snapshot_digest=(
+            payload.get("control_binding_snapshot_digest")
+            if isinstance(payload.get("control_binding_snapshot_digest"), str)
+            else None
+        ),
+        execution_authorization_digest=(
+            payload.get("execution_authorization_digest")
+            if isinstance(payload.get("execution_authorization_digest"), str)
+            else None
+        ),
     )
 
 

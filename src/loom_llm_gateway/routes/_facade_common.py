@@ -36,6 +36,7 @@ from loom.security.secret_store import (
 )
 from loom_llm_gateway.dialect import TokenUsage
 from loom_llm_gateway.errors import RateCardNotFoundError
+from loom_llm_gateway.execution_attempt_dispatch import authorize_execution_attempt_dispatch
 from loom_llm_gateway.llm_calls import record_failed_call
 from loom_llm_gateway.rate_card import (
     CostEstimate,
@@ -68,6 +69,8 @@ async def verify_facade_auth(
     session: Any,
     authorization: str | None,
     signing_key: str,
+    *,
+    allow_execution_attempt: bool = False,
 ) -> AuthContext:
     """Step-scoped JWT auth path shared by all facade routes.
 
@@ -86,6 +89,12 @@ async def verify_facade_auth(
             status_code=403,
             detail="step-scoped token required (loom_step_<jwt>)",
         )
+    if ctx.execution_attempt_id is not None and not allow_execution_attempt:
+        raise HTTPException(
+            status_code=403,
+            detail="execution-attempt tokens are not supported by this route",
+        )
+    await authorize_execution_attempt_dispatch(session, ctx)
     return ctx
 
 
