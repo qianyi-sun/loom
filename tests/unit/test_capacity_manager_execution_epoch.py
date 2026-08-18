@@ -193,6 +193,7 @@ def test_activation_names_exact_prepared_manifest_and_positive_ceiling() -> None
         expected_writer_epoch=2,
         execution_epoch=9,
         execution_manifest_sha256="9" * 64,
+        prepared_readiness_sha256="8" * 64,
         executable_new_capacity_ceiling=1,
         executable_new_capacity_rate_per_minute=1,
     )
