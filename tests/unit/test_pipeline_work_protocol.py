@@ -9,7 +9,11 @@ from uuid import UUID
 import pytest
 from pydantic import ValidationError
 
-from loom.integrations.terminalgen.authority import TERMINALGEN_RUNTIME_POLICY_DIGEST
+from loom.integrations.terminalgen.authority import (
+    TERMINALGEN_RUNTIME_POLICY_DIGEST,
+    build_terminal_task_validation_grant,
+    terminalgen_validation_argv,
+)
 from loom.pipeline.keys import canonical_digest, canonical_document
 from loom.pipeline.state import RetryClass, StageResultV1
 from loom.pipeline.work_protocol import (
@@ -280,7 +284,14 @@ def terminalgen_validation_claim() -> dict[str, Any]:
     spec["container_node"].update(
         node_key="validate_card_00",
         image=IMAGE,
-        argv=["python", "-m", "loom.integrations.terminalgen.cli", "run", "validate_card_00"],
+        argv=terminalgen_validation_argv(
+            node_key="validate_card_00",
+            task_base_image="registry.example.com/loom/task-base@sha256:" + "5" * 64,
+            dependency_resolver_image=(
+                "registry.example.com/loom/dependency-resolver@sha256:" + "6" * 64
+            ),
+            dependency_allowlist_digest=D1,
+        ),
         resource_profile="terminalgen-validate-none@1",
         timeout_seconds=7_200,
     )
@@ -309,26 +320,15 @@ def terminalgen_validation_claim() -> dict[str, Any]:
         "image_runtime_contract_digest": spec["image_runtime_contract_digest"],
         "resolved_input_bindings_digest": spec["resolved_input_bindings_digest"],
         "runtime_policy_digest": TERMINALGEN_RUNTIME_POLICY_DIGEST,
-        "validation": {
-            "authorization_id": UUID(int=41),
-            "pipeline_run_id": RUN_ID,
-            "stage_run_id": STAGE_ID,
-            "execution_attempt_id": ATTEMPT_ID,
-            "task_bundle_content_sha256": D0,
-            "validator_image": IMAGE,
-            "task_base_image": "registry.example.com/loom/task-base@sha256:" + "5" * 64,
-            "dependency_resolver_image": (
-                "registry.example.com/loom/dependency-resolver@sha256:" + "6" * 64
-            ),
-            "policy_digest": D3,
-            "dependency_allowlist_digest": D1,
-            "repeat_count": 2,
-            "cpu_cores": 4,
-            "memory_bytes": 16 << 30,
-            "pids_limit": 2_048,
-            "timeout_seconds": 7_200,
-            "network_profile": "none",
-        },
+        "validation": build_terminal_task_validation_grant(
+            pipeline_run_id=RUN_ID,
+            stage_run_id=STAGE_ID,
+            execution_attempt_id=ATTEMPT_ID,
+            node_key="validate_card_00",
+            node=spec["container_node"],
+            resource_profile=profile,
+            input_bindings=[task_binding],
+        ).model_dump(mode="python"),
     }
     return value
 
