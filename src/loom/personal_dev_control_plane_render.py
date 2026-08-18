@@ -635,7 +635,7 @@ def _management_resource_admission(context: _RenderContext) -> tuple[dict[str, A
                         "apiGroups": ["*"],
                         "apiVersions": ["*"],
                         "operations": ["CREATE", "UPDATE", "DELETE", "CONNECT"],
-                        "resources": ["*", "*/*"],
+                        "resources": ["*/*"],
                     }
                 ]
             },
