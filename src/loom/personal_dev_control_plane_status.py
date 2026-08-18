@@ -833,7 +833,7 @@ def _acceptance_manager_status(
         executable_new_capacity_ceiling=plan.manager.executable_new_capacity_ceiling,
     )
     blockers: set[str] = set()
-    if binding != expected:
+    if not binding.satisfies_acceptance_boundary(expected):
         blockers.add("manager_binding_drift")
     if binding.executable_new_capacity_ceiling != 0:
         blockers.add("manager_ceiling_nonzero")

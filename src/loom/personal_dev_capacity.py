@@ -104,6 +104,24 @@ class PersonalDevCapacityManagerBinding:
             executable_new_capacity_ceiling=self.executable_new_capacity_ceiling,
         )
 
+    def satisfies_acceptance_boundary(
+        self,
+        planned: PersonalDevCapacityManagerBinding,
+    ) -> bool:
+        """Match immutable execution authority while allowing configuration progress."""
+
+        if not isinstance(planned, PersonalDevCapacityManagerBinding):
+            raise TypeError("planned capacity manager binding is invalid")
+        return (
+            self.authority_incarnation == planned.authority_incarnation
+            and self.observer_principal_id == planned.observer_principal_id
+            and self.configuration_epoch >= planned.configuration_epoch
+            and self.execution_state == planned.execution_state
+            and self.execution_epoch == planned.execution_epoch
+            and self.executable_new_capacity_ceiling
+            == planned.executable_new_capacity_ceiling
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class PersonalDevCapacityManagerCheckpoint:

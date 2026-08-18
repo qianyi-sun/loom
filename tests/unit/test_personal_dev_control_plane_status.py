@@ -644,6 +644,21 @@ def test_healthy_acceptance_returns_separate_readiness_facets_and_safe_commands(
         assert command[0] in {"config", "get", "--request-timeout=10s"}
 
 
+def test_acceptance_status_allows_monotonic_manager_configuration_advancement(
+    tmp_path: Path,
+) -> None:
+    expected, plan, runner = _acceptance_healthy_fixture(tmp_path)
+    manager = runner.responses[_ACCEPTANCE_MANAGER]
+    assert isinstance(manager, dict)
+    manager["configuration_epoch"] = plan.manager.configuration_epoch + 4
+
+    result = _observe_acceptance(expected, plan, runner)
+
+    assert result.ready is True
+    assert result.capacity_publication_ready is True
+    assert "manager_binding_drift" not in result.blockers
+
+
 @pytest.mark.parametrize(
     ("mutation", "blocker"),
     [
@@ -832,7 +847,7 @@ def test_acceptance_permits_only_exact_owned_dynamic_namespace_families(
         ("scanner-policy", "management_acceptance_binding_invalid"),
         ("manager-authority", "manager_binding_drift"),
         ("manager-principal", "manager_binding_drift"),
-        ("manager-configuration-epoch", "manager_binding_drift"),
+        ("manager-configuration-epoch-regression", "manager_binding_drift"),
         ("manager-state", "manager_binding_drift"),
         ("manager-execution-epoch", "manager_binding_drift"),
         ("manager-ceiling", "manager_ceiling_nonzero"),
@@ -918,8 +933,8 @@ def test_acceptance_status_matrix_fails_closed_on_exact_binding_drift(
             manager["authority_incarnation"] = "00000000-0000-0000-0000-000000000102"
         elif mutation == "manager-principal":
             manager["observer_principal_id"] = "wrong-lifecycle"
-        elif mutation == "manager-configuration-epoch":
-            manager["configuration_epoch"] = 8
+        elif mutation == "manager-configuration-epoch-regression":
+            manager["configuration_epoch"] = 6
         elif mutation == "manager-state":
             manager["execution_state"] = "drain-only"
         elif mutation == "manager-execution-epoch":

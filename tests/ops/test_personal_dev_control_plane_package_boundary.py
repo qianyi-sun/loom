@@ -417,7 +417,7 @@ def test_zero_capacity_acceptance_runbook_preserves_stop_and_authority_boundarie
         "runtimeclass or scanner drift",
         "secret key inventory drift",
         "migration or storage drift",
-        "manager identity, epoch, state, or ceiling drift",
+        "manager identity, configuration-epoch regression, execution epoch/state, or",
         "namespace ownership drift",
         "personal worker deployment",
     ):

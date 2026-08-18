@@ -69,7 +69,7 @@ class _Projector:
         return self.binding
 
 
-async def test_acceptance_interlock_accepts_only_the_exact_live_binding() -> None:
+async def test_acceptance_interlock_accepts_the_planned_initial_boundary() -> None:
     projector = _Projector(_manager_binding())
     interlock = PersonalDevAcceptanceInterlock.from_json(
         projector=projector,  # type: ignore[arg-type]
@@ -83,12 +83,25 @@ async def test_acceptance_interlock_accepts_only_the_exact_live_binding() -> Non
     assert interlock.expected_manager == _manager_binding()
 
 
+async def test_acceptance_interlock_allows_monotonic_configuration_advancement() -> None:
+    projector = _Projector(replace(_manager_binding(), configuration_epoch=9))
+    interlock = PersonalDevAcceptanceInterlock.from_json(
+        projector=projector,  # type: ignore[arg-type]
+        binding_json=_binding_json(),
+        expected_plan_sha256=_PLAN_SHA256,
+    )
+
+    await interlock.assert_ready(now=_NOW)
+
+    assert projector.calls == 1
+
+
 @pytest.mark.parametrize(
     "changes",
     [
         {"authority_incarnation": UUID("00000000-0000-0000-0000-000000000102")},
         {"observer_principal_id": "different-lifecycle"},
-        {"configuration_epoch": 8},
+        {"configuration_epoch": 6},
         {"execution_state": "prepared", "execution_epoch": 1},
         {"execution_state": "drain-only", "execution_epoch": 2},
         {

@@ -235,7 +235,7 @@ class PersonalDevAcceptanceInterlock:
             observed = await self.projector.current_manager_binding()
         except Exception:
             raise PersonalDevAcceptanceInterlockError("capacity-manager-unavailable") from None
-        if observed != self.expected_manager:
+        if not observed.satisfies_acceptance_boundary(self.expected_manager):
             raise PersonalDevAcceptanceInterlockError("capacity-manager-binding-drift")
 
 

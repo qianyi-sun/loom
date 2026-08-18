@@ -37,9 +37,10 @@ pytest, Ruff, mypy.
   weights; OLDLAB x86_64 and GB10 arm64 remain the only advertised physical
   capabilities.
 - The global manager is the only capacity authority. Acceptance requires its
-  exact incarnation, configuration epoch, execution state, execution epoch,
-  authenticated lifecycle principal, and executable new-capacity ceiling
-  `0`.
+  exact incarnation, execution state, execution epoch, authenticated lifecycle
+  principal, and executable new-capacity ceiling `0`. The plan records the
+  initial configuration epoch as a monotonic floor: personal projections and
+  unrelated environments may advance it, but it may never regress.
 - The release and acceptance plan are canonical owner-only mode-`0600`,
   single-link, non-symlink files with independently supplied SHA-256 values.
 - All workload images are immutable digest references. The three Loom images
@@ -343,8 +344,9 @@ pytest, Ruff, mypy.
   Assert `/v1/status` returns `observer_principal_id` from the authenticated
   `capacity:read` principal and that the projector rejects a missing/wrong
   principal, UUID, epoch, state, ceiling, response type, redirect, oversized
-  body, or transport error. Assert the interlock accepts only exact equality,
-  rejects expiry, and does not treat `bool` as an integer. Assert service
+  body, or transport error. Assert the interlock accepts monotonic
+  configuration-epoch advancement but rejects regression or any immutable
+  execution-boundary drift, rejects expiry, and does not treat `bool` as an integer. Assert service
   startup closes its owned HTTP client after rejection, acceptance readiness
   returns 503 on drift, and both activation-intent read and acknowledgement
   reject before touching the database when the interlock is unavailable.
@@ -518,8 +520,9 @@ pytest, Ruff, mypy.
 - [x] **Step 1: Write failing acceptance status and CLI matrix tests**
 
   Build a healthy fixture with management and activation deployments ready,
-  exact RuntimeClass handler/profile annotation, exact manager identity, zero
-  workers, and zero or valid managed dynamic namespaces. Assert canonical
+  exact RuntimeClass handler/profile annotation, exact manager execution
+  identity, a configuration epoch at or above the plan floor, zero workers,
+  and zero or valid managed dynamic namespaces. Assert canonical
   output has `worker_available: false`. Parameterize drift in plan digest,
   flags, activation replicas/readiness, RuntimeClass handler/profile, scanner
   inputs, manager identity/epoch/state/ceiling, window expiry, malformed

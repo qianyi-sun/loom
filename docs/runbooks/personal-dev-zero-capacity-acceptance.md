@@ -26,7 +26,8 @@ Stop without improvising cleanup for any of these conditions:
 - RuntimeClass or scanner drift;
 - Secret key inventory drift;
 - migration or storage drift;
-- manager identity, epoch, state, or ceiling drift;
+- manager identity, configuration-epoch regression, execution epoch/state, or
+  ceiling drift;
 - namespace ownership drift; or
 - any personal worker Deployment.
 
@@ -229,7 +230,10 @@ owner-only input to stable bytes.
 These functions are observations only. Acceptance status compares the complete
 expected render, the plan digest, the exact RuntimeClass handler/profile,
 scanner bindings, dynamic namespace ownership, all Deployments in all
-namespaces, and the authenticated global-manager identity/epochs/state/ceiling.
+namespaces, and the authenticated global-manager identity, monotonic
+configuration-epoch floor, exact execution epoch/state, and ceiling. Each
+personal projection advances the global configuration epoch; advancement is
+expected, while regression is a stop condition.
 
     assert_reviewed_kubeconfig() {
       test -f "$kubeconfig" && test ! -L "$kubeconfig"

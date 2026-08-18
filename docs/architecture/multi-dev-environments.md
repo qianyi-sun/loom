@@ -29,7 +29,11 @@ The controlled
 then exercises two concurrent owners with distinct authenticated sessions,
 source snapshots, lifecycle operations, namespaces, storage identities, and
 capacity publications. Acceptance requires `worker_available=false` and an
-exact global executable-new-capacity ceiling of zero throughout.
+exact global executable-new-capacity ceiling of zero throughout. Its plan pins
+the manager configuration epoch as a monotonic floor rather than a constant:
+every personal projection advances the global epoch, and other environments
+share the same authority, so advancement is valid while regression fails the
+acceptance interlock.
 
 ## Checked-in interfaces
 
