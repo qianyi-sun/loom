@@ -41,6 +41,7 @@ contracts.
 - [`benchmark-onboarding-pipeline-plan.md`](benchmark-onboarding-pipeline-plan.md)
 - [`human-readable-spa-ux-implementation-plan.md`](human-readable-spa-ux-implementation-plan.md)
 - [`pipeline-platform-governance.md`](pipeline-platform-governance.md)
+- [`terminalgen-authoring-implementation-plan.md`](terminalgen-authoring-implementation-plan.md)
 - [`v1-release-ready-program.md`](v1-release-ready-program.md)
 
 ## Historical and status records
