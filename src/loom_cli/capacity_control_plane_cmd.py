@@ -11,12 +11,20 @@ from uuid import UUID
 
 from pydantic import ValidationError
 
+from loom_capacity_executor.runtime import (
+    RuntimeAssemblyError,
+    load_activation_runtime_artifact,
+    load_approved_launch_profile_set,
+)
 from loom_capacity_manager.execution_policy import load_execution_preparation_policy
 from loom_capacity_manager.health_probe import capacity_health_probe_argv
 from loom_cli.capacity_control_plane import (
     load_capacity_control_plane_profile,
     load_capacity_pool_executor_profile,
     render_capacity_control_plane_manifests,
+    render_capacity_pool_executor_active_config,
+    render_capacity_pool_executor_active_manifest_sha256,
+    render_capacity_pool_executor_active_service_environment,
     render_capacity_pool_executor_configs,
     render_capacity_pool_executor_service_environment,
     render_capacity_pool_inventory_policies,
@@ -68,6 +76,30 @@ def _render(args: argparse.Namespace) -> int:
 
 
 def _render_executor(args: argparse.Namespace) -> int:
+    approved_profiles_file = args.approved_profiles_file
+    activation_runtime_artifact = args.activation_runtime_artifact
+    active_manifest = args.output == "active-manifest-sha256"
+    artifact_bound = args.output in {"active-config", "active-service-environment"}
+    if (
+        (
+            active_manifest
+            and (
+                approved_profiles_file is None
+                or activation_runtime_artifact is not None
+            )
+        )
+        or (
+            artifact_bound
+            and (activation_runtime_artifact is None or approved_profiles_file is not None)
+        )
+        or (
+            not active_manifest
+            and not artifact_bound
+            and (approved_profiles_file is not None or activation_runtime_artifact is not None)
+        )
+    ):
+        sys.stderr.write("error: active executor render inputs do not match the output\n")
+        return 2
     try:
         profile = load_capacity_pool_executor_profile(Path(args.file).resolve())
         if args.output == "config":
@@ -76,12 +108,35 @@ def _render_executor(args: argparse.Namespace) -> int:
             rendered = render_capacity_pool_inventory_policies(profile)[args.pool]
         elif args.output == "service-environment":
             rendered = render_capacity_pool_executor_service_environment(profile, args.pool)
+        elif active_manifest:
+            profiles = load_approved_launch_profile_set(Path(approved_profiles_file).resolve())
+            rendered = (
+                render_capacity_pool_executor_active_manifest_sha256(
+                    profile,
+                    args.pool,
+                    profiles,
+                )
+                + "\n"
+            )
+        elif artifact_bound:
+            artifact = load_activation_runtime_artifact(
+                Path(activation_runtime_artifact).resolve()
+            )
+            rendered = (
+                render_capacity_pool_executor_active_config(profile, args.pool, artifact)
+                if args.output == "active-config"
+                else render_capacity_pool_executor_active_service_environment(
+                    profile,
+                    args.pool,
+                    artifact,
+                )
+            )
         else:
             raise ValueError("capacity pool-executor output is invalid")
     except ValidationError:
         sys.stderr.write("error: capacity pool-executor render inputs are invalid\n")
         return 2
-    except (OSError, ValueError) as exc:
+    except (OSError, RuntimeAssemblyError, ValueError) as exc:
         sys.stderr.write(f"error: capacity pool-executor render failed: {exc}\n")
         return 2
     sys.stdout.write(rendered)
@@ -181,9 +236,26 @@ def add_capacity_control_plane_subparser(subparsers: Any) -> None:
     )
     render_executor.add_argument(
         "--output",
-        choices=("config", "inventory-policy", "service-environment"),
+        choices=(
+            "config",
+            "inventory-policy",
+            "service-environment",
+            "active-manifest-sha256",
+            "active-config",
+            "active-service-environment",
+        ),
         default="config",
-        help="Render production JSON, inventory policy, or non-secret systemd environment.",
+        help="Render prepared or separately artifact-bound active executor output.",
+    )
+    render_executor.add_argument(
+        "--approved-profiles-file",
+        type=Path,
+        help="Owner-only approved profile set required only for active manifest preflight.",
+    )
+    render_executor.add_argument(
+        "--activation-runtime-artifact",
+        type=Path,
+        help="Owner-only activation artifact required only for active config/environment.",
     )
     render_executor.set_defaults(handler=_render_executor)
 

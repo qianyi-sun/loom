@@ -14,6 +14,13 @@ import yaml  # type: ignore[import-untyped]
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from loom_capacity_executor.config import ImmutablePoolManifest
+from loom_capacity_executor.launch_renderer import canonical_launch_policy_digest
+from loom_capacity_executor.runtime import (
+    ActivationRuntimeArtifactV2,
+    ApprovedLaunchProfileSetV2,
+    RuntimeAssemblyError,
+    canonical_approved_profiles_digest,
+)
 from loom_capacity_manager.executable_contracts import (
     ExecutionPreparationPolicyV2,
     canonical_executable_bytes,
@@ -423,11 +430,24 @@ def capacity_pool_executor_manifest_sha256(
     if not isinstance(profile, CapacityPoolExecutorProfile):
         raise TypeError("capacity pool-executor profile is invalid")
     pool = _pool_binding(profile, pool_id)
+    return _capacity_pool_executor_manifest(
+        profile,
+        pool,
+        approved_profiles_sha256="0" * 64,
+    ).sha256()
+
+
+def _capacity_pool_executor_manifest(
+    profile: CapacityPoolExecutorProfile,
+    pool: CapacityPoolExecutorBinding,
+    *,
+    approved_profiles_sha256: str,
+) -> ImmutablePoolManifest:
     return ImmutablePoolManifest(
         pool_id=pool.pool_id,
         pool_generation=pool.pool_generation,
         controller_authority_sha256=pool.controller_authority_sha256,
-        approved_profiles_sha256="0" * 64,
+        approved_profiles_sha256=approved_profiles_sha256,
         executor_id=pool.executor_id,
         executor_incarnation=UUID(pool.executor_incarnation),
         local_authority_sha256=pool.local_authority_sha256,
@@ -458,7 +478,182 @@ def capacity_pool_executor_manifest_sha256(
         ),
         executor_image=profile.executor_image,
         service_user=profile.service_user,
+    )
+
+
+def _active_profile_set_digest(
+    profile: CapacityPoolExecutorProfile,
+    pool: CapacityPoolExecutorBinding,
+    profiles: ApprovedLaunchProfileSetV2,
+) -> str:
+    if not isinstance(profiles, ApprovedLaunchProfileSetV2):
+        raise TypeError("approved launch profiles are invalid")
+    try:
+        digest = canonical_approved_profiles_digest(profiles.profiles)
+    except RuntimeAssemblyError as exc:
+        raise ValueError("approved launch profile set is invalid") from exc
+    for runtime_profile in profiles.profiles:
+        if (
+            runtime_profile.pool_id != pool.pool_id
+            or runtime_profile.pool_generation != pool.pool_generation
+            or runtime_profile.controller_authority_sha256
+            != pool.controller_authority_sha256
+            or canonical_launch_policy_digest(runtime_profile)
+            != runtime_profile.controller_authority_sha256
+            or runtime_profile.slurm_cluster != pool.slurm_cluster
+            or runtime_profile.controller_host != pool.controller_host
+            or runtime_profile.partition != pool.partition
+            or runtime_profile.association != pool.association
+            or runtime_profile.submitter != pool.submitter
+            or runtime_profile.qos != pool.qos
+            or runtime_profile.trusted_launcher_release_sha256
+            != profile.trusted_fleet_release_sha256
+        ):
+            raise ValueError("approved launch profile differs from pool binding")
+    if not any(
+        runtime_profile.profile_id == pool.profile_id
+        and runtime_profile.profile_generation == pool.profile_generation
+        and runtime_profile.profile_digest == pool.profile_digest
+        for runtime_profile in profiles.profiles
+    ):
+        raise ValueError("approved launch profile set omits the local profile binding")
+    if digest == "0" * 64:
+        raise ValueError("approved launch profile set digest is not active")
+    return digest
+
+
+def render_capacity_pool_executor_active_manifest_sha256(
+    profile: CapacityPoolExecutorProfile,
+    pool_id: Literal["gb10", "oldlab"] | str,
+    profiles: ApprovedLaunchProfileSetV2,
+) -> str:
+    """Render the positive immutable-manifest digest for one reviewed profile set."""
+
+    if not isinstance(profile, CapacityPoolExecutorProfile):
+        raise TypeError("capacity pool-executor profile is invalid")
+    pool = _pool_binding(profile, pool_id)
+    approved_profiles_sha256 = _active_profile_set_digest(profile, pool, profiles)
+    return _capacity_pool_executor_manifest(
+        profile,
+        pool,
+        approved_profiles_sha256=approved_profiles_sha256,
     ).sha256()
+
+
+def _validate_active_runtime_artifact(
+    profile: CapacityPoolExecutorProfile,
+    pool: CapacityPoolExecutorBinding,
+    artifact: ActivationRuntimeArtifactV2,
+) -> str:
+    if not isinstance(artifact, ActivationRuntimeArtifactV2):
+        raise TypeError("activation runtime artifact is invalid")
+    execution = artifact.execution
+    if (
+        execution.authority_incarnation != UUID(profile.authority_incarnation)
+        or execution.writer_epoch != profile.writer_epoch
+        or execution.configuration_epoch != profile.configuration_epoch
+        or execution.execution_epoch != profile.execution_epoch
+        or execution.execution_manifest_sha256 != profile.execution_manifest_sha256
+        or execution.execution_state != "active"
+        or execution.executable_new_capacity_ceiling <= 0
+        or execution.executable_new_capacity_rate_per_minute <= 0
+        or execution.trusted_fleet_release_sha256
+        != profile.trusted_fleet_release_sha256
+    ):
+        raise ValueError("activation runtime artifact differs from the active execution fence")
+    profiles = ApprovedLaunchProfileSetV2(profiles=artifact.profiles)
+    approved_profiles_sha256 = _active_profile_set_digest(profile, pool, profiles)
+    expected_manifest_sha256 = _capacity_pool_executor_manifest(
+        profile,
+        pool,
+        approved_profiles_sha256=approved_profiles_sha256,
+    ).sha256()
+    if (
+        artifact.pool_id != pool.pool_id
+        or artifact.pool_generation != pool.pool_generation
+        or artifact.executor_id != pool.executor_id
+        or artifact.executor_incarnation != UUID(pool.executor_incarnation)
+        or artifact.controller_authority_sha256 != pool.controller_authority_sha256
+        or artifact.approved_profiles_sha256 != approved_profiles_sha256
+        or artifact.local_authority_sha256 != pool.local_authority_sha256
+        or artifact.signing_key_id != pool.signing_key_id
+        or artifact.signing_key_sha256 != pool.signing_key_sha256
+        or artifact.immutable_manifest_sha256 != expected_manifest_sha256
+        or Path(artifact.state_directory) != Path(pool.state_directory)
+        or Path(artifact.journal_file) != Path(pool.journal_file)
+    ):
+        raise ValueError("activation runtime artifact differs from the pool binding")
+    slurm = artifact.slurm_authority
+    executable_paths = tuple(
+        sorted(
+            (name, Path(getattr(slurm.executables, name).path))
+            for name in ("scontrol", "sacctmgr", "squeue", "sbatch", "scancel", "sacct")
+        )
+    )
+    configured_paths = tuple(
+        sorted(
+            (name, Path(value))
+            for name, value in pool.slurm_executables.model_dump().items()
+        )
+    )
+    if (
+        slurm.cluster != pool.slurm_cluster
+        or slurm.controller_host != pool.controller_host
+        or slurm.partition != pool.partition
+        or slurm.account != pool.association
+        or slurm.submitter != pool.submitter
+        or slurm.qos != pool.qos
+        or slurm.local_uid != pool.local_uid
+        or executable_paths != configured_paths
+    ):
+        raise ValueError("activation runtime artifact differs from the Slurm binding")
+    return expected_manifest_sha256
+
+
+def render_capacity_pool_executor_active_config(
+    profile: CapacityPoolExecutorProfile,
+    pool_id: Literal["gb10", "oldlab"] | str,
+    artifact: ActivationRuntimeArtifactV2,
+) -> str:
+    """Render one positive controller-local config bound to an activation artifact."""
+
+    if not isinstance(profile, CapacityPoolExecutorProfile):
+        raise TypeError("capacity pool-executor profile is invalid")
+    pool = _pool_binding(profile, pool_id)
+    _validate_active_runtime_artifact(profile, pool, artifact)
+    value = _pool_executor_config(profile, pool)
+    value["approved_profiles_sha256"] = artifact.approved_profiles_sha256
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ) + "\n"
+
+
+def render_capacity_pool_executor_active_service_environment(
+    profile: CapacityPoolExecutorProfile,
+    pool_id: Literal["gb10", "oldlab"] | str,
+    artifact: ActivationRuntimeArtifactV2,
+) -> str:
+    """Render the non-secret environment for the separately enabled active timer."""
+
+    if not isinstance(profile, CapacityPoolExecutorProfile):
+        raise TypeError("capacity pool-executor profile is invalid")
+    pool = _pool_binding(profile, pool_id)
+    expected_manifest_sha256 = _validate_active_runtime_artifact(profile, pool, artifact)
+    active_config = Path(pool.config_file).with_name(f"{pool.pool_id}-active.json")
+    runtime_artifact = Path(pool.config_file).with_name(
+        f"{pool.pool_id}-activation-runtime.json"
+    )
+    return (
+        "LOOM_CAPACITY_EXECUTOR_ACTIVATION_RUNTIME_ARTIFACT="
+        f"{runtime_artifact}\n"
+        f"LOOM_CAPACITY_EXECUTOR_CONFIG={active_config}\n"
+        "LOOM_CAPACITY_EXECUTOR_EXPECTED_MANIFEST_SHA256="
+        f"{expected_manifest_sha256}\n"
+        f"LOOM_CAPACITY_EXECUTOR_POOL={pool.pool_id}\n"
+    )
 
 
 def load_capacity_control_plane_profile(path: Path) -> CapacityControlPlaneProfile:
@@ -1263,6 +1458,9 @@ __all__ = [
     "load_capacity_control_plane_profile",
     "load_capacity_pool_executor_profile",
     "render_capacity_control_plane_manifests",
+    "render_capacity_pool_executor_active_config",
+    "render_capacity_pool_executor_active_manifest_sha256",
+    "render_capacity_pool_executor_active_service_environment",
     "render_capacity_pool_executor_configs",
     "render_capacity_pool_executor_service_environment",
     "render_capacity_pool_inventory_policies",

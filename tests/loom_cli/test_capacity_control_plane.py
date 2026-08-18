@@ -14,8 +14,24 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import ValidationError
 
 import loom_cli.capacity_control_plane as capacity_control_plane
-from loom_capacity_executor.config import PoolExecutorConfig
+from loom_capacity_executor.config import ImmutablePoolManifest, PoolExecutorConfig
+from loom_capacity_executor.launch_renderer import (
+    OperatorLaunchProfileV2,
+    canonical_launch_policy_digest,
+)
+from loom_capacity_executor.runtime import (
+    ActivationRuntimeArtifactV2,
+    ApprovedLaunchProfileSetV2,
+    canonical_approved_profiles_digest,
+)
+from loom_capacity_executor.slurm_contracts import (
+    SlurmAuthorityV2,
+    SlurmExecutableIdentityV2,
+    SlurmExecutablesV2,
+    SlurmResourceV2,
+)
 from loom_capacity_manager.executable_contracts import (
+    ExecutionContextV2,
     canonical_executable_bytes,
     canonical_executable_digest,
 )
@@ -31,11 +47,15 @@ from loom_cli.capacity_control_plane import (
     load_capacity_control_plane_profile,
     load_capacity_pool_executor_profile,
     render_capacity_control_plane_manifests,
+    render_capacity_pool_executor_active_config,
+    render_capacity_pool_executor_active_manifest_sha256,
+    render_capacity_pool_executor_active_service_environment,
     render_capacity_pool_executor_configs,
     render_capacity_pool_executor_service_environment,
     render_capacity_pool_inventory_policies,
 )
 from tests.capacity_execution_fixtures import execution_policy
+from tests.unit.test_capacity_executor_launch_renderer import operator_profile_fixture
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PROFILE = _REPO_ROOT / "deploy/dev-fleet/capacity-control-plane.toml"
@@ -43,6 +63,191 @@ _EXECUTOR_PROFILE = _REPO_ROOT / "deploy/dev-fleet/capacity-pool-executor.toml.e
 _EXECUTOR_SERVICE = _REPO_ROOT / "deploy/dev-fleet/loom-capacity-pool-executor.service"
 _MANAGER_IMAGE = "ghcr.io/qianyi-sun/loom-capacity-manager@sha256:" + "a" * 64
 _AUTHORITY = UUID("00000000-0000-4000-8000-000000000901")
+
+
+def _active_manifest_sha256(
+    profile: CapacityPoolExecutorProfile,
+    pool_id: str,
+    approved_profiles_sha256: str,
+) -> str:
+    pool = next(item for item in profile.pools if item.pool_id == pool_id)
+    return ImmutablePoolManifest(
+        pool_id=pool.pool_id,
+        pool_generation=pool.pool_generation,
+        controller_authority_sha256=pool.controller_authority_sha256,
+        approved_profiles_sha256=approved_profiles_sha256,
+        executor_id=pool.executor_id,
+        executor_incarnation=UUID(pool.executor_incarnation),
+        local_authority_sha256=pool.local_authority_sha256,
+        signing_key_id=pool.signing_key_id,
+        signing_key_sha256=pool.signing_key_sha256,
+        ownership_key_file=Path(pool.ownership_key_file),
+        manager_origin=profile.manager_origin,
+        bearer_token_file=Path(pool.bearer_token_file),
+        tls_ca_file=Path(pool.tls_ca_file),
+        tls_certificate_file=Path(pool.tls_certificate_file),
+        tls_private_key_file=Path(pool.tls_private_key_file),
+        state_directory=Path(pool.state_directory),
+        journal_file=Path(pool.journal_file),
+        local_uid=pool.local_uid,
+        slurm_cluster=pool.slurm_cluster,
+        controller_host=pool.controller_host,
+        partition=pool.partition,
+        association=pool.association,
+        submitter=pool.submitter,
+        qos=pool.qos,
+        profile_id=pool.profile_id,
+        profile_generation=pool.profile_generation,
+        profile_digest=pool.profile_digest,
+        slurm_executables=tuple(
+            sorted(
+                (name, Path(value))
+                for name, value in pool.slurm_executables.model_dump().items()
+            )
+        ),
+        executor_image=profile.executor_image,
+        service_user=profile.service_user,
+    ).sha256()
+
+
+def _active_render_fixture(
+    tmp_path: Path,
+) -> tuple[
+    CapacityPoolExecutorProfile,
+    ApprovedLaunchProfileSetV2,
+    ActivationRuntimeArtifactV2,
+]:
+    base = load_capacity_pool_executor_profile(_EXECUTOR_PROFILE)
+    original_pool = next(item for item in base.pools if item.pool_id == "oldlab")
+    state = tmp_path / "state"
+    admission = tmp_path / "admission"
+    handoff = tmp_path / "handoff"
+    for directory in (state, admission, handoff):
+        directory.mkdir(mode=0o700)
+    private_key = Ed25519PrivateKey.from_private_bytes(b"z" * 32)
+    secret_paths = {
+        "bearer_token_file": tmp_path / "bearer-token",
+        "tls_ca_file": tmp_path / "manager-ca.pem",
+        "tls_certificate_file": tmp_path / "client-certificate.pem",
+        "tls_private_key_file": tmp_path / "client-private-key.pem",
+        "ownership_key_file": tmp_path / "ownership-private-key",
+    }
+    for name, path in secret_paths.items():
+        path.write_bytes(
+            private_key.private_bytes_raw() if name == "ownership_key_file" else b"x"
+        )
+        path.chmod(0o600)
+    operator = operator_profile_fixture().model_copy(
+        update={
+            "pool_id": original_pool.pool_id,
+            "pool_generation": original_pool.pool_generation,
+            "profile_id": original_pool.profile_id,
+            "profile_generation": original_pool.profile_generation,
+            "profile_digest": original_pool.profile_digest,
+            "slurm_cluster": original_pool.slurm_cluster,
+            "controller_host": original_pool.controller_host,
+            "partition": original_pool.partition,
+            "association": original_pool.association,
+            "submitter": original_pool.submitter,
+            "qos": original_pool.qos,
+            "trusted_launcher_release_sha256": base.trusted_fleet_release_sha256,
+            "controller_authority_sha256": "0" * 64,
+        }
+    )
+    operator = OperatorLaunchProfileV2.model_validate(
+        operator.model_copy(
+            update={
+                "controller_authority_sha256": canonical_launch_policy_digest(operator)
+            }
+        ).model_dump(mode="python")
+    )
+    inventory = original_pool.inventory.model_copy(update={"query_uid": os.geteuid()})
+    active_pool = original_pool.model_copy(
+        update={
+            "controller_authority_sha256": operator.controller_authority_sha256,
+            "local_uid": os.geteuid(),
+            "signing_key_sha256": public_key_fingerprint(private_key.public_key()),
+            "profile_id": operator.profile_id,
+            "profile_generation": operator.profile_generation,
+            "profile_digest": operator.profile_digest,
+            "config_file": str(tmp_path / "oldlab.json"),
+            "state_directory": str(state),
+            "journal_file": str(state / "executor.journal"),
+            **{name: str(path) for name, path in secret_paths.items()},
+            "inventory": inventory,
+        }
+    )
+    candidate = base.model_copy(
+        update={
+            "pools": tuple(
+                active_pool if item.pool_id == "oldlab" else item for item in base.pools
+            )
+        }
+    )
+    profile = CapacityPoolExecutorProfile.model_validate(candidate.model_dump(mode="python"))
+    profiles = ApprovedLaunchProfileSetV2(profiles=(operator,))
+    profile_set_digest = canonical_approved_profiles_digest(profiles.profiles)
+    execution = ExecutionContextV2(
+        authority_incarnation=UUID(profile.authority_incarnation),
+        writer_epoch=profile.writer_epoch,
+        configuration_epoch=profile.configuration_epoch,
+        execution_epoch=profile.execution_epoch,
+        execution_manifest_sha256=profile.execution_manifest_sha256,
+        execution_state="active",
+        executable_new_capacity_ceiling=1,
+        executable_new_capacity_rate_per_minute=1,
+        trusted_fleet_release_sha256=profile.trusted_fleet_release_sha256,
+    )
+    executable_identities = {
+        name: SlurmExecutableIdentityV2(
+            path=value,
+            sha256=str(index) * 64,
+            owner_uid=os.geteuid(),
+        )
+        for index, (name, value) in enumerate(
+            active_pool.slurm_executables.model_dump().items(),
+            start=1,
+        )
+    }
+    artifact = ActivationRuntimeArtifactV2(
+        execution=execution,
+        pool_id=active_pool.pool_id,
+        pool_generation=active_pool.pool_generation,
+        executor_id=active_pool.executor_id,
+        executor_incarnation=UUID(active_pool.executor_incarnation),
+        controller_authority_sha256=active_pool.controller_authority_sha256,
+        approved_profiles_sha256=profile_set_digest,
+        local_authority_sha256=active_pool.local_authority_sha256,
+        signing_key_id=active_pool.signing_key_id,
+        signing_key_sha256=active_pool.signing_key_sha256,
+        immutable_manifest_sha256=_active_manifest_sha256(
+            profile,
+            active_pool.pool_id,
+            profile_set_digest,
+        ),
+        admission_directory=str(admission),
+        admission_directory_sha256="d" * 64,
+        handoff_directory=str(handoff),
+        journal_file=active_pool.journal_file,
+        state_directory=active_pool.state_directory,
+        slurm_authority=SlurmAuthorityV2(
+            cluster=active_pool.slurm_cluster,
+            controller_host=active_pool.controller_host,
+            partition=active_pool.partition,
+            account=active_pool.association,
+            submitter=active_pool.submitter,
+            qos=active_pool.qos,
+            local_uid=active_pool.local_uid,
+            executables=SlurmExecutablesV2(**executable_identities),
+            resource_ceiling=SlurmResourceV2(
+                cpus=64,
+                memory_bytes=256 * 1024 * 1024 * 1024,
+                gpus=8,
+            ),
+        ),
+        profiles=profiles.profiles,
+    )
+    return profile, profiles, artifact
 
 
 def test_checked_in_executor_profile_is_inert_and_pool_complete() -> None:
@@ -115,6 +320,149 @@ def test_checked_in_executor_profile_is_inert_and_pool_complete() -> None:
             f"{capacity_pool_executor_manifest_sha256(profile, pool.pool_id)}\n"
             f"LOOM_CAPACITY_EXECUTOR_INVENTORY_POLICY={inventory_policy_file}\n"
             f"LOOM_CAPACITY_EXECUTOR_POOL={pool.pool_id}\n"
+        )
+
+
+def test_active_executor_renderers_bind_profiles_artifact_manifest_and_paths(
+    tmp_path: Path,
+) -> None:
+    profile, profiles, artifact = _active_render_fixture(tmp_path)
+    pool = next(item for item in profile.pools if item.pool_id == artifact.pool_id)
+    profile_set_digest = canonical_approved_profiles_digest(profiles.profiles)
+    expected_manifest = _active_manifest_sha256(
+        profile,
+        artifact.pool_id,
+        profile_set_digest,
+    )
+
+    assert (
+        render_capacity_pool_executor_active_manifest_sha256(
+            profile,
+            artifact.pool_id,
+            profiles,
+        )
+        == expected_manifest
+    )
+    assert expected_manifest == artifact.immutable_manifest_sha256
+    prepared_payload = json.loads(render_capacity_pool_executor_configs(profile)[artifact.pool_id])
+    active_config = render_capacity_pool_executor_active_config(
+        profile,
+        artifact.pool_id,
+        artifact,
+    )
+    active_payload = json.loads(active_config)
+    assert active_payload == prepared_payload | {
+        "approved_profiles_sha256": profile_set_digest
+    }
+    assert prepared_payload["approved_profiles_sha256"] == "0" * 64
+    assert active_payload["approved_profiles_sha256"] != "0" * 64
+    active_config_file = Path(pool.config_file).with_name(f"{pool.pool_id}-active.json")
+    runtime_artifact_file = Path(pool.config_file).with_name(
+        f"{pool.pool_id}-activation-runtime.json"
+    )
+    assert render_capacity_pool_executor_active_service_environment(
+        profile,
+        artifact.pool_id,
+        artifact,
+    ) == (
+        "LOOM_CAPACITY_EXECUTOR_ACTIVATION_RUNTIME_ARTIFACT="
+        f"{runtime_artifact_file}\n"
+        f"LOOM_CAPACITY_EXECUTOR_CONFIG={active_config_file}\n"
+        "LOOM_CAPACITY_EXECUTOR_EXPECTED_MANIFEST_SHA256="
+        f"{expected_manifest}\n"
+        f"LOOM_CAPACITY_EXECUTOR_POOL={pool.pool_id}\n"
+    )
+    active_config_file.write_text(active_config, encoding="utf-8")
+    active_config_file.chmod(0o600)
+    loaded = PoolExecutorConfig.from_files(
+        active_config_file,
+        expected_manifest_sha256=expected_manifest,
+    )
+    assert loaded.approved_profiles_sha256 == profile_set_digest
+    assert loaded.manifest.sha256() == expected_manifest
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "pool",
+        "pool-generation",
+        "executor",
+        "controller-authority",
+        "local-authority",
+        "signing-key",
+        "profile",
+        "profile-set",
+        "immutable-manifest",
+        "state-directory",
+        "journal-file",
+        "execution-fence",
+        "slurm-authority",
+    ),
+)
+def test_active_executor_config_rejects_every_artifact_binding_drift(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    profile, _profiles, artifact = _active_render_fixture(tmp_path)
+    if mutation == "pool":
+        changed = artifact.model_copy(update={"pool_id": "gb10"})
+    elif mutation == "pool-generation":
+        changed = artifact.model_copy(update={"pool_generation": artifact.pool_generation + 1})
+    elif mutation == "executor":
+        changed = artifact.model_copy(update={"executor_id": "oldlab-other-executor"})
+    elif mutation == "controller-authority":
+        changed = artifact.model_copy(update={"controller_authority_sha256": "e" * 64})
+    elif mutation == "local-authority":
+        changed = artifact.model_copy(update={"local_authority_sha256": "e" * 64})
+    elif mutation == "signing-key":
+        changed = artifact.model_copy(update={"signing_key_sha256": "e" * 64})
+    elif mutation == "profile":
+        changed_profile = artifact.profiles[0].model_copy(update={"profile_digest": "e" * 64})
+        changed = artifact.model_copy(update={"profiles": (changed_profile,)})
+    elif mutation == "profile-set":
+        changed = artifact.model_copy(update={"approved_profiles_sha256": "e" * 64})
+    elif mutation == "immutable-manifest":
+        changed = artifact.model_copy(update={"immutable_manifest_sha256": "e" * 64})
+    elif mutation == "state-directory":
+        changed = artifact.model_copy(update={"state_directory": str(tmp_path / "other-state")})
+    elif mutation == "journal-file":
+        changed = artifact.model_copy(update={"journal_file": str(tmp_path / "other-journal")})
+    elif mutation == "execution-fence":
+        changed = artifact.model_copy(
+            update={
+                "execution": artifact.execution.model_copy(
+                    update={"execution_manifest_sha256": "e" * 64}
+                )
+            }
+        )
+    else:
+        changed = artifact.model_copy(
+            update={
+                "slurm_authority": artifact.slurm_authority.model_copy(
+                    update={"controller_host": "other-oldlab-controller.loom.invalid"}
+                )
+            }
+        )
+
+    with pytest.raises(ValueError, match=r"active|artifact|profile|binding|manifest|Slurm"):
+        render_capacity_pool_executor_active_config(
+            profile,
+            artifact.pool_id,
+            changed,
+        )
+
+
+def test_active_manifest_rejects_a_profile_set_for_another_pool(tmp_path: Path) -> None:
+    profile, profiles, artifact = _active_render_fixture(tmp_path)
+    foreign = profiles.profiles[0].model_copy(update={"pool_id": "gb10"})
+    foreign_profiles = ApprovedLaunchProfileSetV2(profiles=(foreign,))
+
+    with pytest.raises(ValueError, match="profile"):
+        render_capacity_pool_executor_active_manifest_sha256(
+            profile,
+            artifact.pool_id,
+            foreign_profiles,
         )
 
 
