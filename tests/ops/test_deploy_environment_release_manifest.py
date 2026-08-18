@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -71,8 +73,27 @@ def test_deploy_workflow_uploads_rollout_evidence_artifact() -> None:
         ),
     )
 
-    for job_name in ("deploy-development", "deploy-staging", "deploy-production"):
+    for job_name in ("deploy-development", "deploy-production"):
         job = workflow["jobs"][job_name]
         assert job["env"]["LOOM_ROLLOUT_EVIDENCE_DIR"] == "rollout-evidence"
         assert "rollout-evidence" in str(job)
         assert "actions/upload-artifact" in str(job)
+
+
+def test_deploy_script_rejects_protected_staging_before_credentials() -> None:
+    completed = subprocess.run(
+        ["bash", "scripts/ops/deploy_environment.sh"],
+        cwd=REPO_ROOT,
+        env={
+            "PATH": os.environ["PATH"],
+            "LOOM_DEPLOY_ENVIRONMENT": "staging",
+            "LOOM_IMAGE_TAG": "staging-refused",
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 2
+    assert completed.stdout == ""
+    assert "installed host-local loom-staging-rollout authority" in completed.stderr

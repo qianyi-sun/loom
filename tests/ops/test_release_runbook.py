@@ -37,6 +37,9 @@ def test_current_release_docs_cover_executable_validation_and_promotion() -> Non
         assert fragment in operator or fragment in staging
 
     assert ".github/workflows/deploy-environment.yml" in operator
+    assert "development and production only" in operator
+    assert "does not deploy staging" in staging
+    assert "loom-staging-rollout --env staging start" in operator
     assert "environment=production" in operator
     assert "successful `release_gate_run_id`" in operator
 

@@ -48,6 +48,9 @@ EXPECTED_ENVIRONMENTS = {
     },
 }
 
+HOSTED_DEPLOY_ENVIRONMENTS = ("development", "production")
+PROTECTED_HOST_LOCAL_ENVIRONMENTS = ("staging",)
+
 REQUIRED_DISTINCT_FIELDS = (
     "namespace",
     "database_name",
@@ -355,7 +358,23 @@ def validate_workflow(workflow_path: Path) -> list[str]:
     workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
     jobs = workflow.get("jobs", {})
     errors: list[str] = []
-    for env_name, expected in EXPECTED_ENVIRONMENTS.items():
+    triggers = workflow.get("on", workflow.get(True, {}))
+    dispatch = triggers.get("workflow_dispatch", {}) if isinstance(triggers, dict) else {}
+    inputs = dispatch.get("inputs", {}) if isinstance(dispatch, dict) else {}
+    environment_input = inputs.get("environment", {}) if isinstance(inputs, dict) else {}
+    options = (
+        environment_input.get("options")
+        if isinstance(environment_input, dict)
+        else None
+    )
+    expected_options = list(HOSTED_DEPLOY_ENVIRONMENTS)
+    if options != expected_options:
+        errors.append(
+            f"workflow dispatch environment options must be {expected_options!r}"
+        )
+
+    for env_name in HOSTED_DEPLOY_ENVIRONMENTS:
+        expected = EXPECTED_ENVIRONMENTS[env_name]
         job_name = f"deploy-{env_name}"
         job = jobs.get(job_name)
         if job is None:
@@ -391,6 +410,12 @@ def validate_workflow(workflow_path: Path) -> list[str]:
                 errors.append(
                     f"{job_name}: env.{secret_name} must use environment secret {secret_name}",
                 )
+
+    for env_name in PROTECTED_HOST_LOCAL_ENVIRONMENTS:
+        if f"deploy-{env_name}" in jobs:
+            errors.append(
+                f"deploy-{env_name}: protected environment must use host-local rollout authority"
+            )
 
     return errors
 

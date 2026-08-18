@@ -3,18 +3,23 @@ set -euo pipefail
 
 : "${LOOM_DEPLOY_ENVIRONMENT:?set by the deploy-environment workflow}"
 : "${LOOM_IMAGE_TAG:?set by the deploy-environment workflow}"
-: "${LOOM_KUBECONFIG_B64:?environment-scoped GitHub secret is required}"
-: "${LOOM_CLUSTER_CONFIG_B64:?environment-scoped GitHub secret is required}"
-: "${LOOM_DEPLOY_TOKEN:?environment-scoped GitHub secret is required}"
 
 case "${LOOM_DEPLOY_ENVIRONMENT}" in
-  development|staging|production)
+  development|production)
+    ;;
+  staging)
+    echo "Staging deploys require the installed host-local loom-staging-rollout authority." >&2
+    exit 2
     ;;
   *)
     echo "Unsupported LOOM_DEPLOY_ENVIRONMENT=${LOOM_DEPLOY_ENVIRONMENT}" >&2
     exit 2
     ;;
 esac
+
+: "${LOOM_KUBECONFIG_B64:?environment-scoped GitHub secret is required}"
+: "${LOOM_CLUSTER_CONFIG_B64:?environment-scoped GitHub secret is required}"
+: "${LOOM_DEPLOY_TOKEN:?environment-scoped GitHub secret is required}"
 
 umask 077
 tmpdir="$(mktemp -d)"
@@ -92,7 +97,7 @@ if [[ "${LOOM_DRY_RUN:-false}" == "true" ]]; then
   exit 0
 fi
 
-if [[ "${LOOM_DEPLOY_ENVIRONMENT}" != "development" && -z "${LOOM_ROLLOUT_LOCK_DIR:-}" ]]; then
+if [[ "${LOOM_DEPLOY_ENVIRONMENT}" == "production" && -z "${LOOM_ROLLOUT_LOCK_DIR:-}" ]]; then
   echo "LOOM_ROLLOUT_LOCK_DIR is required for ${LOOM_DEPLOY_ENVIRONMENT} deploys." >&2
   echo "Set it to the shared protected-environment rollout lock directory." >&2
   exit 2

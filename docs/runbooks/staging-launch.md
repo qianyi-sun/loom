@@ -3,6 +3,8 @@
 Use this checklist after the installed rollout authority has deployed an exact
 merged `dev` candidate to shared staging. It defines the current validation
 boundary for production promotion; it is not authority to mutate the cluster.
+This checklist consumes an installed-authority rollout and does not dispatch
+the generic workflow: `.github/workflows/deploy-environment.yml` does not deploy staging.
 
 ## Candidate and environment identity
 
