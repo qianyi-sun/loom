@@ -319,7 +319,22 @@
     "default": "PosixPath('/var/lib/loom-personal-dev-scanner')",
     "required": false
   },
+  "personal_dev_builder_scanner_cache_identity_sha256": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
+  "personal_dev_builder_scanner_database_metadata_sha256": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
   "personal_dev_builder_scanner_identity": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
+  "personal_dev_builder_scanner_java_database_metadata_sha256": {
     "annotation": "<class 'str'>",
     "default": "''",
     "required": false

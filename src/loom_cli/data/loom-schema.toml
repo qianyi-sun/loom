@@ -352,11 +352,29 @@ used_by     = ["loom-service"]
 python_type = "Path"
 default     = "/var/lib/loom-personal-dev-scanner"
 
+[service_config.personal_dev_builder_scanner_cache_identity_sha256]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = ""
+description = "Release-bound SHA-256 identity of the exact personal-dev scanner-cache generation mounted into management."
+
 [service_config.personal_dev_builder_scanner_identity]
 used_by     = ["loom-service"]
 python_type = "str"
 default     = ""
 description = "Immutable scanner binary and vulnerability-database identity written into personal-dev safety evidence."
+
+[service_config.personal_dev_builder_scanner_database_metadata_sha256]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = ""
+description = "Release-bound SHA-256 of the personal-dev Trivy database metadata."
+
+[service_config.personal_dev_builder_scanner_java_database_metadata_sha256]
+used_by     = ["loom-service"]
+python_type = "str"
+default     = ""
+description = "Release-bound SHA-256 of the personal-dev Trivy Java database metadata."
 
 [service_config.personal_dev_builder_scanner_policy_sha256]
 used_by     = ["loom-service"]

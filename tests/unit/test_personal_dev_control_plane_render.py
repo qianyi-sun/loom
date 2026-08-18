@@ -41,7 +41,7 @@ _MANAGEMENT_FILES = {
 
 def _release_value() -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "source_sha": "1" * 40,
         "source_tree": "2" * 40,
         "images": {
@@ -52,9 +52,25 @@ def _release_value() -> dict[str, Any]:
             "personal_dev_activation_agent": (
                 "ghcr.io/qianyi-sun/loom-personal-dev-activation-agent@sha256:" + "5" * 64
             ),
+            "personal_dev_scanner_cache": (
+                "ghcr.io/qianyi-sun/loom-personal-dev-scanner-cache@sha256:" + "a" * 64
+            ),
             "postgres": "docker.io/library/postgres@sha256:" + "6" * 64,
             "minio": "quay.io/minio/minio@sha256:" + "7" * 64,
             "minio_client": "quay.io/minio/mc@sha256:" + "9" * 64,
+        },
+        "scanner": {
+            "binary_platform": "linux/amd64",
+            "binary_sha256": "b" * 64,
+            "cache_identity_sha256": (
+                "b1c136b8577f3813c62588d6930db21b0f2343b7f70278836741387c43c33761"
+            ),
+            "database_metadata_sha256": "c" * 64,
+            "database_sha256": "d" * 64,
+            "java_database_metadata_sha256": "e" * 64,
+            "java_database_sha256": "f" * 64,
+            "lock_sha256": "1" * 64,
+            "trivy_version": "v0.70.0",
         },
         "release_evidence_sha256": "8" * 64,
     }
@@ -133,10 +149,17 @@ def _acceptance_render(tmp_path: Path):
             "runtime_class_name": profile.builder.runtime_class_name,
             "runtime_handler": "runsc-personal-dev",
             "runtime_profile_sha256": "d" * 64,
-            "scanner_binary_sha256": "f" * 64,
-            "scanner_database_sha256": "1" * 64,
+            "scanner_binary_sha256": release.scanner.binary_sha256,
+            "scanner_cache_identity_sha256": release.scanner.cache_identity_sha256,
+            "scanner_database_sha256": release.scanner.database_sha256,
+            "scanner_database_metadata_sha256": (
+                release.scanner.database_metadata_sha256
+            ),
             "scanner_finding_policy_sha256": "3" * 64,
-            "scanner_java_database_sha256": "2" * 64,
+            "scanner_java_database_sha256": release.scanner.java_database_sha256,
+            "scanner_java_database_metadata_sha256": (
+                release.scanner.java_database_metadata_sha256
+            ),
             "trusted_launcher_profile_sha256": "e" * 64,
         },
         "manager": {
@@ -219,7 +242,7 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
     assert rendered.input_sha256 == expected_input
     assert rendered.release_sha256 == hashlib.sha256(release.canonical_bytes()).hexdigest()
     assert hashlib.sha256(rendered.yaml_text.encode("utf-8")).hexdigest() == (
-        "009cc10cd2de5657644f10b1aa7d0d64f08a0c3aff0389af2b9d1ba27a0f0db9"
+        "2c2ed0c405e1c79fd60ee6c3ebf645687daba2675876d7bff24b136f00ee69df"
     )
 
     identities = {_identity(document) for document in documents}
@@ -396,6 +419,155 @@ def test_acceptance_render_enables_only_personal_application_authorities(
     assert "loom-capacity-manager" not in workload_names
 
 
+def test_management_prepares_and_mounts_only_the_release_bound_scanner_generation(
+    tmp_path: Path,
+) -> None:
+    shadow_profile, shadow_release, shadow_render, shadow_documents = _render(tmp_path)
+    (
+        acceptance_profile,
+        acceptance_release,
+        acceptance_plan,
+        _shadow,
+        acceptance_render,
+        acceptance_documents,
+    ) = _acceptance_render(tmp_path)
+
+    assert shadow_render.resource_count == acceptance_render.resource_count == 33
+    for profile, release, plan, documents in (
+        (shadow_profile, shadow_release, None, shadow_documents),
+        (
+            acceptance_profile,
+            acceptance_release,
+            acceptance_plan,
+            acceptance_documents,
+        ),
+    ):
+        management = next(
+            item
+            for item in documents
+            if _identity(item)
+            == ("Deployment", "loom-dev", "loom-personal-dev-management")
+        )
+        pod = management["spec"]["template"]["spec"]
+        generation_subpath = f"generations/{release.scanner.cache_identity_sha256}"
+        generation_path = f"/var/lib/loom-personal-dev-scanner/{generation_subpath}"
+        init = pod["initContainers"][0]
+        assert init == {
+            "name": "personal-dev-scanner-cache-init",
+            "image": release.images.personal_dev_scanner_cache,
+            "command": ["python", "-m", "loom.personal_dev_scanner_cache_init"],
+            "args": [
+                "--source-root",
+                "/opt/loom-personal-dev-scanner-cache/assets",
+                "--destination-root",
+                "/var/lib/loom-personal-dev-scanner",
+                "--cache-identity-sha256",
+                release.scanner.cache_identity_sha256,
+                "--scanner-binary-sha256",
+                release.scanner.binary_sha256,
+                "--database-sha256",
+                release.scanner.database_sha256,
+                "--database-metadata-sha256",
+                release.scanner.database_metadata_sha256,
+                "--java-database-sha256",
+                release.scanner.java_database_sha256,
+                "--java-database-metadata-sha256",
+                release.scanner.java_database_metadata_sha256,
+            ],
+            "securityContext": {
+                "allowPrivilegeEscalation": False,
+                "capabilities": {"drop": ["ALL"]},
+                "readOnlyRootFilesystem": True,
+                "runAsNonRoot": True,
+                "runAsUser": 65531,
+            },
+            "resources": {
+                "requests": {
+                    "cpu": profile.resources.management.cpu_request,
+                    "memory": profile.resources.management.memory_request,
+                },
+                "limits": {
+                    "cpu": profile.resources.management.cpu_limit,
+                    "memory": profile.resources.management.memory_limit,
+                },
+            },
+            "volumeMounts": [
+                {
+                    "name": "scanner-cache",
+                    "mountPath": "/var/lib/loom-personal-dev-scanner",
+                },
+                {"name": "tmp", "mountPath": "/tmp"},
+            ],
+        }
+        assert "env" not in init
+        assert pod["automountServiceAccountToken"] is False
+        assert pod["nodeSelector"] == {"kubernetes.io/arch": "amd64"}
+
+        service = next(
+            container for container in pod["containers"] if container["name"] == "management"
+        )
+        service_env = {
+            item["name"]: item["value"] for item in service["env"] if "value" in item
+        }
+        scanner_identity = (
+            f"trivy-bin-sha256:{release.scanner.binary_sha256}:"
+            f"db-sha256:{release.scanner.database_sha256}:"
+            f"java-db-sha256:{release.scanner.java_database_sha256}"
+        )
+        assert service_env["LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_CACHE_DIR"] == (
+            generation_path
+        )
+        assert service_env[
+            "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_CACHE_IDENTITY_SHA256"
+        ] == release.scanner.cache_identity_sha256
+        assert service_env[
+            "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_DATABASE_METADATA_SHA256"
+        ] == release.scanner.database_metadata_sha256
+        assert service_env[
+            "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_JAVA_DATABASE_METADATA_SHA256"
+        ] == release.scanner.java_database_metadata_sha256
+        assert service_env["LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_IDENTITY"] == (
+            scanner_identity
+        )
+        assert service_env["LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_POLICY_SHA256"] == (
+            "" if plan is None else plan.builder.scanner_finding_policy_sha256
+        )
+
+        scanner_mounts = [
+            mount for mount in service["volumeMounts"] if mount["name"] == "scanner-cache"
+        ]
+        assert scanner_mounts == [
+            {
+                "name": "scanner-cache",
+                "mountPath": generation_path,
+                "subPath": generation_subpath,
+            }
+        ]
+        assert {
+            "name": "scanner-fanal",
+            "mountPath": f"{generation_path}/fanal",
+        } in service["volumeMounts"]
+        scanner_cache_root_mounts = [
+            (container["name"], mount)
+            for container in (*pod["initContainers"], *pod["containers"])
+            for mount in container.get("volumeMounts", [])
+            if mount.get("name") == "scanner-cache"
+            and mount.get("mountPath") == "/var/lib/loom-personal-dev-scanner"
+        ]
+        assert scanner_cache_root_mounts == [
+            (
+                "personal-dev-scanner-cache-init",
+                {
+                    "name": "scanner-cache",
+                    "mountPath": "/var/lib/loom-personal-dev-scanner",
+                },
+            )
+        ]
+        assert next(
+            volume for volume in pod["volumes"] if volume["name"] == "scanner-fanal"
+        ) == {"name": "scanner-fanal", "emptyDir": {"sizeLimit": "4Gi"}}
+
+
 def test_acceptance_render_rejects_shadow_manifest_binding_drift(tmp_path: Path) -> None:
     profile, release, plan, _shadow, _rendered, _documents = _acceptance_render(tmp_path)
     drifted = replace(
@@ -444,7 +616,11 @@ def test_shadow_workloads_are_inert_immutable_and_exclude_shared_app(tmp_path: P
     assert service_env["LOOM_SVC_PERSONAL_DEV_BUILDER_ENABLED"] == "false"
     assert service_env["LOOM_SVC_K8S_WORKER_ENABLED"] == "false"
     assert not any("SLURM" in item["name"] for item in service["env"])
-    assert service_env["LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_IDENTITY"] == ""
+    assert service_env["LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_IDENTITY"] == (
+        f"trivy-bin-sha256:{release.scanner.binary_sha256}:"
+        f"db-sha256:{release.scanner.database_sha256}:"
+        f"java-db-sha256:{release.scanner.java_database_sha256}"
+    )
     assert service_env["LOOM_SVC_PERSONAL_DEV_TRUSTED_LAUNCHER_PROFILE_SHA256"] == ""
     assert activation["spec"]["replicas"] == 0
 
@@ -471,6 +647,7 @@ def test_shadow_workloads_are_inert_immutable_and_exclude_shared_app(tmp_path: P
     assert images == {
         release.images.loom_service,
         release.images.personal_dev_activation_agent,
+        release.images.personal_dev_scanner_cache,
         release.images.postgres,
         release.images.minio,
         release.images.minio_client,

@@ -580,7 +580,20 @@ def _acceptance_management_binding_valid(
         "LOOM_SVC_PERSONAL_DEV_BUILDER_PUBLISHER_IDENTITY": (plan.builder.publisher_identity),
         "LOOM_SVC_PERSONAL_DEV_BUILDER_REGISTRY_PREFIX": plan.builder.registry_prefix,
         "LOOM_SVC_PERSONAL_DEV_BUILDER_RUNTIME_CLASS_NAME": (plan.builder.runtime_class_name),
+        "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_CACHE_DIR": (
+            "/var/lib/loom-personal-dev-scanner/generations/"
+            + plan.builder.scanner_cache_identity_sha256
+        ),
+        "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_CACHE_IDENTITY_SHA256": (
+            plan.builder.scanner_cache_identity_sha256
+        ),
+        "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_DATABASE_METADATA_SHA256": (
+            plan.builder.scanner_database_metadata_sha256
+        ),
         "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_IDENTITY": scanner_identity,
+        "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_JAVA_DATABASE_METADATA_SHA256": (
+            plan.builder.scanner_java_database_metadata_sha256
+        ),
         "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_POLICY_SHA256": (
             plan.builder.scanner_finding_policy_sha256
         ),
