@@ -8,9 +8,9 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import text
 
-from loom.pipeline.keys import canonical_digest
+from loom.pipeline.keys import canonical_digest, canonical_document
 from loom.pipeline.spec import FanoutManifestV1, RunGraphSpecV1
-from loom_pipeline_orchestrator.repository import StaleControllerLeaseError
+from loom_pipeline_orchestrator.repository import FrozenReadiness, StaleControllerLeaseError
 
 if TYPE_CHECKING:
     from tests.integration.pipeline_orchestrator_fixtures import OrchestratorSeed
@@ -212,17 +212,190 @@ async def test_atomic_zero_one_many_fanout_and_mirrored_gates(
                                  WHERE pipeline_run_id=:id),
                                (SELECT stage_runs_created FROM pipeline_budget_ledgers
                                  WHERE pipeline_run_id=:id),
-                               (SELECT count(*) FROM pipeline_stage_dependencies d
+                           (SELECT count(*) FROM pipeline_stage_dependencies d
                                   JOIN pipeline_stage_runs downstream
                                     ON downstream.id=d.downstream_stage_run_id
                                  WHERE d.pipeline_run_id=:id
                                    AND downstream.node_key='finalize'
-                                   AND d.dependency_kind='terminal_barrier')
+                                   AND d.dependency_kind='terminal_barrier'),
+                           (SELECT count(*) FROM pipeline_stage_runs
+                             WHERE pipeline_run_id=:id AND node_key='fanout'
+                               AND fanout_item_json IS NOT NULL
+                               AND fanout_item_digest IS NOT NULL)
                     """),
                     {"id": seed.run_id},
                 )
             ).one()
-        assert values == (1, item_count * 2 + 1, item_count * 2 + 1, item_count)
+        assert values == (
+            1,
+            item_count * 2 + 1,
+            item_count * 2 + 1,
+            item_count,
+            item_count,
+        )
+    finally:
+        await seed.repository.release(lease)
+
+
+@pytest.mark.asyncio
+async def test_terminal_renderer_waits_for_zero_item_expansion_marker_and_freezes_snapshot(
+    orchestrator_seed: OrchestratorSeed,
+) -> None:
+    from tests.integration.pipeline_orchestrator_fixtures import DIGEST, container
+
+    seed = orchestrator_seed
+    source_id = uuid4()
+    fanout = container("fanout")
+    fanout["inputs"] = [
+        {
+            "source": "fanout_item",
+            "binding_name": "current_case",
+            "artifact_type": "behavior.case.v1",
+        }
+    ]
+    fanout["fanout"] = {
+        "source": "run_input",
+        "manifest_input_name": "cases",
+        "items_pointer": "/items",
+        "shard_key_pointer": "/shard_key",
+        "item_binding_name": "current_case",
+        "item_artifact_type": "behavior.case.v1",
+        "parameters_contract": {"name": "case_params", "version": 1, "digest": DIGEST},
+        "max_items": 3,
+    }
+    fanout["outputs"] = [
+        {
+            "name": "result",
+            "artifact_type": "behavior.result.v1",
+            "required": True,
+            "role": "artifact",
+            "producer": "container",
+            "max_bytes": 1024,
+        }
+    ]
+    finalize = container("finalize", needs=["fanout"])
+    finalize["inputs"] = [
+        {
+            "source": "terminal_outputs",
+            "binding_name": "results",
+            "artifact_type": "behavior.result.v1",
+            "stage_keys": ["fanout"],
+            "output_name": "result",
+            "match_outcomes": ["selected"],
+        }
+    ]
+    finalize["request_renderer"] = {
+        "name": "fanout_finalize",
+        "version": 1,
+        "digest": DIGEST,
+        "max_bytes": 65_536,
+        "terminal_stage_keys": ["fanout"],
+    }
+    graph = RunGraphSpecV1.model_validate(
+        {
+            "schema_version": "loom.run-graph.v1",
+            "recipe": {"name": "fanout-fixture", "version": 1, "digest": DIGEST},
+            "inputs": [
+                {"name": "cases", "artifact_type": "loom.fanout-manifest.v1", "required": True}
+            ],
+            "parameters": {},
+            "budget": {
+                "max_provider_cost_usd": "0",
+                "max_gpu_seconds": 0,
+                "max_wall_seconds": 600,
+                "max_artifact_bytes": 1000,
+                "max_stage_runs": 4,
+                "max_attempts_total": 4,
+            },
+            "nodes": [fanout, finalize],
+        }
+    )
+    manifest = FanoutManifestV1(
+        schema_version="loom.fanout-manifest.v1",
+        items=[],
+    )
+    manifest_digest = canonical_digest(manifest)
+    async with seed.sessions() as session, session.begin():
+        await session.execute(
+            text("""
+                UPDATE pipeline_runs SET recipe_name='fanout-fixture',
+                    graph_spec_json=CAST(:graph AS jsonb), graph_spec_digest=:graph_digest,
+                    budget_json=CAST(:budget AS jsonb)
+                 WHERE id=:run_id
+            """),
+            {
+                "run_id": seed.run_id,
+                "graph": json.dumps(graph.model_dump(mode="json", exclude_none=False)),
+                "graph_digest": canonical_digest(graph),
+                "budget": json.dumps(graph.budget.model_dump(mode="json")),
+            },
+        )
+        await session.execute(
+            text("""
+                INSERT INTO artifacts (id,artifact_type,name,team_id,content_hash)
+                VALUES (:id,'loom.fanout-manifest.v1','cases',:team,:digest)
+            """),
+            {"id": source_id, "team": seed.team_id, "digest": manifest_digest},
+        )
+    lease = (await seed.repository.claim_runs(controller_id="terminal-closure"))[0]
+    try:
+        assert await seed.repository.initialize_run(lease) == 1
+        assert await seed.repository.readiness_candidates(lease) == ()
+        assert await seed.repository.expand_fanout(
+            lease,
+            node_key="fanout",
+            source_kind="run_input",
+            source_artifact_id=source_id,
+            source_manifest_digest=manifest_digest,
+            manifest=manifest,
+            run_input_parameters_validated=True,
+        ) == 0
+        candidates = await seed.repository.readiness_candidates(lease)
+        assert len(candidates) == 1
+        candidate = candidates[0]
+        assert candidate.node_key == "finalize"
+        assert candidate.terminal_snapshot is not None
+        assert candidate.terminal_snapshot.stages_json == []
+        assert candidate.terminal_snapshot.snapshot_json["terminal_stage_keys"] == ["fanout"]
+        assert candidate.ordinary_input_bindings_json == [
+            {
+                "binding_name": "results",
+                "artifact_type": "behavior.result.v1",
+                "cardinality": "many",
+                "items": [],
+            }
+        ]
+        execution_spec = {"schema_version": "test.execution-spec.v1"}
+        frozen = FrozenReadiness(
+            input_bindings_json=[],
+            input_bindings_digest=canonical_digest([]),
+            execution_spec_json=execution_spec,
+            execution_spec_bytes=canonical_document(execution_spec),
+            execution_spec_digest=canonical_digest(execution_spec),
+        )
+        assert await seed.repository.freeze_readiness(
+            lease,
+            stage_run_id=candidate.stage_run_id,
+            frozen=frozen,
+            terminal_snapshot=candidate.terminal_snapshot,
+        )
+        assert not await seed.repository.freeze_readiness(
+            lease,
+            stage_run_id=candidate.stage_run_id,
+            frozen=frozen,
+            terminal_snapshot=candidate.terminal_snapshot,
+        )
+        async with seed.sessions() as session:
+            persisted = (
+                await session.execute(
+                    text("""
+                        SELECT snapshot_digest FROM pipeline_terminal_snapshots
+                         WHERE consumer_stage_run_id=:stage_id
+                    """),
+                    {"stage_id": candidate.stage_run_id},
+                )
+            ).scalar_one()
+        assert persisted == candidate.terminal_snapshot.snapshot_digest
     finally:
         await seed.repository.release(lease)
 

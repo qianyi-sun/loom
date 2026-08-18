@@ -13,10 +13,10 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 def test_repository_migration_plan_is_single_head_and_policy_bound() -> None:
     result = inspect_migration_plan(REPO_ROOT / "migrations/alembic.ini")
 
-    assert result.head == "0099"
+    assert result.head == "0100"
     assert result.base == "0001"
-    assert result.revision_count == 100
-    assert len(result.revision_sha256) == 100
+    assert result.revision_count == 101
+    assert len(result.revision_sha256) == 101
     assert result.graph_policy == "single-head-closed-dag"
     assert result.upgrade_policy == "expand-contract-before-destructive-change"
     assert result.downgrade_policy == "revision-declared-fail-closed"
@@ -32,8 +32,8 @@ def test_repository_migration_plan_is_independent_of_process_cwd(
 
     result = inspect_migration_plan(REPO_ROOT / "migrations/alembic.ini")
 
-    assert result.head == "0099"
-    assert result.revision_count == 100
+    assert result.head == "0100"
+    assert result.revision_count == 101
 
 
 def test_migration_plan_rejects_noncanonical_script_location(tmp_path: Path) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Literal
 from uuid import UUID
 
 from loom.pipeline.gates import GateSelection, strict_and_gate_target
@@ -62,11 +63,17 @@ def build_terminal_snapshot(
     return document, canonical_document(document), canonical_digest(document)
 
 
-def descriptor_state(state: PipelineStageRunState) -> str:
+def descriptor_state(
+    state: PipelineStageRunState,
+) -> Literal["succeeded", "failed", "skipped"]:
     if state not in {
         PipelineStageRunState.SUCCEEDED,
         PipelineStageRunState.FAILED,
         PipelineStageRunState.SKIPPED,
     }:
         raise ValueError("terminal snapshot cannot contain an open/cancelled StageRun")
-    return state.value
+    if state is PipelineStageRunState.SUCCEEDED:
+        return "succeeded"
+    if state is PipelineStageRunState.FAILED:
+        return "failed"
+    return "skipped"

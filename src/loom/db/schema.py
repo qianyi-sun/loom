@@ -4124,9 +4124,9 @@ class PipelineStageRun(Base):
         ),
         CheckConstraint(
             "(fanout_expansion_id IS NULL AND fanout_parameters_json IS NULL "
-            "AND fanout_item_digest IS NULL) OR "
+            "AND fanout_item_json IS NULL AND fanout_item_digest IS NULL) OR "
             "(fanout_expansion_id IS NOT NULL AND fanout_parameters_json IS NOT NULL "
-            "AND fanout_item_digest IS NOT NULL)",
+            "AND fanout_item_json IS NOT NULL AND fanout_item_digest IS NOT NULL)",
             name="pipeline_stage_runs_fanout_group_check",
         ),
         CheckConstraint(
@@ -4230,6 +4230,7 @@ class PipelineStageRun(Base):
     resolved_input_bindings_json: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB)
     resolved_input_bindings_digest: Mapped[str | None] = mapped_column(Text)
     fanout_parameters_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    fanout_item_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     fanout_item_digest: Mapped[str | None] = mapped_column(Text)
     fanout_expansion_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),

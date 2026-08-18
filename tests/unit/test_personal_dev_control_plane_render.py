@@ -161,7 +161,7 @@ def _acceptance_render(tmp_path: Path):
         "source": {"commit": release.source_sha, "tree": release.source_tree},
         "storage": {
             "backup_restore_evidence_sha256": "b" * 64,
-            "schema_head": "0099",
+            "schema_head": "0100",
         },
         "window": {
             "expires_at": "2026-08-17T23:00:00Z",

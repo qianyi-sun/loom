@@ -116,6 +116,40 @@ async def test_platform_fanout_manifest_is_synthesized_inside_final_marker(
         "max_attempts": 3,
         "failure_policy": "fail_run",
     }
+    finalize = {
+        "node_kind": "container",
+        "node_key": "finalize",
+        "image": "registry.example.com/loom/pipeline@sha256:" + "b" * 64,
+        "argv": ["finalize"],
+        "workdir": "/workspace",
+        "resource_profile": "pipeline-test-cpu-none@1",
+        "network_profile": "none",
+        "needs": ["root"],
+        "inputs": [
+            {
+                "source": "terminal_outputs",
+                "binding_name": "manifests",
+                "artifact_type": "loom.fanout-manifest.v1",
+                "stage_keys": ["root"],
+                "output_name": "manifest",
+                "match_outcomes": ["generated"],
+            }
+        ],
+        "outputs": [],
+        "request_renderer": {
+            "name": "finalize",
+            "version": 1,
+            "digest": DIGEST,
+            "max_bytes": 65_536,
+            "terminal_stage_keys": ["root"],
+        },
+        "checkpoint": None,
+        "fanout": None,
+        "fanout_commit": None,
+        "timeout_seconds": 60,
+        "max_attempts": 3,
+        "failure_policy": "fail_run",
+    }
     graph = RunGraphSpecV1.model_validate(
         {
             "schema_version": "loom.run-graph.v1",
@@ -130,7 +164,7 @@ async def test_platform_fanout_manifest_is_synthesized_inside_final_marker(
                 "max_stage_runs": 8,
                 "max_attempts_total": 8,
             },
-            "nodes": [node, consumer],
+            "nodes": [node, consumer, finalize],
         }
     )
     async with seed.sessions() as db, db.begin():
@@ -150,8 +184,12 @@ async def test_platform_fanout_manifest_is_synthesized_inside_final_marker(
             },
         )
     lease = (await seed.repository.claim_runs(controller_id="fanout-commit"))[0]
-    assert await seed.repository.initialize_run(lease) == 1
-    candidate = (await seed.repository.readiness_candidates(lease))[0]
+    assert await seed.repository.initialize_run(lease) == 2
+    candidate = next(
+        candidate
+        for candidate in await seed.repository.readiness_candidates(lease)
+        if candidate.node_key == "root"
+    )
     spec = {
         "schema_version": "loom.execution-spec.v1",
         "recipe_digest": DIGEST,
@@ -332,6 +370,8 @@ async def test_platform_fanout_manifest_is_synthesized_inside_final_marker(
         stage_result_sha256=canonical_digest(stage_result),
         final_output_upload_session_id=grant.upload_session_id,
     )
+    worker_id = uuid4()
+    claim_id = uuid4()
     async with seed.sessions() as db, db.begin():
         persisted_attempt = await db.get(ExecutionAttempt, attempt_id)
         assert persisted_attempt is not None
@@ -342,12 +382,46 @@ async def test_platform_fanout_manifest_is_synthesized_inside_final_marker(
         )
         await db.execute(
             text("""
+                INSERT INTO workers (
+                    id, hostname, version, capabilities, supported_work_kinds,
+                    pool_name, registered_at, last_seen_at, status
+                ) VALUES (
+                    :id, 'fanout-fixture', 'test', '[]'::jsonb,
+                    ARRAY['trial','execution_attempt']::text[],
+                    'behavior-gpu-oldlab', clock_timestamp(), clock_timestamp(), 'active'
+                )
+            """),
+            {"id": worker_id},
+        )
+        await db.execute(
+            text("""
                 UPDATE pipeline_stage_runs
                    SET state='succeeded', domain_outcome='generated',
                        reason_code='generated', finished_at=clock_timestamp()
                  WHERE id=:stage_id
             """),
             {"stage_id": candidate.stage_run_id},
+        )
+        await db.execute(
+            text("""
+                UPDATE execution_attempts
+                   SET state='succeeded', worker_id=:worker_id, claim_id=:claim_id,
+                       lease_token_digest=:lease_digest,
+                       lease_expires_at=clock_timestamp() + interval '5 minutes',
+                       claimed_at=clock_timestamp(), started_at=clock_timestamp(),
+                       exit_code=0, retry_class='none', reason_code='generated',
+                       result_manifest_json=CAST(:result AS jsonb),
+                       result_manifest_digest=:result_digest, finished_at=clock_timestamp()
+                 WHERE id=:attempt_id
+            """),
+            {
+                "attempt_id": attempt_id,
+                "worker_id": worker_id,
+                "claim_id": claim_id,
+                "lease_digest": "1" * 64,
+                "result": json.dumps(stage_result.model_dump(mode="json")),
+                "result_digest": canonical_digest(stage_result),
+            },
         )
     assert committed_bytes["control"] == len(platform_bytes)
     sources = await seed.repository.fanout_source_candidates(lease)
@@ -375,4 +449,36 @@ async def test_platform_fanout_manifest_is_synthesized_inside_final_marker(
             ).scalars()
         )
     assert child_keys == ["a", "b"]
+    assert await seed.repository.reconcile_dependencies_and_gates(lease) == 3
+    candidates = await seed.repository.readiness_candidates(lease)
+    child_candidates = [candidate for candidate in candidates if candidate.node_key == "consume"]
+    assert [candidate.shard_key for candidate in child_candidates] == ["a", "b"]
+    assert [
+        candidate.fanout_item_json["shard_key"]
+        for candidate in child_candidates
+        if candidate.fanout_item_json is not None
+    ] == ["a", "b"]
+    assert [
+        candidate.ordinary_input_bindings_json[0]["items"][0]["artifact_id"]
+        for candidate in child_candidates
+        if candidate.ordinary_input_bindings_json is not None
+    ] == [
+        str(records["out_a"].artifact_id),
+        str(records["out_b"].artifact_id),
+    ]
+    terminal_candidate = next(
+        candidate for candidate in candidates if candidate.node_key == "finalize"
+    )
+    assert terminal_candidate.terminal_snapshot is not None
+    assert terminal_candidate.terminal_snapshot.stages_json[0]["node_key"] == "root"
+    assert terminal_candidate.terminal_snapshot.stages_json[0]["terminal_state"] == "succeeded"
+    assert terminal_candidate.ordinary_input_bindings_json is not None
+    assert terminal_candidate.ordinary_input_bindings_json[0]["items"][0]["artifact_id"] == str(
+        records["manifest"].artifact_id
+    )
     await seed.repository.release(lease)
+    async with seed.sessions() as db, db.begin():
+        await db.execute(
+            text("DELETE FROM pipeline_runs WHERE id=:id"), {"id": seed.run_id}
+        )
+        await db.execute(text("DELETE FROM workers WHERE id=:id"), {"id": worker_id})
