@@ -270,13 +270,19 @@ def _validate_builtin_contract(registry: ResourceProfileRegistry) -> None:
         ),
         "pipeline-test-cpu-none@1": ([], ["pipeline-test-cpu"]),
         "terminalgen-generate-gateway@1": (
-            ["loom-secret-tmpfs-v1"],
+            ["loom-secret-tmpfs-v1", "loom-terminalgen-authoring-worker-v1"],
             ["terminalgen-generator"],
         ),
-        "terminalgen-package-none@1": ([], ["terminalgen-packager"]),
-        "terminalgen-plan-none@1": ([], ["terminalgen-planner"]),
+        "terminalgen-package-none@1": (
+            ["loom-terminalgen-authoring-worker-v1"],
+            ["terminalgen-packager"],
+        ),
+        "terminalgen-plan-none@1": (
+            ["loom-terminalgen-authoring-worker-v1"],
+            ["terminalgen-planner"],
+        ),
         "terminalgen-validate-none@1": (
-            ["loom-terminal-task-validator-v1"],
+            ["loom-terminal-task-validator-v1", "loom-terminalgen-authoring-worker-v1"],
             ["terminalgen-validator"],
         ),
     }

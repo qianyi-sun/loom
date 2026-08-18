@@ -80,30 +80,38 @@ def test_terminalgen_profiles_are_closed_cpu_pools_with_profile_owned_pid_limits
             "gateway",
             "terminalgen-generator",
             1_024,
+            {"loom-secret-tmpfs-v1", "loom-terminalgen-authoring-worker-v1"},
         ),
         "terminalgen-package-none@1": (
             "terminalgen-package-none",
             "none",
             "terminalgen-packager",
             512,
+            {"loom-terminalgen-authoring-worker-v1"},
         ),
         "terminalgen-plan-none@1": (
             "terminalgen-plan-none",
             "none",
             "terminalgen-planner",
             256,
+            {"loom-terminalgen-authoring-worker-v1"},
         ),
         "terminalgen-validate-none@1": (
             "terminalgen-validate-none",
             "none",
             "terminalgen-validator",
             2_048,
+            {
+                "loom-terminal-task-validator-v1",
+                "loom-terminalgen-authoring-worker-v1",
+            },
         ),
     }
-    for identity, (pool, network, image_feature, pids) in expected.items():
+    for identity, (pool, network, image_feature, pids, host_features) in expected.items():
         profile = registry.get(identity).profile
         assert profile.network_profile == network
         assert profile.required_image_features == [image_feature]
+        assert set(profile.required_host_runtime_features) == host_features
         assert profile.pids_limit == pids
         assert len(profile.execution_variants) == 1
         variant = profile.execution_variants[0]
@@ -127,9 +135,7 @@ def test_profiles_reject_network_and_memory_accounting_overrides() -> None:
 def test_user_parameters_cannot_select_variant_pool_device_or_network() -> None:
     reject_user_resource_overrides({"task": {"seed": 7}})
     with pytest.raises(ResourceProfileRegistryError, match="execution_variant_id"):
-        reject_user_resource_overrides(
-            {"task": {"execution_variant_id": "gb10-shared-1gpu"}}
-        )
+        reject_user_resource_overrides({"task": {"execution_variant_id": "gb10-shared-1gpu"}})
     with pytest.raises(ResourceProfileRegistryError, match="network_profile"):
         reject_user_resource_overrides({"network_profile": "gateway"})
     with pytest.raises(ResourceProfileRegistryError, match="pids_limit"):

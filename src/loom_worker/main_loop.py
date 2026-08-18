@@ -286,8 +286,9 @@ def _pipeline_registration_payload(
     allocation = None
     cluster_id = os.environ.get("LOOM_SLURM_CLUSTER_ID", "")
     gpu_pool = settings.pool_name in {"behavior-gpu-oldlab", "behavior-gpu-gb10"}
-    cpu_data_pool = settings.pool_name == "behavior-cpu-data"
-    if (gpu_pool or cpu_data_pool) and settings.max_concurrent != 1:
+    terminalgen_pool = settings.pool_name.startswith("terminalgen-")
+    cpu_slurm_pool = settings.pool_name == "behavior-cpu-data" or terminalgen_pool
+    if (gpu_pool or cpu_slurm_pool) and settings.max_concurrent != 1:
         raise GpuCapabilityProbeError("Pipeline Slurm workers require concurrency exactly one")
     if gpu_pool:
         if cluster_id not in {"oldlab", "gb10"}:
@@ -312,7 +313,7 @@ def _pipeline_registration_payload(
             nvidia_smi_csv=completed.stdout,
             meminfo=meminfo,
         )
-    elif cpu_data_pool:
+    elif cpu_slurm_pool:
         validate_oldlab_cpu_allocation(os.environ)
     runtime_features = ["loom-secret-tmpfs-v1"]
     if devices:
@@ -322,6 +323,11 @@ def _pipeline_registration_payload(
 
         if production_pipeline_enabled(settings):
             runtime_features.append("loom-stage1-smoke-worker-v1")
+    elif settings.pool_name in {"terminalgen-package-none", "terminalgen-plan-none"}:
+        from loom_worker.pipeline_execution import production_pipeline_enabled
+
+        if production_pipeline_enabled(settings):
+            runtime_features.append("loom-terminalgen-authoring-worker-v1")
     cache = dict(cache_fields or {})
     snapshot = build_worker_capability_snapshot(
         cpu_arch=cpu_arch,

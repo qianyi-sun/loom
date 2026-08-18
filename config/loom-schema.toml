@@ -1295,6 +1295,12 @@ python_type = "int"
 default     = 0
 description = "Per-container hard PID cap for trial and setup-sidecar containers. Maps to Docker pids_limit. Non-exclusive Slurm policies require a positive ceiling and stay disabled when containment is incomplete."
 
+[service_config.pipeline_terminalgen_authoring_enabled]
+used_by     = ["worker"]
+python_type = "bool"
+default     = false
+description = "Disabled-by-default worker admission for the code-owned terminalgen-authoring@1 runtime. Enabling this flag alone grants no work: pool containment, immutable attempt grants, image contracts, provider bindings, and validation backend capabilities remain mandatory."
+
 [service_config.require_cgroup_parent]
 used_by     = ["worker"]
 python_type = "bool"

@@ -809,7 +809,9 @@ async def register_worker(
             or not required_legacy_network_policies <= projected_network_policies
         ):
             raise HTTPException(status_code=409, detail="legacy_capability_projection_drift")
-        if pool_name.startswith("behavior-") and max_concurrent != 1:
+        if (pool_name.startswith("behavior-") or pool_name.startswith("terminalgen-")) and (
+            max_concurrent != 1
+        ):
             raise HTTPException(status_code=409, detail="pipeline_worker_concurrency_drift")
         if capability_snapshot.gpu_devices:
             if raw_allocation_evidence is None:
@@ -842,7 +844,13 @@ async def register_worker(
                 raise HTTPException(status_code=409, detail="gpu_worker_pool_contract_drift")
         elif raw_allocation_evidence is not None:
             raise HTTPException(status_code=400, detail="cpu_worker_has_gpu_allocation")
-        elif pool_name != "behavior-cpu-data":
+        elif pool_name not in {
+            "behavior-cpu-data",
+            "terminalgen-generate-gateway",
+            "terminalgen-package-none",
+            "terminalgen-plan-none",
+            "terminalgen-validate-none",
+        }:
             raise HTTPException(status_code=409, detail="cpu_worker_pool_contract_drift")
         capability_identity = capability_snapshot.model_dump(mode="json")
     elif raw_allocation_evidence is not None:
