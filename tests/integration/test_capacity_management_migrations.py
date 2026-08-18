@@ -19,9 +19,12 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.engine import Connection, make_url
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from loom_capacity_manager.executable_contracts import (
+    MAX_EXECUTABLE_ADMISSION_PROPOSAL_BYTES,
+)
 from loom_capacity_manager.models import CapacityAuditEvent, CapacityAuthorityState
 from loom_capacity_manager.schema_startup import (
     CapacitySchemaNotAtHeadError,
@@ -47,11 +50,15 @@ EXPECTED_TABLES = {
     "capacity_execution_executors",
     "capacity_executable_bootstrap_acknowledgements",
     "capacity_executable_bootstrap_proposals",
+    "capacity_executable_admission_acknowledgements",
+    "capacity_executable_admission_closure_acknowledgements",
+    "capacity_executable_admission_proposals",
     "capacity_executable_command_receipts",
     "capacity_executable_executor_states",
     "capacity_executable_intents",
     "capacity_executable_launch_rate_buckets",
     "capacity_executable_protected_release_receipts",
+    "capacity_executable_tranches",
     "capacity_fairness_state",
     "capacity_launch_permits",
     "capacity_launch_rate_buckets",
@@ -69,6 +76,21 @@ EXPECTED_TABLES = {
     "capacity_worker_profiles",
 }
 
+CAPACITY_0014_FUNCTION_SIGNATURES = (
+    "public.capacity_executable_canonical_jsonb_text(jsonb)",
+    "public.capacity_executable_admission_proposal_payload_is_exact("
+    "jsonb,uuid,bigint,bigint,uuid,uuid,text,text,text,text,timestamptz)",
+    "public.capacity_executable_admission_ack_payload_is_exact(jsonb,jsonb)",
+    "public.capacity_executable_intent_protected_bootstrap_guard()",
+    "public.capacity_executable_admission_proposal_insert_guard()",
+    "public.capacity_executable_admission_ack_insert_guard()",
+    "public.capacity_executable_admission_closure_ack_insert_guard()",
+)
+
+CAPACITY_0012_INTENT_GUARD_SIGNATURE = (
+    "public.capacity_executable_intent_protected_bootstrap_guard()"
+)
+
 
 def _normalize_sql(sql: str) -> str:
     return " ".join(sql.split())
@@ -80,6 +102,39 @@ def _capacity_config(url: str) -> AlembicConfig:
     cfg.set_main_option("script_location", str(root / "capacity_migrations"))
     os.environ["LOOM_CAPACITY_DB_URL"] = url
     return cfg
+
+
+def _assert_function_execute_acls_are_owner_only(
+    connection: Connection,
+    *,
+    signatures: tuple[str, ...],
+) -> None:
+    owner = connection.execute(text("SELECT current_user")).scalar_one()
+    rows = connection.execute(
+        text(
+            "WITH requested(signature) AS ("
+            "SELECT unnest(CAST(:signatures AS text[]))"
+            ") "
+            "SELECT requested.signature, "
+            "pg_get_userbyid(procedure.proowner) AS procedure_owner, "
+            "CASE WHEN privilege.grantee = 0 THEN 'PUBLIC' "
+            "ELSE pg_get_userbyid(privilege.grantee) END AS grantee, "
+            "pg_get_userbyid(privilege.grantor) AS grantor, "
+            "privilege.privilege_type, privilege.is_grantable "
+            "FROM requested "
+            "JOIN pg_proc AS procedure "
+            "ON procedure.oid = to_regprocedure(requested.signature) "
+            "CROSS JOIN LATERAL aclexplode(COALESCE("
+            "procedure.proacl, acldefault('f', procedure.proowner)"
+            ")) AS privilege "
+            "ORDER BY requested.signature, grantee, privilege.privilege_type"
+        ),
+        {"signatures": list(signatures)},
+    ).all()
+    assert rows == [
+        (signature, owner, owner, owner, "EXECUTE", False)
+        for signature in sorted(signatures)
+    ]
 
 
 def _seed_execution_pools(connection: Connection, *, configuration_epoch: int) -> None:
@@ -1924,6 +1979,673 @@ def test_capacity_0007_upgrade_and_downgrade_ignore_search_path(
         engine.dispose()
 
 
+def _insert_unchecked_capacity_0014_admission_proposal(
+    connection: sqlalchemy.Connection,
+    *,
+    proposal_payload: dict[str, object] | None = None,
+) -> None:
+    connection.execute(
+        text(
+            "ALTER TABLE public.capacity_executable_admission_proposals "
+            "DISABLE TRIGGER ALL"
+        )
+    )
+    connection.execute(
+        text(
+            "INSERT INTO public.capacity_executable_admission_proposals "
+            "(id, proposal_id, plan_id, admission_incarnation, tranche_id, "
+            "execution_epoch, execution_manifest_sha256, allocation_epoch, "
+            "subject_id, subject_incarnation, pool_id, reporter_incarnation, "
+            "protected_admission_sha256, manager_input_digest, "
+            "manager_allocation_digest, proposal_digest, proposal_payload, expires_at) "
+            "VALUES (:id, :proposal_id, :plan_id, :admission_incarnation, :tranche_id, "
+            "1, repeat('1', 64), 1, :subject_id, :subject_incarnation, 'oldlab', "
+            ":reporter_incarnation, repeat('2', 64), repeat('3', 64), "
+            "repeat('4', 64), repeat('5', 64), CAST(:proposal_payload AS jsonb), "
+            "now() + interval '1 minute')"
+        ),
+        {
+            "id": uuid4(),
+            "proposal_id": uuid4(),
+            "plan_id": uuid4(),
+            "admission_incarnation": uuid4(),
+            "tranche_id": uuid4(),
+            "subject_id": uuid4(),
+            "subject_incarnation": uuid4(),
+            "reporter_incarnation": uuid4(),
+            "proposal_payload": json.dumps(proposal_payload or {}),
+        },
+    )
+    connection.execute(
+        text(
+            "ALTER TABLE public.capacity_executable_admission_proposals "
+            "ENABLE TRIGGER ALL"
+        )
+    )
+
+
+def _insert_unchecked_capacity_0014_admission_closure_acknowledgement(
+    connection: sqlalchemy.Connection,
+) -> None:
+    proposal = connection.execute(
+        text(
+            "SELECT proposal_id, proposal_digest, plan_id, admission_incarnation, "
+            "subject_id, subject_incarnation, reporter_incarnation, "
+            "protected_admission_sha256 "
+            "FROM public.capacity_executable_admission_proposals"
+        )
+    ).mappings().one()
+    connection.execute(
+        text(
+            "ALTER TABLE public.capacity_executable_admission_closure_acknowledgements "
+            "DISABLE TRIGGER ALL"
+        )
+    )
+    connection.execute(
+        text(
+            "INSERT INTO public.capacity_executable_admission_closure_acknowledgements "
+            "(id, idempotency_key, closure_id, proposal_id, proposal_digest, "
+            "plan_id, admission_incarnation, subject_id, subject_incarnation, "
+            "reporter_incarnation, protected_admission_sha256, close_reason, "
+            "disposition_kind, disposition_digest, acknowledgement_digest, "
+            "actor_id, acknowledgement_payload) VALUES "
+            "(:id, :idempotency_key, :closure_id, :proposal_id, :proposal_digest, "
+            ":plan_id, :admission_incarnation, :subject_id, :subject_incarnation, "
+            ":reporter_incarnation, :protected_admission_sha256, 'manager-closed', "
+            "'never-converged', repeat('6', 64), repeat('7', 64), "
+            "'migration-test', '{}'::jsonb)"
+        ),
+        {
+            "id": uuid4(),
+            "idempotency_key": uuid4(),
+            "closure_id": uuid4(),
+            **proposal,
+        },
+    )
+    connection.execute(
+        text(
+            "ALTER TABLE public.capacity_executable_admission_closure_acknowledgements "
+            "ENABLE TRIGGER ALL"
+        )
+    )
+
+
+def _insert_unchecked_capacity_0014_bootstrap_without_launch_intent(
+    connection: sqlalchemy.Connection,
+    *,
+    state: str,
+) -> None:
+    allocation_epoch = _seed_executable_allocation_history(connection)
+    executor_incarnation = connection.execute(
+        text(
+            "SELECT executor_incarnation FROM public.capacity_execution_executors "
+            "WHERE pool_id = 'gb10'"
+        )
+    ).scalar_one()
+    intent_id = uuid4()
+    tranche_id = uuid4()
+    subject_id = uuid4()
+    subject_incarnation = uuid4()
+    shape_instance_id = "shape-capacity-0014-only"
+    binding_payload = {
+        "schema_version": 2,
+        "intent_id": str(intent_id),
+        "tranche_id": str(tranche_id),
+        "shape_instance_id": shape_instance_id,
+        "subject_id": str(subject_id),
+        "subject_incarnation": str(subject_incarnation),
+        "pool_id": "gb10",
+        "pool_generation": 1,
+        "executor_id": "gb10-executor",
+        "executor_incarnation": str(executor_incarnation),
+        "resources": {"cpu": 1},
+        "node_ids": [],
+        "execution": {
+            "configuration_epoch": 1,
+            "allocation_epoch": allocation_epoch,
+            "execution_epoch": 1,
+            "execution_manifest_sha256": "6" * 64,
+        },
+    }
+    has_terminal_evidence = state in {"closing", "released"}
+    connection.execute(
+        text(
+            "INSERT INTO public.capacity_executable_tranches "
+            "(tranche_id, execution_epoch, execution_manifest_sha256, "
+            "configuration_epoch, allocation_epoch, executor_id, "
+            "executor_incarnation, pool_id, pool_generation, subject_id, "
+            "subject_incarnation, proposal_digest, proposal_payload) VALUES "
+            "(:tranche_id, 1, repeat('6', 64), 1, :allocation_epoch, "
+            "'gb10-executor', :executor_incarnation, 'gb10', 1, "
+            ":subject_id, :subject_incarnation, repeat('1', 64), '{}'::jsonb)"
+        ),
+        {
+            "tranche_id": tranche_id,
+            "allocation_epoch": allocation_epoch,
+            "executor_incarnation": executor_incarnation,
+            "subject_id": subject_id,
+            "subject_incarnation": subject_incarnation,
+        },
+    )
+    connection.execute(text("ALTER TABLE public.capacity_executable_intents DISABLE TRIGGER ALL"))
+    try:
+        connection.execute(
+            text(
+                "INSERT INTO public.capacity_executable_intents "
+                "(id, intent_id, tranche_id, shape_instance_id, execution_epoch, "
+                "execution_manifest_sha256, configuration_epoch, allocation_epoch, "
+                "executor_id, executor_incarnation, pool_id, pool_generation, "
+                "subject_id, subject_incarnation, launch_rank, proposal_digest, "
+                "proposal_payload, binding_digest, binding_payload, state, accepted_at, "
+                "bootstrap_registration_epoch, bootstrap_evidence_sha256, "
+                "launch_ready_at, inventory_sequence, observed_state, terminal_kind, "
+                "terminal_identity, terminal_evidence_sha256, released_at) VALUES "
+                "(:id, :intent_id, :tranche_id, :shape_instance_id, 1, "
+                "repeat('6', 64), 1, :allocation_epoch, 'gb10-executor', "
+                ":executor_incarnation, 'gb10', 1, :subject_id, :subject_incarnation, "
+                "1, repeat('1', 64), '{}'::jsonb, repeat('2', 64), "
+                "CAST(:binding_payload AS jsonb), :state, now(), 1, repeat('8', 64), "
+                "NULL, :inventory_sequence, NULL, :terminal_kind, :terminal_identity, "
+                ":terminal_evidence_sha256, "
+                "CASE WHEN :state = 'released' THEN now() ELSE NULL END)"
+            ),
+            {
+                "id": uuid4(),
+                "intent_id": intent_id,
+                "tranche_id": tranche_id,
+                "shape_instance_id": shape_instance_id,
+                "allocation_epoch": allocation_epoch,
+                "executor_incarnation": executor_incarnation,
+                "subject_id": subject_id,
+                "subject_incarnation": subject_incarnation,
+                "binding_payload": json.dumps(binding_payload),
+                "state": state,
+                "inventory_sequence": 1 if has_terminal_evidence else None,
+                "terminal_kind": "unused" if has_terminal_evidence else None,
+                "terminal_identity": shape_instance_id if has_terminal_evidence else None,
+                "terminal_evidence_sha256": "9" * 64 if has_terminal_evidence else None,
+            },
+        )
+    finally:
+        connection.execute(text("ALTER TABLE public.capacity_executable_intents ENABLE TRIGGER ALL"))
+
+
+def _seed_capacity_0007_intent(
+    connection: sqlalchemy.Connection,
+    *,
+    state: str,
+    repeated_scope: bool = False,
+) -> None:
+    subject_id = uuid4()
+    subject_incarnation = uuid4()
+    ranks = [
+        {
+            "rank": 1,
+            "subject_id": str(subject_id),
+            "pool_id": "gb10",
+            "shape_instance_id": "shape-legacy-00000001",
+        }
+    ]
+    if repeated_scope:
+        ranks.append(
+            {
+                "rank": 2,
+                "subject_id": str(subject_id),
+                "pool_id": "gb10",
+                "shape_instance_id": "shape-legacy-00000002",
+            }
+        )
+    allocation_epoch = _seed_executable_allocation_history(
+        connection,
+        complete_payload={
+            "allocations": [],
+            "hypothetical_launch_rank": ranks,
+        },
+    )
+    executor_incarnation = connection.execute(
+        text(
+            "SELECT executor_incarnation FROM public.capacity_execution_executors "
+            "WHERE pool_id = 'gb10'"
+        )
+    ).scalar_one()
+    permit_id = uuid4() if state == "permitted" else None
+    connection.execute(
+        text("ALTER TABLE public.capacity_executable_intents DISABLE TRIGGER ALL")
+    )
+    try:
+        connection.execute(
+            text(
+                "INSERT INTO public.capacity_executable_intents "
+                "(id, intent_id, tranche_id, shape_instance_id, execution_epoch, "
+                "execution_manifest_sha256, configuration_epoch, allocation_epoch, "
+                "executor_id, executor_incarnation, pool_id, pool_generation, "
+                "subject_id, subject_incarnation, launch_rank, proposal_digest, "
+                "proposal_payload, binding_digest, binding_payload, state, accepted_at, "
+                "bootstrap_registration_epoch, bootstrap_evidence_sha256, "
+                "launch_ready_at, permit_id, permit_epoch, permit_digest, permit_payload, "
+                "permit_expires_at, inventory_sequence, observed_state) VALUES "
+                "(:id, :intent_id, :tranche_id, 'shape-legacy-00000001', 1, "
+                "repeat('6', 64), 1, :allocation_epoch, 'gb10-executor', "
+                ":executor_incarnation, 'gb10', 1, :subject_id, :subject_incarnation, "
+                "1, repeat('1', 64), '{}'::jsonb, repeat('2', 64), '{}'::jsonb, "
+                ":state, now(), 1, repeat('3', 64), now(), CAST(:permit_id AS uuid), "
+                "CASE WHEN CAST(:permit_id AS uuid) IS NULL THEN NULL ELSE 1 END, "
+                "CASE WHEN CAST(:permit_id AS uuid) IS NULL "
+                "THEN NULL ELSE repeat('4', 64) END, "
+                "CASE WHEN CAST(:permit_id AS uuid) IS NULL "
+                "THEN NULL ELSE '{}'::jsonb END, "
+                "CASE WHEN CAST(:permit_id AS uuid) IS NULL "
+                "THEN NULL ELSE now() + interval '1 minute' END, "
+                "CASE WHEN :state = 'observed' THEN 1 ELSE NULL END, "
+                "CASE WHEN :state = 'observed' THEN 'active' ELSE NULL END)"
+            ),
+            {
+                "id": uuid4(),
+                "intent_id": uuid4(),
+                "tranche_id": uuid4(),
+                "allocation_epoch": allocation_epoch,
+                "executor_incarnation": executor_incarnation,
+                "subject_id": subject_id,
+                "subject_incarnation": subject_incarnation,
+                "state": state,
+                "permit_id": permit_id,
+            },
+        )
+    finally:
+        connection.execute(
+            text("ALTER TABLE public.capacity_executable_intents ENABLE TRIGGER ALL")
+        )
+
+
+@pytest.mark.parametrize("state", ("launch-ready", "permitted"))
+def test_capacity_0014_refuses_bootstrap_only_launchable_legacy_intents(
+    isolated_capacity_migration_url: str,
+    state: str,
+) -> None:
+    """Pre-admission launch authority must not survive the admission-gate upgrade."""
+
+    cfg = _capacity_config(isolated_capacity_migration_url)
+    command.upgrade(cfg, "capacity_0007")
+    engine = create_engine(isolated_capacity_migration_url)
+    try:
+        with engine.begin() as connection:
+            _seed_capacity_0007_intent(connection, state=state)
+
+        with pytest.raises(
+            RuntimeError,
+            match="cannot upgrade capacity_0014 with bootstrap-only launch authority",
+        ):
+            command.upgrade(cfg, "capacity_0014")
+
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "capacity_0007"
+            assert connection.execute(
+                text("SELECT state FROM public.capacity_executable_intents")
+            ).scalar_one() == state
+    finally:
+        engine.dispose()
+
+
+def test_capacity_0014_refuses_partial_legacy_multi_shape_scope(
+    isolated_capacity_migration_url: str,
+) -> None:
+    """A legacy one-intent tranche cannot represent a partially-created batched scope."""
+
+    cfg = _capacity_config(isolated_capacity_migration_url)
+    command.upgrade(cfg, "capacity_0007")
+    engine = create_engine(isolated_capacity_migration_url)
+    try:
+        with engine.begin() as connection:
+            _seed_capacity_0007_intent(
+                connection,
+                state="observed",
+                repeated_scope=True,
+            )
+
+        with pytest.raises(
+            RuntimeError,
+            match="cannot upgrade capacity_0014 with unbatchable legacy intent scope",
+        ):
+            command.upgrade(cfg, "capacity_0014")
+
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "capacity_0007"
+    finally:
+        engine.dispose()
+
+
+def test_capacity_0014_adds_batched_tranche_and_protected_admission_schema(
+    isolated_capacity_migration_url: str,
+) -> None:
+    """Keeping one-intent tranches or mutable admission evidence must fail migration review."""
+
+    cfg = _capacity_config(isolated_capacity_migration_url)
+    command.upgrade(cfg, "capacity_0013")
+    engine = create_engine(isolated_capacity_migration_url)
+    migration = importlib.import_module(
+        "capacity_migrations.versions.capacity_0014_protected_admission_plan"
+    )
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("CREATE SCHEMA capacity_admission_decoy"))
+            connection.execute(
+                text("SET LOCAL search_path TO capacity_admission_decoy, pg_catalog")
+            )
+            migration_context = MigrationContext.configure(connection)
+            with Operations.context(migration_context):
+                migration.upgrade()
+
+            public_tables = set(inspect(connection).get_table_names(schema="public"))
+            assert {
+                "capacity_executable_admission_acknowledgements",
+                "capacity_executable_admission_closure_acknowledgements",
+                "capacity_executable_admission_proposals",
+                "capacity_executable_tranches",
+            } <= public_tables
+            assert not inspect(connection).get_table_names(schema="capacity_admission_decoy")
+            closure_ack_columns = {
+                item["name"]
+                for item in inspect(connection).get_columns(
+                    "capacity_executable_admission_closure_acknowledgements",
+                    schema="public",
+                )
+            }
+            assert {"disposition_kind", "disposition_digest"} <= closure_ack_columns
+            assert "abandonment_digest" not in closure_ack_columns
+
+            intent_uniques = {
+                item["name"]
+                for item in inspect(connection).get_unique_constraints(
+                    "capacity_executable_intents",
+                    schema="public",
+                )
+            }
+            assert "capacity_executable_tranche_identity_key" not in intent_uniques
+            assert "capacity_executable_tranche_intent_key" in intent_uniques
+            state_check = next(
+                item["sqltext"]
+                for item in inspect(connection).get_check_constraints(
+                    "capacity_executable_intents",
+                    schema="public",
+                )
+                if item["name"] == "capacity_executable_intent_state_check"
+            )
+            assert "bootstrap-acknowledged" in state_check
+            execution_quantity_check = next(
+                item["sqltext"]
+                for item in inspect(connection).get_check_constraints(
+                    "capacity_execution_epochs",
+                    schema="public",
+                )
+                if item["name"] == "capacity_execution_epoch_quantity_check"
+            )
+            assert "requested_ceiling > 0" in execution_quantity_check
+            assert "requested_ceiling = 1" not in execution_quantity_check
+
+            functions = dict(
+                connection.execute(
+                    text(
+                        "SELECT proname, array_to_string(proconfig, ',') "
+                        "FROM pg_proc JOIN pg_namespace "
+                        "ON pg_namespace.oid = pronamespace "
+                        "WHERE nspname = 'public' AND proname IN "
+                        "('capacity_executable_admission_proposal_insert_guard', "
+                        "'capacity_executable_admission_ack_insert_guard', "
+                        "'capacity_executable_admission_closure_ack_insert_guard', "
+                        "'capacity_executable_intent_protected_bootstrap_guard')"
+                    )
+                ).all()
+            )
+            assert functions == {
+                "capacity_executable_admission_ack_insert_guard": "search_path=pg_catalog",
+                "capacity_executable_admission_closure_ack_insert_guard": (
+                    "search_path=pg_catalog"
+                ),
+                "capacity_executable_admission_proposal_insert_guard": (
+                    "search_path=pg_catalog"
+                ),
+                "capacity_executable_intent_protected_bootstrap_guard": (
+                    "search_path=pg_catalog"
+                ),
+            }
+
+            with Operations.context(migration_context):
+                migration.downgrade()
+            assert {
+                "capacity_executable_admission_acknowledgements",
+                "capacity_executable_admission_closure_acknowledgements",
+                "capacity_executable_admission_proposals",
+                "capacity_executable_tranches",
+            }.isdisjoint(inspect(connection).get_table_names(schema="public"))
+            restored_uniques = {
+                item["name"]
+                for item in inspect(connection).get_unique_constraints(
+                    "capacity_executable_intents",
+                    schema="public",
+                )
+            }
+            assert "capacity_executable_tranche_identity_key" in restored_uniques
+    finally:
+        engine.dispose()
+
+
+def test_capacity_0014_fresh_upgrade_makes_all_new_functions_owner_only(
+    isolated_capacity_migration_url: str,
+) -> None:
+    """Every internal capacity_0014 helper must reject implicit PUBLIC execution."""
+
+    cfg = _capacity_config(isolated_capacity_migration_url)
+    command.upgrade(cfg, "capacity_0014")
+    engine = create_engine(isolated_capacity_migration_url)
+    try:
+        with engine.connect() as connection:
+            _assert_function_execute_acls_are_owner_only(
+                connection,
+                signatures=CAPACITY_0014_FUNCTION_SIGNATURES,
+            )
+    finally:
+        engine.dispose()
+
+
+def test_capacity_0014_downgrade_and_reupgrade_preserve_owner_only_function_acls(
+    isolated_capacity_migration_url: str,
+) -> None:
+    """Recreated legacy and head helpers must not reacquire PUBLIC execution."""
+
+    cfg = _capacity_config(isolated_capacity_migration_url)
+    command.upgrade(cfg, "capacity_0014")
+    command.downgrade(cfg, "capacity_0013")
+    engine = create_engine(isolated_capacity_migration_url)
+    try:
+        with engine.connect() as connection:
+            _assert_function_execute_acls_are_owner_only(
+                connection,
+                signatures=(CAPACITY_0012_INTENT_GUARD_SIGNATURE,),
+            )
+        command.upgrade(cfg, "capacity_0014")
+        with engine.connect() as connection:
+            _assert_function_execute_acls_are_owner_only(
+                connection,
+                signatures=CAPACITY_0014_FUNCTION_SIGNATURES,
+            )
+    finally:
+        engine.dispose()
+
+
+def test_capacity_0014_admission_evidence_is_append_only(
+    isolated_capacity_migration_url: str,
+) -> None:
+    """Allowing a committed protected plan proposal to change must fail."""
+
+    cfg = _capacity_config(isolated_capacity_migration_url)
+    command.upgrade(cfg, "capacity_0014")
+    engine = create_engine(isolated_capacity_migration_url)
+    try:
+        with engine.begin() as connection:
+            _insert_unchecked_capacity_0014_admission_proposal(connection)
+        for statement in (
+            "UPDATE public.capacity_executable_admission_proposals "
+            "SET manager_input_digest = repeat('9', 64)",
+            "DELETE FROM public.capacity_executable_admission_proposals",
+            "TRUNCATE public.capacity_executable_admission_closure_acknowledgements, "
+            "public.capacity_executable_admission_acknowledgements, "
+            "public.capacity_executable_admission_proposals",
+        ):
+            with pytest.raises(DBAPIError, match="append-only"):
+                with engine.begin() as connection:
+                    connection.execute(text(statement))
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "statement",
+    (
+        "UPDATE public.capacity_executable_admission_closure_acknowledgements "
+        "SET disposition_digest = disposition_digest",
+        "DELETE FROM public.capacity_executable_admission_closure_acknowledgements",
+        "TRUNCATE public.capacity_executable_admission_closure_acknowledgements",
+    ),
+)
+def test_capacity_0014_admission_closure_acknowledgements_are_append_only(
+    isolated_capacity_migration_url: str,
+    statement: str,
+) -> None:
+    """Every direct mutation path must preserve a committed closure receipt."""
+
+    cfg = _capacity_config(isolated_capacity_migration_url)
+    command.upgrade(cfg, "capacity_0014")
+    engine = create_engine(isolated_capacity_migration_url)
+    try:
+        with engine.begin() as connection:
+            _insert_unchecked_capacity_0014_admission_proposal(connection)
+            _insert_unchecked_capacity_0014_admission_closure_acknowledgement(
+                connection
+            )
+        with pytest.raises(DBAPIError, match="append-only"):
+            with engine.begin() as connection:
+                connection.execute(text(statement))
+        with engine.connect() as connection:
+            assert connection.execute(
+                text(
+                    "SELECT count(*) FROM "
+                    "public.capacity_executable_admission_closure_acknowledgements"
+                )
+            ).scalar_one() == 1
+    finally:
+        engine.dispose()
+
+
+def test_capacity_0014_persists_the_exact_shared_admission_response_boundary(
+    isolated_capacity_migration_url: str,
+) -> None:
+    """Persistence must accept the derived exact limit and reject one byte more."""
+
+    cfg = _capacity_config(isolated_capacity_migration_url)
+    command.upgrade(cfg, "capacity_0014")
+    engine = create_engine(isolated_capacity_migration_url)
+    empty_payload_bytes = len(b'{"padding":""}')
+    exact = {
+        "padding": "x"
+        * (MAX_EXECUTABLE_ADMISSION_PROPOSAL_BYTES - empty_payload_bytes)
+    }
+    oversized = {"padding": exact["padding"] + "x"}
+    assert len(
+        json.dumps(exact, sort_keys=True, separators=(",", ":")).encode("ascii")
+    ) == MAX_EXECUTABLE_ADMISSION_PROPOSAL_BYTES
+    try:
+        with engine.begin() as connection:
+            _insert_unchecked_capacity_0014_admission_proposal(
+                connection,
+                proposal_payload=exact,
+            )
+        with pytest.raises(
+            DBAPIError,
+            match="capacity_executable_admission_proposal_payload_check",
+        ):
+            with engine.begin() as connection:
+                _insert_unchecked_capacity_0014_admission_proposal(
+                    connection,
+                    proposal_payload=oversized,
+                )
+    finally:
+        engine.dispose()
+
+
+def test_capacity_0014_refuses_downgrade_with_protected_admission_evidence(
+    isolated_capacity_migration_url: str,
+) -> None:
+    """Dropping durable local-plan acknowledgement history must fail closed."""
+
+    cfg = _capacity_config(isolated_capacity_migration_url)
+    command.upgrade(cfg, "capacity_0014")
+    engine = create_engine(isolated_capacity_migration_url)
+    try:
+        with engine.begin() as connection:
+            _insert_unchecked_capacity_0014_admission_proposal(connection)
+
+        with pytest.raises(
+            RuntimeError,
+            match="cannot downgrade capacity_0014 while protected admission evidence exists",
+        ):
+            command.downgrade(cfg, "capacity_0013")
+
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "capacity_0014"
+            assert connection.execute(
+                text("SELECT count(*) FROM capacity_executable_admission_proposals")
+            ).scalar_one() == 1
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("state", ("closing", "released", "quarantined"))
+def test_capacity_0014_refuses_downgrade_with_bootstrap_without_launch_tuple(
+    isolated_capacity_migration_url: str,
+    state: str,
+) -> None:
+    """capacity_0013 cannot safely continue retained bootstrap evidence without launch."""
+
+    cfg = _capacity_config(isolated_capacity_migration_url)
+    command.upgrade(cfg, "capacity_0014")
+    engine = create_engine(isolated_capacity_migration_url)
+    try:
+        with engine.begin() as connection:
+            _insert_unchecked_capacity_0014_bootstrap_without_launch_intent(
+                connection,
+                state=state,
+            )
+
+        with pytest.raises(
+            RuntimeError,
+            match="cannot downgrade capacity_0014 with capacity_0014-only executable history",
+        ):
+            command.downgrade(cfg, "capacity_0013")
+
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == "capacity_0014"
+            assert connection.execute(
+                text(
+                    "SELECT count(*) FROM public.capacity_executable_intents "
+                    "WHERE state = :state "
+                    "AND bootstrap_registration_epoch IS NOT NULL "
+                    "AND bootstrap_evidence_sha256 IS NOT NULL "
+                    "AND launch_ready_at IS NULL"
+                ),
+                {"state": state},
+            ).scalar_one() == 1
+    finally:
+        engine.dispose()
+
+
 def test_capacity_schema_has_independent_revision_table(
     capacity_postgres_url: str,
     postgres_url: str,
@@ -1934,12 +2656,12 @@ def test_capacity_schema_has_independent_revision_table(
         with capacity_engine.connect() as connection:
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == ("capacity_0013")
+            ).scalar_one() == ("capacity_0014")
         with environment_engine.connect() as connection:
             environment_revision = connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one()
-            assert environment_revision != "capacity_0013"
+            assert environment_revision != "capacity_0014"
             assert not (EXPECTED_TABLES & set(inspect(connection).get_table_names()))
     finally:
         capacity_engine.dispose()
@@ -1961,7 +2683,7 @@ async def test_capacity_schema_error_uses_installed_capacity_migration_command(
 async def test_capacity_schema_startup_returns_numeric_head(
     capacity_engine: AsyncEngine,
 ) -> None:
-    assert await assert_capacity_schema_at_head(capacity_engine) == 13
+    assert await assert_capacity_schema_at_head(capacity_engine) == 14
 
 
 def test_package3_tables_are_database_constrained_to_dry_run(

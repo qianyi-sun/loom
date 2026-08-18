@@ -1345,7 +1345,7 @@ async def test_inert_attempt_lifecycle_is_exact_monotonic_and_terminal(
         operation="cancel",
         expected_sequence=2,
     )
-    async with _agent_session(capacity_guard_database) as session:
+    async with _serializable_agent_session(capacity_guard_database) as session:
         prepared = CapacityPreparedAdmissionStore(session, registration=registration)
         lifecycle = CapacityAttemptLifecycleStore(session, registration=registration)
         await prepared.prepare_plan(plan)

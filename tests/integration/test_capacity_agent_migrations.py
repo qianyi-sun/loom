@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import uuid4
 
@@ -11,7 +13,19 @@ from alembic import command
 from alembic.config import Config as AlembicConfig
 from psycopg.errors import InsufficientPrivilege, ObjectNotInPrerequisiteState
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from loom_capacity_agent.contracts import AgentRegistrationV1
+from loom_capacity_agent.store import (
+    CapacityAgentStore,
+    capture_demand_observation,
+    capture_lifecycle_demand_observation,
+    read_agent_lifecycle_demand_observation,
+)
+from loom_capacity_guard.contracts import GuardFenceV1
+from loom_capacity_guard.store import CapacityGuardStore
 
 
 def _value(database: dict[str, object], key: str) -> str:
@@ -30,6 +44,239 @@ def _guard_config(database: dict[str, object]) -> AlembicConfig:
     os.environ["LOOM_CAPACITY_GUARD_EXECUTOR_ROLE"] = _value(database, "executor_role")
     os.environ["LOOM_CAPACITY_GUARD_OBSERVER_ROLE"] = _value(database, "observer_role")
     return cfg
+
+
+@asynccontextmanager
+async def _guard_owner_session(
+    database: dict[str, object],
+) -> AsyncIterator[tuple[CapacityAgentStore, CapacityGuardStore, AsyncSession]]:
+    engine = create_async_engine(
+        make_url(_value(database, "migrator_url")),
+        isolation_level="SERIALIZABLE",
+    )
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    owner_role = _value(database, "owner_role")
+    quoted_owner = engine.sync_engine.dialect.identifier_preparer.quote(owner_role)
+    try:
+        async with factory() as session, session.begin():
+            await session.execute(text(f"SET LOCAL ROLE {quoted_owner}"))
+            yield (
+                CapacityAgentStore(
+                    session,
+                    expected_owner_role=owner_role,
+                    expected_agent_role=_value(database, "agent_role"),
+                ),
+                CapacityGuardStore(session, expected_owner_role=owner_role),
+                session,
+            )
+    finally:
+        await engine.dispose()
+
+
+@asynccontextmanager
+async def _guard_agent_session(database: dict[str, object]) -> AsyncIterator[AsyncSession]:
+    engine = create_async_engine(
+        make_url(_value(database, "agent_url")),
+        isolation_level="SERIALIZABLE",
+    )
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with factory() as session, session.begin():
+            yield session
+    finally:
+        await engine.dispose()
+
+
+def _distinct_candidate_fence() -> GuardFenceV1:
+    return GuardFenceV1(
+        environment_id="dev-candidate-provenance",
+        subject_id=uuid4(),
+        subject_incarnation=uuid4(),
+        authority_incarnation=uuid4(),
+        reporter_incarnation=uuid4(),
+        deployment_generation=1,
+        configuration_generation=1,
+        candidate_digest="a" * 64,
+    )
+
+
+def _distinct_candidate_registration(fence: GuardFenceV1) -> AgentRegistrationV1:
+    return AgentRegistrationV1(
+        environment_id=fence.environment_id,
+        subject_id=fence.subject_id,
+        subject_incarnation=fence.subject_incarnation,
+        authority_incarnation=fence.authority_incarnation,
+        agent_incarnation=uuid4(),
+        reporter_incarnation=fence.reporter_incarnation,
+        candidate_digest=fence.candidate_digest,
+        candidate_identity_algorithm="git-sha1",
+        candidate_identity="b" * 40,
+        candidate_publication_sha256="c" * 64,
+        deployment_generation=fence.deployment_generation,
+        configuration_generation=fence.configuration_generation,
+    )
+
+
+@pytest.mark.asyncio
+async def test_capture_observations_emit_exact_candidate_provenance(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    fence = _distinct_candidate_fence()
+    registration = _distinct_candidate_registration(fence)
+    assert len(
+        {
+            registration.candidate_digest,
+            registration.candidate_identity_algorithm,
+            registration.candidate_identity,
+            registration.candidate_publication_sha256,
+        }
+    ) == 4
+    async with _guard_owner_session(capacity_guard_database) as (
+        agent_store,
+        guard_store,
+        _,
+    ):
+        await guard_store.initialize_disabled_authority(fence)
+        await agent_store.register_agent(registration)
+
+    async with _guard_agent_session(capacity_guard_database) as session:
+        demand = await capture_demand_observation(
+            session,
+            registration=registration,
+            expected_high_water=0,
+            max_attempts=100,
+        )
+    async with _guard_agent_session(capacity_guard_database) as session:
+        lifecycle = await capture_lifecycle_demand_observation(
+            session,
+            registration=registration,
+            expected_high_water=1,
+            max_attempts=100,
+        )
+    async with _guard_agent_session(capacity_guard_database) as session:
+        recovered = await read_agent_lifecycle_demand_observation(
+            session,
+            registration=registration,
+            sequence=2,
+        )
+
+    assert demand.candidate_digest == registration.candidate_digest
+    assert demand.candidate_identity_algorithm == registration.candidate_identity_algorithm
+    assert demand.candidate_identity == registration.candidate_identity
+    assert demand.candidate_publication_sha256 == registration.candidate_publication_sha256
+    assert lifecycle.candidate_digest == registration.candidate_digest
+    assert lifecycle.candidate_identity_algorithm == registration.candidate_identity_algorithm
+    assert lifecycle.candidate_identity == registration.candidate_identity
+    assert lifecycle.candidate_publication_sha256 == registration.candidate_publication_sha256
+    assert recovered == lifecycle
+
+
+def _capture_candidate_payloads(
+    database: dict[str, object],
+    registration: AgentRegistrationV1,
+    *,
+    expected_high_water: int,
+) -> tuple[dict[str, object], dict[str, object]]:
+    engine = create_engine(
+        _value(database, "agent_url"),
+        isolation_level="SERIALIZABLE",
+    )
+    try:
+        with engine.begin() as connection:
+            demand = connection.execute(
+                text(
+                    "SELECT loom_capacity_guard.capture_demand_observation("
+                    ":agent_incarnation, :expected_high_water, :max_attempts)"
+                ),
+                {
+                    "agent_incarnation": registration.agent_incarnation,
+                    "expected_high_water": expected_high_water,
+                    "max_attempts": 100,
+                },
+            ).scalar_one()
+            lifecycle = connection.execute(
+                text(
+                    "SELECT loom_capacity_guard."
+                    "capture_lifecycle_demand_observation("
+                    ":agent_incarnation, :expected_high_water, :max_attempts)"
+                ),
+                {
+                    "agent_incarnation": registration.agent_incarnation,
+                    "expected_high_water": expected_high_water + 1,
+                    "max_attempts": 100,
+                },
+            ).scalar_one()
+    finally:
+        engine.dispose()
+    assert isinstance(demand, dict)
+    assert isinstance(lifecycle, dict)
+    return demand, lifecycle
+
+
+def _assert_candidate_provenance(
+    payloads: tuple[dict[str, object], dict[str, object]],
+    registration: AgentRegistrationV1,
+) -> None:
+    for payload in payloads:
+        assert payload["candidate_digest"] == registration.candidate_digest
+        assert (
+            payload["candidate_identity_algorithm"]
+            == registration.candidate_identity_algorithm
+        )
+        assert payload["candidate_identity"] == registration.candidate_identity
+        assert (
+            payload["candidate_publication_sha256"]
+            == registration.candidate_publication_sha256
+        )
+
+
+@pytest.mark.asyncio
+async def test_guard_0021_capture_provenance_downgrades_and_reupgrades(
+    capacity_guard_database: dict[str, object],
+) -> None:
+    cfg = _guard_config(capacity_guard_database)
+    fence = _distinct_candidate_fence()
+    registration = _distinct_candidate_registration(fence)
+
+    async with _guard_owner_session(capacity_guard_database) as (
+        agent_store,
+        guard_store,
+        _,
+    ):
+        await guard_store.initialize_disabled_authority(fence)
+        await agent_store.register_agent(registration)
+    try:
+        _assert_candidate_provenance(
+            _capture_candidate_payloads(
+                capacity_guard_database,
+                registration,
+                expected_high_water=0,
+            ),
+            registration,
+        )
+
+        command.downgrade(cfg, "guard_0020")
+        downgraded = _capture_candidate_payloads(
+            capacity_guard_database,
+            registration,
+            expected_high_water=2,
+        )
+        for payload in downgraded:
+            assert "candidate_identity_algorithm" not in payload
+            assert "candidate_identity" not in payload
+            assert "candidate_publication_sha256" not in payload
+
+        command.upgrade(cfg, "head")
+        _assert_candidate_provenance(
+            _capture_candidate_payloads(
+                capacity_guard_database,
+                registration,
+                expected_high_water=4,
+            ),
+            registration,
+        )
+    finally:
+        command.upgrade(cfg, "head")
 
 
 def test_executor_role_is_distinct_and_has_only_bounded_guard_procedures(
