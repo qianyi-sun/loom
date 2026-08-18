@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: loom-staging-public-entry
+  namespace: ingress-nginx
+  labels:
+    app.kubernetes.io/name: loom-staging-public-entry
+    app.kubernetes.io/part-of: loom
+spec:
+  type: NodePort
+  externalTrafficPolicy: Cluster
+  selector:
+    app.kubernetes.io/component: controller
+    app.kubernetes.io/instance: ingress-nginx
+    app.kubernetes.io/name: ingress-nginx
+  ports:
+    - name: http
+      appProtocol: http
+      nodePort: 32080
+      port: 80
+      protocol: TCP
+      targetPort: http
+    - name: https
+      appProtocol: https
+      nodePort: 32443
+      port: 443
+      protocol: TCP
+      targetPort: https

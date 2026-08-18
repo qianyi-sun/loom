@@ -1,12 +1,16 @@
 [Unit]
 Description=Route public :443/:80 to the k3s ingress (kind->k3s entry cutover)
-After=docker.service network-online.target
-Wants=network-online.target
+Requires=loom-staging-public-proxy@18080-32080.service loom-staging-public-proxy@18443-32443.service
+After=docker.service k3s.service network-online.target loom-staging-public-proxy@18080-32080.service loom-staging-public-proxy@18443-32443.service
+Wants=docker.service k3s.service network-online.target
+PartOf=docker.service k3s.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/local/sbin/loom-staging-k3s-cutover.sh
+Restart=on-failure
+RestartSec=5s
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=docker.service k3s.service multi-user.target

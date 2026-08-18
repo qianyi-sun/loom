@@ -6,8 +6,8 @@
 #   sudo KUBECONFIG=/etc/rancher/k3s/k3s.yaml scripts/ops/bootstrap_staging_k3s_entry_tls.sh
 #
 # It:
-#  1. installs the entry-cutover script + systemd unit (host :443/:80 -> k3s
-#     ingress :8443/:8080), enabled + started;
+#  1. applies the dedicated NodePort Service, starts supervised host proxies,
+#     then installs its legacy-route verifier + systemd unit;
 #  2. patches the cert-manager controller to hostNetwork (its ACME API calls
 #     need the host's clean egress — the CNI pod net MITMs outbound HTTPS);
 #  3. applies the LE ClusterIssuer + Certificate (deploy/staging-k3s/tls-acme.yaml).
@@ -18,18 +18,51 @@ here="$(cd "$(dirname "$0")/../.." && pwd)"        # repo root
 KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"; export KUBECONFIG
 log() { echo "[bootstrap-entry-tls] $*"; }
 
-# 1. entry cutover (host iptables -> k3s ingress), persisted via systemd.
-log "installing entry-cutover script + systemd unit"
+# 1. Create the Kubernetes route and start Loom-owned proxy listeners before
+#    removing any predecessor path.
+log "applying the pinned public-entry NodePort Service"
+kubectl apply -f "${here}/deploy/staging-k3s/loom-staging-public-entry.yaml"
+log "installing public-entry proxy + cutover units"
+install -m 0755 "${here}/deploy/staging-k3s/loom-staging-public-proxy.sh" \
+  /usr/local/sbin/loom-staging-public-proxy.sh
+install -m 0644 "${here}/deploy/staging-k3s/loom-staging-public-proxy@.service" \
+  /etc/systemd/system/loom-staging-public-proxy@.service
 install -m 0755 "${here}/deploy/staging-k3s/loom-staging-k3s-cutover.sh" \
   /usr/local/sbin/loom-staging-k3s-cutover.sh
 install -m 0644 "${here}/deploy/staging-k3s/loom-staging-k3s-cutover.service" \
   /etc/systemd/system/loom-staging-k3s-cutover.service
 systemctl daemon-reload
-systemctl enable loom-staging-k3s-cutover.service
-# The unit is a RemainAfterExit oneshot. ``enable --now`` does not re-execute
-# an already-active unit after this script replaces its cutover executable.
-systemctl restart loom-staging-k3s-cutover.service
-log "entry cutover: $(systemctl is-active loom-staging-k3s-cutover.service)"
+systemctl reenable \
+  loom-staging-public-proxy@18080-32080.service \
+  loom-staging-public-proxy@18443-32443.service \
+  loom-staging-k3s-cutover.service
+systemctl restart \
+  loom-staging-public-proxy@18080-32080.service \
+  loom-staging-public-proxy@18443-32443.service
+# The cutover is a RemainAfterExit oneshot; restart revalidates after replacing
+# its executable and after both proxy listeners are active.
+if ! systemctl restart loom-staging-k3s-cutover.service; then
+  log "initial entry cutover attempt is waiting for proxy/kube-proxy readiness"
+fi
+cutover_active=false
+for _attempt in {0..12}; do
+  if systemctl is-active --quiet loom-staging-k3s-cutover.service; then
+    cutover_active=true
+    break
+  fi
+  if (( _attempt < 12 )); then
+    sleep 5
+  fi
+done
+if [[ "${cutover_active}" != true ]]; then
+  systemctl status loom-staging-k3s-cutover.service --no-pager -l || true
+  echo "entry cutover did not become active within 60 seconds" >&2
+  exit 1
+fi
+log "entry path: $(systemctl is-active \
+  loom-staging-public-proxy@18080-32080.service \
+  loom-staging-public-proxy@18443-32443.service \
+  loom-staging-k3s-cutover.service | paste -sd' ')"
 
 # 2. cert-manager controller needs host-network egress to reach Let's Encrypt.
 log "patching cert-manager controller -> hostNetwork (clean ACME egress)"

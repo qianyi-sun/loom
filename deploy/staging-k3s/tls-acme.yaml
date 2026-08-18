@@ -9,8 +9,8 @@
 #
 # PREREQUISITE — inbound HTTP-01: Let's Encrypt must reach
 # http://yylx.world/.well-known/acme-challenge/... on the k3s ingress. The
-# entry cutover (loom-staging-k3s-cutover.service) routes host :80 -> k3s :8080
-# for exactly this.
+# supervised public-entry HTTP proxy forwards host :80 through the dedicated
+# loom-staging-public-entry NodePort Service for exactly this.
 ---
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer

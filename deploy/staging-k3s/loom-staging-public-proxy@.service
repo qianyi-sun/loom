@@ -1,0 +1,13 @@
+[Unit]
+Description=Staging public ingress proxy %i (owned listener -> k3s NodePort)
+After=k3s.service network-online.target
+Wants=k3s.service network-online.target
+PartOf=k3s.service
+
+[Service]
+ExecStart=/usr/local/sbin/loom-staging-public-proxy.sh %i
+Restart=always
+RestartSec=2s
+
+[Install]
+WantedBy=k3s.service multi-user.target
