@@ -288,6 +288,7 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
         "candidate-index",
         "publish",
         "publish-manifest",
+        "personal-dev-trusted-release",
         "stage1-publish",
         "stage1-publish-index",
         "images-gate",
@@ -325,10 +326,17 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
         "id-token": "write",
         "packages": "write",
     }
+    assert jobs["personal-dev-trusted-release"]["permissions"] == {
+        "actions": "read",
+        "attestations": "read",
+        "contents": "read",
+        "packages": "read",
+    }
     assert jobs["stage1-publish"]["permissions"] == jobs["publish"]["permissions"]
     assert jobs["stage1-publish-index"]["permissions"] == jobs["publish-manifest"]["permissions"]
     assert "environment" not in jobs["publish"]
     assert "environment" not in jobs["publish-manifest"]
+    assert "environment" not in jobs["personal-dev-trusted-release"]
     assert "environment" not in jobs["stage1-publish"]
     assert "environment" not in jobs["stage1-publish-index"]
 
@@ -344,6 +352,7 @@ def test_images_secret_and_cache_authority_is_exact() -> None:
     ]
 
     assert secret_references == [
+        "${{ secrets.GITHUB_TOKEN }}",
         "${{ secrets.GITHUB_TOKEN }}",
         "${{ secrets.GITHUB_TOKEN }}",
         "${{ secrets.GITHUB_TOKEN }}",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import ssl
 from dataclasses import dataclass, field
@@ -30,6 +31,7 @@ from loom_capacity_manager.contracts import (
 from loom_capacity_manager.executable_contracts import ExecutableIntentBindingV2
 
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
+_PRINCIPAL_ID_RE = re.compile(r"[a-z0-9-]{1,128}")
 _MAX_RESPONSE_BYTES = 64 * 1024
 _EXECUTABLE_INTENT_STATES = frozenset(
     {
@@ -54,6 +56,71 @@ class PersonalDevCapacityProjectionError(RuntimeError):
 
 class PersonalDevCapacityProjectionConflictError(PersonalDevCapacityProjectionError):
     """The global configuration epoch changed before projection."""
+
+
+def _duplicate_rejecting_json_object(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate capacity manager response field")
+        value[key] = item
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class PersonalDevCapacityManagerBinding:
+    """Authenticated identity and execution boundary of the global manager."""
+
+    authority_incarnation: UUID
+    observer_principal_id: str
+    configuration_epoch: int
+    execution_state: Literal["shadow", "prepared", "active", "drain-only"]
+    execution_epoch: int
+    executable_new_capacity_ceiling: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.authority_incarnation, UUID) or self.authority_incarnation.int == 0:
+            raise ValueError("capacity manager authority incarnation is invalid")
+        if (
+            not isinstance(self.observer_principal_id, str)
+            or _PRINCIPAL_ID_RE.fullmatch(self.observer_principal_id) is None
+        ):
+            raise ValueError("capacity manager observer principal is invalid")
+        PersonalDevCapacityManagerCheckpoint(
+            configuration_epoch=self.configuration_epoch,
+            execution_state=self.execution_state,
+            execution_epoch=self.execution_epoch,
+            executable_new_capacity_ceiling=self.executable_new_capacity_ceiling,
+        )
+
+    @property
+    def checkpoint(self) -> PersonalDevCapacityManagerCheckpoint:
+        return PersonalDevCapacityManagerCheckpoint(
+            configuration_epoch=self.configuration_epoch,
+            execution_state=self.execution_state,
+            execution_epoch=self.execution_epoch,
+            executable_new_capacity_ceiling=self.executable_new_capacity_ceiling,
+        )
+
+    def satisfies_acceptance_boundary(
+        self,
+        planned: PersonalDevCapacityManagerBinding,
+    ) -> bool:
+        """Match immutable execution authority while allowing configuration progress."""
+
+        if not isinstance(planned, PersonalDevCapacityManagerBinding):
+            raise TypeError("planned capacity manager binding is invalid")
+        return (
+            self.authority_incarnation == planned.authority_incarnation
+            and self.observer_principal_id == planned.observer_principal_id
+            and self.configuration_epoch >= planned.configuration_epoch
+            and self.execution_state == planned.execution_state
+            and self.execution_epoch == planned.execution_epoch
+            and self.executable_new_capacity_ceiling
+            == planned.executable_new_capacity_ceiling
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -421,6 +488,79 @@ class CapacityManagerPersonalDevProjector:
                 "capacity manager checkpoint is invalid"
             ) from exc
 
+    async def current_manager_binding(self) -> PersonalDevCapacityManagerBinding:
+        """Read the exact manager identity observed by this authenticated principal."""
+
+        try:
+            async with self._http.stream(
+                "GET",
+                f"{self._origin}/v1/status",
+                headers={**self._headers, "Accept-Encoding": "identity"},
+            ) as response:
+                if response.status_code != 200:
+                    raise PersonalDevCapacityProjectionError(
+                        f"capacity manager status request returned {response.status_code}"
+                    )
+                content_type = response.headers.get("content-type", "").split(";", 1)[0].strip()
+                if content_type != "application/json":
+                    raise PersonalDevCapacityProjectionError(
+                        "capacity manager response is not canonical JSON"
+                    )
+                content_encoding = response.headers.get("content-encoding", "").strip().lower()
+                if content_encoding not in {"", "identity"}:
+                    raise PersonalDevCapacityProjectionError(
+                        "capacity manager response is not canonical JSON"
+                    )
+                content = bytearray()
+                async for chunk in response.aiter_bytes(
+                    chunk_size=_MAX_RESPONSE_BYTES + 1
+                ):
+                    if len(content) + len(chunk) > _MAX_RESPONSE_BYTES:
+                        raise PersonalDevCapacityProjectionError(
+                            "capacity manager response exceeds its size bound"
+                        )
+                    content.extend(chunk)
+        except PersonalDevCapacityProjectionError:
+            raise
+        except httpx.HTTPError as exc:
+            raise PersonalDevCapacityProjectionError(
+                "capacity manager status request failed"
+            ) from exc
+        try:
+            payload = json.loads(
+                content,
+                object_pairs_hook=_duplicate_rejecting_json_object,
+                parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()),
+            )
+        except (RecursionError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+            raise PersonalDevCapacityProjectionError(
+                "capacity manager returned invalid JSON"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise PersonalDevCapacityProjectionError("capacity manager binding is invalid")
+        try:
+            raw_authority = payload.get("authority_incarnation")
+            if not isinstance(raw_authority, str):
+                raise ValueError
+            authority_incarnation = UUID(raw_authority)
+            if str(authority_incarnation) != raw_authority:
+                raise ValueError
+            return PersonalDevCapacityManagerBinding(
+                authority_incarnation=authority_incarnation,
+                observer_principal_id=cast(str, payload.get("observer_principal_id")),
+                configuration_epoch=cast(int, payload.get("configuration_epoch")),
+                execution_state=cast(
+                    Literal["shadow", "prepared", "active", "drain-only"],
+                    payload.get("execution_state"),
+                ),
+                execution_epoch=cast(int, payload.get("execution_epoch")),
+                executable_new_capacity_ceiling=cast(
+                    int, payload.get("executable_new_capacity_ceiling")
+                ),
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise PersonalDevCapacityProjectionError("capacity manager binding is invalid") from exc
+
     async def subject_status(
         self,
         *,
@@ -737,6 +877,7 @@ __all__ = [
     "PersonalDevCapacityAvailability",
     "PersonalDevCapacityInstallation",
     "PersonalDevCapacityInstaller",
+    "PersonalDevCapacityManagerBinding",
     "PersonalDevCapacityManagerCheckpoint",
     "PersonalDevCapacityManagerConnection",
     "PersonalDevCapacityProjectionConflictError",

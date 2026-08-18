@@ -6,6 +6,8 @@ import importlib
 import json
 import subprocess
 from collections.abc import Sequence
+from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -13,20 +15,26 @@ import pytest
 import yaml
 
 from loom.personal_dev_control_plane_config import (
+    PersonalDevAcceptancePlan,
+    load_personal_dev_acceptance_plan,
     load_personal_dev_control_plane_profile,
     load_personal_dev_trusted_release,
 )
 from loom.personal_dev_control_plane_render import (
     RenderedPersonalDevControlPlane,
+    render_acceptance_personal_dev_control_plane,
     render_shadow_personal_dev_control_plane,
 )
 from loom.personal_dev_control_plane_status import (
+    PersonalDevAcceptanceStatus,
+    observe_personal_dev_acceptance_status,
     observe_personal_dev_shadow_status,
 )
 
 _ROOT = Path(__file__).resolve().parents[2]
 _PROFILE = _ROOT / "deploy/dev-fleet/personal-dev-control-plane.toml"
 _MANAGED_BY = "loom-personal-dev-control-plane"
+_NOW = datetime(2026, 8, 17, 21, 0, 0, tzinfo=UTC)
 
 _CONTEXT = ("config", "current-context")
 _NAMESPACES = ("get", "namespaces", "--output=json")
@@ -84,6 +92,36 @@ _MANAGER = (
     "--server-certificate-file",
     "/var/run/loom-capacity-manager/runtime/credentials/server-certificate.pem",
     "--observe",
+)
+_ACCEPTANCE_MANAGER = (
+    "--request-timeout=10s",
+    "--namespace",
+    "loom-dev",
+    "exec",
+    "deployment/loom-personal-dev-management",
+    "-c",
+    "management",
+    "--",
+    "python",
+    "-m",
+    "loom_capacity_manager.health_probe",
+    "--url",
+    "https://loom-capacity-manager.loom-dev.svc.cluster.local:8443/v1/status",
+    "--ca-file",
+    "/run/loom-personal-dev/management/files/capacity-lifecycle-ca.pem",
+    "--certificate-file",
+    "/run/loom-personal-dev/management/files/capacity-lifecycle-certificate.pem",
+    "--private-key-file",
+    "/run/loom-personal-dev/management/files/capacity-lifecycle-private-key.pem",
+    "--bearer-token-file",
+    "/run/loom-personal-dev/management/files/capacity-lifecycle-token",
+    "--observe-identity",
+)
+_DEPLOYMENTS = (
+    "get",
+    "deployments.apps",
+    "--all-namespaces",
+    "--output=json",
 )
 
 
@@ -288,6 +326,238 @@ def _healthy_fixture(
     return expected, _FakeRunner(responses)
 
 
+def _quota_value(profile: Any) -> dict[str, int]:
+    return {
+        "builder_global_concurrency": profile.limits.builder_global_concurrency,
+        "builder_per_owner_concurrency": profile.limits.builder_per_owner_concurrency,
+        "candidate_retained_bytes": profile.limits.candidate_retained_bytes,
+        "candidate_retained_count": profile.limits.candidate_retained_count,
+        "global_live_instances": profile.limits.global_live_instances,
+        "per_owner_aggregate_max_slots": profile.limits.per_owner_aggregate_max_slots,
+        "per_owner_aggregate_min_slots": profile.limits.per_owner_aggregate_min_slots,
+        "per_owner_live_instances": profile.limits.per_owner_live_instances,
+        "source_max_archive_bytes": profile.limits.source_max_archive_bytes,
+    }
+
+
+def _acceptance_inputs(
+    tmp_path: Path,
+) -> tuple[RenderedPersonalDevControlPlane, PersonalDevAcceptancePlan]:
+    payload = json.dumps(
+        _release_value(),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("ascii")
+    release_path = tmp_path / "acceptance-trusted-release.json"
+    release_path.write_bytes(payload)
+    release_path.chmod(0o600)
+    release = load_personal_dev_trusted_release(
+        release_path,
+        hashlib.sha256(payload).hexdigest(),
+    )
+    profile = load_personal_dev_control_plane_profile(_PROFILE)
+    shadow = render_shadow_personal_dev_control_plane(profile, release)
+    protocol_sha256 = hashlib.sha256(
+        json.dumps(
+            dict(profile.protocol_versions),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+    ).hexdigest()
+    value = {
+        "acceptance_owners": [
+            {
+                "team_id": "00000000-0000-0000-0000-000000000201",
+                "user_id": "00000000-0000-0000-0000-000000000301",
+            },
+            {
+                "team_id": "00000000-0000-0000-0000-000000000202",
+                "user_id": "00000000-0000-0000-0000-000000000302",
+            },
+        ],
+        "activation": {
+            "key_id": "personal-dev-agent-v1",
+            "public_key_sha256": "c" * 64,
+        },
+        "builder": {
+            "protocol_map_sha256": protocol_sha256,
+            "publisher_identity": profile.builder.publisher_identity,
+            "registry_prefix": profile.builder.registry_prefix,
+            "runtime_class_name": profile.builder.runtime_class_name,
+            "runtime_handler": "runsc-personal-dev",
+            "runtime_profile_sha256": "d" * 64,
+            "scanner_binary_sha256": "f" * 64,
+            "scanner_database_sha256": "1" * 64,
+            "scanner_finding_policy_sha256": "3" * 64,
+            "scanner_java_database_sha256": "2" * 64,
+            "trusted_launcher_profile_sha256": "e" * 64,
+        },
+        "manager": {
+            "authority_incarnation": "00000000-0000-0000-0000-000000000101",
+            "configuration_epoch": 7,
+            "executable_new_capacity_ceiling": 0,
+            "execution_epoch": 11,
+            "execution_state": "prepared",
+        },
+        "principals": {
+            "lifecycle_principal_id": "personal-dev-lifecycle",
+            "reporter_principal_id": "personal-dev-reporter",
+        },
+        "quotas": _quota_value(profile),
+        "release": {
+            "images": release.canonical_value()["images"],
+            "release_evidence_sha256": release.release_evidence_sha256,
+            "shadow_manifest_sha256": hashlib.sha256(shadow.yaml_text.encode("utf-8")).hexdigest(),
+            "trusted_release_sha256": hashlib.sha256(release.canonical_bytes()).hexdigest(),
+        },
+        "schema_version": 1,
+        "source": {"commit": release.source_sha, "tree": release.source_tree},
+        "storage": {
+            "backup_restore_evidence_sha256": "b" * 64,
+            "schema_head": "0098",
+        },
+        "window": {
+            "expires_at": "2099-12-31T23:00:00Z",
+            "rollback_expires_at": "2100-01-31T23:00:00Z",
+            "started_at": "2026-01-01T00:00:00Z",
+        },
+    }
+    plan_payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")
+    plan_path = tmp_path / "acceptance-plan.json"
+    plan_path.write_bytes(plan_payload)
+    plan_path.chmod(0o600)
+    plan = load_personal_dev_acceptance_plan(
+        plan_path,
+        hashlib.sha256(plan_payload).hexdigest(),
+    )
+    return (
+        render_acceptance_personal_dev_control_plane(
+            profile,
+            release,
+            plan,
+            now=_NOW,
+        ),
+        plan,
+    )
+
+
+def _acceptance_healthy_fixture(
+    tmp_path: Path,
+) -> tuple[RenderedPersonalDevControlPlane, PersonalDevAcceptancePlan, _FakeRunner]:
+    expected, plan = _acceptance_inputs(tmp_path)
+    documents = [copy.deepcopy(item) for item in yaml.safe_load_all(expected.yaml_text)]
+    namespace = next(item for item in documents if item["kind"] == "Namespace")
+    cluster = [item for item in documents if "namespace" not in item["metadata"]]
+    cluster.remove(namespace)
+    namespaced = [item for item in documents if item["metadata"].get("namespace")]
+
+    generated: list[dict[str, Any]] = []
+    for item in namespaced:
+        metadata = item["metadata"]
+        metadata["generation"] = 1
+        kind, name = _identity(item)
+        if kind == "StatefulSet":
+            item["status"] = {
+                "observedGeneration": 1,
+                "replicas": 1,
+                "currentReplicas": 1,
+                "readyReplicas": 1,
+                "updatedReplicas": 1,
+                "currentRevision": "revision-1",
+                "updateRevision": "revision-1",
+            }
+            template = item["spec"]["volumeClaimTemplates"][0]
+            generated.append(
+                {
+                    "apiVersion": "v1",
+                    "kind": "PersistentVolumeClaim",
+                    "metadata": {
+                        "name": f"{template['metadata']['name']}-{name}-0",
+                        "namespace": "loom-dev",
+                        "labels": copy.deepcopy(template["metadata"]["labels"]),
+                        "annotations": copy.deepcopy(template["metadata"]["annotations"]),
+                    },
+                    "spec": copy.deepcopy(template["spec"]),
+                    "status": {"phase": "Bound"},
+                }
+            )
+            generated.append(_pod_for(item, "0", phase="Running"))
+        elif kind == "Deployment":
+            replicas = item["spec"]["replicas"]
+            item["status"] = {
+                "observedGeneration": 1,
+                "replicas": replicas,
+                "readyReplicas": replicas,
+                "availableReplicas": replicas,
+                "updatedReplicas": replicas,
+            }
+            if replicas:
+                generated.append(_pod_for(item, "abcde", phase="Running"))
+        elif kind == "Job":
+            item["status"] = {
+                "active": 0,
+                "failed": 0,
+                "succeeded": 1,
+                "conditions": [{"type": "Complete", "status": "True"}],
+            }
+            generated.append(_pod_for(item, "abcde", phase="Succeeded"))
+        elif kind == "PersistentVolumeClaim":
+            item["status"] = {"phase": "Bound"}
+
+    deployments = [item for item in namespaced if item["kind"] == "Deployment"]
+    responses: dict[tuple[str, ...], object] = {
+        _CONTEXT: "reviewed-loom-dev\n",
+        _NAMESPACES: {
+            "apiVersion": "v1",
+            "kind": "NamespaceList",
+            "items": [
+                namespace,
+                {
+                    "apiVersion": "v1",
+                    "kind": "Namespace",
+                    "metadata": {"name": "kube-system"},
+                },
+            ],
+        },
+        _RUNTIME_CLASS: {
+            "apiVersion": "node.k8s.io/v1",
+            "kind": "RuntimeClass",
+            "metadata": {
+                "name": "loom-personal-dev-builder",
+                "annotations": {
+                    "loom.dev/runtime-profile-sha256": plan.builder.runtime_profile_sha256,
+                },
+            },
+            "handler": plan.builder.runtime_handler,
+        },
+        _NAMESPACED: {
+            "apiVersion": "v1",
+            "kind": "List",
+            "items": [*namespaced, *generated],
+        },
+        _CLUSTER: {
+            "apiVersion": "v1",
+            "kind": "List",
+            "items": cluster,
+        },
+        _ACCEPTANCE_MANAGER: {
+            "authority_incarnation": str(plan.manager.authority_incarnation),
+            "configuration_epoch": plan.manager.configuration_epoch,
+            "executable_new_capacity_ceiling": 0,
+            "execution_epoch": plan.manager.execution_epoch,
+            "execution_state": plan.manager.execution_state,
+            "observer_principal_id": plan.principals.lifecycle_principal_id,
+        },
+        _DEPLOYMENTS: {
+            "apiVersion": "apps/v1",
+            "kind": "DeploymentList",
+            "items": deployments,
+        },
+    }
+    return expected, plan, _FakeRunner(responses)
+
+
 def _items(runner: _FakeRunner, command: tuple[str, ...]) -> list[dict[str, Any]]:
     document = runner.responses[command]
     assert isinstance(document, dict)
@@ -314,6 +584,515 @@ def _observe(
         expected=expected,
         namespace="loom-dev",
     )
+
+
+def _observe_acceptance(
+    expected: RenderedPersonalDevControlPlane,
+    plan: PersonalDevAcceptancePlan,
+    runner: _FakeRunner,
+) -> PersonalDevAcceptanceStatus:
+    return observe_personal_dev_acceptance_status(
+        runner,
+        expected=expected,
+        plan=plan,
+        namespace="loom-dev",
+    )
+
+
+def test_healthy_acceptance_returns_separate_readiness_facets_and_safe_commands(
+    tmp_path: Path,
+) -> None:
+    expected, plan, runner = _acceptance_healthy_fixture(tmp_path)
+
+    result = _observe_acceptance(expected, plan, runner)
+
+    assert isinstance(result, PersonalDevAcceptanceStatus)
+    assert result.to_dict() == {
+        "acceptance_plan_sha256": plan.sha256,
+        "application_ready": True,
+        "blockers": [],
+        "capacity_publication_ready": True,
+        "components": [
+            {"name": "cluster-resources", "observed": 10, "ready": True},
+            {"name": "manager", "observed": 1, "ready": True},
+            {"name": "namespaced-resources", "observed": 29, "ready": True},
+            {"name": "namespaces", "observed": 1, "ready": True},
+            {"name": "personal-workers", "observed": 0, "ready": True},
+            {"name": "runtime-class", "observed": 1, "ready": True},
+        ],
+        "input_sha256": expected.input_sha256,
+        "manager_ceiling": 0,
+        "mode": "acceptance",
+        "ready": True,
+        "release_sha256": expected.release_sha256,
+        "schema": "loom-personal-dev-control-plane-status-v1",
+        "worker_available": False,
+    }
+    assert [call for call, _timeout in runner.calls] == [
+        _CONTEXT,
+        _NAMESPACES,
+        _RUNTIME_CLASS,
+        _NAMESPACED,
+        _CLUSTER,
+        _ACCEPTANCE_MANAGER,
+        _DEPLOYMENTS,
+    ]
+    assert all(1 <= timeout <= 10 for _call, timeout in runner.calls)
+    assert sum(call == _DEPLOYMENTS for call, _timeout in runner.calls) == 1
+    for command, _timeout in runner.calls:
+        assert "secret" not in " ".join(command).casefold()
+        assert command[0] in {"config", "get", "--request-timeout=10s"}
+
+
+def test_acceptance_status_allows_monotonic_manager_configuration_advancement(
+    tmp_path: Path,
+) -> None:
+    expected, plan, runner = _acceptance_healthy_fixture(tmp_path)
+    manager = runner.responses[_ACCEPTANCE_MANAGER]
+    assert isinstance(manager, dict)
+    manager["configuration_epoch"] = plan.manager.configuration_epoch + 4
+
+    result = _observe_acceptance(expected, plan, runner)
+
+    assert result.ready is True
+    assert result.capacity_publication_ready is True
+    assert "manager_binding_drift" not in result.blockers
+
+
+@pytest.mark.parametrize(
+    ("mutation", "blocker"),
+    [
+        ("cluster-role-aggregation", "cluster_resource_drift"),
+        ("admission-binding-match-resources", "cluster_resource_drift"),
+        ("default-deny-ingress", "resource_inventory_drift"),
+        ("management-host-network", "resource_inventory_drift"),
+        ("management-pod-host-network", "resource_inventory_drift"),
+        ("postgres-node-port", "resource_inventory_drift"),
+    ],
+)
+def test_acceptance_status_rejects_live_authority_or_exposure_widening(
+    tmp_path: Path,
+    mutation: str,
+    blocker: str,
+) -> None:
+    expected, plan, runner = _acceptance_healthy_fixture(tmp_path)
+
+    if mutation == "cluster-role-aggregation":
+        role = next(item for item in _items(runner, _CLUSTER) if item["kind"] == "ClusterRole")
+        role["aggregationRule"] = {
+            "clusterRoleSelectors": [{"matchLabels": {"loom.dev/aggregate": "true"}}]
+        }
+    elif mutation == "admission-binding-match-resources":
+        binding = next(
+            item
+            for item in _items(runner, _CLUSTER)
+            if item["kind"] == "ValidatingAdmissionPolicyBinding"
+        )
+        binding["spec"]["matchResources"] = {
+            "namespaceSelector": {"matchLabels": {"loom.dev/skip-policy": "false"}}
+        }
+    elif mutation == "default-deny-ingress":
+        policy = _item(
+            runner,
+            _NAMESPACED,
+            "NetworkPolicy",
+            "loom-personal-dev-default-deny",
+        )
+        policy["spec"]["ingress"] = [{}]
+    elif mutation == "management-host-network":
+        deployment = _item(
+            runner,
+            _NAMESPACED,
+            "Deployment",
+            "loom-personal-dev-management",
+        )
+        deployment["spec"]["template"]["spec"]["hostNetwork"] = True
+    elif mutation == "management-pod-host-network":
+        pod = next(
+            item
+            for item in _items(runner, _NAMESPACED)
+            if item["kind"] == "Pod"
+            and item["metadata"]["labels"].get("app") == "loom-personal-dev-management"
+        )
+        pod["spec"]["hostNetwork"] = True
+    elif mutation == "postgres-node-port":
+        service = _item(runner, _NAMESPACED, "Service", "loom-dev-postgres")
+        service["spec"]["type"] = "NodePort"
+    else:  # pragma: no cover - parameter table is exhaustive
+        raise AssertionError(mutation)
+
+    result = _observe_acceptance(expected, plan, runner)
+
+    assert result.ready is False
+    assert blocker in result.blockers
+
+
+def test_acceptance_queries_the_runtime_class_bound_by_the_plan(
+    tmp_path: Path,
+) -> None:
+    expected, plan, runner = _acceptance_healthy_fixture(tmp_path)
+    runtime_class_name = "custom-personal-dev-runtime"
+    plan = replace(
+        plan,
+        builder=replace(plan.builder, runtime_class_name=runtime_class_name),
+    )
+    runtime_command = (
+        "get",
+        f"runtimeclass.node.k8s.io/{runtime_class_name}",
+        "--output=json",
+    )
+    runner.responses[runtime_command] = {
+        "apiVersion": "node.k8s.io/v1",
+        "handler": plan.builder.runtime_handler,
+        "kind": "RuntimeClass",
+        "metadata": {
+            "annotations": {
+                "loom.dev/runtime-profile-sha256": plan.builder.runtime_profile_sha256,
+            },
+            "name": runtime_class_name,
+        },
+    }
+
+    result = _observe_acceptance(expected, plan, runner)
+
+    assert "runtime_class_binding_invalid" not in result.blockers
+    assert runtime_command in [command for command, _timeout in runner.calls]
+
+
+def test_acceptance_permits_only_exact_owned_dynamic_namespace_families(
+    tmp_path: Path,
+) -> None:
+    expected, plan, runner = _acceptance_healthy_fixture(tmp_path)
+    namespaces = _items(runner, _NAMESPACES)
+    personal_subject = "00000000-0000-0000-0000-000000000401"
+    builder_subject = "00000000-0000-0000-0000-000000000402"
+    namespaces.extend(
+        [
+            {
+                "apiVersion": "v1",
+                "kind": "Namespace",
+                "metadata": {
+                    "name": "loom-dev-alice",
+                    "labels": {
+                        "app.kubernetes.io/managed-by": "loom-dev-instance-controller",
+                        "app.kubernetes.io/part-of": "loom",
+                        "loom.dev/subject": personal_subject,
+                        "pod-security.kubernetes.io/enforce": "restricted",
+                    },
+                },
+            },
+            {
+                "apiVersion": "v1",
+                "kind": "Namespace",
+                "metadata": {
+                    "name": f"loom-build-{'a' * 32}-l{'b' * 16}",
+                    "labels": {
+                        "app.kubernetes.io/managed-by": ("loom-personal-dev-builder-controller"),
+                        "app.kubernetes.io/part-of": "loom",
+                        "loom.dev/subject": builder_subject,
+                        "pod-security.kubernetes.io/enforce": "restricted",
+                    },
+                },
+            },
+        ]
+    )
+    deployments = _items(runner, _DEPLOYMENTS)
+    deployments.append(
+        {
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {
+                "name": "loom-service-g1",
+                "namespace": "loom-dev-alice",
+                "labels": {"app": "loom-service-g1"},
+            },
+            "spec": {
+                "template": {
+                    "metadata": {"labels": {"app": "loom-service-g1"}},
+                    "spec": {
+                        "containers": [
+                            {
+                                "name": "service",
+                                "image": "ghcr.io/qianyi-sun/loom-service@sha256:" + "3" * 64,
+                                "env": [{"name": "LOOM_SVC_K8S_WORKER_ENABLED", "value": "false"}],
+                            }
+                        ]
+                    },
+                }
+            },
+        }
+    )
+
+    result = _observe_acceptance(expected, plan, runner)
+
+    assert result.ready is True
+    assert result.worker_available is False
+    components = {component.name: component for component in result.components}
+    assert components["namespaces"].observed == 3
+    assert components["namespaces"].ready is True
+    assert components["personal-workers"].observed == 0
+
+
+@pytest.mark.parametrize(
+    ("mutation", "blocker"),
+    [
+        ("acceptance-plan-digest", "acceptance_plan_digest_drift"),
+        ("management-feature-disabled", "management_acceptance_binding_invalid"),
+        ("management-readiness-path", "management_acceptance_probe_invalid"),
+        ("activation-replicas", "activation_replicas_invalid"),
+        ("activation-not-ready", "activation_not_ready"),
+        ("runtime-handler", "runtime_class_binding_invalid"),
+        ("runtime-profile", "runtime_class_binding_invalid"),
+        ("scanner-identity", "management_acceptance_binding_invalid"),
+        ("scanner-policy", "management_acceptance_binding_invalid"),
+        ("manager-authority", "manager_binding_drift"),
+        ("manager-principal", "manager_binding_drift"),
+        ("manager-configuration-epoch-regression", "manager_binding_drift"),
+        ("manager-state", "manager_binding_drift"),
+        ("manager-execution-epoch", "manager_binding_drift"),
+        ("manager-ceiling", "manager_ceiling_nonzero"),
+        ("window-expired", "acceptance_window_expired"),
+        ("personal-name", "personal_namespace_invalid"),
+        ("personal-owner", "personal_namespace_invalid"),
+        ("personal-subject", "personal_namespace_invalid"),
+        ("builder-name", "builder_namespace_invalid"),
+        ("builder-owner", "builder_namespace_invalid"),
+        ("builder-subject", "builder_namespace_invalid"),
+        ("personal-worker", "unexpected_personal_worker"),
+        ("manager-oversized", "manager_probe_unavailable"),
+        ("deployments-wrong-kind", "deployment_inventory_invalid"),
+        ("bool-returncode", "kube_context_invalid"),
+    ],
+)
+def test_acceptance_status_matrix_fails_closed_on_exact_binding_drift(
+    tmp_path: Path,
+    mutation: str,
+    blocker: str,
+) -> None:
+    expected, plan, runner = _acceptance_healthy_fixture(tmp_path)
+
+    if mutation == "acceptance-plan-digest":
+        service = _item(
+            runner,
+            _NAMESPACED,
+            "Service",
+            "loom-personal-dev-management",
+        )
+        service["metadata"]["annotations"]["loom.dev/acceptance-plan-sha256"] = "a" * 64
+    elif mutation in {
+        "management-feature-disabled",
+        "scanner-identity",
+        "scanner-policy",
+    }:
+        deployment = _item(
+            runner,
+            _NAMESPACED,
+            "Deployment",
+            "loom-personal-dev-management",
+        )
+        environment = deployment["spec"]["template"]["spec"]["containers"][0]["env"]
+        field = {
+            "management-feature-disabled": "LOOM_SVC_DEV_INSTANCES_ENABLED",
+            "scanner-identity": "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_IDENTITY",
+            "scanner-policy": "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_POLICY_SHA256",
+        }[mutation]
+        entry = next(value for value in environment if value["name"] == field)
+        entry["value"] = "false" if mutation == "management-feature-disabled" else "a" * 64
+    elif mutation == "management-readiness-path":
+        deployment = _item(
+            runner,
+            _NAMESPACED,
+            "Deployment",
+            "loom-personal-dev-management",
+        )
+        deployment["spec"]["template"]["spec"]["containers"][0]["readinessProbe"]["httpGet"][
+            "path"
+        ] = "/api/v1/health"
+    elif mutation in {"activation-replicas", "activation-not-ready"}:
+        activation = _item(
+            runner,
+            _NAMESPACED,
+            "Deployment",
+            "loom-personal-dev-activation-agent",
+        )
+        if mutation == "activation-replicas":
+            activation["spec"]["replicas"] = 0
+        else:
+            activation["status"]["availableReplicas"] = 0
+    elif mutation in {"runtime-handler", "runtime-profile"}:
+        runtime = runner.responses[_RUNTIME_CLASS]
+        assert isinstance(runtime, dict)
+        if mutation == "runtime-handler":
+            runtime["handler"] = "runc"
+        else:
+            runtime["metadata"]["annotations"]["loom.dev/runtime-profile-sha256"] = "a" * 64
+    elif mutation.startswith("manager-") and mutation != "manager-oversized":
+        manager = runner.responses[_ACCEPTANCE_MANAGER]
+        assert isinstance(manager, dict)
+        if mutation == "manager-authority":
+            manager["authority_incarnation"] = "00000000-0000-0000-0000-000000000102"
+        elif mutation == "manager-principal":
+            manager["observer_principal_id"] = "wrong-lifecycle"
+        elif mutation == "manager-configuration-epoch-regression":
+            manager["configuration_epoch"] = 6
+        elif mutation == "manager-state":
+            manager["execution_state"] = "drain-only"
+        elif mutation == "manager-execution-epoch":
+            manager["execution_epoch"] = 12
+        elif mutation == "manager-ceiling":
+            manager["execution_state"] = "active"
+            manager["executable_new_capacity_ceiling"] = 1
+        else:  # pragma: no cover - parameter table is exhaustive
+            raise AssertionError(mutation)
+    elif mutation == "window-expired":
+        plan = replace(
+            plan,
+            window=replace(
+                plan.window,
+                started_at=datetime(2025, 1, 1, tzinfo=UTC),
+                expires_at=datetime(2025, 2, 1, tzinfo=UTC),
+                rollback_expires_at=datetime(2025, 3, 1, tzinfo=UTC),
+            ),
+        )
+    elif mutation in {"personal-name", "personal-owner", "personal-subject"}:
+        name = "loom-dev-shared" if mutation == "personal-name" else "loom-dev-alice"
+        managed_by = (
+            "wrong-controller" if mutation == "personal-owner" else "loom-dev-instance-controller"
+        )
+        subject = (
+            "NOT-A-UUID"
+            if mutation == "personal-subject"
+            else "00000000-0000-0000-0000-000000000401"
+        )
+        _items(runner, _NAMESPACES).append(
+            {
+                "apiVersion": "v1",
+                "kind": "Namespace",
+                "metadata": {
+                    "name": name,
+                    "labels": {
+                        "app.kubernetes.io/managed-by": managed_by,
+                        "app.kubernetes.io/part-of": "loom",
+                        "loom.dev/subject": subject,
+                        "pod-security.kubernetes.io/enforce": "restricted",
+                    },
+                },
+            }
+        )
+    elif mutation.startswith("builder-"):
+        name = (
+            "loom-build-attempt"
+            if mutation == "builder-name"
+            else f"loom-build-{'a' * 32}-l{'b' * 16}"
+        )
+        managed_by = (
+            "wrong-controller"
+            if mutation == "builder-owner"
+            else "loom-personal-dev-builder-controller"
+        )
+        subject = (
+            "00000000-0000-0000-0000-000000000000"
+            if mutation == "builder-subject"
+            else "00000000-0000-0000-0000-000000000402"
+        )
+        _items(runner, _NAMESPACES).append(
+            {
+                "apiVersion": "v1",
+                "kind": "Namespace",
+                "metadata": {
+                    "name": name,
+                    "labels": {
+                        "app.kubernetes.io/managed-by": managed_by,
+                        "app.kubernetes.io/part-of": "loom",
+                        "loom.dev/subject": subject,
+                        "pod-security.kubernetes.io/enforce": "restricted",
+                    },
+                },
+            }
+        )
+    elif mutation == "personal-worker":
+        _items(runner, _DEPLOYMENTS).append(
+            {
+                "apiVersion": "apps/v1",
+                "kind": "Deployment",
+                "metadata": {
+                    "name": "loom-worker",
+                    "namespace": "loom-dev-alice",
+                    "labels": {"app": "loom-worker"},
+                },
+                "spec": {
+                    "template": {
+                        "metadata": {"labels": {"app": "loom-worker"}},
+                        "spec": {"containers": [{"name": "worker"}]},
+                    }
+                },
+            }
+        )
+    elif mutation == "manager-oversized":
+        runner.responses[_ACCEPTANCE_MANAGER] = "x" * (4 * 1024 * 1024 + 1)
+    elif mutation == "deployments-wrong-kind":
+        deployments = runner.responses[_DEPLOYMENTS]
+        assert isinstance(deployments, dict)
+        deployments["kind"] = "List"
+    elif mutation == "bool-returncode":
+        runner.responses[_CONTEXT] = subprocess.CompletedProcess(
+            list(_CONTEXT),
+            False,
+            "reviewed-loom-dev\n",
+            "",
+        )
+    else:  # pragma: no cover - parameter table is exhaustive
+        raise AssertionError(mutation)
+
+    result = _observe_acceptance(expected, plan, runner)
+
+    assert result.ready is False
+    assert blocker in result.blockers
+    assert result.blockers == tuple(sorted(set(result.blockers)))
+    assert result.worker_available is False
+    if mutation.startswith("manager-"):
+        assert result.application_ready is True
+        assert result.capacity_publication_ready is False
+    if mutation in {
+        "activation-replicas",
+        "activation-not-ready",
+        "management-feature-disabled",
+        "management-readiness-path",
+        "runtime-handler",
+        "runtime-profile",
+        "scanner-identity",
+        "scanner-policy",
+    }:
+        assert result.application_ready is False
+        assert result.capacity_publication_ready is True
+
+
+def test_acceptance_observer_rejects_invalid_local_inputs_before_any_call(
+    tmp_path: Path,
+) -> None:
+    expected, plan, runner = _acceptance_healthy_fixture(tmp_path)
+
+    with pytest.raises(ValueError, match="namespace"):
+        observe_personal_dev_acceptance_status(
+            runner,
+            expected=expected,
+            plan=plan,
+            namespace="loom-dev-alice",
+        )
+    with pytest.raises(TypeError, match="expected render"):
+        observe_personal_dev_acceptance_status(
+            runner,
+            expected=object(),  # type: ignore[arg-type]
+            plan=plan,
+        )
+    with pytest.raises(TypeError, match="acceptance plan"):
+        observe_personal_dev_acceptance_status(
+            runner,
+            expected=expected,
+            plan=object(),  # type: ignore[arg-type]
+        )
+
+    assert runner.calls == []
 
 
 def test_healthy_shadow_returns_canonical_bounded_status_and_safe_commands(

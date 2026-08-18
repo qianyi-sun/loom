@@ -7,9 +7,11 @@ endpoint only proves the FastAPI process is alive."""
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Request, Response
 
+from loom.personal_dev_runtime import PersonalDevAcceptanceInterlockError
 from loom_service.dependencies import SessionAndCtx
 from loom_service.readiness import probe_dependencies
 
@@ -19,6 +21,35 @@ router = APIRouter()
 @router.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@router.get("/health/personal-dev-acceptance")
+async def personal_dev_acceptance_readiness(
+    request: Request,
+    response: Response,
+) -> dict[str, object]:
+    """Expose only a stable, secret-free zero-capacity acceptance result."""
+
+    interlock = getattr(request.app.state, "personal_dev_acceptance_interlock", None)
+    assert_ready = getattr(interlock, "assert_ready", None)
+    if not callable(assert_ready):
+        response.status_code = 503
+        return {
+            "blockers": ["acceptance-interlock-unavailable"],
+            "status": "not-ready",
+        }
+    try:
+        await assert_ready(now=datetime.now(UTC))
+    except PersonalDevAcceptanceInterlockError as exc:
+        response.status_code = 503
+        return {"blockers": [exc.code], "status": "not-ready"}
+    except Exception:
+        response.status_code = 503
+        return {
+            "blockers": ["acceptance-interlock-unavailable"],
+            "status": "not-ready",
+        }
+    return {"blockers": [], "status": "ready"}
 
 
 @router.get("/health/ready")

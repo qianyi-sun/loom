@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import json
+import re
 import secrets
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Protocol
+from datetime import UTC, datetime
+from typing import Literal, Protocol
+from uuid import UUID
 
 from loom.dev_instance import DevInstanceIdentity, derive_identity
 from loom.dev_instance_manifest import (
@@ -21,11 +25,218 @@ from loom.dev_instance_provisioner import (
     SqlExecutor,
     dev_buckets,
 )
+from loom.personal_dev_capacity import PersonalDevCapacityManagerBinding
 from loom.personal_dev_environment import PersonalDevReconciliationClaim
 from loom.personal_dev_reconciler import (
     PersonalDevReadinessObservation,
     personal_dev_candidate_images,
 )
+
+_ACCEPTANCE_DIGEST_RE = re.compile(r"[0-9a-f]{64}")
+_ACCEPTANCE_BINDING_MAX_BYTES = 16 * 1024
+_ACCEPTANCE_BINDING_FIELDS = {
+    "acceptance_plan_sha256",
+    "expires_at",
+    "manager",
+    "schema_version",
+    "started_at",
+}
+_ACCEPTANCE_MANAGER_FIELDS = {
+    "authority_incarnation",
+    "configuration_epoch",
+    "executable_new_capacity_ceiling",
+    "execution_epoch",
+    "execution_state",
+    "observer_principal_id",
+}
+
+PersonalDevAcceptanceBlockerCode = Literal[
+    "acceptance-binding-invalid",
+    "acceptance-time-invalid",
+    "acceptance-window-not-open",
+    "acceptance-window-expired",
+    "capacity-manager-unavailable",
+    "capacity-manager-binding-drift",
+]
+
+
+class PersonalDevAcceptanceInterlockError(RuntimeError):
+    """One stable secret-free blocker for the acceptance runtime gate."""
+
+    def __init__(self, code: PersonalDevAcceptanceBlockerCode) -> None:
+        self.code = code
+        super().__init__(code)
+
+
+class PersonalDevManagerBindingReader(Protocol):
+    async def current_manager_binding(self) -> PersonalDevCapacityManagerBinding: ...
+
+
+def _unique_acceptance_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate acceptance binding field")
+        result[key] = value
+    return result
+
+
+def _acceptance_timestamp(value: object) -> datetime:
+    if not isinstance(value, str) or len(value) != 20:
+        raise ValueError("acceptance timestamp is invalid")
+    parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    if parsed.strftime("%Y-%m-%dT%H:%M:%SZ") != value:
+        raise ValueError("acceptance timestamp is not canonical")
+    return parsed
+
+
+@dataclass(frozen=True, slots=True)
+class PersonalDevAcceptanceRuntimeBinding:
+    """Parsed, canonical, secret-free acceptance runtime configuration."""
+
+    acceptance_plan_sha256: str
+    expected_manager: PersonalDevCapacityManagerBinding
+    started_at: datetime
+    expires_at: datetime
+
+
+def parse_personal_dev_acceptance_runtime_binding(
+    binding_json: str,
+    expected_plan_sha256: str,
+) -> PersonalDevAcceptanceRuntimeBinding:
+    """Parse the canonical binding before opening any owned network client."""
+
+    try:
+        if (
+            not isinstance(binding_json, str)
+            or not 0 < len(binding_json.encode("ascii")) <= _ACCEPTANCE_BINDING_MAX_BYTES
+            or _ACCEPTANCE_DIGEST_RE.fullmatch(expected_plan_sha256) is None
+            or expected_plan_sha256 == "0" * 64
+        ):
+            raise ValueError
+        document = json.loads(
+            binding_json,
+            object_pairs_hook=_unique_acceptance_object,
+            parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()),
+        )
+        canonical = json.dumps(
+            document,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        )
+        if (
+            not isinstance(document, dict)
+            or set(document) != _ACCEPTANCE_BINDING_FIELDS
+            or canonical != binding_json
+            or type(document["schema_version"]) is not int
+            or document["schema_version"] != 1
+            or document["acceptance_plan_sha256"] != expected_plan_sha256
+        ):
+            raise ValueError
+        manager = document["manager"]
+        if not isinstance(manager, dict) or set(manager) != _ACCEPTANCE_MANAGER_FIELDS:
+            raise ValueError
+        raw_authority = manager["authority_incarnation"]
+        if not isinstance(raw_authority, str):
+            raise ValueError
+        authority = UUID(raw_authority)
+        if str(authority) != raw_authority:
+            raise ValueError
+        expected_manager = PersonalDevCapacityManagerBinding(
+            authority_incarnation=authority,
+            observer_principal_id=manager["observer_principal_id"],
+            configuration_epoch=manager["configuration_epoch"],
+            execution_state=manager["execution_state"],
+            execution_epoch=manager["execution_epoch"],
+            executable_new_capacity_ceiling=manager["executable_new_capacity_ceiling"],
+        )
+        if (
+            expected_manager.execution_state not in {"shadow", "prepared", "drain-only"}
+            or expected_manager.executable_new_capacity_ceiling != 0
+        ):
+            raise ValueError
+        started_at = _acceptance_timestamp(document["started_at"])
+        expires_at = _acceptance_timestamp(document["expires_at"])
+        if started_at >= expires_at:
+            raise ValueError
+    except (
+        AttributeError,
+        RecursionError,
+        UnicodeError,
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+    ):
+        raise PersonalDevAcceptanceInterlockError("acceptance-binding-invalid") from None
+    return PersonalDevAcceptanceRuntimeBinding(
+        acceptance_plan_sha256=expected_plan_sha256,
+        expected_manager=expected_manager,
+        started_at=started_at,
+        expires_at=expires_at,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class PersonalDevAcceptanceInterlock:
+    """Continuously bind personal operations to one zero-capacity manager."""
+
+    projector: PersonalDevManagerBindingReader
+    acceptance_plan_sha256: str
+    expected_manager: PersonalDevCapacityManagerBinding
+    started_at: datetime
+    expires_at: datetime
+
+    @classmethod
+    def from_binding(
+        cls,
+        *,
+        projector: PersonalDevManagerBindingReader,
+        binding: PersonalDevAcceptanceRuntimeBinding,
+    ) -> PersonalDevAcceptanceInterlock:
+        if not callable(getattr(projector, "current_manager_binding", None)) or not isinstance(
+            binding, PersonalDevAcceptanceRuntimeBinding
+        ):
+            raise PersonalDevAcceptanceInterlockError("acceptance-binding-invalid")
+        return cls(
+            projector=projector,
+            acceptance_plan_sha256=binding.acceptance_plan_sha256,
+            expected_manager=binding.expected_manager,
+            started_at=binding.started_at,
+            expires_at=binding.expires_at,
+        )
+
+    @classmethod
+    def from_json(
+        cls,
+        *,
+        projector: PersonalDevManagerBindingReader,
+        binding_json: str,
+        expected_plan_sha256: str,
+    ) -> PersonalDevAcceptanceInterlock:
+        return cls.from_binding(
+            projector=projector,
+            binding=parse_personal_dev_acceptance_runtime_binding(
+                binding_json,
+                expected_plan_sha256,
+            ),
+        )
+
+    async def assert_ready(self, *, now: datetime) -> None:
+        if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
+            raise PersonalDevAcceptanceInterlockError("acceptance-time-invalid")
+        observed_at = now.astimezone(UTC)
+        if observed_at < self.started_at:
+            raise PersonalDevAcceptanceInterlockError("acceptance-window-not-open")
+        if observed_at >= self.expires_at:
+            raise PersonalDevAcceptanceInterlockError("acceptance-window-expired")
+        try:
+            observed = await self.projector.current_manager_binding()
+        except Exception:
+            raise PersonalDevAcceptanceInterlockError("capacity-manager-unavailable") from None
+        if not observed.satisfies_acceptance_boundary(self.expected_manager):
+            raise PersonalDevAcceptanceInterlockError("capacity-manager-binding-drift")
 
 
 class ReusablePersonalDevSecretVault(Protocol):
@@ -177,7 +388,13 @@ class PersonalDevPreparationRuntime:
 
 __all__ = [
     "CandidateGenerationProvisioner",
+    "PersonalDevAcceptanceBlockerCode",
+    "PersonalDevAcceptanceInterlock",
+    "PersonalDevAcceptanceInterlockError",
+    "PersonalDevAcceptanceRuntimeBinding",
+    "PersonalDevManagerBindingReader",
     "PersonalDevPreparationRuntime",
     "PersonalDevRuntimeConfig",
     "ReusablePersonalDevSecretVault",
+    "parse_personal_dev_acceptance_runtime_binding",
 ]

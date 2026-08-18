@@ -1807,7 +1807,7 @@ def create_app(
     @app.get("/v1/status")
     async def aggregate_status(
         request: Request,
-        _actor: CapacityPrincipal = Depends(require("capacity:read")),
+        actor: CapacityPrincipal = Depends(require("capacity:read")),
     ) -> Any:
         allocation_input = await _allocation_input(request)
         session_factory, _store, _writer = runtime(request)
@@ -1853,6 +1853,7 @@ def create_app(
         return {
             "schema_version": 1,
             "authority_incarnation": authority.authority_incarnation,
+            "observer_principal_id": actor.principal_id,
             "writer_epoch": authority.writer_epoch,
             "configuration_epoch": allocation_input.configuration.configuration_epoch,
             "configuration_digest": canonical_digest(allocation_input.configuration),

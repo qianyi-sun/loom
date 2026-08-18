@@ -6,18 +6,32 @@ import argparse
 import ipaddress
 import json
 import os
+import re
 import ssl
 import stat
 import sys
 from pathlib import Path
 from urllib.parse import urlsplit
+from uuid import UUID
 
 import httpx
 from cryptography import x509
 
+from loom.personal_dev_capacity import PersonalDevCapacityManagerBinding
+from loom_capacity_agent.client import read_owner_only_bearer_token
+
 _MAX_HEALTH_BYTES = 1024
 _MAX_SERVER_CERTIFICATE_BYTES = 64 * 1024
 _HEALTH_FIELDS = {"status", "executable_new_capacity_ceiling"}
+_IDENTITY_FIELDS = {
+    "authority_incarnation",
+    "observer_principal_id",
+    "configuration_epoch",
+    "execution_state",
+    "execution_epoch",
+    "executable_new_capacity_ceiling",
+}
+_PRINCIPAL_ID = re.compile(r"[a-z0-9-]{1,128}")
 _MANAGER_SERVICE_DNS = "loom-capacity-manager.loom-dev.svc.cluster.local"
 _LOOPBACK_IP = ipaddress.ip_address("127.0.0.1")
 _DEFAULT_CREDENTIALS = "/var/run/loom-capacity-manager/runtime/credentials"
@@ -32,14 +46,36 @@ def capacity_health_probe_argv(
     *,
     observe: bool = False,
     allow_positive_ceiling: bool = False,
+    observe_identity: bool = False,
 ) -> tuple[str, ...]:
     """Return one fixed in-container health-probe command."""
 
-    if type(observe) is not bool or type(allow_positive_ceiling) is not bool:
+    if (
+        type(observe) is not bool
+        or type(allow_positive_ceiling) is not bool
+        or type(observe_identity) is not bool
+    ):
         raise ValueError("capacity health probe mode is invalid")
-    if observe and allow_positive_ceiling:
+    if sum((observe, allow_positive_ceiling, observe_identity)) > 1:
         raise ValueError("capacity health probe modes are mutually exclusive")
 
+    if observe_identity:
+        return (
+            "python",
+            "-m",
+            "loom_capacity_manager.health_probe",
+            "--url",
+            "https://loom-capacity-manager.loom-dev.svc.cluster.local:8443/v1/status",
+            "--ca-file",
+            f"{credentials_directory}/capacity-lifecycle-ca.pem",
+            "--certificate-file",
+            f"{credentials_directory}/capacity-lifecycle-certificate.pem",
+            "--private-key-file",
+            f"{credentials_directory}/capacity-lifecycle-private-key.pem",
+            "--bearer-token-file",
+            f"{credentials_directory}/capacity-lifecycle-token",
+            "--observe-identity",
+        )
     command = (
         "python",
         "-m",
@@ -114,6 +150,53 @@ def parse_capacity_health_response(
     return document
 
 
+def parse_observed_capacity_manager_identity_response(
+    status_code: int,
+    payload: bytes,
+) -> dict[str, object]:
+    """Parse a bounded status response into a secret-free manager binding."""
+
+    if status_code != 200 or not 0 < len(payload) <= 64 * 1024:
+        raise CapacityHealthProbeError("capacity manager identity is unavailable")
+    try:
+        document = json.loads(payload, object_pairs_hook=_unique_object)
+        if not isinstance(document, dict) or not _IDENTITY_FIELDS.issubset(document):
+            raise ValueError
+        authority_value = document["authority_incarnation"]
+        if not isinstance(authority_value, str):
+            raise ValueError
+        authority = UUID(authority_value)
+        if str(authority) != authority_value:
+            raise ValueError
+        principal = document["observer_principal_id"]
+        if not isinstance(principal, str) or _PRINCIPAL_ID.fullmatch(principal) is None:
+            raise ValueError
+        binding = PersonalDevCapacityManagerBinding(
+            authority_incarnation=authority,
+            observer_principal_id=principal,
+            configuration_epoch=document["configuration_epoch"],
+            execution_state=document["execution_state"],
+            execution_epoch=document["execution_epoch"],
+            executable_new_capacity_ceiling=document["executable_new_capacity_ceiling"],
+        )
+    except (
+        CapacityHealthProbeError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise CapacityHealthProbeError("capacity manager identity observation is invalid") from exc
+    return {
+        "authority_incarnation": str(binding.authority_incarnation),
+        "configuration_epoch": binding.configuration_epoch,
+        "executable_new_capacity_ceiling": binding.executable_new_capacity_ceiling,
+        "execution_epoch": binding.execution_epoch,
+        "execution_state": binding.execution_state,
+        "observer_principal_id": binding.observer_principal_id,
+    }
+
+
 def _validate_server_certificate_identities(path: Path) -> None:
     try:
         descriptor = os.open(
@@ -168,10 +251,12 @@ def probe_capacity_manager(
     ca_file: Path,
     certificate_file: Path,
     private_key_file: Path,
-    server_certificate_file: Path,
+    server_certificate_file: Path | None = None,
+    bearer_token_file: Path | None = None,
     timeout_seconds: float = 3.0,
     observe: bool = False,
     allow_positive_ceiling: bool = False,
+    observe_identity: bool = False,
 ) -> dict[str, object]:
     """Perform one bounded, server-verified, client-authenticated health request."""
 
@@ -181,7 +266,12 @@ def probe_capacity_manager(
         or not parsed.hostname
         or parsed.username is not None
         or parsed.password is not None
-        or parsed.path != "/healthz"
+        or parsed.path != ("/v1/status" if observe_identity else "/healthz")
+        or (
+            observe_identity
+            and url
+            != "https://loom-capacity-manager.loom-dev.svc.cluster.local:8443/v1/status"
+        )
         or parsed.query
         or parsed.fragment
     ):
@@ -192,11 +282,21 @@ def probe_capacity_manager(
         or not 0 < timeout_seconds <= 30
         or type(observe) is not bool
         or type(allow_positive_ceiling) is not bool
-        or (observe and allow_positive_ceiling)
+        or type(observe_identity) is not bool
+        or sum((observe, allow_positive_ceiling, observe_identity)) > 1
+        or (observe_identity and bearer_token_file is None)
+        or (not observe_identity and bearer_token_file is not None)
+        or (not observe_identity and server_certificate_file is None)
     ):
         raise CapacityHealthProbeError("capacity health timeout is invalid")
-    _validate_server_certificate_identities(server_certificate_file)
+    if server_certificate_file is not None:
+        _validate_server_certificate_identities(server_certificate_file)
     try:
+        bearer_token = (
+            read_owner_only_bearer_token(bearer_token_file)
+            if bearer_token_file is not None
+            else None
+        )
         context = ssl.create_default_context(cafile=str(ca_file))
         context.load_cert_chain(
             certfile=str(certificate_file),
@@ -207,11 +307,27 @@ def probe_capacity_manager(
             timeout=float(timeout_seconds),
             trust_env=False,
         ) as client:
-            with client.stream("GET", url) as response:
+            headers = (
+                {
+                    "Authorization": f"Bearer {bearer_token}",
+                    "Accept": "application/json",
+                    "Accept-Encoding": "identity",
+                }
+                if bearer_token is not None
+                else None
+            )
+            response_limit = 64 * 1024 if observe_identity else _MAX_HEALTH_BYTES
+            with client.stream("GET", url, headers=headers) as response:
+                if observe_identity and response.headers.get(
+                    "content-encoding", ""
+                ).strip().lower() not in {"", "identity"}:
+                    raise CapacityHealthProbeError(
+                        "capacity health response encoding is invalid"
+                    )
                 payload = bytearray()
-                for chunk in response.iter_bytes(chunk_size=_MAX_HEALTH_BYTES + 1):
+                for chunk in response.iter_bytes(chunk_size=response_limit + 1):
                     payload.extend(chunk)
-                    if len(payload) > _MAX_HEALTH_BYTES:
+                    if len(payload) > response_limit:
                         raise CapacityHealthProbeError(
                             "capacity health response exceeds its size bound"
                         )
@@ -220,6 +336,11 @@ def probe_capacity_manager(
         raise
     except (OSError, ValueError, ssl.SSLError, httpx.HTTPError) as exc:
         raise CapacityHealthProbeError("capacity health transport failed") from exc
+    if observe_identity:
+        return parse_observed_capacity_manager_identity_response(
+            status_code,
+            bytes(payload),
+        )
     if observe:
         return parse_observed_capacity_health_response(status_code, bytes(payload))
     return parse_capacity_health_response(
@@ -235,7 +356,8 @@ def main() -> None:
     parser.add_argument("--ca-file", type=Path, required=True)
     parser.add_argument("--certificate-file", type=Path, required=True)
     parser.add_argument("--private-key-file", type=Path, required=True)
-    parser.add_argument("--server-certificate-file", type=Path, required=True)
+    parser.add_argument("--server-certificate-file", type=Path)
+    parser.add_argument("--bearer-token-file", type=Path)
     parser.add_argument("--timeout-seconds", type=float, default=3.0)
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument(
@@ -248,6 +370,11 @@ def main() -> None:
         action="store_true",
         help="Require ready while accepting an exact nonnegative executable ceiling.",
     )
+    modes.add_argument(
+        "--observe-identity",
+        action="store_true",
+        help="Emit the authenticated manager identity and execution boundary.",
+    )
     arguments = parser.parse_args()
     try:
         document = probe_capacity_manager(
@@ -256,9 +383,11 @@ def main() -> None:
             certificate_file=arguments.certificate_file,
             private_key_file=arguments.private_key_file,
             server_certificate_file=arguments.server_certificate_file,
+            bearer_token_file=arguments.bearer_token_file,
             timeout_seconds=arguments.timeout_seconds,
             observe=arguments.observe,
             allow_positive_ceiling=arguments.allow_positive_ceiling,
+            observe_identity=arguments.observe_identity,
         )
     except CapacityHealthProbeError as exc:
         sys.stderr.write(f"error: {exc}\n")
@@ -276,5 +405,6 @@ __all__ = [
     "main",
     "parse_capacity_health_response",
     "parse_observed_capacity_health_response",
+    "parse_observed_capacity_manager_identity_response",
     "probe_capacity_manager",
 ]

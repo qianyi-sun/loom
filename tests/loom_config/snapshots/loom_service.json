@@ -219,6 +219,16 @@
     "default": "PydanticUndefined",
     "required": true
   },
+  "personal_dev_acceptance_binding_json": {
+    "annotation": "<class 'str'>",
+    "default": "'{}'",
+    "required": false
+  },
+  "personal_dev_acceptance_plan_sha256": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
   "personal_dev_activation_ack_max_age_sec": {
     "annotation": "<class 'int'>",
     "default": "300",
@@ -232,6 +242,11 @@
   "personal_dev_activation_public_key_file": {
     "annotation": "pathlib.Path | None",
     "default": "None",
+    "required": false
+  },
+  "personal_dev_activation_public_key_sha256": {
+    "annotation": "<class 'str'>",
+    "default": "''",
     "required": false
   },
   "personal_dev_builder_docker_path": {

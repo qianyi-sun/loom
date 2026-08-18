@@ -126,10 +126,16 @@ spec:
             secretKeyRef:
               name: loom-secrets
               key: minio-secret-key
+        - name: LOOM_SVC_PERSONAL_DEV_ACCEPTANCE_BINDING_JSON
+          value: '{}'
+        - name: LOOM_SVC_PERSONAL_DEV_ACCEPTANCE_PLAN_SHA256
+          value: ''
         - name: LOOM_SVC_PERSONAL_DEV_ACTIVATION_ACK_MAX_AGE_SEC
           value: '300'
         - name: LOOM_SVC_PERSONAL_DEV_ACTIVATION_KEY_ID
           value: personal-dev-agent-v1
+        - name: LOOM_SVC_PERSONAL_DEV_ACTIVATION_PUBLIC_KEY_SHA256
+          value: ''
         - name: LOOM_SVC_PERSONAL_DEV_BUILDER_DOCKER_PATH
           value: /usr/bin/docker
         - name: LOOM_SVC_PERSONAL_DEV_BUILDER_ENABLED

@@ -52,6 +52,27 @@ def _settings(tmp_path: Path, **overrides: object) -> LoomServiceSettings:
     return LoomServiceSettings(_env_file=None, **values)  # type: ignore[arg-type]
 
 
+def _acceptance_binding() -> str:
+    return json.dumps(
+        {
+            "acceptance_plan_sha256": "a" * 64,
+            "expires_at": "2026-08-18T00:00:00Z",
+            "manager": {
+                "authority_incarnation": "00000000-0000-0000-0000-000000000101",
+                "configuration_epoch": 7,
+                "executable_new_capacity_ceiling": 0,
+                "execution_epoch": 0,
+                "execution_state": "shadow",
+                "observer_principal_id": "personal-dev-lifecycle",
+            },
+            "schema_version": 1,
+            "started_at": "2026-08-17T00:00:00Z",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 def test_controller_wiring_is_absent_by_default(tmp_path: Path) -> None:
     settings = _settings(tmp_path, dev_instances_enabled=False)
     assert build_dev_instance_provisioner_factory(settings, minio_client=_Minio()) is None
@@ -63,7 +84,11 @@ def test_capacity_runtime_wires_global_projector_and_trusted_installer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    projector = object()
+    class _Projector:
+        async def current_manager_binding(self):  # type: ignore[no-untyped-def]
+            raise AssertionError("this wiring test must not contact the manager")
+
+    projector = _Projector()
     captured: dict[str, object] = {}
 
     def credential(name: str, value: str) -> Path:
@@ -94,6 +119,9 @@ def test_capacity_runtime_wires_global_projector_and_trusted_installer(
     )
     settings = _settings(
         tmp_path,
+        personal_dev_builder_enabled=True,
+        personal_dev_acceptance_binding_json=_acceptance_binding(),
+        personal_dev_acceptance_plan_sha256="a" * 64,
         personal_dev_capacity_agent_image=("registry.example/loom-service@sha256:" + "1" * 64),
         personal_dev_capacity_ca_file=agent_ca,
         personal_dev_capacity_certificate_file=agent_certificate,
@@ -107,6 +135,8 @@ def test_capacity_runtime_wires_global_projector_and_trusted_installer(
 
     assert runtime is not None
     assert runtime.projector is projector
+    assert runtime.acceptance_interlock is not None
+    assert runtime.acceptance_interlock.projector is projector
     assert runtime.installer is not None
     connection = captured["connection"]
     assert connection.tls_files.ca_file == lifecycle_ca  # type: ignore[attr-defined]
@@ -144,6 +174,62 @@ def test_capacity_runtime_rejects_shared_lifecycle_and_agent_identity(
                 personal_dev_capacity_lifecycle_ca_file=agent_ca,
                 personal_dev_capacity_lifecycle_certificate_file=shared_certificate,
                 personal_dev_capacity_lifecycle_private_key_file=shared_private_key,
+            )
+        )
+
+
+def test_capacity_runtime_opens_owned_projector_only_after_local_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def credential(name: str, value: str) -> Path:
+        path = tmp_path / name
+        path.write_text(value)
+        path.chmod(0o600)
+        return path
+
+    def unexpected_projector(_connection: object) -> object:
+        raise AssertionError("projector opened before local construction completed")
+
+    monkeypatch.setattr(
+        CapacityManagerPersonalDevProjector,
+        "from_files",
+        unexpected_projector,
+    )
+    monkeypatch.setattr(
+        "loom_service.personal_dev_lifecycle.build_reporter_tls_context",
+        lambda _files: object(),
+    )
+    monkeypatch.setattr(
+        "loom_service.personal_dev_lifecycle.KubectlClient",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ValueError("synthetic local construction failure")
+        ),
+    )
+
+    with pytest.raises(ValueError, match="local construction failure"):
+        build_personal_dev_capacity_runtime(
+            _settings(
+                tmp_path,
+                personal_dev_capacity_agent_image=(
+                    "registry.example/loom-service@sha256:" + "1" * 64
+                ),
+                personal_dev_capacity_ca_file=credential("agent-ca.pem", "agent-ca"),
+                personal_dev_capacity_certificate_file=credential(
+                    "agent-certificate.pem", "agent-certificate"
+                ),
+                personal_dev_capacity_private_key_file=credential(
+                    "agent-private-key.pem", "agent-private-key"
+                ),
+                personal_dev_capacity_lifecycle_ca_file=credential(
+                    "lifecycle-ca.pem", "lifecycle-ca"
+                ),
+                personal_dev_capacity_lifecycle_certificate_file=credential(
+                    "lifecycle-certificate.pem", "lifecycle-certificate"
+                ),
+                personal_dev_capacity_lifecycle_private_key_file=credential(
+                    "lifecycle-private-key.pem", "lifecycle-private-key"
+                ),
             )
         )
 

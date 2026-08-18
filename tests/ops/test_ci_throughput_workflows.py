@@ -1665,6 +1665,55 @@ def test_images_gate_separates_untrusted_build_from_trusted_publish(
 
 
 @pytest.mark.parametrize(
+    ("event_name", "required", "release_result", "expected_returncode"),
+    [
+        ("push", "true", "success", 0),
+        ("push", "true", "skipped", 1),
+        ("push", "false", "skipped", 0),
+        ("pull_request", "true", "skipped", 0),
+    ],
+)
+def test_images_gate_requires_personal_release_only_for_protected_selected_publish(
+    event_name: str,
+    required: str,
+    release_result: str,
+    expected_returncode: int,
+) -> None:
+    selected = json.dumps(
+        [
+            {"image": "service"},
+            {"image": "personal-dev-builder"},
+            {"image": "personal-dev-activation-agent"},
+        ],
+        separators=(",", ":"),
+    )
+    protected_publish = event_name == "push" and required == "true"
+    result = subprocess.run(
+        ["bash"],
+        input=_gate_script(".github/workflows/images.yml", "images-gate"),
+        text=True,
+        capture_output=True,
+        env={
+            "EVENT_NAME": event_name,
+            "TRUSTED_PUBLISH": "false",
+            "PLAN_RESULT": "success",
+            "GATE_MODE": "full",
+            "REQUIRED": required,
+            "BUILD_RESULT": "skipped" if protected_publish or required == "false" else "success",
+            "CANDIDATE_INDEX_RESULT": "skipped",
+            "PUBLISH_RESULT": "success" if protected_publish else "skipped",
+            "MANIFEST_RESULT": "success" if protected_publish else "skipped",
+            "PERSONAL_DEV_RELEASE_RESULT": release_result,
+            "STANDARD_IMAGES": selected,
+            "INTERNAL_PULL_REQUEST": "false",
+        },
+        check=False,
+    )
+
+    assert result.returncode == expected_returncode, result.stderr
+
+
+@pytest.mark.parametrize(
     ("event_name", "required", "build_result", "publish_result"),
     [
         ("pull_request", "true", "success", "success"),
@@ -1836,6 +1885,7 @@ def test_optional_validation_workflows_have_stable_gate_contexts() -> None:
                 "candidate-index": "CANDIDATE_INDEX_RESULT",
                 "publish": "PUBLISH_RESULT",
                 "publish-manifest": "MANIFEST_RESULT",
+                "personal-dev-trusted-release": "PERSONAL_DEV_RELEASE_RESULT",
                 "stage1-build": "STAGE1_BUILD_RESULT",
                 "stage1-publish": "STAGE1_PUBLISH_RESULT",
                 "stage1-publish-index": "STAGE1_INDEX_RESULT",

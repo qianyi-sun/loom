@@ -14,6 +14,7 @@ import os
 import socket
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -186,7 +187,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
             raise RuntimeError("personal-dev artifact GC poll interval must be positive")
 
     @asynccontextmanager
-    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    async def _service_lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Validate deterministic URL shape before opening database, mTLS, or
         # HTTP resources so a startup rejection cannot leak any of them.
         gw_path = settings.gateway_url.path or "/"
@@ -200,6 +201,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
             settings.db_engine_url,
             connect_args=settings.db_engine_connect_args,
         )
+        app.state._owned_service_engine = engine
         await _assert_schema_startup(engine)
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
         await retry_startup_dependency(
@@ -218,6 +220,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
             settings,
             endpoint_url=settings.minio_endpoint,
         )
+        app.state._owned_service_minio_client = minio_client
         personal_dev_task: asyncio.Task[None] | None = None
         personal_dev_builder_task: asyncio.Task[None] | None = None
         personal_dev_artifact_gc_task: asyncio.Task[None] | None = None
@@ -226,6 +229,12 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         personal_dev_artifact_collector = None
         personal_dev_capacity_runtime = None
         if personal_dev_limits is not None:
+            personal_dev_capacity_runtime = build_personal_dev_capacity_runtime(settings)
+            if personal_dev_capacity_runtime is None:  # pragma: no cover - guarded by limits
+                raise RuntimeError("personal-dev capacity runtime is unavailable")
+            app.state._owned_personal_dev_capacity_projector = (
+                personal_dev_capacity_runtime.projector
+            )
             if settings.personal_dev_activation_public_key_file is None:
                 raise RuntimeError(
                     "LOOM_SVC_PERSONAL_DEV_ACTIVATION_PUBLIC_KEY_FILE is required "
@@ -235,6 +244,11 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
                 settings.personal_dev_activation_public_key_file,
                 key_id=settings.personal_dev_activation_key_id,
                 max_age_seconds=settings.personal_dev_activation_ack_max_age_sec,
+                expected_sha256=(
+                    settings.personal_dev_activation_public_key_sha256
+                    if settings.personal_dev_builder_enabled
+                    else None
+                ),
             )
             personal_dev_runtime = build_personal_dev_preparation_runtime(
                 settings,
@@ -250,13 +264,18 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
                 settings,
                 minio_client=minio_client,
             )
-            personal_dev_capacity_runtime = build_personal_dev_capacity_runtime(settings)
-            if personal_dev_capacity_runtime is None:  # pragma: no cover - guarded by limits
-                raise RuntimeError("personal-dev capacity runtime is unavailable")
+            if personal_dev_capacity_runtime.acceptance_interlock is not None:
+                await personal_dev_capacity_runtime.acceptance_interlock.assert_ready(
+                    now=datetime.now(UTC)
+                )
+                app.state.personal_dev_acceptance_interlock = (
+                    personal_dev_capacity_runtime.acceptance_interlock
+                )
         http_client = httpx.AsyncClient(
             base_url=str(settings.control_plane_url),
             timeout=10.0,
         )
+        app.state._owned_service_http_client = http_client
 
         # Plan 20: separate httpx client for the Gateway. Rate-card
         # routes proxy to /admin/rate-cards on the Gateway; we keep
@@ -270,6 +289,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
             base_url=str(settings.gateway_url),
             timeout=10.0,
         )
+        app.state._owned_service_gateway_client = gateway_client
 
         app.state.settings = settings
         app.state.session_factory = session_factory
@@ -428,17 +448,41 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
             if personal_dev_artifact_gc_task is not None:
                 with contextlib.suppress(asyncio.CancelledError):
                     await personal_dev_artifact_gc_task
-            with contextlib.suppress(Exception):
-                await gateway_client.aclose()
-            with contextlib.suppress(Exception):
-                await http_client.aclose()
-            if personal_dev_capacity_runtime is not None:
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        """Close every owned client even when startup rejects before yielding."""
+
+        try:
+            async with _service_lifespan(app):
+                yield
+        finally:
+            for attribute in (
+                "_owned_service_gateway_client",
+                "_owned_service_http_client",
+                "_owned_personal_dev_capacity_projector",
+            ):
+                client = getattr(app.state, attribute, None)
+                close = getattr(client, "aclose", None)
+                if callable(close):
+                    with contextlib.suppress(Exception):
+                        await close()
+            minio = getattr(app.state, "_owned_service_minio_client", None)
+            close_minio = getattr(minio, "close", None)
+            if callable(close_minio):
                 with contextlib.suppress(Exception):
-                    await personal_dev_capacity_runtime.projector.aclose()
-            await engine.dispose()
+                    close_minio()
+            owned_engine = getattr(app.state, "_owned_service_engine", None)
+            dispose = getattr(owned_engine, "dispose", None)
+            if callable(dispose):
+                with contextlib.suppress(Exception):
+                    await dispose()
 
     app = FastAPI(title="Loom Service", version="0.0.1", lifespan=lifespan)
     app.state.personal_dev_builder_available = False
+    app.state.personal_dev_acceptance_required = (
+        settings.dev_instances_enabled and settings.personal_dev_builder_enabled
+    )
     stage1_candidate_authority = build_stage1_candidate_authority_from_environment(
         repo_root=Path(__file__).resolve().parents[2]
     )

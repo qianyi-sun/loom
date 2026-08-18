@@ -37,6 +37,12 @@ from loom.personal_dev_reconciler import (
     PersonalDevEnvironmentReconciler,
     PersonalDevPreparationExecutor,
 )
+from loom.personal_dev_runtime import (
+    PersonalDevAcceptanceInterlock,
+    PersonalDevAcceptanceInterlockError,
+    PersonalDevAcceptanceRuntimeBinding,
+    parse_personal_dev_acceptance_runtime_binding,
+)
 from loom_capacity_agent.client import (
     DemandReporterTLSFiles,
     build_reporter_tls_context,
@@ -53,6 +59,7 @@ class PersonalDevCapacityRuntime:
     installer: PersonalDevCapacityInstaller
     projector: CapacityManagerPersonalDevProjector
     status_reader: PersonalDevCapacityStatusReader
+    acceptance_interlock: PersonalDevAcceptanceInterlock | None
 
 
 def build_personal_dev_capacity_runtime(
@@ -62,6 +69,15 @@ def build_personal_dev_capacity_runtime(
 
     if not settings.dev_instances_enabled:
         return None
+    acceptance_binding: PersonalDevAcceptanceRuntimeBinding | None = None
+    if settings.personal_dev_builder_enabled:
+        try:
+            acceptance_binding = parse_personal_dev_acceptance_runtime_binding(
+                settings.personal_dev_acceptance_binding_json,
+                settings.personal_dev_acceptance_plan_sha256,
+            )
+        except PersonalDevAcceptanceInterlockError as exc:
+            raise RuntimeError("personal-dev acceptance binding is invalid") from exc
     if settings.dev_instance_database_admin_url is None:
         raise RuntimeError(
             "LOOM_SVC_DEV_INSTANCE_DATABASE_ADMIN_URL is required when dev instances are enabled"
@@ -122,10 +138,6 @@ def build_personal_dev_capacity_runtime(
         raise RuntimeError("personal-dev capacity runtime credentials are invalid") from exc
     if agent_certificate == lifecycle_certificate or agent_private_key == lifecycle_private_key:
         raise RuntimeError("personal-dev lifecycle and reporter agent must use distinct identities")
-    try:
-        projector = CapacityManagerPersonalDevProjector.from_files(connection)
-    except (OSError, ssl.SSLError, TypeError, ValueError) as exc:
-        raise RuntimeError("personal-dev capacity runtime credentials are invalid") from exc
     kubectl = KubectlClient(
         str(kubectl_path),
         context=settings.dev_instance_kube_context,
@@ -136,6 +148,10 @@ def build_personal_dev_capacity_runtime(
         database=PsycopgPersonalDevCapacityDatabase(str(settings.dev_instance_database_admin_url)),
         config=config,
     )
+    try:
+        projector = CapacityManagerPersonalDevProjector.from_files(connection)
+    except (OSError, ssl.SSLError, TypeError, ValueError) as exc:
+        raise RuntimeError("personal-dev capacity runtime credentials are invalid") from exc
     return PersonalDevCapacityRuntime(
         installer=installer,
         projector=projector,
@@ -143,6 +159,14 @@ def build_personal_dev_capacity_runtime(
             kubectl=kubectl,
             database_admin_url=str(settings.dev_instance_database_admin_url),
             projector=projector,
+        ),
+        acceptance_interlock=(
+            PersonalDevAcceptanceInterlock.from_binding(
+                projector=projector,
+                binding=acceptance_binding,
+            )
+            if acceptance_binding is not None
+            else None
         ),
     )
 
