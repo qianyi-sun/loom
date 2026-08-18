@@ -1044,7 +1044,7 @@ def test_migration_job_name_stays_a_bounded_dns_label_for_future_heads(
     assert re.fullmatch(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?", name)
 
 
-def test_renderer_pins_images_credentials_security_and_zero_only_commands() -> None:
+def test_renderer_pins_images_credentials_security_and_runtime_commands() -> None:
     documents = _documents()
     workloads = {
         document["kind"]: document
@@ -1145,10 +1145,25 @@ def test_renderer_pins_images_credentials_security_and_zero_only_commands() -> N
         "/var/run/loom-capacity-manager/runtime/credentials/health-private-key.pem",
         "--server-certificate-file",
         "/var/run/loom-capacity-manager/runtime/credentials/server-certificate.pem",
+        "--observe",
     ]
     assert manager_container["startupProbe"]["exec"]["command"] == health_command
     assert manager_container["readinessProbe"]["exec"]["command"] == health_command
     assert manager_container["livenessProbe"]["tcpSocket"] == {"port": 8443}
+
+
+def test_manager_runtime_probes_observe_positive_activation_without_weakening_health() -> None:
+    """Runtime availability must not disappear solely because activation is positive."""
+
+    manager = next(document for document in _documents() if document["kind"] == "Deployment")
+    container = manager["spec"]["template"]["spec"]["containers"][0]
+    startup_command = container["startupProbe"]["exec"]["command"]
+    readiness_command = container["readinessProbe"]["exec"]["command"]
+
+    assert startup_command == readiness_command
+    assert startup_command[-1] == "--observe"
+    assert startup_command.count("--observe") == 1
+    assert container["livenessProbe"]["tcpSocket"] == {"port": 8443}
 
 
 def test_renderer_exposes_only_cluster_internal_mtls_and_least_access_networks() -> None:
