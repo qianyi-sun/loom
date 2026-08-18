@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from loom_capacity_executor.heartbeat import ExecutableHeartbeatError, ExecutableHeartbeatLoop
-from loom_capacity_executor.journal import ExecutorJournal
+from loom_capacity_executor.journal import ExecutorJournal, JournalRegressionError
 from loom_capacity_manager.executable_contracts import (
     ExecutableExecutorHeartbeatV2,
     ExecutableExecutorRegistrationV2,
@@ -78,6 +78,72 @@ async def test_heartbeat_replays_after_active_authority_json_round_trip(
 
     assert (first.heartbeat_sequence, second.heartbeat_sequence) == (1, 2)
     assert [item.heartbeat_sequence for item in client.heartbeats] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_prepared_heartbeat_journal_continues_at_exact_active_epoch(
+    tmp_path: Path,
+) -> None:
+    active = _registration()
+    prepared = active.model_copy(
+        update={
+            "execution": active.execution.model_copy(
+                update={
+                    "execution_state": "prepared",
+                    "executable_new_capacity_ceiling": 0,
+                    "executable_new_capacity_rate_per_minute": 0,
+                }
+            )
+        }
+    )
+    client = RecordingHeartbeatClient()
+    journal = ExecutorJournal(tmp_path / "executor.journal")
+    with journal:
+        first = await ExecutableHeartbeatLoop(prepared, journal, client).heartbeat()
+        second = await ExecutableHeartbeatLoop(active, journal, client).heartbeat()
+
+    assert first.execution.execution_state == "prepared"
+    assert second.execution == active.execution
+    assert (first.heartbeat_sequence, second.heartbeat_sequence) == (1, 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "changed"),
+    (
+        ("writer_epoch", 3),
+        ("configuration_epoch", 2),
+        ("execution_epoch", 2),
+        ("execution_manifest_sha256", "f" * 64),
+        ("trusted_fleet_release_sha256", "e" * 64),
+    ),
+)
+async def test_prepared_heartbeat_journal_rejects_changed_active_epoch(
+    tmp_path: Path,
+    field: str,
+    changed: object,
+) -> None:
+    active = _registration()
+    prepared = active.model_copy(
+        update={
+            "execution": active.execution.model_copy(
+                update={
+                    "execution_state": "prepared",
+                    "executable_new_capacity_ceiling": 0,
+                    "executable_new_capacity_rate_per_minute": 0,
+                }
+            )
+        }
+    )
+    changed_active = active.model_copy(
+        update={"execution": active.execution.model_copy(update={field: changed})}
+    )
+    client = RecordingHeartbeatClient()
+    journal = ExecutorJournal(tmp_path / f"executor-{field}.journal")
+    with journal:
+        await ExecutableHeartbeatLoop(prepared, journal, client).heartbeat()
+        with pytest.raises(JournalRegressionError, match="binding changed"):
+            await ExecutableHeartbeatLoop(changed_active, journal, client).heartbeat()
 
 
 @pytest.mark.asyncio

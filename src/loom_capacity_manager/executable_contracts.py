@@ -145,6 +145,38 @@ class ExecutionAuthorityV2(ExecutionContextV2):
     executable: Literal[True] = True
 
 
+def retained_prepared_activation_matches(
+    retained: ExecutionContextV2,
+    current: ExecutionContextV2,
+) -> bool:
+    """Match one durable prepared executor record to its exact active epoch."""
+
+    if not isinstance(retained, ExecutionContextV2) or not isinstance(
+        current, ExecutionContextV2
+    ):
+        return False
+    if (
+        retained.execution_state != "prepared"
+        or current.execution_state != "active"
+        or retained.writer_epoch != current.writer_epoch
+    ):
+        return False
+    mutable_fields = {
+        "execution_state",
+        "executable_new_capacity_ceiling",
+        "executable_new_capacity_rate_per_minute",
+        "allocation_epoch",
+        "executable",
+    }
+    return retained.model_dump(
+        mode="json",
+        exclude=mutable_fields,
+    ) == current.model_dump(
+        mode="json",
+        exclude=mutable_fields,
+    )
+
+
 class ExecutionFenceV2(ExecutionAuthorityV2):
     """Execution authority bound to one committed allocation epoch."""
 
@@ -1317,5 +1349,6 @@ __all__ = [
     "canonical_executable_bytes",
     "canonical_executable_digest",
     "canonical_inventory_confirmation_journal_head",
+    "retained_prepared_activation_matches",
     "validate_executable_admission_work_size",
 ]
