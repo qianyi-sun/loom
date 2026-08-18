@@ -13,7 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from loom_capacity_manager.contracts import StaticCandidateProvenanceV1
 from loom_capacity_manager.executable_contracts import (
     CandidateBindingV2,
+    ExecutableExecutorHeartbeatV2,
+    ExecutableExecutorInventoryV2,
     ExecutableExecutorRegistrationV2,
+    ExecutionActivationV2,
     ExecutionContextV2,
     ExecutionPreparationPolicyV2,
     ExecutionPreparationV2,
@@ -21,7 +24,10 @@ from loom_capacity_manager.executable_contracts import (
     PoolControllerAuthorityV2,
     PreparedExecutorBindingV2,
     SubjectExecutionAcknowledgementV2,
+    canonical_executable_digest,
+    canonical_inventory_confirmation_journal_head,
 )
+from loom_capacity_manager.execution_store import CapacityExecutionStore
 from loom_capacity_manager.grant_contracts import DryRunExecutorRegistrationV1
 from loom_capacity_manager.grant_store import CapacityGrantStore
 from loom_capacity_manager.models import (
@@ -29,6 +35,10 @@ from loom_capacity_manager.models import (
     CapacityAuthorityState,
 )
 from loom_capacity_manager.ownership import OwnershipKeyring, public_key_fingerprint
+from loom_capacity_manager.preparation_readiness import (
+    canonical_prepared_readiness_digest,
+    load_prepared_execution_readiness,
+)
 from loom_capacity_manager.store import CapacityManagementStore, WriterFence
 from tests.capacity_fixtures import (
     AUTHORITY_ID,
@@ -338,6 +348,79 @@ async def register_execution_executors(
         )
 
 
+async def ready_execution_activation(
+    session: AsyncSession,
+    store: CapacityManagementStore,
+    preparation: ExecutionPreparationV2,
+    prepared: ExecutionContextV2,
+    *,
+    freshness_seconds: int = 120,
+    execution_store: CapacityExecutionStore | None = None,
+) -> ExecutionActivationV2:
+    """Publish exact prepared executor evidence and bind activation to its digest."""
+
+    executions = execution_store or CapacityExecutionStore()
+    for binding in preparation.executors:
+        common = {
+            "execution": prepared,
+            "executor_id": binding.executor_id,
+            "executor_incarnation": binding.executor_incarnation,
+            "pool_id": binding.pool_id,
+            "pool_generation": binding.pool_generation,
+        }
+        heartbeat = ExecutableExecutorHeartbeatV2(
+            **common,
+            heartbeat_sequence=1,
+            journal_sequence=0,
+            journal_digest="0" * 64,
+        )
+        await executions.heartbeat_executor(session, heartbeat)
+        inventory = ExecutableExecutorInventoryV2(
+            **common,
+            inventory_sequence=1,
+            journal_sequence=0,
+            journal_digest="0" * 64,
+            records=(),
+        )
+        await executions.ingest_executor_inventory(session, inventory)
+        confirmation_sequence, confirmation_digest = (
+            canonical_inventory_confirmation_journal_head(inventory)
+        )
+        await executions.heartbeat_executor(
+            session,
+            heartbeat.model_copy(
+                update={
+                    "heartbeat_sequence": 2,
+                    "journal_sequence": confirmation_sequence,
+                    "journal_digest": confirmation_digest,
+                }
+            ),
+        )
+
+    policy = store.execution_policy
+    if policy is None:
+        raise RuntimeError("ready execution activation requires a pinned policy")
+    readiness = await load_prepared_execution_readiness(
+        session,
+        execution_policy=policy,
+        execution_policy_sha256=canonical_executable_digest(policy),
+        freshness_seconds=freshness_seconds,
+    )
+    if not readiness.ready or readiness.execution != prepared:
+        raise RuntimeError(
+            f"prepared execution readiness is incomplete: {readiness.blockers}"
+        )
+    return ExecutionActivationV2(
+        authority_incarnation=prepared.authority_incarnation,
+        expected_writer_epoch=prepared.writer_epoch,
+        execution_epoch=prepared.execution_epoch,
+        execution_manifest_sha256=prepared.execution_manifest_sha256,
+        prepared_readiness_sha256=canonical_prepared_readiness_digest(readiness),
+        executable_new_capacity_ceiling=preparation.requested_ceiling,
+        executable_new_capacity_rate_per_minute=preparation.requested_rate_per_minute,
+    )
+
+
 __all__ = [
     "CONTROLLER_DIGESTS",
     "EXECUTOR_INCARNATIONS",
@@ -348,6 +431,7 @@ __all__ = [
     "execution_policy",
     "executor_binding",
     "protected_candidate",
+    "ready_execution_activation",
     "register_execution_executors",
     "setup_execution",
     "source_candidate",

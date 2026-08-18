@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Loom active global capacity pool executor ticks
+
+[Timer]
+OnBootSec=15
+OnUnitInactiveSec=30
+AccuracySec=5
+Persistent=false
+Unit=loom-capacity-pool-executor-active.service
+
+[Install]
+WantedBy=timers.target

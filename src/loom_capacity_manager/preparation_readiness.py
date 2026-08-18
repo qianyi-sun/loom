@@ -175,8 +175,27 @@ class PreparedExecutionReadinessV2(StrictV2Model):
         return value
 
 
+def canonical_prepared_readiness_digest(
+    value: PreparedExecutionReadinessV2,
+) -> str:
+    """Return the canonical digest of one complete prepared-readiness object."""
+
+    if not isinstance(value, PreparedExecutionReadinessV2):
+        raise ValueError("prepared readiness digest requires prepared readiness")
+    return canonical_executable_digest(value)
+
+
 @asynccontextmanager
-async def _read_transaction(session: AsyncSession) -> AsyncIterator[None]:
+async def _read_transaction(
+    session: AsyncSession,
+    *,
+    create: bool,
+) -> AsyncIterator[None]:
+    if not create:
+        if not session.in_transaction():
+            raise ValueError("prepared readiness requires an active transaction")
+        yield
+        return
     transaction = session.begin_nested() if session.in_transaction() else session.begin()
     async with transaction:
         yield
@@ -280,12 +299,13 @@ async def _subject_readiness(
     epoch: CapacityExecutionEpoch,
     preparation: ExecutionPreparationV2 | None,
     execution_policy: ExecutionPreparationPolicyV2,
+    exclusive: bool,
 ) -> tuple[int, int]:
     configuration = (
         await session.execute(
             select(CapacityConfigurationEpoch).where(
                 CapacityConfigurationEpoch.configuration_epoch == epoch.configuration_epoch
-            )
+            ).with_for_update(read=not exclusive)
         )
     ).scalar_one_or_none()
     subjects = (
@@ -294,6 +314,7 @@ async def _subject_readiness(
                 select(CapacitySubject)
                 .where(CapacitySubject.configuration_epoch == epoch.configuration_epoch)
                 .order_by(CapacitySubject.subject_id)
+                .with_for_update(read=not exclusive)
             )
         )
         .scalars()
@@ -332,7 +353,7 @@ async def _subject_readiness(
                     CapacityCandidate.subject_id == subject.subject_id,
                     CapacityCandidate.subject_incarnation == subject.subject_incarnation,
                     CapacityCandidate.candidate_generation == subject.candidate_generation,
-                )
+                ).with_for_update(read=not exclusive)
             )
         ).scalar_one_or_none()
         if candidate is None or (
@@ -475,14 +496,16 @@ def _executor_readiness(
     )
 
 
-async def load_prepared_execution_readiness(
+async def _load_prepared_execution_readiness(
     session: AsyncSession,
     *,
     execution_policy: ExecutionPreparationPolicyV2 | None,
     execution_policy_sha256: str | None,
     freshness_seconds: int,
+    exclusive: bool,
+    create_transaction: bool,
 ) -> PreparedExecutionReadinessV2:
-    """Load one bounded readiness snapshot without credentials or scheduler access."""
+    """Load one readiness object under caller-selected PostgreSQL row locks."""
 
     if type(freshness_seconds) is not int or freshness_seconds <= 0:
         raise ValueError("prepared readiness freshness must be a positive integer")
@@ -496,12 +519,12 @@ async def load_prepared_execution_readiness(
     blockers: list[PreparedReadinessBlocker] = []
     if execution_policy is None:
         blockers.append("execution-policy-disabled")
-    async with _read_transaction(session):
+    async with _read_transaction(session, create=create_transaction):
         authority = (
             await session.execute(
                 select(CapacityAuthorityState)
                 .where(CapacityAuthorityState.singleton_id == 1)
-                .with_for_update(read=True)
+                .with_for_update(read=not exclusive)
             )
         ).scalar_one()
         if authority.execution_state == "shadow":
@@ -521,7 +544,7 @@ async def load_prepared_execution_readiness(
                 await session.execute(
                     select(CapacityExecutionEpoch)
                     .where(CapacityExecutionEpoch.execution_epoch == authority.execution_epoch)
-                    .with_for_update(read=True)
+                    .with_for_update(read=not exclusive)
                 )
             ).scalar_one_or_none()
         if epoch is not None:
@@ -558,6 +581,7 @@ async def load_prepared_execution_readiness(
                 epoch=epoch,
                 preparation=preparation,
                 execution_policy=execution_policy,
+                exclusive=exclusive,
             )
             if acknowledged_subject_count != expected_subject_count:
                 blockers.append("subject-acknowledgements-incomplete")
@@ -589,7 +613,7 @@ async def load_prepared_execution_readiness(
                         select(CapacityExecutionExecutor)
                         .where(CapacityExecutionExecutor.execution_epoch == epoch.execution_epoch)
                         .order_by(CapacityExecutionExecutor.pool_id)
-                        .with_for_update(read=True)
+                        .with_for_update(read=not exclusive)
                     )
                 )
                 .scalars()
@@ -603,7 +627,7 @@ async def load_prepared_execution_readiness(
                             CapacityExecutableExecutorState.execution_epoch == epoch.execution_epoch
                         )
                         .order_by(CapacityExecutableExecutorState.pool_id)
-                        .with_for_update(read=True)
+                        .with_for_update(read=not exclusive)
                     )
                 )
                 .scalars()
@@ -653,9 +677,29 @@ async def load_prepared_execution_readiness(
     )
 
 
+async def load_prepared_execution_readiness(
+    session: AsyncSession,
+    *,
+    execution_policy: ExecutionPreparationPolicyV2 | None,
+    execution_policy_sha256: str | None,
+    freshness_seconds: int,
+) -> PreparedExecutionReadinessV2:
+    """Load one bounded readiness snapshot without credentials or scheduler access."""
+
+    return await _load_prepared_execution_readiness(
+        session,
+        execution_policy=execution_policy,
+        execution_policy_sha256=execution_policy_sha256,
+        freshness_seconds=freshness_seconds,
+        exclusive=False,
+        create_transaction=True,
+    )
+
+
 __all__ = [
     "PreparedExecutionReadinessV2",
     "PreparedExecutorReadinessV1",
     "PreparedReadinessBlocker",
+    "canonical_prepared_readiness_digest",
     "load_prepared_execution_readiness",
 ]

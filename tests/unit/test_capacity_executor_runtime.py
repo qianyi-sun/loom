@@ -20,12 +20,14 @@ from loom_capacity_executor.runtime import (
     ActivationRuntimeArtifactV2,
     AdmissionBindingEntryV2,
     AdmissionBindingResolutionError,
+    ApprovedLaunchProfileSetV2,
     RoutedExecutableAdmissionClient,
     RuntimeAssemblyError,
     build_executable_runtime,
     canonical_admission_directory_digest,
     canonical_approved_profiles_digest,
     load_activation_runtime_artifact,
+    load_approved_launch_profile_set,
     resolve_runtime_profile,
     write_admission_binding_directory,
 )
@@ -317,6 +319,22 @@ def _slurm_authority(root: Path, profile: OperatorLaunchProfileV2) -> SlurmAutho
     )
 
 
+def _slurm_authority_for_config(
+    root: Path,
+    profile: OperatorLaunchProfileV2,
+    config: PoolExecutorConfig,
+) -> SlurmAuthorityV2:
+    authority = _slurm_authority(root, profile)
+    configured_paths = dict(config.manifest.slurm_executables)
+    executables = {
+        name: getattr(authority.executables, name).model_copy(
+            update={"path": str(configured_paths[name])}
+        )
+        for name in ("scontrol", "sacctmgr", "squeue", "sbatch", "scancel", "sacct")
+    }
+    return authority.model_copy(update={"executables": SlurmExecutablesV2(**executables)})
+
+
 def _two_slot_profile(profile: OperatorLaunchProfileV2) -> OperatorLaunchProfileV2:
     changed = profile.model_copy(
         update={
@@ -438,7 +456,11 @@ def test_activation_runtime_artifact_builds_exact_executor_runtime(tmp_path: Pat
         handoff_directory=str(handoff),
         journal_file=str(config.journal_file),
         state_directory=str(config.state_directory),
-        slurm_authority=_slurm_authority(tmp_path / "slurm-bin", profile),
+        slurm_authority=_slurm_authority_for_config(
+            tmp_path / "slurm-bin",
+            profile,
+            config,
+        ),
         profiles=profiles,
     )
     manager = object()
@@ -495,6 +517,21 @@ def test_activation_runtime_artifact_builds_exact_executor_runtime(tmp_path: Pat
             admission_client_factory=lambda *_args, **_kwargs: admission,
             slurm_backend_factory=slurm_factory,
         )
+
+    seen.clear()
+    changed_slurm = artifact.slurm_authority.model_copy(
+        update={"controller_host": "other-controller.internal"}
+    )
+    with pytest.raises(RuntimeAssemblyError, match="Slurm"):
+        build_executable_runtime(
+            config,
+            artifact.model_copy(update={"slurm_authority": changed_slurm}),
+            manager_client=manager,
+            current_context=active,
+            admission_client_factory=lambda *_args, **_kwargs: admission,
+            slurm_backend_factory=slurm_factory,
+        )
+    assert seen == []
     with pytest.raises(RuntimeAssemblyError, match="activation artifact"):
         build_executable_runtime(
             config,
@@ -597,7 +634,11 @@ def test_activation_runtime_rejects_profile_set_not_pinned_by_local_manifest(
         handoff_directory=str(handoff),
         journal_file=str(config.journal_file),
         state_directory=str(config.state_directory),
-        slurm_authority=_slurm_authority(tmp_path / "slurm-bin-profile-set", profile),
+        slurm_authority=_slurm_authority_for_config(
+            tmp_path / "slurm-bin-profile-set",
+            profile,
+            config,
+        ),
         profiles=(tampered,),
     )
 
@@ -701,3 +742,18 @@ def test_activation_runtime_artifact_loader_rejects_group_readable_file(
 
     with pytest.raises(RuntimeAssemblyError, match="0600"):
         load_activation_runtime_artifact(artifact)
+
+
+def test_approved_profile_set_loader_requires_owner_only_bounded_regular_file(
+    tmp_path: Path,
+) -> None:
+    profiles = ApprovedLaunchProfileSetV2(profiles=(operator_profile_fixture(),))
+    source = tmp_path / "approved-profiles.json"
+    source.write_bytes(canonical_executable_bytes(profiles))
+    source.chmod(0o600)
+
+    assert load_approved_launch_profile_set(source) == profiles
+
+    source.chmod(0o640)
+    with pytest.raises(RuntimeAssemblyError, match="0600"):
+        load_approved_launch_profile_set(source)

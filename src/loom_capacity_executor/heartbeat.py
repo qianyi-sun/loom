@@ -15,6 +15,7 @@ from loom_capacity_manager.executable_contracts import (
     StrictV2Model,
     canonical_executable_bytes,
     canonical_executable_digest,
+    retained_prepared_activation_matches,
 )
 
 _ZERO_DIGEST = "0" * 64
@@ -213,8 +214,14 @@ class ExecutableHeartbeatLoop:
 
     def _assert_heartbeat_binding(self, heartbeat: ExecutableExecutorHeartbeatV2) -> None:
         if (
-            self._execution_context(heartbeat.execution)
-            != self._execution_context(self.registration.execution)
+            (
+                self._execution_context(heartbeat.execution)
+                != self._execution_context(self.registration.execution)
+                and not retained_prepared_activation_matches(
+                    heartbeat.execution,
+                    self.registration.execution,
+                )
+            )
             or heartbeat.executor_id != self.registration.executor_id
             or heartbeat.executor_incarnation != self.registration.executor_incarnation
             or heartbeat.pool_id != self.registration.pool_id

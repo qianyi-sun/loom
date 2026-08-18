@@ -31,6 +31,9 @@ CapacityScope = Literal[
     "capacity:execute:pool",
     "capacity:execution:prepare",
     "capacity:execution:abort",
+    "capacity:execution:activate",
+    "capacity:execution:drain",
+    "capacity:execution:retire",
 ]
 
 
@@ -99,7 +102,13 @@ class _PrincipalDocument(_StrictModel):
             )
         )
         has_execution_transition = bool(
-            {"capacity:execution:prepare", "capacity:execution:abort"}.intersection(self.scopes)
+            {
+                "capacity:execution:prepare",
+                "capacity:execution:abort",
+                "capacity:execution:activate",
+                "capacity:execution:drain",
+                "capacity:execution:retire",
+            }.intersection(self.scopes)
         )
         if has_execution_transition and (has_subject or self.pool_id is not None):
             raise ValueError("execution transition principal must be unbound")

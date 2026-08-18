@@ -38,7 +38,6 @@ from loom_capacity_manager.executable_contracts import (
     ExecutableProtectedReleaseV2,
     ExecutableReservationAcceptanceV2,
     ExecutableReservationProposalV2,
-    ExecutionActivationV2,
     ExecutionContextV2,
     ExecutionDrainV2,
     ExecutionPreparationV2,
@@ -79,6 +78,7 @@ from tests.capacity_execution_fixtures import (
     EXECUTOR_KEYS,
     execution_policy,
     executor_binding,
+    ready_execution_activation,
     register_execution_executors,
     setup_execution,
 )
@@ -134,16 +134,15 @@ async def _active_plan_with_policy(  # type: ignore[no-untyped-def]
         idempotency_key=UUID(int=901),
     )
     await register_execution_executors(session, fixture, prepared)
+    activation = await ready_execution_activation(
+        session,
+        fixture.store,
+        request,
+        prepared,
+    )
     active = await fixture.store.activate_execution_epoch(
         session,
-        ExecutionActivationV2(
-            authority_incarnation=prepared.authority_incarnation,
-            expected_writer_epoch=prepared.writer_epoch,
-            execution_epoch=prepared.execution_epoch,
-            execution_manifest_sha256=prepared.execution_manifest_sha256,
-            executable_new_capacity_ceiling=policy.executable_new_capacity_ceiling,
-            executable_new_capacity_rate_per_minute=policy.executable_new_capacity_rate_per_minute,
-        ),
+        activation,
         actor="activation-operator",
         idempotency_key=UUID(int=902),
     )
@@ -212,16 +211,15 @@ async def _active_batched_plan(
         idempotency_key=UUID(int=911),
     )
     await register_execution_executors(session, fixture, prepared)
+    activation = await ready_execution_activation(
+        session,
+        fixture.store,
+        request,
+        prepared,
+    )
     active = await fixture.store.activate_execution_epoch(
         session,
-        ExecutionActivationV2(
-            authority_incarnation=prepared.authority_incarnation,
-            expected_writer_epoch=prepared.writer_epoch,
-            execution_epoch=prepared.execution_epoch,
-            execution_manifest_sha256=prepared.execution_manifest_sha256,
-            executable_new_capacity_ceiling=slots,
-            executable_new_capacity_rate_per_minute=slots,
-        ),
+        activation,
         actor="activation-operator",
         idempotency_key=UUID(int=912),
     )
@@ -616,39 +614,70 @@ async def _clone_sealed_epoch(  # type: ignore[no-untyped-def]
     return clone.allocation_epoch
 
 
+async def _executor_state(
+    session: AsyncSession,
+    execution: ExecutionContextV2,
+    *,
+    pool_id: str,
+) -> CapacityExecutableExecutorState:
+    return (
+        await session.execute(
+            select(CapacityExecutableExecutorState).where(
+                CapacityExecutableExecutorState.execution_epoch == execution.execution_epoch,
+                CapacityExecutableExecutorState.pool_id == pool_id,
+            )
+        )
+    ).scalar_one()
+
+
 async def _heartbeat(
     store: CapacityExecutionStore,
     session: AsyncSession,
     active,  # type: ignore[no-untyped-def]
     *,
     pool_id: str,
-) -> None:
+):  # type: ignore[no-untyped-def]
     binding = executor_binding(pool_id)
-    await store.heartbeat_executor(
-        session,
-        ExecutableExecutorHeartbeatV2(
-            execution=active,
-            executor_id=binding.executor_id,
-            executor_incarnation=binding.executor_incarnation,
-            pool_id=binding.pool_id,
-            pool_generation=binding.pool_generation,
-            heartbeat_sequence=1,
-            journal_sequence=0,
-            journal_digest="0" * 64,
-        ),
+    state = await _executor_state(session, active, pool_id=pool_id)
+    heartbeat_contract = ExecutableExecutorHeartbeatV2(
+        execution=active,
+        executor_id=binding.executor_id,
+        executor_incarnation=binding.executor_incarnation,
+        pool_id=binding.pool_id,
+        pool_generation=binding.pool_generation,
+        heartbeat_sequence=state.heartbeat_high_water + 1,
+        journal_sequence=state.journal_high_water,
+        journal_digest=state.journal_digest,
+        journal_checkpoint_sequence=state.journal_high_water,
+        journal_checkpoint_digest=state.journal_digest,
     )
-    await store.ingest_executor_inventory(
+    heartbeat = await store.heartbeat_executor(
         session,
-        ExecutableExecutorInventoryV2(
-            execution=active,
-            executor_id=binding.executor_id,
-            executor_incarnation=binding.executor_incarnation,
-            pool_id=binding.pool_id,
-            pool_generation=binding.pool_generation,
-            inventory_sequence=1,
-            journal_sequence=0,
-            journal_digest="0" * 64,
-        ),
+        heartbeat_contract,
+    )
+    return heartbeat_contract, heartbeat
+
+
+async def _next_inventory(
+    session: AsyncSession,
+    execution: ExecutionContextV2,
+    binding,
+    *,
+    records=(),
+):  # type: ignore[no-untyped-def]
+    state = await _executor_state(session, execution, pool_id=binding.pool_id)
+    return ExecutableExecutorInventoryV2(
+        execution=execution,
+        executor_id=binding.executor_id,
+        executor_incarnation=binding.executor_incarnation,
+        pool_id=binding.pool_id,
+        pool_generation=binding.pool_generation,
+        inventory_sequence=state.inventory_high_water + 1,
+        journal_sequence=state.journal_high_water,
+        journal_digest=state.journal_digest,
+        journal_checkpoint_sequence=state.journal_high_water,
+        journal_checkpoint_digest=state.journal_digest,
+        records=records,
     )
 
 
@@ -836,35 +865,39 @@ async def test_drain_telemetry_accepts_only_the_retained_active_registration(
         writer_epoch = successor.writer_epoch
     executor = executor_binding("gb10")
 
-    heartbeat = await store.heartbeat_executor(
+    _heartbeat_contract, heartbeat = await _heartbeat(
+        store,
         capacity_session,
-        ExecutableExecutorHeartbeatV2(
-            execution=active,
-            executor_id=executor.executor_id,
-            executor_incarnation=executor.executor_incarnation,
-            pool_id=executor.pool_id,
-            pool_generation=executor.pool_generation,
-            heartbeat_sequence=1,
-            journal_sequence=0,
-            journal_digest="0" * 64,
-        ),
+        active,
+        pool_id=executor.pool_id,
     )
+    state = (
+        await capacity_session.execute(
+            select(CapacityExecutableExecutorState).where(
+                CapacityExecutableExecutorState.execution_epoch == active.execution_epoch,
+                CapacityExecutableExecutorState.pool_id == executor.pool_id,
+            )
+        )
+    ).scalar_one()
     inventory_contract = ExecutableExecutorInventoryV2(
         execution=active,
         executor_id=executor.executor_id,
         executor_incarnation=executor.executor_incarnation,
         pool_id=executor.pool_id,
         pool_generation=executor.pool_generation,
-        inventory_sequence=1,
-        journal_sequence=0,
-        journal_digest="0" * 64,
+        inventory_sequence=state.inventory_high_water + 1,
+        journal_sequence=state.journal_high_water,
+        journal_digest=state.journal_digest,
+        journal_checkpoint_sequence=state.journal_high_water,
+        journal_checkpoint_digest=state.journal_digest,
+        records=(),
     )
     inventory = await store.ingest_executor_inventory(
         capacity_session,
         inventory_contract,
     )
 
-    assert heartbeat.heartbeat_sequence == 1
+    assert heartbeat.heartbeat_sequence == 3
     assert inventory.inventory_digest == store.contract_digest(inventory_contract)
 
 
@@ -885,18 +918,11 @@ async def test_drain_telemetry_rejects_a_changed_original_active_context(
         expected_epoch=active.writer_epoch,
     )
     executor = executor_binding("gb10")
-    await store.heartbeat_executor(
+    await _heartbeat(
+        store,
         capacity_session,
-        ExecutableExecutorHeartbeatV2(
-            execution=active,
-            executor_id=executor.executor_id,
-            executor_incarnation=executor.executor_incarnation,
-            pool_id=executor.pool_id,
-            pool_generation=executor.pool_generation,
-            heartbeat_sequence=1,
-            journal_sequence=0,
-            journal_digest="0" * 64,
-        ),
+        active,
+        pool_id=executor.pool_id,
     )
     state = (
         await capacity_session.execute(
@@ -944,9 +970,9 @@ async def test_drain_telemetry_rejects_a_changed_original_active_context(
                     executor_incarnation=executor.executor_incarnation,
                     pool_id=executor.pool_id,
                     pool_generation=executor.pool_generation,
-                    heartbeat_sequence=2,
-                    journal_sequence=0,
-                    journal_digest="0" * 64,
+                    heartbeat_sequence=state.heartbeat_high_water + 1,
+                    journal_sequence=state.journal_high_water,
+                    journal_digest=state.journal_digest,
                 ),
             )
         else:
@@ -958,9 +984,9 @@ async def test_drain_telemetry_rejects_a_changed_original_active_context(
                     executor_incarnation=executor.executor_incarnation,
                     pool_id=executor.pool_id,
                     pool_generation=executor.pool_generation,
-                    inventory_sequence=1,
-                    journal_sequence=0,
-                    journal_digest="0" * 64,
+                    inventory_sequence=state.inventory_high_water + 1,
+                    journal_sequence=state.journal_high_water,
+                    journal_digest=state.journal_digest,
                 ),
             )
     await capacity_session.refresh(state)
@@ -1090,15 +1116,10 @@ async def _consume_then_publish_empty_inventory(
             command_sequence=3,
         ),
     )
-    inventory = ExecutableExecutorInventoryV2(
-        execution=_inventory_execution(permit.binding),
-        executor_id=permit.binding.executor_id,
-        executor_incarnation=permit.binding.executor_incarnation,
-        pool_id=permit.binding.pool_id,
-        pool_generation=permit.binding.pool_generation,
-        inventory_sequence=2,
-        journal_sequence=0,
-        journal_digest="0" * 64,
+    inventory = await _next_inventory(
+        session,
+        _inventory_execution(permit.binding),
+        permit.binding,
     )
     await store.ingest_executor_inventory(session, inventory)
     return permit, inventory
@@ -1218,15 +1239,10 @@ async def _quarantined_consumed_permit(
             command_sequence=3,
         ),
     )
-    inventory = ExecutableExecutorInventoryV2(
-        execution=_inventory_execution(permit.binding),
-        executor_id=permit.binding.executor_id,
-        executor_incarnation=permit.binding.executor_incarnation,
-        pool_id=permit.binding.pool_id,
-        pool_generation=permit.binding.pool_generation,
-        inventory_sequence=2,
-        journal_sequence=0,
-        journal_digest="0" * 64,
+    inventory = await _next_inventory(
+        session,
+        _inventory_execution(permit.binding),
+        permit.binding,
     )
     await store.ingest_executor_inventory(session, inventory)
     await store.recover_unsubmitted_permit(session, _submission_recovery(store, permit, inventory))
@@ -1270,6 +1286,8 @@ async def _post_inventory_heartbeat(
             heartbeat_sequence=state.heartbeat_high_water + 1,
             journal_sequence=state.journal_high_water,
             journal_digest=state.journal_digest,
+            journal_checkpoint_sequence=state.journal_high_water,
+            journal_checkpoint_digest=state.journal_digest,
         ),
     )
 
@@ -2101,16 +2119,17 @@ async def test_executor_equivocation_is_durably_fenced(
     store = CapacityExecutionStore()
     active, _allocation_epoch = await _active_plan(capacity_session)
     binding = executor_binding("gb10")
-    await _heartbeat(store, capacity_session, active, pool_id="gb10")
-    changed = ExecutableExecutorHeartbeatV2(
-        execution=active,
-        executor_id=binding.executor_id,
-        executor_incarnation=binding.executor_incarnation,
-        pool_id=binding.pool_id,
-        pool_generation=binding.pool_generation,
-        heartbeat_sequence=1,
-        journal_sequence=1,
-        journal_digest="7" * 64,
+    heartbeat_contract, _heartbeat_result = await _heartbeat(
+        store,
+        capacity_session,
+        active,
+        pool_id="gb10",
+    )
+    changed = heartbeat_contract.model_copy(
+        update={
+            "journal_sequence": heartbeat_contract.journal_sequence + 1,
+            "journal_digest": "7" * 64,
+        }
     )
 
     with pytest.raises(ExecutionConflictError, match="equivocated"):
@@ -2134,6 +2153,10 @@ async def test_heartbeat_requires_exact_journal_checkpoint_sequence(
     store = CapacityExecutionStore()
     active, _allocation_epoch = await _active_plan(capacity_session)
     binding = executor_binding("gb10")
+    initial_state = await _executor_state(capacity_session, active, pool_id="gb10")
+    initial_heartbeat = initial_state.heartbeat_high_water
+    initial_journal = initial_state.journal_high_water
+    initial_digest = initial_state.journal_digest
     await store.heartbeat_executor(
         capacity_session,
         ExecutableExecutorHeartbeatV2(
@@ -2142,9 +2165,11 @@ async def test_heartbeat_requires_exact_journal_checkpoint_sequence(
             executor_incarnation=binding.executor_incarnation,
             pool_id=binding.pool_id,
             pool_generation=binding.pool_generation,
-            heartbeat_sequence=1,
-            journal_sequence=2,
+            heartbeat_sequence=initial_heartbeat + 1,
+            journal_sequence=initial_journal + 1,
             journal_digest="a" * 64,
+            journal_checkpoint_sequence=initial_journal,
+            journal_checkpoint_digest=initial_digest,
         ),
     )
 
@@ -2157,11 +2182,11 @@ async def test_heartbeat_requires_exact_journal_checkpoint_sequence(
                 executor_incarnation=binding.executor_incarnation,
                 pool_id=binding.pool_id,
                 pool_generation=binding.pool_generation,
-                heartbeat_sequence=2,
-                journal_sequence=3,
+                heartbeat_sequence=initial_heartbeat + 2,
+                journal_sequence=initial_journal + 2,
                 journal_digest="b" * 64,
-                journal_checkpoint_sequence=1,
-                journal_checkpoint_digest="a" * 64,
+                journal_checkpoint_sequence=initial_journal,
+                journal_checkpoint_digest=initial_digest,
             ),
         )
 
@@ -2172,6 +2197,11 @@ async def test_inventory_requires_exact_journal_checkpoint_sequence(
     store = CapacityExecutionStore()
     active, _allocation_epoch = await _active_plan(capacity_session)
     binding = executor_binding("gb10")
+    initial_state = await _executor_state(capacity_session, active, pool_id="gb10")
+    initial_heartbeat = initial_state.heartbeat_high_water
+    initial_inventory = initial_state.inventory_high_water
+    initial_journal = initial_state.journal_high_water
+    initial_digest = initial_state.journal_digest
     await store.heartbeat_executor(
         capacity_session,
         ExecutableExecutorHeartbeatV2(
@@ -2180,9 +2210,11 @@ async def test_inventory_requires_exact_journal_checkpoint_sequence(
             executor_incarnation=binding.executor_incarnation,
             pool_id=binding.pool_id,
             pool_generation=binding.pool_generation,
-            heartbeat_sequence=1,
-            journal_sequence=2,
+            heartbeat_sequence=initial_heartbeat + 1,
+            journal_sequence=initial_journal + 1,
             journal_digest="a" * 64,
+            journal_checkpoint_sequence=initial_journal,
+            journal_checkpoint_digest=initial_digest,
         ),
     )
     await store.ingest_executor_inventory(
@@ -2193,10 +2225,10 @@ async def test_inventory_requires_exact_journal_checkpoint_sequence(
             executor_incarnation=binding.executor_incarnation,
             pool_id=binding.pool_id,
             pool_generation=binding.pool_generation,
-            inventory_sequence=1,
-            journal_sequence=2,
+            inventory_sequence=initial_inventory + 1,
+            journal_sequence=initial_journal + 1,
             journal_digest="a" * 64,
-            journal_checkpoint_sequence=2,
+            journal_checkpoint_sequence=initial_journal + 1,
             journal_checkpoint_digest="a" * 64,
         ),
     )
@@ -2210,11 +2242,11 @@ async def test_inventory_requires_exact_journal_checkpoint_sequence(
                 executor_incarnation=binding.executor_incarnation,
                 pool_id=binding.pool_id,
                 pool_generation=binding.pool_generation,
-                inventory_sequence=2,
-                journal_sequence=3,
+                inventory_sequence=initial_inventory + 2,
+                journal_sequence=initial_journal + 2,
                 journal_digest="b" * 64,
-                journal_checkpoint_sequence=1,
-                journal_checkpoint_digest="a" * 64,
+                journal_checkpoint_sequence=initial_journal,
+                journal_checkpoint_digest=initial_digest,
             ),
         )
 
@@ -2225,6 +2257,11 @@ async def test_inventory_advances_the_stored_journal_head(
     store = CapacityExecutionStore()
     active, _allocation_epoch = await _active_plan(capacity_session)
     binding = executor_binding("gb10")
+    initial_state = await _executor_state(capacity_session, active, pool_id="gb10")
+    initial_heartbeat = initial_state.heartbeat_high_water
+    initial_inventory = initial_state.inventory_high_water
+    initial_journal = initial_state.journal_high_water
+    initial_digest = initial_state.journal_digest
     await store.heartbeat_executor(
         capacity_session,
         ExecutableExecutorHeartbeatV2(
@@ -2233,9 +2270,11 @@ async def test_inventory_advances_the_stored_journal_head(
             executor_incarnation=binding.executor_incarnation,
             pool_id=binding.pool_id,
             pool_generation=binding.pool_generation,
-            heartbeat_sequence=1,
-            journal_sequence=1,
+            heartbeat_sequence=initial_heartbeat + 1,
+            journal_sequence=initial_journal + 1,
             journal_digest="a" * 64,
+            journal_checkpoint_sequence=initial_journal,
+            journal_checkpoint_digest=initial_digest,
         ),
     )
 
@@ -2247,17 +2286,17 @@ async def test_inventory_advances_the_stored_journal_head(
             executor_incarnation=binding.executor_incarnation,
             pool_id=binding.pool_id,
             pool_generation=binding.pool_generation,
-            inventory_sequence=1,
-            journal_sequence=2,
+            inventory_sequence=initial_inventory + 1,
+            journal_sequence=initial_journal + 2,
             journal_digest="b" * 64,
-            journal_checkpoint_sequence=1,
+            journal_checkpoint_sequence=initial_journal + 1,
             journal_checkpoint_digest="a" * 64,
         ),
     )
 
     checkpoint = await store.executor_checkpoint(capacity_session, binding)
 
-    assert checkpoint.journal_sequence == 2
+    assert checkpoint.journal_sequence == initial_journal + 2
     assert checkpoint.journal_digest == "b" * 64
 
 
@@ -2267,6 +2306,10 @@ async def test_heartbeat_rejects_changed_journal_digest_at_same_head_sequence(
     store = CapacityExecutionStore()
     active, _allocation_epoch = await _active_plan(capacity_session)
     binding = executor_binding("gb10")
+    initial_state = await _executor_state(capacity_session, active, pool_id="gb10")
+    initial_heartbeat = initial_state.heartbeat_high_water
+    initial_journal = initial_state.journal_high_water
+    initial_digest = initial_state.journal_digest
     await store.heartbeat_executor(
         capacity_session,
         ExecutableExecutorHeartbeatV2(
@@ -2275,9 +2318,11 @@ async def test_heartbeat_rejects_changed_journal_digest_at_same_head_sequence(
             executor_incarnation=binding.executor_incarnation,
             pool_id=binding.pool_id,
             pool_generation=binding.pool_generation,
-            heartbeat_sequence=1,
-            journal_sequence=2,
+            heartbeat_sequence=initial_heartbeat + 1,
+            journal_sequence=initial_journal + 1,
             journal_digest="a" * 64,
+            journal_checkpoint_sequence=initial_journal,
+            journal_checkpoint_digest=initial_digest,
         ),
     )
 
@@ -2289,10 +2334,10 @@ async def test_heartbeat_rejects_changed_journal_digest_at_same_head_sequence(
             executor_incarnation=binding.executor_incarnation,
             pool_id=binding.pool_id,
             pool_generation=binding.pool_generation,
-            heartbeat_sequence=2,
-            journal_sequence=2,
+            heartbeat_sequence=initial_heartbeat + 2,
+            journal_sequence=initial_journal + 1,
             journal_digest="a" * 64,
-            journal_checkpoint_sequence=2,
+            journal_checkpoint_sequence=initial_journal + 1,
             journal_checkpoint_digest="a" * 64,
         ),
     )
@@ -2307,10 +2352,10 @@ async def test_heartbeat_rejects_changed_journal_digest_at_same_head_sequence(
                 executor_incarnation=binding.executor_incarnation,
                 pool_id=binding.pool_id,
                 pool_generation=binding.pool_generation,
-                heartbeat_sequence=3,
-                journal_sequence=2,
+                heartbeat_sequence=initial_heartbeat + 3,
+                journal_sequence=initial_journal + 1,
                 journal_digest="b" * 64,
-                journal_checkpoint_sequence=2,
+                journal_checkpoint_sequence=initial_journal + 1,
                 journal_checkpoint_digest="a" * 64,
             ),
         )
@@ -2322,6 +2367,11 @@ async def test_inventory_rejects_changed_journal_digest_at_same_head_sequence(
     store = CapacityExecutionStore()
     active, _allocation_epoch = await _active_plan(capacity_session)
     binding = executor_binding("gb10")
+    initial_state = await _executor_state(capacity_session, active, pool_id="gb10")
+    initial_heartbeat = initial_state.heartbeat_high_water
+    initial_inventory = initial_state.inventory_high_water
+    initial_journal = initial_state.journal_high_water
+    initial_digest = initial_state.journal_digest
     await store.heartbeat_executor(
         capacity_session,
         ExecutableExecutorHeartbeatV2(
@@ -2330,9 +2380,11 @@ async def test_inventory_rejects_changed_journal_digest_at_same_head_sequence(
             executor_incarnation=binding.executor_incarnation,
             pool_id=binding.pool_id,
             pool_generation=binding.pool_generation,
-            heartbeat_sequence=1,
-            journal_sequence=2,
+            heartbeat_sequence=initial_heartbeat + 1,
+            journal_sequence=initial_journal + 1,
             journal_digest="a" * 64,
+            journal_checkpoint_sequence=initial_journal,
+            journal_checkpoint_digest=initial_digest,
         ),
     )
     replay = await store.ingest_executor_inventory(
@@ -2343,10 +2395,10 @@ async def test_inventory_rejects_changed_journal_digest_at_same_head_sequence(
             executor_incarnation=binding.executor_incarnation,
             pool_id=binding.pool_id,
             pool_generation=binding.pool_generation,
-            inventory_sequence=1,
-            journal_sequence=2,
+            inventory_sequence=initial_inventory + 1,
+            journal_sequence=initial_journal + 1,
             journal_digest="a" * 64,
-            journal_checkpoint_sequence=2,
+            journal_checkpoint_sequence=initial_journal + 1,
             journal_checkpoint_digest="a" * 64,
         ),
     )
@@ -2361,10 +2413,10 @@ async def test_inventory_rejects_changed_journal_digest_at_same_head_sequence(
                 executor_incarnation=binding.executor_incarnation,
                 pool_id=binding.pool_id,
                 pool_generation=binding.pool_generation,
-                inventory_sequence=2,
-                journal_sequence=2,
+                inventory_sequence=initial_inventory + 2,
+                journal_sequence=initial_journal + 1,
                 journal_digest="b" * 64,
-                journal_checkpoint_sequence=2,
+                journal_checkpoint_sequence=initial_journal + 1,
                 journal_checkpoint_digest="a" * 64,
             ),
         )
@@ -4427,18 +4479,15 @@ async def test_admission_closure_survives_active_epoch_before_first_allocation(
             actor="executor-installer",
             idempotency_key=UUID(int=1000 + index),
         )
+    activation = await ready_execution_activation(
+        capacity_session,
+        manager,
+        preparation,
+        prepared,
+    )
     await manager.activate_execution_epoch(
         capacity_session,
-        ExecutionActivationV2(
-            authority_incarnation=prepared.authority_incarnation,
-            expected_writer_epoch=prepared.writer_epoch,
-            execution_epoch=prepared.execution_epoch,
-            execution_manifest_sha256=prepared.execution_manifest_sha256,
-            executable_new_capacity_ceiling=preparation.requested_ceiling,
-            executable_new_capacity_rate_per_minute=(
-                preparation.requested_rate_per_minute
-            ),
-        ),
+        activation,
         actor="activation-operator",
         idempotency_key=UUID(int=1003),
     )
@@ -6320,15 +6369,10 @@ async def test_crash_before_submit_recovery_survives_drain_only_but_blocks_retir
         permit.binding.execution.authority_incarnation,
         expected_epoch=permit.binding.execution.writer_epoch,
     )
-    inventory = ExecutableExecutorInventoryV2(
-        execution=_inventory_execution(permit.binding),
-        executor_id=permit.binding.executor_id,
-        executor_incarnation=permit.binding.executor_incarnation,
-        pool_id=permit.binding.pool_id,
-        pool_generation=permit.binding.pool_generation,
-        inventory_sequence=2,
-        journal_sequence=0,
-        journal_digest="0" * 64,
+    inventory = await _next_inventory(
+        capacity_session,
+        _inventory_execution(permit.binding),
+        permit.binding,
     )
     await store.ingest_executor_inventory(capacity_session, inventory)
     recovery = _submission_recovery(store, permit, inventory)
@@ -7552,15 +7596,10 @@ async def test_quarantined_intent_counts_against_multi_node_topology(
             command_sequence=3,
         ),
     )
-    inventory = ExecutableExecutorInventoryV2(
-        execution=_inventory_execution(permit.binding),
-        executor_id=permit.binding.executor_id,
-        executor_incarnation=permit.binding.executor_incarnation,
-        pool_id=permit.binding.pool_id,
-        pool_generation=permit.binding.pool_generation,
-        inventory_sequence=2,
-        journal_sequence=0,
-        journal_digest="0" * 64,
+    inventory = await _next_inventory(
+        capacity_session,
+        _inventory_execution(permit.binding),
+        permit.binding,
     )
     await store.ingest_executor_inventory(capacity_session, inventory)
     await store.recover_unsubmitted_permit(
@@ -7879,15 +7918,10 @@ async def test_drain_only_transition_emits_close_for_superseded_observed_worker(
     active_payload.pop("executable")
     await store.ingest_executor_inventory(
         capacity_session,
-        ExecutableExecutorInventoryV2(
-            execution=ExecutionContextV2.model_validate(active_payload),
-            executor_id=binding.executor_id,
-            executor_incarnation=binding.executor_incarnation,
-            pool_id=binding.pool_id,
-            pool_generation=binding.pool_generation,
-            inventory_sequence=2,
-            journal_sequence=0,
-            journal_digest="0" * 64,
+        await _next_inventory(
+            capacity_session,
+            ExecutionContextV2.model_validate(active_payload),
+            binding,
             records=(
                 ExecutableInventoryRecordV2(
                     physical_identity="job-123",
@@ -7940,15 +7974,10 @@ async def test_duplicate_inventory_claims_for_one_intent_fence_the_executor(
     with pytest.raises(ExecutionConflictError, match="duplicate executable inventory claim"):
         await store.ingest_executor_inventory(
             capacity_session,
-            ExecutableExecutorInventoryV2(
-                execution=_inventory_execution(permit.binding),
-                executor_id=permit.binding.executor_id,
-                executor_incarnation=permit.binding.executor_incarnation,
-                pool_id=permit.binding.pool_id,
-                pool_generation=permit.binding.pool_generation,
-                inventory_sequence=2,
-                journal_sequence=0,
-                journal_digest="0" * 64,
+            await _next_inventory(
+                capacity_session,
+                _inventory_execution(permit.binding),
+                permit.binding,
                 records=(
                     _inventory_record(permit.binding, physical_identity="job-123"),
                     _inventory_record(permit.binding, physical_identity="job-124"),
@@ -7977,15 +8006,10 @@ async def test_pre_consumption_valid_inventory_quarantines_the_intent(
 
     await store.ingest_executor_inventory(
         capacity_session,
-        ExecutableExecutorInventoryV2(
-            execution=_inventory_execution(permit.binding),
-            executor_id=permit.binding.executor_id,
-            executor_incarnation=permit.binding.executor_incarnation,
-            pool_id=permit.binding.pool_id,
-            pool_generation=permit.binding.pool_generation,
-            inventory_sequence=2,
-            journal_sequence=0,
-            journal_digest="0" * 64,
+        await _next_inventory(
+            capacity_session,
+            _inventory_execution(permit.binding),
+            permit.binding,
             records=(_inventory_record(permit.binding, physical_identity="job-123"),),
         ),
     )
@@ -8029,15 +8053,10 @@ async def test_bootstrap_acknowledged_inventory_quarantines_without_launch_permi
         )
     ).scalar_one() == 0
 
-    inventory = ExecutableExecutorInventoryV2(
-        execution=_inventory_execution(binding),
-        executor_id=binding.executor_id,
-        executor_incarnation=binding.executor_incarnation,
-        pool_id=binding.pool_id,
-        pool_generation=binding.pool_generation,
-        inventory_sequence=2,
-        journal_sequence=0,
-        journal_digest="0" * 64,
+    inventory = await _next_inventory(
+        capacity_session,
+        _inventory_execution(binding),
+        binding,
         records=(_inventory_record(binding, physical_identity="job-before-permit"),),
     )
     ingested = await store.ingest_executor_inventory(capacity_session, inventory)
@@ -8077,15 +8096,10 @@ async def test_released_intent_state_is_preserved_by_late_terminal_inventory(
 
     await store.ingest_executor_inventory(
         capacity_session,
-        ExecutableExecutorInventoryV2(
-            execution=_inventory_execution(permit.binding),
-            executor_id=permit.binding.executor_id,
-            executor_incarnation=permit.binding.executor_incarnation,
-            pool_id=permit.binding.pool_id,
-            pool_generation=permit.binding.pool_generation,
-            inventory_sequence=2,
-            journal_sequence=0,
-            journal_digest="0" * 64,
+        await _next_inventory(
+            capacity_session,
+            _inventory_execution(permit.binding),
+            permit.binding,
             records=(
                 _inventory_record(
                     permit.binding,
@@ -8119,15 +8133,10 @@ async def test_released_intent_state_ignores_invalid_late_inventory(
 
     await store.ingest_executor_inventory(
         capacity_session,
-        ExecutableExecutorInventoryV2(
-            execution=_inventory_execution(permit.binding),
-            executor_id=permit.binding.executor_id,
-            executor_incarnation=permit.binding.executor_incarnation,
-            pool_id=permit.binding.pool_id,
-            pool_generation=permit.binding.pool_generation,
-            inventory_sequence=2,
-            journal_sequence=0,
-            journal_digest="0" * 64,
+        await _next_inventory(
+            capacity_session,
+            _inventory_execution(permit.binding),
+            permit.binding,
             records=(
                 _inventory_record(permit.binding, physical_identity="job-123").model_copy(
                     update={"authority_scope": "registered-loom"}
@@ -8162,15 +8171,10 @@ async def test_released_intent_state_ignores_identity_drift(
 
     await store.ingest_executor_inventory(
         capacity_session,
-        ExecutableExecutorInventoryV2(
-            execution=_inventory_execution(permit.binding),
-            executor_id=permit.binding.executor_id,
-            executor_incarnation=permit.binding.executor_incarnation,
-            pool_id=permit.binding.pool_id,
-            pool_generation=permit.binding.pool_generation,
-            inventory_sequence=2,
-            journal_sequence=0,
-            journal_digest="0" * 64,
+        await _next_inventory(
+            capacity_session,
+            _inventory_execution(permit.binding),
+            permit.binding,
             records=(_inventory_record(permit.binding, physical_identity="job-456"),),
         ),
     )
@@ -8197,15 +8201,10 @@ async def test_terminal_intent_quarantines_on_binding_matching_invalid_inventory
     )
     await store.ingest_executor_inventory(
         capacity_session,
-        ExecutableExecutorInventoryV2(
-            execution=_inventory_execution(permit.binding),
-            executor_id=permit.binding.executor_id,
-            executor_incarnation=permit.binding.executor_incarnation,
-            pool_id=permit.binding.pool_id,
-            pool_generation=permit.binding.pool_generation,
-            inventory_sequence=2,
-            journal_sequence=0,
-            journal_digest="0" * 64,
+        await _next_inventory(
+            capacity_session,
+            _inventory_execution(permit.binding),
+            permit.binding,
             records=(
                 _inventory_record(
                     permit.binding,
@@ -8218,15 +8217,10 @@ async def test_terminal_intent_quarantines_on_binding_matching_invalid_inventory
     )
     await store.ingest_executor_inventory(
         capacity_session,
-        ExecutableExecutorInventoryV2(
-            execution=_inventory_execution(permit.binding),
-            executor_id=permit.binding.executor_id,
-            executor_incarnation=permit.binding.executor_incarnation,
-            pool_id=permit.binding.pool_id,
-            pool_generation=permit.binding.pool_generation,
-            inventory_sequence=3,
-            journal_sequence=0,
-            journal_digest="0" * 64,
+        await _next_inventory(
+            capacity_session,
+            _inventory_execution(permit.binding),
+            permit.binding,
             records=(
                 _inventory_record(
                     permit.binding,
@@ -8264,15 +8258,10 @@ async def test_closing_terminal_intent_quarantines_on_conflicting_terminal_evide
     )
     await store.ingest_executor_inventory(
         capacity_session,
-        ExecutableExecutorInventoryV2(
-            execution=_inventory_execution(permit.binding),
-            executor_id=permit.binding.executor_id,
-            executor_incarnation=permit.binding.executor_incarnation,
-            pool_id=permit.binding.pool_id,
-            pool_generation=permit.binding.pool_generation,
-            inventory_sequence=2,
-            journal_sequence=0,
-            journal_digest="0" * 64,
+        await _next_inventory(
+            capacity_session,
+            _inventory_execution(permit.binding),
+            permit.binding,
             records=(
                 _inventory_record(
                     permit.binding,
@@ -8303,15 +8292,10 @@ async def test_closing_terminal_intent_quarantines_on_conflicting_terminal_evide
     )
     await store.ingest_executor_inventory(
         capacity_session,
-        ExecutableExecutorInventoryV2(
-            execution=_inventory_execution(permit.binding),
-            executor_id=permit.binding.executor_id,
-            executor_incarnation=permit.binding.executor_incarnation,
-            pool_id=permit.binding.pool_id,
-            pool_generation=permit.binding.pool_generation,
-            inventory_sequence=3,
-            journal_sequence=0,
-            journal_digest="0" * 64,
+        await _next_inventory(
+            capacity_session,
+            _inventory_execution(permit.binding),
+            permit.binding,
             records=(
                 _inventory_record(
                     permit.binding,
@@ -8346,15 +8330,10 @@ async def test_unused_closing_intent_quarantines_on_any_physical_inventory(
     )
     await store.ingest_executor_inventory(
         capacity_session,
-        ExecutableExecutorInventoryV2(
-            execution=_inventory_execution(permit.binding),
-            executor_id=permit.binding.executor_id,
-            executor_incarnation=permit.binding.executor_incarnation,
-            pool_id=permit.binding.pool_id,
-            pool_generation=permit.binding.pool_generation,
-            inventory_sequence=2,
-            journal_sequence=0,
-            journal_digest="0" * 64,
+        await _next_inventory(
+            capacity_session,
+            _inventory_execution(permit.binding),
+            permit.binding,
             records=(_inventory_record(permit.binding, physical_identity="job-123"),),
         ),
     )
@@ -8387,29 +8366,19 @@ async def test_inventory_identity_drift_quarantines_an_observed_intent(
     )
     await store.ingest_executor_inventory(
         capacity_session,
-        ExecutableExecutorInventoryV2(
-            execution=_inventory_execution(permit.binding),
-            executor_id=permit.binding.executor_id,
-            executor_incarnation=permit.binding.executor_incarnation,
-            pool_id=permit.binding.pool_id,
-            pool_generation=permit.binding.pool_generation,
-            inventory_sequence=2,
-            journal_sequence=0,
-            journal_digest="0" * 64,
+        await _next_inventory(
+            capacity_session,
+            _inventory_execution(permit.binding),
+            permit.binding,
             records=(_inventory_record(permit.binding, physical_identity="job-123"),),
         ),
     )
     await store.ingest_executor_inventory(
         capacity_session,
-        ExecutableExecutorInventoryV2(
-            execution=_inventory_execution(permit.binding),
-            executor_id=permit.binding.executor_id,
-            executor_incarnation=permit.binding.executor_incarnation,
-            pool_id=permit.binding.pool_id,
-            pool_generation=permit.binding.pool_generation,
-            inventory_sequence=3,
-            journal_sequence=0,
-            journal_digest="0" * 64,
+        await _next_inventory(
+            capacity_session,
+            _inventory_execution(permit.binding),
+            permit.binding,
             records=(_inventory_record(permit.binding, physical_identity="job-456"),),
         ),
     )
@@ -8462,15 +8431,10 @@ async def test_release_requires_matching_protected_and_physical_terminal_evidenc
     active_payload = binding.execution.model_dump(mode="python")
     active_payload.pop("allocation_epoch")
     active_payload.pop("executable")
-    inventory = ExecutableExecutorInventoryV2(
-        execution=ExecutionContextV2.model_validate(active_payload),
-        executor_id=binding.executor_id,
-        executor_incarnation=binding.executor_incarnation,
-        pool_id=binding.pool_id,
-        pool_generation=binding.pool_generation,
-        inventory_sequence=2,
-        journal_sequence=0,
-        journal_digest="0" * 64,
+    inventory = await _next_inventory(
+        capacity_session,
+        ExecutionContextV2.model_validate(active_payload),
+        binding,
         records=(
             ExecutableInventoryRecordV2(
                 physical_identity="job-123",
@@ -8575,15 +8539,10 @@ async def test_protected_release_receipts_retain_monotonic_successors_and_old_re
     )
     await store.ingest_executor_inventory(
         capacity_session,
-        ExecutableExecutorInventoryV2(
-            execution=_inventory_execution(permit.binding),
-            executor_id=permit.binding.executor_id,
-            executor_incarnation=permit.binding.executor_incarnation,
-            pool_id=permit.binding.pool_id,
-            pool_generation=permit.binding.pool_generation,
-            inventory_sequence=2,
-            journal_sequence=0,
-            journal_digest="0" * 64,
+        await _next_inventory(
+            capacity_session,
+            _inventory_execution(permit.binding),
+            permit.binding,
             records=(
                 _inventory_record(
                     permit.binding,
@@ -8875,15 +8834,10 @@ async def test_intent_guard_rejects_release_without_terminal_and_protected_evide
     )
     await store.ingest_executor_inventory(
         capacity_session,
-        ExecutableExecutorInventoryV2(
-            execution=_inventory_execution(permit.binding),
-            executor_id=permit.binding.executor_id,
-            executor_incarnation=permit.binding.executor_incarnation,
-            pool_id=permit.binding.pool_id,
-            pool_generation=permit.binding.pool_generation,
-            inventory_sequence=2,
-            journal_sequence=0,
-            journal_digest="0" * 64,
+        await _next_inventory(
+            capacity_session,
+            _inventory_execution(permit.binding),
+            permit.binding,
             records=(_inventory_record(permit.binding, physical_identity="job-live"),),
         ),
     )
@@ -8919,15 +8873,10 @@ async def test_intent_guard_rejects_release_without_protected_receipt(
     )
     await store.ingest_executor_inventory(
         capacity_session,
-        ExecutableExecutorInventoryV2(
-            execution=_inventory_execution(permit.binding),
-            executor_id=permit.binding.executor_id,
-            executor_incarnation=permit.binding.executor_incarnation,
-            pool_id=permit.binding.pool_id,
-            pool_generation=permit.binding.pool_generation,
-            inventory_sequence=2,
-            journal_sequence=0,
-            journal_digest="0" * 64,
+        await _next_inventory(
+            capacity_session,
+            _inventory_execution(permit.binding),
+            permit.binding,
             records=(
                 _inventory_record(
                     permit.binding,

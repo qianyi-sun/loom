@@ -163,6 +163,10 @@ from loom_capacity_manager.models import (
     CapacityExecutableProtectedReleaseReceipt,
 )
 from loom_capacity_manager.ownership import OwnershipKeyring, public_key_fingerprint
+from loom_capacity_manager.preparation_readiness import (
+    canonical_prepared_readiness_digest,
+    load_prepared_execution_readiness,
+)
 from loom_capacity_manager.store import CapacityManagementStore, ExecutionConflictError
 
 _AUTHORITY_ID = UUID("0f8ad3cd-6cb9-5cb5-8270-356dfe5f98ad")
@@ -862,6 +866,29 @@ class PoolHarness:
             self.client,
         ).heartbeat()
         self.heartbeat_sequence = heartbeat.heartbeat_sequence
+
+    async def publish_prepared_empty_inventory(self) -> None:
+        """Observe and confirm one empty prepared inventory through the real runtime."""
+
+        if self.journal is None or self.registration is None:
+            raise RuntimeError("pool executor is not installed")
+        await self.heartbeat()
+        result = await self.tick()
+        if result.status != "inventory-published":
+            raise RuntimeError("prepared executor did not publish empty inventory")
+        latest = self.journal.latest(
+            "inventory",
+            str(self.registration.executor_incarnation),
+        )
+        if latest is None or latest.durable_payload() is None:
+            raise RuntimeError("prepared executor inventory is unavailable")
+        inventory = ExecutableExecutorInventoryV2.model_validate_json(
+            latest.durable_payload()
+        )
+        if inventory.records:
+            raise RuntimeError("prepared executor inventory is not empty")
+        self.last_inventory = inventory
+        await self.heartbeat()
 
     def owner_slots(self, subject_id: UUID) -> int:
         bindings = self.harness._pool_job_bindings(self.pool_id)
@@ -2457,6 +2484,37 @@ class ExecutableCapacityHarness:
                     actor="executor-installer",
                     idempotency_key=_uuid(f"epoch:{self._epoch_number}:register:{pool_id}"),
                 )
+            journal_root = self.root / "journals" / f"epoch-{self._epoch_number}"
+            for pool_id in _POOL_ORDER:
+                binding, key = self._executor_material[pool_id]
+                registration = ExecutableExecutorRegistrationV2(
+                    execution=prepared,
+                    executor_id=binding.executor_id,
+                    executor_incarnation=binding.executor_incarnation,
+                    pool_id=binding.pool_id,
+                    pool_generation=binding.pool_generation,
+                    signing_key_id=key.signing_key_id,
+                    signing_key_sha256=key.public_key_sha256,
+                    local_authority_sha256=binding.local_authority_sha256,
+                    controller_authority_sha256=binding.controller_authority_sha256,
+                )
+                pool = self.pools[pool_id]
+                await pool.install(
+                    registration,
+                    key,
+                    journal_root / f"{pool_id}.journal",
+                )
+                await pool.publish_prepared_empty_inventory()
+            readiness = await load_prepared_execution_readiness(
+                session,
+                execution_policy=policy,
+                execution_policy_sha256=canonical_executable_digest(policy),
+                freshness_seconds=3_600,
+            )
+            if not readiness.ready or readiness.execution != prepared:
+                raise RuntimeError(
+                    f"prepared execution readiness is incomplete: {readiness.blockers}"
+                )
             active = await self.management_store.activate_execution_epoch(
                 session,
                 ExecutionActivationV2(
@@ -2464,6 +2522,9 @@ class ExecutableCapacityHarness:
                     expected_writer_epoch=prepared.writer_epoch,
                     execution_epoch=prepared.execution_epoch,
                     execution_manifest_sha256=prepared.execution_manifest_sha256,
+                    prepared_readiness_sha256=canonical_prepared_readiness_digest(
+                        readiness
+                    ),
                     executable_new_capacity_ceiling=4,
                     executable_new_capacity_rate_per_minute=4,
                 ),

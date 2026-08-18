@@ -365,6 +365,63 @@ def test_execution_authority_distinguishes_active_from_drain_only() -> None:
         )
 
 
+def test_execution_activation_requires_current_prepared_readiness_digest() -> None:
+    """Dropping or zeroing the readiness compare-and-set must fail activation."""
+
+    contracts = _contracts()
+    payload = {
+        "authority_incarnation": UUID(int=1),
+        "expected_writer_epoch": 2,
+        "execution_epoch": 4,
+        "execution_manifest_sha256": "c" * 64,
+        "executable_new_capacity_ceiling": 1,
+        "executable_new_capacity_rate_per_minute": 1,
+    }
+
+    with pytest.raises(ValidationError):
+        contracts.ExecutionActivationV2.model_validate(payload)
+    with pytest.raises(ValidationError):
+        contracts.ExecutionActivationV2.model_validate(
+            payload | {"prepared_readiness_sha256": "0" * 64}
+        )
+    with pytest.raises(ValidationError):
+        contracts.ExecutionActivationV2.model_validate(
+            payload | {"prepared_readiness_sha256": "g" * 64}
+        )
+
+    request = contracts.ExecutionActivationV2.model_validate(
+        payload | {"prepared_readiness_sha256": "f" * 64}
+    )
+    assert request.prepared_readiness_sha256 == "f" * 64
+
+
+def test_prepared_readiness_digest_is_stable_across_json_round_trip() -> None:
+    """Changing canonical readiness serialization must change this proof boundary."""
+
+    from loom_capacity_manager import preparation_readiness
+
+    readiness = preparation_readiness.PreparedExecutionReadinessV2(
+        ready=False,
+        policy_mode="disabled",
+        policy_sha256=None,
+        execution=None,
+        expected_subject_count=0,
+        acknowledged_subject_count=0,
+        executors=(),
+        blockers=("execution-policy-disabled", "manager-shadow"),
+    )
+
+    assert hasattr(preparation_readiness, "canonical_prepared_readiness_digest")
+    digest = preparation_readiness.canonical_prepared_readiness_digest(readiness)
+    assert digest == preparation_readiness.canonical_prepared_readiness_digest(
+        preparation_readiness.PreparedExecutionReadinessV2.model_validate_json(
+            readiness.model_dump_json()
+        )
+    )
+    assert len(digest) == 64
+    assert digest != "0" * 64
+
+
 def test_execution_drain_contract_binds_the_exact_positive_active_envelope() -> None:
     """Dropping any active compare-and-set field must fail this drain request."""
 

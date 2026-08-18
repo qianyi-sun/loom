@@ -1,15 +1,17 @@
 # Executable global capacity bridge rehearsal
 
 This runbook prepares and observes one global execution epoch at an effective
-new-capacity ceiling and rate of exactly zero. It covers the Package 5C1
-prepared-only manager and the distinct GB10 and OLDLAB controller-local
-inventory services. It contains no activation command.
+new-capacity ceiling and rate of exactly zero, then performs one explicitly
+bounded protected activation followed by drain and retirement. It covers the
+prepared-only and active GB10 and OLDLAB controller-local services. Activation
+is an HTTP authority transition; no CLI command applies infrastructure or
+changes the ceiling.
 
-The repository is render-only. A merge does not authorize Kubernetes apply,
-database migration, legacy-writer freeze, systemd installation/start/enable,
-Slurm mutation, activation, or a ceiling change. The shadow deployment,
-preparation, and abort below are live changes and may run only in the explicit
-operator window tracked by issue #906.
+The repository renderers are non-installing. A merge does not authorize
+Kubernetes apply, database migration, legacy-writer freeze, systemd
+installation/start/enable, Slurm mutation, activation, or a ceiling change.
+Every live action below may run only in the explicit operator window tracked
+by issue #906.
 
 Personal applications use `loom-dev-<owner>` namespaces. `loom-dev` contains
 shared infrastructure only. Never create or accept `loom-dev-shared`.
@@ -33,9 +35,10 @@ During the window, stop immediately and retain the current zero-capacity state
 for any unapproved image or source commit, incomplete subject acknowledgement,
 missing or changed pool binding, missing freeze/restore evidence, stale lease
 or inventory, journal mismatch, foreign/unknown/unsigned/quarantined physical
-record, failed database restore, or possible writer overlap. `ready=true` means
-only that the zero-ceiling prepared rehearsal is complete; it is not worker,
-application, or activation readiness.
+record, failed database restore, or possible writer overlap. `ready=true` plus
+the exact `readiness_sha256` is only a short-lived activation precondition. It
+is not worker or application readiness, and the manager revalidates it under
+the activation transaction locks.
 
 ## 1. Prepare owner-only render evidence
 
@@ -80,6 +83,16 @@ the approved digest reference and non-nil authority UUID:
 ```bash
 manager_image='ghcr.io/qianyi-sun/loom-capacity-manager@sha256:<64-lowercase-hex>'
 authority_incarnation='<reviewed-non-nil-uuid>'
+mapfile -t external_manager_client_cidrs < <(
+  printf '%s\n' \
+    '<observed-oldlab-or-operator-source>/32' \
+    '<observed-gb10-source>/32' \
+  | sort -u
+)
+external_manager_client_args=()
+for cidr in "${external_manager_client_cidrs[@]}"; do
+  external_manager_client_args+=(--external-manager-client-cidr "$cidr")
+done
 
 uv run --no-sync loom admin capacity-control-plane render \
   --file deploy/dev-fleet/capacity-control-plane.toml \
@@ -87,6 +100,7 @@ uv run --no-sync loom admin capacity-control-plane render \
   --authority-incarnation "$authority_incarnation" \
   --execution-policy-file "$execution_policy" \
   --execution-policy-sha256 "$execution_policy_sha256" \
+  "${external_manager_client_args[@]}" \
   > "$manager_render"
 chmod 0600 "$manager_render"
 sha256sum "$manager_render" > "$manager_render.sha256"
@@ -99,10 +113,15 @@ grep -F "value: $execution_policy_sha256" "$manager_render"
 ```
 
 Supplying only one policy argument, a digest that differs from the canonical
-policy payload, an unsafe file, or a changed file fails before YAML is written.
-The rendered ConfigMap contains only canonical policy JSON. The pod init copies
-that projection into a memory-backed, manager-UID-owned mode-`0600` file; the
-manager mounts only the copied directory read-only.
+policy payload, missing external-client evidence, an unsafe file, or a changed
+file fails before YAML is written. External manager clients are 1–8 sorted,
+unique canonical host routes only (`/32` or `/128`), never a subnet. Derive
+them from #906 route/CNI evidence showing the effective source addresses of
+both controller services and the operator client path; do not substitute SSH
+destination addresses or guessed NAT addresses. The rendered ConfigMap
+contains only canonical policy JSON. The pod init copies that projection into
+a memory-backed, manager-UID-owned mode-`0600` file; the manager mounts only
+the copied directory read-only.
 
 ## 2. Shadow-deploy only inside the #906 window
 
@@ -175,7 +194,12 @@ identity is a different unbound `capacity:execution:abort` principal.
 
 Run the HTTP commands from the separately approved client path that can reach
 the cluster-internal manager Service. Replace `manager_origin` only with that
-reviewed endpoint.
+reviewed endpoint. Before preparation, prove the operator path and both
+controller-local service accounts resolve that name, validate the manager
+certificate, and complete an mTLS request through the reviewed route. The
+checked-in package does not create a cross-network tunnel or DNS override; that
+transport is explicit #906 evidence and must remain available through drain
+and retirement.
 
 ```bash
 manager_origin='https://loom-capacity-manager.loom-dev.svc.cluster.local:8443'
@@ -308,6 +332,8 @@ chmod 0600 "$evidence_dir/prepared-readiness.canonical.json"
 
 jq -e '
   .ready == true and
+  (.readiness_sha256 | test("^[0-9a-f]{64}$")) and
+  .readiness_sha256 != ("0" * 64) and
   .policy_mode == "pinned" and
   .policy_sha256 == $digest and
   .executable == false and
@@ -334,24 +360,147 @@ The canonical response has this exact top-level shape; values and timestamps
 come from the locked manager state and database clock:
 
 ```json
-{"acknowledged_subject_count":"<N>","blockers":[],"executable":false,"execution":{"authority_incarnation":"<uuid>","configuration_epoch":"<positive integer>","executable_new_capacity_ceiling":0,"executable_new_capacity_rate_per_minute":0,"execution_epoch":"<positive integer>","execution_manifest_sha256":"<sha256>","execution_state":"prepared","schema_version":2,"trusted_fleet_release_sha256":"<sha256>","writer_epoch":"<positive integer>"},"executors":[{"pool_id":"gb10","...":"bounded readiness fields"},{"pool_id":"oldlab","...":"bounded readiness fields"}],"expected_subject_count":"<N>","policy_mode":"pinned","policy_sha256":"<sha256>","ready":true,"schema_version":2}
+{"acknowledged_subject_count":"<N>","blockers":[],"executable":false,"execution":{"authority_incarnation":"<uuid>","configuration_epoch":"<positive integer>","executable_new_capacity_ceiling":0,"executable_new_capacity_rate_per_minute":0,"execution_epoch":"<positive integer>","execution_manifest_sha256":"<sha256>","execution_state":"prepared","schema_version":2,"trusted_fleet_release_sha256":"<sha256>","writer_epoch":"<positive integer>"},"executors":[{"pool_id":"gb10","...":"bounded readiness fields"},{"pool_id":"oldlab","...":"bounded readiness fields"}],"expected_subject_count":"<N>","policy_mode":"pinned","policy_sha256":"<sha256>","readiness_sha256":"<sha256>","ready":true,"schema_version":2}
 ```
 
 JSON integers are numbers on the wire; the quoted metavariables above are
 documentation placeholders, not literal response values. Any blocker or pool
 order other than `gb10`, `oldlab` fails the rehearsal. Do not infer activation
-permission from an empty blocker list.
+permission from an empty blocker list. `readiness_sha256` is the canonical
+digest of the complete typed readiness object excluding that top-level digest
+field; it is not the raw response-file digest recorded above.
 
-## 6. Stop refresh, abort safely, and retain evidence
+## 6. Stage the active package while disabled
 
-Abort is a second management-database mutation and requires the same #906
-window. Stop both prepared timers first so no refresh races the transition.
-Preserve journals and installed files; do not replace a journal with an empty
-one.
+Do all positive-runtime rendering and installation before stopping prepared
+refresh. For each pool, prepare one reviewed owner-only mode-`0600`
+`ApprovedLaunchProfileSetV2` and one mode-`0600`
+`ActivationRuntimeArtifactV2`. The artifact's execution context predicts the
+exact active response: the prepared authority, writer, configuration and
+execution fences; `execution_state: "active"`; and exactly the positive
+ceiling and rate in the reviewed preparation request. It also binds the exact
+pool executor, approved profile-set digest, active immutable-manifest digest,
+controller/local/signing authorities, owner-only admission and handoff
+directories, journal and state paths, Slurm authority, and complete profiles.
 
-Run on both controllers:
+The artifact loader validates its embedded controller-local directories and
+journal against the current UID. Therefore run each pool iteration on that
+pool's controller as `loom_capacity_executor`, after its owner-only mode-`0700`
+runtime directories exist; the loop below is a two-controller template, not a
+command to run both pools on one host. Render the manifest digest first,
+construct and byte-review the artifact with that digest at its final
+controller-local path, and only then render the artifact-bound config and
+environment:
 
 ```bash
+pool='<this-controller-gb10-or-oldlab>'
+approved_profiles="$evidence_dir/$pool-approved-profiles.json"
+active_artifact="/etc/loom-capacity-executor/$pool-activation-runtime.json"
+
+for input in "$approved_profiles" "$active_artifact"; do
+  test -f "$input" && test ! -L "$input"
+  test "$(stat -c %u "$input")" = "$(id -u)"
+  test "$(stat -c %a "$input")" = 600
+done
+
+uv run --no-sync loom admin capacity-control-plane render-executor \
+  --file "$executor_profile" --pool "$pool" \
+  --output active-manifest-sha256 \
+  --approved-profiles-file "$approved_profiles" \
+  > "$evidence_dir/$pool-active-manifest.sha256"
+uv run --no-sync loom admin capacity-control-plane render-executor \
+  --file "$executor_profile" --pool "$pool" --output active-config \
+  --activation-runtime-artifact "$active_artifact" \
+  > "$evidence_dir/$pool-active.json"
+uv run --no-sync loom admin capacity-control-plane render-executor \
+  --file "$executor_profile" --pool "$pool" \
+  --output active-service-environment \
+  --activation-runtime-artifact "$active_artifact" \
+  > "$evidence_dir/$pool-active-service.env"
+jq -cS .execution "$active_artifact" \
+  > "$evidence_dir/$pool-expected-active-context.json"
+chmod 0600 "$evidence_dir/$pool-active-manifest.sha256" \
+  "$evidence_dir/$pool-active.json" \
+  "$evidence_dir/$pool-active-service.env" \
+  "$evidence_dir/$pool-expected-active-context.json"
+
+# After transferring both canonical context files to central operator evidence.
+cp "$evidence_dir/gb10-expected-active-context.json" \
+  "$evidence_dir/expected-active-context.json"
+cmp -s "$evidence_dir/expected-active-context.json" \
+  "$evidence_dir/oldlab-expected-active-context.json"
+chmod 0600 "$evidence_dir/expected-active-context.json"
+```
+
+Transfer only the resulting hashes and canonical `.execution` evidence to the
+central operator evidence directory, then compare the two predicted contexts
+as shown above. Do not copy or reuse a pool's runtime artifact on the other
+controller.
+
+On each controller, the #906 installer places only that pool's active config,
+runtime artifact and environment at the exact rendered paths, plus the
+checked-in active service and timer. The active config and artifact are
+`/etc/loom-capacity-executor/<pool>-active.json` and
+`/etc/loom-capacity-executor/<pool>-activation-runtime.json`; the environment
+is `/etc/loom-capacity-executor/active-service.env`. Apply the same ownership,
+mode and non-symlink rules as the prepared files. Install the units root-owned
+mode `0644`, but keep both active timers disabled and both active services
+stopped:
+
+```bash
+sudo systemctl disable --now loom-capacity-pool-executor-active.timer
+sudo systemctl stop loom-capacity-pool-executor-active.service
+sudo systemctl daemon-reload
+sudo systemd-analyze verify \
+  /etc/systemd/system/loom-capacity-pool-executor-active.service \
+  /etc/systemd/system/loom-capacity-pool-executor-active.timer
+sudo systemctl is-enabled loom-capacity-pool-executor-active.timer \
+  | grep -Fx disabled
+test "$(systemctl is-active loom-capacity-pool-executor-active.timer)" = inactive
+test "$(systemctl is-active loom-capacity-pool-executor-active.service)" = inactive
+```
+
+The active service has no `[Install]` section and cannot be enabled directly.
+Do not start it yet.
+
+## 7. Lock final readiness and activate the exact epoch
+
+Use separate unbound principals with only `capacity:execution:activate`,
+`capacity:execution:drain`, and `capacity:execution:retire`. Validate their
+owner-only mode-`0600` curl configurations exactly as in section 3:
+
+```bash
+activate_curl_config=/absolute/owner-only/path/activate.curl
+drain_curl_config=/absolute/owner-only/path/drain.curl
+retire_curl_config=/absolute/owner-only/path/retire.curl
+
+for config in "$activate_curl_config" "$drain_curl_config" \
+  "$retire_curl_config"; do
+  test -f "$config" && test ! -L "$config"
+  test "$(stat -c %u "$config")" = "$(id -u)"
+  test "$(stat -c %a "$config")" = 600
+done
+```
+
+Obtain readiness again after all staging work. Replace the earlier response;
+do not activate against an older digest. Repeat every section 5 assertion and
+record the exact nonzero `readiness_sha256`. Then stop both prepared timers and
+services so no refresh can race the transition. Preserve journals and all
+installed files.
+
+```bash
+curl --silent --show-error --fail-with-body \
+  --config "$read_curl_config" \
+  "$manager_origin/v2/status/execution-preparation" \
+  > "$readiness_response"
+chmod 0600 "$readiness_response"
+jq -e '
+  .ready == true and .blockers == [] and
+  (.readiness_sha256 | test("^[0-9a-f]{64}$")) and
+  .readiness_sha256 != ("0" * 64)
+' "$readiness_response"
+
+# Run on both controllers.
 sudo systemctl disable --now loom-capacity-pool-executor-prepared.timer
 sudo systemctl stop loom-capacity-pool-executor-prepared.service
 sudo systemctl show loom-capacity-pool-executor-prepared.timer \
@@ -360,10 +509,250 @@ sudo systemctl show loom-capacity-pool-executor-prepared.service \
   -p ActiveState -p SubState -p Result -p ExecMainStatus
 ```
 
-Construct one exact mode-`0600` abort document from the prepared response. It
-contains only the authority UUID, writer epoch, execution epoch, manifest
-digest, `schema_version: 2`, and `executable: true`. Byte-review it before the
-request.
+Construct the strict activation request from the final response and reviewed
+preparation request. Also construct the drain request in advance from the
+common expected active context so emergency drain does not depend on editing
+JSON after activation. Byte-review both mode-`0600` files.
+
+```bash
+activation_request="$evidence_dir/execution-activation.json"
+activation_response="$evidence_dir/execution-activation-response.json"
+drain_request="$evidence_dir/execution-drain.json"
+drain_response="$evidence_dir/execution-drain-response.json"
+activation_idempotency_key="$(uuidgen)"
+execution_epoch="$(jq -r .execution_epoch "$prepared_response")"
+
+jq -cn --slurpfile prepared "$prepared_response" \
+  --slurpfile preparation "$preparation_request" \
+  --slurpfile readiness "$readiness_response" '{
+    schema_version: 2,
+    authority_incarnation: $prepared[0].authority_incarnation,
+    expected_writer_epoch: $prepared[0].writer_epoch,
+    execution_epoch: $prepared[0].execution_epoch,
+    execution_manifest_sha256: $prepared[0].execution_manifest_sha256,
+    prepared_readiness_sha256: $readiness[0].readiness_sha256,
+    executable_new_capacity_ceiling: $preparation[0].requested_ceiling,
+    executable_new_capacity_rate_per_minute:
+      $preparation[0].requested_rate_per_minute,
+    executable: true
+  }' > "$activation_request"
+
+jq -c '{
+  schema_version: 2,
+  authority_incarnation,
+  expected_writer_epoch: .writer_epoch,
+  execution_epoch,
+  execution_manifest_sha256,
+  expected_executable_new_capacity_ceiling:
+    .executable_new_capacity_ceiling,
+  expected_executable_new_capacity_rate_per_minute:
+    .executable_new_capacity_rate_per_minute,
+  executable: true
+}' "$evidence_dir/expected-active-context.json" > "$drain_request"
+chmod 0600 "$activation_request" "$drain_request"
+
+curl --silent --show-error --fail-with-body \
+  --config "$activate_curl_config" \
+  --header 'Content-Type: application/json' \
+  --header "Idempotency-Key: $activation_idempotency_key" \
+  --data-binary "@$activation_request" \
+  "$manager_origin/v2/execution-preparations/$execution_epoch/activate" \
+  > "$activation_response"
+chmod 0600 "$activation_response"
+
+jq -cS . "$activation_response" \
+  > "$evidence_dir/activation-response.canonical.json"
+cmp -s "$evidence_dir/expected-active-context.json" \
+  "$evidence_dir/activation-response.canonical.json"
+```
+
+The manager recomputes readiness while holding the transition locks and
+rejects any changed digest, fence, policy, acknowledgement, lease, inventory,
+or heartbeat with `409`. Retry only the same bytes with the same idempotency
+UUID. Never replace the request after a timeout; first determine whether the
+exact request was accepted.
+
+After the exact response comparison succeeds, enable and start the active
+timer on both controllers, then force one service tick. Verify the two manager
+executor sequences advanced beyond the final prepared response and archive
+both controller journals:
+
+```bash
+# Run on both controllers.
+sudo systemctl enable --now loom-capacity-pool-executor-active.timer
+sudo systemctl start loom-capacity-pool-executor-active.service
+sudo systemctl show loom-capacity-pool-executor-active.service \
+  -p Result -p ExecMainStatus -p ActiveState -p SubState
+sudo journalctl -u loom-capacity-pool-executor-active.service \
+  --since '15 minutes ago' --no-pager
+
+curl --silent --show-error --fail-with-body \
+  --config "$read_curl_config" "$manager_origin/v2/status/executors" \
+  > "$evidence_dir/active-executors.json"
+chmod 0600 "$evidence_dir/active-executors.json"
+jq -e --slurpfile before "$readiness_response" '
+  .execution_state == "active" and .blockers == [] and
+  ([.items[].pool_id] == ["gb10", "oldlab"]) and
+  all(.items[] as $after;
+    any($before[0].executors[];
+      .pool_id == $after.pool_id and
+      $after.heartbeat_sequence > .heartbeat_sequence and
+      $after.inventory_sequence > .inventory_sequence))
+' "$evidence_dir/active-executors.json"
+```
+
+If any check fails after activation was accepted, post the pre-reviewed drain
+before any other remediation. A successful rehearsal also drains immediately
+after the single verified tick; this is not an open-ended production window.
+Use a fresh idempotency UUID and require the exact `drain-only`, zero-ceiling,
+zero-rate response:
+
+```bash
+drain_idempotency_key="$(uuidgen)"
+curl --silent --show-error --fail-with-body \
+  --config "$drain_curl_config" \
+  --header 'Content-Type: application/json' \
+  --header "Idempotency-Key: $drain_idempotency_key" \
+  --data-binary "@$drain_request" \
+  "$manager_origin/v2/execution-epochs/$execution_epoch/drain" \
+  > "$drain_response"
+chmod 0600 "$drain_response"
+jq -e '
+  .execution_state == "drain-only" and
+  .executable_new_capacity_ceiling == 0 and
+  .executable_new_capacity_rate_per_minute == 0
+' "$drain_response"
+```
+
+If the activation request itself was rejected and status proves the epoch is
+still prepared, do not send drain; use the prepared-only abort branch below.
+
+## 8. Continue drain-only cleanup and retire
+
+Keep both active timers enabled during drain-only. The retained activation
+artifact authorizes the exact executors to consume zero-capacity commands,
+cancel or release their own work, and publish final evidence; it cannot admit
+new capacity. Do not disable the timers merely because drain succeeded.
+
+Wait until current manager status contains exactly both pools, no executor
+blocker, empty inventory counts, and `retirement_safe: true`. The heartbeat
+must be newer than the final inventory. Query every subject acknowledged by
+the preparation request and require every observed intent state to be
+`released`, with no active or quarantined capacity. The retirement transaction
+independently repeats the all-intents-released check under database locks.
+
+```bash
+executor_status="$evidence_dir/drain-only-executors.json"
+curl --silent --show-error --fail-with-body \
+  --config "$read_curl_config" "$manager_origin/v2/status/executors" \
+  > "$executor_status"
+chmod 0600 "$executor_status"
+jq -e '
+  .execution_state == "drain-only" and
+  .executable_new_capacity_ceiling == 0 and
+  .blockers == ["manager-drain-only", "zero-executable-ceiling"] and
+  ([.items[].pool_id] == ["gb10", "oldlab"]) and
+  all(.items[];
+    .blockers == [] and .retirement_safe == true and
+    .inventory_record_counts == {} and
+    .inventory_digest != null and
+    .inventory_observed_at < .last_heartbeat_at)
+' "$executor_status"
+
+subject_statuses="$evidence_dir/drain-only-subjects.jsonl"
+: > "$subject_statuses"
+chmod 0600 "$subject_statuses"
+while read -r subject_id; do
+  curl --silent --show-error --fail-with-body \
+    --config "$read_curl_config" \
+    "$manager_origin/v2/status/subjects/$subject_id" \
+    >> "$subject_statuses"
+  printf '\n' >> "$subject_statuses"
+done < <(jq -r '.subject_acknowledgements[].subject_id' "$preparation_request")
+jq -se '
+  all(.[].intent_state_counts;
+    all(to_entries[]; .key == "released")) and
+  all(.[];
+    .active_capacity_intent_count == 0 and
+    .active_capacity_slots == 0 and
+    .quarantined_intent_count == 0)
+' "$subject_statuses"
+```
+
+Build the two canonical `ExecutionRetirementExecutorCheckpointV2` values only
+from that fresh executor response. Byte-review the request, post it with a new
+idempotency UUID, and require a non-replayed retirement response:
+
+```bash
+retirement_request="$evidence_dir/execution-retirement.json"
+retirement_response="$evidence_dir/execution-retirement-response.json"
+retirement_idempotency_key="$(uuidgen)"
+
+jq -cn --slurpfile drained "$drain_response" \
+  --slurpfile status "$executor_status" '{
+    schema_version: 2,
+    authority_incarnation: $drained[0].authority_incarnation,
+    expected_writer_epoch: $drained[0].writer_epoch,
+    execution_epoch: $drained[0].execution_epoch,
+    execution_manifest_sha256: $drained[0].execution_manifest_sha256,
+    executor_checkpoints: [$status[0].items[] | {
+      schema_version: 2,
+      executor_id,
+      executor_incarnation,
+      pool_id,
+      pool_generation,
+      heartbeat_sequence,
+      command_sequence,
+      journal_sequence,
+      journal_digest,
+      inventory_sequence,
+      inventory_digest
+    }],
+    executable: true
+  }' > "$retirement_request"
+chmod 0600 "$retirement_request"
+
+curl --silent --show-error --fail-with-body \
+  --config "$retire_curl_config" \
+  --header 'Content-Type: application/json' \
+  --header "Idempotency-Key: $retirement_idempotency_key" \
+  --data-binary "@$retirement_request" \
+  "$manager_origin/v2/execution-epochs/$execution_epoch/retire" \
+  > "$retirement_response"
+chmod 0600 "$retirement_response"
+jq -e --argjson epoch "$execution_epoch" '
+  .execution_epoch == $epoch and .replayed == false
+' "$retirement_response"
+```
+
+Only after retirement succeeds, disable the active timers and stop any
+remaining active services on both controllers. The manager must be shadow at
+ceiling zero:
+
+```bash
+# Run on both controllers.
+sudo systemctl disable --now loom-capacity-pool-executor-active.timer
+sudo systemctl stop loom-capacity-pool-executor-active.service
+
+curl --silent --show-error --fail-with-body \
+  --config "$read_curl_config" \
+  "$manager_origin/v2/status/execution-preparation" \
+  > "$evidence_dir/post-retirement-readiness.json"
+chmod 0600 "$evidence_dir/post-retirement-readiness.json"
+jq -e '
+  .ready == false and .executable == false and
+  (.blockers | index("manager-shadow") != null)
+' "$evidence_dir/post-retirement-readiness.json"
+uv run --no-sync loom admin capacity-control-plane status \
+  --namespace loom-dev --kubeconfig "$kubeconfig"
+```
+
+### Prepared-only abort branch
+
+If a failure occurs before activation is accepted and current status proves
+the exact epoch remains prepared, keep both active timers disabled. With both
+prepared timers already stopped, construct and byte-review this mode-`0600`
+request and use the separate abort principal:
 
 ```bash
 abort_request="$evidence_dir/execution-abort.json"
@@ -380,7 +769,6 @@ jq -c '{
 }' "$prepared_response" > "$abort_request"
 chmod 0600 "$abort_request"
 
-execution_epoch="$(jq -r .execution_epoch "$prepared_response")"
 curl --silent --show-error --fail-with-body \
   --config "$abort_curl_config" \
   --header 'Content-Type: application/json' \
@@ -389,42 +777,26 @@ curl --silent --show-error --fail-with-body \
   "$manager_origin/v2/execution-preparations/$execution_epoch/abort" \
   > "$abort_response"
 chmod 0600 "$abort_response"
-
 jq -e --argjson epoch "$execution_epoch" '
   .execution_epoch == $epoch and .replayed == false
 ' "$abort_response"
-sha256sum "$abort_request" "$abort_response" \
-  > "$evidence_dir/execution-abort.sha256"
-chmod 0600 "$evidence_dir/execution-abort.sha256"
 ```
 
-A safe abort is possible only for the exact current prepared epoch, while no
-executable intent exists. It append-only retires the preparation and restores
-`shadow`, ceiling/rate zero, with the increase freeze retained. Retry only with
-the same abort bytes and idempotency UUID; a replay returns `replayed: true`.
+Abort is valid only for the exact current prepared epoch while no executable
+intent exists. It append-only retires preparation and restores shadow at zero,
+with the increase freeze retained. Retry only the same bytes and idempotency
+UUID. The #906 operator decision determines whether frozen legacy writers
+remain stopped or are restored after abort or retirement.
 
-Finally capture status again. It must be not ready with `manager-shadow`; the
-general manager health probe must still report ceiling zero:
+Finally hash all retained evidence without changing any journal:
 
 ```bash
-curl --silent --show-error --fail-with-body \
-  --config "$read_curl_config" \
-  "$manager_origin/v2/status/execution-preparation" \
-  > "$evidence_dir/post-abort-readiness.json"
-chmod 0600 "$evidence_dir/post-abort-readiness.json"
-jq -e '
-  .ready == false and .executable == false and
-  (.blockers | index("manager-shadow") != null)
-' "$evidence_dir/post-abort-readiness.json"
-
-uv run --no-sync loom admin capacity-control-plane status \
-  --namespace loom-dev --kubeconfig "$kubeconfig"
-sha256sum "$evidence_dir"/*.json "$evidence_dir"/*.yaml \
-  > "$evidence_dir/final-evidence.sha256"
+mapfile -d '' evidence_files < <(
+  find "$evidence_dir" -maxdepth 1 -type f \
+    \( -name '*.json' -o -name '*.jsonl' -o -name '*.yaml' \) \
+    -print0 | sort -z
+)
+test "${#evidence_files[@]}" -gt 0
+sha256sum "${evidence_files[@]}" > "$evidence_dir/final-evidence.sha256"
 chmod 0600 "$evidence_dir/final-evidence.sha256"
 ```
-
-The #906 operator decision, not this runbook, determines whether frozen legacy
-writers remain stopped or are restored after abort. There is deliberately no
-`prepared -> active` endpoint, CLI operation, systemd mode, or command in this
-package.

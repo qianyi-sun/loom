@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 import yaml  # type: ignore[import-untyped]
 
+import loom_cli.capacity_control_plane_cmd as capacity_control_plane_cmd
 from loom_capacity_manager.executable_contracts import canonical_executable_bytes
 from loom_cli.admin_cmd import dispatch
 from tests.capacity_execution_fixtures import execution_policy
@@ -148,6 +149,10 @@ def test_admin_render_loads_exact_execution_policy_without_partial_output(
             str(policy_file),
             "--execution-policy-sha256",
             digest,
+            "--external-manager-client-cidr",
+            "192.168.20.1/32",
+            "--external-manager-client-cidr",
+            "192.168.50.13/32",
         ]
     )
 
@@ -164,6 +169,38 @@ def test_admin_render_loads_exact_execution_policy_without_partial_output(
         if volume["name"] == "execution-policy-projected"
     )
     assert policy_source["configMap"]["name"] == config_map["metadata"]["name"]
+
+
+def test_admin_render_rejects_execution_policy_without_external_client_ingress(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    payload = canonical_executable_bytes(execution_policy())
+    policy_file = tmp_path / "execution-policy.json"
+    policy_file.write_bytes(payload)
+    policy_file.chmod(0o600)
+
+    result = dispatch(
+        [
+            "capacity-control-plane",
+            "render",
+            "--file",
+            str(_PROFILE),
+            "--manager-image",
+            _MANAGER_IMAGE,
+            "--authority-incarnation",
+            _AUTHORITY,
+            "--execution-policy-file",
+            str(policy_file),
+            "--execution-policy-sha256",
+            hashlib.sha256(payload).hexdigest(),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert captured.out == ""
+    assert "external manager client CIDRs" in captured.err
 
 
 @pytest.mark.parametrize(
@@ -220,6 +257,8 @@ def test_admin_render_redacts_rejected_execution_policy(
             str(policy_file),
             "--execution-policy-sha256",
             hashlib.sha256(policy_file.read_bytes()).hexdigest(),
+            "--external-manager-client-cidr",
+            "192.168.20.1/32",
         ]
     )
 
@@ -308,6 +347,164 @@ def test_admin_render_executor_writes_only_the_selected_inventory_policy(
     assert payload["relevant_partitions"] == ["gb10-workers"]
     assert {node["pool_id"] for node in payload["nodes"]} == {"gb10"}
     assert "oldlab-node" not in captured.out
+
+
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    (
+        ("active-manifest-sha256", "a" * 64 + "\n"),
+        ("active-config", '{"active":true}\n'),
+        ("active-service-environment", "LOOM_ACTIVE=1\n"),
+    ),
+)
+def test_admin_render_executor_active_outputs_use_only_the_required_owner_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    output: str,
+    expected: str,
+) -> None:
+    profile = object()
+    approved_profiles = object()
+    artifact = object()
+    approved_path = tmp_path / "approved-profiles.json"
+    artifact_path = tmp_path / "activation-runtime.json"
+    observed: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        capacity_control_plane_cmd,
+        "load_capacity_pool_executor_profile",
+        lambda _path: profile,
+    )
+
+    def load_profiles(path: Path) -> object:
+        observed["approved_path"] = path
+        return approved_profiles
+
+    def load_artifact(path: Path) -> object:
+        observed["artifact_path"] = path
+        return artifact
+
+    def render_manifest(value: object, pool_id: str, profiles: object) -> str:
+        observed["render"] = (value, pool_id, profiles)
+        return "a" * 64
+
+    def render_artifact(value: object, pool_id: str, runtime_artifact: object) -> str:
+        observed["render"] = (value, pool_id, runtime_artifact)
+        return expected
+
+    monkeypatch.setattr(
+        capacity_control_plane_cmd,
+        "load_approved_launch_profile_set",
+        load_profiles,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        capacity_control_plane_cmd,
+        "load_activation_runtime_artifact",
+        load_artifact,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        capacity_control_plane_cmd,
+        "render_capacity_pool_executor_active_manifest_sha256",
+        render_manifest,
+        raising=False,
+    )
+    renderer_name = (
+        "render_capacity_pool_executor_active_config"
+        if output == "active-config"
+        else "render_capacity_pool_executor_active_service_environment"
+    )
+    if output != "active-manifest-sha256":
+        monkeypatch.setattr(
+            capacity_control_plane_cmd,
+            renderer_name,
+            render_artifact,
+            raising=False,
+        )
+    owner_argument = (
+        ("--approved-profiles-file", str(approved_path))
+        if output == "active-manifest-sha256"
+        else ("--activation-runtime-artifact", str(artifact_path))
+    )
+
+    result = dispatch(
+        [
+            "capacity-control-plane",
+            "render-executor",
+            "--file",
+            str(_EXECUTOR_PROFILE),
+            "--pool",
+            "oldlab",
+            "--output",
+            output,
+            *owner_argument,
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert captured.out == expected
+    assert captured.err == ""
+    if output == "active-manifest-sha256":
+        assert observed == {
+            "approved_path": approved_path,
+            "render": (profile, "oldlab", approved_profiles),
+        }
+    else:
+        assert observed == {
+            "artifact_path": artifact_path,
+            "render": (profile, "oldlab", artifact),
+        }
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    (
+        ("--output", "active-manifest-sha256"),
+        ("--output", "active-config"),
+        ("--output", "active-service-environment"),
+        ("--output", "config", "--approved-profiles-file", "profiles.json"),
+        (
+            "--output",
+            "active-config",
+            "--approved-profiles-file",
+            "profiles.json",
+            "--activation-runtime-artifact",
+            "artifact.json",
+        ),
+    ),
+)
+def test_admin_render_executor_rejects_unpaired_active_inputs_without_reading_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    arguments: tuple[str, ...],
+) -> None:
+    def unexpected_load(_path: Path) -> object:
+        raise AssertionError("invalid active renderer inputs must fail before file reads")
+
+    monkeypatch.setattr(
+        capacity_control_plane_cmd,
+        "load_capacity_pool_executor_profile",
+        unexpected_load,
+    )
+    result = dispatch(
+        [
+            "capacity-control-plane",
+            "render-executor",
+            "--file",
+            str(_EXECUTOR_PROFILE),
+            "--pool",
+            "oldlab",
+            *arguments,
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert captured.out == ""
+    assert captured.err == "error: active executor render inputs do not match the output\n"
 
 
 def test_admin_render_executor_rejects_invalid_inventory_without_partial_or_leaked_output(

@@ -864,6 +864,36 @@ async def test_drain_only_tick_rejects_new_capacity_work_without_side_effects(
     journal.close()
 
 
+async def test_prepared_tick_publishes_inventory_without_fetching_capacity_work(
+    tmp_path: Path,
+) -> None:
+    executor, journal, manager, _admission, slurm, _launch = executor_fixture(
+        tmp_path,
+        work=object(),
+    )
+    prepared_execution = executor.registration.execution.model_copy(
+        update={
+            "execution_state": "prepared",
+            "executable_new_capacity_ceiling": 0,
+            "executable_new_capacity_rate_per_minute": 0,
+        }
+    )
+    prepared_registration = executor.registration.model_copy(
+        update={"execution": prepared_execution}
+    )
+    executor.registration = prepared_registration
+    manager.registration = prepared_registration
+    manager.reject_work_fetch = True
+
+    result = await executor.tick()
+
+    assert result.status == "inventory-published"
+    assert len(manager.inventories) == 1
+    assert manager.inventories[0].execution == prepared_execution
+    assert slurm.submit_count == 0
+    journal.close()
+
+
 async def test_binding_proposes_handoff_and_waits_for_acknowledged_permit(
     tmp_path: Path,
 ) -> None:

@@ -24,6 +24,23 @@ def test_health_response_accepts_only_ready_with_integer_zero() -> None:
     }
 
 
+def test_runtime_health_accepts_positive_ready_but_rejects_not_ready() -> None:
+    assert parse_capacity_health_response(
+        200,
+        b'{"status":"ready","executable_new_capacity_ceiling":3}',
+        allow_positive_ceiling=True,
+    ) == {
+        "status": "ready",
+        "executable_new_capacity_ceiling": 3,
+    }
+    with pytest.raises(CapacityHealthProbeError):
+        parse_capacity_health_response(
+            503,
+            b'{"status":"not-ready","executable_new_capacity_ceiling":0}',
+            allow_positive_ceiling=True,
+        )
+
+
 @pytest.mark.parametrize(
     ("status_code", "payload", "ceiling"),
     [
@@ -65,9 +82,13 @@ def test_observed_health_rejects_ambiguous_state(
 def test_health_probe_argv_keeps_strict_default_and_explicit_observation_mode() -> None:
     strict = capacity_health_probe_argv()
     observed = capacity_health_probe_argv(observe=True)
+    runtime_ready = capacity_health_probe_argv(allow_positive_ceiling=True)
 
     assert "--observe" not in strict
     assert observed == (*strict, "--observe")
+    assert runtime_ready == (*strict, "--allow-positive-ceiling")
+    with pytest.raises(ValueError):
+        capacity_health_probe_argv(observe=True, allow_positive_ceiling=True)
 
 
 def test_health_probe_identity_observation_uses_lifecycle_identity_explicitly() -> None:
@@ -90,6 +111,19 @@ def test_health_probe_identity_observation_uses_lifecycle_identity_explicitly() 
         "/run/loom-personal-dev/management/files/capacity-lifecycle-token",
         "--observe-identity",
     )
+
+
+@pytest.mark.parametrize(
+    "modes",
+    (
+        {"observe": True, "observe_identity": True},
+        {"observe": True, "allow_positive_ceiling": True},
+        {"observe_identity": True, "allow_positive_ceiling": True},
+    ),
+)
+def test_health_probe_argv_rejects_overlapping_modes(modes: dict[str, bool]) -> None:
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        capacity_health_probe_argv(**modes)
 
 
 def test_identity_response_returns_only_exact_manager_binding() -> None:

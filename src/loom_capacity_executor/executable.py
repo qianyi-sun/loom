@@ -82,6 +82,7 @@ from loom_capacity_manager.executable_contracts import (
     StrictV2Model,
     canonical_executable_bytes,
     canonical_executable_digest,
+    retained_prepared_activation_matches,
 )
 from loom_capacity_manager.ownership import OwnershipKeyring, verify_executable_ownership
 
@@ -813,6 +814,8 @@ class ExecutablePoolExecutor:
         replayed = await self._replay_central_request(checkpoint)
         if replayed is not None:
             return replayed
+        if self.registration.execution.execution_state == "prepared":
+            return await self._publish_inventory(checkpoint)
         work = await self.client.next_executable_work(checkpoint.command_sequence)
         if work is None:
             return await self._publish_inventory(checkpoint)
@@ -2404,6 +2407,9 @@ class ExecutablePoolExecutor:
     def _assert_inventory_binding(self, inventory: ExecutableExecutorInventoryV2) -> None:
         if not _inventory_execution_matches(
             inventory.execution, self.registration.execution
+        ) and not retained_prepared_activation_matches(
+            inventory.execution,
+            self.registration.execution,
         ) and not _retained_drain_execution_matches(
             inventory.execution,
             self.registration.execution,

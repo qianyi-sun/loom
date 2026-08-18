@@ -107,6 +107,16 @@ test -f "$execution_policy" && test ! -L "$execution_policy"
 test "$(stat -c %u "$execution_policy")" = "$(id -u)"
 test "$(stat -c %a "$execution_policy")" = 600
 execution_policy_sha256="$(sha256sum "$execution_policy" | awk '{print $1}')"
+mapfile -t external_manager_client_cidrs < <(
+  printf '%s\n' \
+    '<observed-oldlab-or-operator-source>/32' \
+    '<observed-gb10-source>/32' \
+  | sort -u
+)
+external_manager_client_args=()
+for cidr in "${external_manager_client_cidrs[@]}"; do
+  external_manager_client_args+=(--external-manager-client-cidr "$cidr")
+done
 
 uv run --no-sync loom admin capacity-control-plane render \
   --file deploy/dev-fleet/capacity-control-plane.toml \
@@ -114,6 +124,7 @@ uv run --no-sync loom admin capacity-control-plane render \
   --authority-incarnation 11111111-1111-4111-8111-111111111111 \
   --execution-policy-file "$execution_policy" \
   --execution-policy-sha256 "$execution_policy_sha256" \
+  "${external_manager_client_args[@]}" \
   > "$render_path"
 chmod 0600 "$render_path"
 ```
@@ -122,8 +133,11 @@ The renderer validates the file before stdout, creates one immutable
 digest-addressed ConfigMap, and binds its full digest separately. The projected
 policy is copied into a manager-UID-owned mode-`0600` file on a memory-backed
 volume; only that copied directory reaches the manager read-only. Supplying
-only one policy argument, unsafe ownership/mode, changed bytes, a noncanonical
-payload, or the wrong digest fails closed.
+only one policy argument, missing external-client evidence, unsafe
+ownership/mode, changed bytes, a noncanonical payload, or the wrong digest
+fails closed. The repeated external-client values are 1–8 sorted, unique,
+reviewed `/32` or `/128` effective source routes for the controller/operator
+paths; broader or guessed routes are rejected.
 
 The referenced `loom-capacity-manager` Kubernetes Secret is not rendered or
 created. It must already contain exactly the keys consumed by this release:
@@ -183,19 +197,20 @@ not expose the manager or copy Secret contents through command arguments.
 
 ## Activation
 
-No asset in this directory authorizes activation. The capacity profile is
-render-only. The zero-ceiling manager preparation and abort routes are database
-mutations and may be used only in #906's explicit operator window. Prepared
-executor registration and inventory are automatic after each controller's
-prepared-only timer is explicitly enabled in that window; operators do not
-construct registrations. Stop both timers before aborting the exact prepared
-epoch, and preserve their journals and evidence.
+No asset in this directory authorizes live activation. The capacity CLI is
+non-installing and render/status-only. Protected prepare, activate, drain,
+retire, and abort routes are database authority mutations and may be used only
+in #906's explicit operator window. Prepared executor registration and
+inventory are automatic after each controller's prepared-only timer is
+explicitly enabled. The separately packaged active timer requires the exact
+owner-reviewed positive runtime artifact and remains disabled until activation.
 
 The latest read-only live audit found no `loom-dev` deployment and confirmed
 that environment-local OLDLAB and GB10 autoscalers remain authoritative. The
 global path therefore is not operational merely because these assets exist.
 The complete policy/freeze, render, shadow-deploy, prepare, inventory,
-readiness, timer-stop, and abort sequence is in the
+readiness, activation, emergency drain, retirement, and prepared-only abort
+sequence is in the
 [executable bridge rehearsal](../../docs/runbooks/executable-global-capacity-bridge-rehearsal.md).
 
 Do not apply `shared-fixture.yaml`, install the legacy global autoscaler
@@ -206,8 +221,9 @@ gate in #906 under the global fleet design.
 Do not run `kubectl apply` on rendered capacity-control-plane YAML during this
 repository slice. A live apply belongs only to #906's explicit operator change
 window after its pre-activation evidence and rollback gates are approved. No
-CLI subcommand or asset here implements `prepared -> active`, an apply action,
-or a nonzero effective ceiling.
+CLI subcommand implements apply, install, start, or a ceiling change; the
+least-scope manager HTTP transition and separately enabled controller-local
+active service implement the protected runtime path.
 
 The implemented interfaces and disabled authority boundaries are documented in
 [`Personal development environments`](../../docs/architecture/multi-dev-environments.md),

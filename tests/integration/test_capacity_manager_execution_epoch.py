@@ -15,12 +15,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from loom_capacity_manager.contracts import (
     ConfigurationActivationV1,
     ConfigurationGenerationRefV1,
+    ResourceVectorV1,
     canonical_digest,
 )
 from loom_capacity_manager.executable_contracts import (
     ExecutableExecutorHeartbeatV2,
     ExecutableExecutorInventoryV2,
     ExecutableExecutorRegistrationV2,
+    ExecutableInventoryRecordV2,
     ExecutionActivationV2,
     ExecutionContextV2,
     ExecutionDrainV2,
@@ -36,11 +38,17 @@ from loom_capacity_manager.models import (
     CapacityAllocationEpoch,
     CapacityAuthorityState,
     CapacityCandidate,
+    CapacityExecutableExecutorState,
     CapacityExecutableIntent,
     CapacityExecutableTranche,
     CapacityExecutionEpoch,
     CapacityExecutionExecutor,
     CapacityPoolReporter,
+)
+from loom_capacity_manager.preparation_readiness import (
+    PreparedExecutionReadinessV2,
+    canonical_prepared_readiness_digest,
+    load_prepared_execution_readiness,
 )
 from loom_capacity_manager.reconciler import reconcile_shadow_once
 from loom_capacity_manager.store import (
@@ -79,6 +87,323 @@ from tests.capacity_fixtures import (
 )
 
 
+async def _publish_empty_prepared_inventory(
+    capacity_session: AsyncSession,
+    fixture: _PreparedFixture,
+    prepared: ExecutionContextV2,
+    *,
+    records_by_pool: dict[str, tuple[ExecutableInventoryRecordV2, ...]] | None = None,
+    executor_lease_seconds: int = 120,
+    confirm_inventory: bool = True,
+    expected_ready: bool = True,
+) -> PreparedExecutionReadinessV2:
+    await _register_execution_executors(capacity_session, fixture, prepared)
+    execution_store = CapacityExecutionStore(
+        executor_lease_seconds=executor_lease_seconds,
+    )
+    for binding in fixture.request.executors:
+        await execution_store.heartbeat_executor(
+            capacity_session,
+            ExecutableExecutorHeartbeatV2(
+                execution=prepared,
+                executor_id=binding.executor_id,
+                executor_incarnation=binding.executor_incarnation,
+                pool_id=binding.pool_id,
+                pool_generation=binding.pool_generation,
+                heartbeat_sequence=1,
+                journal_sequence=0,
+                journal_digest="0" * 64,
+            ),
+        )
+        inventory = ExecutableExecutorInventoryV2(
+            execution=prepared,
+            executor_id=binding.executor_id,
+            executor_incarnation=binding.executor_incarnation,
+            pool_id=binding.pool_id,
+            pool_generation=binding.pool_generation,
+            inventory_sequence=1,
+            journal_sequence=0,
+            journal_digest="0" * 64,
+            records=() if records_by_pool is None else records_by_pool.get(binding.pool_id, ()),
+        )
+        await execution_store.ingest_executor_inventory(capacity_session, inventory)
+        if confirm_inventory:
+            confirmation_sequence, confirmation_digest = (
+                canonical_inventory_confirmation_journal_head(inventory)
+            )
+            await execution_store.heartbeat_executor(
+                capacity_session,
+                ExecutableExecutorHeartbeatV2(
+                    execution=prepared,
+                    executor_id=binding.executor_id,
+                    executor_incarnation=binding.executor_incarnation,
+                    pool_id=binding.pool_id,
+                    pool_generation=binding.pool_generation,
+                    heartbeat_sequence=2,
+                    journal_sequence=confirmation_sequence,
+                    journal_digest=confirmation_digest,
+                ),
+            )
+    policy = fixture.store.execution_policy
+    assert policy is not None
+    readiness = await load_prepared_execution_readiness(
+        capacity_session,
+        execution_policy=policy,
+        execution_policy_sha256=canonical_executable_digest(policy),
+        freshness_seconds=120,
+    )
+    assert readiness.ready is expected_ready
+    if expected_ready:
+        assert readiness.execution == prepared
+    return readiness
+
+
+async def _current_activation_request(
+    capacity_session: AsyncSession,
+    fixture: _PreparedFixture,
+    prepared: ExecutionContextV2,
+) -> ExecutionActivationV2:
+    readiness = await _publish_empty_prepared_inventory(
+        capacity_session,
+        fixture,
+        prepared,
+    )
+    return _activation_request(fixture, prepared, readiness)
+
+
+def _activation_request(
+    fixture: _PreparedFixture,
+    prepared: ExecutionContextV2,
+    readiness: PreparedExecutionReadinessV2,
+) -> ExecutionActivationV2:
+    return ExecutionActivationV2(
+        authority_incarnation=prepared.authority_incarnation,
+        expected_writer_epoch=prepared.writer_epoch,
+        execution_epoch=prepared.execution_epoch,
+        execution_manifest_sha256=prepared.execution_manifest_sha256,
+        prepared_readiness_sha256=canonical_prepared_readiness_digest(readiness),
+        executable_new_capacity_ceiling=fixture.request.requested_ceiling,
+        executable_new_capacity_rate_per_minute=fixture.request.requested_rate_per_minute,
+    )
+
+
+async def test_activation_rejects_wrong_prepared_readiness_digest(
+    capacity_session: AsyncSession,
+) -> None:
+    """Ignoring the operator's readiness compare-and-set must fail this test."""
+
+    fixture = await _setup(capacity_session, execution_policy=_policy())
+    prepared = await fixture.store.prepare_execution_epoch(
+        capacity_session,
+        fixture.request,
+        actor="activation-operator",
+        idempotency_key=UUID(int=15001),
+    )
+    readiness = await _publish_empty_prepared_inventory(
+        capacity_session,
+        fixture,
+        prepared,
+    )
+    assert canonical_prepared_readiness_digest(readiness) != "f" * 64
+
+    with pytest.raises(ExecutionConflictError, match="prepared execution readiness changed"):
+        await fixture.store.activate_execution_epoch(
+            capacity_session,
+            ExecutionActivationV2(
+                authority_incarnation=prepared.authority_incarnation,
+                expected_writer_epoch=prepared.writer_epoch,
+                execution_epoch=prepared.execution_epoch,
+                execution_manifest_sha256=prepared.execution_manifest_sha256,
+                prepared_readiness_sha256="f" * 64,
+                executable_new_capacity_ceiling=1,
+                executable_new_capacity_rate_per_minute=1,
+            ),
+            actor="activation-operator",
+            idempotency_key=UUID(int=15002),
+        )
+
+
+async def test_activation_rejects_missing_post_inventory_heartbeat(
+    capacity_session: AsyncSession,
+) -> None:
+    """Registration plus an unconfirmed empty inventory must not activate."""
+
+    fixture = await _setup(capacity_session, execution_policy=_policy())
+    prepared = await fixture.store.prepare_execution_epoch(
+        capacity_session,
+        fixture.request,
+        actor="activation-operator",
+        idempotency_key=UUID(int=15003),
+    )
+    readiness = await _publish_empty_prepared_inventory(
+        capacity_session,
+        fixture,
+        prepared,
+        confirm_inventory=False,
+        expected_ready=False,
+    )
+    assert "executor-post-inventory-heartbeat-missing" in readiness.blockers
+
+    with pytest.raises(ExecutionConflictError, match="readiness is not current"):
+        await fixture.store.activate_execution_epoch(
+            capacity_session,
+            _activation_request(fixture, prepared, readiness),
+            actor="activation-operator",
+            idempotency_key=UUID(int=15004),
+        )
+
+
+async def test_activation_rejects_nonempty_prepared_inventory(
+    capacity_session: AsyncSession,
+) -> None:
+    """A foreign physical record must keep the prepared epoch nonexecutable."""
+
+    fixture = await _setup(capacity_session, execution_policy=_policy())
+    prepared = await fixture.store.prepare_execution_epoch(
+        capacity_session,
+        fixture.request,
+        actor="activation-operator",
+        idempotency_key=UUID(int=15005),
+    )
+    record = ExecutableInventoryRecordV2(
+        physical_identity="foreign-job",
+        physical_kind="slurm-job",
+        authority_scope="foreign",
+        state="active",
+        resources=ResourceVectorV1(slots=1),
+        controller_evidence_sha256="9" * 64,
+    )
+    readiness = await _publish_empty_prepared_inventory(
+        capacity_session,
+        fixture,
+        prepared,
+        records_by_pool={"gb10": (record,)},
+        expected_ready=False,
+    )
+    assert "executor-inventory-foreign" in readiness.blockers
+    assert "executor-inventory-quarantined" in readiness.blockers
+
+    with pytest.raises(ExecutionConflictError, match="readiness is not current"):
+        await fixture.store.activate_execution_epoch(
+            capacity_session,
+            _activation_request(fixture, prepared, readiness),
+            actor="activation-operator",
+            idempotency_key=UUID(int=15006),
+        )
+
+
+async def test_activation_rejects_expired_prepared_executor_lease(
+    capacity_session: AsyncSession,
+) -> None:
+    """A digest captured before executor lease expiry must not authorize activation."""
+
+    fixture = await _setup(capacity_session, execution_policy=_policy())
+    prepared = await fixture.store.prepare_execution_epoch(
+        capacity_session,
+        fixture.request,
+        actor="activation-operator",
+        idempotency_key=UUID(int=15007),
+    )
+    readiness = await _publish_empty_prepared_inventory(
+        capacity_session,
+        fixture,
+        prepared,
+        executor_lease_seconds=1,
+    )
+    request = _activation_request(fixture, prepared, readiness)
+    await capacity_session.execute(text("SELECT pg_sleep(1.05)"))
+
+    with pytest.raises(ExecutionConflictError, match="readiness is not current"):
+        await fixture.store.activate_execution_epoch(
+            capacity_session,
+            request,
+            actor="activation-operator",
+            idempotency_key=UUID(int=15008),
+        )
+
+
+async def test_activation_rejects_stale_digest_after_fresh_inventory_change(
+    capacity_session: AsyncSession,
+) -> None:
+    """A later still-safe inventory must invalidate the operator's stale digest."""
+
+    fixture = await _setup(capacity_session, execution_policy=_policy())
+    prepared = await fixture.store.prepare_execution_epoch(
+        capacity_session,
+        fixture.request,
+        actor="activation-operator",
+        idempotency_key=UUID(int=15009),
+    )
+    readiness = await _publish_empty_prepared_inventory(
+        capacity_session,
+        fixture,
+        prepared,
+    )
+    request = _activation_request(fixture, prepared, readiness)
+    binding = fixture.request.executors[0]
+    first_inventory = ExecutableExecutorInventoryV2(
+        execution=prepared,
+        executor_id=binding.executor_id,
+        executor_incarnation=binding.executor_incarnation,
+        pool_id=binding.pool_id,
+        pool_generation=binding.pool_generation,
+        inventory_sequence=1,
+        journal_sequence=0,
+        journal_digest="0" * 64,
+        records=(),
+    )
+    first_sequence, first_digest = canonical_inventory_confirmation_journal_head(
+        first_inventory
+    )
+    second_inventory = first_inventory.model_copy(
+        update={
+            "inventory_sequence": 2,
+            "journal_sequence": first_sequence,
+            "journal_digest": first_digest,
+            "journal_checkpoint_sequence": first_sequence,
+            "journal_checkpoint_digest": first_digest,
+        }
+    )
+    execution_store = CapacityExecutionStore()
+    await execution_store.ingest_executor_inventory(capacity_session, second_inventory)
+    second_sequence, second_digest = canonical_inventory_confirmation_journal_head(
+        second_inventory
+    )
+    await execution_store.heartbeat_executor(
+        capacity_session,
+        ExecutableExecutorHeartbeatV2(
+            execution=prepared,
+            executor_id=binding.executor_id,
+            executor_incarnation=binding.executor_incarnation,
+            pool_id=binding.pool_id,
+            pool_generation=binding.pool_generation,
+            heartbeat_sequence=3,
+            journal_sequence=second_sequence,
+            journal_digest=second_digest,
+            journal_checkpoint_sequence=first_sequence,
+            journal_checkpoint_digest=first_digest,
+        ),
+    )
+    policy = fixture.store.execution_policy
+    assert policy is not None
+    changed = await load_prepared_execution_readiness(
+        capacity_session,
+        execution_policy=policy,
+        execution_policy_sha256=canonical_executable_digest(policy),
+        freshness_seconds=120,
+    )
+    assert changed.ready is True
+    assert canonical_prepared_readiness_digest(changed) != request.prepared_readiness_sha256
+
+    with pytest.raises(ExecutionConflictError, match="readiness changed"):
+        await fixture.store.activate_execution_epoch(
+            capacity_session,
+            request,
+            actor="activation-operator",
+            idempotency_key=UUID(int=15010),
+        )
+
+
 async def _activate_fixture(
     capacity_session: AsyncSession,
     *,
@@ -97,14 +422,10 @@ async def _activate_fixture(
         actor="activation-operator",
         idempotency_key=UUID(int=780),
     )
-    await _register_execution_executors(capacity_session, fixture, prepared)
-    activation = ExecutionActivationV2(
-        authority_incarnation=AUTHORITY_ID,
-        expected_writer_epoch=fixture.writer.writer_epoch,
-        execution_epoch=prepared.execution_epoch,
-        execution_manifest_sha256=prepared.execution_manifest_sha256,
-        executable_new_capacity_ceiling=1,
-        executable_new_capacity_rate_per_minute=1,
+    activation = await _current_activation_request(
+        capacity_session,
+        fixture,
+        prepared,
     )
     active = await fixture.store.activate_execution_epoch(
         capacity_session,
@@ -123,17 +444,14 @@ async def _activate_execution(capacity_session: AsyncSession):  # type: ignore[n
         actor="activation-operator",
         idempotency_key=UUID(int=12010),
     )
-    await _register_execution_executors(capacity_session, fixture, prepared)
+    activation = await _current_activation_request(
+        capacity_session,
+        fixture,
+        prepared,
+    )
     active = await fixture.store.activate_execution_epoch(
         capacity_session,
-        ExecutionActivationV2(
-            authority_incarnation=prepared.authority_incarnation,
-            expected_writer_epoch=prepared.writer_epoch,
-            execution_epoch=prepared.execution_epoch,
-            execution_manifest_sha256=prepared.execution_manifest_sha256,
-            executable_new_capacity_ceiling=1,
-            executable_new_capacity_rate_per_minute=1,
-        ),
+        activation,
         actor="activation-operator",
         idempotency_key=UUID(int=12011),
     )
@@ -186,6 +504,16 @@ async def _publish_final_safe_evidence(
     retained_execution = await _retained_active_context(capacity_session, drained)
     for pool_id in ("gb10", "oldlab"):
         binding = _executor_binding(pool_id)
+        runtime = (
+            await capacity_session.execute(
+                select(CapacityExecutableExecutorState).where(
+                    CapacityExecutableExecutorState.executor_incarnation
+                    == binding.executor_incarnation
+                )
+            )
+        ).scalar_one()
+        heartbeat_sequence = runtime.heartbeat_high_water + 1
+        command_sequence = runtime.command_high_water
         common = {
             "execution": retained_execution,
             "executor_id": binding.executor_id,
@@ -193,20 +521,15 @@ async def _publish_final_safe_evidence(
             "pool_id": binding.pool_id,
             "pool_generation": binding.pool_generation,
         }
-        await execution_store.heartbeat_executor(
-            capacity_session,
-            ExecutableExecutorHeartbeatV2(
-                **common,
-                heartbeat_sequence=1,
-                journal_sequence=0,
-                journal_digest="0" * 64,
-            ),
-        )
+        checkpoint_sequence = runtime.journal_high_water
+        checkpoint_digest = runtime.journal_digest
         inventory = ExecutableExecutorInventoryV2(
             **common,
-            inventory_sequence=1,
-            journal_sequence=0,
-            journal_digest="0" * 64,
+            inventory_sequence=runtime.inventory_high_water + 1,
+            journal_sequence=checkpoint_sequence,
+            journal_digest=checkpoint_digest,
+            journal_checkpoint_sequence=checkpoint_sequence,
+            journal_checkpoint_digest=checkpoint_digest,
             records=(),
         )
         await execution_store.ingest_executor_inventory(capacity_session, inventory)
@@ -217,9 +540,11 @@ async def _publish_final_safe_evidence(
             capacity_session,
             ExecutableExecutorHeartbeatV2(
                 **common,
-                heartbeat_sequence=2,
+                heartbeat_sequence=heartbeat_sequence,
                 journal_sequence=confirmation_sequence,
                 journal_digest=confirmation_digest,
+                journal_checkpoint_sequence=checkpoint_sequence,
+                journal_checkpoint_digest=checkpoint_digest,
             ),
         )
         checkpoints.append(
@@ -228,11 +553,11 @@ async def _publish_final_safe_evidence(
                 executor_incarnation=binding.executor_incarnation,
                 pool_id=binding.pool_id,
                 pool_generation=binding.pool_generation,
-                heartbeat_sequence=2,
-                command_sequence=0,
+                heartbeat_sequence=heartbeat_sequence,
+                command_sequence=command_sequence,
                 journal_sequence=confirmation_sequence,
                 journal_digest=confirmation_digest,
-                inventory_sequence=1,
+                inventory_sequence=inventory.inventory_sequence,
                 inventory_digest=canonical_executable_digest(inventory),
             )
         )
@@ -480,15 +805,11 @@ async def test_activation_rechecks_freeze_and_exact_evidence(
         actor="activation-operator",
         idempotency_key=UUID(int=723),
     )
-    activation = ExecutionActivationV2(
-        authority_incarnation=AUTHORITY_ID,
-        expected_writer_epoch=fixture.writer.writer_epoch,
-        execution_epoch=prepared.execution_epoch,
-        execution_manifest_sha256=prepared.execution_manifest_sha256,
-        executable_new_capacity_ceiling=1,
-        executable_new_capacity_rate_per_minute=1,
+    activation = await _current_activation_request(
+        capacity_session,
+        fixture,
+        prepared,
     )
-    await _register_execution_executors(capacity_session, fixture, prepared)
     await capacity_session.execute(
         update(CapacityAuthorityState).values(
             increase_freeze=False,
@@ -549,17 +870,14 @@ async def test_active_fact_ingestion_preserves_bound_identity(
         actor="activation-operator",
         idempotency_key=UUID(int=11902),
     )
-    await _register_execution_executors(capacity_session, fixture, prepared)
+    activation = await _current_activation_request(
+        capacity_session,
+        fixture,
+        prepared,
+    )
     await fixture.store.activate_execution_epoch(
         capacity_session,
-        ExecutionActivationV2(
-            authority_incarnation=AUTHORITY_ID,
-            expected_writer_epoch=fixture.writer.writer_epoch,
-            execution_epoch=prepared.execution_epoch,
-            execution_manifest_sha256=prepared.execution_manifest_sha256,
-            executable_new_capacity_ceiling=2,
-            executable_new_capacity_rate_per_minute=1,
-        ),
+        activation,
         actor="activation-operator",
         idempotency_key=UUID(int=11903),
     )
@@ -663,17 +981,14 @@ async def test_active_pool_fact_rejects_same_generation_replacement_reporter(
         actor="activation-operator",
         idempotency_key=UUID(int=11920),
     )
-    await _register_execution_executors(capacity_session, fixture, prepared)
+    activation = await _current_activation_request(
+        capacity_session,
+        fixture,
+        prepared,
+    )
     await fixture.store.activate_execution_epoch(
         capacity_session,
-        ExecutionActivationV2(
-            authority_incarnation=AUTHORITY_ID,
-            expected_writer_epoch=fixture.writer.writer_epoch,
-            execution_epoch=prepared.execution_epoch,
-            execution_manifest_sha256=prepared.execution_manifest_sha256,
-            executable_new_capacity_ceiling=1,
-            executable_new_capacity_rate_per_minute=1,
-        ),
+        activation,
         actor="activation-operator",
         idempotency_key=UUID(int=11921),
     )
@@ -720,17 +1035,14 @@ async def test_prepared_fact_and_drain_only_fact_ingestion_are_rejected(
         await fixture.store.ingest_demand_snapshot(
             capacity_session, demand_snapshot(sequence=1), actor="dev-a"
         )
-    await _register_execution_executors(capacity_session, fixture, prepared)
+    activation = await _current_activation_request(
+        capacity_session,
+        fixture,
+        prepared,
+    )
     await fixture.store.activate_execution_epoch(
         capacity_session,
-        ExecutionActivationV2(
-            authority_incarnation=AUTHORITY_ID,
-            expected_writer_epoch=fixture.writer.writer_epoch,
-            execution_epoch=prepared.execution_epoch,
-            execution_manifest_sha256=prepared.execution_manifest_sha256,
-            executable_new_capacity_ceiling=1,
-            executable_new_capacity_rate_per_minute=1,
-        ),
+        activation,
         actor="activation-operator",
         idempotency_key=UUID(int=11911),
     )
@@ -769,19 +1081,15 @@ async def test_execution_rechecks_durable_candidate_provenance(
         actor="activation-operator",
         idempotency_key=UUID(int=734),
     )
-    await _register_execution_executors(capacity_session, fixture, prepared)
-    activation = ExecutionActivationV2(
-        authority_incarnation=AUTHORITY_ID,
-        expected_writer_epoch=fixture.writer.writer_epoch,
-        execution_epoch=prepared.execution_epoch,
-        execution_manifest_sha256=prepared.execution_manifest_sha256,
-        executable_new_capacity_ceiling=1,
-        executable_new_capacity_rate_per_minute=1,
+    activation = await _current_activation_request(
+        capacity_session,
+        fixture,
+        prepared,
     )
     await capacity_session.execute(
         update(CapacityCandidate).values(source_payload={"publication_sha256": "8" * 64})
     )
-    with pytest.raises(ExecutionConflictError, match="candidate provenance"):
+    with pytest.raises(ExecutionConflictError, match="readiness is not current"):
         await fixture.store.activate_execution_epoch(
             capacity_session,
             activation,
@@ -989,17 +1297,14 @@ async def test_active_writer_restart_clamps_to_drain_only_and_refences(
         actor="activation-operator",
         idempotency_key=UUID(int=736),
     )
-    await _register_execution_executors(capacity_session, fixture, prepared)
+    activation = await _current_activation_request(
+        capacity_session,
+        fixture,
+        prepared,
+    )
     await fixture.store.activate_execution_epoch(
         capacity_session,
-        ExecutionActivationV2(
-            authority_incarnation=AUTHORITY_ID,
-            expected_writer_epoch=fixture.writer.writer_epoch,
-            execution_epoch=prepared.execution_epoch,
-            execution_manifest_sha256=prepared.execution_manifest_sha256,
-            executable_new_capacity_ceiling=1,
-            executable_new_capacity_rate_per_minute=1,
-        ),
+        activation,
         actor="activation-operator",
         idempotency_key=UUID(int=737),
     )
@@ -1054,6 +1359,7 @@ async def test_dry_run_executor_registration_is_not_executable_provenance(
         expected_writer_epoch=fixture.writer.writer_epoch,
         execution_epoch=prepared.execution_epoch,
         execution_manifest_sha256=prepared.execution_manifest_sha256,
+        prepared_readiness_sha256="f" * 64,
         executable_new_capacity_ceiling=1,
         executable_new_capacity_rate_per_minute=1,
     )
@@ -1072,7 +1378,7 @@ async def test_dry_run_executor_registration_is_not_executable_provenance(
                 )
             )
 
-    with pytest.raises(ExecutionConflictError, match="executable executor"):
+    with pytest.raises(ExecutionConflictError, match="readiness is not current"):
         await fixture.store.activate_execution_epoch(
             capacity_session,
             activation,
@@ -1093,15 +1399,11 @@ async def test_activation_is_atomic_and_exact_replay(
         actor="activation-operator",
         idempotency_key=UUID(int=725),
     )
-    activation = ExecutionActivationV2(
-        authority_incarnation=AUTHORITY_ID,
-        expected_writer_epoch=fixture.writer.writer_epoch,
-        execution_epoch=prepared.execution_epoch,
-        execution_manifest_sha256=prepared.execution_manifest_sha256,
-        executable_new_capacity_ceiling=1,
-        executable_new_capacity_rate_per_minute=1,
+    activation = await _current_activation_request(
+        capacity_session,
+        fixture,
+        prepared,
     )
-    await _register_execution_executors(capacity_session, fixture, prepared)
     with pytest.raises(DBAPIError, match="append-only"):
         async with capacity_session.begin_nested():
             await capacity_session.execute(
@@ -1545,7 +1847,9 @@ async def test_retirement_replay_is_exact_after_shadow_restoration(
     assert replay.execution_manifest_sha256 == first.execution_manifest_sha256
     assert replay.retired_at == first.retired_at
     assert replay.replayed is True
-    changed_checkpoint = checkpoints[0].model_copy(update={"heartbeat_sequence": 3})
+    changed_checkpoint = checkpoints[0].model_copy(
+        update={"heartbeat_sequence": checkpoints[0].heartbeat_sequence + 1}
+    )
     changed = request.model_copy(
         update={"executor_checkpoints": (changed_checkpoint, checkpoints[1])}
     )

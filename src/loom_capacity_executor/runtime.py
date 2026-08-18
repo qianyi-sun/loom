@@ -292,30 +292,26 @@ class ActivationRuntimeArtifactV2(StrictV2Model):
         return value
 
 
-def load_activation_runtime_artifact(path: Path) -> ActivationRuntimeArtifactV2:
-    """Securely load one non-renderable, operator-supplied runtime artifact."""
-
+def _load_owner_runtime_payload(path: Path, *, label: str) -> bytes:
     artifact_path = _absolute_owner_path(str(path))
     try:
         before = artifact_path.lstat()
     except OSError as exc:
-        raise RuntimeAssemblyError("activation runtime artifact is unavailable") from exc
+        raise RuntimeAssemblyError(f"{label} is unavailable") from exc
     if (
         artifact_path.is_symlink()
         or not stat.S_ISREG(before.st_mode)
         or before.st_uid != os.geteuid()
         or stat.S_IMODE(before.st_mode) != 0o600
     ):
-        raise RuntimeAssemblyError(
-            "activation runtime artifact must be a current-UID-owned 0600 nonsymlink"
-        )
+        raise RuntimeAssemblyError(f"{label} must be a current-UID-owned 0600 nonsymlink")
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(artifact_path, flags)
     except OSError as exc:
         if exc.errno in {errno.ELOOP, errno.EMLINK}:
-            raise RuntimeAssemblyError("activation runtime artifact must be a nonsymlink") from exc
-        raise RuntimeAssemblyError("activation runtime artifact is unavailable") from exc
+            raise RuntimeAssemblyError(f"{label} must be a nonsymlink") from exc
+        raise RuntimeAssemblyError(f"{label} is unavailable") from exc
     try:
         opened = os.fstat(descriptor)
         if (
@@ -324,16 +320,33 @@ def load_activation_runtime_artifact(path: Path) -> ActivationRuntimeArtifactV2:
             or opened.st_uid != os.geteuid()
             or stat.S_IMODE(opened.st_mode) != 0o600
         ):
-            raise RuntimeAssemblyError("activation runtime artifact changed while opening")
+            raise RuntimeAssemblyError(f"{label} changed while opening")
         payload = os.read(descriptor, _MAX_RUNTIME_ARTIFACT_BYTES + 1)
     finally:
         os.close(descriptor)
     if not payload or len(payload) > _MAX_RUNTIME_ARTIFACT_BYTES:
-        raise RuntimeAssemblyError("activation runtime artifact exceeds its byte bound")
+        raise RuntimeAssemblyError(f"{label} exceeds its byte bound")
+    return payload
+
+
+def load_activation_runtime_artifact(path: Path) -> ActivationRuntimeArtifactV2:
+    """Securely load one non-renderable, operator-supplied runtime artifact."""
+
+    payload = _load_owner_runtime_payload(path, label="activation runtime artifact")
     try:
         return ActivationRuntimeArtifactV2.model_validate_json(payload)
     except ValueError as exc:
         raise RuntimeAssemblyError("activation runtime artifact is invalid") from exc
+
+
+def load_approved_launch_profile_set(path: Path) -> ApprovedLaunchProfileSetV2:
+    """Securely load one canonical owner-supplied positive launch-profile set."""
+
+    payload = _load_owner_runtime_payload(path, label="approved launch profile set")
+    try:
+        return ApprovedLaunchProfileSetV2.model_validate_json(payload)
+    except ValueError as exc:
+        raise RuntimeAssemblyError("approved launch profile set is invalid") from exc
 
 
 def _absolute_owner_path(value: str) -> Path:
@@ -421,6 +434,13 @@ def _assert_config_artifact_binding(
         raise RuntimeAssemblyError(
             "activation artifact approved profile set differs from controller-local binding"
         )
+    slurm = artifact.slurm_authority
+    slurm_executable_paths = tuple(
+        sorted(
+            (name, Path(getattr(slurm.executables, name).path))
+            for name in ("scontrol", "sacctmgr", "squeue", "sbatch", "scancel", "sacct")
+        )
+    )
     if (
         artifact.pool_id != config.pool_id
         or artifact.pool_generation != config.pool_generation
@@ -438,6 +458,19 @@ def _assert_config_artifact_binding(
         or Path(artifact.state_directory) != config.state_directory
     ):
         raise RuntimeAssemblyError("activation artifact differs from controller-local binding")
+    if (
+        slurm.cluster != config.slurm_cluster
+        or slurm.controller_host != config.controller_host
+        or slurm.partition != config.partition
+        or slurm.account != config.association
+        or slurm.submitter != config.submitter
+        or slurm.qos != config.qos
+        or slurm.local_uid != config.local_uid
+        or slurm_executable_paths != config.manifest.slurm_executables
+    ):
+        raise RuntimeAssemblyError(
+            "activation artifact Slurm authority differs from controller-local binding"
+        )
 
 
 def _assert_profiles(config: PoolExecutorConfig, artifact: ActivationRuntimeArtifactV2) -> None:
@@ -798,6 +831,7 @@ __all__ = [
     "canonical_approved_profiles_digest",
     "load_activation_runtime_artifact",
     "load_admission_binding_directory",
+    "load_approved_launch_profile_set",
     "resolve_runtime_profile",
     "write_admission_binding_directory",
 ]

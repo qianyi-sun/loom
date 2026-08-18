@@ -88,6 +88,10 @@ from loom_capacity_manager.models import (
     CapacityTier,
     CapacityWorkerProfile,
 )
+from loom_capacity_manager.preparation_readiness import (
+    _load_prepared_execution_readiness,
+    canonical_prepared_readiness_digest,
+)
 
 
 class CapacityStoreError(RuntimeError):
@@ -505,11 +509,23 @@ class CapacityManagementStore:
         *,
         freshness_seconds: int = 120,
         execution_policy: ExecutionPreparationPolicyV2 | None = None,
+        execution_policy_sha256: str | None = None,
     ) -> None:
         if type(freshness_seconds) is not int or freshness_seconds <= 0:
             raise ValueError("freshness_seconds must be a positive integer")
+        if execution_policy is None and execution_policy_sha256 is not None:
+            raise ValueError("execution policy digest requires an execution policy")
+        if execution_policy is not None:
+            canonical_policy_sha256 = canonical_executable_digest(execution_policy)
+            if (
+                execution_policy_sha256 is not None
+                and execution_policy_sha256 != canonical_policy_sha256
+            ):
+                raise ValueError("execution policy digest does not match its contract")
+            execution_policy_sha256 = execution_policy_sha256 or canonical_policy_sha256
         self._freshness = timedelta(seconds=freshness_seconds)
         self._execution_policy = execution_policy
+        self._execution_policy_sha256 = execution_policy_sha256
 
     @property
     def execution_policy(self) -> ExecutionPreparationPolicyV2 | None:
@@ -2389,6 +2405,24 @@ class CapacityManagementStore:
                 raise ExecutionConflictError("prepared execution fence changed")
             if not authority.increase_freeze:
                 raise ExecutionConflictError("execution activation requires increase freeze")
+
+            readiness = await _load_prepared_execution_readiness(
+                session,
+                execution_policy=self._execution_policy,
+                execution_policy_sha256=self._execution_policy_sha256,
+                freshness_seconds=int(self._freshness.total_seconds()),
+                exclusive=True,
+                create_transaction=False,
+            )
+            if not readiness.ready:
+                raise ExecutionConflictError("prepared execution readiness is not current")
+            if readiness.execution != self._execution_context(authority, row):
+                raise ExecutionConflictError("prepared execution readiness changed")
+            if (
+                canonical_prepared_readiness_digest(readiness)
+                != request.prepared_readiness_sha256
+            ):
+                raise ExecutionConflictError("prepared execution readiness changed")
 
             preparation = self._execution_preparation_from_row(row)
             await self._validate_execution_preparation(session, authority, preparation)
