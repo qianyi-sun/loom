@@ -35,8 +35,9 @@ capacity.
   whose AMD64 and ARM64 members report exactly version `0.70.0`. Release
   assembly rejects a different runtime version before it records the binary
   hash.
-- The management service cannot modify the protected database files. Trivy may
-  write only its separate `fanal` runtime cache.
+- The management service never mounts the PVC root. It mounts only the exact
+  digest-named generation through `subPath`, while a bounded `emptyDir` mounted
+  over `fanal/` receives Trivy's disposable runtime writes.
 - Publication is idempotent, bounded, crash-safe, and atomic at the generation
   directory boundary.
 - An incomplete, changed, ambiguous, oversized, linked, or non-regular input
@@ -58,6 +59,24 @@ This is the selected approach. It gives Kubernetes an ordinary immutable image
 transport, needs no runtime network or credentials, co-mounts the RWO volume in
 the management Pod, and leaves the general `loom-service` image free of roughly
 one gigabyte of scanner data.
+
+The init container alone mounts the PVC root. After it publishes the requested
+generation, Kubernetes starts the management container with that exact
+`generations/CACHE_IDENTITY_SHA256` directory as a `subPath` mount. A separate
+4 GiB disk-backed `emptyDir` is mounted over its `fanal/` child. This prevents
+the management UID from renaming the protected generation through a writable
+PVC parent and prevents retained-generation cleanup from depending on nested
+runtime files owned by the management UID.
+
+### Management PVC-root or persistent-fanal access
+
+Mounting the PVC root into management would let a process with write access to
+the volume root rename the protected `generations` directory even though its
+files are mode `0444`. Keeping fanal data inside the retained generation would
+also make deterministic pruning depend on modes and ownership chosen by Trivy
+under UID `65532`. Both variants are rejected. The runtime fanal cache is an
+optimization rather than release evidence and does not need to survive a Pod
+replacement.
 
 ### Embed the databases in `loom-service`
 
@@ -207,8 +226,8 @@ For a missing generation the installer:
 2. creates one private staging directory under `generations`;
 3. copies and hashes each source into a new single-link regular file;
 4. writes canonical `identity.json` containing all expected hashes;
-5. makes protected directories `0555`, protected files `0444`, and `fanal`
-   `0770` for the management service's runtime group;
+5. makes protected directories `0555`, protected files `0444`, and the empty
+   `fanal` mountpoint `0770` for the management service's runtime group;
 6. fsyncs every file and directory; and
 7. renames the complete staging directory to its digest name in one filesystem
    operation.
@@ -229,11 +248,12 @@ or a deletion set above 16 GiB. A crash before cleanup is repaired by the next
 identical init. At steady state the PVC therefore contains at most two complete
 generations, preserving one quick rollback while bounding disk use.
 
-The management process runs as UID/GID `65532`. Protected cache files remain
-owned by installer UID `65531` and are not writable by UID `65532`; only the
-group-writable `fanal` directory is mutable. Service startup continues to hash
-the Trivy executable and both database files before builder authority exists.
-It additionally verifies both metadata hashes and the canonical identity file.
+The installer requires the PVC-side `fanal` mountpoint to remain empty. The
+management process runs as UID/GID `65532` against a disposable `emptyDir`
+mounted over that path, while protected cache files remain owned by installer
+UID `65531`. Service startup continues to hash the Trivy executable and both
+database files before builder authority exists. It additionally verifies both
+metadata hashes and the canonical identity file.
 
 ## Kubernetes rendering
 
@@ -251,17 +271,21 @@ the existing scanner PVC mounted read-write, and these controls:
 - the existing `Recreate` Deployment strategy, so no previous management
   process reads the PVC during a release transition.
 
-The management container uses this exact cache path:
+The management container uses this exact cache path and exact PVC `subPath`:
 
 ```text
 /var/lib/loom-personal-dev-scanner/generations/CACHE_IDENTITY_SHA256
+generations/CACHE_IDENTITY_SHA256
 ```
 
-It keeps the PVC read-write only for `fanal`; the protected directories are
-filesystem read-only by ownership and mode. The management Pod has an AMD64
-node selector. No new ServiceAccount, RBAC verb, NetworkPolicy egress, Secret,
-PVC, Job, or resource identity is added, so the rendered package remains 33
-resources.
+It does not mount `/var/lib/loom-personal-dev-scanner` or the PVC root. The
+generation subPath remains nominally read-write only so the nested fanal mount
+can be placed, but its protected files and directories are read-only by
+ownership and mode. The `scanner-fanal` emptyDir is disk-backed, has a 4 GiB
+size limit, and is mounted over the exact generation's empty `fanal/`
+mountpoint. The management Pod has an AMD64 node selector. No new
+ServiceAccount, RBAC verb, NetworkPolicy egress, Secret, PVC, Job, or resource
+identity is added, so the rendered package remains 33 resources.
 
 The scanner identity environment variable is release-bound in shadow as well
 as acceptance. Shadow still leaves the finding-policy digest empty and the

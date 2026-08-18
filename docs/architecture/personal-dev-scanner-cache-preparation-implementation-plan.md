@@ -28,8 +28,9 @@ PyYAML, pytest, Ruff, and mypy.
   manifests in `deploy/dev-fleet/personal-dev-scanner-cache-lock.json`.
 - Runtime preparation has no network, Secret, service-account token, hostPath,
   node path, `kubectl cp`, or mutable image.
-- Cache protected files are owned by UID `65531`, management runs as UID
-  `65532`, and only the `fanal` directory is group-writable.
+- Cache protected files are owned by UID `65531`; management UID `65532` mounts
+  only the exact generation subPath, and a bounded `scanner-fanal` emptyDir is
+  the only writable scanner-cache surface.
 - Trusted release schema is exactly version `2` and adds the immutable
   `personal_dev_scanner_cache` image plus a complete scanner binding.
 - The rendered package stays at 33 resources and shadow stays inert with
@@ -599,7 +600,9 @@ PyYAML, pytest, Ruff, and mypy.
 - Management environment always uses the release-bound scanner identity and
   exact `generations/CACHE_IDENTITY_SHA256` path; policy remains empty in shadow.
 - Management Deployment gets cache init container
-  `personal-dev-scanner-cache-init` and AMD64 node selector.
+  `personal-dev-scanner-cache-init`, an exact-generation PVC subPath mount, a
+  4 GiB disk-backed `scanner-fanal` emptyDir mounted over `fanal/`, and an AMD64
+  node selector. Management never mounts the PVC root.
 - Builder startup rehashes binary, DBs, metadata, and canonical identity before
   constructing any build authority.
 
@@ -618,10 +621,11 @@ PyYAML, pytest, Ruff, and mypy.
 - [ ] **Step 2: Write failing render and status tests**
 
   Assert both modes render the exact cache image/args, UID 65531/GID 65532,
-  no env/Secret/token/API mount, read-only root, finite resources, scanner PVC
-  RW mount, AMD64 selector, release-bound path/identity, 33 resources, and
-  unchanged inert flags. Status fixtures must block on any init/image/argument/
-  path/hash drift through expected-render comparison.
+  no env/Secret/token/API mount, read-only root, finite resources, init-only
+  scanner PVC root mount, exact management generation `subPath`, nested bounded
+  `scanner-fanal` emptyDir, AMD64 selector, release-bound path/identity, 33
+  resources, and unchanged inert flags. Status fixtures must block on any
+  init/image/argument/mount/path/hash drift through expected-render comparison.
 
 - [ ] **Step 3: Run focused tests and confirm missing settings/init behavior**
 
@@ -679,7 +683,27 @@ PyYAML, pytest, Ruff, and mypy.
   }
   ```
 
-  Place it before credential init containers, add
+  Place it before credential init containers. The init container is the only
+  container with the PVC-root mount above. Add this management mount pair,
+  where `generation_path` and `generation_subpath` include the exact release
+  cache identity:
+
+  ```python
+  [
+      {
+          "name": "scanner-cache",
+          "mountPath": generation_path,
+          "subPath": generation_subpath,
+      },
+      {
+          "name": "scanner-fanal",
+          "mountPath": f"{generation_path}/fanal",
+      },
+  ]
+  ```
+
+  Add `{"name": "scanner-fanal", "emptyDir": {"sizeLimit": "4Gi"}}` to the
+  Pod volumes, require the PVC-side fanal mountpoint to remain empty, add
   `nodeSelector: {"kubernetes.io/arch": "amd64"}`, and set scanner env in shadow
   from `release.scanner`. Acceptance uses the same values and adds only policy/
   enablement bindings.
