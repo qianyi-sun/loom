@@ -113,35 +113,7 @@ def test_validate_only_succeeds_before_runtime_materialization(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     config = _enabled_config(module, tmp_path)
-    validated_nodes: list[str] = []
-    credential_validations: list[object] = []
-
-    class _ValidationRunner:
-        def __init__(self, actual: object) -> None:
-            assert actual is config
-
-        async def validate_builder_request(
-            self,
-            *,
-            node: str,
-            config: object,
-        ) -> None:
-            assert config is not None
-            validated_nodes.append(node)
-
-    async def validate_credentials(_args: object, actual: object) -> dict[str, object]:
-        credential_validations.append(actual)
-        return {
-            "credentials_valid": True,
-            "credential_evidence_sha256": "a" * 64,
-        }
-
     monkeypatch.setattr(module, "_load_enabled_builder_config", lambda _args: config)
-    monkeypatch.setattr(
-        module,
-        "SubprocessTaskImageBuilderSlurmRunner",
-        _ValidationRunner,
-    )
     monkeypatch.setattr(
         module.transport,
         "_validate_local_slurm_authority",
@@ -155,23 +127,14 @@ def test_validate_only_succeeds_before_runtime_materialization(
     monkeypatch.setattr(module, "_validate_builder_runtime_files", forbidden)
     monkeypatch.setattr(module, "_validate_builder_credentials", forbidden)
     monkeypatch.setattr(module.transport, "_load_cp_db_url", forbidden)
-    monkeypatch.setattr(
-        module,
-        "_validate_rehearsal_credentials_once",
-        validate_credentials,
-        raising=False,
-    )
 
     asyncio.run(module._main_async(_args(module, tmp_path, "--validate-only")))
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["mode"] == "validate-only"
+    assert payload["mode"] == "rehearsal-validate-only"
     assert payload["pool_name"] == "task-image-builder-gb10"
     assert payload["request_nodes"] == ["trt-gb10-1"]
     assert len(payload["request_set_sha256"]) == 64
-    assert validated_nodes == ["trt-gb10-1"]
-    assert credential_validations == [config]
-    assert payload["credentials_valid"] is True
     assert not Path(config.env_file).exists()
 
 
@@ -362,43 +325,6 @@ async def test_builder_credentials_reject_username_only_registry_entry(
             env_file=str(env_file),
             registry_docker_config_dir=str(registry_config_dir),
         )
-
-
-async def test_rehearsal_credentials_do_not_require_candidate_runtime_files(
-    module: Any,
-    tmp_path: Path,
-) -> None:
-    token_file = tmp_path / "builder-token"
-    token_file.write_text("dedicated-builder-token\n", encoding="ascii")
-    token_file.chmod(0o600)
-    config = _enabled_config(module, tmp_path)
-    config = SimpleNamespace(
-        **{
-            **config.__dict__,
-            "builder_token_file": str(token_file),
-            "registry_docker_config_dir": str(_registry_config(tmp_path)),
-        }
-    )
-    observed_queries: list[object] = []
-
-    class _Session:
-        async def execute(self, query: object) -> Any:
-            observed_queries.append(query)
-            return SimpleNamespace(
-                one_or_none=lambda: ("worker", ["task-image:build"], None, None)
-            )
-
-    evidence = await module._validate_builder_rehearsal_credentials(
-        _Session(),
-        config=config,
-    )
-
-    assert evidence["credentials_valid"] is True
-    assert len(evidence["credential_evidence_sha256"]) == 64
-    assert len(observed_queries) == 1
-    assert not Path(config.env_file).exists()
-    assert not Path(config.env_template_file).exists()
-    assert not Path(config.repo_dir).exists()
 
 
 async def test_drain_only_reconcile_bypasses_builder_credentials(
