@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import ssl
 from dataclasses import dataclass, field
@@ -55,6 +56,17 @@ class PersonalDevCapacityProjectionError(RuntimeError):
 
 class PersonalDevCapacityProjectionConflictError(PersonalDevCapacityProjectionError):
     """The global configuration epoch changed before projection."""
+
+
+def _duplicate_rejecting_json_object(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate capacity manager response field")
+        value[key] = item
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -462,16 +474,50 @@ class CapacityManagerPersonalDevProjector:
         """Read the exact manager identity observed by this authenticated principal."""
 
         try:
-            response = await self._http.get(f"{self._origin}/v1/status", headers=self._headers)
+            async with self._http.stream(
+                "GET",
+                f"{self._origin}/v1/status",
+                headers={**self._headers, "Accept-Encoding": "identity"},
+            ) as response:
+                if response.status_code != 200:
+                    raise PersonalDevCapacityProjectionError(
+                        f"capacity manager status request returned {response.status_code}"
+                    )
+                content_type = response.headers.get("content-type", "").split(";", 1)[0].strip()
+                if content_type != "application/json":
+                    raise PersonalDevCapacityProjectionError(
+                        "capacity manager response is not canonical JSON"
+                    )
+                content_encoding = response.headers.get("content-encoding", "").strip().lower()
+                if content_encoding not in {"", "identity"}:
+                    raise PersonalDevCapacityProjectionError(
+                        "capacity manager response is not canonical JSON"
+                    )
+                content = bytearray()
+                async for chunk in response.aiter_bytes(
+                    chunk_size=_MAX_RESPONSE_BYTES + 1
+                ):
+                    if len(content) + len(chunk) > _MAX_RESPONSE_BYTES:
+                        raise PersonalDevCapacityProjectionError(
+                            "capacity manager response exceeds its size bound"
+                        )
+                    content.extend(chunk)
+        except PersonalDevCapacityProjectionError:
+            raise
         except httpx.HTTPError as exc:
             raise PersonalDevCapacityProjectionError(
                 "capacity manager status request failed"
             ) from exc
-        if response.status_code != 200:
-            raise PersonalDevCapacityProjectionError(
-                f"capacity manager status request returned {response.status_code}"
+        try:
+            payload = json.loads(
+                content,
+                object_pairs_hook=_duplicate_rejecting_json_object,
+                parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()),
             )
-        payload = self._bounded_json(response)
+        except (RecursionError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+            raise PersonalDevCapacityProjectionError(
+                "capacity manager returned invalid JSON"
+            ) from exc
         if not isinstance(payload, dict):
             raise PersonalDevCapacityProjectionError("capacity manager binding is invalid")
         try:

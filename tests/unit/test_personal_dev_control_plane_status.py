@@ -644,6 +644,38 @@ def test_healthy_acceptance_returns_separate_readiness_facets_and_safe_commands(
         assert command[0] in {"config", "get", "--request-timeout=10s"}
 
 
+def test_acceptance_queries_the_runtime_class_bound_by_the_plan(
+    tmp_path: Path,
+) -> None:
+    expected, plan, runner = _acceptance_healthy_fixture(tmp_path)
+    runtime_class_name = "custom-personal-dev-runtime"
+    plan = replace(
+        plan,
+        builder=replace(plan.builder, runtime_class_name=runtime_class_name),
+    )
+    runtime_command = (
+        "get",
+        f"runtimeclass.node.k8s.io/{runtime_class_name}",
+        "--output=json",
+    )
+    runner.responses[runtime_command] = {
+        "apiVersion": "node.k8s.io/v1",
+        "handler": plan.builder.runtime_handler,
+        "kind": "RuntimeClass",
+        "metadata": {
+            "annotations": {
+                "loom.dev/runtime-profile-sha256": plan.builder.runtime_profile_sha256,
+            },
+            "name": runtime_class_name,
+        },
+    }
+
+    result = _observe_acceptance(expected, plan, runner)
+
+    assert "runtime_class_binding_invalid" not in result.blockers
+    assert runtime_command in [command for command, _timeout in runner.calls]
+
+
 def test_acceptance_permits_only_exact_owned_dynamic_namespace_families(
     tmp_path: Path,
 ) -> None:

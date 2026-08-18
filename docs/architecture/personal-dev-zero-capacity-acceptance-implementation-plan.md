@@ -400,7 +400,7 @@ pytest, Ruff, mypy.
   Run:
 
   ```bash
-  PYTHONPATH=src:. /home/hongjian/loom/.venv/bin/python -m loom_cli.main config codegen
+  PYTHONPATH=src:. /home/hongjian/loom/.venv/bin/python -m loom_cli config codegen
   PYTHONPATH=src:. /home/hongjian/loom/.venv/bin/python -m pytest -q \
     tests/integration/test_capacity_manager_api.py \
     tests/unit/test_capacity_manager_health_probe.py \
@@ -663,12 +663,11 @@ pytest, Ruff, mypy.
     tests/ops/test_ci_personal_dev_trusted_release.py \
     tests/ops/test_ci_throughput_workflows.py \
     tests/ops/test_personal_dev_control_plane_package_boundary.py
-  PYTHONPATH=src:. /home/hongjian/loom/.venv/bin/python -m ruff format --check \
-    src scripts tests
   PYTHONPATH=src:. /home/hongjian/loom/.venv/bin/python -m ruff check \
-    src scripts tests
+    src scripts tests packages migrations capacity_guard_migrations \
+    capacity_migrations
   PYTHONPATH=src:. /home/hongjian/loom/.venv/bin/python -m mypy src
-  PYTHONPATH=src:. /home/hongjian/loom/.venv/bin/python -m loom_cli.main config codegen --check
+  PYTHONPATH=src:. /home/hongjian/loom/.venv/bin/python -m loom_cli config codegen --check
   ```
 
 - [ ] **Step 2: Self-review until one clean pass**

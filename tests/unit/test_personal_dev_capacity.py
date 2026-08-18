@@ -266,6 +266,81 @@ async def test_capacity_projector_rejects_unsafe_manager_binding_response(
             await projector.current_manager_binding()
 
 
+async def test_capacity_projector_stops_reading_manager_binding_at_response_bound() -> None:
+    class _OversizedManagerStream(httpx.AsyncByteStream):
+        async def __aiter__(self):  # type: ignore[no-untyped-def]
+            yield b"x" * (64 * 1024 + 1)
+            raise AssertionError("manager response was read beyond its declared bound")
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            stream=_OversizedManagerStream(),
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        projector = CapacityManagerPersonalDevProjector(
+            manager_origin="https://capacity.example",
+            bearer_token="lifecycle-token",
+            http_client=http,
+        )
+        with pytest.raises(PersonalDevCapacityProjectionError, match="exceeds its size bound"):
+            await projector.current_manager_binding()
+
+
+async def test_capacity_projector_rejects_encoded_manager_binding_before_decoding() -> None:
+    class _EncodedManagerStream(httpx.AsyncByteStream):
+        async def __aiter__(self):  # type: ignore[no-untyped-def]
+            yield b"{}"
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Accept-Encoding"] == "identity"
+        return httpx.Response(
+            200,
+            headers={
+                "content-encoding": "gzip",
+                "content-type": "application/json",
+            },
+            stream=_EncodedManagerStream(),
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        projector = CapacityManagerPersonalDevProjector(
+            manager_origin="https://capacity.example",
+            bearer_token="lifecycle-token",
+            http_client=http,
+        )
+        with pytest.raises(PersonalDevCapacityProjectionError, match="not canonical JSON"):
+            await projector.current_manager_binding()
+
+
+async def test_capacity_projector_rejects_duplicate_manager_binding_fields() -> None:
+    payload = (
+        b'{"authority_incarnation":"00000000-0000-0000-0000-000000000101",'
+        b'"configuration_epoch":7,"configuration_epoch":7,'
+        b'"executable_new_capacity_ceiling":0,"execution_epoch":0,'
+        b'"execution_state":"shadow",'
+        b'"observer_principal_id":"personal-dev-lifecycle"}'
+    )
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            content=payload,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        projector = CapacityManagerPersonalDevProjector(
+            manager_origin="https://capacity.example",
+            bearer_token="lifecycle-token",
+            http_client=http,
+        )
+        with pytest.raises(PersonalDevCapacityProjectionError, match="invalid JSON"):
+            await projector.current_manager_binding()
+
+
 async def test_capacity_projector_rejects_manager_binding_transport_error() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("synthetic connection failure", request=request)

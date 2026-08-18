@@ -852,6 +852,15 @@ def _observe_personal_dev_status(
     acceptance = plan is not None
     expected_namespaced, expected_cluster, expected_namespace = _expected_documents(expected)
     deadline = time.monotonic() + _TOTAL_TIMEOUT_SECONDS
+    runtime_class_command = (
+        (
+            "get",
+            f"runtimeclass.node.k8s.io/{plan.builder.runtime_class_name}",
+            "--output=json",
+        )
+        if plan is not None
+        else _RUNTIME_CLASS_COMMAND
+    )
     mode_commands = (
         (_ACCEPTANCE_MANAGER_COMMAND, _DEPLOYMENTS_COMMAND) if acceptance else (_MANAGER_COMMAND,)
     )
@@ -860,7 +869,7 @@ def _observe_personal_dev_status(
         for command in (
             _CONTEXT_COMMAND,
             _NAMESPACE_COMMAND,
-            _RUNTIME_CLASS_COMMAND,
+            runtime_class_command,
             _NAMESPACED_COMMAND,
             _CLUSTER_COMMAND,
             *mode_commands,
@@ -930,7 +939,7 @@ def _observe_personal_dev_status(
 
     runtime_ok = False
     runtime_observed = 0
-    runtime_result = results[_RUNTIME_CLASS_COMMAND]
+    runtime_result = results[runtime_class_command]
     if runtime_result is not None and runtime_result.returncode == 0:
         try:
             runtime = _json_document(runtime_result.stdout)
