@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated, Literal, Protocol, cast
 from uuid import UUID
 
@@ -47,6 +47,7 @@ from loom.personal_dev_environment_store import (
     SqlAlchemyPersonalDevActivationIntentReader,
     SqlAlchemyPersonalDevEnvironmentAuthority,
 )
+from loom.personal_dev_runtime import PersonalDevAcceptanceInterlockError
 from loom_service.auth_guards import is_admin, require_scope, require_submitting_user
 from loom_service.dependencies import SessionAndCtx
 from loom_service.dev_instance_access import (
@@ -60,6 +61,28 @@ router = APIRouter()
 internal_router = APIRouter()
 
 ProvisionerFactory = Callable[[InstanceStore], DevInstanceProvisioner]
+
+
+async def _assert_personal_dev_acceptance(request: Request) -> None:
+    interlock = getattr(request.app.state, "personal_dev_acceptance_interlock", None)
+    assert_ready = getattr(interlock, "assert_ready", None)
+    if not callable(assert_ready):
+        raise HTTPException(
+            status_code=503,
+            detail="personal-dev acceptance acceptance-interlock-unavailable",
+        )
+    try:
+        await assert_ready(now=datetime.now(UTC))
+    except PersonalDevAcceptanceInterlockError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"personal-dev acceptance {exc.code}",
+        ) from None
+    except Exception:
+        raise HTTPException(
+            status_code=503,
+            detail="personal-dev acceptance acceptance-interlock-unavailable",
+        ) from None
 
 
 class VisibleInstanceStore(InstanceStore, Protocol):
@@ -667,6 +690,7 @@ async def next_personal_dev_activation_intent(
     signature: Annotated[str, Header(alias="X-Loom-Activation-Signature")],
 ) -> PersonalDevActivationIntentPayload | Response:
     """Return one current intent only to an agent proving signing-key possession."""
+    await _assert_personal_dev_acceptance(request)
     verifier = getattr(request.app.state, "personal_dev_activation_verifier", None)
     session_factory = getattr(request.app.state, "session_factory", None)
     if not isinstance(verifier, PersonalDevActivationVerifier) or session_factory is None:
@@ -718,6 +742,7 @@ async def acknowledge_personal_dev_activation(
     signature: Annotated[str, Header(alias="X-Loom-Activation-Signature")],
 ) -> PersonalDevEnvironmentApplyResponse:
     """Accept only fresh evidence signed by the trusted environment agent."""
+    await _assert_personal_dev_acceptance(request)
     verifier = getattr(request.app.state, "personal_dev_activation_verifier", None)
     session_factory = getattr(request.app.state, "session_factory", None)
     if not isinstance(verifier, PersonalDevActivationVerifier) or session_factory is None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -105,6 +106,7 @@ def test_activation_key_loaders_separate_public_verification_from_private_signin
         public_file,
         key_id="personal-dev-agent-v1",
         max_age_seconds=300,
+        expected_sha256=hashlib.sha256(public_key).hexdigest(),
     )
     private_file = tmp_path / "activation.key"
     private_file.write_bytes(private_key)
@@ -121,6 +123,21 @@ def test_activation_key_loaders_separate_public_verification_from_private_signin
         load_personal_dev_activation_signer(
             private_file,
             key_id="personal-dev-agent-v1",
+        )
+
+
+def test_activation_public_key_loader_rejects_wrong_expected_digest(tmp_path) -> None:
+    _private_key, public_key = _keys()
+    public_file = tmp_path / "activation.pub"
+    public_file.write_bytes(public_key)
+    public_file.chmod(0o600)
+
+    with pytest.raises(RuntimeError, match="digest"):
+        load_personal_dev_activation_verifier(
+            public_file,
+            key_id="personal-dev-agent-v1",
+            max_age_seconds=300,
+            expected_sha256="0" * 64,
         )
 
 

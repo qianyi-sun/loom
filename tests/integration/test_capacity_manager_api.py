@@ -3777,6 +3777,7 @@ def test_body_limit_and_status_pagination_are_bounded(
     status_response = client.get("/v1/status", headers=operator_headers)
     assert status_response.status_code == 200
     status_body = status_response.json()
+    assert status_body["observer_principal_id"] == "fleet-operator"
     assert status_body["execution_state"] == "shadow"
     assert status_body["execution_epoch"] == 0
     assert status_body["execution_manifest_sha256"] is None

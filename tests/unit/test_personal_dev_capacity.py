@@ -7,6 +7,7 @@ import pytest
 
 from loom.personal_dev_capacity import (
     CapacityManagerPersonalDevProjector,
+    PersonalDevCapacityManagerBinding,
     PersonalDevCapacityManagerCheckpoint,
     PersonalDevCapacityProjectionConflictError,
     PersonalDevCapacityProjectionError,
@@ -145,6 +146,138 @@ async def test_capacity_projector_reads_complete_shadow_checkpoint() -> None:
                 executable_new_capacity_ceiling=0,
             )
         )
+
+
+async def test_capacity_projector_reads_exact_authenticated_manager_binding() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url == httpx.URL("https://capacity.example/v1/status")
+        assert request.headers["Authorization"] == "Bearer lifecycle-token"
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            json={
+                "authority_incarnation": "00000000-0000-0000-0000-000000000101",
+                "observer_principal_id": "personal-dev-lifecycle",
+                "configuration_epoch": 7,
+                "execution_state": "shadow",
+                "execution_epoch": 0,
+                "executable_new_capacity_ceiling": 0,
+                "unrelated_aggregate_status_field": {},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        projector = CapacityManagerPersonalDevProjector(
+            manager_origin="https://capacity.example",
+            bearer_token="lifecycle-token",
+            http_client=http,
+        )
+        assert await projector.current_manager_binding() == (
+            PersonalDevCapacityManagerBinding(
+                authority_incarnation=UUID("00000000-0000-0000-0000-000000000101"),
+                observer_principal_id="personal-dev-lifecycle",
+                configuration_epoch=7,
+                execution_state="shadow",
+                execution_epoch=0,
+                executable_new_capacity_ceiling=0,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("authority_incarnation", None),
+        ("authority_incarnation", "not-a-uuid"),
+        ("authority_incarnation", "00000000000000000000000000000101"),
+        ("observer_principal_id", None),
+        ("observer_principal_id", "wrong principal"),
+        ("configuration_epoch", True),
+        ("configuration_epoch", 0),
+        ("execution_state", "active-ish"),
+        ("execution_epoch", False),
+        ("execution_epoch", -1),
+        ("executable_new_capacity_ceiling", False),
+        ("executable_new_capacity_ceiling", -1),
+    ],
+)
+async def test_capacity_projector_rejects_invalid_manager_binding_field(
+    field: str,
+    value: object,
+) -> None:
+    payload: dict[str, object] = {
+        "authority_incarnation": "00000000-0000-0000-0000-000000000101",
+        "observer_principal_id": "personal-dev-lifecycle",
+        "configuration_epoch": 7,
+        "execution_state": "shadow",
+        "execution_epoch": 0,
+        "executable_new_capacity_ceiling": 0,
+    }
+    if value is None:
+        payload.pop(field)
+    else:
+        payload[field] = value
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            json=payload,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        projector = CapacityManagerPersonalDevProjector(
+            manager_origin="https://capacity.example",
+            bearer_token="lifecycle-token",
+            http_client=http,
+        )
+        with pytest.raises(PersonalDevCapacityProjectionError, match="binding"):
+            await projector.current_manager_binding()
+
+
+@pytest.mark.parametrize(
+    ("status_code", "content_type", "content"),
+    [
+        (307, "application/json", b"{}"),
+        (200, "text/html", b"{}"),
+        (200, "application/json", b"[]"),
+        (200, "application/json", b"{}" + b" " * (64 * 1024)),
+    ],
+)
+async def test_capacity_projector_rejects_unsafe_manager_binding_response(
+    status_code: int,
+    content_type: str,
+    content: bytes,
+) -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code,
+            headers={"content-type": content_type, "location": "/somewhere"},
+            content=content,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        projector = CapacityManagerPersonalDevProjector(
+            manager_origin="https://capacity.example",
+            bearer_token="lifecycle-token",
+            http_client=http,
+        )
+        with pytest.raises(PersonalDevCapacityProjectionError):
+            await projector.current_manager_binding()
+
+
+async def test_capacity_projector_rejects_manager_binding_transport_error() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("synthetic connection failure", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        projector = CapacityManagerPersonalDevProjector(
+            manager_origin="https://capacity.example",
+            bearer_token="lifecycle-token",
+            http_client=http,
+        )
+        with pytest.raises(PersonalDevCapacityProjectionError, match="request failed"):
+            await projector.current_manager_binding()
 
 
 async def test_capacity_projector_publishes_canonical_exact_request() -> None:

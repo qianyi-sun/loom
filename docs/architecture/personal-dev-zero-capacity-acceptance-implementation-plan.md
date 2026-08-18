@@ -338,7 +338,7 @@ pytest, Ruff, mypy.
   `GET /api/v1/health/personal-dev-acceptance` for the Kubernetes readiness
   probe; it returns only status and stable blocker codes.
 
-- [ ] **Step 1: Write failing manager binding, startup, route, and readiness tests**
+- [x] **Step 1: Write failing manager binding, startup, route, and readiness tests**
 
   Assert `/v1/status` returns `observer_principal_id` from the authenticated
   `capacity:read` principal and that the projector rejects a missing/wrong
@@ -349,7 +349,7 @@ pytest, Ruff, mypy.
   returns 503 on drift, and both activation-intent read and acknowledgement
   reject before touching the database when the interlock is unavailable.
 
-- [ ] **Step 2: Run focused tests and observe exact failures**
+- [x] **Step 2: Run focused tests and observe exact failures**
 
   Run:
 
@@ -363,7 +363,7 @@ pytest, Ruff, mypy.
 
   Expected: the binding and interlock interfaces do not exist.
 
-- [ ] **Step 3: Expose and parse the authenticated manager identity**
+- [x] **Step 3: Expose and parse the authenticated manager identity**
 
   Preserve the existing checkpoint method as a compatibility projection.
   Add the principal only to authenticated `/v1/status`, then parse selected
@@ -384,7 +384,7 @@ pytest, Ruff, mypy.
   mode used only by operator status; keep its existing strict zero-ceiling
   default byte-compatible.
 
-- [ ] **Step 4: Implement service-owned acceptance interlock and continuous gate**
+- [x] **Step 4: Implement service-owned acceptance interlock and continuous gate**
 
   Add schema-backed settings `personal_dev_acceptance_binding_json` (default
   `{}`), `personal_dev_acceptance_plan_sha256` (default empty), and
@@ -395,7 +395,7 @@ pytest, Ruff, mypy.
   call it on every acceptance readiness request and before both activation
   routes, and close the projector on every startup/teardown path.
 
-- [ ] **Step 5: Regenerate config, verify, and commit the runtime interlock**
+- [x] **Step 5: Regenerate config, verify, and commit the runtime interlock**
 
   Run:
 

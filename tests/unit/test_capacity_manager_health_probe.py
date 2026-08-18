@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from loom_capacity_manager.health_probe import (
@@ -7,6 +9,8 @@ from loom_capacity_manager.health_probe import (
     capacity_health_probe_argv,
     parse_capacity_health_response,
     parse_observed_capacity_health_response,
+    parse_observed_capacity_manager_identity_response,
+    probe_capacity_manager,
 )
 
 
@@ -64,6 +68,163 @@ def test_health_probe_argv_keeps_strict_default_and_explicit_observation_mode() 
 
     assert "--observe" not in strict
     assert observed == (*strict, "--observe")
+
+
+def test_health_probe_identity_observation_uses_lifecycle_identity_explicitly() -> None:
+    assert capacity_health_probe_argv(
+        "/run/loom-personal-dev/management/files",
+        observe_identity=True,
+    ) == (
+        "python",
+        "-m",
+        "loom_capacity_manager.health_probe",
+        "--url",
+        "https://loom-capacity-manager.loom-dev.svc.cluster.local:8443/v1/status",
+        "--ca-file",
+        "/run/loom-personal-dev/management/files/capacity-lifecycle-ca.pem",
+        "--certificate-file",
+        "/run/loom-personal-dev/management/files/capacity-lifecycle-certificate.pem",
+        "--private-key-file",
+        "/run/loom-personal-dev/management/files/capacity-lifecycle-private-key.pem",
+        "--bearer-token-file",
+        "/run/loom-personal-dev/management/files/capacity-lifecycle-token",
+        "--observe-identity",
+    )
+
+
+def test_identity_response_returns_only_exact_manager_binding() -> None:
+    assert parse_observed_capacity_manager_identity_response(
+        200,
+        (
+            b'{"authority_incarnation":"00000000-0000-0000-0000-000000000101",'
+            b'"observer_principal_id":"personal-dev-lifecycle",'
+            b'"configuration_epoch":7,"execution_state":"shadow",'
+            b'"execution_epoch":0,"executable_new_capacity_ceiling":0,'
+            b'"schema_version":1,"account_slots":{}}'
+        ),
+    ) == {
+        "authority_incarnation": "00000000-0000-0000-0000-000000000101",
+        "configuration_epoch": 7,
+        "executable_new_capacity_ceiling": 0,
+        "execution_epoch": 0,
+        "execution_state": "shadow",
+        "observer_principal_id": "personal-dev-lifecycle",
+    }
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"[]",
+        b'{"authority_incarnation":"not-a-uuid","observer_principal_id":"reader",'
+        b'"configuration_epoch":7,"execution_state":"shadow","execution_epoch":0,'
+        b'"executable_new_capacity_ceiling":0}',
+        b'{"authority_incarnation":"00000000-0000-0000-0000-000000000101",'
+        b'"observer_principal_id":"wrong principal","configuration_epoch":7,'
+        b'"execution_state":"shadow","execution_epoch":0,'
+        b'"executable_new_capacity_ceiling":0}',
+        b'{"authority_incarnation":"00000000-0000-0000-0000-000000000101",'
+        b'"observer_principal_id":"reader","configuration_epoch":true,'
+        b'"execution_state":"shadow","execution_epoch":0,'
+        b'"executable_new_capacity_ceiling":0}',
+        b'{"authority_incarnation":"00000000-0000-0000-0000-000000000101",'
+        b'"observer_principal_id":"reader","configuration_epoch":7,'
+        b'"execution_state":"shadow","execution_epoch":0,'
+        b'"executable_new_capacity_ceiling":false}',
+        b'{"authority_incarnation":"00000000-0000-0000-0000-000000000101",'
+        b'"observer_principal_id":"reader","observer_principal_id":"other",'
+        b'"configuration_epoch":7,"execution_state":"shadow","execution_epoch":0,'
+        b'"executable_new_capacity_ceiling":0}',
+    ],
+)
+def test_identity_response_rejects_ambiguous_manager_binding(payload: bytes) -> None:
+    with pytest.raises(CapacityHealthProbeError):
+        parse_observed_capacity_manager_identity_response(200, payload)
+
+
+def test_identity_probe_authenticates_and_parses_the_status_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token_file = tmp_path / "lifecycle-token"
+    token_file.write_text("lifecycle-secret", encoding="utf-8")
+    token_file.chmod(0o600)
+
+    class _Context:
+        def load_cert_chain(self, **_kwargs: object) -> None:
+            pass
+
+    class _Response:
+        status_code = 200
+
+        def __enter__(self) -> _Response:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def iter_bytes(self, *, chunk_size: int):
+            assert chunk_size == 64 * 1024 + 1
+            yield (
+                b'{"authority_incarnation":"00000000-0000-0000-0000-000000000101",'
+                b'"observer_principal_id":"personal-dev-lifecycle",'
+                b'"configuration_epoch":7,"execution_state":"shadow",'
+                b'"execution_epoch":0,"executable_new_capacity_ceiling":0}'
+            )
+
+    class _Client:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> _Client:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def stream(
+            self,
+            method: str,
+            url: str,
+            *,
+            headers: dict[str, str] | None,
+        ) -> _Response:
+            if (
+                method != "GET"
+                or url != "https://loom-capacity-manager.loom-dev.svc.cluster.local:8443/v1/status"
+                or headers
+                != {
+                    "Accept": "application/json",
+                    "Authorization": "Bearer lifecycle-secret",
+                }
+            ):
+                raise AssertionError("identity observation was not authenticated exactly")
+            return _Response()
+
+    monkeypatch.setattr(
+        "loom_capacity_manager.health_probe._validate_server_certificate_identities",
+        lambda _path: None,
+    )
+    monkeypatch.setattr(
+        "loom_capacity_manager.health_probe.ssl.create_default_context",
+        lambda **_kwargs: _Context(),
+    )
+    monkeypatch.setattr(
+        "loom_capacity_manager.health_probe.httpx.Client",
+        _Client,
+    )
+
+    assert (
+        probe_capacity_manager(
+            url="https://loom-capacity-manager.loom-dev.svc.cluster.local:8443/v1/status",
+            ca_file=tmp_path / "ca.pem",
+            certificate_file=tmp_path / "certificate.pem",
+            private_key_file=tmp_path / "private-key.pem",
+            bearer_token_file=token_file,
+            observe_identity=True,
+        )["observer_principal_id"]
+        == "personal-dev-lifecycle"
+    )
 
 
 @pytest.mark.parametrize(

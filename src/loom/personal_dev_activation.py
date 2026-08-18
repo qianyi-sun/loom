@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -258,10 +259,7 @@ class PersonalDevActivationVerifier:
         if type(future_skew_seconds) is not int or future_skew_seconds < 0:
             raise ValueError("activation acknowledgement future skew must be nonnegative")
         self._keys = MappingProxyType(
-            {
-                key_id: Ed25519PublicKey.from_public_bytes(key)
-                for key_id, key in normalized.items()
-            }
+            {key_id: Ed25519PublicKey.from_public_bytes(key) for key_id, key in normalized.items()}
         )
         self._max_age = timedelta(seconds=max_age_seconds)
         self._future_skew = timedelta(seconds=future_skew_seconds)
@@ -415,19 +413,18 @@ def _load_activation_key(
             or first.st_size != 32
         ):
             authority = "owner-only " if owner_only else "read-only "
-            raise RuntimeError(
-                f"personal-dev activation {label} must be a regular {authority}file"
-            )
+            raise RuntimeError(f"personal-dev activation {label} must be a regular {authority}file")
         key = os.read(descriptor, 33)
         second = os.fstat(descriptor)
     except OSError:
         raise RuntimeError(f"personal-dev activation {label} is unreadable") from None
     finally:
         os.close(descriptor)
-    if (
-        len(key) != 32
-        or (first.st_dev, first.st_ino, first.st_size, first.st_mtime_ns)
-        != (second.st_dev, second.st_ino, second.st_size, second.st_mtime_ns)
+    if len(key) != 32 or (first.st_dev, first.st_ino, first.st_size, first.st_mtime_ns) != (
+        second.st_dev,
+        second.st_ino,
+        second.st_size,
+        second.st_mtime_ns,
     ):
         raise RuntimeError(f"personal-dev activation {label} changed while reading")
     return key
@@ -438,6 +435,7 @@ def load_personal_dev_activation_verifier(
     *,
     key_id: str,
     max_age_seconds: int,
+    expected_sha256: str | None = None,
 ) -> PersonalDevActivationVerifier:
     """Load one raw public verification key; this grants no signing authority."""
     key = _load_activation_key(
@@ -445,6 +443,11 @@ def load_personal_dev_activation_verifier(
         owner_only=False,
         label="public key",
     )
+    if expected_sha256 is not None and (
+        _DIGEST_RE.fullmatch(expected_sha256) is None
+        or not hmac.compare_digest(hashlib.sha256(key).hexdigest(), expected_sha256)
+    ):
+        raise RuntimeError("personal-dev activation public key digest does not match")
     return PersonalDevActivationVerifier(
         keys={key_id: key},
         max_age_seconds=max_age_seconds,

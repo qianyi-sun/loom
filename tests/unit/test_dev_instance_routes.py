@@ -27,6 +27,7 @@ from loom.personal_dev_environment import (
     PersonalDevEnvironmentRecord,
     PersonalDevLifecycleOperationRecord,
 )
+from loom.personal_dev_runtime import PersonalDevAcceptanceInterlockError
 from loom_service.routes.dev_instances import (
     DevInstanceCreateRequest,
     PersonalDevActivationAcknowledgementPayload,
@@ -252,6 +253,12 @@ def _request(
 ) -> Request:
     app = FastAPI()
     app.state.dev_instance_store_factory = lambda _session: store
+
+    class _ReadyInterlock:
+        async def assert_ready(self, *, now: datetime) -> None:
+            assert now.tzinfo == UTC
+
+    app.state.personal_dev_acceptance_interlock = _ReadyInterlock()
 
     async def access_factory(_session, ctx):
         assert ctx.user_id is not None
@@ -680,6 +687,71 @@ async def test_activation_ack_route_rejects_unsigned_agent_payload_before_databa
         )
 
     assert exc.value.status_code == 403
+
+
+async def test_activation_ack_rejects_when_acceptance_interlock_is_unavailable() -> None:
+    class _Interlock:
+        async def assert_ready(self, *, now: datetime) -> None:
+            assert now.tzinfo == UTC
+            raise PersonalDevAcceptanceInterlockError("capacity-manager-unavailable")
+
+    request = _request(_Store(), configured=False)
+    request.app.state.personal_dev_acceptance_interlock = _Interlock()
+    payload = PersonalDevActivationAcknowledgementPayload(
+        environment_name="alice",
+        subject_id=UUID("00000000-0000-0000-0000-000000000010"),
+        subject_incarnation=UUID("00000000-0000-0000-0000-000000000011"),
+        operation_id=UUID("00000000-0000-0000-0000-000000000012"),
+        operation_epoch=1,
+        attempt_id=UUID("00000000-0000-0000-0000-000000000013"),
+        candidate_id=UUID("00000000-0000-0000-0000-000000000014"),
+        candidate_sha="a" * 64,
+        deployment_generation=1,
+        readiness_evidence_sha256="b" * 64,
+        local_activation_sha256="c" * 64,
+        agent_key_id="personal-dev-agent-v1",
+        observed_at=datetime.now(UTC),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await acknowledge_personal_dev_activation(
+            payload,
+            request,
+            signature="0" * 128,
+        )
+
+    assert exc.value.status_code == 503
+    assert exc.value.detail == "personal-dev acceptance capacity-manager-unavailable"
+
+
+async def test_activation_intent_read_rejects_before_database_when_interlock_drifts() -> None:
+    calls = 0
+
+    class _Interlock:
+        async def assert_ready(self, *, now: datetime) -> None:
+            nonlocal calls
+            calls += 1
+            assert now.tzinfo == UTC
+            raise PersonalDevAcceptanceInterlockError("capacity-manager-binding-drift")
+
+    request = _request(_Store(), configured=False)
+    request.app.state.personal_dev_acceptance_interlock = _Interlock()
+    payload = PersonalDevActivationIntentRequestPayload(
+        agent_key_id="personal-dev-agent-v1",
+        request_nonce=UUID("00000000-0000-0000-0000-000000000099"),
+        requested_at=datetime.now(UTC),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await next_personal_dev_activation_intent(
+            payload,
+            request,
+            signature="0" * 128,
+        )
+
+    assert calls == 1
+    assert exc.value.status_code == 503
+    assert exc.value.detail == "personal-dev acceptance capacity-manager-binding-drift"
 
 
 async def test_activation_intent_route_requires_agent_signature_and_returns_exact_binding(
