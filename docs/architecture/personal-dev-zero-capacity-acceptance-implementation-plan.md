@@ -515,7 +515,7 @@ pytest, Ruff, mypy.
 - Acceptance status adds booleans `application_ready`,
   `capacity_publication_ready`, and `worker_available`.
 
-- [ ] **Step 1: Write failing acceptance status and CLI matrix tests**
+- [x] **Step 1: Write failing acceptance status and CLI matrix tests**
 
   Build a healthy fixture with management and activation deployments ready,
   exact RuntimeClass handler/profile annotation, exact manager identity, zero
@@ -527,7 +527,7 @@ pytest, Ruff, mypy.
   response bounds. Assert neither command accepts partial plan arguments or an
   apply/activate option.
 
-- [ ] **Step 2: Run tests and confirm the mode interfaces are absent**
+- [x] **Step 2: Run tests and confirm the mode interfaces are absent**
 
   Run:
 
@@ -537,7 +537,7 @@ pytest, Ruff, mypy.
     tests/loom_cli/test_personal_dev_control_plane_cmd.py
   ```
 
-- [ ] **Step 3: Implement bounded acceptance observation**
+- [x] **Step 3: Implement bounded acceptance observation**
 
   Reuse the shadow resource/index comparison. In acceptance mode, require
   exact enabled flags, one ready activation replica, exact RuntimeClass
@@ -553,14 +553,14 @@ pytest, Ruff, mypy.
   ready = application_ready and capacity_publication_ready and not blockers
   ```
 
-- [ ] **Step 4: Add explicit acceptance CLI handlers**
+- [x] **Step 4: Add explicit acceptance CLI handlers**
 
   Load profile, release, and plan before rendering or starting kubectl. Emit
   YAML only on stdout and one canonical evidence object on stderr. Status exit
   codes remain `0` ready, `1` observed but blocked, and `2` invalid local
   inputs. Preserve the anonymous immutable kubeconfig snapshot mechanism.
 
-- [ ] **Step 5: Verify and commit status/CLI**
+- [x] **Step 5: Verify and commit status/CLI**
 
   Run focused pytest, Ruff, and mypy, then:
 
