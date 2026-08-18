@@ -10,10 +10,13 @@ import { FrontendBootstrap } from "./bootstrap/FrontendBootstrap";
 import { RootErrorBoundary } from "./components/RootErrorBoundary";
 import "./index.css";
 import {
+  IS_BROWSER_TEST_BUILD,
+  shouldTriggerBrowserTestRecoveryFault,
+} from "./lib/browserTestBuild";
+import {
   installBrowserConsoleErrorRedaction,
   installBrowserErrorEventRedaction,
 } from "./lib/errorReporting";
-import { shouldTriggerBrowserTestRecoveryFault } from "./lib/browserTestBuild";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -63,7 +66,7 @@ function BrowserTestRootFault({
   children: React.ReactNode;
 }): JSX.Element {
   if (
-    __LOOM_BROWSER_TEST_BUILD__ &&
+    IS_BROWSER_TEST_BUILD &&
     shouldTriggerBrowserTestRecoveryFault("root-render-once")
   ) {
     throw new Error("browser-test-only root render fault");
