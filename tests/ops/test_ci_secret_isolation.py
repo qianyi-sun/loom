@@ -283,6 +283,7 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
         "plan",
         "image-route",
         "trivy-binary",
+        "personal-dev-scanner-cache-assets",
         "build",
         "stage1-build",
         "candidate-index",
@@ -312,6 +313,17 @@ def test_images_permissions_are_an_exact_job_allowlist() -> None:
         "contents": "read",
     }
     assert "environment" not in jobs["image-route"]
+
+    scanner_cache_assets = jobs["personal-dev-scanner-cache-assets"]
+    assert scanner_cache_assets["permissions"] == {
+        "actions": "read",
+        "contents": "read",
+    }
+    assert "environment" not in scanner_cache_assets
+    assert "id-token" not in scanner_cache_assets["permissions"]
+    assert all(
+        value != "write" for value in scanner_cache_assets["permissions"].values()
+    )
 
     assert jobs["publish"]["permissions"] == {
         "attestations": "write",

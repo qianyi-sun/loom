@@ -358,6 +358,20 @@ def test_zero_capacity_acceptance_runbook_has_exact_two_owner_workflow() -> None
     assert "umask 077" in runbook
     assert "personal-dev-trusted-release-run-<run>-attempt-<attempt>" in runbook
     assert 'trusted_release="$trusted_release_artifact/trusted-release.json"' in runbook
+    assert (
+        'scanner_cache_lock="$(pwd -P)/deploy/dev-fleet/'
+        'personal-dev-scanner-cache-lock.json"'
+    ) in runbook
+    assert 'scanner_cache_lock_sha256="$(sha256sum "$scanner_cache_lock"' in runbook
+    assert '$(jq -r .scanner.lock_sha256 "$trusted_release")' in runbook
+    assert '.images.personal_dev_scanner_cache "$trusted_release"' in runbook
+    assert '.release.images.personal_dev_scanner_cache "$acceptance_plan"' in runbook
+    assert '.scanner.cache_identity_sha256 "$trusted_release"' in runbook
+    assert '.builder.scanner_cache_identity_sha256 "$acceptance_plan"' in runbook
+    assert '.scanner.database_metadata_sha256 "$trusted_release"' in runbook
+    assert '.builder.scanner_database_metadata_sha256 "$acceptance_plan"' in runbook
+    assert '.scanner.java_database_metadata_sha256 "$trusted_release"' in runbook
+    assert '.builder.scanner_java_database_metadata_sha256 "$acceptance_plan"' in runbook
     assert 'acceptance_plan="<absolute-owner-only-acceptance-plan.json>"' in runbook
     assert 'test "$(stat -c %a "$acceptance_plan")" = 600' in runbook
     assert 'test "$(stat -c %h "$acceptance_plan")" = 1' in runbook
@@ -405,6 +419,11 @@ def test_zero_capacity_acceptance_runbook_has_exact_two_owner_workflow() -> None
     assert 'kubectl --kubeconfig "$kubeconfig" diff --server-side' in normalized
     assert 'kubectl --kubeconfig "$kubeconfig" apply --server-side' in normalized
     assert "--field-manager=loom-personal-dev-control-plane" in normalized
+    assert runbook.count(
+        "rollout status deployment/loom-personal-dev-management"
+    ) >= 2
+    assert "capture_scanner_cache_init_status" in runbook
+    assert runbook.count("personal-dev-scanner-cache-init") >= 2
 
 
 def test_zero_capacity_acceptance_runbook_preserves_stop_and_authority_boundaries() -> None:
@@ -437,6 +456,18 @@ def test_zero_capacity_acceptance_runbook_preserves_stop_and_authority_boundarie
     assert "never delete pvcs" in lowered
     assert "never delete a namespace directly" in lowered
     assert "physical capacity remains unchanged" in lowered
+
+    for legacy_input in (
+        "scanner_binary=",
+        "scanner_database=",
+        "scanner_java_database=",
+    ):
+        assert legacy_input not in runbook
+    assert "kubectl cp" not in lowered
+    assert "--download-db-only" not in lowered
+    assert "--download-java-db-only" not in lowered
+    assert "hostpath" not in lowered
+    assert "temporary egress" not in lowered
 
     assert "loom-dev-shared" not in runbook
     assert "kubectl create secret" not in lowered
@@ -473,3 +504,23 @@ def test_zero_capacity_acceptance_runbook_is_indexed_and_current() -> None:
     assert "status-acceptance" in fleet
     assert "two concurrent owners" in architecture.casefold()
     assert "worker_available=false" in architecture
+
+
+def test_release_bound_scanner_cache_is_architecture_linked_and_inert() -> None:
+    management = _read(
+        "docs/architecture/personal-dev-management-plane-deployment.md"
+    )
+    environments = _read("docs/architecture/multi-dev-environments.md")
+    fleet = _read("deploy/dev-fleet/README.md")
+
+    for document in (management, environments, fleet):
+        lowered = document.casefold()
+        assert "release-bound scanner cache" in lowered
+        assert "personal_dev_scanner_cache" in document
+        assert "ceiling" in lowered and "zero" in lowered
+    for document in (management, environments):
+        assert "personal-dev-scanner-cache-preparation.md" in document
+    assert "remain separate operational gates" in " ".join(
+        management.casefold().split()
+    )
+    assert "remain separate operational gates" in " ".join(fleet.casefold().split())

@@ -60,6 +60,7 @@ exactly the aggregate release, its evidence, and its digest.
     trusted_release_evidence="$trusted_release_artifact/trusted-release-evidence.json"
     acceptance_plan="<absolute-owner-only-acceptance-plan.json>"
     profile="$(pwd -P)/deploy/dev-fleet/personal-dev-control-plane.toml"
+    scanner_cache_lock="$(pwd -P)/deploy/dev-fleet/personal-dev-scanner-cache-lock.json"
     kubeconfig="<absolute-reviewed-self-contained-mode-0600-kubeconfig>"
     expected_kube_context="<exact-reviewed-kubernetes-context>"
 
@@ -69,20 +70,19 @@ exactly the aggregate release, its evidence, and its digest.
     shadow_render_evidence="$evidence_dir/reviewed-rollback-shadow.render.json"
     pre_acceptance_status="$evidence_dir/pre-acceptance.status.json"
     post_acceptance_status="$evidence_dir/post-acceptance.status.json"
+    scanner_cache_init_status="$evidence_dir/scanner-cache-init.status.json"
     initial_acceptance_status="$evidence_dir/initial-two-owner.status.json"
     updated_acceptance_status="$evidence_dir/updated-two-owner.status.json"
     post_rejection_acceptance_status="$evidence_dir/post-rejection.status.json"
     post_destroy_acceptance_status="$evidence_dir/post-destroy.status.json"
     final_acceptance_status="$evidence_dir/final-acceptance.status.json"
     rollback_pre_status="$evidence_dir/rollback-pre.status.json"
+    rollback_scanner_cache_init_status="$evidence_dir/rollback-scanner-cache-init.status.json"
     rollback_status="$evidence_dir/rollback-shadow.status.json"
 
     backup_restore_evidence="<absolute-owner-only-backup-restore-evidence>"
     runtime_profile="<absolute-reviewed-runtime-profile>"
     trusted_launcher_profile="<absolute-reviewed-trusted-launcher-profile>"
-    scanner_binary="<absolute-reviewed-scanner-binary>"
-    scanner_database="<absolute-reviewed-scanner-database-archive>"
-    scanner_java_database="<absolute-reviewed-scanner-java-database-archive>"
     scanner_finding_policy="<absolute-reviewed-scanner-finding-policy>"
 
     owner_a_xdg="<absolute-mode-0700-owner-a-xdg-config-root>"
@@ -198,6 +198,9 @@ owner-only input to stable bytes.
     test "$(git rev-parse HEAD^{tree})" = "$(jq -r .source_tree "$trusted_release")"
     test -f "$profile" && test ! -L "$profile"
     profile_sha256="$(sha256sum "$profile" | awk '{print $1}')"
+    test -f "$scanner_cache_lock" && test ! -L "$scanner_cache_lock"
+    test "$(realpath -e "$scanner_cache_lock")" = "$scanner_cache_lock"
+    scanner_cache_lock_sha256="$(sha256sum "$scanner_cache_lock" | awk '{print $1}')"
 
     assert_owner_only_file "$kubeconfig"
     kubeconfig_sha256="$(sha256sum "$kubeconfig" | awk '{print $1}')"
@@ -206,24 +209,31 @@ owner-only input to stable bytes.
     backup_restore_evidence_sha256="$(jq -r .storage.backup_restore_evidence_sha256 "$acceptance_plan")"
     runtime_profile_sha256="$(jq -r .builder.runtime_profile_sha256 "$acceptance_plan")"
     trusted_launcher_profile_sha256="$(jq -r .builder.trusted_launcher_profile_sha256 "$acceptance_plan")"
-    scanner_binary_sha256="$(jq -r .builder.scanner_binary_sha256 "$acceptance_plan")"
-    scanner_database_sha256="$(jq -r .builder.scanner_database_sha256 "$acceptance_plan")"
-    scanner_java_database_sha256="$(jq -r .builder.scanner_java_database_sha256 "$acceptance_plan")"
     scanner_finding_policy_sha256="$(jq -r .builder.scanner_finding_policy_sha256 "$acceptance_plan")"
 
     for path in "$backup_restore_evidence" "$runtime_profile" "$trusted_launcher_profile" "$scanner_finding_policy"; do
       assert_owner_only_file "$path"
     done
-    assert_owner_only_file "$scanner_binary" 536870912
-    assert_owner_only_file "$scanner_database" 4294967296
-    assert_owner_only_file "$scanner_java_database" 4294967296
     test "$(sha256sum "$backup_restore_evidence" | awk '{print $1}')" = "$backup_restore_evidence_sha256"
     test "$(sha256sum "$runtime_profile" | awk '{print $1}')" = "$runtime_profile_sha256"
     test "$(sha256sum "$trusted_launcher_profile" | awk '{print $1}')" = "$trusted_launcher_profile_sha256"
-    test "$(sha256sum "$scanner_binary" | awk '{print $1}')" = "$scanner_binary_sha256"
-    test "$(sha256sum "$scanner_database" | awk '{print $1}')" = "$scanner_database_sha256"
-    test "$(sha256sum "$scanner_java_database" | awk '{print $1}')" = "$scanner_java_database_sha256"
     test "$(sha256sum "$scanner_finding_policy" | awk '{print $1}')" = "$scanner_finding_policy_sha256"
+
+    assert_scanner_release_binding() {
+      test "$(jq -r .schema_version "$trusted_release")" = 2
+      test -f "$scanner_cache_lock" && test ! -L "$scanner_cache_lock"
+      test "$(realpath -e "$scanner_cache_lock")" = "$scanner_cache_lock"
+      test "$(sha256sum "$scanner_cache_lock" | awk '{print $1}')" = "$scanner_cache_lock_sha256"
+      test "$scanner_cache_lock_sha256" = "$(jq -r .scanner.lock_sha256 "$trusted_release")"
+      test "$(jq -r .images.personal_dev_scanner_cache "$trusted_release")" = "$(jq -r .release.images.personal_dev_scanner_cache "$acceptance_plan")"
+      test "$(jq -r .scanner.binary_sha256 "$trusted_release")" = "$(jq -r .builder.scanner_binary_sha256 "$acceptance_plan")"
+      test "$(jq -r .scanner.cache_identity_sha256 "$trusted_release")" = "$(jq -r .builder.scanner_cache_identity_sha256 "$acceptance_plan")"
+      test "$(jq -r .scanner.database_sha256 "$trusted_release")" = "$(jq -r .builder.scanner_database_sha256 "$acceptance_plan")"
+      test "$(jq -r .scanner.database_metadata_sha256 "$trusted_release")" = "$(jq -r .builder.scanner_database_metadata_sha256 "$acceptance_plan")"
+      test "$(jq -r .scanner.java_database_sha256 "$trusted_release")" = "$(jq -r .builder.scanner_java_database_sha256 "$acceptance_plan")"
+      test "$(jq -r .scanner.java_database_metadata_sha256 "$trusted_release")" = "$(jq -r .builder.scanner_java_database_metadata_sha256 "$acceptance_plan")"
+    }
+    assert_scanner_release_binding
 
 ## 2. Define the repeated read-only interlocks
 
@@ -287,6 +297,14 @@ expected, while regression is a stop condition.
       kubectl --kubeconfig "$kubeconfig" --request-timeout=10s --namespace loom-dev get jobs -l app=loom-personal-dev-migration -o json | jq -e '.items | length >= 1 and any(.[]; any(.status.conditions[]?; .type == "Complete" and .status == "True")) and all(.[]; all(.status.conditions[]?; .type != "Failed" or .status != "True"))' >/dev/null
     }
 
+    capture_scanner_cache_init_status() {
+      local output="$1"
+      kubectl --kubeconfig "$kubeconfig" --request-timeout=10s --namespace loom-dev get pods -l app=loom-personal-dev-management -o json | jq -cS '[.items[] | {init: [.status.initContainerStatuses[]? | select(.name == "personal-dev-scanner-cache-init") | {exit_code: .state.terminated.exitCode, image_id: .imageID, name: .name, reason: .state.terminated.reason}], pod: .metadata.name}]' > "$output"
+      chmod 0600 "$output"
+      assert_canonical_json_line "$output"
+      jq -e 'length == 1 and (.[0].init | length == 1) and .[0].init[0].name == "personal-dev-scanner-cache-init" and .[0].init[0].exit_code == 0 and .[0].init[0].reason == "Completed" and (.[0].init[0].image_id | type == "string" and test("@sha256:[0-9a-f]{64}$"))' "$output" >/dev/null
+    }
+
     assert_current_artifacts() {
       assert_owner_only_file "$trusted_release"
       assert_owner_only_file "$trusted_release_evidence"
@@ -304,12 +322,10 @@ expected, while regression is a stop condition.
       test "$(canonical_json_sha256 "$trusted_release")" = "$trusted_release_sha256"
       test "$(canonical_json_sha256 "$trusted_release_evidence")" = "$(jq -r .release_evidence_sha256 "$trusted_release")"
       test "$(canonical_json_sha256 "$acceptance_plan")" = "$acceptance_plan_sha256"
+      assert_scanner_release_binding
       test "$(sha256sum "$backup_restore_evidence" | awk '{print $1}')" = "$backup_restore_evidence_sha256"
       test "$(sha256sum "$runtime_profile" | awk '{print $1}')" = "$runtime_profile_sha256"
       test "$(sha256sum "$trusted_launcher_profile" | awk '{print $1}')" = "$trusted_launcher_profile_sha256"
-      test "$(sha256sum "$scanner_binary" | awk '{print $1}')" = "$scanner_binary_sha256"
-      test "$(sha256sum "$scanner_database" | awk '{print $1}')" = "$scanner_database_sha256"
-      test "$(sha256sum "$scanner_java_database" | awk '{print $1}')" = "$scanner_java_database_sha256"
       test "$(sha256sum "$scanner_finding_policy" | awk '{print $1}')" = "$scanner_finding_policy_sha256"
       test "$(sha256sum "$acceptance_render" | awk '{print $1}')" = "$acceptance_render_sha256"
       test "$(sha256sum "$shadow_render" | awk '{print $1}')" = "$shadow_render_sha256"
@@ -375,6 +391,10 @@ Render both modes before mutation. The shadow digest must equal the acceptance
 plan's exact rollback binding. Review both YAML files and both canonical render
 records; the acceptance diff may enable only personal lifecycle/build flags,
 one activation replica, and the plan-bound readiness/interlock settings.
+Both manifests must contain the exact `personal-dev-scanner-cache-init`
+container and release-bound generation mount. Deployment rollout readiness
+proves that init completed before management started; the procedure records
+that init's zero exit status and immutable image ID after each apply.
 
     acceptance_tmp="$(mktemp "$evidence_dir/acceptance.XXXXXX.yaml")"
     acceptance_evidence_tmp="$(mktemp "$evidence_dir/acceptance.XXXXXX.json")"
@@ -421,6 +441,7 @@ or unrelated namespace is a stop condition.
 
     kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status deployment/loom-personal-dev-management --timeout=300s
     kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status deployment/loom-personal-dev-activation-agent --timeout=300s
+    capture_scanner_cache_init_status "$scanner_cache_init_status"
     assert_live_acceptance "$post_acceptance_status"
 
 ## 5. Verify the two owner sessions
@@ -622,6 +643,7 @@ separate reviewed plan.
     chmod 0600 "$evidence_dir/rollback.server-side-apply.txt"
 
     kubectl --kubeconfig "$kubeconfig" --namespace loom-dev rollout status deployment/loom-personal-dev-management --timeout=300s
+    capture_scanner_cache_init_status "$rollback_scanner_cache_init_status"
     test "$(kubectl --kubeconfig "$kubeconfig" --namespace loom-dev get deployment/loom-personal-dev-activation-agent -o jsonpath='{.spec.replicas}')" = 0
     /home/hongjian/loom/.venv/bin/loom admin personal-dev-control-plane status --namespace loom-dev --kubeconfig "$kubeconfig" --file "$profile" --trusted-release-file "$trusted_release" --trusted-release-sha256 "$trusted_release_sha256" > "$rollback_status"
     chmod 0600 "$rollback_status"
@@ -629,8 +651,9 @@ separate reviewed plan.
     jq -e '.schema == "loom-personal-dev-control-plane-status-v1" and .mode == "shadow" and .ready == true and .blockers == [] and .manager_ceiling == 0 and all(.components[]; .ready == true)' "$rollback_status" >/dev/null
 
 Retain the trusted-release artifact, acceptance plan, backup/restore record,
-both reviewed manifests, diffs, applies, status records, owner operation
-records, canonical result, and their hashes. The final state is the inert
-shared management shadow: lifecycle and builder disabled, activation replicas
-zero, no dynamic namespace, no personal worker, and global executable capacity
-still exactly zero.
+both reviewed manifests, scanner-init completion records, diffs, applies,
+status records, owner operation records, canonical result, and their hashes.
+The final state is the inert shared management shadow: the release-bound cache
+generation remains prepared, lifecycle and builder are disabled, activation
+replicas are zero, no dynamic namespace or personal worker exists, and global
+executable capacity is still exactly zero.

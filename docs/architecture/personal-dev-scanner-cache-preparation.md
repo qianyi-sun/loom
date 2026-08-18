@@ -2,16 +2,18 @@
 
 ## Status and purpose
 
-The personal-development management-plane shadow renders a 20 GiB scanner
-cache PVC and mounts it into the management service. Zero-capacity acceptance
-binds exact Trivy binary, vulnerability database, Java database, and finding
-policy digests. The service verifies those digests before it enables the
-restricted builder.
+The personal-development management-plane package now renders a 20 GiB scanner
+cache PVC and deterministically prepares it from the exact trusted release.
+Zero-capacity acceptance binds the Trivy binary, vulnerability database, Java
+database, both metadata files, cache identity, cache image, checked-in source
+lock, and finding policy. The service verifies the installed binding before it
+enables the restricted builder.
 
-The current package has no authority that can put the two databases on a new
-PVC. The acceptance runbook verifies owner-local database archives, but no
-reviewed component consumes those archives. An empty PVC therefore makes an
-otherwise valid acceptance deployment fail at startup.
+Before this design, the package had no authority that could put the two
+databases on a new PVC: the acceptance runbook verified owner-local archives
+that no reviewed component consumed. The implemented release-bound image and
+init path closes that gap. Live application acceptance is still a separate
+controlled operation and executable capacity remains zero.
 
 This design adds a release-bound, networkless cache image and a management init
 container. The init container verifies every protected cache file and publishes
@@ -177,9 +179,9 @@ checkout files cannot impersonate that context. The image contains only:
 - `/opt/loom-personal-dev-scanner-cache/assets/java-db/trivy-java.db`; and
 - `/opt/loom-personal-dev-scanner-cache/assets/java-db/metadata.json`.
 
-The image runs as UID/GID `65531`, has no shell entrypoint contract, and invokes
-`python -m loom.personal_dev_scanner_cache_init`. CI validates the named-context
-file inventory and hashes both before and after each build, then scans and
+The image runs as UID `65531` and GID `65532`, has no shell entrypoint contract,
+and invokes `python -m loom.personal_dev_scanner_cache_init`. CI validates the
+named-context file inventory and hashes both before and after each build, then scans and
 attests both platform members through the existing image release path. The
 trusted release contains only its immutable multi-platform digest.
 
@@ -191,6 +193,7 @@ The new module `loom.personal_dev_scanner_cache_init` accepts:
 --source-root SOURCE_ROOT
 --destination-root DESTINATION_ROOT
 --cache-identity-sha256 SHA256
+--scanner-binary-sha256 SHA256
 --database-sha256 SHA256
 --database-metadata-sha256 SHA256
 --java-database-sha256 SHA256
@@ -263,10 +266,11 @@ Deployment. It uses the trusted release's
 the existing scanner PVC mounted read-write, and these controls:
 
 - `automountServiceAccountToken: false` inherited from the Pod;
-- no environment variables, Secret, token, network, or API mount;
-- read-only root filesystem and a bounded memory-backed `/tmp`;
-- non-root UID/GID `65531`, all capabilities dropped, no privilege escalation,
-  and RuntimeDefault seccomp;
+- no environment variables, Secret, token, or API mount, and no runtime network
+  operation;
+- read-only root filesystem and a bounded `/tmp` volume;
+- non-root UID `65531` and GID `65532`, all capabilities dropped, no privilege
+  escalation, and RuntimeDefault seccomp;
 - finite CPU/memory requests and limits; and
 - the existing `Recreate` Deployment strategy, so no previous management
   process reads the PVC during a release transition.
