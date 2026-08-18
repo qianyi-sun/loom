@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import shutil
@@ -17,6 +18,7 @@ import yaml  # type: ignore[import-untyped]
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _CAPACITY_MANAGER_DOCKERFILE = _REPO_ROOT / "deploy/Dockerfile.capacity-manager"
+_CAPACITY_MANAGER_SOURCES = _REPO_ROOT / "src/loom_capacity_manager"
 _MIGRATION_RESOURCES = {
     "capacity_migrations/__init__.py",
     "capacity_migrations/alembic.ini",
@@ -103,6 +105,31 @@ def test_capacity_manager_image_installs_the_packaged_migration_tree() -> None:
     assert dockerfile.count(copy) == 1
     assert dockerfile.count(install) == 1
     assert dockerfile.index(copy) < dockerfile.index(install)
+
+
+def test_capacity_manager_sources_do_not_import_unpackaged_loom_modules() -> None:
+    unpackaged: list[str] = []
+    for source in sorted(_CAPACITY_MANAGER_SOURCES.glob("*.py")):
+        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
+            modules: tuple[str, ...]
+            if isinstance(node, ast.Import):
+                modules = tuple(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module is not None:
+                modules = (node.module,)
+            else:
+                continue
+            unpackaged.extend(
+                f"{source.relative_to(_REPO_ROOT)}:{module}"
+                for module in modules
+                if module == "loom"
+                or module.startswith("loom.")
+                or (
+                    module.startswith("loom_")
+                    and not module.startswith("loom_capacity_manager")
+                )
+            )
+
+    assert unpackaged == []
 
 
 def test_installed_wheel_renders_capacity_manifests_outside_checkout(
