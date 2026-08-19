@@ -106,6 +106,7 @@ from loom_worker.signal_handler import ShutdownState, install_signal_handlers
 from loom_worker.step_gateway_client import StepTokenGatewayClient
 from loom_worker.task_image import TaskImageBuildError, resolve_task_image
 from loom_worker.task_sidecars import DockerTaskSidecarRuntime
+from loom_worker.terminal_task_validator import attest_terminal_task_validator
 from loom_worker.trial_cache import (
     _daemon_build_slot,
     evict_stale_managed_images_from_env,
@@ -327,6 +328,7 @@ def _pipeline_registration_payload(
         "terminalgen-generate-gateway",
         "terminalgen-package-none",
         "terminalgen-plan-none",
+        "terminalgen-validate-none",
     }:
         from loom_worker.pipeline_execution import production_pipeline_enabled
 
@@ -335,6 +337,12 @@ def _pipeline_registration_payload(
                 from loom_worker.pipeline_runtime_secret import require_runtime_secret_tmpfs
 
                 require_runtime_secret_tmpfs(settings.pipeline_runtime_secrets_dir)
+            elif settings.pool_name == "terminalgen-validate-none":
+                attest_terminal_task_validator(
+                    settings.pipeline_terminal_task_validator_path,
+                    settings.pipeline_terminal_task_validator_sha256,
+                )
+                runtime_features.append("loom-terminal-task-validator-v1")
             runtime_features.append("loom-terminalgen-authoring-worker-v1")
     cache = dict(cache_fields or {})
     snapshot = build_worker_capability_snapshot(

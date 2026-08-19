@@ -169,6 +169,16 @@
     "default": "PosixPath('/dev/shm')",
     "required": false
   },
+  "pipeline_terminal_task_validator_path": {
+    "annotation": "<class 'pathlib.Path'>",
+    "default": "PosixPath('/usr/local/bin/loom-terminal-task-validator')",
+    "required": false
+  },
+  "pipeline_terminal_task_validator_sha256": {
+    "annotation": "<class 'str'>",
+    "default": "''",
+    "required": false
+  },
   "pipeline_terminalgen_authoring_enabled": {
     "annotation": "<class 'bool'>",
     "default": "False",
