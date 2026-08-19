@@ -164,6 +164,11 @@
     "default": "PydanticUndefined",
     "required": true
   },
+  "pipeline_runtime_secrets_dir": {
+    "annotation": "<class 'pathlib.Path'>",
+    "default": "PosixPath('/dev/shm')",
+    "required": false
+  },
   "pipeline_terminalgen_authoring_enabled": {
     "annotation": "<class 'bool'>",
     "default": "False",

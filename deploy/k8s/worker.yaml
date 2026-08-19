@@ -79,6 +79,8 @@ spec:
             secretKeyRef:
               name: loom-secrets
               key: minio-secret-key
+        - name: LOOM_WORKER_PIPELINE_RUNTIME_SECRETS_DIR
+          value: /dev/shm
         - name: LOOM_WORKER_PIPELINE_TERMINALGEN_AUTHORING_ENABLED
           value: 'False'
         - name: LOOM_WORKER_PRE_START_HEARTBEAT_INTERVAL_SEC

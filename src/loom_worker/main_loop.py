@@ -323,10 +323,18 @@ def _pipeline_registration_payload(
 
         if production_pipeline_enabled(settings):
             runtime_features.append("loom-stage1-smoke-worker-v1")
-    elif settings.pool_name in {"terminalgen-package-none", "terminalgen-plan-none"}:
+    elif settings.pool_name in {
+        "terminalgen-generate-gateway",
+        "terminalgen-package-none",
+        "terminalgen-plan-none",
+    }:
         from loom_worker.pipeline_execution import production_pipeline_enabled
 
         if production_pipeline_enabled(settings):
+            if settings.pool_name == "terminalgen-generate-gateway":
+                from loom_worker.pipeline_runtime_secret import require_runtime_secret_tmpfs
+
+                require_runtime_secret_tmpfs(settings.pipeline_runtime_secrets_dir)
             runtime_features.append("loom-terminalgen-authoring-worker-v1")
     cache = dict(cache_fields or {})
     snapshot = build_worker_capability_snapshot(

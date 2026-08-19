@@ -228,6 +228,8 @@ def test_secret_rotation_is_atomic_private_and_tears_down(tmp_path: Path) -> Non
     assert first.mode == 0o400
     assert first.uid == uid
     assert first.gid == gid
+    assert mount.root.stat().st_uid == uid
+    assert mount.root.stat().st_gid == gid
     second = mount.rotate(b"loom_step_second")
     assert mount.read_verified() == b"loom_step_second"
     assert second.inode != first.inode
@@ -248,6 +250,13 @@ def test_secret_mount_rejects_symlink_and_unknown_teardown_entry(tmp_path: Path)
     gid = os.getgid() or 65_534
     with pytest.raises(RuntimeSecretError, match="real directory"):
         RuntimeSecretMount(alias, container_uid=uid, container_gid=gid).initialize()
+    with pytest.raises(RuntimeSecretError, match="real directory"):
+        RuntimeSecretMount(alias, container_uid=uid, container_gid=gid).teardown()
+
+    dangling = tmp_path / "dangling"
+    dangling.symlink_to(tmp_path / "missing", target_is_directory=True)
+    with pytest.raises(RuntimeSecretError, match="real directory"):
+        RuntimeSecretMount(dangling, container_uid=uid, container_gid=gid).teardown()
 
     mount = RuntimeSecretMount(tmp_path / "owned", container_uid=uid, container_gid=gid)
     mount.initialize()
