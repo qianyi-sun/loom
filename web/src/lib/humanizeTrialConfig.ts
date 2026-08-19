@@ -26,6 +26,8 @@ const KNOWN_TRIAL_CONFIG_KEYS = new Set([
   "verifier_env_mode",
   "verifier_timeout_multiplier",
   "workspace_staging_policy_name",
+  "multi_model",
+  "model_switch_plan_mode",
 ]);
 
 export function humanizeTrialConfig(
@@ -87,6 +89,29 @@ export function humanizeTrialConfig(
     c.workspace_staging_policy_name
   ) {
     items.push(`Workspace staging: ${c.workspace_staging_policy_name}`);
+  }
+  if (c.multi_model && typeof c.multi_model === "object") {
+    const mm = c.multi_model as Record<string, unknown>;
+    if (mm.enabled === true) {
+      const teacher =
+        mm.secondary_model && typeof mm.secondary_model === "object"
+          ? modelLabel(mm.secondary_model)
+          : "teacher";
+      items.push(
+        mm.policy === "beta_mixture"
+          ? `Multi-model: beta mixture (teacher ${teacher}` +
+              (typeof mm.beta === "number" ? `, beta=${mm.beta}` : "") +
+              ")"
+          : `Multi-model: student/teacher/student (teacher ${teacher}` +
+              (typeof mm.switch_episode === "number"
+                ? `, K1=${mm.switch_episode}`
+                : "") +
+              (typeof mm.return_switch_episode === "number"
+                ? `, K2=${mm.return_switch_episode}`
+                : "") +
+              ")",
+      );
+    }
   }
 
   return {

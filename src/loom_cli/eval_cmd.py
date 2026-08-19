@@ -8,6 +8,8 @@ Wraps the server-side routes:
 - POST /api/v1/batches                 → `loom eval batch create`
   (optional ``trial_config.workspace_staging_policy_name`` via
   ``--workspace-staging-policy``; #1263)
+  (optional terminus-2 ``trial_config.multi_model`` via ``--multi-model``;
+  #1380 — default remains single-model)
 - GET  /api/v1/batches[/{id}]          → `loom eval batch {list, show}`
 - POST /api/v1/batches/{id}/cancel     → `loom eval batch cancel`
 
@@ -521,6 +523,33 @@ def _batch_create(args: argparse.Namespace) -> int:
         with authed_client(cfg) as c:
             combinations = args.combinations_json
             conn: dict[str, Any] | None = None
+            multi_model = bool(getattr(args, "multi_model", False))
+            if multi_model and combinations is not None:
+                sys.stderr.write(
+                    "error: --multi-model is not supported with "
+                    "--combinations-json; use the single-agent "
+                    "`--agent terminus-2` path.\n",
+                )
+                return 2
+            if multi_model:
+                if args.agent != "terminus-2":
+                    sys.stderr.write(
+                        "error: --multi-model requires --agent terminus-2 "
+                        f"(got {args.agent!r}). Default remains a single-model trial.\n",
+                    )
+                    return 2
+                if not args.multi_model_secondary:
+                    sys.stderr.write(
+                        "error: --multi-model requires "
+                        "--multi-model-secondary <model-id>.\n",
+                    )
+                    return 2
+                if not args.provider or not args.model:
+                    sys.stderr.write(
+                        "error: --multi-model requires --provider and "
+                        "--model (primary) plus --multi-model-secondary.\n",
+                    )
+                    return 2
             if combinations is not None:
                 conflicting = [
                     flag
@@ -596,6 +625,63 @@ def _batch_create(args: argparse.Namespace) -> int:
                 trial_config["workspace_staging_policy_name"] = (
                     args.workspace_staging_policy
                 )
+            if multi_model:
+                # #1380: K1/K2 blocks or beta_mixture (terminus-2 only).
+                assert conn is not None
+                assert args.multi_model_secondary is not None
+                schedule_flags = (
+                    args.multi_model_switch_episode is not None
+                    or getattr(args, "multi_model_teacher_episodes", None) is not None
+                    or args.multi_model_episode_ceiling is not None
+                )
+                beta = getattr(args, "multi_model_beta", None)
+                mix_seed = getattr(args, "multi_model_seed", None)
+                if beta is not None and schedule_flags:
+                    sys.stderr.write(
+                        "error: --multi-model-beta cannot be combined with "
+                        "--multi-model-switch-episode, "
+                        "--multi-model-teacher-episodes, or "
+                        "--multi-model-episode-ceiling.\n",
+                    )
+                    return 2
+                if mix_seed is not None and beta is None:
+                    sys.stderr.write(
+                        "error: --multi-model-seed requires --multi-model-beta.\n",
+                    )
+                    return 2
+                if beta is not None and not 0.0 <= float(beta) <= 1.0:
+                    sys.stderr.write(
+                        "error: --multi-model-beta must be in [0, 1].\n",
+                    )
+                    return 2
+                multi_model_block: dict[str, Any] = {
+                    "enabled": True,
+                    "secondary_model": _build_agent_model(
+                        conn["type"],
+                        args.multi_model_secondary,
+                        agent_provider_override=args.agent_provider,
+                    ),
+                }
+                if beta is not None:
+                    multi_model_block["policy"] = "beta_mixture"
+                    multi_model_block["beta"] = float(beta)
+                    if mix_seed is not None:
+                        multi_model_block["mix_seed"] = str(mix_seed)
+                else:
+                    multi_model_block["policy"] = "student_teacher_student"
+                    if args.multi_model_switch_episode is not None:
+                        multi_model_block["switch_episode"] = (
+                            args.multi_model_switch_episode
+                        )
+                    if getattr(args, "multi_model_teacher_episodes", None) is not None:
+                        multi_model_block["teacher_episodes"] = (
+                            args.multi_model_teacher_episodes
+                        )
+                    if args.multi_model_episode_ceiling is not None:
+                        multi_model_block["episode_ceiling"] = (
+                            args.multi_model_episode_ceiling
+                        )
+                trial_config["multi_model"] = multi_model_block
             # --benchmark / --task-set are shortcuts for common task_filter
             # shapes. Operators wanting richer filters use --task-filter JSON
             # instead. Multiple selector forms are rejected so precedence stays
@@ -1457,6 +1543,82 @@ def dispatch(argv: list[str]) -> int:
             "`none` uses full-bundle upload. Omit to keep current "
             "defaults (TB2.1-r6 tasks always enforce tb21). "
             "terminal-bench-2@tb2.1-r6/* cannot select `none`."
+        ),
+    )
+    p_bc.add_argument(
+        "--multi-model",
+        dest="multi_model",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable terminus-2 student/teacher model mix (#1380). "
+            "Default is off (single-model trial). Requires "
+            "--agent terminus-2, --provider/--model (student), and "
+            "--multi-model-secondary (teacher). Same BYO provider connection. "
+            "Default policy is student until K1, teacher for teacher_episodes, "
+            "then student from K2. Pass --multi-model-beta instead for a "
+            "per-episode teacher coin (teacher if draw < beta)."
+        ),
+    )
+    p_bc.add_argument(
+        "--multi-model-secondary",
+        dest="multi_model_secondary",
+        default=None,
+        help=(
+            "Teacher (usually larger) upstream model id. Student is --model. "
+            "Required with --multi-model. Same provider connection."
+        ),
+    )
+    p_bc.add_argument(
+        "--multi-model-switch-episode",
+        dest="multi_model_switch_episode",
+        type=int,
+        default=None,
+        help=(
+            "Harbor episode index (1-based, >= 2) where the teacher takes "
+            "over (K1). Omit to let the server sample once into "
+            "[2, --multi-model-episode-ceiling]."
+        ),
+    )
+    p_bc.add_argument(
+        "--multi-model-episode-ceiling",
+        dest="multi_model_episode_ceiling",
+        type=int,
+        default=None,
+        help=(
+            "Upper bound for random K1 sampling when "
+            "--multi-model-switch-episode is omitted (default on server: 50)."
+        ),
+    )
+    p_bc.add_argument(
+        "--multi-model-teacher-episodes",
+        dest="multi_model_teacher_episodes",
+        type=int,
+        default=None,
+        help=(
+            "How many Harbor episodes the teacher keeps (default 2). "
+            "K2 = K1 + this value; student then continues to the end. "
+            "Incompatible with --multi-model-beta."
+        ),
+    )
+    p_bc.add_argument(
+        "--multi-model-beta",
+        dest="multi_model_beta",
+        type=float,
+        default=None,
+        help=(
+            "Per-episode mix: P(teacher drives) = this value in [0, 1]. "
+            "Teacher if hash(seed, trial, episode) < beta, else student. "
+            "Incompatible with K1/K2 flags. Not DAgger labels."
+        ),
+    )
+    p_bc.add_argument(
+        "--multi-model-seed",
+        dest="multi_model_seed",
+        default=None,
+        help=(
+            "Optional mix seed stored on the plan (beta_mixture only). "
+            "Omit to let the server generate one. Replays inherit this seed."
         ),
     )
     p_bc.set_defaults(handler=_batch_create)

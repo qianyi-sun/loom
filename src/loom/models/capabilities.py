@@ -40,6 +40,7 @@ class Capabilities(BaseModel):
     # isolation on AND this is False, the trial fails loudly with
     # CapabilityError rather than silently degrading.
     supports_custom_network: bool = False
+    terminus2_model_switch: bool = False
 
 
 class RequiredCapabilities(BaseModel):
@@ -51,6 +52,7 @@ class RequiredCapabilities(BaseModel):
     cpu_arch: RequiredCPUArch = "x86_64"
     gpu_vendor: GPUVendor
     network_policies: frozenset[NetworkPolicyKind]
+    terminus2_model_switch: bool = False
 
     def satisfied_by(self, caps: Capabilities) -> bool:
         """True iff `caps` offers everything this requires."""
@@ -59,4 +61,5 @@ class RequiredCapabilities(BaseModel):
             and (self.cpu_arch == "any" or self.cpu_arch == caps.cpu_arch)
             and self.gpu_vendor == caps.gpu_vendor
             and self.network_policies <= caps.network_policies
+            and (not self.terminus2_model_switch or caps.terminus2_model_switch)
         )

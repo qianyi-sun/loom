@@ -605,10 +605,12 @@ async def record_facade_failed_call(
     attempt: int = 1,
     failure_status_code: int | None = None,
     failure_error_type: str | None = None,
+    correlation: dict[str, Any] | None = None,
 ) -> None:
     assert ctx.team_id is not None
     assert ctx.trial_id is not None
     assert ctx.step_id is not None
+    corr = correlation or {}
     async with request.app.state.session_factory() as audit_session:
         await record_failed_call(
             audit_session,
@@ -623,4 +625,12 @@ async def record_facade_failed_call(
             failure_category=failure_category,
             failure_status_code=failure_status_code,
             failure_error_type=failure_error_type,
+            client_call_id=corr.get("client_call_id"),
+            agent_execution_id=corr.get("agent_execution_id"),
+            agent_run_attempt_id=corr.get("agent_run_attempt_id"),
+            episode=corr.get("episode"),
+            call_ordinal=corr.get("call_ordinal"),
+            requested_model=corr.get("requested_model") or model,
+            role=corr.get("role"),
+            correlation_status=str(corr.get("correlation_status") or "legacy_uncorrelated"),
         )

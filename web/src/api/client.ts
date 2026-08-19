@@ -478,7 +478,11 @@ export interface Backend {
 export interface Combination {
   label?: string | null;
   agent_name: string;
-  agent_model: { provider: string; name: string } | null;
+  agent_model: {
+    provider: string;
+    name: string;
+    source?: string;
+  } | null;
   n_per_task: number;
   provider_connection_id?: string | null;
   provider_model_id?: string | null;

@@ -19,13 +19,17 @@ RUN pip install --no-cache-dir \
         "envoy-data-plane==2.1.0" \
         "xds-protos==1.81.1" \
         "grpcio>=1.81,<2.0" \
-        "psycopg[binary]>=3.2,<4.0"
+        "psycopg[binary]>=3.2,<4.0" \
+        "prometheus-client>=0.19,<1.0"
 
 # Copy the package into /app and add /app to PYTHONPATH so
 # `python -m loom_egress_xds` resolves the package without a
 # `pip install -e .` step (which would require copying pyproject +
 # the whole src/ tree just for setuptools metadata).
+# The provider-connections watcher imports loom_listen for LISTEN/NOTIFY
+# metrics and the startup self-test; that package must live on PYTHONPATH.
 COPY src/loom_egress_xds /app/loom_egress_xds
+COPY src/loom_listen /app/loom_listen
 
 EXPOSE 18000
 

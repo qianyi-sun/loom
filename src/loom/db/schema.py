@@ -6138,6 +6138,186 @@ class RateCard(Base):
     table: Mapped[dict[str, Any]] = mapped_column("table", JSONB, nullable=False)
 
 
+class ModelSwitchPlan(Base):
+    """Immutable K1/K2 plan for a terminus-2 multi-model trial (#1380)."""
+
+    __tablename__ = "model_switch_plans"
+    id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid4,
+    )
+    trial_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("trials.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    combination_idx: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    mix_mode: Mapped[str] = mapped_column(
+        String, nullable=False, default="student_teacher_student",
+    )
+    k1: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    k2: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    teacher_episodes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    beta: Mapped[float | None] = mapped_column(Float, nullable=True)
+    seed: Mapped[str] = mapped_column(Text, nullable=False)
+    prng_version: Mapped[str] = mapped_column(Text, nullable=False)
+    student_model_snapshot: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False,
+    )
+    teacher_model_snapshot: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False,
+    )
+    provider_connection_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("provider_connections.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    pricing_snapshot: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict,
+    )
+    capability_snapshot: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict,
+    )
+    inherited_from_plan_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("model_switch_plans.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now(),
+    )
+
+
+class TerminusAgentExecution(Base):
+    """One Terminus2 session per agent phase (not pipeline execution_attempts)."""
+
+    __tablename__ = "terminus_agent_executions"
+    __table_args__ = (
+        UniqueConstraint("trial_id", "step_id", name="terminus_agent_executions_trial_step_uidx"),
+    )
+    id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid4,
+    )
+    trial_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("trials.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    step_id: Mapped[str] = mapped_column(Text, nullable=False)
+    model_switch_plan_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("model_switch_plans.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now(),
+    )
+
+
+class TerminusAgentRunAttempt(Base):
+    """Worker reclaim tenure for one Terminus2 execution."""
+
+    __tablename__ = "terminus_agent_run_attempts"
+    __table_args__ = (
+        UniqueConstraint(
+            "execution_id", "attempt_number",
+            name="terminus_agent_run_attempts_exec_num_uidx",
+        ),
+        CheckConstraint(
+            "state IN ('running','succeeded','failed','recovery_failed')",
+            name="terminus_agent_run_attempts_state_check",
+        ),
+    )
+    id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid4,
+    )
+    execution_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("terminus_agent_executions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    worker_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("workers.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    state: Mapped[str] = mapped_column(Text, nullable=False, default="running")
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now(),
+    )
+
+
+class EpisodeCheckpoint(Base):
+    """Versioned Terminus2 episode checkpoint for reclaim."""
+
+    __tablename__ = "episode_checkpoints"
+    __table_args__ = (
+        UniqueConstraint(
+            "execution_id", "version", name="episode_checkpoints_exec_version_uidx",
+        ),
+    )
+    id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid4,
+    )
+    execution_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("terminus_agent_executions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    run_attempt_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("terminus_agent_run_attempts.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    episode: Mapped[int] = mapped_column(Integer, nullable=False)
+    tmux_session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    active_role: Mapped[str] = mapped_column(Text, nullable=False)
+    last_call_ordinal: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    checksum: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now(),
+    )
+
+
+class LlmCallIntent(Base):
+    """Registered before upstream I/O so gateway rows correlate by id (#1380)."""
+
+    __tablename__ = "llm_call_intents"
+    client_call_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), unique=True, nullable=False,
+    )
+    id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid4,
+    )
+    trial_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("trials.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    step_id: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_execution_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("terminus_agent_executions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    agent_run_attempt_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("terminus_agent_run_attempts.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    episode: Mapped[int] = mapped_column(Integer, nullable=False)
+    call_ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    requested_model: Mapped[str] = mapped_column(Text, nullable=False)
+    role: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="registered")
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now(),
+    )
+
+
 class LlmCall(Base):
     """One row per LLM call routed through the Gateway. Written by every
     dialect endpoint after the upstream provider returns. Read by the
@@ -6199,6 +6379,30 @@ class LlmCall(Base):
         ForeignKey("data_lifecycle_authorities.id", ondelete="RESTRICT"),
         nullable=True,
         index=True,
+    )
+    client_call_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), nullable=True,
+    )
+    agent_execution_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("terminus_agent_executions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    agent_run_attempt_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("terminus_agent_run_attempts.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    episode: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    call_ordinal: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    requested_model: Mapped[str | None] = mapped_column(Text, nullable=True)
+    response_model: Mapped[str | None] = mapped_column(Text, nullable=True)
+    role: Mapped[str | None] = mapped_column(Text, nullable=True)
+    correlation_status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'legacy_uncorrelated'"),
+        default="legacy_uncorrelated",
     )
 
 

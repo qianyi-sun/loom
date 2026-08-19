@@ -242,3 +242,139 @@ async def test_bridge_skips_unknown_sources(tmp_path: Path) -> None:
     )
     async with writer:
         assert await bridge.sync_trajectory_file(traj) == 0
+
+
+def _correlated_row(*, gw_id: str, episode: int) -> dict[str, object]:
+    return {
+        "id": gw_id,
+        "step_id": "main",
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "dialect": "openai_chat",
+        "model": "glm-5.2",
+        "cost_usd": 0.01,
+        "rate_card_hash": "abc",
+        "captured_at": "2026-08-18T00:00:00Z",
+        "episode": episode,
+        "call_ordinal": episode,
+        "correlation_status": "correlated",
+    }
+
+
+@pytest.mark.asyncio
+async def test_bridge_joins_nth_agent_step_to_loom_episode(tmp_path: Path) -> None:
+    """Harbor step_id 2 is the first agent turn (episode 1), not loom episode 2."""
+    store = FakeObjectStore()
+    local = tmp_path / "events.jsonl"
+    writer = TrajectoryWriter(
+        local_path=local,
+        store=store,
+        bucket="trajectories",
+        key="t/events.jsonl",
+        flush_event_count=1000,
+        flush_bytes=10_000_000,
+        flush_sec=3600,
+        min_part_bytes=0,
+    )
+    bridge = HarborCheckpointBridge(
+        trajectory=writer,
+        trial_id=uuid4(),
+        step_id="main",
+        model=ModelSpec(provider="openai", name="glm-5.2"),
+        cp_client=_CpClient([_correlated_row(gw_id="ep1", episode=1)]),
+    )
+    traj = tmp_path / "trajectory.json"
+    traj.write_text(
+        json.dumps(
+            {
+                "steps": [
+                    {"step_id": 1, "source": "user", "message": "fix the renderer"},
+                    {
+                        "step_id": 2,
+                        "source": "agent",
+                        "message": "Analysis: start\nPlan: ls",
+                        "metrics": {
+                            "input_tokens": 10,
+                            "output_tokens": 5,
+                            "cost_usd": 0.01,
+                        },
+                        "tool_calls": [
+                            {
+                                "function_name": "bash_command",
+                                "tool_call_id": "c1",
+                                "arguments": {
+                                    "keystrokes": "ls\n",
+                                    "duration": 0.1,
+                                },
+                            },
+                        ],
+                        "observation": {"results": [{"content": "ok\n"}]},
+                    },
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+    async with writer:
+        synced = await bridge.sync_trajectory_file(traj)
+    assert synced == 2
+    events = [
+        _adapter.validate_json(line)
+        for line in local.read_text().strip().splitlines()
+    ]
+    llm = next(e for e in events if e.kind == EventKind.LLM_CALL)
+    assert llm.gateway_request_id == "ep1"
+
+
+@pytest.mark.asyncio
+async def test_bridge_poll_skips_agent_step_until_episode_row_exists(
+    tmp_path: Path,
+) -> None:
+    store = FakeObjectStore()
+    writer = TrajectoryWriter(
+        local_path=tmp_path / "events.jsonl",
+        store=store,
+        bucket="trajectories",
+        key="t/events.jsonl",
+        flush_event_count=1000,
+        flush_bytes=10_000_000,
+        flush_sec=3600,
+        min_part_bytes=0,
+    )
+    client = _CpClient([])
+    bridge = HarborCheckpointBridge(
+        trajectory=writer,
+        trial_id=uuid4(),
+        step_id="main",
+        model=ModelSpec(provider="openai", name="glm-5.2"),
+        cp_client=client,
+    )
+    traj = tmp_path / "trajectory.json"
+    traj.write_text(
+        json.dumps(
+            {
+                "steps": [
+                    {"step_id": 1, "source": "user", "message": "go"},
+                    {
+                        "step_id": 2,
+                        "source": "agent",
+                        "message": "Analysis: x\nPlan: y",
+                        "metrics": {
+                            "input_tokens": 10,
+                            "output_tokens": 5,
+                        },
+                        "tool_calls": [],
+                        "observation": {"results": [{"content": "ok"}]},
+                    },
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+    async with writer:
+        synced = await bridge.sync_trajectory_file(traj, allow_incomplete=True)
+        assert synced == 1
+        client._rows = [_correlated_row(gw_id="ep1", episode=1)]
+        synced = await bridge.sync_trajectory_file(traj, allow_incomplete=True)
+        assert synced == 1
+

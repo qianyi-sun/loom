@@ -13,7 +13,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import UUID
 
 from loom.agent.base import AgentRuntime
@@ -136,6 +136,7 @@ class LocalTrialRunner:
     # it here; the runner forwards it onto TrialContext for
     # Trial.run → TrajectoryWriter to mirror events through.
     cp_event_sink: CpEventSink | None = None
+    model_switch_plan: dict[str, Any] | None = None
     # #896: per-container hard resource caps for the trial + setup-sidecar
     # containers this runner creates. Loom Slurm admission requires positive
     # values; 0 remains available only to non-Slurm callers. main_loop populates
@@ -257,6 +258,10 @@ class LocalTrialRunner:
             agent.artifact_paths = [a for step in self.task_config.steps for a in step.artifacts]
         if hasattr(agent, "request_params"):
             agent.request_params = dict(self.trial_config.request_params)
+        if hasattr(agent, "multi_model"):
+            agent.multi_model = self.trial_config.multi_model
+        if hasattr(agent, "model_switch_plan"):
+            agent.model_switch_plan = self.model_switch_plan
         verifier = self.verifier_factory()
 
         ctx = TrialContext(

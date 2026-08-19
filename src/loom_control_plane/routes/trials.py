@@ -6,7 +6,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Request
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import insert, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,6 +17,7 @@ from loom.data_lifecycle_registry import ensure_trial_lifecycle_authority
 from loom.db.schema import (
     Batch,
     LlmCall,
+    ProviderConnection,
     TeamQuota,
     TrialTaskImageMaterialization,
 )
@@ -231,6 +232,18 @@ async def submit_trial(
             status_code=400,
             detail=f"invalid trial config: {exc}",
         ) from exc
+    if trial_config.multi_model is not None and trial_config.multi_model.enabled:
+        from loom.models.trial import (
+            MultiModelSwitchSpec,
+            materialize_multi_model_switch_episode,
+        )
+
+        materialized = materialize_multi_model_switch_episode(trial_config.multi_model)
+        trial_config = trial_config.model_copy(
+            update={
+                "multi_model": MultiModelSwitchSpec.model_validate(materialized),
+            },
+        )
     async with request.app.state.session_factory() as session:
         await validate_submission_agent_task_compatibility(
             session,
@@ -240,6 +253,8 @@ async def submit_trial(
         )
     requires_caps = derive_requires_caps(task_config)
     requires_caps_json = requires_caps.model_dump(mode="json")
+    if trial_config.multi_model is not None and trial_config.multi_model.enabled:
+        requires_caps_json["terminus2_model_switch"] = True
     required_worker_pool = _required_worker_pool(payload)
     if required_worker_pool is not None:
         requires_caps_json["worker_pool"] = required_worker_pool
@@ -407,6 +422,34 @@ async def submit_trial(
             trial_id=trial_id,
             task_row=task_row,
         )
+        if trial_config.multi_model is not None and trial_config.multi_model.enabled:
+            from loom.model_switch_store import persist_model_switch_plan
+
+            conn_id = None
+            if provider_connection_id:
+                conn_id = UUID(str(provider_connection_id))
+            inherit_raw = payload.get("inherit_model_switch_plan_from_trial_id")
+            inherit_from = UUID(str(inherit_raw)) if inherit_raw else None
+            conn_row = None
+            if conn_id is not None:
+                conn_row = (
+                    await session.execute(
+                        select(ProviderConnection).where(
+                            ProviderConnection.id == conn_id,
+                        ),
+                    )
+                ).scalar_one_or_none()
+            dumped = trial_config.model_dump(mode="json")
+            await persist_model_switch_plan(
+                session,
+                trial_id=trial_id,
+                trial_config=dumped,
+                agent_model=trial_config.agent_model,
+                provider_connection_id=conn_id,
+                combination_idx=combination_idx,
+                inherit_from_trial_id=inherit_from,
+                provider_connection=conn_row,
+            )
         await session.commit()
 
     return {
@@ -575,7 +618,99 @@ async def get_trial_llm_calls(
                 # #298 Slice B: gateway-internal retry attempt that
                 # produced this row. Defaults to 1 for pre-#298 rows.
                 "attempt": r.attempt,
+                "client_call_id": str(r.client_call_id) if r.client_call_id else None,
+                "episode": r.episode,
+                "call_ordinal": r.call_ordinal,
+                "requested_model": r.requested_model,
+                "response_model": r.response_model,
+                "role": r.role,
+                "correlation_status": r.correlation_status,
             }
             for r in rows
         ],
     }
+
+
+class _TerminusReclaimBody(BaseModel):
+    step_id: str = Field(min_length=1)
+    worker_id: UUID | None = None
+
+
+class _EpisodeCheckpointBody(BaseModel):
+    execution_id: UUID
+    run_attempt_id: UUID
+    episode: int = Field(ge=1)
+    active_role: str
+    last_call_ordinal: int = Field(ge=0)
+    last_seq: int = Field(ge=0)
+    tmux_session_id: str | None = None
+
+
+@router.post("/trials/{trial_id}/terminus/reclaim")
+async def reclaim_terminus(
+    trial_id: UUID,
+    payload: _TerminusReclaimBody,
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    async with request.app.state.session_factory() as session:
+        ctx = await verify_bearer_token(session, authorization)
+    if ctx is None:
+        raise HTTPException(status_code=401, detail="not authorized")
+    from loom_control_plane.terminus_recovery import reclaim_terminus_execution
+
+    async with request.app.state.session_factory() as session:
+        trial_team = (
+            await session.execute(
+                select(TrialRow.team_id).where(TrialRow.id == trial_id),
+            )
+        ).scalar_one_or_none()
+        if trial_team is None:
+            raise HTTPException(status_code=404, detail="trial not found")
+        if ctx.team_id is not None and trial_team != ctx.team_id:
+            raise HTTPException(status_code=403, detail="trial belongs to another team")
+        state = await reclaim_terminus_execution(
+            session,
+            trial_id=trial_id,
+            step_id=payload.step_id,
+            worker_id=payload.worker_id,
+        )
+        await session.commit()
+    return state.model_dump(mode="json")
+
+
+@router.post("/trials/{trial_id}/terminus/episode-checkpoints")
+async def post_episode_checkpoint(
+    trial_id: UUID,
+    payload: _EpisodeCheckpointBody,
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    async with request.app.state.session_factory() as session:
+        ctx = await verify_bearer_token(session, authorization)
+    if ctx is None:
+        raise HTTPException(status_code=401, detail="not authorized")
+    from loom_control_plane.terminus_recovery import write_episode_checkpoint
+
+    async with request.app.state.session_factory() as session:
+        trial_team = (
+            await session.execute(
+                select(TrialRow.team_id).where(TrialRow.id == trial_id),
+            )
+        ).scalar_one_or_none()
+        if trial_team is None:
+            raise HTTPException(status_code=404, detail="trial not found")
+        if ctx.team_id is not None and trial_team != ctx.team_id:
+            raise HTTPException(status_code=403, detail="trial belongs to another team")
+        row = await write_episode_checkpoint(
+            session,
+            execution_id=payload.execution_id,
+            run_attempt_id=payload.run_attempt_id,
+            episode=payload.episode,
+            active_role=payload.active_role,
+            last_call_ordinal=payload.last_call_ordinal,
+            last_seq=payload.last_seq,
+            tmux_session_id=payload.tmux_session_id,
+        )
+        await session.commit()
+    return {"id": str(row.id), "version": row.version, "checksum": row.checksum}

@@ -14,7 +14,7 @@ import react from "@vitejs/plugin-react";
 const apiProxyTarget =
   process.env.VITE_API_PROXY_TARGET ?? "http://localhost:8090";
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
   plugins: [react()],
   // Recovery tests may consume this compile-time constant, but the normal
   // production build always substitutes false. Only build-browser-test.mjs
@@ -24,13 +24,18 @@ export default defineConfig({
       process.env.VITE_BROWSER_TEST_BUILD === "true",
     ),
   },
-  // Keep the shipped relative-asset contract by default. The browser quality
-  // harness supplies an explicit prefix so deep-route reloads exercise the
-  // same production build without depending on a live deployment.
-  base: process.env.VITE_E2E_ROUTE_BASE ?? "./",
+  // Production builds keep relative assets. The Vite 8.0.16 dev server with
+  // `base: "./"` does not match `/api` proxy rules, so `/api/v1/auth/me`
+  // 404s and the SPA shows "session service is temporarily unavailable".
+  base: process.env.VITE_E2E_ROUTE_BASE ?? (command === "build" ? "./" : "/"),
   server: {
     port: 5173,
-    proxy: { "/api": apiProxyTarget },
+    proxy: {
+      "/api": {
+        target: apiProxyTarget,
+        changeOrigin: true,
+      },
+    },
     // Vite registers its raw ErrorEvent forwarder before the application
     // entrypoint. Disable that channel so root-boundary failures cannot be
     // serialized to an agent/dev terminal before our capture listener redacts
@@ -62,4 +67,4 @@ export default defineConfig({
       },
     },
   },
-});
+}));

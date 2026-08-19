@@ -1557,6 +1557,59 @@ loom run
   under `.loom/agent/`. Requires a provider + model; does not use
   `loom-launcher` or per-trial `install_script`. See
   [`architecture/terminus2-runtime.md`](architecture/terminus2-runtime.md).
+
+  Optional student/teacher mix (#1380): default remains a **single-model**
+  trial. Opt in on `loom eval batch create` with **one** of the two
+  policies (they cannot be combined):
+
+  ```bash
+  # Path A — K1/K2 blocks (default when --multi-model is set without --beta)
+  loom eval batch create \
+    --agent terminus-2 \
+    --provider <name> \
+    --model <student> \
+    --multi-model \
+    --multi-model-secondary <teacher> \
+    [--multi-model-switch-episode 3] \
+    [--multi-model-teacher-episodes 2] \
+    ...
+
+  # Path B — per-episode teacher coin
+  loom eval batch create \
+    --agent terminus-2 \
+    --provider <name> \
+    --model <student> \
+    --multi-model \
+    --multi-model-secondary <teacher> \
+    --multi-model-beta 0.6 \
+    [--multi-model-seed 42] \
+    ...
+  ```
+
+  Same BYO connection. Path A: student until K1, teacher for
+  `teacher_episodes`, then student from K2. K1 is sampled if the
+  switch-episode flag is omitted.
+
+  Path B (`--multi-model-beta`): each Harbor episode the teacher drives
+  if `hash(seed:trial_id:episode) < beta`. Optional `--multi-model-seed`
+  is stored on `model_switch_plans.seed` (not on `trial_config` as
+  `seed`). This is who acts, not DAgger teacher labels.
+
+  `raw-harbor-tb2-v2` packs applied cuts in
+  `agent_runs/.../trajectory.json` → `model_switches`, and per-step
+  `role` on agent steps. Gateway `llm_calls.role` / `requested_model`
+  are the call-grain evidence.
+
+  Not supported with `--combinations-json`.
+
+  If a worker dies after the agent has already written episode checkpoints,
+  Loom **does not** restart Harbor from episode 1 on the same trial
+  trajectory (that would glue a new student run onto a partial
+  student/teacher log). The attempt fails with `terminus-2 recovery_failed`.
+  Retry the task as a new trial that inherits the same plan (K1/K2 or
+  beta mix seed). See
+  [terminus2-runtime.md](architecture/terminus2-runtime.md)
+  (mid-trajectory switch, worker retry).
 - any other name — resolved via `loom_launcher.get_adapter(name)` from the
   included adapters (claude-code, codex, openhands, aider,
   opencode, swe-agent, mini-swe-agent, openhands-sdk, gemini-cli,

@@ -69,6 +69,7 @@ class TrajectoryWriter:
         # The final flush at close() ignores it (last-part has no minimum).
         self._min_part_bytes = min_part_bytes
         self._cp_event_sink = cp_event_sink
+        self._append_lock = asyncio.Lock()
 
         self._buf: list[bytes] = []
         self._buf_bytes = 0
@@ -120,16 +121,14 @@ class TrajectoryWriter:
     async def append(self, event: TrajectoryEvent) -> None:
         if self._closed:
             raise RuntimeError("append after close")
-        event = event.model_copy(update={"seq": self._assign_seq(event.seq)})
-        if event.kind == EventKind.LLM_CALL:
-            self._llm_call_event_count += 1
-        line = event.model_dump_json().encode("utf-8") + b"\n"
-        await self._write_line(line)
-        # #5 Slice 3b: mirror the typed event to the CP sink. Sink
-        # internally swallows all errors so a CP outage never fails
-        # the trial in this slice.
-        if self._cp_event_sink is not None:
-            await self._cp_event_sink.observe(event)
+        async with self._append_lock:
+            event = event.model_copy(update={"seq": self._assign_seq(event.seq)})
+            if event.kind == EventKind.LLM_CALL:
+                self._llm_call_event_count += 1
+            line = event.model_dump_json().encode("utf-8") + b"\n"
+            await self._write_line(line)
+            if self._cp_event_sink is not None:
+                await self._cp_event_sink.observe(event)
 
     async def write_raw_dict(self, data: dict[str, object]) -> None:
         """Append a pre-shaped dict as one JSONL line WITHOUT pydantic

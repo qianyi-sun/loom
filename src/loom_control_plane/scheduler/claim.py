@@ -149,6 +149,13 @@ WITH next AS (
               '[]'::jsonb
             ) ? 'loom-stage1-smoke-worker-v1'
           )
+          AND (
+            COALESCE((t.requires_caps->>'terminus2_model_switch')::boolean, false) IS NOT TRUE
+            OR EXISTS (
+              SELECT 1 FROM jsonb_array_elements(w.capabilities) cap
+              WHERE COALESCE((cap->>'terminus2_model_switch')::boolean, false) IS TRUE
+            )
+          )
      )
    ORDER BY
        (q.in_flight_count * 1.0) / NULLIF(q.fair_share_weight, 0) ASC,
@@ -298,6 +305,13 @@ WITH candidates AS (
      )
      AND t.requires_caps->>'gpu_vendor' = ANY(:worker_gpu_vendors)
      AND (t.requires_caps->'network_policies') <@ (:worker_network_policies)::jsonb
+     AND (
+       COALESCE((t.requires_caps->>'terminus2_model_switch')::boolean, false) IS NOT TRUE
+       OR EXISTS (
+         SELECT 1 FROM jsonb_array_elements(w.capabilities) cap
+         WHERE COALESCE((cap->>'terminus2_model_switch')::boolean, false) IS TRUE
+       )
+     )
      AND (
        t.family_key IS NULL
        OR EXISTS (

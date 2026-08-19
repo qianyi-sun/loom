@@ -80,6 +80,11 @@ from loom_service.monitor_filters import (
     apply_batch_monitor_filters,
     resolve_monitor_team_filter,
 )
+from loom_service.multi_model import (
+    apply_plan_mode,
+    parse_multi_model,
+    validate_multi_model_for_batch,
+)
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.provider_connection_lookup import validate_provider_connection
 from loom_service.stale_running_debug import batch_stale_running_decisions
@@ -212,6 +217,7 @@ class _CreateBatch(BaseModel):
     budget_usd: float | None = Field(default=None, ge=0)
     budget_policy: Literal["none", "soft", "hard"] = "none"
     budget_confirmed: bool = False
+    model_switch_plan_mode: Literal["inherit", "resample"] | None = None
 
 
 class _AdminCreateBatchOnBehalf(_CreateBatch):
@@ -226,6 +232,7 @@ class _AdminCreateBatchOnBehalf(_CreateBatch):
 class _RerunFailedBatch(BaseModel):
     task_ids: list[str] = Field(default_factory=list, max_length=5000)
     include_operator_approval: bool = False
+    model_switch_plan_mode: Literal["inherit", "resample"] = "inherit"
 
 
 def _sanitize_trial_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -233,6 +240,42 @@ def _sanitize_trial_config(config: dict[str, Any]) -> dict[str, Any]:
     if "request_params" in out:
         out["request_params"] = sanitize_request_extras(out.get("request_params"))
     return out
+
+
+def _multi_model_block(trial_config: dict[str, Any] | None) -> dict[str, Any]:
+    raw = (trial_config or {}).get("multi_model")
+    return raw if isinstance(raw, dict) else {}
+
+
+def _multi_model_teacher_id(trial_config: dict[str, Any] | None) -> str | None:
+    mm = _multi_model_block(trial_config)
+    if not mm.get("enabled"):
+        return None
+    secondary = mm.get("secondary_model") or {}
+    if isinstance(secondary, dict):
+        name = secondary.get("name")
+        return str(name) if name else None
+    return None
+
+
+def _multi_model_teacher_episodes(trial_config: dict[str, Any] | None) -> int | None:
+    mm = _multi_model_block(trial_config)
+    if not mm.get("enabled"):
+        return None
+    try:
+        return int(mm.get("teacher_episodes") or 2)
+    except (TypeError, ValueError):
+        return 2
+
+
+def _multi_model_episode_ceiling(trial_config: dict[str, Any] | None) -> int | None:
+    mm = _multi_model_block(trial_config)
+    if not mm.get("enabled"):
+        return None
+    try:
+        return int(mm.get("episode_ceiling") or 50)
+    except (TypeError, ValueError):
+        return 50
 
 
 def _reject_invalid_workspace_staging_policy_name(
@@ -564,6 +607,9 @@ async def _estimate_pre_run_budget_for_payload(
             settings=settings,
             budget_usd=budget_usd,
             budget_policy=budget_policy,
+            secondary_model_id=_multi_model_teacher_id(payload.trial_config),
+            teacher_episodes=_multi_model_teacher_episodes(payload.trial_config),
+            episode_ceiling=_multi_model_episode_ceiling(payload.trial_config),
         )
         return estimate, []
 
@@ -584,6 +630,9 @@ async def _estimate_pre_run_budget_for_payload(
             settings=settings,
             budget_usd=budget_usd,
             budget_policy=budget_policy,
+            secondary_model_id=_multi_model_teacher_id(payload.trial_config),
+            teacher_episodes=_multi_model_teacher_episodes(payload.trial_config),
+            episode_ceiling=_multi_model_episode_ceiling(payload.trial_config),
         )
         estimates.append(estimate)
         items.append(
@@ -909,6 +958,97 @@ async def _create_batch_record(
             .all()
         )
         provider_connections_by_id = {row.id: row for row in provider_rows}
+
+    # #1380: mid-trajectory model switch validation (after provider rows load).
+    multi_model_spec = None
+    try:
+        multi_model_spec = parse_multi_model(trial_config)
+    except Exception as exc:
+        _reject_submission(
+            reason="invalid_input",
+            status_code=400,
+            detail=f"trial_config.multi_model is invalid: {exc}",
+        )
+    if multi_model_spec is not None and multi_model_spec.enabled:
+        if payload.combinations:
+            for i, combo in enumerate(payload.combinations):
+                conn_id, _model_id = _effective_provider_fields(payload, combo)
+                conn_row = (
+                    provider_connections_by_id.get(conn_id)
+                    if conn_id is not None
+                    else None
+                )
+                err = validate_multi_model_for_batch(
+                    trial_config=trial_config,
+                    agent_name=combo.agent_name,
+                    agent_model=combo.agent_model,
+                    provider_connection_id=conn_id,
+                    provider_connection=conn_row,
+                    context=f"combinations[{i}]",
+                )
+                if err is not None:
+                    _reject_submission(
+                        reason="invalid_input",
+                        status_code=400,
+                        detail=err,
+                    )
+                await _reject_if_known_failed_provider_model(
+                    s,
+                    provider_connection_id=conn_id,
+                    provider_model_id=multi_model_spec.secondary_model.name
+                    if multi_model_spec.secondary_model is not None
+                    else None,
+                    context=f"combinations[{i}].multi_model.secondary_model",
+                )
+        else:
+            agent_name = trial_config.get("agent_name")
+            model_raw = trial_config.get("agent_model")
+            model = None
+            if model_raw is not None:
+                try:
+                    model = ModelSpec.model_validate(model_raw)
+                except Exception as exc:
+                    _reject_submission(
+                        reason="invalid_input",
+                        status_code=400,
+                        detail=f"trial_config.agent_model failed to validate: {exc}",
+                    )
+            conn_id, _model_id = _effective_provider_fields(payload, None)
+            conn_row = (
+                provider_connections_by_id.get(conn_id)
+                if conn_id is not None
+                else provider_connection
+            )
+            err = validate_multi_model_for_batch(
+                trial_config=trial_config,
+                agent_name=agent_name if isinstance(agent_name, str) else None,
+                agent_model=model,
+                provider_connection_id=conn_id,
+                provider_connection=conn_row,
+                context="trial_config",
+            )
+            if err is not None:
+                _reject_submission(
+                    reason="invalid_input",
+                    status_code=400,
+                    detail=err,
+                )
+            await _reject_if_known_failed_provider_model(
+                s,
+                provider_connection_id=conn_id,
+                provider_model_id=(
+                    multi_model_spec.secondary_model.name
+                    if multi_model_spec.secondary_model is not None
+                    else None
+                ),
+                context="trial_config.multi_model.secondary_model",
+            )
+        # Persist a concrete switch_episode on the batch trial_config so
+        # retries / fan-out reuse the same K when not overridden per trial.
+        trial_config = apply_plan_mode(
+            trial_config,
+            mode=payload.model_switch_plan_mode,
+        )
 
     task_result = await resolve_task_filter_with_diagnostics(
         s,
@@ -2391,7 +2531,10 @@ async def rerun_failed_batch(
         description=(f"Reruns {len(targets)} transient failed case(s) from batch {b.id}."),
         task_filter={"subset_kind": "explicit", "task_ids": task_ids},
         resolved_task_ids=list(rerun_task_result.task_ids),
-        trial_config=dict(b.trial_config),
+        trial_config=apply_plan_mode(
+            dict(b.trial_config),
+            mode=request_payload.model_switch_plan_mode,
+        ),
         state="submitted",
         created_by_token_prefix=token_prefix,
         submitted_by_user_id=ctx.user_id,

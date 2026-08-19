@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from uuid import UUID, uuid4
 
 from loom.agent.terminus2.agent_message import parse_agent_message
@@ -22,6 +23,7 @@ from loom.agent.terminus2.provenance import (
 from loom.models.trajectory import (
     Terminus2ArtifactRefEvent,
     Terminus2CommandEvent,
+    Terminus2ModelSwitchEvent,
     Terminus2RuntimeProvenanceEvent,
     Terminus2TerminalObservationEvent,
     Terminus2TurnEvent,
@@ -59,7 +61,9 @@ class HarborCheckpointBridge:
             step_id=step_id,
         )
         self._seq = 0
+        self._seq_lock = asyncio.Lock()
         self._seen_step_ids: set[int] = set()
+        self._bridged_agent_episodes = 0
         self._provenance_emitted = False
 
     def _next_seq(self) -> int:
@@ -92,6 +96,7 @@ class HarborCheckpointBridge:
         path: Path,
         *,
         completeness: str = "full",
+        allow_incomplete: bool = False,
     ) -> int:
         if not path.is_file():
             return 0
@@ -118,7 +123,19 @@ class HarborCheckpointBridge:
             if source != "agent":
                 self._seen_step_ids.add(step_id)
                 continue
-            await self._bridge_agent_step(step, completeness=completeness)
+            try:
+                await self._bridge_agent_step(
+                    step,
+                    completeness=completeness,
+                    episode=self._bridged_agent_episodes + 1,
+                )
+            except CheckpointBridgeError:
+                # The 0.5s poller can see Harbor's agent step before the
+                # matching llm_calls row is visible. Leave it unseen.
+                if allow_incomplete:
+                    break
+                raise
+            self._bridged_agent_episodes += 1
             self._seen_step_ids.add(step_id)
             synced += 1
         return synced
@@ -144,6 +161,7 @@ class HarborCheckpointBridge:
         step: dict[str, Any],
         *,
         completeness: str,
+        episode: int,
     ) -> None:
         metrics = step.get("metrics") or {}
         if not metrics:
@@ -156,7 +174,14 @@ class HarborCheckpointBridge:
                 "real gateway_request_id joins",
             )
 
-        llm_row = self._gateway_ledger.resolve_for_metrics(metrics)
+        # Harbor ATIF step_id counts user + agent rows (initial prompt is
+        # step 1, first agent turn is 2). loom_episode / llm_calls.episode
+        # count Harbor agent loops. Join on the nth bridged agent step,
+        # not Harbor step_id.
+        llm_row = self._gateway_ledger.resolve_for_metrics(
+            metrics,
+            episode=episode,
+        )
         gateway_request_id = str(llm_row["id"])
         turn_id = str(uuid4())
         batch_id = str(uuid4())
@@ -289,3 +314,26 @@ class HarborCheckpointBridge:
                     share_policy="restricted",
                 ),
             )
+
+    async def emit_model_switch(
+        self,
+        *,
+        switch_episode: int,
+        from_model: ModelSpec,
+        to_model: ModelSpec,
+        from_role: Literal["student", "teacher"] = "student",
+        to_role: Literal["student", "teacher"] = "teacher",
+    ) -> None:
+        await self._trajectory.append(
+            Terminus2ModelSwitchEvent(
+                emitted_at=datetime.now(UTC),
+                trial_id=self._trial_id,
+                step_id=self._step_id,
+                seq=self._next_seq(),
+                switch_episode=switch_episode,
+                from_role=from_role,
+                to_role=to_role,
+                from_model=from_model,
+                to_model=to_model,
+            ),
+        )

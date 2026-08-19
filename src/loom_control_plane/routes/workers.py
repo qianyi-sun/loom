@@ -21,6 +21,7 @@ from loom.integrations.terminalgen.authority import (
     build_terminal_task_validation_grant,
     build_terminalgen_authoring_grant,
 )
+from loom.model_switch_store import load_model_switch_plan, plan_snapshot_from_row
 from loom.models.capabilities import Capabilities
 from loom.models.result import FailureReason
 from loom.models.worker_capabilities import (
@@ -54,6 +55,13 @@ from loom_control_plane.scheduler.claim import (
 )
 
 router = APIRouter()
+
+
+async def _model_switch_plan_payload(session: Any, trial_id: UUID) -> dict[str, Any] | None:
+    row = await load_model_switch_plan(session, trial_id)
+    if row is None:
+        return None
+    return plan_snapshot_from_row(row).model_dump(mode="json")
 
 _WORKER_HEARTBEAT_STATUSES = {"active", "idle-exit", "shutting-down"}
 
@@ -232,6 +240,7 @@ async def claim_trial(
             enforce_shared_slot=True,
         )
         task_image_materialization = None
+        model_switch_plan = None
         if row is not None:
             try:
                 task_image_materialization = await get_trial_task_image_execution_grant(
@@ -242,6 +251,10 @@ async def claim_trial(
             except RuntimeError:
                 await session.rollback()
                 return Response(status_code=204)
+            # Same snapshot as POST /work/claim. Local compose still uses
+            # this legacy endpoint; without the plan, beta_mixture cannot
+            # recover mix seed from trial_config.
+            model_switch_plan = await _model_switch_plan_payload(session, row["id"])
         await session.commit()
     elapsed = _time.perf_counter() - t0
 
@@ -275,6 +288,7 @@ async def claim_trial(
                 if task_image_materialization is not None
                 else None
             ),
+            "model_switch_plan": model_switch_plan,
             "state": "claimed",
         }
     )
@@ -369,6 +383,7 @@ async def claim_any_work(
                 family_run_spec=family_row["family_run_spec"] if family_row else None,
                 task_image_materialization=task_image_materialization,
                 state="claimed",
+                model_switch_plan=await _model_switch_plan_payload(session, row["id"]),
             )
         else:
             assert lease_token is not None

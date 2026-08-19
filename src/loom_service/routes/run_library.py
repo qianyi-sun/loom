@@ -6,7 +6,7 @@ import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, Literal, cast
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -40,6 +40,7 @@ from loom_service.dependencies import SessionAndCtx
 from loom_service.diagnosis import build_batch_diagnosis, trial_failure_records
 from loom_service.failure_taxonomy import is_replaceable_by_successful_supplemental
 from loom_service.monitor_filters import apply_batch_monitor_filters
+from loom_service.multi_model import apply_plan_mode
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.provider_connection_lookup import validate_provider_connection
 from loom_service.public_links import public_url_for
@@ -92,6 +93,7 @@ class _CloneConfigRequest(BaseModel):
     description: str | None = None
     provider_connection_id: UUID | None = None
     provider_model_id: str | None = None
+    model_switch_plan_mode: Literal["inherit", "resample"] = "inherit"
 
 
 class _ReuseArtifactRequest(BaseModel):
@@ -2073,7 +2075,10 @@ async def clone_run_library_batch_config(
         description=payload.description or (f"Cloned config from shared batch {source.id}."),
         task_filter=task_filter,
         resolved_task_ids=resolved_task_ids,
-        trial_config=dict(source.trial_config),
+        trial_config=apply_plan_mode(
+            dict(source.trial_config),
+            mode=payload.model_switch_plan_mode,
+        ),
         state="submitted",
         created_by_token_prefix=token_prefix,
         submitted_by_user_id=ctx.user_id,

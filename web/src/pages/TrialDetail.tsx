@@ -188,6 +188,15 @@ function TrialHeader({
           />
           <StatCard label="Agent" value={trial.agent_name ?? "—"} />
           <StatCard label="Model" value={modelLabel(trial.model)} />
+          {"model_switch_plan" in trial && trial.model_switch_plan != null ? (
+            <StatCard
+              label="Teacher model"
+              value={modelLabel(
+                (trial.model_switch_plan as { teacher_model?: unknown })
+                  .teacher_model,
+              )}
+            />
+          ) : null}
           <StatCard
             label="Evaluator score"
             value={

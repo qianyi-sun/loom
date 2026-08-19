@@ -3,6 +3,7 @@ import { Outlet, useLocation } from "react-router-dom";
 
 import {
   clearBrowserTestRecoveryFault,
+  IS_BROWSER_TEST_BUILD,
   shouldTriggerBrowserTestRecoveryFault,
 } from "../lib/browserTestBuild";
 import { frontendHomePath } from "../lib/frontendConfig";
@@ -30,7 +31,7 @@ function BrowserTestRouteFault({
   children: React.ReactNode;
 }): JSX.Element {
   if (
-    __LOOM_BROWSER_TEST_BUILD__ &&
+    IS_BROWSER_TEST_BUILD &&
     shouldTriggerBrowserTestRecoveryFault("route-render-once")
   ) {
     throw new Error("browser-test-only route render fault");
@@ -47,7 +48,7 @@ export function RouteRecoveryBoundary({
   const location = useLocation();
   const faultLocationKey = React.useRef(location.key);
   if (
-    __LOOM_BROWSER_TEST_BUILD__ &&
+    IS_BROWSER_TEST_BUILD &&
     faultLocationKey.current !== location.key
   ) {
     faultLocationKey.current = location.key;

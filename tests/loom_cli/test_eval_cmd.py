@@ -540,6 +540,212 @@ def test_batch_create_workspace_staging_policy_tb21(
     assert body["trial_config"]["agent_name"] == "terminus-2"
 
 
+def test_batch_create_multi_model_default_off_omits_block(
+    mock_server: MockServer,
+) -> None:
+    """#1380: without --multi-model, trial_config stays single-model."""
+    _stub_connection_lookup(mock_server)
+    mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(
+        201,
+        json={
+            "batch_id": _BATCH_ID,
+            "expected_trial_count": 1,
+            "n_per_task": 1,
+            "backend": "docker",
+            "combinations": [],
+            "state": "submitted",
+            "created_at": "2026-06-16T00:00:00Z",
+        },
+    )
+    rc = main(
+        [
+            "eval",
+            "batch",
+            "create",
+            "--provider",
+            "openai-prod",
+            "--model",
+            "glm-5.1",
+            "--agent",
+            "terminus-2",
+            "--benchmark",
+            "strict-pass-39",
+            "--name",
+            "single-model",
+        ]
+    )
+    assert rc == 0
+    body = json.loads(mock_server[1].content)
+    assert "multi_model" not in body["trial_config"]
+
+
+def test_batch_create_multi_model_flag_builds_trial_config(
+    mock_server: MockServer,
+) -> None:
+    """#1380: --multi-model nests student/teacher switch config under trial_config."""
+    _stub_connection_lookup(mock_server)
+    mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(
+        201,
+        json={
+            "batch_id": _BATCH_ID,
+            "expected_trial_count": 1,
+            "n_per_task": 1,
+            "backend": "docker",
+            "combinations": [],
+            "state": "submitted",
+            "created_at": "2026-06-16T00:00:00Z",
+        },
+    )
+    rc = main(
+        [
+            "eval",
+            "batch",
+            "create",
+            "--provider",
+            "openai-prod",
+            "--model",
+            "glm-5.1",
+            "--agent",
+            "terminus-2",
+            "--benchmark",
+            "strict-pass-39",
+            "--multi-model",
+            "--multi-model-secondary",
+            "qwen-test",
+            "--multi-model-switch-episode",
+            "3",
+            "--name",
+            "dual-model",
+        ]
+    )
+    assert rc == 0
+    body = json.loads(mock_server[1].content)
+    assert body["trial_config"]["multi_model"] == {
+        "enabled": True,
+        "policy": "student_teacher_student",
+        "secondary_model": {
+            "provider": "openai",
+            "name": "qwen-test",
+            "source": "api",
+        },
+        "switch_episode": 3,
+    }
+
+
+def test_batch_create_multi_model_beta_builds_trial_config(
+    mock_server: MockServer,
+) -> None:
+    _stub_connection_lookup(mock_server)
+    mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(
+        201,
+        json={
+            "batch_id": _BATCH_ID,
+            "expected_trial_count": 1,
+            "n_per_task": 1,
+            "backend": "docker",
+            "combinations": [],
+            "state": "submitted",
+            "created_at": "2026-06-16T00:00:00Z",
+        },
+    )
+    rc = main(
+        [
+            "eval",
+            "batch",
+            "create",
+            "--provider",
+            "openai-prod",
+            "--model",
+            "glm-5.1",
+            "--agent",
+            "terminus-2",
+            "--benchmark",
+            "strict-pass-39",
+            "--multi-model",
+            "--multi-model-secondary",
+            "qwen-test",
+            "--multi-model-beta",
+            "0.6",
+            "--multi-model-seed",
+            "42",
+            "--name",
+            "beta-mix",
+        ]
+    )
+    assert rc == 0
+    body = json.loads(mock_server[1].content)
+    assert body["trial_config"]["multi_model"] == {
+        "enabled": True,
+        "policy": "beta_mixture",
+        "beta": 0.6,
+        "mix_seed": "42",
+        "secondary_model": {
+            "provider": "openai",
+            "name": "qwen-test",
+            "source": "api",
+        },
+    }
+
+
+def test_batch_create_multi_model_beta_rejects_k1(
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _stub_connection_lookup(mock_server)
+    rc = main(
+        [
+            "eval",
+            "batch",
+            "create",
+            "--provider",
+            "openai-prod",
+            "--model",
+            "glm-5.1",
+            "--agent",
+            "terminus-2",
+            "--benchmark",
+            "strict-pass-39",
+            "--multi-model",
+            "--multi-model-secondary",
+            "qwen-test",
+            "--multi-model-beta",
+            "0.6",
+            "--multi-model-switch-episode",
+            "3",
+        ]
+    )
+    assert rc == 2
+    assert "--multi-model-beta cannot be combined" in capsys.readouterr().err
+    assert not any(req.url.path.endswith("/batches") for req in mock_server.requests)
+
+
+def test_batch_create_multi_model_rejects_non_terminus(
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rc = main(
+        [
+            "eval",
+            "batch",
+            "create",
+            "--provider",
+            "openai-prod",
+            "--model",
+            "gpt-4o",
+            "--agent",
+            "litellm",
+            "--benchmark",
+            "humaneval",
+            "--multi-model",
+            "--multi-model-secondary",
+            "other",
+        ]
+    )
+    assert rc == 2
+    assert "--multi-model requires --agent terminus-2" in capsys.readouterr().err
+    assert mock_server.requests == []
+
+
 def test_batch_create_with_combinations_json_routes_provider_per_combo(
     mock_server: MockServer,
     capsys: pytest.CaptureFixture[str],

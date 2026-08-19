@@ -81,6 +81,7 @@ class PendingUnit:
     # onto ``trials.family_key`` so the scheduler's claim query can
     # gate the trial on family sequence position.
     family_key: str | None = None
+    inherit_model_switch_plan_from_trial_id: UUID | None = None
 
 
 def next_batch_state(
@@ -175,13 +176,15 @@ def _materialize_trial_config(
     the shared config (route forbids them when combinations is
     non-empty, but defense in depth).
     """
+    from loom_service.multi_model import apply_plan_mode
+
     if combination is None:
-        return shared
+        return apply_plan_mode(shared, mode=shared.get("model_switch_plan_mode"))
     import copy as _copy
     out: dict[str, Any] = _copy.deepcopy(shared)
     out["agent_name"] = combination["agent_name"]
     out["agent_model"] = combination.get("agent_model")
-    return out
+    return apply_plan_mode(out, mode=out.get("model_switch_plan_mode"))
 
 
 def _coerce_uuid(value: object) -> UUID | None:
@@ -473,6 +476,9 @@ def _with_family_key(
         provider_connection_id=unit.provider_connection_id,
         provider_model_id=unit.provider_model_id,
         family_key=family_key,
+        inherit_model_switch_plan_from_trial_id=(
+            unit.inherit_model_switch_plan_from_trial_id
+        ),
     )
 
 
@@ -561,6 +567,10 @@ async def _pending_rerun_units(
             batch,
             combination,
         )
+        inherit_from = None
+        raw_origin = target.get("original_trial_id")
+        if raw_origin:
+            inherit_from = _coerce_uuid(raw_origin)
         pending.append(
             PendingUnit(
                 task_id=task_id,
@@ -569,6 +579,7 @@ async def _pending_rerun_units(
                 sample_idx=sample_idx,
                 provider_connection_id=provider_connection_id,
                 provider_model_id=provider_model_id,
+                inherit_model_switch_plan_from_trial_id=inherit_from,
             ),
         )
     return pending
@@ -587,6 +598,7 @@ async def _submit_one(
     combination_idx: int | None = None,
     required_worker_pool: str | None = None,
     family_key: str | None = None,
+    inherit_model_switch_plan_from_trial_id: UUID | None = None,
 ) -> _SubmitResult:
     idempotency_key = _idempotency_key(
         batch_id,
@@ -612,6 +624,10 @@ async def _submit_one(
         payload["provider_model_id"] = provider_model_id
     if family_key is not None:
         payload["family_key"] = family_key
+    if inherit_model_switch_plan_from_trial_id is not None:
+        payload["inherit_model_switch_plan_from_trial_id"] = str(
+            inherit_model_switch_plan_from_trial_id,
+        )
     headers: dict[str, str] = {}
     if authorization:
         headers["Authorization"] = authorization
@@ -1054,6 +1070,9 @@ async def run_once(
                     combination_idx=unit.combination_idx,
                     required_worker_pool=unit.required_worker_pool,
                     family_key=unit.family_key,
+                    inherit_model_switch_plan_from_trial_id=(
+                        unit.inherit_model_switch_plan_from_trial_id
+                    ),
                 )
                 if (
                     not submit_result.ok

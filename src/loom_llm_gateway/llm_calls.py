@@ -32,6 +32,15 @@ async def record_call(
     attempt: int = 1,
     request_params: dict[str, Any] | None = None,
     raw_provider_log: dict[str, Any] | None = None,
+    client_call_id: UUID | None = None,
+    agent_execution_id: UUID | None = None,
+    agent_run_attempt_id: UUID | None = None,
+    episode: int | None = None,
+    call_ordinal: int | None = None,
+    requested_model: str | None = None,
+    response_model: str | None = None,
+    role: str | None = None,
+    correlation_status: str = "legacy_uncorrelated",
 ) -> None:
     """Insert one row into `llm_calls`. Called by every dialect endpoint
     (chat / messages / responses / gemini) AFTER the upstream provider
@@ -107,6 +116,15 @@ async def record_call(
             rate_card_hash=rate_card_hash,
             attempt=attempt,
             lifecycle_authority_id=lifecycle_authority_id,
+            client_call_id=client_call_id,
+            agent_execution_id=agent_execution_id,
+            agent_run_attempt_id=agent_run_attempt_id,
+            episode=episode,
+            call_ordinal=call_ordinal,
+            requested_model=requested_model or model,
+            response_model=response_model,
+            role=role,
+            correlation_status=correlation_status,
         )
     )
     await session.commit()
@@ -138,6 +156,15 @@ async def record_failed_call(
     failure_category: str,
     failure_status_code: int | None = None,
     failure_error_type: str | None = None,
+    client_call_id: UUID | None = None,
+    agent_execution_id: UUID | None = None,
+    agent_run_attempt_id: UUID | None = None,
+    episode: int | None = None,
+    call_ordinal: int | None = None,
+    requested_model: str | None = None,
+    response_model: str | None = None,
+    role: str | None = None,
+    correlation_status: str = "legacy_uncorrelated",
 ) -> None:
     """Insert one zero-token audit row for an attempted upstream call.
 
@@ -199,6 +226,15 @@ async def record_failed_call(
             rate_card_hash="failed-upstream",
             attempt=max(int(attempt or 1), 1),
             lifecycle_authority_id=lifecycle_authority_id,
+            client_call_id=client_call_id,
+            agent_execution_id=agent_execution_id,
+            agent_run_attempt_id=agent_run_attempt_id,
+            episode=episode,
+            call_ordinal=call_ordinal,
+            requested_model=requested_model or model,
+            response_model=response_model,
+            role=role,
+            correlation_status=correlation_status,
         )
     )
     await session.commit()

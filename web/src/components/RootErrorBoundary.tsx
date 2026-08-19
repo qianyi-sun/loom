@@ -1,11 +1,14 @@
 import React from "react";
 
 import {
+  clearBrowserTestRecoveryFault,
+  IS_BROWSER_TEST_BUILD,
+} from "../lib/browserTestBuild";
+import {
   clearBrowserFailureConsoleRedaction,
   prepareBrowserFailureForBoundary,
   reportBrowserFailure,
 } from "../lib/errorReporting";
-import { clearBrowserTestRecoveryFault } from "../lib/browserTestBuild";
 import { frontendHomePath } from "../lib/frontendConfig";
 import { RecoveryPanel } from "./RecoveryPanel";
 
@@ -52,7 +55,7 @@ export class RootErrorBoundary extends React.Component<
   };
 
   private readonly retry = (): void => {
-    if (__LOOM_BROWSER_TEST_BUILD__) {
+    if (IS_BROWSER_TEST_BUILD) {
       clearBrowserTestRecoveryFault("root-render-once");
     }
     this.props.onRetry?.();

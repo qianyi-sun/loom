@@ -263,6 +263,7 @@ _DEFAULT_CAPS = [
         "dynamic_network_policy": True,
         "mounted_fs": True,
         "resource_modes": ["auto", "limit", "guarantee"],
+        "terminus2_model_switch": True,
     }
 ]
 
@@ -1397,6 +1398,7 @@ async def _spawn_trial(
             # mattering more; for now MinIO remains authoritative
             # and the sink swallows its own errors.
             cp_event_sink=trial_cp_event_sink,
+            model_switch_plan=payload.get("model_switch_plan"),
             # PR-E: worker-spawned vLLM registry. Shared across trials
             # claimed by this worker process so the 1-3 min vLLM startup
             # is amortised across many same-model trials.

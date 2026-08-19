@@ -1,9 +1,17 @@
 /**
- * Compile-time browser-harness marker. Normal production builds replace this
- * with `false`; only the local Playwright build command replaces it with
- * `true`. It must never be derived from runtime state.
+ * Compile-time browser-harness marker. Vite `define` replaces
+ * `__LOOM_BROWSER_TEST_BUILD__` with `true` only for the Playwright bundle
+ * (`VITE_BROWSER_TEST_BUILD=true`). It must never be derived from URL, env
+ * runtime config, or API state.
+ *
+ * Vite 8.0.16's dev transform can leave the identifier unbound. `typeof` does
+ * not throw in that case, so the SPA still boots instead of sticking on the
+ * static "Starting Loom…" shell.
  */
-export const IS_BROWSER_TEST_BUILD: boolean = __LOOM_BROWSER_TEST_BUILD__;
+export const IS_BROWSER_TEST_BUILD: boolean =
+  typeof __LOOM_BROWSER_TEST_BUILD__ === "boolean"
+    ? __LOOM_BROWSER_TEST_BUILD__
+    : false;
 
 export type BrowserTestRecoveryFault =
   | "root-render-once"

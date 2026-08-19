@@ -6,6 +6,7 @@ import asyncio
 import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, cast
 from urllib.parse import urlsplit, urlunsplit
@@ -18,10 +19,25 @@ from loom.agent.terminus2.harbor_environment import (
     ensure_sandbox_deps,
     make_trial_paths,
 )
+from loom.agent.terminus2.model_switch import (
+    Role,
+    install_role_router,
+    seed_fingerprint,
+)
 from loom.agent.terminus2.provenance import HARBOR_COMPAT_SHA, LOOM_BRIDGE_REVISION
 from loom.driver.base import Driver
 from loom.errors import AgentError
 from loom.models.mcp import MCPConnection
+from loom.models.trajectory import (
+    Terminus2EpisodeCheckpointEvent,
+    Terminus2LlmCallCompletedEvent,
+    Terminus2LlmCallFailedEvent,
+    Terminus2LlmCallStartedEvent,
+    Terminus2ModelMixPlannedEvent,
+    Terminus2ModelSwitchPlannedEvent,
+    Terminus2RecoveryFailedEvent,
+)
+from loom.models.trial import MultiModelSwitchSpec
 from loom.models.types import OS, ModelSpec
 from loom.request_params import sanitize_request_extras
 from loom.trajectory.writer import TrajectoryWriter
@@ -49,6 +65,9 @@ def _openai_gateway_base(gateway_url: str) -> str:
 
 
 def _harbor_model_name(model: ModelSpec) -> str:
+    # LiteLLM provider prefix for the OpenAI facade, not ModelSpec.provider.
+    # The gateway strips this ``openai/`` when correlating loom_requested_model
+    # against the HTTP body ``model`` field (see canonical_facade_model_id).
     return f"openai/{model.name}"
 
 
@@ -241,6 +260,125 @@ async def _publish_harbor_artifacts_to_sandbox(
     return published
 
 
+def _assert_harbor_artifacts_have_no_step_secrets(logs_root: Path) -> None:
+    """Fail closed if a step JWT leaked into Harbor's published dump."""
+    for name in _HARBOR_ARTIFACT_NAMES:
+        path = logs_root / name
+        if not path.is_file():
+            continue
+        body = path.read_bytes()
+        if b"loom_step_" in body or b'"api_key"' in body.lower():
+            raise AgentError(
+                f"refusing to publish Harbor artifact {name}: "
+                "step credential material is present",
+            )
+
+
+class _RouterEventSink:
+    def __init__(
+        self,
+        *,
+        bridge: HarborCheckpointBridge,
+        trajectory: TrajectoryWriter,
+        trial_id: UUID,
+        step_id: str,
+        student: ModelSpec,
+        teacher: ModelSpec,
+    ) -> None:
+        self.bridge = bridge
+        self.trajectory = trajectory
+        self.trial_id = trial_id
+        self.step_id = step_id
+        self.student = student
+        self.teacher = teacher
+
+    async def on_switch(
+        self, *, switch_episode: int, from_role: Role, to_role: Role,
+    ) -> None:
+        await self.bridge.emit_model_switch(
+            switch_episode=switch_episode,
+            from_role=from_role,
+            to_role=to_role,
+            from_model=self.student if from_role == "student" else self.teacher,
+            to_model=self.teacher if to_role == "teacher" else self.student,
+        )
+
+    async def on_llm_started(
+        self,
+        *,
+        client_call_id: str,
+        episode: int,
+        call_ordinal: int,
+        role: Role,
+        requested_model: str,
+        first_of_role: bool,
+    ) -> None:
+        del first_of_role
+        await self.trajectory.append(
+            Terminus2LlmCallStartedEvent(
+                emitted_at=datetime.now(UTC),
+                trial_id=self.trial_id,
+                step_id=self.step_id,
+                seq=0,
+                client_call_id=UUID(client_call_id),
+                episode=episode,
+                call_ordinal=call_ordinal,
+                role=role,
+                requested_model=requested_model,
+            ),
+        )
+
+    async def on_llm_completed(
+        self,
+        *,
+        client_call_id: str,
+        episode: int,
+        call_ordinal: int,
+        role: Role,
+        requested_model: str,
+        response_model: str | None,
+    ) -> None:
+        await self.trajectory.append(
+            Terminus2LlmCallCompletedEvent(
+                emitted_at=datetime.now(UTC),
+                trial_id=self.trial_id,
+                step_id=self.step_id,
+                seq=0,
+                client_call_id=UUID(client_call_id),
+                episode=episode,
+                call_ordinal=call_ordinal,
+                role=role,
+                requested_model=requested_model,
+                response_model=response_model,
+            ),
+        )
+
+    async def on_llm_failed(
+        self,
+        *,
+        client_call_id: str,
+        episode: int,
+        call_ordinal: int,
+        role: Role,
+        requested_model: str,
+        error: str,
+    ) -> None:
+        await self.trajectory.append(
+            Terminus2LlmCallFailedEvent(
+                emitted_at=datetime.now(UTC),
+                trial_id=self.trial_id,
+                step_id=self.step_id,
+                seq=0,
+                client_call_id=UUID(client_call_id),
+                episode=episode,
+                call_ordinal=call_ordinal,
+                role=role,
+                requested_model=requested_model,
+                error=error,
+            ),
+        )
+
+
 @dataclass
 class LoomTerminus2Runtime:
     """Worker-side wrapper around pinned Harbor ``Terminus2``."""
@@ -257,6 +395,8 @@ class LoomTerminus2Runtime:
     emits_gateway_llm_call_events: bool = True
     provider_connection_id: str | None = None
     request_params: dict[str, Any] = field(default_factory=dict)
+    multi_model: MultiModelSwitchSpec | None = None
+    model_switch_plan: dict[str, Any] | None = None
     max_turns: int = 50
     workdir: PurePosixPath = field(default_factory=lambda: PurePosixPath("/workspace"))
     step_token_ttl_sec: int = 1800
@@ -289,7 +429,38 @@ class LoomTerminus2Runtime:
         )
         api_base = _openai_gateway_base(self.gateway_url)
 
-        logs_root = Path(tempfile.mkdtemp(prefix=f"loom-terminus2-{self.trial_id}-"))
+        logs_ctx = tempfile.TemporaryDirectory(
+            prefix=f"loom-terminus2-{self.trial_id}-",
+        )
+        logs_root = Path(logs_ctx.name)
+        try:
+            await self._run_harbor(
+                instruction=instruction,
+                env=env,
+                trajectory=trajectory,
+                step_id=step_id,
+                step_token=step_token,
+                api_base=api_base,
+                logs_root=logs_root,
+                terminus2_cls=terminus2_cls,
+                agent_context_cls=agent_context_cls,
+            )
+        finally:
+            logs_ctx.cleanup()
+
+    async def _run_harbor(
+        self,
+        *,
+        instruction: str,
+        env: Driver,
+        trajectory: TrajectoryWriter,
+        step_id: str,
+        step_token: str,
+        api_base: str,
+        logs_root: Path,
+        terminus2_cls: type,
+        agent_context_cls: type,
+    ) -> None:
         trial_paths = make_trial_paths(logs_root)
         trial_paths.mkdir()
 
@@ -320,17 +491,199 @@ class LoomTerminus2Runtime:
             enable_summarize=False,
             llm_kwargs={"api_key": step_token},
         )
+        model_switch = None
+        if self.multi_model is not None and self.multi_model.enabled:
+            if self.multi_model.secondary_model is None:
+                raise AgentError(
+                    "multi_model.enabled requires secondary_model",
+                )
+            plan = self.model_switch_plan or {}
+            mix_mode = str(
+                plan.get("mix_mode")
+                or self.multi_model.policy
+                or "student_teacher_student"
+            )
+            student = self.model
+            teacher = self.multi_model.secondary_model
+            recovery = {"recovery": "fresh", "last_call_ordinal": 0}
+            reclaim = getattr(self.cp_client, "reclaim_terminus_execution", None)
+            if callable(reclaim):
+                recovery = await reclaim(
+                    trial_id=self.trial_id,
+                    step_id=step_id,
+                )
+            # Harbor Terminus2 always boots at episode 1. If this execution
+            # already has a checkpoint, starting again would merge a new
+            # student run onto the partial log. Fail closed instead.
+            if recovery.get("recovery") in {"recovery_failed", "resumed"}:
+                await trajectory.append(
+                    Terminus2RecoveryFailedEvent(
+                        emitted_at=datetime.now(UTC),
+                        trial_id=self.trial_id,
+                        step_id=step_id,
+                        seq=0,
+                        reason=(
+                            "unverifiable checkpoint"
+                            if recovery.get("recovery") == "recovery_failed"
+                            else (
+                                "harbor cannot resume mid-session; refusing "
+                                "to start episode 1 on the same trajectory"
+                            )
+                        ),
+                        last_episode=recovery.get("last_episode"),
+                    ),
+                )
+                raise AgentError(
+                    "terminus-2 recovery_failed: Harbor cannot resume a "
+                    "multi-model session mid-run; a new Harbor start would "
+                    "merge a second episode-1 onto this trial's trajectory",
+                )
+            last_call_ordinal = recovery.get("last_call_ordinal")
+            router_kwargs: dict[str, Any] = {
+                "teacher_model_name": _harbor_model_name(teacher),
+                "student_model_name": _harbor_model_name(student),
+                "agent_execution_id": str(recovery.get("agent_execution_id") or ""),
+                "agent_run_attempt_id": str(recovery.get("agent_run_attempt_id") or ""),
+                "starting_call_ordinal": (
+                    last_call_ordinal if isinstance(last_call_ordinal, int) else 0
+                ),
+            }
+            if mix_mode == "beta_mixture":
+                beta = plan.get("beta")
+                if beta is None:
+                    beta = self.multi_model.beta
+                seed = plan.get("seed")
+                if beta is None or not seed:
+                    raise AgentError(
+                        "model_switch_plan beta/seed must be materialized "
+                        "before terminus-2 run",
+                    )
+                await trajectory.append(
+                    Terminus2ModelMixPlannedEvent(
+                        emitted_at=datetime.now(UTC),
+                        trial_id=self.trial_id,
+                        step_id=step_id,
+                        seq=0,
+                        beta=float(beta),
+                        seed_fingerprint=seed_fingerprint(str(seed)),
+                        student_model=student,
+                        teacher_model=teacher,
+                    ),
+                )
+                router_kwargs.update(
+                    mix_mode="beta_mixture",
+                    beta=float(beta),
+                    seed=str(seed),
+                    trial_id=self.trial_id,
+                )
+            else:
+                k1 = int(plan.get("k1") or self.multi_model.switch_episode or 0)
+                k2 = int(plan.get("k2") or self.multi_model.return_switch_episode or 0)
+                if k1 < 2 or k2 <= k1:
+                    raise AgentError(
+                        "model_switch_plan K1/K2 must be materialized before terminus-2 run",
+                    )
+                await trajectory.append(
+                    Terminus2ModelSwitchPlannedEvent(
+                        emitted_at=datetime.now(UTC),
+                        trial_id=self.trial_id,
+                        step_id=step_id,
+                        seq=0,
+                        switch_episode=k1,
+                        from_role="student",
+                        to_role="teacher",
+                        from_model=student,
+                        to_model=teacher,
+                    ),
+                )
+                await trajectory.append(
+                    Terminus2ModelSwitchPlannedEvent(
+                        emitted_at=datetime.now(UTC),
+                        trial_id=self.trial_id,
+                        step_id=step_id,
+                        seq=0,
+                        switch_episode=k2,
+                        from_role="teacher",
+                        to_role="student",
+                        from_model=teacher,
+                        to_model=student,
+                    ),
+                )
+                router_kwargs.update(
+                    first_switch_episode=k1,
+                    return_switch_episode=k2,
+                )
+            sink = _RouterEventSink(
+                bridge=bridge,
+                trajectory=trajectory,
+                trial_id=self.trial_id,
+                step_id=step_id,
+                student=student,
+                teacher=teacher,
+            )
+            model_switch = install_role_router(
+                agent,
+                event_sink=sink,
+                **router_kwargs,
+            )
+            self._terminus_execution_id = recovery.get("agent_execution_id")
+            self._terminus_run_attempt_id = recovery.get("agent_run_attempt_id")
+
         context = agent_context_cls()
         trajectory_path = logs_root / "trajectory.json"
         completeness = "full"
         poll_stop = asyncio.Event()
         bridge_error: CheckpointBridgeError | None = None
 
+        last_checkpointed_episode = 0
+
+        async def _write_episode_checkpoint() -> None:
+            nonlocal last_checkpointed_episode
+            if model_switch is None:
+                return
+            post = getattr(self.cp_client, "post_episode_checkpoint", None)
+            exec_id = getattr(self, "_terminus_execution_id", None)
+            attempt_id = getattr(self, "_terminus_run_attempt_id", None)
+            if not callable(post) or not exec_id or not attempt_id:
+                return
+            episode = int(getattr(agent, "_n_episodes", 0) or 0)
+            if episode < 1 or episode <= last_checkpointed_episode:
+                return
+            role = model_switch.role()
+            checksum_row = await post(
+                trial_id=self.trial_id,
+                execution_id=UUID(str(exec_id)),
+                run_attempt_id=UUID(str(attempt_id)),
+                episode=episode,
+                active_role=role,
+                last_call_ordinal=int(getattr(model_switch, "_call_ordinal", 0) or 0),
+                last_seq=int(getattr(trajectory, "_next_seq", 0) or 0),
+            )
+            last_checkpointed_episode = episode
+            await trajectory.append(
+                Terminus2EpisodeCheckpointEvent(
+                    emitted_at=datetime.now(UTC),
+                    trial_id=self.trial_id,
+                    step_id=step_id,
+                    seq=0,
+                    episode=episode,
+                    active_role=role,
+                    checksum=str(checksum_row.get("checksum") or ""),
+                    last_call_ordinal=int(
+                        getattr(model_switch, "_call_ordinal", 0) or 0
+                    ),
+                ),
+            )
+
         async def _poll_checkpoints() -> None:
             nonlocal bridge_error
             while not poll_stop.is_set():
                 try:
-                    await bridge.sync_trajectory_file(trajectory_path)
+                    await bridge.sync_trajectory_file(
+                        trajectory_path,
+                        allow_incomplete=True,
+                    )
+                    await _write_episode_checkpoint()
                 except CheckpointBridgeError as exc:
                     bridge_error = exc
                     poll_stop.set()
@@ -353,6 +706,7 @@ class LoomTerminus2Runtime:
                 await bridge.sync_trajectory_file(
                     trajectory_path, completeness=completeness,
                 )
+                await _write_episode_checkpoint()
             except CheckpointBridgeError:
                 pass
             raise
@@ -371,8 +725,10 @@ class LoomTerminus2Runtime:
                 await bridge.sync_trajectory_file(
                     trajectory_path, completeness=completeness,
                 )
+                await _write_episode_checkpoint()
             except CheckpointBridgeError as exc:
                 raise AgentError(str(exc)) from exc
+            _assert_harbor_artifacts_have_no_step_secrets(logs_root)
             sandbox_paths = await _publish_harbor_artifacts_to_sandbox(
                 env, logs_root, self.workdir,
             )

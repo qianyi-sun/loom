@@ -33,6 +33,7 @@ class Terminus2TrajectoryMapper:
         observations_by_turn: dict[str, Terminus2TerminalObservationEvent] = {}
         llm_by_gateway: dict[str, LLMCallEvent] = {}
         user_prompts: list[Terminus2UserPromptEvent] = []
+        switches: list[dict[str, Any]] = []
 
         for event in events:
             if event.kind == EventKind.LLM_CALL:
@@ -56,6 +57,17 @@ class Terminus2TrajectoryMapper:
                 commands_by_turn.setdefault(event.turn_id, []).append(event)
             elif event.kind == EventKind.TERMINUS2_TERMINAL_OBSERVATION:
                 observations_by_turn[event.turn_id] = event
+            elif event.kind == EventKind.TERMINUS2_MODEL_SWITCH:
+                switches.append(
+                    {
+                        "kind": "applied",
+                        "switch_episode": event.switch_episode,
+                        "from_role": event.from_role,
+                        "to_role": event.to_role,
+                        "from_model": event.from_model.model_dump(mode="json"),
+                        "to_model": event.to_model.model_dump(mode="json"),
+                    },
+                )
 
         numbered: list[tuple[int, dict[str, Any]]] = []
         for prompt in sorted(user_prompts, key=lambda p: p.harbor_step_id):
@@ -157,6 +169,10 @@ class Terminus2TrajectoryMapper:
                     "cost_usd": llm.cost_usd_snapshot,
                 }
                 step["gateway_request_id"] = gw_id
+                step["requested_model"] = llm.requested_model or llm.model.name
+                step["response_model"] = llm.response_model
+                if llm.role:
+                    step["role"] = llm.role
             numbered.append((step_number, step))
 
         numbered.sort(key=lambda item: item[0])
@@ -166,6 +182,7 @@ class Terminus2TrajectoryMapper:
             "agent_name": agent_name,
             "agent_version": agent_version,
             "steps": [step for _, step in numbered],
+            "model_switches": switches,
         }
 
     @staticmethod
