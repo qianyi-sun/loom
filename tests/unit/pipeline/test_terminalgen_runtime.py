@@ -64,6 +64,7 @@ def _graph() -> RunGraphSpecV1:
             authoring_package=digests["terminalgen_authoring_package"],
             runtime_package=digests["terminalgen_runtime_package"],
         ),
+        dependency_allowlist_digest=DIGEST,
     )
 
 
