@@ -76,22 +76,14 @@ _STAGING_DATABASE_SECRETS = {
     "task-image-builder-gb10": "loom-external-slurm-autoscaler-db",
     "task-image-builder-oldlab": "loom-secrets",
 }
-_STAGING_GLOBAL_EXECUTION_WITNESSES = {
-    "gb10": "/etc/loom/credentials/global-execution/gb10-witness.json",
-    "oldlab": "/etc/loom/credentials/global-execution/oldlab-witness.json",
-    "task-image-builder-gb10": "/etc/loom/credentials/global-execution/gb10-witness.json",
-    "task-image-builder-oldlab": "/etc/loom/credentials/global-execution/oldlab-witness.json",
-}
 _STAGING_SUPERVISOR_SCRIPTS = {
     "gb10": SCRIPT_PATH,
     "oldlab": SCRIPT_PATH,
     "task-image-builder-gb10": TASK_IMAGE_BUILDER_SCRIPT_PATH,
     "task-image-builder-oldlab": TASK_IMAGE_BUILDER_SCRIPT_PATH,
 }
-_STAGING_MANAGER_PUBLIC_KEY = "/etc/loom/credentials/global-execution/manager-ed25519.pub"
-_STAGING_MANAGER_PUBLIC_KEY_PIN = (
-    "/etc/loom/credentials/global-execution/manager-ed25519.pub.sha256"
-)
+_STAGING_MANAGER_EXPORT = "deployment/loom-capacity-manager"
+_STAGING_MANAGER_NAMESPACE = "loom-dev"
 
 _MAX_PROFILE_BYTES = 1024 * 1024
 _MAX_SCRIPT_BYTES = 2 * 1024 * 1024
@@ -132,9 +124,10 @@ _COMMON_REQUIRED_ARGUMENTS = frozenset(
         "--db-port-forward-stop-timeout-sec",
         "--db-connect-timeout-sec",
         "--freshness-sec",
-        "--global-execution-witness-json",
-        "--manager-public-key",
-        "--expected-manager-public-key-sha256-file",
+        "--global-execution-manager-export",
+        "--global-execution-manager-namespace",
+        "--global-execution-manager-kubeconfig",
+        "--expected-manager-public-key-sha256",
     }
 )
 _TASK_IMAGE_BUILDER_ARGUMENTS = frozenset(
@@ -484,11 +477,17 @@ class ExternalSupervisorIdentity:
         if arguments["--kubeconfig"] != STAGING_KUBECONFIG:
             raise ValueError("external supervisor staging kubeconfig is not canonical")
         if (
-            arguments["--global-execution-witness-json"]
-            != _STAGING_GLOBAL_EXECUTION_WITNESSES[self.pool_name]
-            or arguments["--manager-public-key"] != _STAGING_MANAGER_PUBLIC_KEY
-            or arguments["--expected-manager-public-key-sha256-file"]
-            != _STAGING_MANAGER_PUBLIC_KEY_PIN
+            arguments["--global-execution-manager-export"]
+            != _STAGING_MANAGER_EXPORT
+            or arguments["--global-execution-manager-namespace"]
+            != _STAGING_MANAGER_NAMESPACE
+            or arguments["--global-execution-manager-kubeconfig"]
+            != STAGING_KUBECONFIG
+            or _SHA256_RE.fullmatch(
+                arguments["--expected-manager-public-key-sha256"]
+            )
+            is None
+            or arguments["--expected-manager-public-key-sha256"] == "0" * 64
         ):
             raise ValueError("external supervisor global execution authority is not canonical")
         optional_authority = {

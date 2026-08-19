@@ -22,17 +22,35 @@ from loom_cli.environment_state import (
 
 def _assert_manager_trust_arguments(supervisor: dict[str, Any], *, pool_name: str) -> None:
     args = supervisor["args"]
+    if supervisor["control_plane_environment"] != "staging":
+        expected_files = {
+            "--global-execution-witness-json": (
+                f"/etc/loom/credentials/global-execution/{pool_name}-witness.json"
+            ),
+            "--manager-public-key": (
+                "/etc/loom/credentials/global-execution/manager-ed25519.pub"
+            ),
+            "--expected-manager-public-key-sha256-file": (
+                "/etc/loom/credentials/global-execution/manager-ed25519.pub.sha256"
+            ),
+        }
+        for option, value in expected_files.items():
+            assert args[args.index(option) + 1] == value
+        return
     expected = {
-        "--global-execution-witness-json": (
-            f"/etc/loom/credentials/global-execution/{pool_name}-witness.json"
-        ),
-        "--manager-public-key": "/etc/loom/credentials/global-execution/manager-ed25519.pub",
-        "--expected-manager-public-key-sha256-file": (
-            "/etc/loom/credentials/global-execution/manager-ed25519.pub.sha256"
+        "--global-execution-manager-export": "deployment/loom-capacity-manager",
+        "--global-execution-manager-namespace": "loom-dev",
+        "--global-execution-manager-kubeconfig": (
+            "/var/lib/loom-staging-rollout/kubeconfig"
         ),
     }
     for option, value in expected.items():
         assert args[args.index(option) + 1] == value
+    pin = args[args.index("--expected-manager-public-key-sha256") + 1]
+    assert len(pin) == 64 and set(pin) <= set("0123456789abcdef")
+    assert "--global-execution-witness-json" not in args
+    assert "--manager-public-key" not in args
+    assert "--expected-manager-public-key-sha256-file" not in args
 
 
 def test_normalize_autoscaler_policy_passes_through_qos_and_slurm_scheduler_fields() -> None:

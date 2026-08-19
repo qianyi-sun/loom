@@ -7,10 +7,15 @@ import asyncio
 import json
 import sys
 from collections.abc import Sequence
+from datetime import UTC, datetime
 
 from scripts.ops import worker_pool_autoscaler_external_once as external_once
 
 from loom_cli.rollout.external_supervisor_readiness import REHEARSAL_KUBECONFIG
+from loom_control_plane.global_execution_fence import (
+    GlobalExecutionFenceError,
+    assert_legacy_scale_up_allowed,
+)
 
 _GB10_CLUSTER = "trt-gb10"
 _GB10_CONTROLLER = "gx10-01c7"
@@ -57,6 +62,21 @@ async def _main_async(args: argparse.Namespace) -> dict[str, object]:
         args,
         authority=authority,
     )
+    try:
+        witness = external_once._load_current_global_execution_witness(
+            args,
+            pool_id="gb10",
+        )
+        assert_legacy_scale_up_allowed(
+            witness,
+            expected_authority="global-capacity-manager",
+            expected_pool_id="gb10",
+            now=datetime.now(UTC),
+        )
+    except GlobalExecutionFenceError as exc:
+        raise RehearsalPolicyValidationError(
+            "rehearsal global execution witness is unavailable"
+        ) from exc
     return {
         "database_reachable": True,
         "expected_slurm_authority": {

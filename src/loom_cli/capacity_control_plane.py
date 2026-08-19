@@ -787,6 +787,7 @@ _CREDENTIALS = f"{_RUNTIME_ROOT}/runtime/credentials"
 _MANAGER_CREDENTIAL_FILES = (
     "client-ca.pem",
     "database-url",
+    "global-execution-signing-key",
     "health-certificate.pem",
     "health-private-key.pem",
     "ownership-public-keys.json",
@@ -1246,6 +1247,14 @@ def _manager_deployment(
             (
                 "LOOM_CAPACITY_EXPECTED_AUTHORITY_INCARNATION",
                 str(authority_incarnation),
+            ),
+            (
+                "LOOM_CAPACITY_GLOBAL_EXECUTION_SIGNING_KEY_FILE",
+                f"{_CREDENTIALS}/global-execution-signing-key",
+            ),
+            (
+                "LOOM_CAPACITY_GLOBAL_EXECUTION_SIGNING_KEY_ID",
+                "global-capacity-manager-2026-08",
             ),
             (
                 "LOOM_CAPACITY_TLS_CERT_FILE",

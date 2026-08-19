@@ -11,6 +11,7 @@ from loom_capacity_manager.secret_init import copy_projected_credentials
 _MANAGER_FILES = {
     "client-ca.pem",
     "database-url",
+    "global-execution-signing-key",
     "health-certificate.pem",
     "health-private-key.pem",
     "ownership-public-keys.json",

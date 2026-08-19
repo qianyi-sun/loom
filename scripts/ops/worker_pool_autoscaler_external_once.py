@@ -18,6 +18,7 @@ import json
 import math
 import os
 import re
+import selectors
 import socket
 import subprocess
 import sys
@@ -42,8 +43,10 @@ from loom_control_plane.global_dev_fleet_autoscaler import (
 )
 from loom_control_plane.global_execution_fence import (
     GlobalExecutionFenceError,
+    GlobalExecutionWitness,
     assert_legacy_scale_up_allowed,
     load_global_execution_witness,
+    parse_global_execution_witness_export,
 )
 from loom_control_plane.slurm_worker_jobs import slurm_cluster_for_pool
 from loom_control_plane.worker_pool_autoscaler import (
@@ -54,8 +57,12 @@ _MAX_PORT_FORWARD_READY_TIMEOUT_SEC = 60.0
 _MAX_PORT_FORWARD_STOP_TIMEOUT_SEC = 30.0
 _MAX_PORT_FORWARD_STARTUP_OUTPUT_BYTES = 16 * 1024
 _SLURM_AUTHORITY_TIMEOUT_SEC = 10.0
+_GLOBAL_EXECUTION_EXPORT_TIMEOUT_SEC = 15.0
+_MAX_GLOBAL_EXECUTION_EXPORT_BYTES = 64 * 1024
+_MAX_GLOBAL_EXECUTION_EXPORT_ERROR_BYTES = 16 * 1024
 _KUBERNETES_NAME = re.compile(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?")
 _SLURM_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
 class ExternalAutoscalerError(RuntimeError):
@@ -146,13 +153,20 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         help="Exact deployment generation bound to the capacity grant.",
     )
-    parser.add_argument(
+    witness_source = parser.add_mutually_exclusive_group(required=True)
+    witness_source.add_argument(
         "--global-execution-witness-json",
         type=Path,
-        required=True,
         help="Pinned-key manager witness required before local scale-up.",
     )
-    parser.add_argument("--manager-public-key", type=Path, required=True)
+    witness_source.add_argument(
+        "--global-execution-manager-export",
+        metavar="DEPLOYMENT",
+        help="Fetch a fresh witness from the protected capacity-manager deployment.",
+    )
+    parser.add_argument("--global-execution-manager-namespace")
+    parser.add_argument("--global-execution-manager-kubeconfig")
+    parser.add_argument("--manager-public-key", type=Path)
     manager_pin = parser.add_mutually_exclusive_group(required=True)
     manager_pin.add_argument("--expected-manager-public-key-sha256")
     manager_pin.add_argument("--expected-manager-public-key-sha256-file", type=Path)
@@ -165,6 +179,201 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     return parser
+
+
+def _stop_global_execution_export(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is not None:
+        process.wait(timeout=0)
+        return
+    try:
+        process.terminate()
+    except OSError:
+        pass
+    else:
+        try:
+            process.wait(timeout=1.0)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+    try:
+        process.kill()
+    except OSError:
+        pass
+    try:
+        process.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def _run_bounded_global_execution_export(
+    command: list[str],
+) -> subprocess.CompletedProcess[bytes]:
+    process: subprocess.Popen[bytes] | None = None
+    completed = False
+    try:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if process.stdout is None or process.stderr is None:  # pragma: no cover
+            raise OSError("global execution witness export pipes are unavailable")
+        stdout = bytearray()
+        stderr = bytearray()
+        streams = {
+            process.stdout: (stdout, _MAX_GLOBAL_EXECUTION_EXPORT_BYTES),
+            process.stderr: (stderr, _MAX_GLOBAL_EXECUTION_EXPORT_ERROR_BYTES),
+        }
+        deadline = time.monotonic() + _GLOBAL_EXECUTION_EXPORT_TIMEOUT_SEC
+        with selectors.DefaultSelector() as selector:
+            for stream, stream_state in streams.items():
+                os.set_blocking(stream.fileno(), False)
+                selector.register(stream, selectors.EVENT_READ, stream_state)
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(
+                        command,
+                        _GLOBAL_EXECUTION_EXPORT_TIMEOUT_SEC,
+                    )
+                events = selector.select(remaining)
+                if not events:
+                    raise subprocess.TimeoutExpired(
+                        command,
+                        _GLOBAL_EXECUTION_EXPORT_TIMEOUT_SEC,
+                    )
+                for key, _mask in events:
+                    buffer, maximum_bytes = key.data
+                    try:
+                        chunk = os.read(
+                            key.fd,
+                            min(64 * 1024, maximum_bytes + 1 - len(buffer)),
+                        )
+                    except BlockingIOError:
+                        continue
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    buffer.extend(chunk)
+                    if len(buffer) > maximum_bytes:
+                        raise OverflowError(
+                            "global execution witness export exceeded its output bound"
+                        )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(
+                command,
+                _GLOBAL_EXECUTION_EXPORT_TIMEOUT_SEC,
+            )
+        returncode = process.wait(timeout=remaining)
+        completed = True
+        return subprocess.CompletedProcess(
+            command,
+            returncode,
+            bytes(stdout),
+            bytes(stderr),
+        )
+    except (OSError, OverflowError, subprocess.SubprocessError) as exc:
+        raise GlobalExecutionFenceError(
+            "global execution witness export is unavailable"
+        ) from exc
+    finally:
+        if process is not None:
+            if not completed:
+                _stop_global_execution_export(process)
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
+
+
+def _load_current_global_execution_witness(
+    args: argparse.Namespace,
+    *,
+    pool_id: str,
+) -> GlobalExecutionWitness | None:
+    if pool_id not in {"gb10", "oldlab"}:
+        raise ExternalAutoscalerConfigurationError(
+            "global execution witness pool must be gb10 or oldlab"
+        )
+    if args.global_execution_manager_export is not None:
+        fingerprint = args.expected_manager_public_key_sha256
+        if (
+            args.global_execution_manager_export != "deployment/loom-capacity-manager"
+            or args.global_execution_witness_json is not None
+            or args.manager_public_key is not None
+            or args.expected_manager_public_key_sha256_file is not None
+            or args.global_execution_manager_namespace is None
+            or args.global_execution_manager_kubeconfig is None
+            or not isinstance(fingerprint, str)
+            or _SHA256.fullmatch(fingerprint) is None
+        ):
+            raise ExternalAutoscalerConfigurationError(
+                "manager export requires exactly one reviewed public key fingerprint"
+            )
+        kubectl = str(args.kubectl).strip()
+        kubeconfig = str(args.global_execution_manager_kubeconfig).strip()
+        if not kubectl or not kubeconfig:
+            raise ExternalAutoscalerConfigurationError(
+                "manager export Kubernetes transport is invalid"
+            )
+        namespace = _validated_kubernetes_name(
+            args.global_execution_manager_namespace,
+            "--global-execution-manager-namespace",
+        )
+        command = [
+            kubectl,
+            "--kubeconfig",
+            kubeconfig,
+            "--request-timeout=10s",
+            "-n",
+            namespace,
+            "exec",
+            args.global_execution_manager_export,
+            "-c",
+            "manager",
+            "--",
+            "python",
+            "-I",
+            "-B",
+            "-m",
+            "loom_capacity_manager.global_execution_witness",
+            "--pool-id",
+            pool_id,
+        ]
+        result = _run_bounded_global_execution_export(command)
+        if (
+            result.returncode != 0
+            or not isinstance(result.stdout, bytes)
+            or not isinstance(result.stderr, bytes)
+            or not 0 < len(result.stdout) <= _MAX_GLOBAL_EXECUTION_EXPORT_BYTES
+            or len(result.stderr) > _MAX_GLOBAL_EXECUTION_EXPORT_ERROR_BYTES
+        ):
+            raise GlobalExecutionFenceError(
+                "global execution witness export is unavailable"
+            )
+        return parse_global_execution_witness_export(
+            result.stdout,
+            expected_manager_public_key_sha256=fingerprint,
+        )
+    if (
+        args.global_execution_witness_json is None
+        or args.manager_public_key is None
+        or args.global_execution_manager_namespace is not None
+        or args.global_execution_manager_kubeconfig is not None
+    ):
+        raise ExternalAutoscalerConfigurationError(
+            "global execution witness file source is incomplete"
+        )
+    return load_global_execution_witness(
+        args.global_execution_witness_json,
+        manager_public_key_path=args.manager_public_key,
+        expected_manager_public_key_sha256=args.expected_manager_public_key_sha256,
+        expected_manager_public_key_sha256_file=(
+            args.expected_manager_public_key_sha256_file
+        ),
+    )
 
 
 def _load_cp_db_url(args: argparse.Namespace, *, timeout_sec: float) -> str:
@@ -646,11 +855,32 @@ async def _main_async(args: argparse.Namespace) -> None:
         maximum=_MAX_PORT_FORWARD_READY_TIMEOUT_SEC,
     )
     slurm_authority = _validate_local_slurm_authority(args)
+    physical_pool_ids = {slurm_cluster_for_pool(pool_name) for pool_name in pool_names}
+    if len(physical_pool_ids) != 1:
+        raise ExternalAutoscalerConfigurationError(
+            "one supervisor cannot reconcile multiple physical Slurm pools"
+        )
+    physical_pool_id = next(iter(physical_pool_ids))
     if args.validate_only:
         validation = await _validate_external_policies_once(
             args,
             authority=slurm_authority,
         )
+        try:
+            global_execution_witness = _load_current_global_execution_witness(
+                args,
+                pool_id=physical_pool_id,
+            )
+            assert_legacy_scale_up_allowed(
+                global_execution_witness,
+                expected_authority="global-capacity-manager",
+                expected_pool_id=physical_pool_id,
+                now=datetime.now(UTC),
+            )
+        except GlobalExecutionFenceError as exc:
+            raise ExternalAutoscalerError(
+                "global execution witness is unavailable"
+            ) from exc
         print(
             json.dumps(
                 {
@@ -685,15 +915,9 @@ async def _main_async(args: argparse.Namespace) -> None:
                     finally:
                         await session.rollback()
                 try:
-                    global_execution_witness = load_global_execution_witness(
-                        args.global_execution_witness_json,
-                        manager_public_key_path=args.manager_public_key,
-                        expected_manager_public_key_sha256=(
-                            args.expected_manager_public_key_sha256
-                        ),
-                        expected_manager_public_key_sha256_file=(
-                            args.expected_manager_public_key_sha256_file
-                        ),
+                    global_execution_witness = _load_current_global_execution_witness(
+                        args,
+                        pool_id=physical_pool_id,
                     )
                 except Exception:
                     # Evidence failure is not allowed to skip the reciprocal

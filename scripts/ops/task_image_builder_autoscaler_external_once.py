@@ -33,7 +33,6 @@ from loom_cli.environment_state import (  # noqa: E402
 from loom_control_plane.global_execution_fence import (  # noqa: E402
     GlobalExecutionFenceError,
     assert_legacy_scale_up_allowed,
-    load_global_execution_witness,
 )
 from loom_control_plane.task_image_builder_autoscaler import (  # noqa: E402
     SubprocessTaskImageBuilderSlurmRunner,
@@ -55,13 +54,9 @@ def _global_execution_scale_up_allowed(
     slurm_cluster_id: str,
 ) -> bool:
     try:
-        witness = load_global_execution_witness(
-            args.global_execution_witness_json,
-            manager_public_key_path=args.manager_public_key,
-            expected_manager_public_key_sha256=args.expected_manager_public_key_sha256,
-            expected_manager_public_key_sha256_file=(
-                args.expected_manager_public_key_sha256_file
-            ),
+        witness = transport._load_current_global_execution_witness(
+            args,
+            pool_id=slurm_cluster_id,
         )
         assert_legacy_scale_up_allowed(
             witness,
@@ -520,6 +515,13 @@ async def _main_async(args: argparse.Namespace) -> None:
             "local Slurm authority does not match the builder policy",
         )
     if args.validate_only:
+        if not _global_execution_scale_up_allowed(
+            args,
+            slurm_cluster_id=config.slurm_cluster_id,
+        ):
+            raise TaskImageBuilderPolicyError(
+                "global execution witness is unavailable"
+            )
         evidence = _rehearsal_validation_evidence(config)
         print(
             json.dumps(

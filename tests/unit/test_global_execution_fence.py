@@ -3,13 +3,16 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from loom_capacity_manager.global_execution_witness import (
+    build_global_execution_witness_export,
+)
 from loom_control_plane.global_dev_fleet_autoscaler import GlobalDevFleetAutoscaler
 from loom_control_plane.global_execution_fence import (
     GlobalExecutionFenceError,
@@ -17,6 +20,7 @@ from loom_control_plane.global_execution_fence import (
     assert_legacy_scale_up_allowed,
     canonical_global_execution_witness_bytes,
     load_global_execution_witness,
+    parse_global_execution_witness_export,
 )
 from loom_control_plane.shared_capacity_broker import BrokerBudgets
 from loom_control_plane.worker_pool_autoscaler import (
@@ -89,6 +93,53 @@ def test_required_missing_witness_fails_closed() -> None:
             expected_authority="global-capacity-manager",
             expected_pool_id="oldlab",
             now=NOW,
+        )
+
+
+def test_direct_manager_export_requires_the_reviewed_public_key_pin() -> None:
+    private_key = Ed25519PrivateKey.from_private_bytes(bytes([17]) * 32)
+    raw_public_key = private_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    encoded = build_global_execution_witness_export(
+        private_key=private_key,
+        signing_key_id="global-capacity-manager-2026-08",
+        pool_id="gb10",
+        execution_epoch=0,
+        execution_state="shadow",
+        executable_new_capacity_ceiling=0,
+        expires_at=NOW + timedelta(seconds=30),
+    )
+
+    loaded = parse_global_execution_witness_export(
+        encoded,
+        expected_manager_public_key_sha256=hashlib.sha256(raw_public_key).hexdigest(),
+    )
+
+    assert loaded.pool_id == "gb10"
+    assert loaded.execution_state == "shadow"
+    with pytest.raises(GlobalExecutionFenceError, match="pinned fingerprint"):
+        parse_global_execution_witness_export(
+            encoded,
+            expected_manager_public_key_sha256="f" * 64,
+        )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        b"",
+        b"{}",
+        b'{"schema_version":1,"schema_version":1}',
+        b"x" * (64 * 1024 + 1),
+    ),
+)
+def test_direct_manager_export_rejects_malformed_or_unbounded_output(payload: bytes) -> None:
+    with pytest.raises(GlobalExecutionFenceError, match="export"):
+        parse_global_execution_witness_export(
+            payload,
+            expected_manager_public_key_sha256="a" * 64,
         )
 
 

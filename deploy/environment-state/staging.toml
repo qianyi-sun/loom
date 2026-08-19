@@ -324,9 +324,10 @@ args = [
   "--db-port-forward-stop-timeout-sec", "5",
   "--db-connect-timeout-sec", "10",
   "--freshness-sec", "120",
-  "--global-execution-witness-json", "/etc/loom/credentials/global-execution/gb10-witness.json",
-  "--manager-public-key", "/etc/loom/credentials/global-execution/manager-ed25519.pub",
-  "--expected-manager-public-key-sha256-file", "/etc/loom/credentials/global-execution/manager-ed25519.pub.sha256",
+  "--global-execution-manager-export", "deployment/loom-capacity-manager",
+  "--global-execution-manager-namespace", "loom-dev",
+  "--global-execution-manager-kubeconfig", "/var/lib/loom-staging-rollout/kubeconfig",
+  "--expected-manager-public-key-sha256", "54b44788af0dc10dc5f0a8277396a35fedf2f143b39e14d5ee35ce09b56b18cd",
 ]
 enabled = true
 active = true
@@ -358,9 +359,10 @@ args = [
   "--db-port-forward-stop-timeout-sec", "5",
   "--db-connect-timeout-sec", "10",
   "--freshness-sec", "120",
-  "--global-execution-witness-json", "/etc/loom/credentials/global-execution/oldlab-witness.json",
-  "--manager-public-key", "/etc/loom/credentials/global-execution/manager-ed25519.pub",
-  "--expected-manager-public-key-sha256-file", "/etc/loom/credentials/global-execution/manager-ed25519.pub.sha256",
+  "--global-execution-manager-export", "deployment/loom-capacity-manager",
+  "--global-execution-manager-namespace", "loom-dev",
+  "--global-execution-manager-kubeconfig", "/var/lib/loom-staging-rollout/kubeconfig",
+  "--expected-manager-public-key-sha256", "54b44788af0dc10dc5f0a8277396a35fedf2f143b39e14d5ee35ce09b56b18cd",
 ]
 enabled = true
 active = true
@@ -396,9 +398,10 @@ args = [
   "--db-port-forward-stop-timeout-sec", "5",
   "--db-connect-timeout-sec", "10",
   "--freshness-sec", "120",
-  "--global-execution-witness-json", "/etc/loom/credentials/global-execution/gb10-witness.json",
-  "--manager-public-key", "/etc/loom/credentials/global-execution/manager-ed25519.pub",
-  "--expected-manager-public-key-sha256-file", "/etc/loom/credentials/global-execution/manager-ed25519.pub.sha256",
+  "--global-execution-manager-export", "deployment/loom-capacity-manager",
+  "--global-execution-manager-namespace", "loom-dev",
+  "--global-execution-manager-kubeconfig", "/var/lib/loom-staging-rollout/kubeconfig",
+  "--expected-manager-public-key-sha256", "54b44788af0dc10dc5f0a8277396a35fedf2f143b39e14d5ee35ce09b56b18cd",
 ]
 enabled = false
 active = false
@@ -431,9 +434,10 @@ args = [
   "--db-port-forward-stop-timeout-sec", "5",
   "--db-connect-timeout-sec", "10",
   "--freshness-sec", "120",
-  "--global-execution-witness-json", "/etc/loom/credentials/global-execution/oldlab-witness.json",
-  "--manager-public-key", "/etc/loom/credentials/global-execution/manager-ed25519.pub",
-  "--expected-manager-public-key-sha256-file", "/etc/loom/credentials/global-execution/manager-ed25519.pub.sha256",
+  "--global-execution-manager-export", "deployment/loom-capacity-manager",
+  "--global-execution-manager-namespace", "loom-dev",
+  "--global-execution-manager-kubeconfig", "/var/lib/loom-staging-rollout/kubeconfig",
+  "--expected-manager-public-key-sha256", "54b44788af0dc10dc5f0a8277396a35fedf2f143b39e14d5ee35ce09b56b18cd",
 ]
 enabled = true
 active = true

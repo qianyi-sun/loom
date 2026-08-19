@@ -84,10 +84,18 @@ def test_staging_builder_supervisors_match_proven_native_activation() -> None:
             "/scripts/ops/task_image_builder_autoscaler_external_once.py"
         )
         args = builder_parser().parse_args(row["args"])
-        assert args.global_execution_witness_json.name.endswith("-witness.json")
-        assert args.manager_public_key.name == "manager-ed25519.pub"
-        assert args.expected_manager_public_key_sha256_file.name == (
-            "manager-ed25519.pub.sha256"
+        assert args.global_execution_witness_json is None
+        assert args.manager_public_key is None
+        assert args.expected_manager_public_key_sha256_file is None
+        assert args.global_execution_manager_export == (
+            "deployment/loom-capacity-manager"
+        )
+        assert args.global_execution_manager_namespace == "loom-dev"
+        assert args.global_execution_manager_kubeconfig == (
+            "/var/lib/loom-staging-rollout/kubeconfig"
+        )
+        assert args.expected_manager_public_key_sha256 == (
+            "54b44788af0dc10dc5f0a8277396a35fedf2f143b39e14d5ee35ce09b56b18cd"
         )
     assert supervisors["task-image-builder-oldlab"]["enabled"] is True
     assert supervisors["task-image-builder-oldlab"]["active"] is True
