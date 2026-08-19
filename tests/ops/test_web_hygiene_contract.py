@@ -32,10 +32,14 @@ def test_web_declares_linux_lightningcss_bindings_for_multiarch_builds() -> None
     assert package_lock["packages"][""].get("optionalDependencies") == required
 
 
-def test_web_dockerfile_installs_target_arch_lightningcss_binding() -> None:
+def test_web_dockerfile_installs_target_arch_native_bindings() -> None:
     dockerfile = (ROOT / "deploy/Dockerfile.web").read_text()
 
     assert "ARG TARGETARCH" in dockerfile
     assert "lightningcss-linux-arm64-gnu@1.32.0" in dockerfile
     assert "lightningcss-linux-x64-gnu@1.32.0" in dockerfile
+    assert "@rolldown/binding-linux-arm64-gnu" in dockerfile
+    assert "@rolldown/binding-linux-x64-gnu" in dockerfile
+    assert '"${rolldown_binding}@1.0.3"' in dockerfile
     assert "require('lightningcss')" in dockerfile
+    assert "require('${rolldown_binding}')" in dockerfile
