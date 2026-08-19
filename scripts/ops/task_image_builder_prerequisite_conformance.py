@@ -248,7 +248,7 @@ def _legacy_builder_failures(
             "users": [legacy["user"]],
             "accounts": [legacy["account"]],
             "state": "ACTIVE",
-            "flags": ["SPEC_NODES"],
+            "flags": ["IGNORE_JOBS", "SPEC_NODES"],
         },
     }
     if _exact_mapping(observed, expected):

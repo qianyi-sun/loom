@@ -199,7 +199,7 @@ def _evidence() -> dict[str, Any]:
                             "users": [policy.raw["legacy_guard"]["user"]],
                             "accounts": [policy.raw["legacy_guard"]["account"]],
                             "state": "ACTIVE",
-                            "flags": ["SPEC_NODES"],
+                            "flags": ["IGNORE_JOBS", "SPEC_NODES"],
                         },
                     },
                 },
