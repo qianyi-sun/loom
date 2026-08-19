@@ -102,11 +102,11 @@ templates, rootless BuildKit, GitHub Actions trusted image releases.
   {
     "archive": {
       "members": {
-        "containerd-shim-runsc-v1": {"mode": 365, "sha256": "71b9e90897f39ee51fee8e0345cf675956d95bd1d6458c92f49d984097ffa327", "size": 43208193},
-        "gvisor-bin/checkpointgofer": {"mode": 365, "sha256": "a4f6837a9837a8c3499c7e2d1d58931babb140bf228762f1c2b13469256b2bda", "size": 68743833},
-        "gvisor-bin/gvisor_sentry": {"mode": 365, "sha256": "871a4b5ca197d37fae7d30ab0aa356fe3156c1f9836e8a40122f7f08c6b46f62", "size": 47910193},
-        "gvisor-bin/runsc-metric-server": {"mode": 365, "sha256": "ff3476a1f28cb684bd7340e183e80f8af7a5be5b0b3ca4bdb79bc2a6d92b6cb4", "size": 52294519},
-        "runsc": {"mode": 365, "sha256": "670bcd3cbc103f00d8bb5098edc370f32397ee4c134231436bafa659bb3c068e", "size": 104854508}
+        "containerd-shim-runsc-v1": {"archive_mode": 493, "install_mode": 365, "sha256": "71b9e90897f39ee51fee8e0345cf675956d95bd1d6458c92f49d984097ffa327", "size": 43208193},
+        "gvisor-bin/checkpointgofer": {"archive_mode": 493, "install_mode": 365, "sha256": "a4f6837a9837a8c3499c7e2d1d58931babb140bf228762f1c2b13469256b2bda", "size": 68743833},
+        "gvisor-bin/gvisor_sentry": {"archive_mode": 493, "install_mode": 365, "sha256": "871a4b5ca197d37fae7d30ab0aa356fe3156c1f9836e8a40122f7f08c6b46f62", "size": 47910193},
+        "gvisor-bin/runsc-metric-server": {"archive_mode": 493, "install_mode": 365, "sha256": "ff3476a1f28cb684bd7340e183e80f8af7a5be5b0b3ca4bdb79bc2a6d92b6cb4", "size": 52294519},
+        "runsc": {"archive_mode": 493, "install_mode": 365, "sha256": "670bcd3cbc103f00d8bb5098edc370f32397ee4c134231436bafa659bb3c068e", "size": 104854508}
       },
       "sha512": "3de91138cda15682c11807387f6ecad9e7c8932262018a2813277e1b4efa03efe33b0a948e148c6b1ccfe7345bfab5d5e0d072519505465751273898bae19c62",
       "url": "https://storage.googleapis.com/gvisor/releases/release/20260810/x86_64/gvisor.tar.bz2"
@@ -165,7 +165,8 @@ templates, rootless BuildKit, GitHub Actions trusted image releases.
   }
   ```
 
-  Decimal mode `365` is octal `0555`. The parser rejects any other value.
+  Decimal archive mode `493` is octal `0755`; decimal install mode `365` is
+  octal `0555`. The parser rejects any other value.
 
 - [ ] **Step 4: Implement strict parsing and deterministic renderers**
 
