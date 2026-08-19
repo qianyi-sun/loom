@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import hashlib
 import logging
 import os
 import platform
@@ -22,6 +21,7 @@ from typing import Any, Protocol
 from uuid import UUID
 
 import docker
+from loom_benchmarks.util import sha256_of_dir
 
 from loom.driver.task_image import (
     TaskImageBuildError,
@@ -103,17 +103,6 @@ class TaskImagePublicationError(TaskImageBuildError):
     def __init__(self, message: str, *, registry_images: Mapping[str, str]) -> None:
         super().__init__(message)
         self.registry_images = dict(registry_images)
-
-
-def sha256_of_dir(directory) -> str:  # type: ignore[no-untyped-def]
-    digest = hashlib.sha256()
-    for path in sorted(directory.rglob("*")):
-        if path.is_dir():
-            continue
-        relative = path.relative_to(directory).as_posix().encode("utf-8")
-        digest.update(b"\x00" + relative + b"\x00")
-        digest.update(path.read_bytes())
-    return digest.hexdigest()
 
 
 def _build_worker_object_store(settings: WorkerSettings):  # type: ignore[no-untyped-def]

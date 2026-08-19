@@ -280,7 +280,7 @@ async def test_local_sync_updates_checksum_on_mutation(
             )).scalar_one()
             initial_checksum = initial.checksum
 
-        # Mutate alpha's instruction.md → bundle dirhash should change.
+        # Mutate alpha's instruction.md → bundle checksum should change.
         (bench_root / "alpha" / "instruction.md").write_text("do alpha v2\n")
 
         async with factory() as session:
