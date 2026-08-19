@@ -84,7 +84,10 @@ class LoomServiceSettings(BaseSettings):
     personal_dev_builder_registry_prefix: str = ""
     personal_dev_builder_runtime_class_name: str = "loom-personal-dev-builder"
     personal_dev_builder_scanner_cache_dir: Path = Path("/var/lib/loom-personal-dev-scanner")
+    personal_dev_builder_scanner_cache_identity_sha256: str = ""
+    personal_dev_builder_scanner_database_metadata_sha256: str = ""
     personal_dev_builder_scanner_identity: str = ""
+    personal_dev_builder_scanner_java_database_metadata_sha256: str = ""
     personal_dev_builder_scanner_path: Path = Path("/usr/local/bin/trivy")
     personal_dev_builder_scanner_policy_sha256: str = ""
     personal_dev_builder_skopeo_path: Path = Path("/usr/bin/skopeo")

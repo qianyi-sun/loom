@@ -1271,7 +1271,15 @@ def _management_env(
         ensure_ascii=True,
     )
     acceptance_env: list[dict[str, Any]] = []
-    scanner_identity = ""
+    scanner_identity = (
+        f"trivy-bin-sha256:{release.scanner.binary_sha256}:"
+        f"db-sha256:{release.scanner.database_sha256}:"
+        f"java-db-sha256:{release.scanner.java_database_sha256}"
+    )
+    scanner_generation = (
+        "/var/lib/loom-personal-dev-scanner/generations/"
+        + release.scanner.cache_identity_sha256
+    )
     scanner_policy_sha256 = ""
     launcher_profile_sha256 = ""
     runtime_class_name = profile.builder.runtime_class_name
@@ -1279,11 +1287,6 @@ def _management_env(
     publisher_identity = profile.builder.publisher_identity
     activation_key_id = "personal-dev-agent-v1"
     if plan is not None:
-        scanner_identity = (
-            f"trivy-bin-sha256:{plan.builder.scanner_binary_sha256}:"
-            f"db-sha256:{plan.builder.scanner_database_sha256}:"
-            f"java-db-sha256:{plan.builder.scanner_java_database_sha256}"
-        )
         scanner_policy_sha256 = plan.builder.scanner_finding_policy_sha256
         launcher_profile_sha256 = plan.builder.trusted_launcher_profile_sha256
         runtime_class_name = plan.builder.runtime_class_name
@@ -1371,9 +1374,21 @@ def _management_env(
         ),
         _literal_env(
             "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_CACHE_DIR",
-            "/var/lib/loom-personal-dev-scanner",
+            scanner_generation,
+        ),
+        _literal_env(
+            "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_CACHE_IDENTITY_SHA256",
+            release.scanner.cache_identity_sha256,
         ),
         _literal_env("LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_IDENTITY", scanner_identity),
+        _literal_env(
+            "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_DATABASE_METADATA_SHA256",
+            release.scanner.database_metadata_sha256,
+        ),
+        _literal_env(
+            "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_JAVA_DATABASE_METADATA_SHA256",
+            release.scanner.java_database_metadata_sha256,
+        ),
         _literal_env(
             "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_POLICY_SHA256",
             scanner_policy_sha256,
@@ -1527,6 +1542,44 @@ def _credential_init(
     }
 
 
+def _scanner_cache_init(
+    profile: PersonalDevControlPlaneProfile,
+    release: PersonalDevTrustedRelease,
+) -> dict[str, Any]:
+    return {
+        "name": "personal-dev-scanner-cache-init",
+        "image": release.images.personal_dev_scanner_cache,
+        "command": ["python", "-m", "loom.personal_dev_scanner_cache_init"],
+        "args": [
+            "--source-root",
+            "/opt/loom-personal-dev-scanner-cache/assets",
+            "--destination-root",
+            "/var/lib/loom-personal-dev-scanner",
+            "--cache-identity-sha256",
+            release.scanner.cache_identity_sha256,
+            "--scanner-binary-sha256",
+            release.scanner.binary_sha256,
+            "--database-sha256",
+            release.scanner.database_sha256,
+            "--database-metadata-sha256",
+            release.scanner.database_metadata_sha256,
+            "--java-database-sha256",
+            release.scanner.java_database_sha256,
+            "--java-database-metadata-sha256",
+            release.scanner.java_database_metadata_sha256,
+        ],
+        "securityContext": _container_security(user=65531),
+        "resources": _resources(profile.resources.management),
+        "volumeMounts": [
+            {
+                "name": "scanner-cache",
+                "mountPath": "/var/lib/loom-personal-dev-scanner",
+            },
+            {"name": "tmp", "mountPath": "/tmp"},
+        ],
+    }
+
+
 def _management_deployment(
     context: _RenderContext,
     profile: PersonalDevControlPlaneProfile,
@@ -1535,6 +1588,8 @@ def _management_deployment(
 ) -> dict[str, Any]:
     labels = {"app": "loom-personal-dev-management"}
     projected_management = [{"key": filename, "path": filename} for filename in _MANAGEMENT_FILES]
+    generation_subpath = f"generations/{release.scanner.cache_identity_sha256}"
+    generation_path = f"/var/lib/loom-personal-dev-scanner/{generation_subpath}"
     return {
         "apiVersion": "apps/v1",
         "kind": "Deployment",
@@ -1555,7 +1610,9 @@ def _management_deployment(
                     "automountServiceAccountToken": False,
                     "enableServiceLinks": False,
                     "securityContext": _pod_security(user=65532, group=65532),
+                    "nodeSelector": {"kubernetes.io/arch": "amd64"},
                     "initContainers": [
+                        _scanner_cache_init(profile, release),
                         _credential_init(
                             name="management-credential-init",
                             image=release.images.loom_service,
@@ -1605,7 +1662,12 @@ def _management_deployment(
                                 },
                                 {
                                     "name": "scanner-cache",
-                                    "mountPath": "/var/lib/loom-personal-dev-scanner",
+                                    "mountPath": generation_path,
+                                    "subPath": generation_subpath,
+                                },
+                                {
+                                    "name": "scanner-fanal",
+                                    "mountPath": f"{generation_path}/fanal",
                                 },
                                 _service_account_token_mount(),
                                 {"name": "tmp", "mountPath": "/tmp"},
@@ -1639,6 +1701,7 @@ def _management_deployment(
                                 "claimName": profile.identities.scanner_cache_pvc
                             },
                         },
+                        {"name": "scanner-fanal", "emptyDir": {"sizeLimit": "4Gi"}},
                         _service_account_token_volume(),
                         {"name": "tmp", "emptyDir": {"sizeLimit": "1Gi"}},
                     ],

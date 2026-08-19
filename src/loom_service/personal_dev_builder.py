@@ -37,9 +37,60 @@ from loom.personal_dev_builder_tools import (
 )
 from loom.personal_dev_candidate import PersonalDevCandidateLimits
 from loom.personal_dev_candidate_store import SqlAlchemyPersonalDevCandidateStore
+from loom.personal_dev_scanner_cache import (
+    PersonalDevScannerCacheBinding,
+    PersonalDevScannerCacheFiles,
+)
 from loom_service.config import LoomServiceSettings
 
 logger = logging.getLogger(__name__)
+
+_SCANNER_CACHE_ROOT_ENTRIES = frozenset(
+    {"db", "fanal", "identity.json", "java-db"}
+)
+_SCANNER_CACHE_FILE_ENTRIES = {
+    "db": frozenset({"metadata.json", "trivy.db"}),
+    "java-db": frozenset({"metadata.json", "trivy-java.db"}),
+}
+_SCANNER_CACHE_IDENTITY_KEYS = frozenset(
+    {
+        "cache_identity_sha256",
+        "database_metadata_sha256",
+        "database_sha256",
+        "java_database_metadata_sha256",
+        "java_database_sha256",
+        "scanner_binary_sha256",
+        "schema_version",
+    }
+)
+_MAX_SCANNER_DATABASE_BYTES = 4 * 1024 * 1024 * 1024
+_MAX_SCANNER_METADATA_BYTES = 64 * 1024
+_MAX_SCANNER_IDENTITY_BYTES = 4096
+_SCANNER_CACHE_PROTECTED_UID = 65531
+_SCANNER_CACHE_PROTECTED_GID = 65532
+_DIRECTORY_OPEN_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_DIRECTORY", 0)
+)
+_FILE_OPEN_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_NONBLOCK", 0)
+)
+_STABLE_FILE_FIELDS = (
+    "st_dev",
+    "st_ino",
+    "st_mode",
+    "st_nlink",
+    "st_uid",
+    "st_gid",
+    "st_size",
+    "st_mtime_ns",
+    "st_ctime_ns",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,45 +116,303 @@ def _required_executable(path: Path, *, label: str) -> str:
     return str(path)
 
 
-def _regular_file_sha256(path: Path, *, label: str) -> str:
+def _regular_file_sha256(
+    path: Path,
+    *,
+    label: str,
+    maximum_bytes: int | None = None,
+) -> str:
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        descriptor = os.open(path, _FILE_OPEN_FLAGS)
     except OSError:
         raise RuntimeError(f"personal-dev {label} is unavailable") from None
     try:
         before = os.fstat(descriptor)
-        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or (maximum_bytes is not None and before.st_size > maximum_bytes)
+        ):
             raise RuntimeError(f"personal-dev {label} authority is invalid")
         digest = hashlib.sha256()
+        total = 0
         while chunk := os.read(descriptor, 1024 * 1024):
+            total += len(chunk)
+            if maximum_bytes is not None and total > maximum_bytes:
+                raise RuntimeError(f"personal-dev {label} authority is invalid")
             digest.update(chunk)
         after = os.fstat(descriptor)
     finally:
         os.close(descriptor)
-    if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
-        after.st_dev,
-        after.st_ino,
-        after.st_size,
-        after.st_mtime_ns,
+    if any(
+        getattr(before, field) != getattr(after, field)
+        for field in _STABLE_FILE_FIELDS
     ):
         raise RuntimeError(f"personal-dev {label} changed during verification")
     return digest.hexdigest()
 
 
-def _installed_scanner_identity(executable: Path, cache_directory: Path) -> str:
-    binary = _regular_file_sha256(executable, label="scanner executable")
-    database = _regular_file_sha256(
-        cache_directory / "db" / "trivy.db",
-        label="scanner vulnerability database",
-    )
-    java_database = _regular_file_sha256(
-        cache_directory / "java-db" / "trivy-java.db",
-        label="scanner Java vulnerability database",
-    )
+def _scanner_cache_binding_error() -> RuntimeError:
+    return RuntimeError("personal-dev scanner cache binding is invalid")
+
+
+def _is_sha256(value: object) -> bool:
     return (
-        f"trivy-bin-sha256:{binary}:db-sha256:{database}:"
-        f"java-db-sha256:{java_database}"
+        isinstance(value, str)
+        and len(value) == 64
+        and value != "0" * 64
+        and all(character in "0123456789abcdef" for character in value)
     )
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise _scanner_cache_binding_error()
+        value[key] = item
+    return value
+
+
+def _canonical_json(value: object) -> bytes:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("ascii")
+
+
+def _open_cache_directory(
+    parent: int,
+    name: str,
+    *,
+    protected_owner: int,
+    protected_group: int,
+) -> int:
+    metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != protected_owner
+        or metadata.st_gid != protected_group
+        or stat.S_IMODE(metadata.st_mode) != 0o555
+    ):
+        raise _scanner_cache_binding_error()
+    descriptor = os.open(name, _DIRECTORY_OPEN_FLAGS, dir_fd=parent)
+    opened = os.fstat(descriptor)
+    if any(
+        getattr(metadata, field) != getattr(opened, field)
+        for field in _STABLE_FILE_FIELDS
+    ):
+        os.close(descriptor)
+        raise _scanner_cache_binding_error()
+    return descriptor
+
+
+def _directory_entries_match(directory: int, expected: frozenset[str]) -> bool:
+    observed: set[str] = set()
+    with os.scandir(directory) as entries:
+        for entry in entries:
+            if entry.name not in expected or len(observed) >= len(expected):
+                return False
+            observed.add(entry.name)
+    return observed == expected
+
+
+def _read_cache_file(
+    directory: int,
+    name: str,
+    *,
+    protected_owner: int,
+    protected_group: int,
+    maximum_bytes: int,
+    capture: bool,
+) -> tuple[str, bytes | None]:
+    metadata = os.stat(name, dir_fd=directory, follow_symlinks=False)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or metadata.st_uid != protected_owner
+        or metadata.st_gid != protected_group
+        or stat.S_IMODE(metadata.st_mode) != 0o444
+        or not 0 < metadata.st_size <= maximum_bytes
+    ):
+        raise _scanner_cache_binding_error()
+    descriptor = os.open(name, _FILE_OPEN_FLAGS, dir_fd=directory)
+    try:
+        opened = os.fstat(descriptor)
+        if any(
+            getattr(metadata, field) != getattr(opened, field)
+            for field in _STABLE_FILE_FIELDS
+        ):
+            raise _scanner_cache_binding_error()
+        digest = hashlib.sha256()
+        payload = bytearray() if capture else None
+        total = 0
+        while total <= maximum_bytes:
+            chunk = os.read(
+                descriptor,
+                min(1024 * 1024, maximum_bytes + 1 - total),
+            )
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > maximum_bytes:
+                raise _scanner_cache_binding_error()
+            digest.update(chunk)
+            if payload is not None:
+                payload.extend(chunk)
+        closed = os.fstat(descriptor)
+        if total != metadata.st_size or any(
+            getattr(opened, field) != getattr(closed, field)
+            for field in _STABLE_FILE_FIELDS
+        ):
+            raise _scanner_cache_binding_error()
+        return digest.hexdigest(), bytes(payload) if payload is not None else None
+    finally:
+        os.close(descriptor)
+
+
+def _installed_scanner_cache_binding(
+    cache_directory: Path,
+) -> PersonalDevScannerCacheBinding:
+    """Revalidate one immutable cache generation from the management mount."""
+    try:
+        generation_name = cache_directory.name
+        if not _is_sha256(generation_name):
+            raise _scanner_cache_binding_error()
+        metadata = cache_directory.stat(follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or metadata.st_uid != _SCANNER_CACHE_PROTECTED_UID
+            or metadata.st_gid != _SCANNER_CACHE_PROTECTED_GID
+            or metadata.st_uid == os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o555
+        ):
+            raise _scanner_cache_binding_error()
+        root = os.open(cache_directory, _DIRECTORY_OPEN_FLAGS)
+        try:
+            opened = os.fstat(root)
+            if (
+                any(
+                    getattr(metadata, field) != getattr(opened, field)
+                    for field in _STABLE_FILE_FIELDS
+                )
+                or not _directory_entries_match(root, _SCANNER_CACHE_ROOT_ENTRIES)
+            ):
+                raise _scanner_cache_binding_error()
+            protected_owner = _SCANNER_CACHE_PROTECTED_UID
+            protected_group = _SCANNER_CACHE_PROTECTED_GID
+            identity_digest, identity_payload = _read_cache_file(
+                root,
+                "identity.json",
+                protected_owner=protected_owner,
+                protected_group=protected_group,
+                maximum_bytes=_MAX_SCANNER_IDENTITY_BYTES,
+                capture=True,
+            )
+            del identity_digest
+            if identity_payload is None:
+                raise _scanner_cache_binding_error()
+            try:
+                identity = json.loads(
+                    identity_payload,
+                    object_pairs_hook=_unique_json_object,
+                )
+            except RuntimeError:
+                raise
+            except (TypeError, UnicodeError, ValueError):
+                raise _scanner_cache_binding_error() from None
+            if (
+                not isinstance(identity, dict)
+                or identity.keys() != _SCANNER_CACHE_IDENTITY_KEYS
+                or _canonical_json(identity) != identity_payload
+                or type(identity.get("schema_version")) is not int
+                or identity["schema_version"] != 1
+                or identity.get("cache_identity_sha256") != generation_name
+                or any(
+                    not _is_sha256(identity.get(key))
+                    for key in _SCANNER_CACHE_IDENTITY_KEYS - {"schema_version"}
+                )
+            ):
+                raise _scanner_cache_binding_error()
+
+            observed: dict[str, str] = {}
+            for directory_name, expected_entries in _SCANNER_CACHE_FILE_ENTRIES.items():
+                child = _open_cache_directory(
+                    root,
+                    directory_name,
+                    protected_owner=protected_owner,
+                    protected_group=protected_group,
+                )
+                try:
+                    if not _directory_entries_match(child, expected_entries):
+                        raise _scanner_cache_binding_error()
+                    database_name = (
+                        "trivy.db" if directory_name == "db" else "trivy-java.db"
+                    )
+                    observed[directory_name + "-database"], _ = _read_cache_file(
+                        child,
+                        database_name,
+                        protected_owner=protected_owner,
+                        protected_group=protected_group,
+                        maximum_bytes=_MAX_SCANNER_DATABASE_BYTES,
+                        capture=False,
+                    )
+                    observed[directory_name + "-metadata"], _ = _read_cache_file(
+                        child,
+                        "metadata.json",
+                        protected_owner=protected_owner,
+                        protected_group=protected_group,
+                        maximum_bytes=_MAX_SCANNER_METADATA_BYTES,
+                        capture=False,
+                    )
+                finally:
+                    os.close(child)
+            fanal_metadata = os.stat("fanal", dir_fd=root, follow_symlinks=False)
+            if not stat.S_ISDIR(fanal_metadata.st_mode) or stat.S_ISLNK(
+                fanal_metadata.st_mode
+            ):
+                raise _scanner_cache_binding_error()
+            after = os.fstat(root)
+            if any(
+                getattr(opened, field) != getattr(after, field)
+                for field in _STABLE_FILE_FIELDS
+            ):
+                raise _scanner_cache_binding_error()
+        finally:
+            os.close(root)
+        binding = PersonalDevScannerCacheBinding(
+            cache_identity_sha256=generation_name,
+            scanner_binary_sha256=identity["scanner_binary_sha256"],
+            files=PersonalDevScannerCacheFiles(
+                database_sha256=observed["db-database"],
+                database_metadata_sha256=observed["db-metadata"],
+                java_database_sha256=observed["java-db-database"],
+                java_database_metadata_sha256=observed["java-db-metadata"],
+            ),
+        )
+        if binding != PersonalDevScannerCacheBinding(
+            cache_identity_sha256=identity["cache_identity_sha256"],
+            scanner_binary_sha256=identity["scanner_binary_sha256"],
+            files=PersonalDevScannerCacheFiles(
+                database_sha256=identity["database_sha256"],
+                database_metadata_sha256=identity["database_metadata_sha256"],
+                java_database_sha256=identity["java_database_sha256"],
+                java_database_metadata_sha256=identity[
+                    "java_database_metadata_sha256"
+                ],
+            ),
+        ):
+            raise _scanner_cache_binding_error()
+        return binding
+    except RuntimeError:
+        raise
+    except (KeyError, OSError, TypeError, UnicodeError, ValueError):
+        raise _scanner_cache_binding_error() from None
 
 
 def _required_registry_auth_file(path: Path) -> Path:
@@ -157,12 +466,32 @@ def build_personal_dev_builder_runtime(
     if not settings.personal_dev_trusted_launcher_profile_sha256:
         raise RuntimeError("personal-dev trusted launcher profile digest is required")
     scanner_cache = settings.personal_dev_builder_scanner_cache_dir
+    installed_scanner = _installed_scanner_cache_binding(scanner_cache)
     try:
-        cache_metadata = scanner_cache.stat(follow_symlinks=False)
-    except OSError:
-        raise RuntimeError("personal-dev scanner cache directory is unavailable") from None
-    if not stat.S_ISDIR(cache_metadata.st_mode) or stat.S_ISLNK(cache_metadata.st_mode):
-        raise RuntimeError("personal-dev scanner cache directory is unavailable")
+        scanner_binary_sha256 = _regular_file_sha256(
+            settings.personal_dev_builder_scanner_path,
+            label="scanner executable",
+            maximum_bytes=512 * 1024 * 1024,
+        )
+    except RuntimeError:
+        raise _scanner_cache_binding_error() from None
+    configured_scanner_identity = (
+        f"trivy-bin-sha256:{scanner_binary_sha256}:"
+        f"db-sha256:{installed_scanner.files.database_sha256}:"
+        f"java-db-sha256:{installed_scanner.files.java_database_sha256}"
+    )
+    if (
+        installed_scanner.cache_identity_sha256
+        != settings.personal_dev_builder_scanner_cache_identity_sha256
+        or installed_scanner.scanner_binary_sha256 != scanner_binary_sha256
+        or installed_scanner.files.database_metadata_sha256
+        != settings.personal_dev_builder_scanner_database_metadata_sha256
+        or installed_scanner.files.java_database_metadata_sha256
+        != settings.personal_dev_builder_scanner_java_database_metadata_sha256
+        or configured_scanner_identity
+        != settings.personal_dev_builder_scanner_identity
+    ):
+        raise _scanner_cache_binding_error()
     manifest_config = PersonalDevBuilderManifestConfig(
         builder_image=settings.personal_dev_builder_image,
         max_artifact_bytes=settings.personal_dev_builder_max_artifact_bytes,
@@ -183,14 +512,9 @@ def build_personal_dev_builder_runtime(
             label="scanner",
         ),
         cache_directory=scanner_cache,
-        scanner_identity=_installed_scanner_identity(
-            settings.personal_dev_builder_scanner_path,
-            scanner_cache,
-        ),
+        scanner_identity=configured_scanner_identity,
         policy_sha256=settings.personal_dev_builder_scanner_policy_sha256,
     )
-    if scanner.scanner_identity != settings.personal_dev_builder_scanner_identity:
-        raise RuntimeError("personal-dev installed scanner identity does not match configuration")
     registry_auth_file = _required_registry_auth_file(
         settings.personal_dev_builder_registry_auth_file
     )

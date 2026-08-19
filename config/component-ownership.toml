@@ -202,6 +202,27 @@ runtime_policy = "conformance"
 rollout_role = "none"
 
 [[components]]
+id = "personal-dev-scanner-cache"
+kind = "release-image"
+dockerfile = "deploy/Dockerfile.personal-dev-scanner-cache"
+build_context = "."
+source_paths = [
+  ".dockerignore",
+  "deploy/Dockerfile.personal-dev-scanner-cache",
+  "deploy/dev-fleet/personal-dev-scanner-cache-lock.json",
+  "scripts/prepare_personal_dev_scanner_cache_assets.py",
+  "src/loom/__init__.py",
+  "src/loom/personal_dev_scanner_cache.py",
+  "src/loom/personal_dev_scanner_cache_init.py",
+]
+smoke_owner = "sandbox-network-conformance"
+scan_owner = "images"
+attestation_owner = "release-provenance"
+release_digest = "loom-personal-dev-scanner-cache"
+runtime_policy = "conformance"
+rollout_role = "none"
+
+[[components]]
 id = "personal-dev-builder"
 kind = "release-image"
 dockerfile = "deploy/Dockerfile.personal-dev-builder"
@@ -681,6 +702,7 @@ exclude_paths = [
   "tests/integration/test_gateway_with_litellm_agent.py",
   "tests/integration/test_pipeline_multipart_minio.py",
   "tests/integration/test_pipeline_core_fixture_image.py",
+  "tests/integration/test_personal_dev_scanner_cache_image.py",
   "tests/integration/test_sandbox_network_docker.py",
   "tests/integration/test_subprocess_agent_e2e.py",
   "tests/integration/test_trial_e2e_docker.py",
@@ -704,6 +726,7 @@ include_paths = [
   "tests/integration/test_gateway_with_litellm_agent.py",
   "tests/integration/test_pipeline_multipart_minio.py",
   "tests/integration/test_pipeline_core_fixture_image.py",
+  "tests/integration/test_personal_dev_scanner_cache_image.py",
   "tests/integration/test_sandbox_network_docker.py",
   "tests/integration/test_subprocess_agent_e2e.py",
   "tests/integration/test_trial_e2e_docker.py",

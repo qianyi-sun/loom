@@ -4,6 +4,7 @@ import hashlib
 import json
 import subprocess
 import sys
+import tracemalloc
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,12 @@ _SOURCE_SHA = "a" * 40
 _SOURCE_TREE = "b" * 40
 _RUN_ID = 123
 _RUN_ATTEMPT = 2
+_TRIVY_AMD64 = b"trivy-linux-amd64-v0.70.0"
+_TRIVY_ARM64 = b"trivy-linux-arm64-v0.70.0"
+_DATABASE = b"fixture-vulnerability-database"
+_DATABASE_METADATA = b'{"DownloadedAt":"2026-08-18T00:00:00Z","NextUpdate":"2026-08-19T00:00:00Z","UpdatedAt":"2026-08-18T00:00:00Z","Version":2}'
+_JAVA_DATABASE = b"fixture-java-database"
+_JAVA_DATABASE_METADATA = b'{"DownloadedAt":"2026-08-18T00:00:00Z","NextUpdate":"2026-08-19T00:00:00Z","UpdatedAt":"2026-08-18T00:00:00Z","Version":1}'
 _INTERNAL = {
     "service": {
         "release_key": "loom_service",
@@ -35,6 +42,11 @@ _INTERNAL = {
         "release_key": "personal_dev_activation_agent",
         "image_name": "loom-personal-dev-activation-agent",
         "dockerfile": "deploy/Dockerfile.personal-dev-activation-agent",
+    },
+    "personal-dev-scanner-cache": {
+        "release_key": "personal_dev_scanner_cache",
+        "image_name": "loom-personal-dev-scanner-cache",
+        "dockerfile": "deploy/Dockerfile.personal-dev-scanner-cache",
     },
 }
 _EXTERNAL_REPOSITORIES = {
@@ -71,6 +83,72 @@ def _manifest(members: dict[str, str]) -> dict[str, Any]:
         "mediaType": "application/vnd.oci.image.index.v1+json",
         "schemaVersion": 2,
     }
+
+
+def _scanner_paths(root: Path) -> dict[str, Path]:
+    return {
+        "scanner_cache_lock_file": root / "scanner-cache-lock.json",
+        "scanner_cache_evidence_file": root / "scanner-cache-evidence.json",
+        "scanner_binary_amd64_file": root / "trivy-linux-amd64",
+        "scanner_binary_arm64_file": root / "trivy-linux-arm64",
+    }
+
+
+def _write_scanner_inputs(root: Path) -> dict[str, object]:
+    paths = _scanner_paths(root)
+    lock: dict[str, object] = {
+        "binary_sha256": {
+            "linux/amd64": hashlib.sha256(_TRIVY_AMD64).hexdigest(),
+            "linux/arm64": hashlib.sha256(_TRIVY_ARM64).hexdigest(),
+        },
+        "database": {
+            "image": (
+                "ghcr.io/aquasecurity/trivy-db@sha256:"
+                "01edd081af12fd613776b0db66ac23ce62c9d25802d8ee57671394c10ca3530b"
+            ),
+            "layer_sha256": (
+                "cafb664d1c10b65e06b317f86171d65ed1f17b1f4de594a7232e16c0848f3590"
+            ),
+        },
+        "java_database": {
+            "image": (
+                "ghcr.io/aquasecurity/trivy-java-db@sha256:"
+                "58ef30d104106166d34f36c9861f2c5eb88d3279341fd4838bb5694d8998c436"
+            ),
+            "layer_sha256": (
+                "bcc9ee0a8aa79524502cf892eda69e2180b54a3c7bd54c874b564201d2bdfc10"
+            ),
+        },
+        "schema_version": 1,
+        "trivy_version": "v0.70.0",
+    }
+    lock_bytes = _canonical(lock)
+    paths["scanner_cache_lock_file"].write_bytes(lock_bytes)
+    database_sha256 = hashlib.sha256(_DATABASE).hexdigest()
+    database_metadata_sha256 = hashlib.sha256(_DATABASE_METADATA).hexdigest()
+    java_database_sha256 = hashlib.sha256(_JAVA_DATABASE).hexdigest()
+    java_database_metadata_sha256 = hashlib.sha256(_JAVA_DATABASE_METADATA).hexdigest()
+    evidence = {
+        "binary_platform": "linux/amd64",
+        "binary_sha256": hashlib.sha256(_TRIVY_AMD64).hexdigest(),
+        "database": {
+            **lock["database"],  # type: ignore[dict-item]
+            "metadata_sha256": database_metadata_sha256,
+            "sha256": database_sha256,
+        },
+        "java_database": {
+            **lock["java_database"],  # type: ignore[dict-item]
+            "metadata_sha256": java_database_metadata_sha256,
+            "sha256": java_database_sha256,
+        },
+        "lock_sha256": hashlib.sha256(lock_bytes).hexdigest(),
+        "schema_version": 1,
+        "trivy_version": "v0.70.0",
+    }
+    paths["scanner_cache_evidence_file"].write_bytes(_canonical(evidence) + b"\n")
+    paths["scanner_binary_amd64_file"].write_bytes(_TRIVY_AMD64)
+    paths["scanner_binary_arm64_file"].write_bytes(_TRIVY_ARM64)
+    return evidence
 
 
 def _write_inputs(tmp_path: Path) -> tuple[Path, Path, Path, dict[str, str]]:
@@ -136,6 +214,7 @@ def _write_inputs(tmp_path: Path) -> tuple[Path, Path, Path, dict[str, str]]:
         digest_counter += 2
     external_path = tmp_path / "external-images.json"
     external_path.write_bytes(_canonical(external) + b"\n")
+    _write_scanner_inputs(tmp_path)
     return records_dir, manifests_dir, external_path, expected_references
 
 
@@ -154,6 +233,7 @@ def _assemble_inputs(
         "records_dir": records,
         "manifests_dir": manifests,
         "external_images_file": external,
+        **_scanner_paths(external.parent),
         "repository": "qianyi-sun/loom",
         "ref_name": "dev",
         "source_sha": _SOURCE_SHA,
@@ -180,6 +260,7 @@ def test_assembly_binds_exact_internal_external_and_release_evidence(
         records_dir=records,
         manifests_dir=manifests,
         external_images_file=external,
+        **_scanner_paths(tmp_path),
         repository="qianyi-sun/loom",
         ref_name="dev",
         source_sha=_SOURCE_SHA,
@@ -192,11 +273,36 @@ def test_assembly_binds_exact_internal_external_and_release_evidence(
         runner_environment="github-hosted",
     )
 
+    scanner_without_identity = {
+        "binary_platform": "linux/amd64",
+        "binary_sha256": hashlib.sha256(_TRIVY_AMD64).hexdigest(),
+        "database_metadata_sha256": hashlib.sha256(_DATABASE_METADATA).hexdigest(),
+        "database_sha256": hashlib.sha256(_DATABASE).hexdigest(),
+        "java_database_metadata_sha256": hashlib.sha256(
+            _JAVA_DATABASE_METADATA
+        ).hexdigest(),
+        "java_database_sha256": hashlib.sha256(_JAVA_DATABASE).hexdigest(),
+        "lock_sha256": hashlib.sha256(
+            _scanner_paths(tmp_path)["scanner_cache_lock_file"].read_bytes()
+        ).hexdigest(),
+        "trivy_version": "v0.70.0",
+    }
+    cache_identity_sha256 = hashlib.sha256(
+        b"loom-personal-dev-scanner-cache-v1\0" + _canonical(scanner_without_identity)
+    ).hexdigest()
+    assert cache_identity_sha256 == (
+        "65d47d7144c565e8d0f5c0c28a2e21e502b8a0ce3f062a22cc870895f84af28d"
+    )
+    scanner = {
+        **scanner_without_identity,
+        "cache_identity_sha256": cache_identity_sha256,
+    }
     assert release == {
-        "schema_version": 1,
+        "schema_version": 2,
         "source_sha": _SOURCE_SHA,
         "source_tree": _SOURCE_TREE,
         "images": references,
+        "scanner": scanner,
         "release_evidence_sha256": hashlib.sha256(_canonical(evidence)).hexdigest(),
     }
     assert evidence["release"] == {
@@ -207,8 +313,24 @@ def test_assembly_binds_exact_internal_external_and_release_evidence(
         "run_id": _RUN_ID,
         "run_attempt": _RUN_ATTEMPT,
     }
+    assert evidence["schema_version"] == 2
     assert set(evidence["internal_images"]) == set(_INTERNAL)
     assert set(evidence["external_images"]) == set(_EXTERNAL_REPOSITORIES)
+    assert evidence["scanner"] == {
+        "binary_sha256": {
+            "linux/amd64": hashlib.sha256(_TRIVY_AMD64).hexdigest(),
+            "linux/arm64": hashlib.sha256(_TRIVY_ARM64).hexdigest(),
+        },
+        "cache_identity_frame": "loom-personal-dev-scanner-cache-v1",
+        "database": json.loads(
+            (_scanner_paths(tmp_path)["scanner_cache_evidence_file"]).read_bytes()
+        )["database"],
+        "java_database": json.loads(
+            (_scanner_paths(tmp_path)["scanner_cache_evidence_file"]).read_bytes()
+        )["java_database"],
+        "lock_sha256": scanner_without_identity["lock_sha256"],
+        "trivy_version": "v0.70.0",
+    }
     for item in evidence["internal_images"].values():
         assert set(item["platforms"]) == {"linux/amd64", "linux/arm64"}
         assert all(
@@ -221,6 +343,7 @@ def test_assembly_binds_exact_internal_external_and_release_evidence(
         records_dir=records,
         manifests_dir=manifests,
         external_images_file=external,
+        **_scanner_paths(tmp_path),
         repository="qianyi-sun/loom",
         ref_name="dev",
         source_sha=_SOURCE_SHA,
@@ -234,6 +357,37 @@ def test_assembly_binds_exact_internal_external_and_release_evidence(
     )
     assert _canonical(repeated_release) == _canonical(release)
     assert _canonical(repeated_evidence) == _canonical(evidence)
+
+
+def test_assembly_streams_scanner_binary_hashes_with_bounded_memory(
+    tmp_path: Path,
+) -> None:
+    records, manifests, external, _references = _write_inputs(tmp_path)
+    paths = _scanner_paths(tmp_path)
+    amd64_binary = b"a" * (8 * 1024 * 1024)
+    arm64_binary = b"b" * (8 * 1024 * 1024)
+    paths["scanner_binary_amd64_file"].write_bytes(amd64_binary)
+    paths["scanner_binary_arm64_file"].write_bytes(arm64_binary)
+    lock = json.loads(paths["scanner_cache_lock_file"].read_bytes())
+    lock["binary_sha256"] = {
+        "linux/amd64": hashlib.sha256(amd64_binary).hexdigest(),
+        "linux/arm64": hashlib.sha256(arm64_binary).hexdigest(),
+    }
+    lock_bytes = _canonical(lock)
+    paths["scanner_cache_lock_file"].write_bytes(lock_bytes)
+    evidence = json.loads(paths["scanner_cache_evidence_file"].read_bytes())
+    evidence["binary_sha256"] = lock["binary_sha256"]["linux/amd64"]
+    evidence["lock_sha256"] = hashlib.sha256(lock_bytes).hexdigest()
+    paths["scanner_cache_evidence_file"].write_bytes(_canonical(evidence) + b"\n")
+
+    tracemalloc.start()
+    try:
+        _assemble_inputs(records, manifests, external)
+        _, peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert peak_bytes < 4 * 1024 * 1024
 
 
 @pytest.mark.parametrize(
@@ -284,6 +438,70 @@ def test_assembly_rejects_noncanonical_or_inconsistent_evidence(
     path.write_bytes(mutate(path.read_bytes()))
 
     with pytest.raises(TrustedReleaseError):
+        _assemble_inputs(records, manifests, external)
+
+
+@pytest.mark.parametrize(
+    "drift",
+    [
+        "amd64-binary",
+        "arm64-binary",
+        "evidence-binary",
+        "evidence-lock",
+        "database-source",
+        "database-metadata",
+        "unknown-evidence-field",
+        "evidence-schema",
+        "lock",
+    ],
+)
+def test_assembly_rejects_scanner_input_drift(tmp_path: Path, drift: str) -> None:
+    records, manifests, external, _references = _write_inputs(tmp_path)
+    paths = _scanner_paths(tmp_path)
+    if drift == "amd64-binary":
+        paths["scanner_binary_amd64_file"].write_bytes(b"changed-amd64")
+    elif drift == "arm64-binary":
+        paths["scanner_binary_arm64_file"].write_bytes(b"changed-arm64")
+    elif drift == "lock":
+        lock = json.loads(paths["scanner_cache_lock_file"].read_bytes())
+        lock["binary_sha256"]["linux/amd64"] = "f" * 64
+        paths["scanner_cache_lock_file"].write_bytes(_canonical(lock))
+    else:
+        evidence = json.loads(paths["scanner_cache_evidence_file"].read_bytes())
+        if drift == "evidence-binary":
+            evidence["binary_sha256"] = "f" * 64
+        elif drift == "evidence-lock":
+            evidence["lock_sha256"] = "f" * 64
+        elif drift == "database-source":
+            evidence["database"]["layer_sha256"] = "f" * 64
+        elif drift == "database-metadata":
+            evidence["database"]["metadata_sha256"] = "0" * 64
+        elif drift == "unknown-evidence-field":
+            evidence["unexpected"] = True
+        else:
+            evidence["schema_version"] = 2
+        paths["scanner_cache_evidence_file"].write_bytes(
+            _canonical(evidence) + b"\n"
+        )
+
+    with pytest.raises(TrustedReleaseError):
+        _assemble_inputs(records, manifests, external)
+
+
+@pytest.mark.parametrize("kind", ["record", "manifest"])
+def test_assembly_requires_both_platforms_of_cache_image(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    records, manifests, external, _references = _write_inputs(tmp_path)
+    target = (
+        records / "personal-dev-scanner-cache-arm64.json"
+        if kind == "record"
+        else manifests / "personal-dev-scanner-cache.json"
+    )
+    target.unlink()
+
+    with pytest.raises(TrustedReleaseError, match="exactly the expected files"):
         _assemble_inputs(records, manifests, external)
 
 
@@ -358,6 +576,14 @@ def test_cli_writes_and_revalidates_only_the_three_canonical_outputs(
         str(manifests),
         "--external-images-file",
         str(external),
+        "--scanner-cache-lock-file",
+        str(_scanner_paths(tmp_path)["scanner_cache_lock_file"]),
+        "--scanner-cache-evidence-file",
+        str(_scanner_paths(tmp_path)["scanner_cache_evidence_file"]),
+        "--scanner-binary-amd64-file",
+        str(_scanner_paths(tmp_path)["scanner_binary_amd64_file"]),
+        "--scanner-binary-arm64-file",
+        str(_scanner_paths(tmp_path)["scanner_binary_arm64_file"]),
         "--repository",
         "qianyi-sun/loom",
         "--ref-name",
@@ -421,6 +647,37 @@ def test_cli_writes_and_revalidates_only_the_three_canonical_outputs(
         check=False,
     )
     assert validate.returncode == 0, validate.stderr
+
+    release_file = output / "trusted-release.json"
+    original_release = json.loads(release_file.read_bytes())
+    for drift in ("schema", "cache-identity", "unknown-scanner-field"):
+        changed_release = json.loads(_canonical(original_release))
+        if drift == "schema":
+            changed_release["schema_version"] = 1
+        elif drift == "cache-identity":
+            changed_release["scanner"]["cache_identity_sha256"] = "f" * 64
+        else:
+            changed_release["scanner"]["unexpected"] = True
+        changed_bytes = _canonical(changed_release)
+        release_file.write_bytes(changed_bytes)
+        (output / "trusted-release.sha256").write_text(
+            hashlib.sha256(changed_bytes).hexdigest() + "\n",
+            encoding="ascii",
+        )
+        changed_validate = subprocess.run(
+            validate_command,
+            cwd=_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert changed_validate.returncode != 0
+    original_release_bytes = _canonical(original_release)
+    release_file.write_bytes(original_release_bytes)
+    (output / "trusted-release.sha256").write_text(
+        hashlib.sha256(original_release_bytes).hexdigest() + "\n",
+        encoding="ascii",
+    )
 
     digest_file = output / "trusted-release.sha256"
     digest_payload = digest_file.read_bytes()
@@ -492,7 +749,7 @@ def test_checked_in_external_indexes_are_exact_reviewed_multi_arch_pins() -> Non
     }
 
 
-def test_images_workflow_publishes_least_privilege_three_file_release() -> None:
+def test_images_workflow_publishes_release_bound_scanner_cache() -> None:
     workflow = yaml.safe_load(
         (_ROOT / ".github/workflows/images.yml").read_text(encoding="utf-8")
     )
@@ -516,7 +773,7 @@ def test_images_workflow_publishes_least_privilege_three_file_release() -> None:
         for step in aggregate["steps"]
         if str(step.get("name", "")).startswith("Download exact ")
     ]
-    assert len(downloads) == 6
+    assert len(downloads) == 9
     script = "\n".join(str(step.get("run", "")) for step in aggregate["steps"])
     for component in _INTERNAL:
         for architecture in ("amd64", "arm64"):
@@ -525,7 +782,20 @@ def test_images_workflow_publishes_least_privilege_three_file_release() -> None:
                 "attempt-${{ github.run_attempt }}"
             ) in str(aggregate)
     assert script.count("gh attestation verify") == 1
-    assert "for component in service personal-dev-builder personal-dev-activation-agent" in script
+    assert (
+        "for component in service personal-dev-builder "
+        "personal-dev-activation-agent personal-dev-scanner-cache" in script
+    )
+    assert "personal-dev-scanner-cache-assets-run-${{ github.run_id }}" in str(aggregate)
+    assert "docker create" in script
+    assert "docker cp" in script
+    assert "--network none" not in script
+    assert "--scanner-cache-lock-file" in script
+    assert "--scanner-cache-evidence-file" in script
+    assert "--scanner-binary-amd64-file" in script
+    assert "--scanner-binary-arm64-file" in script
+    assert script.count("prepare_personal_dev_scanner_cache_assets.py") >= 1
+    assert "cmp --silent" in script
     assert script.count("docker buildx imagetools inspect --raw") >= 2
     assert "ci_personal_dev_trusted_release.py assemble" in script
     assert "ci_personal_dev_trusted_release.py validate" in script

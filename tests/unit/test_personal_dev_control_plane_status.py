@@ -127,7 +127,7 @@ _DEPLOYMENTS = (
 
 def _release_value() -> dict[str, object]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "source_sha": "1" * 40,
         "source_tree": "2" * 40,
         "images": {
@@ -138,9 +138,25 @@ def _release_value() -> dict[str, object]:
             "personal_dev_activation_agent": (
                 "ghcr.io/qianyi-sun/loom-personal-dev-activation-agent@sha256:" + "5" * 64
             ),
+            "personal_dev_scanner_cache": (
+                "ghcr.io/qianyi-sun/loom-personal-dev-scanner-cache@sha256:" + "a" * 64
+            ),
             "postgres": "docker.io/library/postgres@sha256:" + "6" * 64,
             "minio": "quay.io/minio/minio@sha256:" + "7" * 64,
             "minio_client": "quay.io/minio/mc@sha256:" + "9" * 64,
+        },
+        "scanner": {
+            "binary_platform": "linux/amd64",
+            "binary_sha256": "b" * 64,
+            "cache_identity_sha256": (
+                "b1c136b8577f3813c62588d6930db21b0f2343b7f70278836741387c43c33761"
+            ),
+            "database_metadata_sha256": "c" * 64,
+            "database_sha256": "d" * 64,
+            "java_database_metadata_sha256": "e" * 64,
+            "java_database_sha256": "f" * 64,
+            "lock_sha256": "1" * 64,
+            "trivy_version": "v0.70.0",
         },
         "release_evidence_sha256": "8" * 64,
     }
@@ -387,10 +403,17 @@ def _acceptance_inputs(
             "runtime_class_name": profile.builder.runtime_class_name,
             "runtime_handler": "runsc-personal-dev",
             "runtime_profile_sha256": "d" * 64,
-            "scanner_binary_sha256": "f" * 64,
-            "scanner_database_sha256": "1" * 64,
+            "scanner_binary_sha256": release.scanner.binary_sha256,
+            "scanner_cache_identity_sha256": release.scanner.cache_identity_sha256,
+            "scanner_database_sha256": release.scanner.database_sha256,
+            "scanner_database_metadata_sha256": (
+                release.scanner.database_metadata_sha256
+            ),
             "scanner_finding_policy_sha256": "3" * 64,
-            "scanner_java_database_sha256": "2" * 64,
+            "scanner_java_database_sha256": release.scanner.java_database_sha256,
+            "scanner_java_database_metadata_sha256": (
+                release.scanner.java_database_metadata_sha256
+            ),
             "trusted_launcher_profile_sha256": "e" * 64,
         },
         "manager": {
@@ -843,7 +866,10 @@ def test_acceptance_permits_only_exact_owned_dynamic_namespace_families(
         ("activation-not-ready", "activation_not_ready"),
         ("runtime-handler", "runtime_class_binding_invalid"),
         ("runtime-profile", "runtime_class_binding_invalid"),
+        ("scanner-cache-identity", "management_acceptance_binding_invalid"),
+        ("scanner-database-metadata", "management_acceptance_binding_invalid"),
         ("scanner-identity", "management_acceptance_binding_invalid"),
+        ("scanner-java-database-metadata", "management_acceptance_binding_invalid"),
         ("scanner-policy", "management_acceptance_binding_invalid"),
         ("manager-authority", "manager_binding_drift"),
         ("manager-principal", "manager_binding_drift"),
@@ -881,7 +907,10 @@ def test_acceptance_status_matrix_fails_closed_on_exact_binding_drift(
         service["metadata"]["annotations"]["loom.dev/acceptance-plan-sha256"] = "a" * 64
     elif mutation in {
         "management-feature-disabled",
+        "scanner-cache-identity",
+        "scanner-database-metadata",
         "scanner-identity",
+        "scanner-java-database-metadata",
         "scanner-policy",
     }:
         deployment = _item(
@@ -893,7 +922,16 @@ def test_acceptance_status_matrix_fails_closed_on_exact_binding_drift(
         environment = deployment["spec"]["template"]["spec"]["containers"][0]["env"]
         field = {
             "management-feature-disabled": "LOOM_SVC_DEV_INSTANCES_ENABLED",
+            "scanner-cache-identity": (
+                "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_CACHE_IDENTITY_SHA256"
+            ),
+            "scanner-database-metadata": (
+                "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_DATABASE_METADATA_SHA256"
+            ),
             "scanner-identity": "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_IDENTITY",
+            "scanner-java-database-metadata": (
+                "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_JAVA_DATABASE_METADATA_SHA256"
+            ),
             "scanner-policy": "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_POLICY_SHA256",
         }[mutation]
         entry = next(value for value in environment if value["name"] == field)
@@ -1060,11 +1098,91 @@ def test_acceptance_status_matrix_fails_closed_on_exact_binding_drift(
         "management-readiness-path",
         "runtime-handler",
         "runtime-profile",
+        "scanner-cache-identity",
+        "scanner-database-metadata",
         "scanner-identity",
+        "scanner-java-database-metadata",
         "scanner-policy",
     }:
         assert result.application_ready is False
         assert result.capacity_publication_ready is True
+
+
+@pytest.mark.parametrize("mode", ["shadow", "acceptance"])
+@pytest.mark.parametrize(
+    ("drift", "blocker"),
+    [
+        ("init-image", "workload_image_drift"),
+        ("init-argument", "resource_inventory_drift"),
+        ("init-root-mount", "resource_inventory_drift"),
+        ("generation-subpath", "resource_inventory_drift"),
+        ("cache-path", "resource_inventory_drift"),
+        ("fanal-limit", "resource_inventory_drift"),
+        ("node-architecture", "resource_inventory_drift"),
+    ],
+)
+def test_status_blocks_release_bound_scanner_cache_workload_drift(
+    tmp_path: Path,
+    mode: str,
+    drift: str,
+    blocker: str,
+) -> None:
+    if mode == "shadow":
+        expected, runner = _healthy_fixture(tmp_path)
+        plan = None
+    else:
+        expected, plan, runner = _acceptance_healthy_fixture(tmp_path)
+    deployment = _item(
+        runner,
+        _NAMESPACED,
+        "Deployment",
+        "loom-personal-dev-management",
+    )
+    pod = deployment["spec"]["template"]["spec"]
+    init = next(
+        item
+        for item in pod["initContainers"]
+        if item["name"] == "personal-dev-scanner-cache-init"
+    )
+    service = next(item for item in pod["containers"] if item["name"] == "management")
+
+    if drift == "init-image":
+        init["image"] = (
+            "ghcr.io/qianyi-sun/loom-personal-dev-scanner-cache@sha256:" + "9" * 64
+        )
+    elif drift == "init-argument":
+        init["args"][-1] = "9" * 64
+    elif drift == "init-root-mount":
+        next(
+            mount for mount in init["volumeMounts"] if mount["name"] == "scanner-cache"
+        )["mountPath"] = "/tmp/scanner-cache"
+    elif drift == "generation-subpath":
+        next(
+            mount for mount in service["volumeMounts"] if mount["name"] == "scanner-cache"
+        )["subPath"] = "generations/" + "9" * 64
+    elif drift == "cache-path":
+        next(
+            entry
+            for entry in service["env"]
+            if entry["name"] == "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_CACHE_DIR"
+        )["value"] = "/var/lib/loom-personal-dev-scanner"
+    elif drift == "fanal-limit":
+        next(volume for volume in pod["volumes"] if volume["name"] == "scanner-fanal")[
+            "emptyDir"
+        ]["sizeLimit"] = "8Gi"
+    elif drift == "node-architecture":
+        pod["nodeSelector"]["kubernetes.io/arch"] = "arm64"
+    else:  # pragma: no cover - parameter table is exhaustive
+        raise AssertionError(drift)
+
+    result = (
+        _observe(expected, runner)
+        if plan is None
+        else _observe_acceptance(expected, plan, runner)
+    )
+
+    assert result.ready is False
+    assert blocker in result.blockers
 
 
 def test_acceptance_observer_rejects_invalid_local_inputs_before_any_call(

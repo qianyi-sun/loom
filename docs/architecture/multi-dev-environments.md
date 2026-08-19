@@ -35,6 +35,16 @@ every personal projection advances the global epoch, and other environments
 share the same authority, so advancement is valid while regression fails the
 acceptance interlock.
 
+Both shadow and acceptance also prepare one release-bound scanner cache, as
+specified by the
+[scanner-cache preparation architecture](personal-dev-scanner-cache-preparation.md).
+Trusted-release schema 2 adds `personal_dev_scanner_cache` and binds the
+checked-in lock, Trivy binary, databases, metadata, and framed cache identity.
+Only the init container mounts the scanner PVC root; management mounts the
+exact generation plus a bounded disposable `fanal/` overlay. Preparation does
+not enable the personal lifecycle, publish executable capacity, or create a
+personal namespace, and the global executable ceiling remains zero.
+
 ## Checked-in interfaces
 
 The candidate-aware lifecycle has a high-level CLI entry point as well as
@@ -165,10 +175,12 @@ lifecycle operation and queues the first build attempt.
 
 The restricted builder is separately gated by
 `LOOM_SVC_PERSONAL_DEV_BUILDER_ENABLED`, which also defaults to `false`.
-Startup validates its immutable builder image, RuntimeClass, scanner and
-offline database identity, finding-policy digest, registry tools and
-publisher, trusted launcher profile, and protocol map. If the builder is not
-available, candidate apply fails with `503` before lifecycle mutation.
+Startup validates its immutable builder image, RuntimeClass, release-bound
+scanner cache, finding-policy digest, registry tools and publisher, trusted
+launcher profile, and protocol map. It rehashes the Trivy binary, both offline
+databases and metadata files, and canonical generation identity before any
+build authority is constructed. If the builder is not available, candidate
+apply fails with `503` before lifecycle mutation.
 
 An enabled build uses lease-fenced amd64 and arm64 jobs for the complete
 personal image set. Build jobs have no service-account token, registry

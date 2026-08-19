@@ -38,9 +38,25 @@ def _canonical(value: object) -> bytes:
     ).encode("ascii")
 
 
+def _scanner_value() -> dict[str, str]:
+    return {
+        "binary_platform": "linux/amd64",
+        "binary_sha256": "b" * 64,
+        "cache_identity_sha256": (
+            "b1c136b8577f3813c62588d6930db21b0f2343b7f70278836741387c43c33761"
+        ),
+        "database_metadata_sha256": "c" * 64,
+        "database_sha256": "d" * 64,
+        "java_database_metadata_sha256": "e" * 64,
+        "java_database_sha256": "f" * 64,
+        "lock_sha256": "1" * 64,
+        "trivy_version": "v0.70.0",
+    }
+
+
 def _release_value() -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "source_sha": "1" * 40,
         "source_tree": "2" * 40,
         "images": {
@@ -51,10 +67,14 @@ def _release_value() -> dict[str, Any]:
             "personal_dev_activation_agent": (
                 "ghcr.io/qianyi-sun/loom-personal-dev-activation-agent@sha256:" + "5" * 64
             ),
+            "personal_dev_scanner_cache": (
+                "ghcr.io/qianyi-sun/loom-personal-dev-scanner-cache@sha256:" + "a" * 64
+            ),
             "postgres": "docker.io/library/postgres@sha256:" + "6" * 64,
             "minio": "quay.io/minio/minio@sha256:" + "7" * 64,
             "minio_client": "quay.io/minio/mc@sha256:" + "9" * 64,
         },
+        "scanner": _scanner_value(),
         "release_evidence_sha256": "8" * 64,
     }
 
@@ -116,9 +136,16 @@ def _plan_value(
             "runtime_handler": "runsc-personal-dev",
             "runtime_profile_sha256": "d" * 64,
             "trusted_launcher_profile_sha256": "e" * 64,
-            "scanner_binary_sha256": "f" * 64,
-            "scanner_database_sha256": "1" * 64,
-            "scanner_java_database_sha256": "2" * 64,
+            "scanner_binary_sha256": release.scanner.binary_sha256,
+            "scanner_cache_identity_sha256": release.scanner.cache_identity_sha256,
+            "scanner_database_sha256": release.scanner.database_sha256,
+            "scanner_database_metadata_sha256": (
+                release.scanner.database_metadata_sha256
+            ),
+            "scanner_java_database_sha256": release.scanner.java_database_sha256,
+            "scanner_java_database_metadata_sha256": (
+                release.scanner.java_database_metadata_sha256
+            ),
             "scanner_finding_policy_sha256": "3" * 64,
             "publisher_identity": profile.builder.publisher_identity,
             "registry_prefix": profile.builder.registry_prefix,
@@ -193,6 +220,16 @@ def test_acceptance_plan_loads_exact_owner_only_canonical_contract(tmp_path: Pat
     assert plan.manager.execution_epoch == 0
     assert plan.manager.executable_new_capacity_ceiling == 0
     assert plan.builder.runtime_handler == "runsc-personal-dev"
+    assert plan.builder.scanner_binary_sha256 == release.scanner.binary_sha256
+    assert plan.builder.scanner_cache_identity_sha256 == (
+        release.scanner.cache_identity_sha256
+    )
+    assert plan.builder.scanner_database_metadata_sha256 == (
+        release.scanner.database_metadata_sha256
+    )
+    assert plan.builder.scanner_java_database_metadata_sha256 == (
+        release.scanner.java_database_metadata_sha256
+    )
     assert plan.quotas.per_owner_aggregate_min_slots == 8
     assert [str(owner.user_id) for owner in plan.acceptance_owners] == [
         "00000000-0000-0000-0000-000000000301",
@@ -378,6 +415,21 @@ def test_acceptance_plan_rejects_path_replacement_race(
             personal_dev_builder=(
                 "ghcr.io/qianyi-sun/loom-personal-dev-builder@sha256:" + "d" * 64
             )
+        ),
+        lambda value: value["release"]["images"].update(
+            personal_dev_scanner_cache=(
+                "ghcr.io/qianyi-sun/loom-personal-dev-scanner-cache@sha256:" + "2" * 64
+            )
+        ),
+        lambda value: value["builder"].update(scanner_binary_sha256="2" * 64),
+        lambda value: value["builder"].update(scanner_cache_identity_sha256="2" * 64),
+        lambda value: value["builder"].update(scanner_database_sha256="2" * 64),
+        lambda value: value["builder"].update(
+            scanner_database_metadata_sha256="2" * 64
+        ),
+        lambda value: value["builder"].update(scanner_java_database_sha256="2" * 64),
+        lambda value: value["builder"].update(
+            scanner_java_database_metadata_sha256="2" * 64
         ),
         lambda value: value["storage"].update(schema_head="0097"),
         lambda value: value["builder"].update(runtime_class_name="other-runtime"),

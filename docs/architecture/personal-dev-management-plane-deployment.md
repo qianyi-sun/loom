@@ -2,10 +2,11 @@
 
 ## Status and purpose
 
-The personal candidate, lifecycle, builder, activation, teardown, and capacity
-projection code is implemented, but an ordinary Loom deployment leaves it
-disabled. The repository currently has no protected package that deploys the
-shared management plane needed to exercise those paths with two owners.
+The personal candidate, lifecycle, builder, activation, teardown, capacity
+projection, and render-only shared-management package are implemented, but an
+ordinary Loom deployment leaves the personal mutation paths disabled. The
+package includes deterministic preparation of one exact release-bound scanner
+cache; its live shadow deployment and acceptance remain controlled operations.
 
 This design adds that package without reintroducing a shared development
 application. `loom-dev` contains trusted shared infrastructure only. Candidate
@@ -34,9 +35,9 @@ The following repository capabilities already exist:
 - the capacity-manager package separately renders a shadow or prepared
   zero-ceiling global authority in `loom-dev`.
 
-The missing operational capability is a deterministic, reviewable deployment
-of the personal management service and its shared storage, credential, RBAC,
-network, migration, builder, and activation dependencies. The generic cluster
+The dedicated package is the deterministic, reviewable deployment of the
+personal management service and its shared storage, credential, RBAC, network,
+migration, scanner, builder, and activation dependencies. The generic cluster
 renderer is not that capability: it renders a shared Control Plane, Gateway,
 web application, and other components that do not belong in `loom-dev` under
 the accepted personal topology. The old rollout broker is also not a suitable
@@ -81,6 +82,12 @@ namespace unless Kubernetes requires cluster scope:
   withholds readiness until both exist;
 - an immutable, release-bound migration Job for the management database, with
   a bounded database wait and a dedicated DNS/PostgreSQL-only egress policy;
+- a 20 GiB scanner-cache PVC plus the immutable
+  `personal_dev_scanner_cache` image. A credential-free init container alone
+  mounts the PVC root and atomically prepares the exact digest-named generation;
+  management mounts only that generation and overlays its `fanal/` directory
+  with a bounded disposable volume. The complete design is the
+  [scanner-cache preparation architecture](personal-dev-scanner-cache-preparation.md);
 - `loom-service` as the management API and lifecycle reconciler, using the
   trusted release's immutable service image;
 - `loom-personal-dev-activation-agent`, using its separately published immutable
@@ -145,11 +152,12 @@ reimplementing its constructors in CEL would not contain a process that
 already holds the lifecycle, publisher, and shared-storage credentials.
 
 The builder RuntimeClass is an independently installed cluster capability. The
-shadow package records its exact future name but sets builder preparation to
-false; it does not invent a runtime handler or claim an unmeasured scanner or
-runtime digest. The later acceptance plan binds the reviewed handler/profile,
-scanner, offline database, and policy digests. Acceptance status fails until
-those observed values match the plan.
+shadow package records its exact future name and prepares the release-bound
+scanner cache, while builder preparation remains false. The protected trusted
+release binds the scanner binary, both databases and metadata files, cache
+identity, checked-in source lock, and immutable cache image. The later
+acceptance plan additionally binds the reviewed RuntimeClass handler/profile
+and finding policy. Acceptance status fails until all observed values match.
 
 ## Configuration and immutable release binding
 
@@ -172,6 +180,8 @@ The render command requires complete digest references for:
 - `loom-service`;
 - `loom-personal-dev-builder`;
 - `loom-personal-dev-activation-agent`;
+- `loom-personal-dev-scanner-cache`, represented by
+  `personal_dev_scanner_cache` in trusted-release schema 2;
 - PostgreSQL; and
 - MinIO plus the separate MinIO client sidecar used for bounded tenant
   administration.
@@ -179,10 +189,12 @@ The render command requires complete digest references for:
 Mutable tags, missing architectures, zero digests, duplicate repositories, or
 an image set from different trusted releases fail before YAML is written. The
 trusted release record binds the exact source commit, source tree, per-platform
-members, and final multi-architecture digests. Every managed workload records
-the canonical render-input digest and trusted-release digest. The final YAML
-digest is external evidence because embedding it in the YAML itself would be a
-self-referential hash; the later acceptance plan binds that external digest.
+members, final multi-architecture digests, checked-in scanner lock, scanner
+binary, database files and metadata, and framed cache identity. Every managed
+workload records the canonical render-input digest and trusted-release digest.
+The final YAML digest is external evidence because embedding it in the YAML
+itself would be a self-referential hash; the later acceptance plan binds that
+external digest.
 
 Shadow rendering is the default. Acceptance rendering additionally requires an
 owner-only canonical JSON plan and its independently supplied SHA-256. The plan
@@ -204,6 +216,13 @@ The file must be a current-user-owned, non-symlink, single-link regular file
 with mode `0600`, canonical JSON bytes, no trailing newline, and an exact digest
 match. It is control evidence, not a credential.
 
+Repository implementation does not establish the live prerequisites by
+itself. DNS, provisioned Secret inventories, the measured gVisor RuntimeClass,
+candidate GHCR publication, backup/restore evidence, and two-owner acceptance
+remain separate operational gates. None may be inferred from a successful
+render or from scanner-cache preparation, and the executable ceiling remains
+zero throughout these gates.
+
 ## Credential boundaries
 
 The renderer never creates Secret values. The operator provisions three
@@ -222,8 +241,8 @@ receives the activation private key. The activation agent never receives
 database, MinIO root, registry publisher, capacity lifecycle, or capacity
 reporter authority. Candidate and builder pods receive neither authority.
 
-Init containers copy file-shaped credentials from one pinned Kubernetes Secret
-projection into memory-backed runtime directories, require the exact file-key
+Credential init containers copy file-shaped credentials from one pinned
+Kubernetes Secret projection into memory-backed runtime directories, require the exact file-key
 set, and install owner-only regular files. They detect projection-generation
 changes and fail closed rather than mix credentials. Application containers
 mount only the copied directories read-only; they do not mount the raw
@@ -249,6 +268,8 @@ be accepted and no stable personal route can be changed.
 
 - every observed image and manifest digest matches the render;
 - storage is ready and the migration Job completed at the exact schema head;
+- the release-bound scanner cache init completed and management mounts only the
+  expected digest-named generation;
 - credential init completed without exposing Secret bytes;
 - the management service is healthy with both mutation features disabled;
 - the activation agent is absent or scaled to zero;
@@ -267,10 +288,12 @@ so a path or in-place rewrite cannot change the authority it consumes.
 The acceptance manifest uses the same immutable release and persistent storage,
 pins the canonical acceptance plan, enables the personal controller and
 restricted builder, and scales the activation agent to one. Before becoming
-ready, the management service validates all builder and credential inputs and
-connects to the exact global-manager identity. Any missing or changed binding,
-stale plan, nonzero manager ceiling, or unready dependency keeps the service
-unready and the agent unable to obtain an intent.
+ready, the management service rehashes the installed scanner binary, both
+databases and metadata files, and canonical cache identity before constructing
+builder, registry, or Kubernetes clients. It also validates all credential
+inputs and connects to the exact global-manager identity. Any missing or
+changed binding, stale plan, nonzero manager ceiling, or unready dependency
+keeps the service unready and the agent unable to obtain an intent.
 
 Acceptance status distinguishes application readiness, capacity publication,
 and worker availability. For this phase, application and non-executable
@@ -323,6 +346,8 @@ Repository verification includes:
   `loom-dev-shared`, nonzero ceilings, pool weights, and enabled in-cluster or
   personal Slurm controllers;
 - credential projection race, ownership, mode, link, size, and exact-key tests;
+- atomic scanner generation, protected ownership/mode, startup rehash, render,
+  and status-drift tests;
 - shadow and acceptance status matrices with manager identity/ceiling drift;
 - startup tests proving disabled shadow behavior and fail-closed acceptance;
 - server-side diff tests against an isolated disposable cluster; and

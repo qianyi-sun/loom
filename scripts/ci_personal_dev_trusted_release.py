@@ -11,24 +11,36 @@ import os
 import re
 import stat
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-if __package__:
-    from scripts.ci_image_release_evidence import (
-        EvidenceError,
-        validate_architecture_record,
-        validate_manifest_subjects,
+if TYPE_CHECKING:
+    from src.loom.personal_dev_scanner_cache import (
+        PersonalDevScannerCacheError,
+        PersonalDevScannerCacheFiles,
+        PersonalDevScannerCacheLock,
+        load_personal_dev_scanner_cache_lock,
     )
-else:  # pragma: no cover - direct workflow script entry point
-    from ci_image_release_evidence import (
-        EvidenceError,
-        validate_architecture_record,
-        validate_manifest_subjects,
+else:
+    from loom.personal_dev_scanner_cache import (
+        PersonalDevScannerCacheError,
+        PersonalDevScannerCacheFiles,
+        PersonalDevScannerCacheLock,
+        load_personal_dev_scanner_cache_lock,
     )
+
+if __package__ in {None, ""}:  # pragma: no cover - direct workflow script entry point
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts.ci_image_release_evidence import (
+    EvidenceError,
+    validate_architecture_record,
+    validate_manifest_subjects,
+)
 
 _MAX_INPUT_BYTES = 1024 * 1024
+_MAX_SCANNER_BINARY_BYTES = 512 * 1024 * 1024
 _HEX40 = re.compile(r"[0-9a-f]{40}")
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 _REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
@@ -49,6 +61,11 @@ _INTERNAL_IMAGES: dict[str, dict[str, str]] = {
         "release_key": "personal_dev_activation_agent",
         "image_name": "loom-personal-dev-activation-agent",
         "dockerfile": "deploy/Dockerfile.personal-dev-activation-agent",
+    },
+    "personal-dev-scanner-cache": {
+        "release_key": "personal_dev_scanner_cache",
+        "image_name": "loom-personal-dev-scanner-cache",
+        "dockerfile": "deploy/Dockerfile.personal-dev-scanner-cache",
     },
 }
 _EXTERNAL_REPOSITORIES = {
@@ -106,7 +123,14 @@ def _file_identity(metadata: os.stat_result) -> tuple[int, ...]:
     )
 
 
-def _read_bounded_file(path: Path, label: str, limit: int) -> bytes:
+def _read_bounded_file(
+    path: Path,
+    label: str,
+    limit: int,
+    *,
+    consumer: Callable[[bytes], object] | None = None,
+    capture: bool = True,
+) -> bytes:
     descriptor: int | None = None
     try:
         path_before = path.lstat()
@@ -128,20 +152,25 @@ def _read_bounded_file(path: Path, label: str, limit: int) -> bytes:
         opened = os.fstat(descriptor)
         if _file_identity(opened) != _file_identity(path_before):
             raise TrustedReleaseError(f"{label} is invalid")
-        payload = bytearray()
-        while len(payload) <= limit:
-            chunk = os.read(descriptor, min(64 * 1024, limit + 1 - len(payload)))
+        payload = bytearray() if capture else None
+        total = 0
+        while total <= limit:
+            chunk = os.read(descriptor, min(64 * 1024, limit + 1 - total))
             if not chunk:
                 break
-            payload.extend(chunk)
+            total += len(chunk)
+            if consumer is not None:
+                consumer(chunk)
+            if payload is not None:
+                payload.extend(chunk)
         if (
-            len(payload) != opened.st_size
-            or len(payload) > limit
+            total != opened.st_size
+            or total > limit
             or _file_identity(os.fstat(descriptor)) != _file_identity(opened)
             or _file_identity(path.lstat()) != _file_identity(path_before)
         ):
             raise TrustedReleaseError(f"{label} is invalid")
-        return bytes(payload)
+        return bytes(payload) if payload is not None else b""
     except TrustedReleaseError:
         raise
     except OSError:
@@ -149,6 +178,18 @@ def _read_bounded_file(path: Path, label: str, limit: int) -> bytes:
     finally:
         if descriptor is not None:
             os.close(descriptor)
+
+
+def _bounded_file_sha256(path: Path, label: str, limit: int) -> str:
+    digest = hashlib.sha256()
+    _read_bounded_file(
+        path,
+        label,
+        limit,
+        consumer=digest.update,
+        capture=False,
+    )
+    return digest.hexdigest()
 
 
 def _read_json(path: Path, label: str) -> tuple[object, bytes]:
@@ -199,6 +240,120 @@ def _exact_text(pattern: re.Pattern[str], value: str, label: str) -> str:
     if not isinstance(value, str) or pattern.fullmatch(value) is None:
         raise TrustedReleaseError(f"{label} is invalid")
     return value
+
+
+def _sha256_digest(value: object, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or _HEX64.fullmatch(value) is None
+        or value == "0" * 64
+    ):
+        raise TrustedReleaseError(f"{label} is invalid")
+    return value
+
+
+def _scanner_source_record(
+    value: object,
+    *,
+    source_image: str,
+    source_layer_sha256: str,
+    label: str,
+) -> dict[str, str]:
+    expected_keys = {"image", "layer_sha256", "metadata_sha256", "sha256"}
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != expected_keys
+        or value.get("image") != source_image
+        or value.get("layer_sha256") != source_layer_sha256
+    ):
+        raise TrustedReleaseError(f"{label} is invalid")
+    return {
+        "image": source_image,
+        "layer_sha256": source_layer_sha256,
+        "metadata_sha256": _sha256_digest(
+            value.get("metadata_sha256"), f"{label} metadata digest"
+        ),
+        "sha256": _sha256_digest(value.get("sha256"), f"{label} digest"),
+    }
+
+
+def _scanner_binding(
+    *,
+    evidence_value: object,
+    lock: PersonalDevScannerCacheLock,
+    scanner_binary_amd64_sha256: str,
+    scanner_binary_arm64_sha256: str,
+) -> tuple[dict[str, str], dict[str, object]]:
+    expected_keys = {
+        "binary_platform",
+        "binary_sha256",
+        "database",
+        "java_database",
+        "lock_sha256",
+        "schema_version",
+        "trivy_version",
+    }
+    if (
+        not isinstance(evidence_value, Mapping)
+        or set(evidence_value) != expected_keys
+        or type(evidence_value.get("schema_version")) is not int
+        or evidence_value.get("schema_version") != 1
+        or evidence_value.get("binary_platform") != "linux/amd64"
+        or evidence_value.get("trivy_version") != lock.trivy_version
+        or evidence_value.get("lock_sha256") != lock.sha256
+        or evidence_value.get("binary_sha256") != scanner_binary_amd64_sha256
+        or scanner_binary_amd64_sha256 != lock.binary_sha256["linux/amd64"]
+        or scanner_binary_arm64_sha256 != lock.binary_sha256["linux/arm64"]
+    ):
+        raise TrustedReleaseError("scanner cache evidence is invalid")
+    database = _scanner_source_record(
+        evidence_value.get("database"),
+        source_image=lock.database.image,
+        source_layer_sha256=lock.database.layer_sha256,
+        label="scanner database evidence",
+    )
+    java_database = _scanner_source_record(
+        evidence_value.get("java_database"),
+        source_image=lock.java_database.image,
+        source_layer_sha256=lock.java_database.layer_sha256,
+        label="scanner Java database evidence",
+    )
+    files = PersonalDevScannerCacheFiles(
+        database_sha256=database["sha256"],
+        database_metadata_sha256=database["metadata_sha256"],
+        java_database_sha256=java_database["sha256"],
+        java_database_metadata_sha256=java_database["metadata_sha256"],
+    )
+    scanner_without_identity = {
+        "binary_platform": "linux/amd64",
+        "binary_sha256": scanner_binary_amd64_sha256,
+        "database_metadata_sha256": files.database_metadata_sha256,
+        "database_sha256": files.database_sha256,
+        "java_database_metadata_sha256": files.java_database_metadata_sha256,
+        "java_database_sha256": files.java_database_sha256,
+        "lock_sha256": lock.sha256,
+        "trivy_version": lock.trivy_version,
+    }
+    cache_identity_sha256 = hashlib.sha256(
+        b"loom-personal-dev-scanner-cache-v1\0"
+        + _canonical_json(scanner_without_identity)
+    ).hexdigest()
+    scanner = {
+        **scanner_without_identity,
+        "cache_identity_sha256": cache_identity_sha256,
+    }
+    scanner_evidence: dict[str, object] = {
+        "binary_sha256": {
+            "linux/amd64": scanner_binary_amd64_sha256,
+            "linux/arm64": scanner_binary_arm64_sha256,
+        },
+        "cache_identity_frame": "loom-personal-dev-scanner-cache-v1",
+        "database": database,
+        "java_database": java_database,
+        "lock_sha256": lock.sha256,
+        "trivy_version": lock.trivy_version,
+    }
+    return scanner, scanner_evidence
 
 
 def _external_images(value: object) -> dict[str, dict[str, object]]:
@@ -282,6 +437,10 @@ def assemble_personal_dev_trusted_release(
     records_dir: Path,
     manifests_dir: Path,
     external_images_file: Path,
+    scanner_cache_lock_file: Path,
+    scanner_cache_evidence_file: Path,
+    scanner_binary_amd64_file: Path,
+    scanner_binary_arm64_file: Path,
     repository: str,
     ref_name: str,
     source_sha: str,
@@ -293,7 +452,7 @@ def assemble_personal_dev_trusted_release(
     repository_owner_id: str,
     runner_environment: str,
 ) -> tuple[dict[str, object], dict[str, object]]:
-    """Validate six indexes and return canonical release and evidence values."""
+    """Validate seven indexes and return canonical release and evidence values."""
 
     repository = _exact_text(_REPOSITORY, repository, "repository")
     if ref_name not in {"dev", "main"}:
@@ -327,6 +486,29 @@ def assemble_personal_dev_trusted_release(
         external_images_file, "external image binding"
     )
     external = _external_images(external_value)
+    try:
+        scanner_lock = load_personal_dev_scanner_cache_lock(scanner_cache_lock_file)
+    except PersonalDevScannerCacheError as exc:
+        raise TrustedReleaseError("scanner cache lock is invalid") from exc
+    scanner_evidence_value, _scanner_evidence_bytes = _read_canonical_json(
+        scanner_cache_evidence_file, "scanner cache evidence"
+    )
+    scanner_binary_amd64_sha256 = _bounded_file_sha256(
+        scanner_binary_amd64_file,
+        "AMD64 scanner binary",
+        _MAX_SCANNER_BINARY_BYTES,
+    )
+    scanner_binary_arm64_sha256 = _bounded_file_sha256(
+        scanner_binary_arm64_file,
+        "ARM64 scanner binary",
+        _MAX_SCANNER_BINARY_BYTES,
+    )
+    scanner, scanner_evidence = _scanner_binding(
+        evidence_value=scanner_evidence_value,
+        lock=scanner_lock,
+        scanner_binary_amd64_sha256=scanner_binary_amd64_sha256,
+        scanner_binary_arm64_sha256=scanner_binary_arm64_sha256,
+    )
 
     release_images: dict[str, str] = {}
     internal_evidence: dict[str, object] = {}
@@ -422,7 +604,7 @@ def assemble_personal_dev_trusted_release(
         raise TrustedReleaseError("trusted image index digests must be distinct")
 
     evidence: dict[str, object] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "release": {
             "repository": repository,
             "ref": f"refs/heads/{ref_name}",
@@ -433,12 +615,14 @@ def assemble_personal_dev_trusted_release(
         },
         "internal_images": internal_evidence,
         "external_images": external_evidence,
+        "scanner": scanner_evidence,
     }
     release: dict[str, object] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "source_sha": source_sha,
         "source_tree": source_tree,
         "images": release_images,
+        "scanner": scanner,
         "release_evidence_sha256": hashlib.sha256(_canonical_json(evidence)).hexdigest(),
     }
     return release, evidence
@@ -448,6 +632,10 @@ def _common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--records-dir", type=Path, required=True)
     parser.add_argument("--manifests-dir", type=Path, required=True)
     parser.add_argument("--external-images-file", type=Path, required=True)
+    parser.add_argument("--scanner-cache-lock-file", type=Path, required=True)
+    parser.add_argument("--scanner-cache-evidence-file", type=Path, required=True)
+    parser.add_argument("--scanner-binary-amd64-file", type=Path, required=True)
+    parser.add_argument("--scanner-binary-arm64-file", type=Path, required=True)
     parser.add_argument("--repository", required=True)
     parser.add_argument("--ref-name", required=True)
     parser.add_argument("--source-sha", required=True)
@@ -467,6 +655,10 @@ def _common_values(arguments: argparse.Namespace) -> dict[str, Any]:
             "records_dir",
             "manifests_dir",
             "external_images_file",
+            "scanner_cache_lock_file",
+            "scanner_cache_evidence_file",
+            "scanner_binary_amd64_file",
+            "scanner_binary_arm64_file",
             "repository",
             "ref_name",
             "source_sha",

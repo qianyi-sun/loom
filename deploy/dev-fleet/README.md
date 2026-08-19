@@ -40,13 +40,23 @@ Both the personal-management shadow and the global-capacity zero-ceiling shadow
 must report ready before the later acceptance interlock can be considered.
 Neither shadow readiness enables personal mutations or physical capacity.
 
+Both modes render the same release-bound scanner cache preparation. Trusted
+release schema 2 adds the immutable `personal_dev_scanner_cache` image and
+binds it to the checked-in lock, scanner binary, both databases and metadata,
+and one digest-named generation. The init has no Secret or API-token mount;
+management never mounts the PVC root. Preparing this cache leaves lifecycle
+and builder flags false in shadow and leaves the executable ceiling at zero.
+
 After both shadows and one exact protected release are ready, use the
 [zero-capacity acceptance runbook](../../docs/runbooks/personal-dev-zero-capacity-acceptance.md).
 Its `render-acceptance` and `status-acceptance` commands bind the enabled
 management plane to an owner-only acceptance plan, exact global-manager
 execution identity, a monotonic configuration-epoch floor, ceiling zero,
-reviewed builder/scanner inputs, and an immutable rollback shadow. Repository
-assets alone do not authorize its live apply.
+reviewed builder/scanner inputs, and an immutable rollback shadow. Live DNS,
+Secret provisioning, measured gVisor, candidate GHCR publication,
+backup/restore evidence, and two-owner acceptance remain separate operational
+gates. Repository assets alone do not authorize their mutation or the live
+acceptance apply.
 
 `personal-dev-activation-agent.yaml.example` is the operator template for the
 independently keyed stable-route activation agent. Replace its image and Secret
