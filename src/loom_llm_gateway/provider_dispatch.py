@@ -9,7 +9,7 @@ from decimal import ROUND_CEILING, Decimal
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.auth import AuthContext
@@ -374,6 +374,11 @@ async def settle_stale_provider_dispatches(
     if not 1 <= limit <= 1000:
         raise ValueError("limit must be between 1 and 1000")
     async with session.begin():
+        # Recovery must never become a Gateway shutdown or readiness blocker
+        # behind a live request's accounting locks. A timed-out sweep rolls
+        # back without mutating the dispatch and retries on the next interval.
+        await session.execute(text("SET LOCAL lock_timeout = '1s'"))
+        await session.execute(text("SET LOCAL statement_timeout = '5s'"))
         rows = (
             await session.execute(
                 select(PipelineProviderDispatch, PipelineStageRun, PipelineRun)

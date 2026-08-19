@@ -53,6 +53,10 @@ async def _reconcile_provider_dispatches(
 ) -> None:
     stale_after = max(1.0, upstream_timeout_seconds) + _PROVIDER_DISPATCH_SETTLEMENT_GRACE_SECONDS
     while True:
+        # Do not race startup/short-lived probes or shutdown with a recovery
+        # transaction. Rows are already held past the upstream timeout plus a
+        # grace period, so one bounded sweep interval preserves semantics.
+        await asyncio.sleep(_PROVIDER_DISPATCH_SWEEP_INTERVAL_SECONDS)
         try:
             async with session_factory() as session:
                 settled = await settle_stale_provider_dispatches(
@@ -68,7 +72,6 @@ async def _reconcile_provider_dispatches(
             raise
         except Exception:
             logger.exception("provider_dispatch_reconciliation_failed")
-        await asyncio.sleep(_PROVIDER_DISPATCH_SWEEP_INTERVAL_SECONDS)
 
 
 def _load_admin_secret_verifier(
