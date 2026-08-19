@@ -435,9 +435,7 @@ def _stage_progress_projection(
     }
 
 
-async def _progress_by_run(
-    sc: SessionAndCtx, run_ids: list[UUID]
-) -> dict[UUID, dict[str, Any]]:
+async def _progress_by_run(sc: SessionAndCtx, run_ids: list[UUID]) -> dict[UUID, dict[str, Any]]:
     if not run_ids:
         return {}
     rows = (
@@ -501,9 +499,7 @@ async def _stage_page(
         )
     rows = list(
         (
-            await sc[0].execute(
-                statement.order_by(node_order, shard_order).limit(query.limit + 1)
-            )
+            await sc[0].execute(statement.order_by(node_order, shard_order).limit(query.limit + 1))
         ).scalars()
     )
     has_more = len(rows) > query.limit
@@ -707,6 +703,7 @@ async def get_pipeline_run(request: Request, sc: SessionAndCtx, run_id: UUID) ->
     ledger = await sc[0].get(PipelineBudgetLedger, run.id)
     body = run_projection(run)
     body["progress"] = progress
+    body["topology"] = _graph_topology_projection(run.graph_spec_json)
     body["stages"] = stages
     body["stages_next_cursor"] = stages_next_cursor
     body["artifacts"] = artifacts
@@ -765,9 +762,7 @@ async def list_pipeline_artifacts(
 ) -> dict[str, Any]:
     run = await _run_for_team(sc, run_id)
     try:
-        query = PipelineArtifactListQueryV1.model_validate(
-            {"cursor": cursor, "limit": limit}
-        )
+        query = PipelineArtifactListQueryV1.model_validate({"cursor": cursor, "limit": limit})
         items, next_cursor = await _artifact_page(request, sc, run=run, query=query)
     except PipelineApiError as exc:
         raise _error(exc) from exc
@@ -1612,6 +1607,33 @@ def _graph_topology(graph: dict[str, Any]) -> dict[str, tuple[int, list[str]]]:
         return level
 
     return {key: (resolve(key), needs) for key, needs in needs_by_key.items()}
+
+
+def _graph_topology_projection(graph: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the complete bounded graph shape independently of StageRun paging."""
+
+    topology = _graph_topology(graph)
+    raw_nodes = graph.get("nodes") if isinstance(graph, dict) else None
+    kinds: dict[str, str] = {}
+    if isinstance(raw_nodes, list):
+        for raw in raw_nodes:
+            if (
+                isinstance(raw, dict)
+                and isinstance(raw.get("node_key"), str)
+                and raw.get("node_kind") in {"container", "gate"}
+            ):
+                kinds[raw["node_key"]] = cast(str, raw["node_kind"])
+    return [
+        {
+            "node_key": key,
+            "node_kind": kinds.get(key, "container"),
+            "topological_level": level,
+            "upstream_node_keys": upstream,
+        }
+        for key, (level, upstream) in sorted(
+            topology.items(), key=lambda item: (item[1][0], item[0].encode("utf-8"))
+        )
+    ]
 
 
 def _resource_projection(item: PipelineStageRun) -> tuple[str | None, str]:

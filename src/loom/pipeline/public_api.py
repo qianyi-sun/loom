@@ -303,6 +303,13 @@ class PipelineNodeProgressV1(PipelineReadModel):
     domain_outcomes: dict[str, NonNegativeSafeInt]
 
 
+class PipelineNodeTopologyV1(PipelineReadModel):
+    node_key: NodeKey
+    node_kind: PipelineNodeKind
+    topological_level: NonNegativeSafeInt
+    upstream_node_keys: list[NodeKey]
+
+
 class PipelineRunProgressV1(PipelineReadModel):
     total_stage_runs: NonNegativeSafeInt
     completed_stage_runs: NonNegativeSafeInt
@@ -314,9 +321,9 @@ class PipelineRunProgressV1(PipelineReadModel):
 class PipelineStageRunListQueryV1(PipelineModel):
     node_key: NodeKey | None = None
     state: PipelineStageRunState | None = None
-    domain_outcome: Annotated[
-        str, StringConstraints(pattern=r"^[a-z][a-z0-9_.-]{0,127}$")
-    ] | None = None
+    domain_outcome: (
+        Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_.-]{0,127}$")] | None
+    ) = None
     cursor: Annotated[str, StringConstraints(min_length=1, max_length=4096)] | None = None
     limit: Annotated[int, Field(strict=True, ge=1, le=500)] = 200
 
@@ -431,6 +438,7 @@ class PipelineRunDetailV1(PipelineReadModel):
     cancellation_requested_at: datetime | None
     source_budget: RunBudgetV1
     progress: PipelineRunProgressV1
+    topology: Annotated[list[PipelineNodeTopologyV1], Field(max_length=128)]
     stages: Annotated[list[PipelineStageRunSummaryV1], Field(max_length=500)]
     stages_next_cursor: str | None
     artifacts: Annotated[list[PipelineArtifactSummaryV1], Field(max_length=200)]
@@ -763,6 +771,7 @@ __all__ = [
     "PipelineIdempotencyEndpoint",
     "PipelineMutationResultV1",
     "PipelineNodeProgressV1",
+    "PipelineNodeTopologyV1",
     "PipelineOfficialRecipeSubmitter",
     "PipelineRecipeBindingResolver",
     "PipelineRunCancelRequestV1",

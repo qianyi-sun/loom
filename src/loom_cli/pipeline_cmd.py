@@ -342,8 +342,7 @@ def _stage1_prepare_candidate(args: argparse.Namespace) -> int:
         _stage1_document_from_mapping(data, model=Stage1SmokeCandidateV1),
     )
     _emit(
-        candidate.model_dump(mode="json")
-        | {"candidate_sha256": candidate.candidate_sha256},
+        candidate.model_dump(mode="json") | {"candidate_sha256": candidate.candidate_sha256},
         json_output=_json_mode(args),
         heading="Stage 1 candidate prepared (no live mutation)",
     )
@@ -584,6 +583,44 @@ def _show(args: argparse.Namespace) -> int:
     with authed_client(cfg) as client:
         data = _request_json(
             client, "GET", f"/api/v1/pipeline-runs/{run_id}", action="show pipeline run"
+        )
+    _emit(data, json_output=_json_mode(args))
+    return 0
+
+
+def _stages(args: argparse.Namespace) -> int:
+    run_id = _uuid(args.run_id, label="run ID")
+    params: dict[str, Any] = {"limit": args.limit}
+    for key in ("node_key", "state", "domain_outcome", "cursor"):
+        value = getattr(args, key)
+        if value is not None:
+            params[key] = value
+    cfg = require_logged_in()
+    with authed_client(cfg) as client:
+        data = _request_json(
+            client,
+            "GET",
+            f"/api/v1/pipeline-runs/{run_id}/stages",
+            action="list pipeline StageRuns",
+            params=params,
+        )
+    _emit(data, json_output=_json_mode(args))
+    return 0
+
+
+def _artifacts(args: argparse.Namespace) -> int:
+    run_id = _uuid(args.run_id, label="run ID")
+    params: dict[str, Any] = {"limit": args.limit}
+    if args.cursor is not None:
+        params["cursor"] = args.cursor
+    cfg = require_logged_in()
+    with authed_client(cfg) as client:
+        data = _request_json(
+            client,
+            "GET",
+            f"/api/v1/pipeline-runs/{run_id}/artifacts",
+            action="list pipeline Artifacts",
+            params=params,
         )
     _emit(data, json_output=_json_mode(args))
     return 0
@@ -1234,6 +1271,37 @@ def _build_parser() -> argparse.ArgumentParser:
     show.add_argument("run_id")
     _add_json(show)
     show.set_defaults(handler=_show)
+
+    stages = sub.add_parser("stages", help="Page through authorized StageRuns")
+    stages.add_argument("run_id")
+    stages.add_argument("--node-key")
+    stages.add_argument(
+        "--state",
+        choices=(
+            "blocked",
+            "ready",
+            "queued",
+            "claimed",
+            "running",
+            "retry_wait",
+            "succeeded",
+            "failed",
+            "cancelled",
+            "skipped",
+        ),
+    )
+    stages.add_argument("--domain-outcome")
+    stages.add_argument("--cursor")
+    stages.add_argument("--limit", type=int, choices=range(1, 501), default=200)
+    _add_json(stages)
+    stages.set_defaults(handler=_stages)
+
+    artifacts = sub.add_parser("artifacts", help="Page through authorized run Artifacts")
+    artifacts.add_argument("run_id")
+    artifacts.add_argument("--cursor")
+    artifacts.add_argument("--limit", type=int, choices=range(1, 201), default=100)
+    _add_json(artifacts)
+    artifacts.set_defaults(handler=_artifacts)
 
     watch = sub.add_parser(
         "watch", help="Poll monotonic Pipeline events; Ctrl-C stops watching without cancelling"

@@ -231,6 +231,9 @@ async def test_submit_request_is_closed_and_requires_idempotency_header(
 
 async def test_get_run_projects_stages_artifacts_and_budget_without_internal_fields() -> None:
     run = _run()
+    run.graph_spec_json = {
+        "nodes": [{"node_key": "evaluate", "node_kind": "container", "needs": []}]
+    }
     stage_id = uuid4()
     artifact_id = uuid4()
     stage = SimpleNamespace(
@@ -297,6 +300,14 @@ async def test_get_run_projects_stages_artifacts_and_budget_without_internal_fie
         f"/api/v1/pipeline-artifacts/{artifact_id}/download"
     )
     assert body["budget"]["max_provider_cost_usd"]["settled"] == 125_000
+    assert body["topology"] == [
+        {
+            "node_key": "evaluate",
+            "node_kind": "container",
+            "topological_level": 0,
+            "upstream_node_keys": [],
+        }
+    ]
     assert "team_id" not in body
     assert "graph_spec_json" not in body
 
@@ -368,7 +379,9 @@ def _stage(run_id: UUID, *, shard_key: str, state: str = "succeeded") -> SimpleN
 
 async def test_stage_run_page_is_bounded_and_returns_durable_progress() -> None:
     run = _run()
-    run.graph_spec_json = {"nodes": [{"node_key": "evaluate", "needs": []}]}
+    run.graph_spec_json = {
+        "nodes": [{"node_key": "evaluate", "node_kind": "container", "needs": []}]
+    }
     first = _stage(run.id, shard_key="slot-0001")
     second = _stage(run.id, shard_key="slot-0002")
     aggregate = [(run.id, "evaluate", "succeeded", "accepted", 2)]
@@ -378,9 +391,7 @@ async def test_stage_run_page_is_bounded_and_returns_durable_progress() -> None:
         transport=httpx.ASGITransport(app=_app(session, _context(team_id=run.team_id))),
         base_url="http://svc",
     ) as client:
-        response = await client.get(
-            f"/api/v1/pipeline-runs/{run.id}/stages", params={"limit": 1}
-        )
+        response = await client.get(f"/api/v1/pipeline-runs/{run.id}/stages", params={"limit": 1})
 
     assert response.status_code == 200, response.text
     body = response.json()
@@ -405,7 +416,9 @@ async def test_stage_run_page_is_bounded_and_returns_durable_progress() -> None:
 
 async def test_stage_run_cursor_is_signed_and_filter_bound() -> None:
     run = _run()
-    run.graph_spec_json = {"nodes": [{"node_key": "evaluate", "needs": []}]}
+    run.graph_spec_json = {
+        "nodes": [{"node_key": "evaluate", "node_kind": "container", "needs": []}]
+    }
     first = _stage(run.id, shard_key="slot-0001")
     second = _stage(run.id, shard_key="slot-0002")
     aggregate = [(run.id, "evaluate", "succeeded", "accepted", 2)]
@@ -431,6 +444,18 @@ async def test_stage_run_cursor_is_signed_and_filter_bound() -> None:
         )
     assert second_response.status_code == 200, second_response.text
     assert [item["id"] for item in second_response.json()["items"]] == [str(second.id)]
+
+    filter_session = _Session(_Result(run))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(filter_session, context)),
+        base_url="http://svc",
+    ) as client:
+        changed_filter = await client.get(
+            f"/api/v1/pipeline-runs/{run.id}/stages",
+            params={"limit": 1, "node_key": "other", "cursor": cursor},
+        )
+    assert changed_filter.status_code == 422
+    assert changed_filter.json()["detail"]["reason_code"] == "invalid_cursor"
 
     tampered_session = _Session(_Result(run))
     async with httpx.AsyncClient(
