@@ -9,11 +9,14 @@ import json
 import os
 import platform
 import re
+import selectors
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -191,25 +194,62 @@ def _open_verified_trivy(path: Path, lock: PersonalDevScannerCacheLock) -> tuple
 
 
 def _bounded_command_output(command: list[str]) -> bytes:
+    process: subprocess.Popen[bytes] | None = None
+    stdout: Any = None
+    completed = False
     try:
-        with tempfile.TemporaryFile() as output:
-            result = subprocess.run(
-                command,
-                stdin=subprocess.DEVNULL,
-                stdout=output,
-                stderr=subprocess.DEVNULL,
-                check=False,
-                timeout=60,
-            )
-            if result.returncode != 0 or output.tell() > _MAX_MANIFEST_BYTES:
-                raise _failure()
-            output.seek(0)
-            payload = output.read(_MAX_MANIFEST_BYTES + 1)
-    except (OSError, subprocess.SubprocessError):
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        stdout = process.stdout
+        if stdout is None:
+            raise OSError("manifest inspection stdout is unavailable")
+        payload = bytearray()
+        deadline = time.monotonic() + 60
+        with selectors.DefaultSelector() as selector:
+            selector.register(stdout, selectors.EVENT_READ)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not selector.select(remaining):
+                    raise subprocess.TimeoutExpired(command, 60)
+                chunk = os.read(
+                    stdout.fileno(),
+                    min(64 * 1024, _MAX_MANIFEST_BYTES + 1 - len(payload)),
+                )
+                if not chunk:
+                    break
+                payload.extend(chunk)
+                if len(payload) > _MAX_MANIFEST_BYTES:
+                    raise OverflowError("manifest inspection output exceeds the bound")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(command, 60)
+        returncode = process.wait(timeout=remaining)
+        if returncode != 0:
+            raise subprocess.CalledProcessError(returncode, command)
+        completed = True
+    except (OSError, OverflowError, subprocess.SubprocessError):
         raise _failure() from None
-    if not 0 < len(payload) <= _MAX_MANIFEST_BYTES:
+    finally:
+        if process is not None and not completed:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        if stdout is not None:
+            stdout.close()
+    if not payload:
         raise _failure()
-    return payload
+    return bytes(payload)
 
 
 def _verify_manifest(

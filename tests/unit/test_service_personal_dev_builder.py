@@ -21,6 +21,18 @@ _ROOT = Path(__file__).resolve().parents[2]
 @pytest.fixture(autouse=True)
 def _management_uid(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(builder_module.os, "geteuid", lambda: 65532)
+    monkeypatch.setattr(
+        builder_module,
+        "_SCANNER_CACHE_PROTECTED_UID",
+        _FILE_OWNER_UID,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        builder_module,
+        "_SCANNER_CACHE_PROTECTED_GID",
+        os.getegid(),
+        raising=False,
+    )
 
 
 def _settings(tmp_path: Path, **overrides):
@@ -195,6 +207,8 @@ def test_builder_runtime_rejects_placeholder_safety_authority(tmp_path: Path) ->
         "protected-hardlink",
         "fanal-symlink",
         "management-owned-generation",
+        "unexpected-protected-owner",
+        "unexpected-protected-group",
         "noncanonical-identity",
         "nonfinite-identity",
         "duplicate-identity-field",
@@ -266,6 +280,20 @@ def test_builder_runtime_revalidates_release_bound_scanner_cache(
         cache.chmod(0o555)
     elif drift == "management-owned-generation":
         monkeypatch.setattr(builder_module.os, "geteuid", lambda: _FILE_OWNER_UID)
+    elif drift == "unexpected-protected-owner":
+        monkeypatch.setattr(
+            builder_module,
+            "_SCANNER_CACHE_PROTECTED_UID",
+            _FILE_OWNER_UID + 1,
+            raising=False,
+        )
+    elif drift == "unexpected-protected-group":
+        monkeypatch.setattr(
+            builder_module,
+            "_SCANNER_CACHE_PROTECTED_GID",
+            os.getegid() + 1,
+            raising=False,
+        )
     elif drift in {
         "noncanonical-identity",
         "nonfinite-identity",

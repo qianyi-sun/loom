@@ -66,6 +66,8 @@ _SCANNER_CACHE_IDENTITY_KEYS = frozenset(
 _MAX_SCANNER_DATABASE_BYTES = 4 * 1024 * 1024 * 1024
 _MAX_SCANNER_METADATA_BYTES = 64 * 1024
 _MAX_SCANNER_IDENTITY_BYTES = 4096
+_SCANNER_CACHE_PROTECTED_UID = 65531
+_SCANNER_CACHE_PROTECTED_GID = 65532
 _DIRECTORY_OPEN_FLAGS = (
     os.O_RDONLY
     | getattr(os, "O_CLOEXEC", 0)
@@ -187,12 +189,14 @@ def _open_cache_directory(
     name: str,
     *,
     protected_owner: int,
+    protected_group: int,
 ) -> int:
     metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
     if (
         not stat.S_ISDIR(metadata.st_mode)
         or stat.S_ISLNK(metadata.st_mode)
         or metadata.st_uid != protected_owner
+        or metadata.st_gid != protected_group
         or stat.S_IMODE(metadata.st_mode) != 0o555
     ):
         raise _scanner_cache_binding_error()
@@ -222,6 +226,7 @@ def _read_cache_file(
     name: str,
     *,
     protected_owner: int,
+    protected_group: int,
     maximum_bytes: int,
     capture: bool,
 ) -> tuple[str, bytes | None]:
@@ -230,6 +235,7 @@ def _read_cache_file(
         not stat.S_ISREG(metadata.st_mode)
         or metadata.st_nlink != 1
         or metadata.st_uid != protected_owner
+        or metadata.st_gid != protected_group
         or stat.S_IMODE(metadata.st_mode) != 0o444
         or not 0 < metadata.st_size <= maximum_bytes
     ):
@@ -281,6 +287,8 @@ def _installed_scanner_cache_binding(
         if (
             not stat.S_ISDIR(metadata.st_mode)
             or stat.S_ISLNK(metadata.st_mode)
+            or metadata.st_uid != _SCANNER_CACHE_PROTECTED_UID
+            or metadata.st_gid != _SCANNER_CACHE_PROTECTED_GID
             or metadata.st_uid == os.geteuid()
             or stat.S_IMODE(metadata.st_mode) != 0o555
         ):
@@ -296,11 +304,13 @@ def _installed_scanner_cache_binding(
                 or not _directory_entries_match(root, _SCANNER_CACHE_ROOT_ENTRIES)
             ):
                 raise _scanner_cache_binding_error()
-            protected_owner = opened.st_uid
+            protected_owner = _SCANNER_CACHE_PROTECTED_UID
+            protected_group = _SCANNER_CACHE_PROTECTED_GID
             identity_digest, identity_payload = _read_cache_file(
                 root,
                 "identity.json",
                 protected_owner=protected_owner,
+                protected_group=protected_group,
                 maximum_bytes=_MAX_SCANNER_IDENTITY_BYTES,
                 capture=True,
             )
@@ -336,6 +346,7 @@ def _installed_scanner_cache_binding(
                     root,
                     directory_name,
                     protected_owner=protected_owner,
+                    protected_group=protected_group,
                 )
                 try:
                     if not _directory_entries_match(child, expected_entries):
@@ -347,6 +358,7 @@ def _installed_scanner_cache_binding(
                         child,
                         database_name,
                         protected_owner=protected_owner,
+                        protected_group=protected_group,
                         maximum_bytes=_MAX_SCANNER_DATABASE_BYTES,
                         capture=False,
                     )
@@ -354,6 +366,7 @@ def _installed_scanner_cache_binding(
                         child,
                         "metadata.json",
                         protected_owner=protected_owner,
+                        protected_group=protected_group,
                         maximum_bytes=_MAX_SCANNER_METADATA_BYTES,
                         capture=False,
                     )

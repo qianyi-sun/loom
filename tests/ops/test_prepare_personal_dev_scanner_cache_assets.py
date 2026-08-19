@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import scripts.prepare_personal_dev_scanner_cache_assets as scanner_cache_assets
 from scripts.prepare_personal_dev_scanner_cache_assets import (
     prepare_personal_dev_scanner_cache_assets,
     verify_personal_dev_scanner_cache_assets,
@@ -112,6 +113,12 @@ if sys.argv[1:5] != ["buildx", "imagetools", "inspect", "--raw"] or len(sys.argv
 reference = sys.argv[5]
 with Path(os.environ["LOOM_TEST_DOCKER_LOG"]).open("a", encoding="utf-8") as stream:
     stream.write(reference + "\\n")
+if os.environ.get("LOOM_TEST_OVERSIZED_MANIFEST") == "1":
+    for _ in range(256):
+        sys.stdout.buffer.write(b"x" * (64 * 1024))
+        sys.stdout.buffer.flush()
+    Path(os.environ["LOOM_TEST_OVERSIZED_MARKER"]).write_text("finished")
+    raise SystemExit(0)
 manifests = json.loads(Path(os.environ["LOOM_TEST_MANIFESTS"]).read_text(encoding="ascii"))
 sys.stdout.write(json.dumps(manifests[reference], sort_keys=True, separators=(",", ":")))
 """
@@ -204,7 +211,7 @@ def _case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Case:
         "layer_sha256": java_database_layer,
     }
     lock = tmp_path / "scanner-cache-lock.json"
-    lock.write_bytes(_canonical(value) + b"\n")
+    lock.write_bytes(_canonical(value))
 
     trivy_log = tmp_path / "trivy.log"
     docker_log = tmp_path / "docker.log"
@@ -523,7 +530,7 @@ def test_materializer_rejects_oci_manifest_drift(
     manifests_path.write_bytes(_canonical(manifests))
     lock_value = json.loads(case.lock.read_bytes())
     lock_value["database"]["image"] = new_reference
-    case.lock.write_bytes(_canonical(lock_value) + b"\n")
+    case.lock.write_bytes(_canonical(lock_value))
     monkeypatch.setenv("LOOM_TEST_DB_REF", new_reference)
 
     with pytest.raises(PersonalDevScannerCacheError, match="preparation failed"):
@@ -531,3 +538,34 @@ def test_materializer_rejects_oci_manifest_drift(
 
     assert not case.output.exists()
     assert not case.trivy_log.exists()
+
+
+def test_manifest_inspection_stops_an_oversized_producer_at_the_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = _case(tmp_path, monkeypatch)
+    marker = tmp_path / "oversized-producer-finished"
+    monkeypatch.setenv("LOOM_TEST_OVERSIZED_MANIFEST", "1")
+    monkeypatch.setenv("LOOM_TEST_OVERSIZED_MARKER", str(marker))
+
+    with pytest.raises(PersonalDevScannerCacheError, match="preparation failed"):
+        prepare_personal_dev_scanner_cache_assets(case.lock, case.trivy, case.output)
+
+    assert not marker.exists()
+    assert not case.output.exists()
+    assert not case.trivy_log.exists()
+
+
+def test_manifest_inspection_cleanup_does_not_mask_command_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def denied_process_group_kill(_process_group: int, _signal: int) -> None:
+        raise PermissionError("process group is already outside this namespace")
+
+    monkeypatch.setattr(scanner_cache_assets.os, "killpg", denied_process_group_kill)
+
+    with pytest.raises(PersonalDevScannerCacheError, match="preparation failed"):
+        scanner_cache_assets._bounded_command_output(
+            [sys.executable, "-c", "raise SystemExit(23)"]
+        )

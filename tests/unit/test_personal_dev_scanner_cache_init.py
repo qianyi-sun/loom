@@ -174,6 +174,27 @@ def test_installer_publishes_exact_protected_generation(tmp_path: Path) -> None:
     assert fanal.stat().st_gid == os.getegid()
 
 
+def test_installer_enforces_generation_modes_under_restrictive_umask(
+    tmp_path: Path,
+) -> None:
+    source = _source(tmp_path, "source")
+    destination = _destination(tmp_path)
+    binding = _binding(source)
+    previous_umask = os.umask(0o077)
+    try:
+        installed = install_personal_dev_scanner_cache(
+            source,
+            destination,
+            expected=binding,
+        )
+    finally:
+        os.umask(previous_umask)
+
+    assert stat.S_IMODE((destination / "generations").stat().st_mode) == 0o755
+    assert stat.S_IMODE(installed.stat().st_mode) == 0o555
+    assert stat.S_IMODE((installed / "db/trivy.db").stat().st_mode) == 0o444
+
+
 def test_identical_install_is_idempotent(tmp_path: Path) -> None:
     source = _source(tmp_path, "source")
     destination = _destination(tmp_path)

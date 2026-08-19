@@ -312,9 +312,6 @@ expected, while regression is a stop condition.
       for path in "$backup_restore_evidence" "$runtime_profile" "$trusted_launcher_profile" "$scanner_finding_policy" "$acceptance_render" "$acceptance_render_evidence" "$shadow_render" "$shadow_render_evidence"; do
         assert_owner_only_file "$path"
       done
-      assert_owner_only_file "$scanner_binary" 536870912
-      assert_owner_only_file "$scanner_database" 4294967296
-      assert_owner_only_file "$scanner_java_database" 4294967296
       test "$(git rev-parse HEAD)" = "$(jq -r .source_sha "$trusted_release")"
       test "$(git rev-parse HEAD^{tree})" = "$(jq -r .source_tree "$trusted_release")"
       test -z "$(git status --porcelain=v1 --untracked-files=all)"

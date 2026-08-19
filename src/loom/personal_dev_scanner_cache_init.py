@@ -397,24 +397,36 @@ def _verify_source(snapshot: _SourceSnapshot, expected: PersonalDevScannerCacheB
 
 
 def _open_generations(destination: int) -> int:
+    created = False
     try:
         metadata = os.stat("generations", dir_fd=destination, follow_symlinks=False)
     except FileNotFoundError:
-        os.mkdir("generations", 0o755, dir_fd=destination)
+        os.mkdir("generations", 0o700, dir_fd=destination)
+        created = True
         metadata = os.stat("generations", dir_fd=destination, follow_symlinks=False)
     if (
         not stat.S_ISDIR(metadata.st_mode)
         or stat.S_ISLNK(metadata.st_mode)
         or metadata.st_uid != os.geteuid()
         or metadata.st_gid != os.getegid()
-        or stat.S_IMODE(metadata.st_mode) != 0o755
+        or (not created and stat.S_IMODE(metadata.st_mode) != 0o755)
     ):
         raise _invalid()
     descriptor, opened = _open_directory_at(destination, "generations")
-    if _file_identity(opened) != _file_identity(metadata):
+    try:
+        if _file_identity(opened) != _file_identity(metadata):
+            raise _invalid()
+        if created:
+            os.fchmod(descriptor, 0o755)
+            os.fsync(descriptor)
+            os.fsync(destination)
+            opened = os.fstat(descriptor)
+        if stat.S_IMODE(opened.st_mode) != 0o755:
+            raise _invalid()
+        return descriptor
+    except BaseException:
         os.close(descriptor)
-        raise _invalid()
-    return descriptor
+        raise
 
 
 def _acquire_installer_lock(destination: int) -> int:

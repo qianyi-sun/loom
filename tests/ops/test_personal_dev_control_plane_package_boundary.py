@@ -463,6 +463,12 @@ def test_zero_capacity_acceptance_runbook_preserves_stop_and_authority_boundarie
         "scanner_java_database=",
     ):
         assert legacy_input not in runbook
+    for legacy_reference in (
+        '"$scanner_binary"',
+        '"$scanner_database"',
+        '"$scanner_java_database"',
+    ):
+        assert legacy_reference not in runbook
     assert "kubectl cp" not in lowered
     assert "--download-db-only" not in lowered
     assert "--download-java-db-only" not in lowered

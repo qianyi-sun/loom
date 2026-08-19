@@ -32,12 +32,12 @@ def _write(tmp_path: Path, value: object) -> Path:
             ensure_ascii=True,
             allow_nan=False,
         ).encode("ascii")
-        + b"\n"
     )
     return path
 
 
 def test_checked_in_scanner_cache_lock_is_exact() -> None:
+    assert not _LOCK.read_bytes().endswith(b"\n")
     lock = load_personal_dev_scanner_cache_lock(_LOCK)
 
     assert lock.schema_version == 1
@@ -116,7 +116,7 @@ def test_scanner_cache_lock_rejects_schema_or_digest_drift(
         load_personal_dev_scanner_cache_lock(path)
 
 
-@pytest.mark.parametrize("variant", ["pretty", "duplicate", "no-newline"])
+@pytest.mark.parametrize("variant", ["pretty", "duplicate", "trailing-newline"])
 def test_scanner_cache_lock_rejects_noncanonical_json(tmp_path: Path, variant: str) -> None:
     value = _value()
     path = tmp_path / "scanner-cache-lock.json"
@@ -125,7 +125,7 @@ def test_scanner_cache_lock_rejects_noncanonical_json(tmp_path: Path, variant: s
     elif variant == "duplicate":
         path.write_bytes(_LOCK.read_bytes().replace(b'{"binary_sha256":', b'{"x":1,"x":2,"binary_sha256":'))
     else:
-        path.write_bytes(_LOCK.read_bytes().removesuffix(b"\n"))
+        path.write_bytes(_LOCK.read_bytes() + b"\n")
 
     with pytest.raises(PersonalDevScannerCacheError, match="lock is invalid"):
         load_personal_dev_scanner_cache_lock(path)

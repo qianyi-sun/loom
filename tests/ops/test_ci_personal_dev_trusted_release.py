@@ -122,7 +122,7 @@ def _write_scanner_inputs(root: Path) -> dict[str, object]:
         "schema_version": 1,
         "trivy_version": "v0.70.0",
     }
-    lock_bytes = _canonical(lock) + b"\n"
+    lock_bytes = _canonical(lock)
     paths["scanner_cache_lock_file"].write_bytes(lock_bytes)
     database_sha256 = hashlib.sha256(_DATABASE).hexdigest()
     database_metadata_sha256 = hashlib.sha256(_DATABASE_METADATA).hexdigest()
@@ -291,7 +291,7 @@ def test_assembly_binds_exact_internal_external_and_release_evidence(
         b"loom-personal-dev-scanner-cache-v1\0" + _canonical(scanner_without_identity)
     ).hexdigest()
     assert cache_identity_sha256 == (
-        "372f0a621475d46ed71fb32a49e6768053049dd39cdd5686a0bd44a20d85a610"
+        "65d47d7144c565e8d0f5c0c28a2e21e502b8a0ce3f062a22cc870895f84af28d"
     )
     scanner = {
         **scanner_without_identity,
@@ -373,7 +373,7 @@ def test_assembly_streams_scanner_binary_hashes_with_bounded_memory(
         "linux/amd64": hashlib.sha256(amd64_binary).hexdigest(),
         "linux/arm64": hashlib.sha256(arm64_binary).hexdigest(),
     }
-    lock_bytes = _canonical(lock) + b"\n"
+    lock_bytes = _canonical(lock)
     paths["scanner_cache_lock_file"].write_bytes(lock_bytes)
     evidence = json.loads(paths["scanner_cache_evidence_file"].read_bytes())
     evidence["binary_sha256"] = lock["binary_sha256"]["linux/amd64"]
@@ -465,7 +465,7 @@ def test_assembly_rejects_scanner_input_drift(tmp_path: Path, drift: str) -> Non
     elif drift == "lock":
         lock = json.loads(paths["scanner_cache_lock_file"].read_bytes())
         lock["binary_sha256"]["linux/amd64"] = "f" * 64
-        paths["scanner_cache_lock_file"].write_bytes(_canonical(lock) + b"\n")
+        paths["scanner_cache_lock_file"].write_bytes(_canonical(lock))
     else:
         evidence = json.loads(paths["scanner_cache_evidence_file"].read_bytes())
         if drift == "evidence-binary":
