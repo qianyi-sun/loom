@@ -11,12 +11,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from loom.integrations.terminalgen.authority import terminalgen_validation_argv
 from loom.integrations.terminalgen.contracts import (
     EXPECTED_CARD_COUNT,
     AuthoringImageLockV1,
     AuthoringParametersV1,
 )
+from loom.integrations.terminalgen.validation_policy import terminalgen_validation_argv
 from loom.pipeline.spec import Digest, PipelineModel, RecipeIdentityV1, RunGraphSpecV1
 
 

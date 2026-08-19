@@ -30,6 +30,10 @@ from loom.integrations.terminalgen.recipe import (
     TerminalGenRendererLocksV1,
     build_terminalgen_authoring_graph,
 )
+from loom.integrations.terminalgen.validation_policy import (
+    TERMINALGEN_VALIDATION_POLICY_DIGEST,
+    terminalgen_validation_argv,
+)
 
 _AUTHORITY_EXPORTS = frozenset(
     {
@@ -37,12 +41,10 @@ _AUTHORITY_EXPORTS = frozenset(
         "TERMINALGEN_RECIPE_NAME",
         "TERMINALGEN_RECIPE_VERSION",
         "TERMINALGEN_RUNTIME_POLICY_DIGEST",
-        "TERMINALGEN_VALIDATION_POLICY_DIGEST",
         "TerminalGenAuthorityError",
         "TerminalGenPoolPolicy",
         "build_terminalgen_authoring_grant",
         "build_terminal_task_validation_grant",
-        "terminalgen_validation_argv",
     }
 )
 
