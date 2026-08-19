@@ -141,10 +141,13 @@ only after the node-local verifier passes against the active generated
 containerd config. The full digest is also recorded in the node annotation
 `loom.dev/personal-dev-runtime-profile-sha256` for human and evidence review.
 
-Acceptance status derives the two label values from the plan's exact runtime
-profile digest and requires the RuntimeClass scheduling object to equal that
-selector. A handler and annotation without exact scheduling are insufficient.
-The dynamic builder manifest supplies no architecture node selector. Both
+The non-secret management profile records the exact runtime handler and runtime
+profile digest even while `prepared=false`. Shadow status derives the two label
+values from that digest and requires the RuntimeClass handler, annotation, and
+scheduling object to match. Acceptance status repeats the check against the
+acceptance plan and requires the plan binding to equal the non-secret profile.
+A handler and annotation without exact scheduling are insufficient. The
+dynamic builder manifest supplies no architecture node selector. Both
 target-platform Jobs consequently use the measured amd64 runtime nodes; the
 target platform remains bound in the immutable build contract and OCI output.
 
