@@ -806,6 +806,97 @@ def test_personal_dev_builder_runtime_hostname_identity_uses_dns_case_rules() ->
     assert behavior.returncode == 0, behavior.stderr
 
 
+def test_personal_dev_builder_runtime_longhorn_health_requires_live_readiness() -> None:
+    runbook = _read("docs/runbooks/personal-dev-builder-runtime.md")
+    jq_filters = re.findall(r"\bjq\b[^']*'(.*?)'", runbook, flags=re.DOTALL)
+    controller_filters = [
+        value
+        for value in jq_filters
+        if 'select(.kind == "Deployment")' in value
+        and "desiredNumberScheduled" in value
+    ]
+    pod_filters = [
+        value
+        for value in jq_filters
+        if '.status.phase != "Succeeded"' in value
+        and '.status.phase != "Failed"' in value
+        and "containerStatuses" in value
+    ]
+    assert len(controller_filters) == 1
+    assert len(pod_filters) == 1
+
+    def evaluate(
+        jq_filter: str, payload: dict[str, object]
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["jq", "-e", jq_filter],
+            input=json.dumps(payload),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    healthy_controllers: dict[str, object] = {
+        "items": [
+            {
+                "kind": "Deployment",
+                "metadata": {"generation": 4},
+                "spec": {"replicas": 3},
+                "status": {
+                    "availableReplicas": 3,
+                    "observedGeneration": 4,
+                    "readyReplicas": 3,
+                    "updatedReplicas": 3,
+                },
+            },
+            {
+                "kind": "DaemonSet",
+                "metadata": {"generation": 7},
+                "status": {
+                    "desiredNumberScheduled": 5,
+                    "numberAvailable": 5,
+                    "numberReady": 5,
+                    "observedGeneration": 7,
+                    "updatedNumberScheduled": 5,
+                },
+            },
+        ]
+    }
+    assert evaluate(controller_filters[0], healthy_controllers).returncode == 0
+    deployment_only = {"items": healthy_controllers["items"][:1]}
+    assert evaluate(controller_filters[0], deployment_only).returncode != 0
+    daemon_set_only = {"items": healthy_controllers["items"][1:]}
+    assert evaluate(controller_filters[0], daemon_set_only).returncode != 0
+    degraded_controllers = json.loads(json.dumps(healthy_controllers))
+    degraded_controllers["items"][0]["status"]["readyReplicas"] = 2
+    assert evaluate(controller_filters[0], degraded_controllers).returncode != 0
+    degraded_daemon_set = json.loads(json.dumps(healthy_controllers))
+    degraded_daemon_set["items"][1]["status"]["numberReady"] = 4
+    assert evaluate(controller_filters[0], degraded_daemon_set).returncode != 0
+
+    ready_with_history: dict[str, object] = {
+        "items": [
+            {
+                "status": {
+                    "containerStatuses": [{"ready": True}],
+                    "phase": "Running",
+                }
+            },
+            {"status": {"phase": "Failed", "reason": "Evicted"}},
+            {"status": {"phase": "Succeeded"}},
+        ]
+    }
+    assert evaluate(pod_filters[0], ready_with_history).returncode == 0
+    not_ready = json.loads(json.dumps(ready_with_history))
+    not_ready["items"][0]["status"]["containerStatuses"][0]["ready"] = False
+    assert evaluate(pod_filters[0], not_ready).returncode != 0
+    pending_with_ready = json.loads(json.dumps(ready_with_history))
+    pending_with_ready["items"].append({"status": {"phase": "Pending"}})
+    assert evaluate(pod_filters[0], pending_with_ready).returncode != 0
+    terminal_only = {"items": ready_with_history["items"][1:]}
+    assert evaluate(pod_filters[0], terminal_only).returncode != 0
+
+
 def test_personal_dev_builder_runtime_runbook_is_indexed_and_architecture_linked() -> None:
     for document in (
         _read("docs/runbooks/README.md"),
