@@ -240,6 +240,18 @@ def _archive_name(name: str) -> str:
     return name
 
 
+def _archive_parent_directories(
+    members: Mapping[str, RuntimeArchiveMember],
+) -> set[str]:
+    directories: set[str] = set()
+    for name in members:
+        parent = PurePosixPath(name).parent
+        while parent != PurePosixPath("."):
+            directories.add(str(parent))
+            parent = parent.parent
+    return directories
+
+
 def _write_member(
     bundle: tarfile.TarFile,
     member: tarfile.TarInfo,
@@ -309,21 +321,35 @@ def _extract_verified_archive(
             raise PersonalDevBuilderRuntimeInstallError("archive_invalid")
         with os.fdopen(descriptor, "rb", closefd=False) as source:
             reader = _HashingReader(source)
-            seen: set[str] = set()
+            expected_directories = _archive_parent_directories(members)
+            seen_files: set[str] = set()
+            seen_directories: set[str] = set()
             try:
                 with tarfile.open(fileobj=cast(BinaryIO, reader), mode="r|bz2") as bundle:
                     for member in bundle:
                         name = _archive_name(member.name)
+                        if member.isdir():
+                            if (
+                                name not in expected_directories
+                                or name in seen_directories
+                                or member.size != 0
+                                or stat.S_IMODE(member.mode) != 0o755
+                            ):
+                                raise PersonalDevBuilderRuntimeInstallError(
+                                    "archive_member_invalid"
+                                )
+                            seen_directories.add(name)
+                            continue
                         expected = members.get(name)
                         if (
                             expected is None
-                            or name in seen
+                            or name in seen_files
                             or not member.isreg()
                             or member.size != expected.size
                             or stat.S_IMODE(member.mode) != expected.archive_mode
                         ):
                             raise PersonalDevBuilderRuntimeInstallError("archive_member_invalid")
-                        seen.add(name)
+                        seen_files.add(name)
                         target = destination.joinpath(*PurePosixPath(name).parts)
                         _write_member(
                             bundle,
@@ -337,7 +363,11 @@ def _extract_verified_archive(
                     pass
             except (OSError, tarfile.TarError, EOFError) as exc:
                 raise PersonalDevBuilderRuntimeInstallError("archive_invalid") from exc
-            if seen != set(members) or reader.digest.hexdigest() != archive_sha512:
+            if (
+                seen_files != set(members)
+                or seen_directories != expected_directories
+                or reader.digest.hexdigest() != archive_sha512
+            ):
                 raise PersonalDevBuilderRuntimeInstallError("archive_invalid")
         after = os.fstat(descriptor)
         if _identity(before) != _identity(after):

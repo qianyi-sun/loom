@@ -150,7 +150,8 @@ properties may appear in sanitized issue evidence.
 The archive is gVisor `release-20260810.0`, tag commit
 `5ceb9a5fd5750d6c73dd166441f28306039300d0`. Download it as the unprivileged
 operator. The node-local preflight independently streams and verifies the
-archive, its five members, modes, sizes, and hashes before installation.
+archive, its five regular-file members, required `gvisor-bin` directory entry,
+modes, sizes, and hashes before installation.
 
 ```bash
 archive="$evidence_dir/gvisor-release-20260810.0.tar.bz2"

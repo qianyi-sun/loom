@@ -66,8 +66,9 @@ templates, rootless BuildKit, GitHub Actions trusted image releases.
 
 - [ ] **Step 1: Write strict profile tests**
 
-  Add tests that load the checked-in profile, assert all five member identities,
-  assert the exact runsc and K3s bytes, and require the derived selector to be:
+  Add tests that load the checked-in profile, assert all five regular-file
+  member identities, assert the exact runsc and K3s bytes, and require the
+  derived selector to be:
 
   ```python
   assert profile.selector == {
@@ -271,8 +272,9 @@ templates, rootless BuildKit, GitHub Actions trusted image releases.
   Stream the supplied archive through `tarfile.open(mode="r|bz2")`. Validate a
   member before reading it, copy with `os.open(..., O_EXCL|O_NOFOLLOW)`, enforce
   the declared size while streaming, fsync, hash, chmod, and publish the
-  complete release directory only after all five members and the archive hash
-  match. Never use `extractall`.
+  complete release directory only after all five regular-file members, the
+  required `gvisor-bin` parent-directory entry, and the archive hash match.
+  Never use `extractall`.
 
 - [ ] **Step 5: Implement host preflight and exact publication**
 

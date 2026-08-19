@@ -124,7 +124,7 @@ def _small_profile() -> tuple[RuntimeProfile, dict[str, bytes]]:
 
 
 def _entries(profile: RuntimeProfile, payloads: dict[str, bytes]) -> list[ArchiveEntry]:
-    return [
+    entries = [
         ArchiveEntry(
             name=name,
             payload=payloads[name],
@@ -132,6 +132,15 @@ def _entries(profile: RuntimeProfile, payloads: dict[str, bytes]) -> list[Archiv
         )
         for name in profile.members
     ]
+    entries.insert(
+        2,
+        ArchiveEntry(
+            name="gvisor-bin",
+            mode=0o755,
+            kind=tarfile.DIRTYPE,
+        ),
+    )
+    return entries
 
 
 def _write_archive(path: Path, entries: Sequence[ArchiveEntry]) -> str:
@@ -247,6 +256,36 @@ def test_preflight_streams_the_exact_archive_without_publishing(tmp_path: Path) 
     _assert_unpublished(installer)
 
 
+def test_preflight_accepts_the_archives_explicit_parent_directory(
+    tmp_path: Path,
+) -> None:
+    profile, archive = _archive(tmp_path)
+    installer = _installer(tmp_path, profile)
+
+    receipt = installer.preflight(archive)
+
+    assert receipt["archive_sha512"] == profile.archive_sha512
+    _assert_unpublished(installer)
+
+
+def test_preflight_rejects_a_missing_explicit_parent_directory(
+    tmp_path: Path,
+) -> None:
+    def remove_explicit_parent(entries: list[ArchiveEntry]) -> None:
+        entries[:] = [entry for entry in entries if entry.name != "gvisor-bin"]
+
+    profile, archive = _archive(tmp_path, mutate=remove_explicit_parent)
+    installer = _installer(tmp_path, profile)
+
+    with pytest.raises(
+        PersonalDevBuilderRuntimeInstallError,
+        match="archive_invalid",
+    ):
+        installer.preflight(archive)
+
+    _assert_unpublished(installer)
+
+
 def test_preflight_reads_procfs_modules_when_stat_reports_zero_size(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -318,6 +357,20 @@ def _wrong_hash(entries: list[ArchiveEntry]) -> None:
     entries[0] = replace(entries[0], payload=bytes([payload[0] ^ 1]) + payload[1:])
 
 
+def _unexpected_directory(entries: list[ArchiveEntry]) -> None:
+    entries.append(ArchiveEntry("foreign", mode=0o755, kind=tarfile.DIRTYPE))
+
+
+def _wrong_directory_mode(entries: list[ArchiveEntry]) -> None:
+    index = next(index for index, entry in enumerate(entries) if entry.name == "gvisor-bin")
+    entries[index] = replace(entries[index], mode=0o700)
+
+
+def _duplicate_directory(entries: list[ArchiveEntry]) -> None:
+    directory = next(entry for entry in entries if entry.name == "gvisor-bin")
+    entries.append(directory)
+
+
 @pytest.mark.parametrize(
     "mutate",
     (
@@ -332,6 +385,9 @@ def _wrong_hash(entries: list[ArchiveEntry]) -> None:
         _wrong_size,
         _wrong_mode,
         _wrong_hash,
+        _unexpected_directory,
+        _wrong_directory_mode,
+        _duplicate_directory,
     ),
 )
 def test_archive_drift_is_rejected_before_publication(

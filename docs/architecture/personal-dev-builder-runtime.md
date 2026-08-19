@@ -56,8 +56,8 @@ file bytes, including the final newline. The profile fixes these inputs:
   `https://storage.googleapis.com/gvisor/releases/release/20260810/x86_64/gvisor.tar.bz2`;
 - archive SHA-512
   `3de91138cda15682c11807387f6ecad9e7c8932262018a2813277e1b4efa03efe33b0a948e148c6b1ccfe7345bfab5d5e0d072519505465751273898bae19c62`;
-- the exact five archive members, sizes, archive/install modes, and SHA-256
-  digests;
+- the exact five regular-file archive members, their required `gvisor-bin`
+  parent-directory entry, sizes, archive/install modes, and SHA-256 digests;
 - K3s `v1.36.2+k3s1`, containerd `v2.3.2-k3s2`, Linux amd64, `/dev/kvm`,
   and loaded `kvm` plus `kvm_intel` modules;
 - all installation paths, containerd handler bytes, and runsc flags; and
