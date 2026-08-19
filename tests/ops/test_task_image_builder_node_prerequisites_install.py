@@ -371,6 +371,23 @@ def test_slurm_alias_binding_failure_precedes_host_mutation(
     assert not fixture.install_base.exists()
 
 
+def test_comma_joined_node_names_are_not_one_inventory_member(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    fixture.policy.write_text(
+        fixture.policy.read_text(encoding="utf-8").replace(
+            'builder_nodes = ["node-1"]',
+            'builder_nodes = ["node-1", "node-2"]',
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run(fixture, "apply", slurm_node="node-1,node-2")
+
+    assert result.returncode == 1
+    assert "outside the cluster builder inventory" in result.stderr
+    assert "loom-builder" not in fixture.passwd_file.read_text(encoding="utf-8")
+
+
 @pytest.mark.parametrize("conflict", ["uid", "gid", "subuid", "docker-group", "other-group"])
 def test_identity_and_subid_conflicts_fail_closed(tmp_path: Path, conflict: str) -> None:
     fixture = _fixture(tmp_path)

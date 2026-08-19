@@ -633,15 +633,33 @@ loom_builder_slurm_check() {
 
 loom_builder_slurm_apply() {
   local cluster_id="$1"
+  local apply_failed=0
   loom_builder_slurm_preflight "$cluster_id"
   if [[ "$LOOM_PARTITION_CONVERGED" == "0" ]]; then
-    loom_builder_slurm_add_partition
+    if ! loom_builder_slurm_add_partition; then
+      apply_failed=1
+    fi
   fi
-  loom_builder_slurm_apply_accounting
-  loom_builder_slurm_validate_durable_config
-  loom_builder_slurm_validate_live_partitions
-  loom_builder_slurm_read_accounting
-  loom_builder_slurm_verify_legacy_fingerprint
+  if [[ "$apply_failed" == "0" ]] && ! loom_builder_slurm_apply_accounting; then
+    apply_failed=1
+  fi
+  if [[ "$apply_failed" == "0" ]] \
+    && ! loom_builder_slurm_validate_durable_config; then
+    apply_failed=1
+  fi
+  if [[ "$apply_failed" == "0" ]] \
+    && ! loom_builder_slurm_validate_live_partitions; then
+    apply_failed=1
+  fi
+  if [[ "$apply_failed" == "0" ]] && ! loom_builder_slurm_read_accounting; then
+    apply_failed=1
+  fi
+  if ! loom_builder_slurm_verify_legacy_fingerprint; then
+    return 1
+  fi
+  if [[ "$apply_failed" != "0" ]]; then
+    return 1
+  fi
   if [[ "$LOOM_PARTITION_CONVERGED" != "1" \
     || "$LOOM_ACCOUNT_CONVERGED" != "1" \
     || "$LOOM_QOS_CONVERGED" != "1" \

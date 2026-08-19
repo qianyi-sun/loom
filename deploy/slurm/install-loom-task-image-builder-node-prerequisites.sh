@@ -29,6 +29,8 @@ loom_node_load_policy() {
   local cluster_id="$1"
   local slurm_node="$2"
   local values=()
+  local expected_nodes=()
+  local expected_node inventory_match=0
   if [[ ! -f "$LOOM_POLICY_PATH" || -L "$LOOM_POLICY_PATH" ]]; then
     loom_node_error "prerequisite policy is unavailable"
     return
@@ -107,7 +109,13 @@ PY
     loom_node_error "host architecture does not match cluster policy"
     return
   fi
-  if [[ ",$LOOM_EXPECTED_NODES," != *",$slurm_node,"* ]]; then
+  IFS=, read -r -a expected_nodes <<<"$LOOM_EXPECTED_NODES"
+  for expected_node in "${expected_nodes[@]}"; do
+    if [[ "$expected_node" == "$slurm_node" ]]; then
+      inventory_match=1
+    fi
+  done
+  if [[ "$inventory_match" != "1" ]]; then
     loom_node_error "Slurm node is outside the cluster builder inventory"
     return
   fi

@@ -121,6 +121,13 @@ def test_qos_semantic_drift_is_rejected(payload: str) -> None:
         _verify_rootless_qos(payload)
 
 
+def test_oversized_integer_is_rejected_through_the_sanitized_error_type() -> None:
+    oversized = ROOTLESS_TRES.replace("|0|1|1|", f"|{'9' * 5_000}|1|1|")
+
+    with pytest.raises(ReadbackError):
+        _verify_rootless_qos(oversized)
+
+
 def test_absent_row_is_allowed_only_when_requested() -> None:
     assert (
         verify_qos(

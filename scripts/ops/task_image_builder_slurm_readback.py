@@ -52,7 +52,7 @@ def parse_parsable2_row(
 
 
 def _parse_unsigned_integer(value: str) -> int:
-    if _UNSIGNED_INTEGER.fullmatch(value) is None:
+    if len(value) > 20 or _UNSIGNED_INTEGER.fullmatch(value) is None:
         raise ReadbackError("integer field is invalid")
     return int(value)
 
@@ -61,10 +61,10 @@ def _parse_wall_seconds(value: str) -> int:
     matched = _WALL_TIME.fullmatch(value)
     if matched is None:
         raise ReadbackError("wall time is invalid")
-    days = int(matched.group("days") or "0")
-    hours = int(matched.group("hours"))
-    minutes = int(matched.group("minutes"))
-    seconds = int(matched.group("seconds"))
+    days = _parse_unsigned_integer(matched.group("days") or "0")
+    hours = _parse_unsigned_integer(matched.group("hours"))
+    minutes = _parse_unsigned_integer(matched.group("minutes"))
+    seconds = _parse_unsigned_integer(matched.group("seconds"))
     if hours > 23 or minutes > 59 or seconds > 59:
         raise ReadbackError("wall time is invalid")
     return (((days * 24) + hours) * 60 + minutes) * 60 + seconds
@@ -92,7 +92,7 @@ def _parse_memory_mib(value: str) -> int:
     matched = _MEMORY.fullmatch(value)
     if matched is None:
         raise ReadbackError("memory TRES is invalid")
-    amount = int(matched.group("amount"))
+    amount = _parse_unsigned_integer(matched.group("amount"))
     unit = matched.group("unit")
     if unit == "K":
         if amount % 1024:

@@ -270,6 +270,7 @@ case "$*" in
     printf 'loom-task-builder|\n' > "$LOOM_ACCOUNT_STATE"
     ;;
   "--immediate add qos name=loom-task-image-builder-rootless-test flags=DenyOnLimit Priority=0 MaxJobsPU=1 MaxSubmitJobsPU=1 MaxWall=02:00:00 GrpTRES=cpu=8,mem=32768M,node=1")
+    if [[ "${LOOM_ROOTLESS_QOS_ADD_FAIL:-0}" == "1" ]]; then exit 1; fi
     printf '%s' "$LOOM_DESIRED_QOS" > "$LOOM_ROOTLESS_QOS_STATE"
     ;;
   "--immediate add user name=loom-builder account=loom-task-builder cluster=test-cluster partition=loom-task-builder qos=loom-task-image-builder-rootless-test defaultqos=loom-task-image-builder-rootless-test")
@@ -307,6 +308,7 @@ def _run(
     builder_state: str = BUILDER_STATE,
     controller_identity_mode: str = "exact",
     post_apply_fingerprint_mismatch: bool = False,
+    rootless_qos_add_fails: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     owner = pwd.getpwuid(os.getuid()).pw_name
     group = grp.getgrgid(os.getgid()).gr_name
@@ -340,6 +342,7 @@ def _run(
         "LOOM_POST_APPLY_FINGERPRINT_MISMATCH": (
             "1" if post_apply_fingerprint_mismatch else "0"
         ),
+        "LOOM_ROOTLESS_QOS_ADD_FAIL": "1" if rootless_qos_add_fails else "0",
     }
     return subprocess.run(
         [
@@ -540,6 +543,18 @@ def test_post_apply_legacy_fingerprint_mismatch_fails_closed(tmp_path: Path) -> 
 
     assert result.returncode == 1
     assert "legacy builder fingerprint changed" in result.stderr
+
+
+def test_failed_partial_apply_still_verifies_legacy_fingerprint(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    fingerprint_count = fixture.config.parent / "fingerprint-count"
+
+    result = _run(fixture, "apply", rootless_qos_add_fails=True)
+
+    assert result.returncode == 1
+    assert "failed to add the rootless builder Slurm QoS" in result.stderr
+    assert fixture.account.read_text(encoding="utf-8") == "loom-task-builder|\n"
+    assert fingerprint_count.read_text(encoding="utf-8") == "2\n"
 
 
 def test_unsafe_authority_state_directory_fails_before_mutation(tmp_path: Path) -> None:
