@@ -17,7 +17,6 @@ LOOM_SUBGID_FILE="${LOOM_SUBGID_FILE:-/etc/subgid}"
 LOOM_INSTALL_OWNER="${LOOM_INSTALL_OWNER:-root}"
 LOOM_INSTALL_GROUP="${LOOM_INSTALL_GROUP:-root}"
 LOOM_HOST_ARCH="${LOOM_HOST_ARCH:-$(uname -m)}"
-LOOM_HOST_NODE="${LOOM_HOST_NODE:-$(hostname -s)}"
 LOOM_SKIP_HOST_CHECKS="${LOOM_SKIP_HOST_CHECKS:-0}"
 LOOM_RELEASE_NAME="rootless-runtime-v1"
 
@@ -28,7 +27,10 @@ loom_node_error() {
 
 loom_node_load_policy() {
   local cluster_id="$1"
+  local slurm_node="$2"
   local values=()
+  local expected_nodes=()
+  local expected_node inventory_match=0
   if [[ ! -f "$LOOM_POLICY_PATH" || -L "$LOOM_POLICY_PATH" ]]; then
     loom_node_error "prerequisite policy is unavailable"
     return
@@ -107,8 +109,99 @@ PY
     loom_node_error "host architecture does not match cluster policy"
     return
   fi
-  if [[ ",$LOOM_EXPECTED_NODES," != *",$LOOM_HOST_NODE,"* ]]; then
-    loom_node_error "host node is outside the cluster builder inventory"
+  IFS=, read -r -a expected_nodes <<<"$LOOM_EXPECTED_NODES"
+  for expected_node in "${expected_nodes[@]}"; do
+    if [[ "$expected_node" == "$slurm_node" ]]; then
+      inventory_match=1
+    fi
+  done
+  if [[ "$inventory_match" != "1" ]]; then
+    loom_node_error "Slurm node is outside the cluster builder inventory"
+    return
+  fi
+  LOOM_SLURM_NODE="$slurm_node"
+}
+
+loom_node_verify_slurm_identity() {
+  local slurm_node="$1"
+  local state field node_name="" node_addr="" node_hostname=""
+  local node_name_count=0 node_addr_count=0 node_hostname_count=0
+  local resolved local_addresses local_hostnames short_name canonical_name aliases
+
+  if ! state="$(timeout 30 scontrol show node "$slurm_node" -o </dev/null 2>/dev/null)" \
+    || [[ -z "$state" || "$state" == *$'\n'* || ${#state} -gt 65536 ]]; then
+    loom_node_error "Slurm node identity does not match the local host"
+    return
+  fi
+  for field in $state; do
+    case "$field" in
+      NodeName=*)
+        node_name="${field#NodeName=}"
+        node_name_count=$((node_name_count + 1))
+        ;;
+      NodeAddr=*)
+        node_addr="${field#NodeAddr=}"
+        node_addr_count=$((node_addr_count + 1))
+        ;;
+      NodeHostName=*)
+        node_hostname="${field#NodeHostName=}"
+        node_hostname_count=$((node_hostname_count + 1))
+        ;;
+    esac
+  done
+  if [[ "$node_name_count" -ne 1 || "$node_addr_count" -ne 1 \
+    || "$node_hostname_count" -ne 1 || -z "$node_name" \
+    || -z "$node_addr" || -z "$node_hostname" ]]; then
+    loom_node_error "Slurm node identity does not match the local host"
+    return
+  fi
+  if ! resolved="$(getent ahosts "$node_addr" 2>/dev/null)" \
+    || ! local_addresses="$(ip -o address show scope global 2>/dev/null)" \
+    || ! short_name="$(hostname -s 2>/dev/null)" \
+    || ! canonical_name="$(hostname -f 2>/dev/null)" \
+    || ! aliases="$(hostname -A 2>/dev/null)"; then
+    loom_node_error "Slurm node identity does not match the local host"
+    return
+  fi
+  local_hostnames="$short_name $canonical_name $aliases"
+  if [[ ${#resolved} -gt 65536 || ${#local_addresses} -gt 65536 \
+    || ${#local_hostnames} -gt 65536 ]]; then
+    loom_node_error "Slurm node identity does not match the local host"
+    return
+  fi
+  if ! python3 - "$slurm_node" "$node_name" "$node_hostname" \
+    "$resolved" "$local_addresses" "$local_hostnames" <<'PY'
+import ipaddress
+import sys
+
+expected_name, observed_name, node_hostname, resolved_raw, local_raw, hostnames_raw = (
+    sys.argv[1:]
+)
+if observed_name != expected_name:
+    raise SystemExit(1)
+
+try:
+    resolved = {
+        ipaddress.ip_address(line.split()[0])
+        for line in resolved_raw.splitlines()
+        if line.split()
+    }
+    local = {
+        ipaddress.ip_interface(fields[3]).ip
+        for line in local_raw.splitlines()
+        if len(fields := line.split()) >= 4 and fields[2] in {"inet", "inet6"}
+    }
+except ValueError:
+    raise SystemExit(1) from None
+
+hostnames = {item.casefold() for item in hostnames_raw.split() if item}
+if not resolved or not resolved.issubset(local):
+    raise SystemExit(1)
+if node_hostname.casefold() not in hostnames:
+    raise SystemExit(1)
+PY
+  then
+    loom_node_error "Slurm node identity does not match the local host"
     return
   fi
 }
@@ -472,8 +565,10 @@ loom_node_host_checks() {
 
 loom_node_check() {
   local cluster_id="$1"
-  local artifact_dir="$2"
-  loom_node_load_policy "$cluster_id"
+  local slurm_node="$2"
+  local artifact_dir="$3"
+  loom_node_load_policy "$cluster_id" "$slurm_node"
+  loom_node_verify_slurm_identity "$slurm_node"
   loom_node_runtime validate "$artifact_dir" >/dev/null
   loom_node_identity_preflight
   if ! loom_node_identity_complete; then
@@ -488,18 +583,20 @@ loom_node_check() {
 
 loom_node_apply() {
   local cluster_id="$1"
-  local artifact_dir="$2"
-  loom_node_load_policy "$cluster_id"
+  local slurm_node="$2"
+  local artifact_dir="$3"
+  loom_node_load_policy "$cluster_id" "$slurm_node"
+  loom_node_verify_slurm_identity "$slurm_node"
   loom_node_runtime validate "$artifact_dir" >/dev/null
   loom_node_identity_preflight
   loom_node_apply_identity
   loom_node_runtime install "$artifact_dir" >/dev/null
-  loom_node_check "$cluster_id" "$artifact_dir"
+  loom_node_check "$cluster_id" "$slurm_node" "$artifact_dir"
 }
 
 loom_node_main() {
-  if [[ "$#" -ne 3 || ( "$1" != "check" && "$1" != "apply" ) ]]; then
-    echo "usage: sudo $0 {check|apply} <cluster-id> <offline-artifact-directory>" >&2
+  if [[ "$#" -ne 4 || ( "$1" != "check" && "$1" != "apply" ) ]]; then
+    echo "usage: sudo $0 {check|apply} <cluster-id> <slurm-node-name> <offline-artifact-directory>" >&2
     return 2
   fi
   if [[ "$LOOM_POLICY_PATH" != "$LOOM_DEFAULT_POLICY_PATH" \
@@ -512,7 +609,6 @@ loom_node_main() {
     || "$LOOM_INSTALL_OWNER" != "root" \
     || "$LOOM_INSTALL_GROUP" != "root" \
     || "$LOOM_HOST_ARCH" != "$(uname -m)" \
-    || "$LOOM_HOST_NODE" != "$(hostname -s)" \
     || "$LOOM_SKIP_HOST_CHECKS" != "0" ]]; then
     loom_node_error "test overrides are forbidden in the direct installer CLI"
     return
@@ -521,7 +617,7 @@ loom_node_main() {
     loom_node_error "node prerequisite installation requires root"
     return
   fi
-  "loom_node_$1" "$2" "$3"
+  "loom_node_$1" "$2" "$3" "$4"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

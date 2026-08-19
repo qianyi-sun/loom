@@ -1,5 +1,10 @@
 # Task-image builder Phase 1 prerequisites implementation plan
 
+> **Live-convergence status:** Superseded by
+> `archive/docs/architecture/2026-08-19-task-image-builder-phase1-isolation-correction.md`.
+> PR #1457 remains fail-closed and must not be applied without the isolation
+> repair and the separate site-specific host convergence boundary.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
 > superpowers:subagent-driven-development (recommended) or
 > superpowers:executing-plans to implement this plan task-by-task. Steps use

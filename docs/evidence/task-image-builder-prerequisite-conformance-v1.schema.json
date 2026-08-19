@@ -193,6 +193,255 @@
         }
       }
     },
+    "controllerIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "user",
+        "uid",
+        "group",
+        "gid",
+        "home",
+        "shell",
+        "supplementary_groups"
+      ],
+      "properties": {
+        "user": {
+          "$ref": "#/$defs/name"
+        },
+        "uid": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "group": {
+          "$ref": "#/$defs/name"
+        },
+        "gid": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "home": {
+          "type": "string",
+          "pattern": "^/[^\\u0000]{0,255}$"
+        },
+        "shell": {
+          "type": "string",
+          "pattern": "^/[^\\u0000]{0,255}$"
+        },
+        "supplementary_groups": {
+          "type": "array",
+          "maxItems": 0
+        }
+      }
+    },
+    "address": {
+      "type": "string",
+      "anyOf": [
+        {
+          "format": "ipv4"
+        },
+        {
+          "format": "ipv6"
+        }
+      ]
+    },
+    "slurmIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node_name",
+        "node_hostname",
+        "node_addr",
+        "resolved_addresses",
+        "local_hostnames",
+        "local_addresses"
+      ],
+      "properties": {
+        "node_name": {
+          "$ref": "#/$defs/name"
+        },
+        "node_hostname": {
+          "$ref": "#/$defs/name"
+        },
+        "node_addr": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "resolved_addresses": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/address"
+          }
+        },
+        "local_hostnames": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/name"
+          }
+        },
+        "local_addresses": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/address"
+          }
+        }
+      }
+    },
+    "legacyQos": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "flags",
+        "priority",
+        "max_jobs_per_user",
+        "max_submit_jobs_per_user",
+        "max_wall",
+        "group_tres"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/name"
+        },
+        "flags": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/name"
+          }
+        },
+        "priority": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_jobs_per_user": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "max_submit_jobs_per_user": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "max_wall": {
+          "type": "string",
+          "pattern": "^[0-9]{2}:[0-9]{2}:[0-9]{2}$"
+        },
+        "group_tres": {
+          "type": "object",
+          "additionalProperties": false,
+          "maxProperties": 0
+        }
+      }
+    },
+    "legacyAssociation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cluster", "account", "user", "qos", "default_qos"],
+      "properties": {
+        "cluster": {
+          "$ref": "#/$defs/name"
+        },
+        "account": {
+          "$ref": "#/$defs/name"
+        },
+        "user": {
+          "$ref": "#/$defs/name"
+        },
+        "qos": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/name"
+          }
+        },
+        "default_qos": {
+          "$ref": "#/$defs/name"
+        }
+      }
+    },
+    "legacyReservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "node",
+        "partition",
+        "users",
+        "accounts",
+        "state",
+        "flags"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/name"
+        },
+        "node": {
+          "$ref": "#/$defs/name"
+        },
+        "partition": {
+          "$ref": "#/$defs/name"
+        },
+        "users": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/name"
+          }
+        },
+        "accounts": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/name"
+          }
+        },
+        "state": {
+          "const": "ACTIVE"
+        },
+        "flags": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "contains": {
+            "const": "SPEC_NODES"
+          },
+          "items": {
+            "$ref": "#/$defs/name"
+          }
+        }
+      }
+    },
+    "legacyBuilder": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["qos", "association", "reservation"],
+      "properties": {
+        "qos": {
+          "$ref": "#/$defs/legacyQos"
+        },
+        "association": {
+          "$ref": "#/$defs/legacyAssociation"
+        },
+        "reservation": {
+          "$ref": "#/$defs/legacyReservation"
+        }
+      }
+    },
     "slurm": {
       "type": "object",
       "additionalProperties": false,
@@ -207,7 +456,8 @@
         "trial_partition",
         "builder_partition",
         "qos",
-        "association"
+        "association",
+        "legacy_builder"
       ],
       "properties": {
         "task_plugin": {
@@ -246,6 +496,9 @@
         },
         "association": {
           "$ref": "#/$defs/association"
+        },
+        "legacy_builder": {
+          "$ref": "#/$defs/legacyBuilder"
         }
       }
     },
@@ -512,6 +765,7 @@
       "required": [
         "name",
         "architecture",
+        "slurm_identity",
         "identity",
         "kernel",
         "runtime",
@@ -526,6 +780,9 @@
         },
         "architecture": {
           "enum": ["x86_64", "aarch64"]
+        },
+        "slurm_identity": {
+          "$ref": "#/$defs/slurmIdentity"
         },
         "identity": {
           "$ref": "#/$defs/identity"
@@ -564,6 +821,7 @@
         "slurm_cluster",
         "controller",
         "architecture",
+        "controller_identity",
         "slurm",
         "nodes"
       ],
@@ -579,6 +837,9 @@
         },
         "architecture": {
           "enum": ["x86_64", "aarch64"]
+        },
+        "controller_identity": {
+          "$ref": "#/$defs/controllerIdentity"
         },
         "slurm": {
           "$ref": "#/$defs/slurm"

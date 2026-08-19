@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -105,6 +106,44 @@ def load_policy(path: Path) -> PrerequisitePolicy:
     certified_nodes = raw_value.get("certified_nodes")
     if certified_nodes != []:
         raise ConformanceError("Phase 1 policy must certify zero nodes")
+    expected_legacy = {
+        "qos": "loom-task-image-builder",
+        "reservation": "loom-task-image-builder",
+        "account": "loom-staging",
+        "user": "loom-rollout",
+        "max_jobs_per_user": 1,
+        "max_submit_jobs_per_user": 1,
+        "max_wall": "04:00:00",
+    }
+    if raw_value.get("legacy_guard") != expected_legacy:
+        raise ConformanceError("legacy builder guard policy is invalid")
+    expected_rootless_qos = {
+        "oldlab": "loom-task-image-builder-rootless-oldlab",
+        "gb10": "loom-task-image-builder-rootless-gb10",
+    }
+    clusters = raw_value.get("clusters")
+    if not isinstance(clusters, list) or len(clusters) != 2:
+        raise ConformanceError("prerequisite cluster policy is invalid")
+    seen_qos: set[str] = set()
+    for cluster in clusters:
+        if not isinstance(cluster, dict):
+            raise ConformanceError("prerequisite cluster policy is invalid")
+        cluster_id = cluster.get("id")
+        if cluster_id not in expected_rootless_qos:
+            raise ConformanceError("prerequisite cluster policy is invalid")
+        qos = cluster.get("slurm_qos")
+        if qos != expected_rootless_qos[cluster_id] or qos == expected_legacy["qos"]:
+            raise ConformanceError("rootless builder QoS policy is invalid")
+        if qos in seen_qos:
+            raise ConformanceError("rootless builder QoS policy is not unique")
+        seen_qos.add(qos)
+        for key in (
+            "legacy_base_qos",
+            "legacy_reservation_node",
+            "legacy_reservation_partition",
+        ):
+            if not isinstance(cluster.get(key), str) or not cluster[key]:
+                raise ConformanceError("legacy cluster guard policy is invalid")
     runtime_section = raw_value.get("runtime")
     if not isinstance(runtime_section, dict):
         raise ConformanceError("prerequisite runtime policy is invalid")
@@ -157,6 +196,87 @@ def _exact_mapping(actual: Mapping[str, Any], expected: Mapping[str, Any]) -> bo
     return dict(actual) == dict(expected)
 
 
+def _controller_identity_failures(
+    observed: Mapping[str, Any],
+    *,
+    cluster_id: str,
+    policy: PrerequisitePolicy,
+) -> list[str]:
+    identity = policy.raw["identity"]
+    expected = {
+        "user": identity["user"],
+        "uid": identity["uid"],
+        "group": identity["group"],
+        "gid": identity["gid"],
+        "home": identity["home"],
+        "shell": identity["shell"],
+        "supplementary_groups": [],
+    }
+    if _exact_mapping(observed, expected):
+        return []
+    return [f"{cluster_id}: controller identity is invalid"]
+
+
+def _legacy_builder_failures(
+    observed: Mapping[str, Any],
+    *,
+    cluster: Mapping[str, Any],
+    policy: PrerequisitePolicy,
+) -> list[str]:
+    legacy = policy.raw["legacy_guard"]
+    expected = {
+        "qos": {
+            "name": legacy["qos"],
+            "flags": ["DenyOnLimit"],
+            "priority": 0,
+            "max_jobs_per_user": legacy["max_jobs_per_user"],
+            "max_submit_jobs_per_user": legacy["max_submit_jobs_per_user"],
+            "max_wall": legacy["max_wall"],
+            "group_tres": {},
+        },
+        "association": {
+            "cluster": cluster["slurm_cluster"],
+            "account": legacy["account"],
+            "user": legacy["user"],
+            "qos": sorted([cluster["legacy_base_qos"], legacy["qos"]]),
+            "default_qos": cluster["legacy_base_qos"],
+        },
+        "reservation": {
+            "name": legacy["reservation"],
+            "node": cluster["legacy_reservation_node"],
+            "partition": cluster["legacy_reservation_partition"],
+            "users": [legacy["user"]],
+            "accounts": [legacy["account"]],
+            "state": "ACTIVE",
+            "flags": ["IGNORE_JOBS", "SPEC_NODES"],
+        },
+    }
+    if _exact_mapping(observed, expected):
+        return []
+    return [f"{cluster['id']}: legacy builder guard is invalid"]
+
+
+def _slurm_identity_failures(node: Mapping[str, Any]) -> list[str]:
+    node_name = node["name"]
+    binding = node["slurm_identity"]
+    try:
+        resolved = {ipaddress.ip_address(item) for item in binding["resolved_addresses"]}
+        local_addresses = {
+            ipaddress.ip_address(item) for item in binding["local_addresses"]
+        }
+    except ValueError:
+        return [f"{node_name}: Slurm host binding is invalid"]
+    local_hostnames = {item.casefold() for item in binding["local_hostnames"]}
+    if (
+        binding["node_name"] != node_name
+        or not resolved
+        or not resolved.issubset(local_addresses)
+        or binding["node_hostname"].casefold() not in local_hostnames
+    ):
+        return [f"{node_name}: Slurm host binding is invalid"]
+    return []
+
+
 def _node_failures(
     node: Mapping[str, Any],
     *,
@@ -165,6 +285,7 @@ def _node_failures(
 ) -> list[str]:
     failures: list[str] = []
     node_name = node["name"]
+    failures.extend(_slurm_identity_failures(node))
     architecture = cluster["architecture"]
     if node["architecture"] != architecture:
         failures.append(f"{node_name}: architecture does not match cluster policy")
@@ -293,6 +414,13 @@ def verify_evidence(
             failures.append(f"{cluster_id}: controller or Slurm cluster identity is invalid")
         if observed["architecture"] != expected["architecture"]:
             failures.append(f"{cluster_id}: architecture does not match policy")
+        failures.extend(
+            _controller_identity_failures(
+                observed["controller_identity"],
+                cluster_id=cluster_id,
+                policy=policy,
+            )
+        )
 
         slurm = observed["slurm"]
         cgroup_policy = policy.raw["cgroup"]
@@ -349,6 +477,13 @@ def verify_evidence(
         }
         if not _exact_mapping(slurm["association"], expected_association):
             failures.append(f"{cluster_id}: dedicated Slurm association is invalid")
+        failures.extend(
+            _legacy_builder_failures(
+                slurm["legacy_builder"],
+                cluster=expected,
+                policy=policy,
+            )
+        )
 
         nodes = observed["nodes"]
         names = [node["name"] for node in nodes]

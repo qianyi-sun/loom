@@ -40,11 +40,25 @@ def _evidence() -> dict[str, Any]:
         architecture = cluster["architecture"]
         runtime = policy.runtime["architectures"][architecture]
         nodes = []
-        for node_name in cluster["builder_nodes"]:
+        for node_index, node_name in enumerate(cluster["builder_nodes"], start=10):
+            address = (
+                f"192.0.2.{node_index}"
+                if cluster["id"] == "oldlab"
+                else f"198.51.100.{node_index}"
+            )
+            physical_name = f"host-{node_name}"
             nodes.append(
                 {
                     "name": node_name,
                     "architecture": architecture,
+                    "slurm_identity": {
+                        "node_name": node_name,
+                        "node_hostname": physical_name,
+                        "node_addr": address,
+                        "resolved_addresses": [address],
+                        "local_hostnames": [physical_name],
+                        "local_addresses": [address],
+                    },
                     "identity": {
                         "user": "loom-builder",
                         "uid": 993,
@@ -110,6 +124,15 @@ def _evidence() -> dict[str, Any]:
                 "slurm_cluster": cluster["slurm_cluster"],
                 "controller": cluster["controller"],
                 "architecture": architecture,
+                "controller_identity": {
+                    "user": "loom-builder",
+                    "uid": 993,
+                    "group": "loom-task-builder",
+                    "gid": 980,
+                    "home": "/nonexistent",
+                    "shell": "/usr/sbin/nologin",
+                    "supplementary_groups": [],
+                },
                 "slurm": {
                     "task_plugin": "task/cgroup",
                     "proctrack_type": "proctrack/cgroup",
@@ -129,7 +152,7 @@ def _evidence() -> dict[str, Any]:
                         "nodes": cluster["builder_nodes"],
                     },
                     "qos": {
-                        "name": "loom-task-image-builder",
+                        "name": cluster["slurm_qos"],
                         "flags": ["DenyOnLimit"],
                         "max_jobs_per_user": 1,
                         "max_submit_jobs_per_user": 1,
@@ -144,8 +167,40 @@ def _evidence() -> dict[str, Any]:
                         "user": "loom-builder",
                         "account": "loom-task-builder",
                         "partition": "loom-task-builder",
-                        "qos": ["loom-task-image-builder"],
-                        "default_qos": "loom-task-image-builder",
+                        "qos": [cluster["slurm_qos"]],
+                        "default_qos": cluster["slurm_qos"],
+                    },
+                    "legacy_builder": {
+                        "qos": {
+                            "name": policy.raw["legacy_guard"]["qos"],
+                            "flags": ["DenyOnLimit"],
+                            "priority": 0,
+                            "max_jobs_per_user": 1,
+                            "max_submit_jobs_per_user": 1,
+                            "max_wall": "04:00:00",
+                            "group_tres": {},
+                        },
+                        "association": {
+                            "cluster": cluster["slurm_cluster"],
+                            "account": policy.raw["legacy_guard"]["account"],
+                            "user": policy.raw["legacy_guard"]["user"],
+                            "qos": sorted(
+                                [
+                                    cluster["legacy_base_qos"],
+                                    policy.raw["legacy_guard"]["qos"],
+                                ]
+                            ),
+                            "default_qos": cluster["legacy_base_qos"],
+                        },
+                        "reservation": {
+                            "name": policy.raw["legacy_guard"]["reservation"],
+                            "node": cluster["legacy_reservation_node"],
+                            "partition": cluster["legacy_reservation_partition"],
+                            "users": [policy.raw["legacy_guard"]["user"]],
+                            "accounts": [policy.raw["legacy_guard"]["account"]],
+                            "state": "ACTIVE",
+                            "flags": ["IGNORE_JOBS", "SPEC_NODES"],
+                        },
                     },
                 },
                 "nodes": nodes,
@@ -187,6 +242,12 @@ def test_schema_and_complete_phase_one_evidence_are_valid_but_not_certifiable() 
             "architecture",
         ),
         (
+            lambda item: item["clusters"][0]["controller_identity"].__setitem__(
+                "uid", 992
+            ),
+            "controller identity",
+        ),
+        (
             lambda item: item["clusters"][0]["slurm"].__setitem__("constrain_ram_space", False),
             "cgroup constraints",
         ),
@@ -209,6 +270,36 @@ def test_schema_and_complete_phase_one_evidence_are_valid_but_not_certifiable() 
                 "user", "loom-rollout"
             ),
             "association",
+        ),
+        (
+            lambda item: item["clusters"][0]["slurm"]["legacy_builder"]["qos"].__setitem__(
+                "max_wall", "08:00:00"
+            ),
+            "legacy builder",
+        ),
+        (
+            lambda item: item["clusters"][0]["slurm"]["legacy_builder"][
+                "reservation"
+            ].__setitem__("node", "trt-eai-oldlab-5"),
+            "legacy builder",
+        ),
+        (
+            lambda item: item["clusters"][0]["nodes"][0]["slurm_identity"].__setitem__(
+                "node_name", "trt-eai-oldlab-4"
+            ),
+            "Slurm host binding",
+        ),
+        (
+            lambda item: item["clusters"][0]["nodes"][0]["slurm_identity"].__setitem__(
+                "resolved_addresses", ["192.0.2.200"]
+            ),
+            "Slurm host binding",
+        ),
+        (
+            lambda item: item["clusters"][0]["nodes"][0]["slurm_identity"].__setitem__(
+                "local_hostnames", ["foreign-host"]
+            ),
+            "Slurm host binding",
         ),
         (
             lambda item: item["clusters"][0]["nodes"][0]["identity"].__setitem__(

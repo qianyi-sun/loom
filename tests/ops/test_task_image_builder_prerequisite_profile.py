@@ -114,6 +114,19 @@ def test_phase_one_policy_is_dynamic_bounded_and_cannot_certify_production() -> 
 
     clusters = {item["id"]: item for item in policy["clusters"]}
     assert set(clusters) == {"oldlab", "gb10"}
+    expected_qos = {
+        "oldlab": "loom-task-image-builder-rootless-oldlab",
+        "gb10": "loom-task-image-builder-rootless-gb10",
+    }
+    assert policy["legacy_guard"] == {
+        "qos": "loom-task-image-builder",
+        "reservation": "loom-task-image-builder",
+        "account": "loom-staging",
+        "user": "loom-rollout",
+        "max_jobs_per_user": 1,
+        "max_submit_jobs_per_user": 1,
+        "max_wall": "04:00:00",
+    }
     assert clusters["oldlab"]["architecture"] == "x86_64"
     assert clusters["oldlab"]["controller"] == "TRT-EAI-OLDLAB-1"
     assert clusters["oldlab"]["trial_partition"] == "loom-staging"
@@ -127,6 +140,9 @@ def test_phase_one_policy_is_dynamic_bounded_and_cannot_certify_production() -> 
     assert clusters["oldlab"]["slurm_config_owner"] == "trt"
     assert clusters["oldlab"]["slurm_config_group"] == "sharedwork"
     assert clusters["oldlab"]["slurm_config_mode"] == "0664"
+    assert clusters["oldlab"]["legacy_base_qos"] == "normal"
+    assert clusters["oldlab"]["legacy_reservation_node"] == "trt-eai-oldlab-6"
+    assert clusters["oldlab"]["legacy_reservation_partition"] == "all"
     assert clusters["oldlab"]["trial_partition_anchor"] == (
         "PartitionName=loom-staging Nodes=trt-eai-oldlab-[3-5] Default=NO "
         "MaxTime=2-00:00:00 State=UP PriorityTier=100 AllowGroups=loom-rollout "
@@ -141,16 +157,20 @@ def test_phase_one_policy_is_dynamic_bounded_and_cannot_certify_production() -> 
     assert clusters["gb10"]["slurm_config_owner"] == "root"
     assert clusters["gb10"]["slurm_config_group"] == "root"
     assert clusters["gb10"]["slurm_config_mode"] == "0644"
+    assert clusters["gb10"]["legacy_base_qos"] == "loom-staging"
+    assert clusters["gb10"]["legacy_reservation_node"] == "trt-gb10-2"
+    assert clusters["gb10"]["legacy_reservation_partition"] == "gb10"
     assert clusters["gb10"]["trial_partition_anchor"] == (
         "PartitionName=gb10 Nodes=trt-gb10-[1-15] Default=YES "
         "MaxTime=1-00:00:00 State=UP PriorityTier=100"
     )
-    for cluster in clusters.values():
+    for cluster_id, cluster in clusters.items():
         assert cluster["builder_partition"] == "loom-task-builder"
         assert cluster["builder_priority_tier"] == 200
         assert cluster["builder_priority_tier"] > cluster["trial_priority_tier"]
         assert cluster["slurm_account"] == "loom-task-builder"
-        assert cluster["slurm_qos"] == "loom-task-image-builder"
+        assert cluster["slurm_qos"] == expected_qos[cluster_id]
+        assert cluster["slurm_qos"] != policy["legacy_guard"]["qos"]
         assert cluster["builder_partition_line"] == (
             f"PartitionName=loom-task-builder Nodes={cluster['builder_nodes_expression']} "
             "Default=NO MaxTime=02:00:00 State=UP PriorityTier=200 "
@@ -158,9 +178,9 @@ def test_phase_one_policy_is_dynamic_bounded_and_cannot_certify_production() -> 
             "OverSubscribe=NO"
         )
 
-    serialized = json.dumps(policy, sort_keys=True).lower()
+    rootless_serialized = json.dumps(policy["clusters"], sort_keys=True).lower()
     for forbidden_key in ('"exclusive"', '"nodelist"', '"reservation"'):
-        assert forbidden_key not in serialized
+        assert forbidden_key not in rootless_serialized
 
 
 def test_runtime_manifest_pins_only_native_rootless_binaries() -> None:
