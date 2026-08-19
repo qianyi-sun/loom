@@ -340,7 +340,7 @@ description = "Maximum size of one verified native OCI image archive within a pe
 used_by     = ["loom-service"]
 python_type = "str"
 default     = "loom-personal-dev-builder"
-description = "Operator-installed RuntimeClass whose measured profile supplies user namespaces and the bounded PID/isolation contract for untrusted builds."
+description = "Operator-installed RuntimeClass whose measured KVM gVisor profile supplies the kernel boundary and bounded PID/isolation contract for untrusted builds."
 
 [service_config.personal_dev_builder_scanner_path]
 used_by     = ["loom-service"]
