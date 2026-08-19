@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -600,10 +601,24 @@ class _ReadyDisabledExternalSupervisorControl:
 
 
 class _ReadyCanonicalExternalSupervisorControl:
-    def __init__(self, canonical: ExternalSupervisorCanonicalIdentity) -> None:
+    def __init__(
+        self,
+        canonical: ExternalSupervisorCanonicalIdentity,
+        *,
+        loaded_candidate_only_service: str | None = None,
+    ) -> None:
         self.canonical = canonical
+        self.loaded_candidate_only_service = loaded_candidate_only_service
 
     def timer_status(self, name: str) -> TimerRuntimeStatus:
+        if name not in self.canonical.unit_sha256:
+            return TimerRuntimeStatus(
+                load_state="not-found",
+                unit_file_state="not-found",
+                active_state="inactive",
+                fragment_path="",
+                need_daemon_reload="no",
+            )
         service_name = f"{name.removesuffix('.timer')}.service"
         active = transport_module._identity_pair_desired_active(
             self.canonical,
@@ -619,6 +634,22 @@ class _ReadyCanonicalExternalSupervisorControl:
         )
 
     def service_status(self, name: str) -> ServiceRuntimeStatus:
+        if name not in self.canonical.unit_sha256:
+            if name == self.loaded_candidate_only_service:
+                return ServiceRuntimeStatus(
+                    load_state="loaded",
+                    result="success",
+                    exec_main_status=0,
+                    fragment_path=str(PROTECTED_USER_UNIT_DIR / name),
+                    need_daemon_reload="no",
+                )
+            return ServiceRuntimeStatus(
+                load_state="not-found",
+                result="",
+                exec_main_status=None,
+                fragment_path="",
+                need_daemon_reload="no",
+            )
         return ServiceRuntimeStatus(
             load_state="loaded",
             result="success",
@@ -635,14 +666,36 @@ class _CanonicalExternalSupervisorStore:
     def list_units(self) -> tuple[str, ...]:
         return tuple(self.canonical.unit_sha256)
 
-    def read_unit(self, name: str) -> bytes:
-        return self.canonical.unit_payloads[name].encode()
+    def read_unit(self, name: str) -> bytes | None:
+        payload = self.canonical.unit_payloads.get(name)
+        return None if payload is None else payload.encode()
 
     def read_canonical(self) -> ExternalSupervisorCanonicalIdentity:
         return self.canonical
 
     def compensation_blockers(self) -> dict[str, str]:
         return {}
+
+
+def _ready_oldlab_canonical_identity() -> ExternalSupervisorCanonicalIdentity:
+    provisional = ExternalSupervisorCanonicalIdentity.from_manifest(
+        load_predecessor_manifest(execution_host="TRT-EAI-OLDLAB-1")
+    )
+    payload = provisional.payload()
+    payload["record_kind"] = "activation"
+    payload["transition_group_id"] = "f" * 32
+    payload["runtime_evidence_digest"] = transport_module._expected_identity_runtime_digest(
+        provisional
+    )
+    record = {
+        **payload,
+        "evidence_digest": hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+    }
+    return ExternalSupervisorCanonicalIdentity.from_bytes(
+        json.dumps(record, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    )
 
 
 class _AbsentExternalSupervisorStore:
@@ -742,6 +795,64 @@ def _pool_identity(
         legacy_rows={name: legacy_count for name in _POOL_IDENTITY_TABLES},
         target_rows={name: target_count for name in _POOL_IDENTITY_TABLES},
     )
+
+
+def _installed_oldlab_canonical_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    candidate_root: Path,
+    *,
+    loaded_candidate_only_service: str | None = None,
+) -> tuple[
+    ExternalSupervisorPredecessorSnapshot,
+    transport_module.ExternalSupervisorLiveObservation,
+    ExternalSupervisorCanonicalIdentity,
+]:
+    context = _installed_predecessor_context(
+        candidate_root,
+        backup_schema_revision="0088",
+        database_schema_revision="0088",
+    )
+    artifact = build_external_supervisor_artifact(
+        candidate_root,
+        candidate_sha=str(context.bindings["candidate.sha"]),
+        candidate_tree=str(context.bindings["candidate.tree"]),
+        image_tag=f"staging-{str(context.bindings['candidate.sha'])[:7]}",
+        environment="staging",
+        execution_host="TRT-EAI-OLDLAB-1",
+    )
+    canonical = _ready_oldlab_canonical_identity()
+    store = _CanonicalExternalSupervisorStore(canonical)
+    control = _ReadyCanonicalExternalSupervisorControl(
+        canonical,
+        loaded_candidate_only_service=loaded_candidate_only_service,
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "AtomicUserUnitStore",
+        lambda **_kwargs: store,
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "FixedUserSystemdControl",
+        lambda **_kwargs: control,
+    )
+    source = installed_deep_preflight_factory._external_supervisor_predecessor_source(
+        candidate_root=candidate_root,
+        git_run=_git_run,
+        service_uid=501,
+        pool_identity_source=lambda: _pool_identity(
+            "0088",
+            legacy_count=0,
+            target_count=1,
+        ),
+        execution_host="TRT-EAI-OLDLAB-1",
+    )
+    snapshot = source(context)
+    final_observation = transport_module.FixedExternalSupervisorTransport(
+        store=store,
+        control=control,
+    ).observe(artifact)
+    return snapshot, final_observation, canonical
 
 
 def test_installed_external_supervisor_predecessor_source_binds_merged_provenance(
@@ -884,6 +995,47 @@ def test_installed_oldlab_preflight_observes_the_final_candidate_unit_set(
     }
     assert snapshot.live_evidence_digest == final_observation.evidence_digest
     assert snapshot.runtime_ready is True
+
+
+def test_installed_oldlab_canonical_predecessor_accepts_absent_candidate_only_units(
+    monkeypatch: pytest.MonkeyPatch,
+    secure_candidate_root: Path,
+) -> None:
+    snapshot, final_observation, canonical = _installed_oldlab_canonical_snapshot(
+        monkeypatch,
+        secure_candidate_root,
+    )
+
+    assert set(canonical.unit_sha256) == {
+        "loom-autoscaler-oldlab-staging.service",
+        "loom-autoscaler-oldlab-staging.timer",
+    }
+    assert set(final_observation.unit_payloads) == {
+        "loom-autoscaler-oldlab-staging.service",
+        "loom-autoscaler-oldlab-staging.timer",
+        "loom-task-image-builder-oldlab-staging.service",
+        "loom-task-image-builder-oldlab-staging.timer",
+    }
+    assert snapshot.live_evidence_digest == final_observation.evidence_digest
+    assert snapshot.runtime_ready is True
+
+
+def test_installed_oldlab_canonical_predecessor_rejects_loaded_candidate_only_unit(
+    monkeypatch: pytest.MonkeyPatch,
+    secure_candidate_root: Path,
+) -> None:
+    snapshot, final_observation, _canonical = _installed_oldlab_canonical_snapshot(
+        monkeypatch,
+        secure_candidate_root,
+        loaded_candidate_only_service="loom-task-image-builder-oldlab-staging.service",
+    )
+
+    extra_service = final_observation.service_statuses[
+        "loom-task-image-builder-oldlab-staging.service"
+    ]
+    assert extra_service.load_state == "loaded"
+    assert snapshot.live_evidence_digest == final_observation.evidence_digest
+    assert snapshot.runtime_ready is False
 
 
 def test_installed_predecessor_recognizes_exact_pr1342_gb10_activation(
