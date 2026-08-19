@@ -186,6 +186,60 @@ set -euo pipefail
 printf 'loom-builder:x:993:980::/nonexistent:/usr/sbin/nologin\n' >> "$LOOM_PASSWD_FILE"
 """,
     )
+    _write_executable(
+        fake_bin / "scontrol",
+        """#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" != "show node node-1 -o" ]]; then exit 2; fi
+case "${LOOM_SLURM_BINDING_MODE:-exact}" in
+  wrong-node)
+    printf 'NodeName=node-2 NodeAddr=192.0.2.10 NodeHostName=physical-node-1 State=IDLE\n'
+    ;;
+  foreign-hostname)
+    printf 'NodeName=node-1 NodeAddr=192.0.2.10 NodeHostName=foreign-node State=IDLE\n'
+    ;;
+  *)
+    printf 'NodeName=node-1 NodeAddr=192.0.2.10 NodeHostName=physical-node-1 State=IDLE\n'
+    ;;
+esac
+""",
+    )
+    _write_executable(
+        fake_bin / "getent",
+        """#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" != "ahosts 192.0.2.10" ]]; then exit 2; fi
+case "${LOOM_SLURM_BINDING_MODE:-exact}" in
+  unresolved) exit 2 ;;
+  foreign-address) printf '192.0.2.11 STREAM foreign\n' ;;
+  mixed-addresses)
+    printf '192.0.2.10 STREAM local\n'
+    printf '192.0.2.11 STREAM foreign\n'
+    ;;
+  *) printf '192.0.2.10 STREAM local\n' ;;
+esac
+""",
+    )
+    _write_executable(
+        fake_bin / "hostname",
+        """#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  -s) printf 'physical-node-1\n' ;;
+  -f) printf 'physical-node-1.example.invalid\n' ;;
+  -A) printf 'physical-node-1.example.invalid physical-node-1\n' ;;
+  *) exit 2 ;;
+esac
+""",
+    )
+    _write_executable(
+        fake_bin / "ip",
+        """#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" != "-o address show scope global" ]]; then exit 2; fi
+printf '2: eth0 inet 192.0.2.10/24 brd 192.0.2.255 scope global eth0\n'
+""",
+    )
     return Fixture(
         root=tmp_path,
         policy=policy,
@@ -200,7 +254,13 @@ printf 'loom-builder:x:993:980::/nonexistent:/usr/sbin/nologin\n' >> "$LOOM_PASS
     )
 
 
-def _run(fixture: Fixture, action: str) -> subprocess.CompletedProcess[str]:
+def _run(
+    fixture: Fixture,
+    action: str,
+    *,
+    slurm_node: str = "node-1",
+    binding_mode: str = "exact",
+) -> subprocess.CompletedProcess[str]:
     owner = pwd.getpwuid(os.getuid()).pw_name
     group = grp.getgrgid(os.getgid()).gr_name
     environment = {
@@ -216,17 +276,18 @@ def _run(fixture: Fixture, action: str) -> subprocess.CompletedProcess[str]:
         "LOOM_INSTALL_OWNER": owner,
         "LOOM_INSTALL_GROUP": group,
         "LOOM_HOST_ARCH": "x86_64",
-        "LOOM_HOST_NODE": "node-1",
         "LOOM_SKIP_HOST_CHECKS": "1",
+        "LOOM_SLURM_BINDING_MODE": binding_mode,
     }
     return subprocess.run(
         [
             shutil.which("bash") or "bash",
             "-c",
-            'source "$1"; "loom_node_$2" oldlab "$3"',
+            'source "$1"; "loom_node_$2" oldlab "$3" "$4"',
             "node-installer-test",
             str(INSTALLER),
             action,
+            slurm_node,
             str(fixture.artifacts),
         ],
         cwd=ROOT,
@@ -272,6 +333,39 @@ def test_invalid_artifact_fails_before_identity_or_release_mutation(tmp_path: Pa
 
     assert result.returncode == 1
     assert "artifact digest" in result.stderr
+    assert "loom-builder" not in fixture.passwd_file.read_text(encoding="utf-8")
+    assert "loom-task-builder" not in fixture.group_file.read_text(encoding="utf-8")
+    assert not fixture.install_base.exists()
+
+
+@pytest.mark.parametrize(
+    ("slurm_node", "binding_mode"),
+    [
+        ("node-2", "exact"),
+        ("node-1", "wrong-node"),
+        ("node-1", "foreign-hostname"),
+        ("node-1", "unresolved"),
+        ("node-1", "foreign-address"),
+        ("node-1", "mixed-addresses"),
+    ],
+)
+def test_slurm_alias_binding_failure_precedes_host_mutation(
+    tmp_path: Path, slurm_node: str, binding_mode: str
+) -> None:
+    fixture = _fixture(tmp_path)
+
+    result = _run(
+        fixture,
+        "apply",
+        slurm_node=slurm_node,
+        binding_mode=binding_mode,
+    )
+
+    assert result.returncode == 1
+    if slurm_node == "node-2":
+        assert "outside the cluster builder inventory" in result.stderr
+    else:
+        assert "Slurm node identity does not match the local host" in result.stderr
     assert "loom-builder" not in fixture.passwd_file.read_text(encoding="utf-8")
     assert "loom-task-builder" not in fixture.group_file.read_text(encoding="utf-8")
     assert not fixture.install_base.exists()
@@ -416,6 +510,7 @@ def test_direct_cli_rejects_test_path_and_host_check_overrides(tmp_path: Path) -
             str(INSTALLER),
             "check",
             "oldlab",
+            "node-1",
             str(fixture.artifacts),
         ],
         cwd=ROOT,
@@ -427,3 +522,24 @@ def test_direct_cli_rejects_test_path_and_host_check_overrides(tmp_path: Path) -
 
     assert result.returncode == 1
     assert "test overrides" in result.stderr
+
+
+def test_direct_cli_rejects_old_three_argument_grammar(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+
+    result = subprocess.run(
+        [
+            shutil.which("bash") or "bash",
+            str(INSTALLER),
+            "check",
+            "oldlab",
+            str(fixture.artifacts),
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "<slurm-node-name>" in result.stderr
