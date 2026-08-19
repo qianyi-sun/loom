@@ -30,7 +30,6 @@ from sqlalchemy import and_, func, or_, select
 
 from loom.db.schema import LlmCall, Task, Team, Trial, User
 from loom.model_switch_store import load_model_switch_plan, plan_snapshot_from_row
-from loom_service.multi_model import usage_by_role
 from loom.models.types import ModelSpec
 from loom_llm_gateway.rate_card import (
     COST_META_CONFIDENCE_KEY,
@@ -53,6 +52,7 @@ from loom_service.monitor_filters import (
     apply_trial_monitor_filters,
     resolve_monitor_team_filter,
 )
+from loom_service.multi_model import usage_by_role
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.provider_connection_lookup import validate_provider_connection
 from loom_service.public_links import public_url_for

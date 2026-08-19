@@ -10,7 +10,6 @@ from loom.models.trajectory import (
     EventKind,
     LLMCallEvent,
     Terminus2CommandEvent,
-    Terminus2ModelSwitchEvent,
     Terminus2TerminalObservationEvent,
     Terminus2TurnEvent,
     Terminus2UserPromptEvent,

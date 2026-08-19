@@ -21,6 +21,7 @@ from loom.integrations.terminalgen.authority import (
     build_terminal_task_validation_grant,
     build_terminalgen_authoring_grant,
 )
+from loom.model_switch_store import load_model_switch_plan, plan_snapshot_from_row
 from loom.models.capabilities import Capabilities
 from loom.models.result import FailureReason
 from loom.models.worker_capabilities import (
@@ -45,7 +46,6 @@ from loom.pipeline.work_protocol import (
     WorkClaimRequestV1,
     WorkClaimV1,
 )
-from loom.model_switch_store import load_model_switch_plan, plan_snapshot_from_row
 from loom.task_image_materialization import get_trial_task_image_execution_grant
 from loom_control_plane.metrics import CLAIM_LATENCY_SEC
 from loom_control_plane.scheduler.claim import (

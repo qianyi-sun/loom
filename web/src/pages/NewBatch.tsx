@@ -1300,7 +1300,9 @@ export default function NewBatch(): JSX.Element {
         mm.secondary_model = {
           ...mm.secondary_model,
           provider: first.provider,
-          source: first.source,
+          ...("source" in first && first.source
+            ? { source: first.source }
+            : {}),
         };
         trial_config.multi_model = mm;
       }

@@ -13,7 +13,6 @@ A first start with no checkpoint remains `fresh`.
 from __future__ import annotations
 
 import hashlib
-from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, select, update

@@ -487,6 +487,7 @@ async def test_runner_selects_claimable_task_for_arm64_required_pool_coverage(
             "cpu_arch": "arm64",
             "gpu_vendor": "none",
             "network_policies": ["public"],
+            "terminus2_model_switch": False,
             "worker_pool": "gb10",
         }
         coverage_trial_id = coverage_trial.id
