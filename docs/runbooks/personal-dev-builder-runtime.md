@@ -602,6 +602,18 @@ cleanup_node_staging() {
     > "$evidence_dir/$node.staging-cleanup.txt"
 }
 
+assert_dns_hostname_identity() {
+  local observed="$1" expected="$2" normalized
+  case "$expected" in
+    trt-eai-oldlab-2|trt-eai-oldlab-3|trt-eai-oldlab-4|trt-eai-oldlab-5) ;;
+    *) return 1 ;;
+  esac
+  test -n "$observed"
+  normalized="$(printf '%s' "$observed" \
+    | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+  test "$normalized" = "$expected"
+}
+
 assert_global_stop_conditions() {
   local capacity_status="$evidence_dir/capacity-status.latest.json"
   local expected_agent_names
@@ -683,7 +695,7 @@ for node in "${nodes[@]}"; do
   [[ "$target" =~ ^[A-Za-z_][A-Za-z0-9._-]*@trt-eai-oldlab-[2-5]$ ]]
   test "${target#*@}" = "$node"
   observed_hostname="$(ssh "${ssh_options[@]}" "$target" /bin/hostname -f)"
-  test "$observed_hostname" = "$node"
+  assert_dns_hostname_identity "$observed_hostname" "$node"
   printf '%s\n' "$observed_hostname" >> "$ssh_host_evidence"
 done
 chmod 0600 "$ssh_host_evidence"
@@ -736,7 +748,8 @@ case "$node" in
   trt-eai-oldlab-2|trt-eai-oldlab-3|trt-eai-oldlab-4|trt-eai-oldlab-5) ;;
   *) exit 1 ;;
 esac
-test "$(ssh "${ssh_options[@]}" "$target" /bin/hostname -f)" = "$node"
+observed_hostname="$(ssh "${ssh_options[@]}" "$target" /bin/hostname -f)"
+assert_dns_hostname_identity "$observed_hostname" "$node"
 assert_global_stop_conditions
 assert_no_runtimeclass_consumers
 assert_runtimeclass_absent
