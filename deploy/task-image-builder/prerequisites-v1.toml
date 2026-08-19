@@ -1,0 +1,128 @@
+schema = "loom.task-image-builder-prerequisites/v1"
+policy_version = "task-image-builder-prerequisites-v1"
+production_certification_allowed = false
+certified_nodes = []
+unconditional_blockers = ["phase2_guard_provider_release_missing"]
+
+[identity]
+user = "loom-builder"
+group = "loom-task-builder"
+uid = 993
+gid = 980
+subid_start = 3000000
+subid_count = 65536
+home = "/nonexistent"
+shell = "/usr/sbin/nologin"
+forbidden_supplementary_groups = ["docker", "root", "sudo"]
+
+[resource_profile]
+cpus = 8
+memory_mib = 32768
+pids = 4096
+scratch_bytes = 107374182400
+scratch_inodes = 1000000
+wall_time = "02:00:00"
+swap_bytes = 0
+max_jobs_per_user = 1
+max_submit_jobs_per_user = 1
+
+[cgroup]
+version = 2
+task_plugin = "task/cgroup"
+proctrack_type = "proctrack/cgroup"
+constrain_cores = true
+constrain_ram_space = true
+constrain_swap_space = true
+constrain_devices = true
+required_delegated_controllers = ["io", "pids"]
+
+[runtime]
+manifest = "rootless-runtime-v1.json"
+snapshotter = "fuse-overlayfs"
+network_driver = "slirp4netns"
+rootlesskit_flags = [
+  "--disable-host-loopback",
+  "--ipv6",
+  "--slirp4netns-sandbox=true",
+  "--slirp4netns-seccomp=true",
+]
+insecure_entitlements = []
+forbidden_paths = [
+  "/run/containerd/containerd.sock",
+  "/var/run/docker.sock",
+]
+required_kernel_primitives = [
+  "clone3_into_cgroup",
+  "pidfd_open",
+  "sealed_memfd",
+  "unprivileged_user_namespaces",
+]
+
+[storage]
+root = "/var/lib/loom-task-builder/jobs"
+allowed_filesystems = ["ext4", "xfs"]
+required_quota_kinds = ["project"]
+cache_enabled = false
+cleanup_required = true
+
+[network]
+bpffs_required = true
+ipv4_default_deny = true
+ipv6_default_deny = true
+ingress_bytes_per_second = 52428800
+egress_bytes_per_second = 52428800
+ingress_packets_per_second = 25000
+egress_packets_per_second = 25000
+concurrent_flows = 1024
+new_flows_per_second = 200
+dns_queries_per_second = 100
+
+[[clusters]]
+id = "oldlab"
+slurm_cluster = "trt-oldlab"
+architecture = "x86_64"
+controller = "TRT-EAI-OLDLAB-1"
+trial_partition = "loom-staging"
+trial_priority_tier = 100
+builder_partition = "loom-task-builder"
+builder_priority_tier = 200
+builder_nodes = [
+  "trt-eai-oldlab-3",
+  "trt-eai-oldlab-4",
+  "trt-eai-oldlab-5",
+]
+slurm_account = "loom-task-builder"
+slurm_qos = "loom-task-image-builder"
+slurm_config = "/etc/slurm/slurm.conf"
+cgroup_config = "/etc/slurm/cgroup.conf"
+
+[[clusters]]
+id = "gb10"
+slurm_cluster = "trt-gb10"
+architecture = "aarch64"
+controller = "gx10-01c7"
+trial_partition = "gb10"
+trial_priority_tier = 100
+builder_partition = "loom-task-builder"
+builder_priority_tier = 200
+builder_nodes = [
+  "trt-gb10-1",
+  "trt-gb10-2",
+  "trt-gb10-3",
+  "trt-gb10-4",
+  "trt-gb10-5",
+  "trt-gb10-6",
+  "trt-gb10-7",
+  "trt-gb10-8",
+  "trt-gb10-9",
+  "trt-gb10-10",
+  "trt-gb10-11",
+  "trt-gb10-12",
+  "trt-gb10-13",
+  "trt-gb10-14",
+  "trt-gb10-15",
+]
+slurm_account = "loom-task-builder"
+slurm_qos = "loom-task-image-builder"
+slurm_config = "/etc/slurm/slurm.conf"
+cgroup_config = "/etc/slurm/cgroup.conf"
