@@ -137,6 +137,8 @@ class _StorageInput(_StrictModel):
 class _BuilderInput(_StrictModel):
     prepared: Literal[False]
     runtime_class_name: str
+    runtime_handler: str
+    runtime_profile_sha256: str
     publisher_identity: str
     registry_prefix: str
 
@@ -145,6 +147,20 @@ class _BuilderInput(_StrictModel):
     def _runtime_class_is_safe(cls, value: str) -> str:
         if len(value) > 253 or _DNS_SUBDOMAIN.fullmatch(value) is None:
             raise ValueError("runtime class identity is invalid")
+        return value
+
+    @field_validator("runtime_handler")
+    @classmethod
+    def _runtime_handler_is_exact(cls, value: str) -> str:
+        if value != "runsc-personal-dev":
+            raise ValueError("runtime handler differs from the measured contract")
+        return value
+
+    @field_validator("runtime_profile_sha256")
+    @classmethod
+    def _runtime_profile_is_exact_digest(cls, value: str) -> str:
+        if _DIGEST.fullmatch(value) is None:
+            raise ValueError("runtime profile digest is invalid")
         return value
 
     @field_validator("publisher_identity")
@@ -795,6 +811,8 @@ class PersonalDevControlPlaneStorage:
 class PersonalDevBuilderTrust:
     prepared: bool
     runtime_class_name: str
+    runtime_handler: str
+    runtime_profile_sha256: str
     publisher_identity: str
     registry_prefix: str
 
@@ -1474,6 +1492,9 @@ def validate_personal_dev_acceptance_plan(
             raise ValueError
         if (
             plan.builder.runtime_class_name != profile.builder.runtime_class_name
+            or plan.builder.runtime_handler != profile.builder.runtime_handler
+            or plan.builder.runtime_profile_sha256
+            != profile.builder.runtime_profile_sha256
             or plan.builder.publisher_identity != profile.builder.publisher_identity
             or plan.builder.registry_prefix != profile.builder.registry_prefix
             or plan.builder.protocol_map_sha256

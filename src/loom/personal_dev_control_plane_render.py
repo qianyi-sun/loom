@@ -47,6 +47,9 @@ class RenderedPersonalDevControlPlane:
     input_sha256: str
     release_sha256: str
     resource_count: int
+    runtime_class_name: str
+    runtime_handler: str
+    runtime_profile_sha256: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -2138,11 +2141,15 @@ def _render_documents(
         sort_keys=False,
         default_flow_style=False,
     )
+    runtime = plan.builder if plan is not None else profile.builder
     return RenderedPersonalDevControlPlane(
         yaml_text=yaml_text,
         input_sha256=context.input_sha256,
         release_sha256=context.release_sha256,
         resource_count=len(documents),
+        runtime_class_name=runtime.runtime_class_name,
+        runtime_handler=runtime.runtime_handler,
+        runtime_profile_sha256=runtime.runtime_profile_sha256,
     )
 
 

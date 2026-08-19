@@ -21,7 +21,6 @@ from loom_capacity_manager.health_probe import capacity_health_probe_argv
 
 _NAMESPACE = "loom-dev"
 _MANAGED_BY = "loom-personal-dev-control-plane"
-_RUNTIME_CLASS = "loom-personal-dev-builder"
 MAX_PERSONAL_DEV_STATUS_RESPONSE_BYTES = 4 * 1024 * 1024
 _TOTAL_TIMEOUT_SECONDS = 60.0
 _CALL_TIMEOUT_SECONDS = 10
@@ -39,11 +38,6 @@ _MAX_MIGRATION_HISTORY = 8
 
 _CONTEXT_COMMAND = ("config", "current-context")
 _NAMESPACE_COMMAND = ("get", "namespaces", "--output=json")
-_RUNTIME_CLASS_COMMAND = (
-    "get",
-    f"runtimeclass.node.k8s.io/{_RUNTIME_CLASS}",
-    "--output=json",
-)
 _NAMESPACED_COMMAND = (
     "get",
     (
@@ -784,21 +778,38 @@ def _manager_status(
     return ceiling, None
 
 
-def _runtime_class_matches_plan(
+def _runtime_class_matches_binding(
     runtime: Mapping[str, Any],
-    plan: PersonalDevAcceptancePlan,
+    *,
+    runtime_class_name: str,
+    runtime_handler: str,
+    runtime_profile_sha256: str,
 ) -> bool:
+    if _DIGEST.fullmatch(runtime_profile_sha256) is None:
+        return False
     metadata = _metadata(runtime)
     annotations = metadata.get("annotations") if metadata is not None else None
+    scheduling = runtime.get("scheduling")
+    selector = {
+        "kubernetes.io/arch": "amd64",
+        "kubernetes.io/os": "linux",
+        "loom.dev/personal-dev-runtime-profile-a": runtime_profile_sha256[:32],
+        "loom.dev/personal-dev-runtime-profile-b": runtime_profile_sha256[32:],
+    }
     return (
         runtime.get("apiVersion") == "node.k8s.io/v1"
         and runtime.get("kind") == "RuntimeClass"
         and metadata is not None
-        and metadata.get("name") == plan.builder.runtime_class_name
-        and runtime.get("handler") == plan.builder.runtime_handler
+        and metadata.get("name") == runtime_class_name
+        and runtime.get("handler") == runtime_handler
         and isinstance(annotations, Mapping)
         and annotations.get("loom.dev/runtime-profile-sha256")
-        == plan.builder.runtime_profile_sha256
+        == runtime_profile_sha256
+        and isinstance(scheduling, Mapping)
+        and set(scheduling).issubset({"nodeSelector", "tolerations"})
+        and scheduling.get("nodeSelector") == selector
+        and scheduling.get("tolerations", []) == []
+        and "overhead" not in runtime
     )
 
 
@@ -983,14 +994,11 @@ def _observe_personal_dev_status(
     acceptance = plan is not None
     expected_namespaced, expected_cluster, expected_namespace = _expected_documents(expected)
     deadline = time.monotonic() + _TOTAL_TIMEOUT_SECONDS
+    runtime_binding = plan.builder if plan is not None else expected
     runtime_class_command = (
-        (
-            "get",
-            f"runtimeclass.node.k8s.io/{plan.builder.runtime_class_name}",
-            "--output=json",
-        )
-        if plan is not None
-        else _RUNTIME_CLASS_COMMAND
+        "get",
+        f"runtimeclass.node.k8s.io/{runtime_binding.runtime_class_name}",
+        "--output=json",
     )
     mode_commands = (
         (_ACCEPTANCE_MANAGER_COMMAND, _DEPLOYMENTS_COMMAND) if acceptance else (_MANAGER_COMMAND,)
@@ -1074,17 +1082,11 @@ def _observe_personal_dev_status(
     if runtime_result is not None and runtime_result.returncode == 0:
         try:
             runtime = _json_document(runtime_result.stdout)
-            runtime_ok = (
-                _runtime_class_matches_plan(runtime, plan)
-                if plan is not None
-                else (
-                    runtime.get("apiVersion") == "node.k8s.io/v1"
-                    and runtime.get("kind") == "RuntimeClass"
-                    and _metadata(runtime) is not None
-                    and _metadata(runtime).get("name") == _RUNTIME_CLASS  # type: ignore[union-attr]
-                    and isinstance(runtime.get("handler"), str)
-                    and bool(runtime["handler"])
-                )
+            runtime_ok = _runtime_class_matches_binding(
+                runtime,
+                runtime_class_name=runtime_binding.runtime_class_name,
+                runtime_handler=runtime_binding.runtime_handler,
+                runtime_profile_sha256=runtime_binding.runtime_profile_sha256,
             )
             runtime_observed = int(runtime_ok)
         except (json.JSONDecodeError, ValueError):

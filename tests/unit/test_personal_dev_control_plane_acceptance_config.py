@@ -133,8 +133,8 @@ def _plan_value(
         },
         "builder": {
             "runtime_class_name": profile.builder.runtime_class_name,
-            "runtime_handler": "runsc-personal-dev",
-            "runtime_profile_sha256": "d" * 64,
+            "runtime_handler": profile.builder.runtime_handler,
+            "runtime_profile_sha256": profile.builder.runtime_profile_sha256,
             "trusted_launcher_profile_sha256": "e" * 64,
             "scanner_binary_sha256": release.scanner.binary_sha256,
             "scanner_cache_identity_sha256": release.scanner.cache_identity_sha256,
@@ -220,6 +220,7 @@ def test_acceptance_plan_loads_exact_owner_only_canonical_contract(tmp_path: Pat
     assert plan.manager.execution_epoch == 0
     assert plan.manager.executable_new_capacity_ceiling == 0
     assert plan.builder.runtime_handler == "runsc-personal-dev"
+    assert plan.builder.runtime_profile_sha256 == profile.builder.runtime_profile_sha256
     assert plan.builder.scanner_binary_sha256 == release.scanner.binary_sha256
     assert plan.builder.scanner_cache_identity_sha256 == (
         release.scanner.cache_identity_sha256
@@ -433,6 +434,8 @@ def test_acceptance_plan_rejects_path_replacement_race(
         ),
         lambda value: value["storage"].update(schema_head="0097"),
         lambda value: value["builder"].update(runtime_class_name="other-runtime"),
+        lambda value: value["builder"].update(runtime_handler="runc"),
+        lambda value: value["builder"].update(runtime_profile_sha256="2" * 64),
         lambda value: value["builder"].update(
             publisher_identity="system:serviceaccount:loom-dev:other-publisher"
         ),

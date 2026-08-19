@@ -29,6 +29,8 @@ scanner_cache_storage = "20Gi"
 [builder]
 prepared = false
 runtime_class_name = "loom-personal-dev-builder"
+runtime_handler = "runsc-personal-dev"
+runtime_profile_sha256 = "880b7c79013e38b016046c732209574d48d6ae5a008164906f9951ba27765b76"
 publisher_identity = "system:serviceaccount:loom-dev:loom-personal-dev-management"
 registry_prefix = "ghcr.io/qianyi-sun/loom-dev"
 
