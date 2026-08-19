@@ -1301,6 +1301,18 @@ python_type = "bool"
 default     = false
 description = "Disabled-by-default worker admission for the code-owned terminalgen-authoring@1 runtime. Enabling this flag alone grants no work: pool containment, immutable attempt grants, image contracts, provider bindings, and validation backend capabilities remain mandatory."
 
+[service_config.pipeline_terminal_task_validator_path]
+used_by     = ["worker"]
+python_type = "Path"
+default     = "/usr/local/bin/loom-terminal-task-validator"
+description = "Absolute operator-provisioned path to the digest-attested rootless BuildKit/OCI TerminalTask validator helper. The validate pool fails before registration when the helper is missing, mutable, symlinked, or fails its closed probe."
+
+[service_config.pipeline_terminal_task_validator_sha256]
+used_by     = ["worker"]
+python_type = "str"
+default     = ""
+description = "Exact lowercase sha256 digest of the approved TerminalTask validator helper executable. Empty keeps terminalgen-validate-none capability disabled."
+
 [service_config.pipeline_runtime_secrets_dir]
 used_by     = ["worker"]
 python_type = "Path"

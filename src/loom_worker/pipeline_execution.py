@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import time
@@ -105,6 +106,11 @@ from loom_worker.pipeline_runtime_secret import (
     PipelineStepJwtRotator,
     RuntimeSecretMount,
     require_runtime_secret_tmpfs,
+)
+from loom_worker.terminal_task_validator import (
+    TerminalTaskValidatorAttestation,
+    TerminalTaskValidatorRunRequestV1,
+    attest_terminal_task_validator,
 )
 
 _STAGE1_POOLS = frozenset({"behavior-gpu-oldlab", "behavior-gpu-gb10"})
@@ -433,9 +439,17 @@ class PipelineCleanupJournal:
         *,
         container_id: str | None,
         runtime_secret_dir: Path | None = None,
+        validator_pid: int | None = None,
+        validator_start_time: int | None = None,
     ) -> None:
+        if (validator_pid is None) != (validator_start_time is None):
+            raise RuntimeError("pipeline_validator_process_identity_incomplete")
         value = {
-            "schema_version": "loom.pipeline-worker-cleanup.v2",
+            "schema_version": (
+                "loom.pipeline-worker-cleanup.v3"
+                if validator_pid is not None
+                else "loom.pipeline-worker-cleanup.v2"
+            ),
             "attempt_id": str(claim.execution_attempt_id),
             "claim_id": str(claim.claim_id),
             "lease_epoch": claim.lease_epoch,
@@ -444,6 +458,9 @@ class PipelineCleanupJournal:
                 str(runtime_secret_dir.absolute()) if runtime_secret_dir is not None else None
             ),
         }
+        if validator_pid is not None:
+            value["validator_pid"] = validator_pid
+            value["validator_start_time"] = validator_start_time
         target = self.root / f"{claim.execution_attempt_id}.json"
         partial = self.root / f".{claim.execution_attempt_id}.tmp"
         partial.write_bytes(canonical_document(value))
@@ -459,7 +476,7 @@ class PipelineCleanupJournal:
     def cleanup_orphans(
         self,
         *,
-        docker_client: Any,
+        docker_client: Any | None,
         attempts_root: Path,
         input_views_root: Path,
         runtime_secrets_root: Path | None = None,
@@ -489,8 +506,19 @@ class PipelineCleanupJournal:
                 if schema_version == "loom.pipeline-worker-cleanup.v2":
                     expected_fields.add("runtime_secret_dir")
                     runtime_secret_dir = value["runtime_secret_dir"]
+                    validator_pid = None
+                    validator_start_time = None
+                elif schema_version == "loom.pipeline-worker-cleanup.v3":
+                    expected_fields.update(
+                        {"runtime_secret_dir", "validator_pid", "validator_start_time"}
+                    )
+                    runtime_secret_dir = value["runtime_secret_dir"]
+                    validator_pid = value["validator_pid"]
+                    validator_start_time = value["validator_start_time"]
                 elif schema_version == "loom.pipeline-worker-cleanup.v1":
                     runtime_secret_dir = None
+                    validator_pid = None
+                    validator_start_time = None
                 else:
                     raise ValueError("cleanup journal schema drift")
                 if (
@@ -502,11 +530,24 @@ class PipelineCleanupJournal:
                     or not isinstance(claim_id, UUID)
                     or not (container_id is None or isinstance(container_id, str))
                     or not (runtime_secret_dir is None or isinstance(runtime_secret_dir, str))
+                    or not (
+                        validator_pid is None
+                        or (
+                            isinstance(validator_pid, int)
+                            and not isinstance(validator_pid, bool)
+                            and validator_pid > 1
+                            and isinstance(validator_start_time, int)
+                            and not isinstance(validator_start_time, bool)
+                            and validator_start_time > 0
+                        )
+                    )
                 ):
                     raise ValueError("cleanup journal record drift")
             except (OSError, ValueError, KeyError, TypeError) as exc:
                 raise RuntimeError("pipeline_cleanup_journal_corrupt") from exc
             if isinstance(container_id, str) and container_id:
+                if docker_client is None:
+                    raise RuntimeError("pipeline_orphan_container_runtime_unavailable")
                 try:
                     container = docker_client.containers.get(container_id)
                 except Exception as exc:
@@ -517,6 +558,15 @@ class PipelineCleanupJournal:
                     if labels.get("loom.execution_attempt_id") != str(attempt_id):
                         raise RuntimeError("pipeline_orphan_container_identity_drift")
                     container.remove(force=True)
+            if isinstance(validator_pid, int):
+                observed_start = _linux_process_start_time(validator_pid)
+                if observed_start is not None:
+                    if observed_start != validator_start_time:
+                        raise RuntimeError("pipeline_orphan_validator_identity_drift")
+                    try:
+                        os.killpg(validator_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
             if isinstance(runtime_secret_dir, str):
                 if runtime_secrets_root is None:
                     raise RuntimeError("pipeline_orphan_secret_root_unavailable")
@@ -542,6 +592,25 @@ class PipelineCleanupJournal:
                 _remove_orphan_input_view(input_root)
             cleaned.append(attempt_id)
         return cleaned
+
+
+def _linux_process_start_time(pid: int) -> int | None:
+    """Return Linux /proc starttime for a PID, protecting against PID reuse."""
+
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise RuntimeError("pipeline_validator_process_identity_unreadable") from exc
+    end = raw.rfind(")")
+    fields = raw[end + 2 :].split() if end >= 0 else []
+    if len(fields) < 20:
+        raise RuntimeError("pipeline_validator_process_identity_invalid")
+    try:
+        return int(fields[19])
+    except ValueError as exc:
+        raise RuntimeError("pipeline_validator_process_identity_invalid") from exc
 
 
 def _remove_orphan_input_view(root: Path) -> None:
@@ -600,7 +669,7 @@ class AttemptControlCancellation(ExecutionCancellation, CancellationSignal):
     control_plane: HttpControlPlaneClient
     paths: PipelineAttemptPaths
     runtime_secret: AttemptRuntimeSecretLifecycle | None = None
-    backend: DockerPipelineBackend | None = None
+    backend: PipelineContainerBackend | None = None
     committer: HttpFinalOutputCommitter | None = None
     current_seq: int = 0
     sticky: bool = False
@@ -1103,6 +1172,170 @@ def _validate_complete_marker(outputs_dir: Path, *, stage_result_digest: str) ->
 
 
 @dataclass(slots=True)
+class RootlessTerminalTaskValidatorBackend(PipelineContainerBackend):
+    """Run the digest-attested rootless validator outside the stage container."""
+
+    claim: ExecutionAttemptClaimV1
+    control_plane: HttpControlPlaneClient
+    paths: PipelineAttemptPaths
+    cleanup_journal: PipelineCleanupJournal
+    attestation: TerminalTaskValidatorAttestation
+    cgroup_parent: str
+    container_absent: bool = True
+    phase_ref: list[HeartbeatPhase] | None = None
+    _process: asyncio.subprocess.Process | None = None
+    _request_path: Path | None = None
+
+    async def run(
+        self,
+        *,
+        attempt_id: UUID,
+        spec: Any,
+        input_view: MaterializedInputView,
+    ) -> ContainerProcessResult:
+        if attempt_id != self.claim.execution_attempt_id:
+            raise RuntimeError("pipeline_attempt_identity_drift")
+        grant = self.claim.terminalgen_authoring
+        validation = grant.validation if grant is not None else None
+        if (
+            validation is None
+            or validation.validator_image != self.claim.image
+            or validation.network_profile != "none"
+            or spec.network_mode != "none"
+            or input_view.root != self.paths.inputs
+        ):
+            raise RuntimeError("pipeline_validator_claim_drift")
+        current_attestation = attest_terminal_task_validator(
+            self.attestation.executable,
+            self.attestation.executable_sha256,
+        )
+        if current_attestation != self.attestation:
+            raise RuntimeError("pipeline_validator_attestation_drift")
+        request = TerminalTaskValidatorRunRequestV1(
+            schema_version="loom.terminal-task-validator-run.v1",
+            execution_attempt_id=attempt_id,
+            stage_run_id=self.claim.stage_run_id,
+            pipeline_run_id=self.claim.pipeline_run_id,
+            executable_sha256=self.attestation.executable_sha256,
+            probe_sha256=self.attestation.probe_sha256,
+            input_view_digest=input_view.input_view_digest,
+            validator_image=self.claim.image,
+            validator_argv=list(self.claim.argv),
+            validation_grant=validation,
+            inputs_root=str(self.paths.inputs),
+            outputs_root=str(self.paths.outputs),
+            scratch_root=str(self.paths.scratch),
+            cgroup_parent=self.cgroup_parent,
+        )
+        request_path = self.paths.scratch / "validator-request.json"
+        request_path.write_bytes(canonical_document(request.model_dump(mode="json")))
+        request_path.chmod(0o400)
+        self._request_path = request_path
+        process = await asyncio.create_subprocess_exec(
+            str(self.attestation.executable),
+            "run",
+            "--request",
+            str(request_path),
+            cwd=self.paths.scratch,
+            env={"LANG": "C.UTF-8"},
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        self._process = process
+        start_time = _linux_process_start_time(process.pid)
+        if start_time is None:
+            await self.terminate(attempt_id=attempt_id, grace_seconds=0)
+            raise RuntimeError("pipeline_validator_process_identity_missing")
+        self.cleanup_journal.record(
+            self.claim,
+            container_id=None,
+            validator_pid=process.pid,
+            validator_start_time=start_time,
+        )
+        await self.control_plane.report_execution_attempt_started(
+            attempt_id=attempt_id,
+            claim=_claim_headers(self.claim),
+            request_id=_request_id(self.claim, "started"),
+            payload=ExecutionStartedV1(
+                container_id=f"rootless-validator-pgid:{process.pid}",
+                runtime_started_at=datetime.now(UTC),
+                input_view_digest=input_view.input_view_digest,
+                step_jwt_id=None,
+            ).model_dump(mode="json"),
+        )
+        if self.phase_ref is not None:
+            self.phase_ref[0] = "running"
+        try:
+            exit_code = await asyncio.wait_for(process.wait(), timeout=self.claim.timeout_seconds)
+        except TimeoutError:
+            await self.terminate(attempt_id=attempt_id, grace_seconds=0)
+            return ContainerProcessResult(
+                exit_code=124,
+                stage_result=None,
+                stage_result_digest=None,
+            )
+        finally:
+            self.cleanup_journal.record(self.claim, container_id=None)
+        if exit_code != 0:
+            return ContainerProcessResult(
+                exit_code=exit_code,
+                stage_result=None,
+                stage_result_digest=None,
+            )
+        result_path = self.paths.outputs / "stage_result.json"
+        raw = result_path.read_bytes()
+        result = StageResultV1.model_validate_json(raw)
+        if canonical_document(result) != raw:
+            raise RuntimeError("stage_result_not_canonical")
+        _validate_complete_marker(self.paths.outputs, stage_result_digest=digest_bytes(raw))
+        return ContainerProcessResult(
+            exit_code=0,
+            stage_result=result.model_dump(mode="json"),
+            stage_result_digest=digest_bytes(raw),
+        )
+
+    async def terminate(self, *, attempt_id: UUID, grace_seconds: int) -> bool:
+        if attempt_id != self.claim.execution_attempt_id:
+            raise RuntimeError("pipeline_attempt_identity_drift")
+        process = self._process
+        if process is None or process.returncode is not None:
+            return False
+        os.killpg(process.pid, signal.SIGTERM)
+        try:
+            await asyncio.wait_for(process.wait(), timeout=grace_seconds)
+            return False
+        except TimeoutError:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            await process.wait()
+            return True
+
+    async def expected_process_group_present(self, *, attempt_id: UUID) -> bool:
+        if attempt_id != self.claim.execution_attempt_id:
+            raise RuntimeError("pipeline_attempt_identity_drift")
+        process = self._process
+        if process is None or process.returncode is not None:
+            return False
+        try:
+            os.kill(process.pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+
+    async def teardown(self, *, attempt_id: UUID) -> None:
+        if await self.expected_process_group_present(attempt_id=attempt_id):
+            await self.terminate(attempt_id=attempt_id, grace_seconds=0)
+        self._process = None
+        if self._request_path is not None:
+            with contextlib.suppress(FileNotFoundError):
+                self._request_path.unlink()
+        self._request_path = None
+        self.cleanup_journal.record(self.claim, container_id=None)
+
+
+@dataclass(slots=True)
 class DockerPipelineBackend(PipelineContainerBackend):
     claim: ExecutionAttemptClaimV1
     control_plane: HttpControlPlaneClient
@@ -1290,6 +1523,7 @@ class PipelineWorkerRuntime:
     journal: ArtifactInputJournal = field(init=False)
     cleanup_journal: PipelineCleanupJournal = field(init=False)
     runtime_secrets_root: Path | None = field(init=False, default=None)
+    validator_attestation: TerminalTaskValidatorAttestation | None = field(init=False, default=None)
     worker_id: UUID | None = None
     _orphan_cleanup_done: bool = False
 
@@ -1307,6 +1541,11 @@ class PipelineWorkerRuntime:
             self.runtime_secrets_root = require_runtime_secret_tmpfs(
                 self.settings.pipeline_runtime_secrets_dir
             )
+        elif self.settings.pool_name == "terminalgen-validate-none":
+            self.validator_attestation = attest_terminal_task_validator(
+                self.settings.pipeline_terminal_task_validator_path,
+                self.settings.pipeline_terminal_task_validator_sha256,
+            )
 
     def registration_cache_fields(self) -> dict[str, int]:
         self._cleanup_orphans()
@@ -1320,6 +1559,18 @@ class PipelineWorkerRuntime:
         if self._orphan_cleanup_done:
             return
         try:
+            if self.settings.pool_name == "terminalgen-validate-none":
+                cleaned = self.cleanup_journal.cleanup_orphans(
+                    docker_client=None,
+                    attempts_root=(self.base / "attempts").resolve(),
+                    input_views_root=(self.base / "input-views").resolve(),
+                    runtime_secrets_root=None,
+                )
+                for attempt_id in cleaned:
+                    self.journal.release_attempt(attempt_id)
+                    self.cleanup_journal.clear(attempt_id)
+                self._orphan_cleanup_done = True
+                return
             import docker
 
             client = docker.from_env()
@@ -1373,15 +1624,30 @@ class PipelineWorkerRuntime:
         )
         committer = HttpFinalOutputCommitter(claim, self.control_plane)
         cancellation.committer = committer
-        backend = DockerPipelineBackend(
-            claim=claim,
-            control_plane=self.control_plane,
-            paths=paths,
-            cleanup_journal=self.cleanup_journal,
-            cgroup_parent=_worker_cgroup_parent(self.settings),
-            identity_labels=_runtime_identity_labels(self.settings),
-            runtime_secret_dir=runtime_secret_dir,
-        )
+        cgroup_parent = _worker_cgroup_parent(self.settings)
+        if claim.terminalgen_authoring is not None and claim.terminalgen_authoring.validation:
+            if self.validator_attestation is None or cgroup_parent is None:
+                raise RuntimeError("pipeline_validator_backend_unavailable")
+            backend: DockerPipelineBackend | RootlessTerminalTaskValidatorBackend = (
+                RootlessTerminalTaskValidatorBackend(
+                    claim=claim,
+                    control_plane=self.control_plane,
+                    paths=paths,
+                    cleanup_journal=self.cleanup_journal,
+                    attestation=self.validator_attestation,
+                    cgroup_parent=cgroup_parent,
+                )
+            )
+        else:
+            backend = DockerPipelineBackend(
+                claim=claim,
+                control_plane=self.control_plane,
+                paths=paths,
+                cleanup_journal=self.cleanup_journal,
+                cgroup_parent=cgroup_parent,
+                identity_labels=_runtime_identity_labels(self.settings),
+                runtime_secret_dir=runtime_secret_dir,
+            )
         cancellation.backend = backend
         phase: list[HeartbeatPhase] = ["input_materializing"]
         cancellation.phase_ref = phase
@@ -1423,7 +1689,9 @@ class PipelineWorkerRuntime:
                 cancellation=cancellation,
                 backend=backend,
                 preflight=(
-                    AttestedGpuExecutionPreflight(plan, backend.observe_gpu_preflight)
+                    AttestedGpuExecutionPreflight(
+                        plan, cast(DockerPipelineBackend, backend).observe_gpu_preflight
+                    )
                     if plan is not None
                     else None
                 ),
@@ -1661,7 +1929,7 @@ async def _observed_cleanup_proof(
     *,
     claim: ExecutionAttemptClaimV1,
     paths: PipelineAttemptPaths,
-    backend: DockerPipelineBackend,
+    backend: PipelineContainerBackend,
     committer: HttpFinalOutputCommitter,
     runtime_secret: AttemptRuntimeSecretLifecycle | None = None,
 ) -> WorkerCleanupProofV1:

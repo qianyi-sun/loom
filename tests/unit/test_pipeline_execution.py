@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import os
+import signal
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,14 +13,16 @@ from uuid import UUID
 import pytest
 
 from loom.pipeline.keys import canonical_document, digest_bytes
+from loom.pipeline.state import StageResultV1
 from loom.pipeline.work_protocol import ExecutionAttemptClaimV1, WorkerCleanupProofV1
 from loom_worker import main_loop as worker_main_loop
-from loom_worker.pipeline_container_runner import PipelineProcessFailedError
+from loom_worker.pipeline_container_runner import MaterializedInputView, PipelineProcessFailedError
 from loom_worker.pipeline_execution import (
     AttemptControlCancellation,
     HttpFinalOutputCommitter,
     PipelineAttemptPaths,
     PipelineCleanupJournal,
+    RootlessTerminalTaskValidatorBackend,
     _container_spec,
     _execution_failure,
     _install_runtime_contract,
@@ -31,6 +36,11 @@ from loom_worker.pipeline_runtime_secret import (
     PipelineStepJwtRotator,
     RuntimeSecretError,
     RuntimeSecretMount,
+)
+from loom_worker.terminal_task_validator import (
+    TerminalTaskValidatorAttestation,
+    TerminalTaskValidatorProbeV1,
+    TerminalTaskValidatorRunRequestV1,
 )
 from tests.pipeline_input_helpers import claim, scalar_artifact
 from tests.unit.test_pipeline_work_protocol import terminalgen_validation_claim
@@ -248,7 +258,7 @@ def test_stage1_runtime_registration_advertises_dedicated_claim_feature(
         ("terminalgen-plan-none", True, True),
         ("terminalgen-package-none", True, True),
         ("terminalgen-generate-gateway", True, True),
-        ("terminalgen-validate-none", True, False),
+        ("terminalgen-validate-none", True, True),
     ],
 )
 def test_terminalgen_registration_feature_is_disabled_by_default(
@@ -271,6 +281,8 @@ def test_terminalgen_registration_feature_is_disabled_by_default(
         candidate_sha="a" * 40,
         compose_project=f"loom-{pool_name}",
         pipeline_runtime_secrets_dir=tmp_path,
+        pipeline_terminal_task_validator_path=tmp_path / "validator",
+        pipeline_terminal_task_validator_sha256="sha256:" + "3" * 64,
     )
     seen_features: list[str] = []
     capability = SimpleNamespace(
@@ -302,6 +314,11 @@ def test_terminalgen_registration_feature_is_disabled_by_default(
         "loom_worker.pipeline_runtime_secret.require_runtime_secret_tmpfs",
         lambda root: root,
     )
+    monkeypatch.setattr(
+        worker_main_loop,
+        "attest_terminal_task_validator",
+        lambda *_args, **_kwargs: object(),
+    )
 
     def _capability(**kwargs: Any) -> Any:
         seen_features.extend(kwargs["container_runtime_features"])
@@ -315,6 +332,10 @@ def test_terminalgen_registration_feature_is_disabled_by_default(
         "loom-terminalgen-authoring-worker-v1"
         in payload["capability_snapshot"]["container_runtime_features"]
     ) is advertised
+    assert (
+        "loom-terminal-task-validator-v1"
+        in payload["capability_snapshot"]["container_runtime_features"]
+    ) is (advertised and pool_name == "terminalgen-validate-none")
 
 
 class _FinalOutputControlPlane:
@@ -537,6 +558,271 @@ def test_cleanup_journal_reaps_exact_attempt_runtime_secret(tmp_path: Path) -> N
 
     assert cleaned == [attempt_id]
     assert not secret_dir.exists()
+
+
+def test_cleanup_journal_reaps_only_exact_validator_process_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    execution = _claim()
+    journal = PipelineCleanupJournal(tmp_path / "journal")
+    journal.record(
+        execution,
+        container_id=None,
+        validator_pid=4312,
+        validator_start_time=9173,
+    )
+    killed: list[tuple[int, signal.Signals]] = []
+    monkeypatch.setattr(
+        "loom_worker.pipeline_execution._linux_process_start_time",
+        lambda _pid: 9174,
+    )
+    monkeypatch.setattr(os, "killpg", lambda pid, sig: killed.append((pid, sig)))
+
+    with pytest.raises(RuntimeError, match="validator_identity_drift"):
+        journal.cleanup_orphans(
+            docker_client=None,
+            attempts_root=tmp_path / "attempts",
+            input_views_root=tmp_path / "input-views",
+        )
+
+    assert killed == []
+
+    monkeypatch.setattr(
+        "loom_worker.pipeline_execution._linux_process_start_time",
+        lambda _pid: 9173,
+    )
+    assert journal.cleanup_orphans(
+        docker_client=None,
+        attempts_root=tmp_path / "attempts",
+        input_views_root=tmp_path / "input-views",
+    ) == [execution.execution_attempt_id]
+    assert killed == [(4312, signal.SIGKILL)]
+
+
+class _ValidatorControlPlane:
+    def __init__(self) -> None:
+        self.started: dict[str, Any] | None = None
+
+    async def report_execution_attempt_started(self, **kwargs: Any) -> None:
+        self.started = kwargs
+
+
+class _CompletedValidatorProcess:
+    pid = 4312
+    returncode: int | None = None
+
+    async def wait(self) -> int:
+        self.returncode = 0
+        return 0
+
+
+class _BlockingValidatorProcess:
+    pid = 4313
+    returncode: int | None = None
+
+    def __init__(self) -> None:
+        self.exited = asyncio.Event()
+
+    async def wait(self) -> int:
+        await self.exited.wait()
+        self.returncode = 137
+        return 137
+
+
+def _validator_backend(
+    tmp_path: Path,
+) -> tuple[
+    RootlessTerminalTaskValidatorBackend,
+    ExecutionAttemptClaimV1,
+    PipelineAttemptPaths,
+    _ValidatorControlPlane,
+]:
+    execution = ExecutionAttemptClaimV1.model_validate(terminalgen_validation_claim())
+    root = tmp_path / "attempt"
+    paths = PipelineAttemptPaths(
+        root=root,
+        inputs=tmp_path / "inputs",
+        outputs=root / "outputs",
+        scratch=root / "scratch",
+    )
+    for path in (paths.inputs, paths.outputs, paths.scratch):
+        path.mkdir(parents=True)
+    probe = TerminalTaskValidatorProbeV1(
+        schema_version="loom.terminal-task-validator-probe.v1",
+        backend="rootless-buildkit-oci-v1",
+        validation_policy_sha256=(
+            execution.terminalgen_authoring.validation.policy_digest  # type: ignore[union-attr]
+        ),
+        rootless=True,
+        network_profile="none",
+        runtime_socket_exposed=False,
+        process_group_isolation=True,
+    )
+    control_plane = _ValidatorControlPlane()
+    backend = RootlessTerminalTaskValidatorBackend(
+        claim=execution,
+        control_plane=control_plane,  # type: ignore[arg-type]
+        paths=paths,
+        cleanup_journal=PipelineCleanupJournal(tmp_path / "journal"),
+        attestation=TerminalTaskValidatorAttestation(
+            executable=tmp_path / "validator",
+            executable_sha256="sha256:" + "1" * 64,
+            probe=probe,
+            probe_sha256="sha256:" + "2" * 64,
+        ),
+        cgroup_parent="loom-job-42.slice",
+    )
+    return backend, execution, paths, control_plane
+
+
+async def test_rootless_validator_backend_runs_exact_attested_request(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    backend, execution, paths, control_plane = _validator_backend(tmp_path)
+    process = _CompletedValidatorProcess()
+    invocation: dict[str, Any] = {}
+
+    async def _create_process(*args: Any, **kwargs: Any) -> _CompletedValidatorProcess:
+        invocation.update(args=args, kwargs=kwargs)
+        artifact = paths.outputs / "artifacts" / "result" / "artifact.json"
+        artifact.parent.mkdir(parents=True)
+        artifact_payload = canonical_document({"schema_version": "example.output.v1"})
+        artifact.write_bytes(artifact_payload)
+        stage_result = StageResultV1.model_validate(
+            {
+                "schema_version": "loom.stage-result.v1",
+                "domain_outcome": "complete",
+                "reason_code": "completed",
+                "retry_class": "none",
+                "inputs": [],
+                "outputs": [
+                    {"name": "result", "artifact_type": "behavior.result.v1"}
+                ],
+                "metrics": {},
+                "provenance": {
+                    "pipeline_run_id": execution.pipeline_run_id,
+                    "stage_run_id": execution.stage_run_id,
+                    "execution_attempt_id": execution.execution_attempt_id,
+                    "recipe_digest": execution.recipe_digest,
+                    "execution_spec_digest": execution.execution_spec_digest,
+                    "image_digest": execution.image.rsplit("@", 1)[1],
+                },
+                "error": None,
+            }
+        )
+        result_payload = canonical_document(stage_result.model_dump(mode="json"))
+        (paths.outputs / "stage_result.json").write_bytes(result_payload)
+        (paths.outputs / "COMPLETE.json").write_bytes(
+            canonical_document(
+                {
+                    "schema_version": "loom.attempt-complete.v1",
+                    "idempotency_key": f"attempt:{execution.execution_attempt_id}",
+                    "stage_result_sha256": digest_bytes(result_payload),
+                    "outputs": [
+                        {
+                            "name": "result",
+                            "artifact_json_sha256": digest_bytes(artifact_payload),
+                            "files": [],
+                        }
+                    ],
+                }
+            )
+        )
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _create_process)
+    monkeypatch.setattr(
+        "loom_worker.pipeline_execution.attest_terminal_task_validator",
+        lambda *_args, **_kwargs: backend.attestation,
+    )
+    monkeypatch.setattr(
+        "loom_worker.pipeline_execution._linux_process_start_time",
+        lambda _pid: 9173,
+    )
+    input_view = MaterializedInputView(
+        root=paths.inputs,
+        input_view_digest="sha256:" + "3" * 64,
+    )
+
+    result = await backend.run(
+        attempt_id=execution.execution_attempt_id,
+        spec=SimpleNamespace(network_mode="none"),
+        input_view=input_view,
+    )
+
+    request = (paths.scratch / "validator-request.json").read_bytes()
+    assert request == canonical_document(json.loads(request))
+    parsed_request = TerminalTaskValidatorRunRequestV1.model_validate_json(request)
+    assert parsed_request.execution_attempt_id == execution.execution_attempt_id
+    assert parsed_request.validation_grant == execution.terminalgen_authoring.validation  # type: ignore[union-attr]
+    assert parsed_request.cgroup_parent == "loom-job-42.slice"
+    assert invocation["args"] == (
+        str(tmp_path / "validator"),
+        "run",
+        "--request",
+        str(paths.scratch / "validator-request.json"),
+    )
+    assert invocation["kwargs"]["env"] == {"LANG": "C.UTF-8"}
+    assert invocation["kwargs"]["start_new_session"] is True
+    assert result.exit_code == 0
+    assert result.stage_result_digest is not None
+    assert control_plane.started is not None
+    assert control_plane.started["payload"]["container_id"] == "rootless-validator-pgid:4312"
+
+
+async def test_rootless_validator_backend_rechecks_attestation_before_launch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    backend, execution, paths, _control_plane = _validator_backend(tmp_path)
+    drifted = TerminalTaskValidatorAttestation(
+        executable=backend.attestation.executable,
+        executable_sha256=backend.attestation.executable_sha256,
+        probe=backend.attestation.probe,
+        probe_sha256="sha256:" + "f" * 64,
+    )
+    monkeypatch.setattr(
+        "loom_worker.pipeline_execution.attest_terminal_task_validator",
+        lambda *_args, **_kwargs: drifted,
+    )
+
+    with pytest.raises(RuntimeError, match="validator_attestation_drift"):
+        await backend.run(
+            attempt_id=execution.execution_attempt_id,
+            spec=SimpleNamespace(network_mode="none"),
+            input_view=MaterializedInputView(
+                root=paths.inputs,
+                input_view_digest="sha256:" + "3" * 64,
+            ),
+        )
+
+
+async def test_rootless_validator_backend_forcibly_terminates_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    backend, execution, _paths, _control_plane = _validator_backend(tmp_path)
+    process = _BlockingValidatorProcess()
+    backend._process = process  # type: ignore[assignment]
+    signals: list[signal.Signals] = []
+
+    def _killpg(_pid: int, requested_signal: signal.Signals) -> None:
+        signals.append(requested_signal)
+        if requested_signal == signal.SIGKILL:
+            process.exited.set()
+
+    monkeypatch.setattr(os, "killpg", _killpg)
+
+    forced = await backend.terminate(
+        attempt_id=execution.execution_attempt_id,
+        grace_seconds=0,
+    )
+
+    assert forced is True
+    assert signals == [signal.SIGTERM, signal.SIGKILL]
+    assert process.returncode == 137
 
 
 def test_cleanup_journal_refuses_substituted_runtime_secret_symlink(tmp_path: Path) -> None:

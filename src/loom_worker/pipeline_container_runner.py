@@ -460,6 +460,9 @@ class ExecutionCancellation(Protocol):
 class PipelineContainerBackend(Protocol):
     """Small runtime adapter shared by Docker-backed production and fakes."""
 
+    @property
+    def container_absent(self) -> bool: ...
+
     async def run(
         self,
         *,
@@ -781,6 +784,7 @@ class FakePipelineContainerBackend:
     result: ContainerProcessResult
     calls: list[str] = field(default_factory=list)
     terminate_forced: bool = False
+    container_absent: bool = True
 
     async def run(
         self,

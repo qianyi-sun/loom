@@ -54,6 +54,8 @@ class WorkerSettings(BaseSettings):
     minio_region: str = "us-east-1"
     minio_secret_key: SecretStr
     pipeline_runtime_secrets_dir: Path = Path("/dev/shm")
+    pipeline_terminal_task_validator_path: Path = Path("/usr/local/bin/loom-terminal-task-validator")
+    pipeline_terminal_task_validator_sha256: str = ""
     pipeline_terminalgen_authoring_enabled: bool = False
     pool_name: str = "default"
     pre_start_heartbeat_interval_sec: float = 60.0
