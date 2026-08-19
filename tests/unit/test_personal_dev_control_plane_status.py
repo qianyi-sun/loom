@@ -667,6 +667,69 @@ def test_healthy_acceptance_returns_separate_readiness_facets_and_safe_commands(
         assert command[0] in {"config", "get", "--request-timeout=10s"}
 
 
+def test_status_accepts_api_server_canonical_empty_literal_environment(
+    tmp_path: Path,
+) -> None:
+    shadow_expected, shadow_runner = _healthy_fixture(tmp_path)
+    acceptance_expected, plan, acceptance_runner = _acceptance_healthy_fixture(tmp_path)
+
+    for runner, expected_empty_names in (
+        (
+            shadow_runner,
+            {
+                "LOOM_SVC_DEV_INSTANCE_KUBE_CONTEXT",
+                "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_POLICY_SHA256",
+                "LOOM_SVC_PERSONAL_DEV_TRUSTED_LAUNCHER_PROFILE_SHA256",
+            },
+        ),
+        (acceptance_runner, {"LOOM_SVC_DEV_INSTANCE_KUBE_CONTEXT"}),
+    ):
+        deployment = _item(
+            runner,
+            _NAMESPACED,
+            "Deployment",
+            "loom-personal-dev-management",
+        )
+        environment = deployment["spec"]["template"]["spec"]["containers"][0]["env"]
+        removed: set[str] = set()
+        for entry in environment:
+            if entry.get("value") != "":
+                continue
+            assert set(entry) == {"name", "value"}
+            removed.add(entry["name"])
+            del entry["value"]
+        assert removed == expected_empty_names
+
+    shadow_status = _observe(shadow_expected, shadow_runner)
+    acceptance_status = _observe_acceptance(acceptance_expected, plan, acceptance_runner)
+
+    assert shadow_status.ready is True
+    assert shadow_status.blockers == ()
+    assert acceptance_status.ready is True
+    assert acceptance_status.blockers == ()
+
+
+def test_status_accepts_api_server_default_empty_admission_selectors(
+    tmp_path: Path,
+) -> None:
+    expected, runner = _healthy_fixture(tmp_path)
+    policies = [
+        item
+        for item in _items(runner, _CLUSTER)
+        if item["kind"] == "ValidatingAdmissionPolicy"
+    ]
+    assert len(policies) == 3
+    for policy in policies:
+        constraints = policy["spec"]["matchConstraints"]
+        constraints["namespaceSelector"] = {}
+        constraints["objectSelector"] = {}
+
+    result = _observe(expected, runner)
+
+    assert result.ready is True
+    assert result.blockers == ()
+
+
 def test_acceptance_status_allows_monotonic_manager_configuration_advancement(
     tmp_path: Path,
 ) -> None:
@@ -687,6 +750,8 @@ def test_acceptance_status_allows_monotonic_manager_configuration_advancement(
     [
         ("cluster-role-aggregation", "cluster_resource_drift"),
         ("admission-binding-match-resources", "cluster_resource_drift"),
+        ("admission-policy-namespace-selector", "cluster_resource_drift"),
+        ("admission-policy-object-selector", "cluster_resource_drift"),
         ("default-deny-ingress", "resource_inventory_drift"),
         ("management-host-network", "resource_inventory_drift"),
         ("management-pod-host-network", "resource_inventory_drift"),
@@ -713,6 +778,23 @@ def test_acceptance_status_rejects_live_authority_or_exposure_widening(
         )
         binding["spec"]["matchResources"] = {
             "namespaceSelector": {"matchLabels": {"loom.dev/skip-policy": "false"}}
+        }
+    elif mutation in {
+        "admission-policy-namespace-selector",
+        "admission-policy-object-selector",
+    }:
+        policy = next(
+            item
+            for item in _items(runner, _CLUSTER)
+            if item["kind"] == "ValidatingAdmissionPolicy"
+        )
+        selector = (
+            "namespaceSelector"
+            if mutation == "admission-policy-namespace-selector"
+            else "objectSelector"
+        )
+        policy["spec"]["matchConstraints"][selector] = {
+            "matchLabels": {"loom.dev/skip-admission": "true"}
         }
     elif mutation == "default-deny-ingress":
         policy = _item(
