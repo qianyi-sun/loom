@@ -136,6 +136,7 @@ class TerminalGenReadinessRuntime:
             if any(
                 item is not None
                 for item in (
+                    fanout_item,
                     candidate.fanout_source_manifest_digest,
                     candidate.fanout_item_digest,
                     fanout_parameters_digest,
@@ -149,6 +150,8 @@ class TerminalGenReadinessRuntime:
             or fanout_parameters_digest is None
         ):
             raise TerminalGenRuntimeError("expanded fanout authority is incomplete")
+        if fanout_item is not None and candidate.fanout_parameters_json != fanout_item.parameters:
+            raise TerminalGenRuntimeError("expanded fanout parameters drift")
 
         spec = ExecutionSpecSnapshotV1(
             schema_version="loom.execution-spec.v1",

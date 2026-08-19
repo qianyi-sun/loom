@@ -296,6 +296,32 @@ async def test_terminalgen_runtime_rejects_graph_digest_drift() -> None:
 
 
 @pytest.mark.asyncio
+async def test_terminalgen_runtime_rejects_singleton_fanout_item() -> None:
+    candidate = replace(
+        _candidate(),
+        fanout_item_json={
+            "artifact_bindings": [
+                {
+                    "artifact_id": "80000000-0000-4000-8000-000000000008",
+                    "artifact_type": "terminalgen.slot.v1",
+                    "name": "slot",
+                }
+            ],
+            "parameters": {"slot_ordinal": 0},
+            "shard_key": "capability__same-domain-parametric__0001",
+        },
+    )
+    runtime = TerminalGenReadinessRuntime(
+        repo_root=REPO_ROOT,
+        resource_profiles=ResourceProfileRegistry.load(),
+        image_runtime=_images(),
+    )
+
+    with pytest.raises(ValueError, match="singleton fanout authority drift"):
+        await runtime.resolve(candidate)
+
+
+@pytest.mark.asyncio
 async def test_terminalgen_runtime_freezes_generate_provider_budget_and_fanout() -> None:
     candidate = _generate_candidate()
     runtime = TerminalGenReadinessRuntime(
@@ -317,3 +343,16 @@ async def test_terminalgen_runtime_freezes_generate_provider_budget_and_fanout()
     assert request.fanout_item is not None
     assert request.fanout_item.shard_key == candidate.shard_key
     assert request.provenance.control_binding is not None
+
+
+@pytest.mark.asyncio
+async def test_terminalgen_runtime_rejects_fanout_parameter_drift() -> None:
+    candidate = replace(_generate_candidate(), fanout_parameters_json={"slot_ordinal": 1})
+    runtime = TerminalGenReadinessRuntime(
+        repo_root=REPO_ROOT,
+        resource_profiles=ResourceProfileRegistry.load(),
+        image_runtime=_images(),
+    )
+
+    with pytest.raises(ValueError, match="expanded fanout parameters drift"):
+        await runtime.resolve(candidate)
