@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from loom.models.types import ModelSpec
 
-PRNG_VERSION = "model_switch_plan.v1"
+PRNG_VERSION = "model_switch_plan.v2"
 
 
 class ModelSwitchPlanSnapshot(BaseModel):
@@ -20,9 +20,13 @@ class ModelSwitchPlanSnapshot(BaseModel):
     id: UUID
     trial_id: UUID
     combination_idx: int = 0
-    k1: int = Field(ge=2)
-    k2: int = Field(ge=3)
-    teacher_episodes: int = Field(ge=1)
+    mix_mode: Literal["student_teacher_student", "beta_mixture"] = (
+        "student_teacher_student"
+    )
+    k1: int | None = Field(default=None, ge=2)
+    k2: int | None = Field(default=None, ge=3)
+    teacher_episodes: int | None = Field(default=None, ge=1)
+    beta: float | None = Field(default=None, ge=0.0, le=1.0)
     seed: str
     prng_version: str = PRNG_VERSION
     student_model: ModelSpec

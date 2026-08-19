@@ -17,13 +17,18 @@ from loom.models.types import ModelSpec
 
 
 def plan_snapshot_from_row(row: ModelSwitchPlan) -> ModelSwitchPlanSnapshot:
+    mix_mode = row.mix_mode or "student_teacher_student"
+    if mix_mode not in {"student_teacher_student", "beta_mixture"}:
+        mix_mode = "student_teacher_student"
     return ModelSwitchPlanSnapshot(
         id=row.id,
         trial_id=row.trial_id,
         combination_idx=row.combination_idx,
+        mix_mode=mix_mode,  # type: ignore[arg-type]
         k1=row.k1,
         k2=row.k2,
         teacher_episodes=row.teacher_episodes,
+        beta=None if row.beta is None else float(row.beta),
         seed=row.seed,
         prng_version=row.prng_version,
         student_model=ModelSpec.model_validate(row.student_model_snapshot),
@@ -54,8 +59,25 @@ async def persist_model_switch_plan(
     spec = MultiModelSwitchSpec.model_validate(raw)
     if not spec.enabled or spec.secondary_model is None:
         return None
-    if spec.switch_episode is None or spec.return_switch_episode is None:
-        return None
+    mix_mode = spec.policy
+    k1: int | None
+    k2: int | None
+    teacher_episodes: int | None
+    beta: float | None
+    if mix_mode == "beta_mixture":
+        if spec.beta is None:
+            return None
+        k1 = None
+        k2 = None
+        teacher_episodes = None
+        beta = float(spec.beta)
+    else:
+        if spec.switch_episode is None or spec.return_switch_episode is None:
+            return None
+        k1 = int(spec.switch_episode)
+        k2 = int(spec.return_switch_episode)
+        teacher_episodes = int(spec.teacher_episodes)
+        beta = None
     if agent_model is None:
         return None
 
@@ -73,6 +95,8 @@ async def persist_model_switch_plan(
         if source is not None:
             inherited_from = source.id
             seed = source.seed
+    elif spec.mix_seed:
+        seed = spec.mix_seed
 
     pricing_snapshot: dict[str, Any] = {}
     capability_snapshot: dict[str, Any] = {}
@@ -94,9 +118,11 @@ async def persist_model_switch_plan(
             id=plan_id,
             trial_id=trial_id,
             combination_idx=combination_idx,
-            k1=int(spec.switch_episode),
-            k2=int(spec.return_switch_episode),
-            teacher_episodes=int(spec.teacher_episodes),
+            mix_mode=mix_mode,
+            k1=k1,
+            k2=k2,
+            teacher_episodes=teacher_episodes,
+            beta=beta,
             seed=seed,
             prng_version=PRNG_VERSION,
             student_model_snapshot=agent_model.model_dump(mode="json"),

@@ -232,11 +232,7 @@ async def submit_trial(
             status_code=400,
             detail=f"invalid trial config: {exc}",
         ) from exc
-    if (
-        trial_config.multi_model is not None
-        and trial_config.multi_model.enabled
-        and trial_config.multi_model.switch_episode is None
-    ):
+    if trial_config.multi_model is not None and trial_config.multi_model.enabled:
         from loom.models.trial import (
             MultiModelSwitchSpec,
             materialize_multi_model_switch_episode,

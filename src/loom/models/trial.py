@@ -15,19 +15,28 @@ from loom.models.skill import SkillRef
 from loom.models.types import ModelSpec, VerifierEnvMode
 from loom.request_params import sanitize_request_extras
 
+MixPolicy = Literal["student_teacher_student", "beta_mixture"]
+
 
 class MultiModelSwitchSpec(BaseModel):
-    """Student/teacher/student mid-trajectory switch for terminus-2 (#1380).
+    """Mid-trajectory student/teacher mix for terminus-2 (#1380).
 
     Primary ``TrialConfig.agent_model`` is the student. ``secondary_model`` is
-    the teacher. v1 uses an episode schedule (K1, teacher_episodes, K2) as a
-    stand-in for a later off-track detector. Same provider connection.
+    the teacher. Same BYO provider connection.
+
+    Two policies share ``LoomRoleRouter``:
+
+    * ``student_teacher_student`` — contiguous Harbor-episode blocks
+      (K1 / teacher_episodes / K2). Default.
+    * ``beta_mixture`` — per-episode coin: teacher if ``draw < beta``.
+      Replay-safe hash of plan seed + trial id + episode. Not DAgger
+      labels; only who drives the docker.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     enabled: bool = False
-    policy: Literal["student_teacher_student"] = "student_teacher_student"
+    policy: MixPolicy = "student_teacher_student"
     secondary_model: ModelSpec | None = None
     # K1: student → teacher (Harbor 1-based episode). Sampled if omitted.
     switch_episode: int | None = Field(default=None, ge=2)
@@ -35,12 +44,28 @@ class MultiModelSwitchSpec(BaseModel):
     # K2: teacher → student. Server sets this to K1 + teacher_episodes.
     return_switch_episode: int | None = Field(default=None, ge=3)
     episode_ceiling: int = Field(default=50, ge=2, le=1000)
+    # Path B: P(teacher drives this episode). Forbidden on the K1/K2 policy.
+    beta: float | None = Field(default=None, ge=0.0, le=1.0)
+    # Optional client seed copied onto model_switch_plans.seed. Not ``seed``.
+    mix_seed: str | None = Field(default=None, min_length=1, max_length=128)
 
     @model_validator(mode="after")
     def _validate_enabled_fields(self) -> MultiModelSwitchSpec:
         if self.enabled and self.secondary_model is None:
             raise ValueError(
                 "multi_model.secondary_model is required when enabled",
+            )
+        if self.policy == "beta_mixture":
+            if not self.enabled:
+                return self
+            if self.beta is None:
+                raise ValueError("multi_model.beta is required when policy is beta_mixture")
+            if self.switch_episode is not None or self.return_switch_episode is not None:
+                raise ValueError("beta_mixture cannot set K1/K2 switch episodes")
+            return self
+        if self.beta is not None or self.mix_seed is not None:
+            raise ValueError(
+                "multi_model.beta and mix_seed require policy beta_mixture",
             )
         if (
             self.switch_episode is not None
@@ -67,7 +92,7 @@ def materialize_multi_model_switch_episode(
     *,
     rng: random.Random | None = None,
 ) -> dict[str, Any] | None:
-    """Persist K1 and K2 when enabled. Idempotent once both are set."""
+    """Materialize policy-specific mix fields. Idempotent once set."""
     if multi_model is None:
         return None
     if isinstance(multi_model, MultiModelSwitchSpec):
@@ -77,6 +102,12 @@ def materialize_multi_model_switch_episode(
     if not data.get("enabled"):
         return data
     data["policy"] = data.get("policy") or "student_teacher_student"
+    if data["policy"] == "beta_mixture":
+        data.pop("switch_episode", None)
+        data.pop("return_switch_episode", None)
+        data.pop("teacher_episodes", None)
+        data.pop("episode_ceiling", None)
+        return data
     teacher_episodes = int(data.get("teacher_episodes") or 2)
     if teacher_episodes < 1:
         teacher_episodes = 1

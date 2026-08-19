@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from loom.agent.terminus2.model_switch import role_for_episode
+from loom.agent.terminus2.model_switch import role_for_beta_episode, role_for_episode
 from loom.db.schema import LlmCallIntent, ModelSwitchPlan
 
 LOOM_PAYLOAD_PREFIX = "loom_"
@@ -168,11 +168,30 @@ async def persist_correlated_intent(
                 "student/teacher plan allowlist"
             ),
         )
-    expected_role = role_for_episode(
-        episode,
-        first_switch_episode=plan.k1,
-        return_switch_episode=plan.k2,
-    )
+    mix_mode = getattr(plan, "mix_mode", None) or "student_teacher_student"
+    if mix_mode == "beta_mixture":
+        if plan.beta is None or not plan.seed:
+            raise HTTPException(
+                status_code=400,
+                detail="beta_mixture plan is missing beta or seed",
+            )
+        expected_role = role_for_beta_episode(
+            episode,
+            beta=float(plan.beta),
+            seed=str(plan.seed),
+            trial_id=str(trial_id),
+        )
+    else:
+        if plan.k1 is None or plan.k2 is None:
+            raise HTTPException(
+                status_code=400,
+                detail="schedule plan is missing K1/K2",
+            )
+        expected_role = role_for_episode(
+            episode,
+            first_switch_episode=int(plan.k1),
+            return_switch_episode=int(plan.k2),
+        )
     if role != expected_role:
         raise HTTPException(
             status_code=400,

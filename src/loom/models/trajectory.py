@@ -59,6 +59,7 @@ class EventKind(StrEnum):
     TERMINUS2_ARTIFACT_REF = "terminus2_artifact_ref"
     TERMINUS2_MODEL_SWITCH = "terminus2_model_switch"
     TERMINUS2_MODEL_SWITCH_PLANNED = "terminus2_model_switch_planned"
+    TERMINUS2_MODEL_MIX_PLANNED = "terminus2_model_mix_planned"
     TERMINUS2_LLM_CALL_STARTED = "terminus2_llm_call_started"
     TERMINUS2_LLM_CALL_COMPLETED = "terminus2_llm_call_completed"
     TERMINUS2_LLM_CALL_FAILED = "terminus2_llm_call_failed"
@@ -396,10 +397,10 @@ class Terminus2ArtifactRefEvent(_EventBase):
 
 
 class Terminus2ModelSwitchEvent(_EventBase):
-    """Emitted on each student/teacher role cut (#1380). At least two per full run."""
+    """Emitted on each student/teacher role cut (#1380)."""
 
     kind: Literal[EventKind.TERMINUS2_MODEL_SWITCH] = EventKind.TERMINUS2_MODEL_SWITCH
-    switch_episode: int = Field(ge=2)
+    switch_episode: int = Field(ge=1)
     from_role: Literal["student", "teacher"] = "student"
     to_role: Literal["student", "teacher"] = "teacher"
     from_model: ModelSpec
@@ -415,6 +416,20 @@ class Terminus2ModelSwitchPlannedEvent(_EventBase):
     to_role: Literal["student", "teacher"]
     from_model: ModelSpec
     to_model: ModelSpec
+
+
+class Terminus2ModelMixPlannedEvent(_EventBase):
+    """Durable beta-mixture plan (episode grain). No K1/K2 cuts."""
+
+    kind: Literal[EventKind.TERMINUS2_MODEL_MIX_PLANNED] = (
+        EventKind.TERMINUS2_MODEL_MIX_PLANNED
+    )
+    policy: Literal["beta_mixture"] = "beta_mixture"
+    beta: float = Field(ge=0.0, le=1.0)
+    grain: Literal["episode"] = "episode"
+    seed_fingerprint: str
+    student_model: ModelSpec
+    teacher_model: ModelSpec
 
 
 class Terminus2LlmCallStartedEvent(_EventBase):
@@ -483,6 +498,7 @@ TrajectoryEvent = Annotated[
     | Terminus2CommandEvent | Terminus2TerminalObservationEvent | Terminus2ParseRetryEvent
     | Terminus2ContextBoundaryEvent | Terminus2ArtifactRefEvent
     | Terminus2ModelSwitchEvent | Terminus2ModelSwitchPlannedEvent
+    | Terminus2ModelMixPlannedEvent
     | Terminus2LlmCallStartedEvent | Terminus2LlmCallCompletedEvent
     | Terminus2LlmCallFailedEvent | Terminus2EpisodeCheckpointEvent
     | Terminus2RecoveryFailedEvent,

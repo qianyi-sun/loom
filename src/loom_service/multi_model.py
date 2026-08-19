@@ -10,11 +10,6 @@ from pydantic import ValidationError
 from loom.db.schema import ProviderConnection
 from loom.models.trial import MultiModelSwitchSpec, materialize_multi_model_switch_episode
 from loom.models.types import ModelSpec
-from loom.model_switch_store import (
-    load_model_switch_plan,
-    persist_model_switch_plan,
-    plan_snapshot_from_row,
-)
 
 _FORBIDDEN_CLIENT_INTERNALS = frozenset({"seed", "prng_version", "k1", "k2"})
 
@@ -101,14 +96,14 @@ def apply_plan_mode(
     *,
     mode: str | None,
 ) -> dict[str, Any]:
-    """inherit keeps materialized K1/K2; resample draws a new K1."""
+    """inherit keeps the mix plan; resample redraws K1 or a new beta seed."""
     out = dict(trial_config)
     resolved = mode or out.get("model_switch_plan_mode") or "inherit"
     out["model_switch_plan_mode"] = resolved
     raw = out.get("multi_model")
     if not isinstance(raw, dict) or not raw.get("enabled"):
         return apply_multi_model_materialization(out)
-    if resolved == "resample":
+    if resolved == "resample" and raw.get("policy") != "beta_mixture":
         mm = dict(raw)
         mm.pop("switch_episode", None)
         mm.pop("return_switch_episode", None)

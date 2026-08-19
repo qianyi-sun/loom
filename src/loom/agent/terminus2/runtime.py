@@ -19,19 +19,20 @@ from loom.agent.terminus2.harbor_environment import (
     ensure_sandbox_deps,
     make_trial_paths,
 )
-from loom.agent.terminus2.model_switch import install_role_router
+from loom.agent.terminus2.model_switch import install_role_router, seed_fingerprint
+from loom.agent.terminus2.provenance import HARBOR_COMPAT_SHA, LOOM_BRIDGE_REVISION
+from loom.driver.base import Driver
+from loom.errors import AgentError
+from loom.models.mcp import MCPConnection
 from loom.models.trajectory import (
     Terminus2EpisodeCheckpointEvent,
     Terminus2LlmCallCompletedEvent,
     Terminus2LlmCallFailedEvent,
     Terminus2LlmCallStartedEvent,
+    Terminus2ModelMixPlannedEvent,
     Terminus2ModelSwitchPlannedEvent,
     Terminus2RecoveryFailedEvent,
 )
-from loom.agent.terminus2.provenance import HARBOR_COMPAT_SHA, LOOM_BRIDGE_REVISION
-from loom.driver.base import Driver
-from loom.errors import AgentError
-from loom.models.mcp import MCPConnection
 from loom.models.trial import MultiModelSwitchSpec
 from loom.models.types import OS, ModelSpec
 from loom.request_params import sanitize_request_extras
@@ -493,12 +494,13 @@ class LoomTerminus2Runtime:
                     "multi_model.enabled requires secondary_model",
                 )
             plan = self.model_switch_plan or {}
-            k1 = int(plan.get("k1") or self.multi_model.switch_episode or 0)
-            k2 = int(plan.get("k2") or self.multi_model.return_switch_episode or 0)
-            if k1 < 2 or k2 <= k1:
-                raise AgentError(
-                    "model_switch_plan K1/K2 must be materialized before terminus-2 run",
-                )
+            mix_mode = str(
+                plan.get("mix_mode")
+                or self.multi_model.policy
+                or "student_teacher_student"
+            )
+            student = self.model
+            teacher = self.multi_model.secondary_model
             recovery = {"recovery": "fresh", "last_call_ordinal": 0}
             reclaim = getattr(self.cp_client, "reclaim_terminus_execution", None)
             if callable(reclaim):
@@ -532,34 +534,78 @@ class LoomTerminus2Runtime:
                     "multi-model session mid-run; a new Harbor start would "
                     "merge a second episode-1 onto this trial's trajectory",
                 )
-            student = self.model
-            teacher = self.multi_model.secondary_model
-            await trajectory.append(
-                Terminus2ModelSwitchPlannedEvent(
-                    emitted_at=datetime.now(UTC),
+            router_kwargs: dict[str, Any] = {
+                "teacher_model_name": _harbor_model_name(teacher),
+                "student_model_name": _harbor_model_name(student),
+                "agent_execution_id": str(recovery.get("agent_execution_id") or ""),
+                "agent_run_attempt_id": str(recovery.get("agent_run_attempt_id") or ""),
+                "starting_call_ordinal": int(recovery.get("last_call_ordinal") or 0),
+            }
+            if mix_mode == "beta_mixture":
+                beta = plan.get("beta")
+                if beta is None:
+                    beta = self.multi_model.beta
+                seed = plan.get("seed")
+                if beta is None or not seed:
+                    raise AgentError(
+                        "model_switch_plan beta/seed must be materialized "
+                        "before terminus-2 run",
+                    )
+                await trajectory.append(
+                    Terminus2ModelMixPlannedEvent(
+                        emitted_at=datetime.now(UTC),
+                        trial_id=self.trial_id,
+                        step_id=step_id,
+                        seq=0,
+                        beta=float(beta),
+                        seed_fingerprint=seed_fingerprint(str(seed)),
+                        student_model=student,
+                        teacher_model=teacher,
+                    ),
+                )
+                router_kwargs.update(
+                    mix_mode="beta_mixture",
+                    beta=float(beta),
+                    seed=str(seed),
                     trial_id=self.trial_id,
-                    step_id=step_id,
-                    seq=0,
-                    switch_episode=k1,
-                    from_role="student",
-                    to_role="teacher",
-                    from_model=student,
-                    to_model=teacher,
-                ),
-            )
-            await trajectory.append(
-                Terminus2ModelSwitchPlannedEvent(
-                    emitted_at=datetime.now(UTC),
-                    trial_id=self.trial_id,
-                    step_id=step_id,
-                    seq=0,
-                    switch_episode=k2,
-                    from_role="teacher",
-                    to_role="student",
-                    from_model=teacher,
-                    to_model=student,
-                ),
-            )
+                )
+            else:
+                k1 = int(plan.get("k1") or self.multi_model.switch_episode or 0)
+                k2 = int(plan.get("k2") or self.multi_model.return_switch_episode or 0)
+                if k1 < 2 or k2 <= k1:
+                    raise AgentError(
+                        "model_switch_plan K1/K2 must be materialized before terminus-2 run",
+                    )
+                await trajectory.append(
+                    Terminus2ModelSwitchPlannedEvent(
+                        emitted_at=datetime.now(UTC),
+                        trial_id=self.trial_id,
+                        step_id=step_id,
+                        seq=0,
+                        switch_episode=k1,
+                        from_role="student",
+                        to_role="teacher",
+                        from_model=student,
+                        to_model=teacher,
+                    ),
+                )
+                await trajectory.append(
+                    Terminus2ModelSwitchPlannedEvent(
+                        emitted_at=datetime.now(UTC),
+                        trial_id=self.trial_id,
+                        step_id=step_id,
+                        seq=0,
+                        switch_episode=k2,
+                        from_role="teacher",
+                        to_role="student",
+                        from_model=teacher,
+                        to_model=student,
+                    ),
+                )
+                router_kwargs.update(
+                    first_switch_episode=k1,
+                    return_switch_episode=k2,
+                )
             sink = _RouterEventSink(
                 bridge=bridge,
                 trajectory=trajectory,
@@ -570,14 +616,8 @@ class LoomTerminus2Runtime:
             )
             model_switch = install_role_router(
                 agent,
-                teacher_model_name=_harbor_model_name(teacher),
-                first_switch_episode=k1,
-                return_switch_episode=k2,
-                student_model_name=_harbor_model_name(student),
-                agent_execution_id=str(recovery.get("agent_execution_id") or ""),
-                agent_run_attempt_id=str(recovery.get("agent_run_attempt_id") or ""),
                 event_sink=sink,
-                starting_call_ordinal=int(recovery.get("last_call_ordinal") or 0),
+                **router_kwargs,
             )
             self._terminus_execution_id = recovery.get("agent_execution_id")
             self._terminus_run_attempt_id = recovery.get("agent_run_attempt_id")

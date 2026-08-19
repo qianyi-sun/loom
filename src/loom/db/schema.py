@@ -6152,9 +6152,13 @@ class ModelSwitchPlan(Base):
         unique=True,
     )
     combination_idx: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    k1: Mapped[int] = mapped_column(Integer, nullable=False)
-    k2: Mapped[int] = mapped_column(Integer, nullable=False)
-    teacher_episodes: Mapped[int] = mapped_column(Integer, nullable=False)
+    mix_mode: Mapped[str] = mapped_column(
+        String, nullable=False, default="student_teacher_student",
+    )
+    k1: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    k2: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    teacher_episodes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    beta: Mapped[float | None] = mapped_column(Float, nullable=True)
     seed: Mapped[str] = mapped_column(Text, nullable=False)
     prng_version: Mapped[str] = mapped_column(Text, nullable=False)
     student_model_snapshot: Mapped[dict[str, Any]] = mapped_column(

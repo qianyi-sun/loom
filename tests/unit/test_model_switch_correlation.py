@@ -115,6 +115,19 @@ def _switch_plan() -> SimpleNamespace:
     )
 
 
+def _beta_plan() -> SimpleNamespace:
+    return SimpleNamespace(
+        provider_connection_id=None,
+        student_model_snapshot={"name": "glm-5.2"},
+        teacher_model_snapshot={"name": "glm-5.2-urg"},
+        mix_mode="beta_mixture",
+        k1=None,
+        k2=None,
+        beta=1.0,
+        seed="s",
+    )
+
+
 def _student_extras(*, requested_model: str) -> dict[str, object]:
     return {
         "loom_client_call_id": str(uuid4()),
@@ -142,6 +155,24 @@ async def test_persist_accepts_openai_prefixed_loom_requested_model() -> None:
     assert result["correlation_status"] == "correlated"
     assert result["requested_model"] == "glm-5.2"
     assert session.committed is True
+
+
+@pytest.mark.asyncio
+async def test_persist_beta_plan_accepts_episode_1_teacher() -> None:
+    extras = _student_extras(requested_model="openai/glm-5.2-urg")
+    extras["loom_role"] = "teacher"
+    extras["loom_episode"] = 1
+    session = _FakeSession(_beta_plan())
+    result = await persist_correlated_intent(
+        session,  # type: ignore[arg-type]
+        trial_id=uuid4(),
+        step_id="agent",
+        extras=extras,
+        jwt_connection_id=None,
+        requested_model="glm-5.2-urg",
+    )
+    assert result["correlation_status"] == "correlated"
+    assert result["role"] == "teacher"
 
 
 @pytest.mark.asyncio

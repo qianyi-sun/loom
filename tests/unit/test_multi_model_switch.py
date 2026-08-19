@@ -12,8 +12,10 @@ from pydantic import ValidationError
 
 from loom.agent.terminus2.model_switch import (
     assert_terminus2_switch_contract,
+    deterministic_episode_draw,
     install_role_router,
     redact_agent_llm_kwargs,
+    role_for_beta_episode,
     role_for_episode,
 )
 from loom.errors import AgentError
@@ -107,6 +109,84 @@ def test_role_for_episode_two_cuts() -> None:
     assert role_for_episode(5, first_switch_episode=3, return_switch_episode=5) == "student"
 
 
+def test_beta_spec_rejects_k1() -> None:
+    with pytest.raises(ValidationError):
+        MultiModelSwitchSpec(
+            enabled=True,
+            policy="beta_mixture",
+            secondary_model=_SECONDARY,
+            beta=0.6,
+            switch_episode=3,
+        )
+
+
+def test_beta_spec_requires_beta() -> None:
+    with pytest.raises(ValidationError):
+        MultiModelSwitchSpec(
+            enabled=True,
+            policy="beta_mixture",
+            secondary_model=_SECONDARY,
+        )
+
+
+def test_schedule_spec_rejects_beta() -> None:
+    with pytest.raises(ValidationError):
+        MultiModelSwitchSpec(
+            enabled=True,
+            secondary_model=_SECONDARY,
+            beta=0.6,
+        )
+
+
+def test_materialize_beta_does_not_sample_k1() -> None:
+    raw = {
+        "enabled": True,
+        "policy": "beta_mixture",
+        "secondary_model": _SECONDARY.model_dump(mode="json"),
+        "beta": 0.6,
+        "mix_seed": "42",
+    }
+    out = materialize_multi_model_switch_episode(raw)
+    assert out is not None
+    assert out["policy"] == "beta_mixture"
+    assert out["beta"] == 0.6
+    assert "switch_episode" not in out
+    assert "return_switch_episode" not in out
+
+
+def test_role_for_beta_teacher_if_draw_lt_beta() -> None:
+    trial = "11111111-1111-1111-1111-111111111111"
+    seed = "abc"
+    draw = deterministic_episode_draw(seed, trial, 1)
+    role = role_for_beta_episode(1, beta=draw + 1e-12, seed=seed, trial_id=trial)
+    assert role == "teacher"
+    role_s = role_for_beta_episode(1, beta=draw, seed=seed, trial_id=trial)
+    assert role_s == "student"
+    assert role_for_beta_episode(1, beta=1.0, seed=seed, trial_id=trial) == "teacher"
+    assert role_for_beta_episode(1, beta=0.0, seed=seed, trial_id=trial) == "student"
+    assert role_for_beta_episode(1, beta=0.6, seed=seed, trial_id=trial) == (
+        role_for_beta_episode(1, beta=0.6, seed=seed, trial_id=trial)
+    )
+
+
+def test_apply_plan_mode_resample_keeps_beta() -> None:
+    cfg = {
+        "agent_name": "terminus-2",
+        "agent_model": _PRIMARY.model_dump(mode="json"),
+        "multi_model": {
+            "enabled": True,
+            "policy": "beta_mixture",
+            "secondary_model": _SECONDARY.model_dump(mode="json"),
+            "beta": 0.6,
+            "mix_seed": "keep-me",
+        },
+    }
+    resampled = apply_plan_mode(cfg, mode="resample")
+    assert resampled["multi_model"]["beta"] == 0.6
+    assert resampled["multi_model"]["policy"] == "beta_mixture"
+    assert "switch_episode" not in resampled["multi_model"]
+
+
 @dataclass
 class _FakeLLM:
     name: str
@@ -177,6 +257,29 @@ async def test_role_router_student_teacher_student() -> None:
     assert [c["to_role"] for c in router.applied_switches] == ["teacher", "student"]
     assert agent._llm_kwargs == {"timeout": 1}
     assert router.get_model_context_limit() == 100
+
+
+@pytest.mark.asyncio
+async def test_role_router_beta_all_teacher() -> None:
+    student = _FakeLLM(name="openai/glm-5.1-student")
+    teacher = _FakeLLM(name="openai/qwen-teacher")
+    agent = _FakeAgent(_llm=student, _model_name="openai/glm-5.1-student")
+    router = install_role_router(
+        agent,
+        teacher_model_name="openai/qwen-teacher",
+        mix_mode="beta_mixture",
+        beta=1.0,
+        seed="s",
+        trial_id="trial-1",
+        teacher_llm=teacher,
+    )
+    agent._n_episodes = 1
+    await router.call(prompt="a")
+    agent._n_episodes = 2
+    await router.call(prompt="b")
+    assert teacher.calls == ["openai/qwen-teacher", "openai/qwen-teacher"]
+    assert student.calls == []
+    assert [c["to_role"] for c in router.applied_switches] == ["teacher"]
 
 
 def test_redact_agent_llm_kwargs() -> None:

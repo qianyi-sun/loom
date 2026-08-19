@@ -1,24 +1,29 @@
-"""Student/teacher/student Terminus2 LLM router (#1380).
+"""Student/teacher Terminus2 LLM router (#1380).
 
 Harbor ``run()`` talks to ``agent._llm`` (a ``BaseLLM``). Loom installs two
 fully constructed Harbor LiteLLM delegates and a router that implements the
 same interface — no ``_model_name`` mutation, no Harbor fork.
 
-v1 schedule (episode-based stand-in for a later off-track detector):
+Two mix policies:
 
-- episodes ``1 .. K1-1``: student
-- episodes ``K1 .. K2-1``: teacher
-- episodes ``>= K2``: student
+- ``student_teacher_student``: episodes ``1 .. K1-1`` student, ``K1 .. K2-1``
+  teacher, ``>= K2`` student.
+- ``beta_mixture``: each Harbor episode draws ``hash(seed, trial_id, episode)``
+  in ``[0, 1)``; teacher if ``draw < beta``, else student. Parse retries stay
+  on the same episode (and therefore the same actor). This is who *drives*
+  the session, not DAgger teacher labels.
 """
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any, Literal, Protocol
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from loom.errors import AgentError
 
 Role = Literal["student", "teacher"]
+MixMode = Literal["student_teacher_student", "beta_mixture"]
 
 
 class RoleRouterEventSink(Protocol):
@@ -97,6 +102,28 @@ def role_for_episode(
     return "student"
 
 
+def seed_fingerprint(seed: str) -> str:
+    """Non-secret handle for trajectory events (do not log the raw seed)."""
+    return hashlib.sha256(seed.encode()).hexdigest()[:16]
+
+
+def deterministic_episode_draw(seed: str, trial_id: str, episode: int) -> float:
+    """Replay-safe number in [0, 1). Same as dagger-tb, Loom identities."""
+    digest = hashlib.sha256(f"{seed}:{trial_id}:{episode}".encode()).digest()
+    return int.from_bytes(digest[:8], "big") / 2**64
+
+
+def role_for_beta_episode(
+    episode: int,
+    *,
+    beta: float,
+    seed: str,
+    trial_id: str,
+) -> Role:
+    draw = deterministic_episode_draw(seed, str(trial_id), episode)
+    return "teacher" if draw < beta else "student"
+
+
 class LoomRoleRouter(_HarborBaseLLM):
     """Instance-local ``BaseLLM`` that forwards to student or teacher LiteLLM."""
 
@@ -106,8 +133,12 @@ class LoomRoleRouter(_HarborBaseLLM):
         agent: Any,
         student: Any,
         teacher: Any,
-        first_switch_episode: int,
-        return_switch_episode: int,
+        first_switch_episode: int | None = None,
+        return_switch_episode: int | None = None,
+        mix_mode: MixMode = "student_teacher_student",
+        beta: float | None = None,
+        seed: str | None = None,
+        trial_id: str | None = None,
         student_model_name: str | None = None,
         teacher_model_name: str | None = None,
         agent_execution_id: str | None = None,
@@ -115,21 +146,37 @@ class LoomRoleRouter(_HarborBaseLLM):
         event_sink: RoleRouterEventSink | None = None,
         starting_call_ordinal: int = 0,
     ) -> None:
-        if first_switch_episode < 2:
-            raise AgentError(
-                "multi_model.switch_episode (K1) must be >= 2, "
-                f"got {first_switch_episode}",
-            )
-        if return_switch_episode <= first_switch_episode:
-            raise AgentError(
-                "multi_model.return_switch_episode (K2) must be > K1 "
-                f"(K1={first_switch_episode}, K2={return_switch_episode})",
-            )
+        if mix_mode == "beta_mixture":
+            if beta is None or seed is None or not trial_id:
+                raise AgentError(
+                    "beta_mixture requires beta, seed, and trial_id",
+                )
+            if not 0.0 <= float(beta) <= 1.0:
+                raise AgentError(f"multi_model.beta must be in [0, 1], got {beta}")
+        else:
+            if first_switch_episode is None or return_switch_episode is None:
+                raise AgentError(
+                    "student_teacher_student requires K1 and K2",
+                )
+            if first_switch_episode < 2:
+                raise AgentError(
+                    "multi_model.switch_episode (K1) must be >= 2, "
+                    f"got {first_switch_episode}",
+                )
+            if return_switch_episode <= first_switch_episode:
+                raise AgentError(
+                    "multi_model.return_switch_episode (K2) must be > K1 "
+                    f"(K1={first_switch_episode}, K2={return_switch_episode})",
+                )
         self.agent = agent
         self.student = student
         self.teacher = teacher
+        self.mix_mode: MixMode = mix_mode
         self.first_switch_episode = first_switch_episode
         self.return_switch_episode = return_switch_episode
+        self.beta = beta
+        self.seed = seed
+        self.trial_id = trial_id
         self.student_model_name = student_model_name or ""
         self.teacher_model_name = teacher_model_name or ""
         self.agent_execution_id = agent_execution_id
@@ -142,6 +189,16 @@ class LoomRoleRouter(_HarborBaseLLM):
 
     def role(self) -> Role:
         episode = int(getattr(self.agent, "_n_episodes", 0) or 0)
+        if self.mix_mode == "beta_mixture":
+            assert self.beta is not None and self.seed is not None and self.trial_id
+            return role_for_beta_episode(
+                episode,
+                beta=self.beta,
+                seed=self.seed,
+                trial_id=self.trial_id,
+            )
+        assert self.first_switch_episode is not None
+        assert self.return_switch_episode is not None
         return role_for_episode(
             episode,
             first_switch_episode=self.first_switch_episode,
@@ -289,8 +346,12 @@ def install_role_router(
     agent: Any,
     *,
     teacher_model_name: str,
-    first_switch_episode: int,
-    return_switch_episode: int,
+    first_switch_episode: int | None = None,
+    return_switch_episode: int | None = None,
+    mix_mode: MixMode = "student_teacher_student",
+    beta: float | None = None,
+    seed: str | None = None,
+    trial_id: str | UUID | None = None,
     teacher_llm: Any | None = None,
     student_model_name: str | None = None,
     agent_execution_id: str | None = None,
@@ -311,6 +372,10 @@ def install_role_router(
         teacher=teacher,
         first_switch_episode=first_switch_episode,
         return_switch_episode=return_switch_episode,
+        mix_mode=mix_mode,
+        beta=beta,
+        seed=seed,
+        trial_id=None if trial_id is None else str(trial_id),
         student_model_name=student_model_name,
         teacher_model_name=teacher_model_name,
         agent_execution_id=agent_execution_id,
