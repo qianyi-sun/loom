@@ -301,6 +301,8 @@ def _extract_verified_archive(
         if (
             not stat.S_ISREG(before.st_mode)
             or before.st_nlink != 1
+            or before.st_uid != uid
+            or before.st_gid != gid
             or not 0 < before.st_size <= _MAX_ARCHIVE_BYTES
             or stat.S_IMODE(before.st_mode) != 0o600
         ):

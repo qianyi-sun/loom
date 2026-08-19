@@ -372,6 +372,37 @@ def test_archive_must_remain_owner_only(tmp_path: Path) -> None:
     _assert_unpublished(installer)
 
 
+def test_archive_must_be_owned_by_the_install_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile, archive = _archive(tmp_path)
+    installer = _installer(tmp_path, profile)
+    real_fstat = os.fstat
+
+    def foreign_archive_fstat(descriptor: int) -> os.stat_result:
+        metadata = real_fstat(descriptor)
+        try:
+            opened_path = Path(os.readlink(f"/proc/self/fd/{descriptor}"))
+        except OSError:
+            return metadata
+        if opened_path != archive:
+            return metadata
+        fields = list(metadata)
+        fields[stat.ST_UID] = installer.context.authority_uid + 1
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(runtime_installer.os, "fstat", foreign_archive_fstat)
+
+    with pytest.raises(
+        PersonalDevBuilderRuntimeInstallError,
+        match="archive_invalid",
+    ):
+        installer.preflight(archive)
+
+    _assert_unpublished(installer)
+
+
 def test_install_publishes_only_exact_immutable_state_and_is_idempotent(
     tmp_path: Path,
 ) -> None:
