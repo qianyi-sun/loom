@@ -30,6 +30,9 @@ else:
         load_personal_dev_scanner_cache_lock,
     )
 
+if __package__ in {None, ""}:  # pragma: no cover - direct workflow script entry point
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from scripts.ci_image_release_evidence import (
     EvidenceError,
     validate_architecture_record,

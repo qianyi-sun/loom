@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import select
 import subprocess
 import sys
 from pathlib import Path
@@ -355,6 +356,8 @@ def test_scanner_binary_hash_rejects_fifo_without_blocking(tmp_path: Path) -> No
             "from pathlib import Path\n"
             "from loom_service.personal_dev_builder import _regular_file_sha256\n"
             "import sys\n"
+            "print('ready', flush=True)\n"
+            "sys.stdin.readline()\n"
             "try:\n"
             "    _regular_file_sha256(\n"
             "        Path(sys.argv[1]), label='scanner executable', maximum_bytes=1024,\n"
@@ -370,12 +373,42 @@ def test_scanner_binary_hash_rejects_fifo_without_blocking(tmp_path: Path) -> No
         "PYTHONPATH": f"{_ROOT / 'src'}:{_ROOT}",
     }
 
+    process = subprocess.Popen(
+        command,
+        env=environment,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
     try:
-        result = subprocess.run(command, env=environment, timeout=2, check=False)
-    except subprocess.TimeoutExpired:
-        pytest.fail("scanner binary FIFO blocked before type validation")
-
-    assert result.returncode == 0
+        assert process.stdout is not None
+        assert process.stdin is not None
+        initialized, _, _ = select.select([process.stdout], [], [], 30)
+        if not initialized:
+            pytest.fail("scanner binary FIFO subprocess did not initialize")
+        ready = process.stdout.readline()
+        if ready != "ready\n":
+            assert process.stderr is not None
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            pytest.fail(
+                "scanner binary FIFO subprocess initialization failed: "
+                + process.stderr.read()
+            )
+        process.stdin.write("verify\n")
+        process.stdin.flush()
+        try:
+            returncode = process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pytest.fail("scanner binary FIFO blocked before type validation")
+        assert process.stderr is not None
+        assert returncode == 0, process.stderr.read()
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
 
 
 def test_artifact_collector_is_wired_only_for_personal_lifecycle(tmp_path: Path) -> None:
