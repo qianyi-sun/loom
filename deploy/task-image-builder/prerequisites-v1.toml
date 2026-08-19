@@ -97,10 +97,16 @@ builder_nodes = [
   "trt-eai-oldlab-4",
   "trt-eai-oldlab-5",
 ]
+builder_nodes_expression = "trt-eai-oldlab-[3-5]"
+trial_partition_anchor = "PartitionName=loom-staging Nodes=trt-eai-oldlab-[3-5] Default=NO MaxTime=2-00:00:00 State=UP PriorityTier=100 AllowGroups=loom-rollout OverSubscribe=NO"
+builder_partition_line = "PartitionName=loom-task-builder Nodes=trt-eai-oldlab-[3-5] Default=NO MaxTime=02:00:00 State=UP PriorityTier=200 AllowAccounts=loom-task-builder AllowGroups=loom-task-builder OverSubscribe=NO"
 slurm_account = "loom-task-builder"
 slurm_qos = "loom-task-image-builder"
 slurm_config = "/etc/slurm/slurm.conf"
 cgroup_config = "/etc/slurm/cgroup.conf"
+slurm_config_owner = "trt"
+slurm_config_group = "sharedwork"
+slurm_config_mode = "0664"
 
 [[clusters]]
 id = "gb10"
@@ -128,7 +134,13 @@ builder_nodes = [
   "trt-gb10-14",
   "trt-gb10-15",
 ]
+builder_nodes_expression = "trt-gb10-[1-15]"
+trial_partition_anchor = "PartitionName=gb10 Nodes=trt-gb10-[1-15] Default=YES MaxTime=1-00:00:00 State=UP PriorityTier=100"
+builder_partition_line = "PartitionName=loom-task-builder Nodes=trt-gb10-[1-15] Default=NO MaxTime=02:00:00 State=UP PriorityTier=200 AllowAccounts=loom-task-builder AllowGroups=loom-task-builder OverSubscribe=NO"
 slurm_account = "loom-task-builder"
 slurm_qos = "loom-task-image-builder"
 slurm_config = "/etc/slurm/slurm.conf"
 cgroup_config = "/etc/slurm/cgroup.conf"
+slurm_config_owner = "root"
+slurm_config_group = "root"
+slurm_config_mode = "0644"

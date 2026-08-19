@@ -123,17 +123,40 @@ def test_phase_one_policy_is_dynamic_bounded_and_cannot_certify_production() -> 
         "trt-eai-oldlab-4",
         "trt-eai-oldlab-5",
     ]
+    assert clusters["oldlab"]["builder_nodes_expression"] == "trt-eai-oldlab-[3-5]"
+    assert clusters["oldlab"]["slurm_config_owner"] == "trt"
+    assert clusters["oldlab"]["slurm_config_group"] == "sharedwork"
+    assert clusters["oldlab"]["slurm_config_mode"] == "0664"
+    assert clusters["oldlab"]["trial_partition_anchor"] == (
+        "PartitionName=loom-staging Nodes=trt-eai-oldlab-[3-5] Default=NO "
+        "MaxTime=2-00:00:00 State=UP PriorityTier=100 AllowGroups=loom-rollout "
+        "OverSubscribe=NO"
+    )
     assert clusters["gb10"]["architecture"] == "aarch64"
     assert clusters["gb10"]["controller"] == "gx10-01c7"
     assert clusters["gb10"]["trial_partition"] == "gb10"
     assert clusters["gb10"]["trial_priority_tier"] == 100
     assert clusters["gb10"]["builder_nodes"] == [f"trt-gb10-{number}" for number in range(1, 16)]
+    assert clusters["gb10"]["builder_nodes_expression"] == "trt-gb10-[1-15]"
+    assert clusters["gb10"]["slurm_config_owner"] == "root"
+    assert clusters["gb10"]["slurm_config_group"] == "root"
+    assert clusters["gb10"]["slurm_config_mode"] == "0644"
+    assert clusters["gb10"]["trial_partition_anchor"] == (
+        "PartitionName=gb10 Nodes=trt-gb10-[1-15] Default=YES "
+        "MaxTime=1-00:00:00 State=UP PriorityTier=100"
+    )
     for cluster in clusters.values():
         assert cluster["builder_partition"] == "loom-task-builder"
         assert cluster["builder_priority_tier"] == 200
         assert cluster["builder_priority_tier"] > cluster["trial_priority_tier"]
         assert cluster["slurm_account"] == "loom-task-builder"
         assert cluster["slurm_qos"] == "loom-task-image-builder"
+        assert cluster["builder_partition_line"] == (
+            f"PartitionName=loom-task-builder Nodes={cluster['builder_nodes_expression']} "
+            "Default=NO MaxTime=02:00:00 State=UP PriorityTier=200 "
+            "AllowAccounts=loom-task-builder AllowGroups=loom-task-builder "
+            "OverSubscribe=NO"
+        )
 
     serialized = json.dumps(policy, sort_keys=True).lower()
     for forbidden_key in ('"exclusive"', '"nodelist"', '"reservation"'):
