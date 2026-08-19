@@ -138,9 +138,17 @@ cp .env.example .env
 loom service up --environment local
 ```
 
-`loom service up --environment local` starts Postgres, MinIO, LLM Gateway,
-Control Plane, `loom_service`, Worker, and the React SPA. It runs migrations, seeds local
-tokens, and prints endpoint URLs.
+`loom service up --environment local` starts Postgres, MinIO, a loopback
+task-image registry, LLM Gateway, Control Plane, `loom_service`, a pull-only
+trial Worker, a laptop Docker **task-image-builder** sidecar, and the React SPA.
+It runs migrations, seeds local tokens (including a least-privilege
+`task-image:build` token), and prints endpoint URLs.
+
+The local builder sidecar uses the laptop Docker daemon. It is **not** the
+production exclusive Slurm builder. Trial workers stay pull-only. Dockerfile-backed
+`loom eval batch create` trials remain `queued` until that sidecar publishes a
+ready digest for the laptop architecture. `loom run` (CLI, not service-mode)
+can still build locally without the registry.
 
 Default local URLs:
 
@@ -151,6 +159,7 @@ Default local URLs:
 | Swagger UI | http://localhost:8090/docs |
 | Health | http://localhost:8090/api/v1/health |
 | MinIO console | http://localhost:9001/ |
+| Task-image registry | http://localhost:55000/ |
 
 Tear down:
 
@@ -1360,8 +1369,11 @@ loom datasets audit team-evals
 `s3://loom-benchmarks/team-evals/<task-id>/` and registers task rows with those
 sources. The worker uses the existing object-store materializer at runtime. If a
 task declares `environment.dockerfile`, that Dockerfile and its build context
-are part of the uploaded bundle; the worker builds and caches a deterministic
-`loom-task:<hash>` image before the first service-mode trial that needs it.
+are part of the uploaded bundle. Service-mode trial workers are **pull-only**:
+they wait for a ready native-arch materialization in the loopback registry
+(local compose) or the shared registry (staging/prod). They do not build
+task-authored Dockerfiles. Local compose provides a laptop `task-image-builder`
+sidecar for that; until it publishes a digest, Dockerfile batches stay queued.
 The secret-bearing `publish-local` flags also accept safe references such as
 `--db-url env:LOOM_DB_URL`, `--minio-access-key env:LOOM_MINIO_ACCESS_KEY`,
 and `--minio-secret-key env:LOOM_MINIO_SECRET_KEY`, but literal credential

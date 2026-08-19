@@ -406,6 +406,7 @@ def test_dev_step_jwt_has_one_local_source() -> None:
     assert f'LOOM_CP_STEP_JWT_SIGNING_KEY: "{source}"' in compose_text
     assert f'LOOM_GW_STEP_JWT_SIGNING_KEY: "{source}"' in compose_text
     assert "LOOM_CP_STEP_JWT_SIGNING_KEY=" in env_text
+    assert "LOOM_TASK_IMAGE_BUILDER_TOKEN=placeholder" in env_text
 
 
 def test_up_invokes_docker_compose_up(
@@ -529,7 +530,7 @@ def test_seed_test_data_parses_all_tokens(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`--print all` emits `<label>: <token>` per line; the wrapper
-    parses team/worker dev tokens while admin comes from a secret file."""
+    parses team/worker/builder tokens while admin comes from a secret file."""
     from subprocess import CompletedProcess
 
     from loom_cli.service_cmd import _seed_test_data
@@ -537,6 +538,7 @@ def test_seed_test_data_parses_all_tokens(
     fake_stdout = (
         "team: loom_team_aaaaaa\n"
         "worker: loom_w_bbbbbb\n"
+        "builder: loom_tib_cccccc\n"
     )
 
     def _fake_run(*_args, **_kwargs):
@@ -548,6 +550,7 @@ def test_seed_test_data_parses_all_tokens(
     assert tokens == {
         "team": "loom_team_aaaaaa",
         "worker": "loom_w_bbbbbb",
+        "builder": "loom_tib_cccccc",
     }
 
 
@@ -641,6 +644,20 @@ def test_write_env_tokens_creates_file_when_absent(tmp_path) -> None:
     assert "LOOM_TEAM_TOKEN=loom_team_aaa" in content
     assert "LOOM_WORKER_TOKEN=loom_w_bbb" in content
     assert "LOOM_ADMIN_TOKEN=loom_admin_ccc" in content
+
+
+def test_write_env_tokens_writes_builder_token(tmp_path: Path) -> None:
+    from loom_cli.service_cmd import _write_env_tokens
+
+    env_file = tmp_path / ".env"
+    _write_env_tokens(env_file, {
+        "team": "loom_team_t",
+        "worker": "loom_w_w",
+        "builder": "loom_tib_b",
+        "admin": "loom_admin_a",
+    })
+    content = env_file.read_text()
+    assert "LOOM_TASK_IMAGE_BUILDER_TOKEN=loom_tib_b" in content
 
 
 def test_write_env_tokens_replaces_existing_keys_preserving_others(
@@ -773,6 +790,57 @@ def test_up_recreates_worker_after_seeding_fresh_tokens(
         "worker recreate must be the last subprocess call, AFTER "
         "_write_env_tokens has persisted fresh tokens"
     )
+
+
+def test_up_recreates_task_image_builder_after_seeding_builder_token(
+    tmp_path: Path,
+) -> None:
+    from subprocess import CompletedProcess
+
+    compose = tmp_path / "compose.yml"
+    compose.write_text("services: {}\n")
+    env_file = tmp_path / ".env"
+    captured_run_calls: list[list[str]] = []
+
+    def _capture_run(argv, *_args, **_kwargs):
+        captured_run_calls.append(list(argv))
+        return CompletedProcess(argv, 0, "", "")
+
+    fake_tokens = {
+        "team": "loom_team_fresh",
+        "worker": "loom_w_fresh",
+        "builder": "loom_tib_fresh",
+        "admin": "loom_admin_db_ignored",
+    }
+
+    with patch("loom_cli.service_cmd._ensure_docker_compose_available",
+               return_value=0), \
+         patch("loom_cli.service_cmd._run", side_effect=_capture_run), \
+         patch("loom_cli.service_cmd._wait_for_postgres",
+               return_value=True), \
+         patch("loom_cli.service_cmd._alembic_upgrade",
+               return_value=0), \
+         patch("loom_cli.service_cmd._seed_test_data",
+               return_value=(0, fake_tokens)), \
+         patch("loom_cli.service_cmd._ensure_dev_admin_secret",
+               return_value="loom_admin_" + "U" * 43), \
+         patch("loom_cli.service_cmd._mint_batch_runner_cp_token",
+               return_value=None):
+        rc = main([
+            "service", "up", "--environment", "local",
+            "--compose-file", str(compose),
+            "--env-file", str(env_file),
+        ])
+
+    assert rc == 0
+    assert "LOOM_TASK_IMAGE_BUILDER_TOKEN=loom_tib_fresh" in env_file.read_text()
+    builder_recreates = [
+        argv for argv in captured_run_calls
+        if "--force-recreate" in argv and "task-image-builder" in argv
+    ]
+    assert len(builder_recreates) == 1
+    assert "--no-deps" in builder_recreates[0]
+
 
 
 def test_up_skips_worker_recreate_when_no_env_file(
