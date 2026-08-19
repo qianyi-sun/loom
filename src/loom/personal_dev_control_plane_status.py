@@ -275,10 +275,27 @@ def _identity(item: Mapping[str, Any]) -> tuple[str, str, str, str] | None:
     return api_version, kind, namespace, name
 
 
-def _expected_subset(expected: object, actual: object) -> bool:
+def _expected_subset(
+    expected: object,
+    actual: object,
+    path: tuple[str, ...] = (),
+) -> bool:
     if isinstance(expected, Mapping):
+        # The API server omits EnvVar.value when its intended literal value is empty.
+        # Accept only that exact, context-bound zero-value normalization.
+        if (
+            isinstance(actual, Mapping)
+            and len(path) >= 4
+            and path[-4] in {"containers", "initContainers"}
+            and path[-2] == "env"
+            and set(expected) == {"name", "value"}
+            and expected.get("value") == ""
+            and set(actual) == {"name"}
+            and actual.get("name") == expected.get("name")
+        ):
+            return True
         return isinstance(actual, Mapping) and all(
-            key in actual and _expected_subset(value, actual[key])
+            key in actual and _expected_subset(value, actual[key], (*path, str(key)))
             for key, value in expected.items()
         )
     if isinstance(expected, list):
@@ -286,7 +303,8 @@ def _expected_subset(expected: object, actual: object) -> bool:
             isinstance(actual, list)
             and len(expected) == len(actual)
             and all(
-                _expected_subset(left, right) for left, right in zip(expected, actual, strict=True)
+                _expected_subset(left, right, (*path, str(index)))
+                for index, (left, right) in enumerate(zip(expected, actual, strict=True))
             )
         )
     return type(expected) is type(actual) and expected == actual
@@ -321,10 +339,21 @@ def _security_boundary_matches(
             actual_constraints, Mapping
         ):
             return False
-        if set(actual_constraints) - {"resourceRules", "matchPolicy"}:
+        if set(actual_constraints) - {
+            "resourceRules",
+            "matchPolicy",
+            "namespaceSelector",
+            "objectSelector",
+        }:
             return False
-        if actual_constraints.get("matchPolicy", "Equivalent") != "Equivalent":
+        if actual_constraints.get("matchPolicy", "Equivalent") != expected_constraints.get(
+            "matchPolicy", "Equivalent"
+        ):
             return False
+        # The API server materializes omitted admission selectors as empty objects.
+        for selector in ("namespaceSelector", "objectSelector"):
+            if actual_constraints.get(selector, {}) != expected_constraints.get(selector, {}):
+                return False
     if kind == "NetworkPolicy":
         expected_spec = expected.get("spec")
         actual_spec = actual.get("spec")
@@ -537,6 +566,10 @@ def _literal_environment(deployment: Mapping[str, Any]) -> dict[str, str] | None
         names.add(name)
         value = entry.get("value")
         if value is None and isinstance(entry.get("valueFrom"), Mapping):
+            continue
+        # EnvVar.value is serialized with omitempty by the Kubernetes API.
+        if value is None and set(entry) == {"name"}:
+            environment[name] = ""
             continue
         if not isinstance(value, str):
             return None
