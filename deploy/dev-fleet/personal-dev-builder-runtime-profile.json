@@ -1,0 +1,92 @@
+{
+  "archive": {
+    "members": {
+      "containerd-shim-runsc-v1": {
+        "archive_mode": 493,
+        "install_mode": 365,
+        "sha256": "71b9e90897f39ee51fee8e0345cf675956d95bd1d6458c92f49d984097ffa327",
+        "size": 43208193
+      },
+      "gvisor-bin/checkpointgofer": {
+        "archive_mode": 493,
+        "install_mode": 365,
+        "sha256": "a4f6837a9837a8c3499c7e2d1d58931babb140bf228762f1c2b13469256b2bda",
+        "size": 68743833
+      },
+      "gvisor-bin/gvisor_sentry": {
+        "archive_mode": 493,
+        "install_mode": 365,
+        "sha256": "871a4b5ca197d37fae7d30ab0aa356fe3156c1f9836e8a40122f7f08c6b46f62",
+        "size": 47910193
+      },
+      "gvisor-bin/runsc-metric-server": {
+        "archive_mode": 493,
+        "install_mode": 365,
+        "sha256": "ff3476a1f28cb684bd7340e183e80f8af7a5be5b0b3ca4bdb79bc2a6d92b6cb4",
+        "size": 52294519
+      },
+      "runsc": {
+        "archive_mode": 493,
+        "install_mode": 365,
+        "sha256": "670bcd3cbc103f00d8bb5098edc370f32397ee4c134231436bafa659bb3c068e",
+        "size": 104854508
+      }
+    },
+    "sha512": "3de91138cda15682c11807387f6ecad9e7c8932262018a2813277e1b4efa03efe33b0a948e148c6b1ccfe7345bfab5d5e0d072519505465751273898bae19c62",
+    "url": "https://storage.googleapis.com/gvisor/releases/release/20260810/x86_64/gvisor.tar.bz2"
+  },
+  "host": {
+    "architecture": "amd64",
+    "containerd_version": "v2.3.2-k3s2",
+    "device": "/dev/kvm",
+    "k3s_service": "k3s-agent",
+    "k3s_version": "v1.36.2+k3s1",
+    "modules": [
+      "kvm",
+      "kvm_intel"
+    ]
+  },
+  "installation": {
+    "k3s_template": "/var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.tmpl",
+    "profile": "/etc/loom/personal-dev-builder-runtime-profile.json",
+    "release_root": "/opt/loom/gvisor/release-20260810.0",
+    "runsc_config": "/etc/containerd/runsc-personal-dev.toml",
+    "shim_link": "/usr/local/bin/containerd-shim-runsc-v1"
+  },
+  "release": {
+    "tag_commit": "5ceb9a5fd5750d6c73dd166441f28306039300d0",
+    "version": "release-20260810.0"
+  },
+  "runtime": {
+    "flags": {
+      "allow-flag-override": "false",
+      "allow-packet-socket-write": "false",
+      "allow-suid": "false",
+      "debug": "false",
+      "directfs": "false",
+      "file-access": "exclusive",
+      "file-access-mounts": "shared",
+      "gvisor-marker-file": "true",
+      "host-fifo": "none",
+      "host-settings": "check",
+      "host-uds": "none",
+      "net-raw": "false",
+      "network": "sandbox",
+      "oci-seccomp": "true",
+      "platform": "kvm",
+      "platform_device_path": "/dev/kvm",
+      "profile": "false",
+      "restore-spec-validation": "enforce",
+      "sidecar-release-enforcement-policy": "ALWAYS",
+      "strace": "false",
+      "watchdog-action": "panic"
+    },
+    "handler": "runsc-personal-dev",
+    "runtime_type": "io.containerd.runsc.v1"
+  },
+  "runtime_class": {
+    "name": "loom-personal-dev-builder",
+    "profile_label_encoding": "sha256-halves-v1"
+  },
+  "schema": "loom.personal-dev-builder-runtime-profile.v1"
+}

@@ -1,0 +1,13 @@
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: loom-personal-dev-builder
+  annotations:
+    loom.dev/runtime-profile-sha256: 880b7c79013e38b016046c732209574d48d6ae5a008164906f9951ba27765b76
+handler: runsc-personal-dev
+scheduling:
+  nodeSelector:
+    kubernetes.io/arch: amd64
+    kubernetes.io/os: linux
+    loom.dev/personal-dev-runtime-profile-a: 880b7c79013e38b016046c732209574d
+    loom.dev/personal-dev-runtime-profile-b: 48d6ae5a008164906f9951ba27765b76

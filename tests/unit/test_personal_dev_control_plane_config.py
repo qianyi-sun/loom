@@ -117,6 +117,10 @@ def test_checked_in_shadow_profile_is_exact_and_canonical() -> None:
     assert profile.identities.scanner_cache_pvc == ("loom-personal-dev-scanner-cache")
     assert profile.builder.prepared is False
     assert profile.builder.runtime_class_name == "loom-personal-dev-builder"
+    assert profile.builder.runtime_handler == "runsc-personal-dev"
+    assert profile.builder.runtime_profile_sha256 == (
+        "880b7c79013e38b016046c732209574d48d6ae5a008164906f9951ba27765b76"
+    )
     assert profile.builder.registry_prefix == "ghcr.io/qianyi-sun/loom-dev"
     assert profile.network.public_origin == "https://loom-service.dev.yylx.world"
     assert profile.network.kubernetes_api_cidr != "0.0.0.0/0"
@@ -198,6 +202,21 @@ def test_checked_in_shadow_profile_is_exact_and_canonical() -> None:
         lambda text: text.replace("kubernetes_api_port = 443", "kubernetes_api_port = 0"),
         lambda text: text.replace('postgres_storage = "20Gi"', 'postgres_storage = "unbounded"'),
         lambda text: text.replace("prepared = false", "prepared = true"),
+        lambda text: text.replace('runtime_handler = "runsc-personal-dev"\n', ""),
+        lambda text: text.replace(
+            'runtime_handler = "runsc-personal-dev"',
+            'runtime_handler = "runc"',
+        ),
+        lambda text: text.replace(
+            "runtime_profile_sha256 = "
+            '"880b7c79013e38b016046c732209574d48d6ae5a008164906f9951ba27765b76"\n',
+            "",
+        ),
+        lambda text: text.replace(
+            "runtime_profile_sha256 = "
+            '"880b7c79013e38b016046c732209574d48d6ae5a008164906f9951ba27765b76"',
+            'runtime_profile_sha256 = "D' + "d" * 63 + '"',
+        ),
         lambda text: text.replace('cpu_request = "250m"', 'cpu_request = "3"', 1),
         lambda text: text.replace(
             'protocol_versions_json = "{',

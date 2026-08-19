@@ -238,6 +238,62 @@ def _pod_for(item: dict[str, Any], suffix: str, *, phase: str) -> dict[str, Any]
     return pod
 
 
+def _runtime_class(
+    *,
+    name: str,
+    handler: str,
+    profile_sha256: str,
+) -> dict[str, Any]:
+    return {
+        "apiVersion": "node.k8s.io/v1",
+        "kind": "RuntimeClass",
+        "metadata": {
+            "name": name,
+            "annotations": {
+                "loom.dev/runtime-profile-sha256": profile_sha256,
+            },
+        },
+        "handler": handler,
+        "scheduling": {
+            "nodeSelector": {
+                "kubernetes.io/arch": "amd64",
+                "kubernetes.io/os": "linux",
+                "loom.dev/personal-dev-runtime-profile-a": profile_sha256[:32],
+                "loom.dev/personal-dev-runtime-profile-b": profile_sha256[32:],
+            }
+        },
+    }
+
+
+def _mutate_runtime_class(runtime: dict[str, Any], mutation: str) -> None:
+    if mutation == "runtime-handler":
+        runtime["handler"] = "runc"
+    elif mutation == "runtime-profile":
+        runtime["metadata"]["annotations"]["loom.dev/runtime-profile-sha256"] = "a" * 64
+    elif mutation == "runtime-scheduling-missing":
+        runtime.pop("scheduling")
+    elif mutation == "runtime-node-selector-missing":
+        runtime["scheduling"].pop("nodeSelector")
+    elif mutation == "runtime-selector-key-missing":
+        runtime["scheduling"]["nodeSelector"].pop("kubernetes.io/os")
+    elif mutation == "runtime-selector-key-extra":
+        runtime["scheduling"]["nodeSelector"]["loom.dev/extra"] = "true"
+    elif mutation == "runtime-profile-half":
+        runtime["scheduling"]["nodeSelector"][
+            "loom.dev/personal-dev-runtime-profile-a"
+        ] = "a" * 32
+    elif mutation == "runtime-os":
+        runtime["scheduling"]["nodeSelector"]["kubernetes.io/os"] = "windows"
+    elif mutation == "runtime-architecture":
+        runtime["scheduling"]["nodeSelector"]["kubernetes.io/arch"] = "arm64"
+    elif mutation == "runtime-tolerations":
+        runtime["scheduling"]["tolerations"] = [{"operator": "Exists"}]
+    elif mutation == "runtime-overhead":
+        runtime["overhead"] = {"podFixed": {"cpu": "1m"}}
+    else:  # pragma: no cover - caller tables are exhaustive
+        raise AssertionError(mutation)
+
+
 def _healthy_fixture(
     tmp_path: Path,
 ) -> tuple[RenderedPersonalDevControlPlane, _FakeRunner]:
@@ -321,12 +377,11 @@ def _healthy_fixture(
                 },
             ],
         },
-        _RUNTIME_CLASS: {
-            "apiVersion": "node.k8s.io/v1",
-            "kind": "RuntimeClass",
-            "metadata": {"name": "loom-personal-dev-builder"},
-            "handler": "loom-personal-dev-builder",
-        },
+        _RUNTIME_CLASS: _runtime_class(
+            name=expected.runtime_class_name,
+            handler=expected.runtime_handler,
+            profile_sha256=expected.runtime_profile_sha256,
+        ),
         _NAMESPACED: {
             "apiVersion": "v1",
             "kind": "List",
@@ -401,8 +456,8 @@ def _acceptance_inputs(
             "publisher_identity": profile.builder.publisher_identity,
             "registry_prefix": profile.builder.registry_prefix,
             "runtime_class_name": profile.builder.runtime_class_name,
-            "runtime_handler": "runsc-personal-dev",
-            "runtime_profile_sha256": "d" * 64,
+            "runtime_handler": profile.builder.runtime_handler,
+            "runtime_profile_sha256": profile.builder.runtime_profile_sha256,
             "scanner_binary_sha256": release.scanner.binary_sha256,
             "scanner_cache_identity_sha256": release.scanner.cache_identity_sha256,
             "scanner_database_sha256": release.scanner.database_sha256,
@@ -543,17 +598,11 @@ def _acceptance_healthy_fixture(
                 },
             ],
         },
-        _RUNTIME_CLASS: {
-            "apiVersion": "node.k8s.io/v1",
-            "kind": "RuntimeClass",
-            "metadata": {
-                "name": "loom-personal-dev-builder",
-                "annotations": {
-                    "loom.dev/runtime-profile-sha256": plan.builder.runtime_profile_sha256,
-                },
-            },
-            "handler": plan.builder.runtime_handler,
-        },
+        _RUNTIME_CLASS: _runtime_class(
+            name=plan.builder.runtime_class_name,
+            handler=plan.builder.runtime_handler,
+            profile_sha256=plan.builder.runtime_profile_sha256,
+        ),
         _NAMESPACED: {
             "apiVersion": "v1",
             "kind": "List",
@@ -846,17 +895,11 @@ def test_acceptance_queries_the_runtime_class_bound_by_the_plan(
         f"runtimeclass.node.k8s.io/{runtime_class_name}",
         "--output=json",
     )
-    runner.responses[runtime_command] = {
-        "apiVersion": "node.k8s.io/v1",
-        "handler": plan.builder.runtime_handler,
-        "kind": "RuntimeClass",
-        "metadata": {
-            "annotations": {
-                "loom.dev/runtime-profile-sha256": plan.builder.runtime_profile_sha256,
-            },
-            "name": runtime_class_name,
-        },
-    }
+    runner.responses[runtime_command] = _runtime_class(
+        name=runtime_class_name,
+        handler=plan.builder.runtime_handler,
+        profile_sha256=plan.builder.runtime_profile_sha256,
+    )
 
     result = _observe_acceptance(expected, plan, runner)
 
@@ -948,6 +991,15 @@ def test_acceptance_permits_only_exact_owned_dynamic_namespace_families(
         ("activation-not-ready", "activation_not_ready"),
         ("runtime-handler", "runtime_class_binding_invalid"),
         ("runtime-profile", "runtime_class_binding_invalid"),
+        ("runtime-scheduling-missing", "runtime_class_binding_invalid"),
+        ("runtime-node-selector-missing", "runtime_class_binding_invalid"),
+        ("runtime-selector-key-missing", "runtime_class_binding_invalid"),
+        ("runtime-selector-key-extra", "runtime_class_binding_invalid"),
+        ("runtime-profile-half", "runtime_class_binding_invalid"),
+        ("runtime-os", "runtime_class_binding_invalid"),
+        ("runtime-architecture", "runtime_class_binding_invalid"),
+        ("runtime-tolerations", "runtime_class_binding_invalid"),
+        ("runtime-overhead", "runtime_class_binding_invalid"),
         ("scanner-cache-identity", "management_acceptance_binding_invalid"),
         ("scanner-database-metadata", "management_acceptance_binding_invalid"),
         ("scanner-identity", "management_acceptance_binding_invalid"),
@@ -1039,13 +1091,10 @@ def test_acceptance_status_matrix_fails_closed_on_exact_binding_drift(
             activation["spec"]["replicas"] = 0
         else:
             activation["status"]["availableReplicas"] = 0
-    elif mutation in {"runtime-handler", "runtime-profile"}:
+    elif mutation.startswith("runtime-"):
         runtime = runner.responses[_RUNTIME_CLASS]
         assert isinstance(runtime, dict)
-        if mutation == "runtime-handler":
-            runtime["handler"] = "runc"
-        else:
-            runtime["metadata"]["annotations"]["loom.dev/runtime-profile-sha256"] = "a" * 64
+        _mutate_runtime_class(runtime, mutation)
     elif mutation.startswith("manager-") and mutation != "manager-oversized":
         manager = runner.responses[_ACCEPTANCE_MANAGER]
         assert isinstance(manager, dict)
@@ -1355,6 +1404,17 @@ def test_healthy_shadow_returns_canonical_bounded_status_and_safe_commands(
         ("flag-true", "management_shadow_flags_invalid"),
         ("activation-nonzero", "activation_replicas_nonzero"),
         ("runtime-class-missing", "runtime_class_missing"),
+        ("runtime-handler", "runtime_class_missing"),
+        ("runtime-profile", "runtime_class_missing"),
+        ("runtime-scheduling-missing", "runtime_class_missing"),
+        ("runtime-node-selector-missing", "runtime_class_missing"),
+        ("runtime-selector-key-missing", "runtime_class_missing"),
+        ("runtime-selector-key-extra", "runtime_class_missing"),
+        ("runtime-profile-half", "runtime_class_missing"),
+        ("runtime-os", "runtime_class_missing"),
+        ("runtime-architecture", "runtime_class_missing"),
+        ("runtime-tolerations", "runtime_class_missing"),
+        ("runtime-overhead", "runtime_class_missing"),
         ("scanner-pvc-missing", "storage_not_ready"),
         ("unexpected-personal-namespace", "unexpected_personal_namespace"),
         ("unexpected-builder-namespace", "unexpected_builder_namespace"),
@@ -1459,6 +1519,10 @@ def test_shadow_status_matrix_reports_stable_sorted_blockers(
         runner.responses[_RUNTIME_CLASS] = subprocess.CompletedProcess(
             list(_RUNTIME_CLASS), 1, "", "not found"
         )
+    elif mutation.startswith("runtime-"):
+        runtime = runner.responses[_RUNTIME_CLASS]
+        assert isinstance(runtime, dict)
+        _mutate_runtime_class(runtime, mutation)
     elif mutation == "scanner-pvc-missing":
         namespaced.remove(
             _item(

@@ -365,9 +365,7 @@ def personal_dev_builder_manifest_documents(
                 "spec": {
                     "restartPolicy": "Never",
                     "automountServiceAccountToken": False,
-                    "hostUsers": False,
                     "runtimeClassName": config.runtime_class_name,
-                    "nodeSelector": {"kubernetes.io/arch": architecture},
                     "securityContext": {
                         "runAsNonRoot": True,
                         "runAsUser": 1000,

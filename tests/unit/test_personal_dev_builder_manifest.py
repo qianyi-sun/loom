@@ -48,9 +48,9 @@ def test_builder_manifest_is_attempt_bound_restricted_and_finite() -> None:
     assert pod["metadata"]["labels"] | expected_labels == pod["metadata"]["labels"]
     spec = pod["spec"]
     assert spec["automountServiceAccountToken"] is False
-    assert spec["hostUsers"] is False
+    assert "hostUsers" not in spec
     assert spec["runtimeClassName"] == "loom-personal-dev-builder"
-    assert spec["nodeSelector"] == {"kubernetes.io/arch": "amd64"}
+    assert "nodeSelector" not in spec
     assert job["spec"]["activeDeadlineSeconds"] == 3600
     container = spec["containers"][0]
     assert container["image"].endswith("@sha256:" + "a" * 64)

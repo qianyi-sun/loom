@@ -40,6 +40,13 @@ Both the personal-management shadow and the global-capacity zero-ceiling shadow
 must report ready before the later acceptance interlock can be considered.
 Neither shadow readiness enables personal mutations or physical capacity.
 
+The independently installed measured builder capability has a separate
+[gVisor runtime rollout](../../docs/runbooks/personal-dev-builder-runtime.md).
+That procedure verifies the exact public profile on OLDLAB Kubernetes agents
+2–5, applies the digest-bound RuntimeClass only after all four agents pass, and
+proves rootless amd64/arm64 BuildKit execution without enabling the personal
+builder, lifecycle, task submission, or physical capacity.
+
 Both modes render the same release-bound scanner cache preparation. Trusted
 release schema 2 adds the immutable `personal_dev_scanner_cache` image and
 binds it to the checked-in lock, scanner binary, both databases and metadata,

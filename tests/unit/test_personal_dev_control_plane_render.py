@@ -147,8 +147,8 @@ def _acceptance_render(tmp_path: Path):
             "publisher_identity": profile.builder.publisher_identity,
             "registry_prefix": profile.builder.registry_prefix,
             "runtime_class_name": profile.builder.runtime_class_name,
-            "runtime_handler": "runsc-personal-dev",
-            "runtime_profile_sha256": "d" * 64,
+            "runtime_handler": profile.builder.runtime_handler,
+            "runtime_profile_sha256": profile.builder.runtime_profile_sha256,
             "scanner_binary_sha256": release.scanner.binary_sha256,
             "scanner_cache_identity_sha256": release.scanner.cache_identity_sha256,
             "scanner_database_sha256": release.scanner.database_sha256,
@@ -241,8 +241,11 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
     ).hexdigest()
     assert rendered.input_sha256 == expected_input
     assert rendered.release_sha256 == hashlib.sha256(release.canonical_bytes()).hexdigest()
+    assert rendered.runtime_class_name == profile.builder.runtime_class_name
+    assert rendered.runtime_handler == profile.builder.runtime_handler
+    assert rendered.runtime_profile_sha256 == profile.builder.runtime_profile_sha256
     assert hashlib.sha256(rendered.yaml_text.encode("utf-8")).hexdigest() == (
-        "2c2ed0c405e1c79fd60ee6c3ebf645687daba2675876d7bff24b136f00ee69df"
+        "42610f0cfa47eeb7a08789f62457e8f56439ebd15aad421bf537248658ad4f5e"
     )
 
     identities = {_identity(document) for document in documents}
@@ -342,6 +345,9 @@ def test_acceptance_render_is_deterministic_plan_bound_and_keeps_shadow_resource
         ).hexdigest()
     )
     assert rendered.resource_count == shadow.resource_count == 33
+    assert rendered.runtime_class_name == plan.builder.runtime_class_name
+    assert rendered.runtime_handler == plan.builder.runtime_handler
+    assert rendered.runtime_profile_sha256 == plan.builder.runtime_profile_sha256
     assert {_identity(item) for item in documents if item["kind"] != "Job"} == {
         _identity(item) for item in shadow_documents if item["kind"] != "Job"
     }
