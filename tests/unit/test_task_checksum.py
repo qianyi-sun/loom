@@ -1,9 +1,9 @@
 from pathlib import Path
 
 import pytest
+from loom_benchmarks.util import sha256_of_dir
 
 from loom.models.task_checksum import task_checksum
-from loom_benchmarks.util import sha256_of_dir
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _BUILDER = _REPO_ROOT / "src" / "loom_worker" / "task_image_builder.py"

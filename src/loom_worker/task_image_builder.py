@@ -21,6 +21,7 @@ from typing import Any, Protocol
 from uuid import UUID
 
 import docker
+from loom_benchmarks.util import sha256_of_dir
 
 from loom.driver.task_image import (
     TaskImageBuildError,
@@ -31,7 +32,6 @@ from loom.driver.task_image import (
 from loom.models.task import TaskConfig
 from loom.task_image_materialization import required_task_image_architectures
 from loom.trajectory.storage import bundle_file_metadata_sha256
-from loom_benchmarks.util import sha256_of_dir
 from loom_worker.config import WorkerSettings
 from loom_worker.control_plane_client import HttpControlPlaneClient, TaskImageBuildClaim
 from loom_worker.task_sidecars import build_task_sidecar_images
