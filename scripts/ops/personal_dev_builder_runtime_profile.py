@@ -260,7 +260,13 @@ def load_runtime_profile(path: Path) -> RuntimeProfile:
     payload = _read_profile(path)
     try:
         value = json.loads(payload.decode("ascii"), object_pairs_hook=_unique_object)
-    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+    except (
+        RecursionError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+    ) as exc:
         raise RuntimeProfileError("runtime profile is not valid JSON") from exc
     if not isinstance(value, dict) or payload != _canonical(value) or value != _EXPECTED_PROFILE:
         raise RuntimeProfileError("runtime profile differs from the reviewed contract")

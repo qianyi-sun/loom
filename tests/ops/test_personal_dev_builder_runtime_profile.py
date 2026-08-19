@@ -187,3 +187,13 @@ def test_profile_rejects_duplicate_keys_and_noncanonical_bytes(tmp_path: Path) -
     for path in (duplicate, noncanonical):
         with pytest.raises(RuntimeProfileError, match="profile"):
             load_runtime_profile(path)
+
+
+def test_profile_rejects_excessive_json_nesting_with_the_public_error(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "nested.json"
+    path.write_bytes(b"[" * 2_000 + b"]" * 2_000)
+
+    with pytest.raises(RuntimeProfileError, match="profile"):
+        load_runtime_profile(path)
