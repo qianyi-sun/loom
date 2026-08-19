@@ -50,6 +50,8 @@ class TerminalGenStageRequestV1(PipelineModel):
     @model_validator(mode="after")
     def closed_request(self) -> TerminalGenStageRequestV1:
         reject_secret_literals(self.parameters)
+        if self.fanout_item is not None:
+            reject_secret_literals(self.fanout_item.parameters)
         if self.shard_key == "singleton" and self.fanout_item is not None:
             raise ValueError("singleton request cannot carry a fanout item")
         if self.shard_key != "singleton":

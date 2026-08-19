@@ -356,3 +356,26 @@ async def test_terminalgen_runtime_rejects_fanout_parameter_drift() -> None:
 
     with pytest.raises(ValueError, match="expanded fanout parameters drift"):
         await runtime.resolve(candidate)
+
+
+@pytest.mark.asyncio
+async def test_terminalgen_runtime_rejects_secret_looking_fanout_parameters() -> None:
+    candidate = _generate_candidate()
+    assert candidate.fanout_item_json is not None
+    parameters = {"api_key": "opaque-but-forbidden"}
+    fanout_item = {**candidate.fanout_item_json, "parameters": parameters}
+    candidate = replace(
+        candidate,
+        fanout_item_json=fanout_item,
+        fanout_item_digest=canonical_digest(fanout_item),
+        fanout_parameters_json=parameters,
+    )
+    runtime = TerminalGenReadinessRuntime(
+        repo_root=REPO_ROOT,
+        resource_profiles=ResourceProfileRegistry.load(),
+        image_runtime=_images(),
+    )
+
+    frozen = await runtime.resolve(candidate)
+    with pytest.raises(ValueError, match="secret-looking field name"):
+        runtime.render(candidate, frozen)
