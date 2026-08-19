@@ -57,6 +57,7 @@ from loom_cli.rollout.systemd_unit_readiness import UNIT_PATHS
 from tests.loom_cli.rollout.operator.test_protected_migration_component import (
     _published_plan,
 )
+from tests.loom_cli.rollout.rehearsal_fixtures import active_staging_profile_text
 
 
 def _hash_json(value: object) -> str:
@@ -131,9 +132,7 @@ def _bound_single_artifact(tmp_path: Path):
     profile_target.parent.mkdir(parents=True, exist_ok=True)
     script_target.parent.mkdir(parents=True, exist_ok=True)
     repository = Path(__file__).resolve().parents[4]
-    shutil.copyfile(repository / "deploy/environment-state/staging.toml", profile_target)
-    profile_text = profile_target.read_text(encoding="utf-8")
-    profile_text = profile_text.replace("materialize = false", "materialize = true", 1)
+    profile_text = active_staging_profile_text()
     # These component mechanics tests retain one supervisor so their exact
     # operation-order assertions stay focused.  The transition suite exercises
     # the additive legacy-GB10 -> GB10+OLDLAB protected transition.
@@ -271,7 +270,7 @@ def _bound_multi_artifacts(tmp_path: Path):
     profile_target.parent.mkdir(parents=True, exist_ok=True)
     script_target.parent.mkdir(parents=True, exist_ok=True)
     repository = Path(__file__).resolve().parents[4]
-    shutil.copyfile(repository / "deploy/environment-state/staging.toml", profile_target)
+    profile_target.write_text(active_staging_profile_text(), encoding="utf-8")
     shutil.copyfile(
         repository / SCRIPT_PATH,
         script_target,

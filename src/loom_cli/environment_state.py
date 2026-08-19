@@ -415,6 +415,10 @@ def staging_gb10_external_activation_blockers(
                 blockers.append("gb10_policy_disabled_reason_missing")
 
     prereq = prerequisites if isinstance(prerequisites, dict) else {}
+    manager_bootstrap = prereq.get("manager_witness_export_bootstrap", False)
+    if type(manager_bootstrap) is not bool:
+        blockers.append("external_slurm_manager_bootstrap_invalid")
+        manager_bootstrap = False
     candidate_attestation_fields = {
         "service_identity",
         "allocation_attestation",
@@ -429,6 +433,12 @@ def staging_gb10_external_activation_blockers(
         not isinstance(pools, list) or not pools or "gb10" in pools
     )
     supervisor_rows = supervisors if isinstance(supervisors, list) else []
+    if manager_bootstrap and any(
+        raw.get("enabled") is not False or raw.get("active") is not False
+        for raw in supervisor_rows
+        if isinstance(raw, dict)
+    ):
+        blockers.append("external_slurm_manager_bootstrap_supervisor_active")
     gb10_supervisors = [
         raw for raw in supervisor_rows if isinstance(raw, dict) and raw.get("pool_name") == "gb10"
     ]
@@ -449,7 +459,7 @@ def staging_gb10_external_activation_blockers(
         blockers.append("external_slurm_gb10_materialization_required")
     if len(gb10_supervisors) != 1:
         blockers.append("external_slurm_gb10_supervisor_count_invalid")
-    elif (
+    elif not manager_bootstrap and (
         gb10_supervisors[0].get("enabled") is not True
         or gb10_supervisors[0].get("active") is not True
     ):

@@ -62,6 +62,7 @@ from loom_cli.rollout.rehearsal_secret_restore import RehearsalSecretArtifact
 from tests.loom_cli.rollout.rehearsal_fixtures import (
     PassingGB10RehearsalTransport,
     active_external_supervisor_artifact,
+    active_staging_profile_text,
     gb10_rehearsal_authority,
     passing_gb10_transport_factory,
 )
@@ -79,9 +80,7 @@ def _external_supervisor_artifact() -> ExternalSupervisorArtifact:
 
 
 def _external_supervisor_profile() -> bytes:
-    profile = (REPO_ROOT / "deploy/environment-state/staging.toml").read_text(encoding="utf-8")
-    profile = profile.replace("materialize = false", "materialize = true", 1)
-    payload = profile.encode()
+    payload = active_staging_profile_text().encode()
     assert hashlib.sha256(payload).hexdigest() == _external_supervisor_artifact().profile_sha256
     return payload
 

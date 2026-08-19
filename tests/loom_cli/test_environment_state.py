@@ -258,8 +258,8 @@ def test_committed_production_profile_ships_fail_closed() -> None:
 def test_committed_slurm_pools_carry_containment_contract() -> None:
     """#896/#1143: every committed non-exclusive Slurm pool must ship the full
     containment contract (per-container caps + a job_pids_max ceiling that fits
-    lease). Both staging pools are enabled; development and production remain
-    fail-closed. GB10 also carries its bounded service-account QoS."""
+    lease), independent of whether a rollout phase has activated the pool.
+    GB10 also carries its bounded service-account QoS."""
     variables = {
         "IMAGE_TAG": "x-abc1234",
         "ENV_CONFIG_VERSION": "x-abc1234",
@@ -275,8 +275,6 @@ def test_committed_slurm_pools_carry_containment_contract() -> None:
         assert slurm_pools, f"{env} has no slurm pool"
         for policy in slurm_pools:
             cfg = policy["actuator_config"]
-            expected_enabled = env == "staging"
-            assert policy["enabled"] is expected_enabled
             assert cfg["exclusive"] is False
             cpus = cfg["container_cpus"]
             mem = cfg["container_memory_mib"]
@@ -2397,7 +2395,7 @@ def test_committed_development_profile_ships_fail_closed_supervisors() -> None:
     )
 
 
-def test_committed_staging_profile_activates_trial_and_proven_builder_supervisors() -> None:
+def test_committed_staging_profile_bootstraps_manager_before_supervisor_activation() -> None:
     profile = load_environment_state_profile(
         Path("deploy/environment-state/staging.toml"),
         variables={
@@ -2408,19 +2406,24 @@ def test_committed_staging_profile_activates_trial_and_proven_builder_supervisor
         expected_environment="staging",
     )
 
-    supervisors = [
-        row
-        for row in profile.external_slurm_autoscaler_supervisors
-        if row["enabled"] and row["active"]
-    ]
-    assert len(supervisors) == 3
+    supervisors = profile.external_slurm_autoscaler_supervisors
     by_name = {supervisor["name"]: supervisor for supervisor in supervisors}
+    assert set(by_name) == {
+        "gb10-staging",
+        "oldlab-staging",
+        "task-image-builder-gb10-staging",
+        "task-image-builder-oldlab-staging",
+    }
+    assert not any(
+        supervisor["enabled"] or supervisor["active"] for supervisor in supervisors
+    )
+
     gb10 = by_name["gb10-staging"]
     assert gb10["pool_name"] == "gb10"
     assert gb10["service_name"] == "loom-autoscaler-gb10-staging.service"
     assert gb10["timer_name"] == "loom-autoscaler-gb10-staging.timer"
-    assert gb10["enabled"] is True
-    assert gb10["active"] is True
+    assert gb10["enabled"] is False
+    assert gb10["active"] is False
     assert "15451" in gb10["args"]
     assert "loom-external-slurm-autoscaler-db" in gb10["args"]
     _assert_manager_trust_arguments(gb10, pool_name="gb10")
@@ -2429,8 +2432,8 @@ def test_committed_staging_profile_activates_trial_and_proven_builder_supervisor
     assert oldlab["pool_name"] == "oldlab"
     assert oldlab["service_name"] == "loom-autoscaler-oldlab-staging.service"
     assert oldlab["timer_name"] == "loom-autoscaler-oldlab-staging.timer"
-    assert oldlab["enabled"] is True
-    assert oldlab["active"] is True
+    assert oldlab["enabled"] is False
+    assert oldlab["active"] is False
     assert "15448" in oldlab["args"]
     assert "service/loom-postgres-rw" in oldlab["args"]
     assert oldlab["working_directory"].startswith("/opt/loom-staging-runner/candidates/")
@@ -2442,6 +2445,11 @@ def test_committed_staging_profile_activates_trial_and_proven_builder_supervisor
     assert builder["timer_name"] == "loom-task-image-builder-oldlab-staging.timer"
     assert "15453" in builder["args"]
     _assert_manager_trust_arguments(builder, pool_name="oldlab")
+
+    gb10_builder = by_name["task-image-builder-gb10-staging"]
+    assert gb10_builder["pool_name"] == "task-image-builder-gb10"
+    assert "15454" in gb10_builder["args"]
+    _assert_manager_trust_arguments(gb10_builder, pool_name="gb10")
 
 
 def test_committed_production_supervisor_has_independently_pinned_manager_trust() -> None:
@@ -2547,6 +2555,48 @@ def test_staging_gb10_external_activation_requires_external_authority(
     if not supervisor_enabled:
         expected.add("external_slurm_gb10_supervisor_activation_incomplete")
     assert blockers == tuple(sorted(expected))
+
+
+def test_staging_manager_export_bootstrap_requires_every_supervisor_inactive() -> None:
+    base = {
+        "environment": "staging",
+        "autoscaler_policies": [
+            {
+                "pool_name": "gb10",
+                "actuator": "slurm",
+                "enabled": True,
+                "actuator_config": {"external_runner": True},
+            }
+        ],
+        "prerequisites": {
+            "pools": ["gb10", "oldlab"],
+            "materialize": True,
+            "require_external_allocation_authority": True,
+            "manager_witness_export_bootstrap": True,
+        },
+    }
+    inactive = [
+        {"pool_name": "gb10", "enabled": False, "active": False},
+        {"pool_name": "oldlab", "enabled": False, "active": False},
+    ]
+
+    assert staging_gb10_external_activation_blockers(
+        **base,
+        supervisors=inactive,
+    ) == ()
+    assert staging_gb10_external_activation_blockers(
+        **base,
+        supervisors=[*inactive, {"pool_name": "other", "enabled": True, "active": True}],
+    ) == ("external_slurm_manager_bootstrap_supervisor_active",)
+
+
+def test_staging_manager_export_bootstrap_rejects_active_supervisor_without_gb10() -> None:
+    assert staging_gb10_external_activation_blockers(
+        environment="staging",
+        autoscaler_policies=[],
+        prerequisites={"manager_witness_export_bootstrap": True},
+        supervisors=[{"pool_name": "other", "enabled": True, "active": True}],
+    ) == ("external_slurm_manager_bootstrap_supervisor_active",)
 
 
 def test_staging_gb10_supervisor_activation_without_policy_requires_external_authority() -> None:
@@ -2719,7 +2769,7 @@ def test_render_supervisor_service_and_timer_contain_full_execstart() -> None:
     assert "OnUnitActiveSec=30" in timer_unit
 
 
-def test_staging_profile_scales_both_slurm_pools_from_zero() -> None:
+def test_staging_bootstrap_preserves_both_zero_minimum_slurm_pool_contracts() -> None:
     profile = load_environment_state_profile(
         Path("deploy/environment-state/staging.toml"),
         variables={

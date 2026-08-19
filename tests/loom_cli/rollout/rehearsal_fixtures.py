@@ -16,6 +16,40 @@ from loom_cli.rollout.systemd_readiness import RehearsalSystemdActivation
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
+def active_staging_profile_text() -> str:
+    """Return the post-bootstrap staging profile for active-path unit tests."""
+
+    profile = (REPO_ROOT / "deploy/environment-state/staging.toml").read_text(
+        encoding="utf-8"
+    )
+    profile = profile.replace("manager_witness_export_bootstrap = true\n", "", 1)
+    profile = profile.replace(
+        'pool_name = "task-image-builder-oldlab"\nenabled = false',
+        'pool_name = "task-image-builder-oldlab"\nenabled = true',
+        1,
+    )
+    profile = profile.replace(
+        'activation_blockers = [\n  "manager_witness_export_bootstrap_pending",\n]',
+        "activation_blockers = []",
+        1,
+    )
+    for name in (
+        "gb10-staging",
+        "oldlab-staging",
+        "task-image-builder-oldlab-staging",
+    ):
+        prefix, marker, suffix = profile.partition(f'name = "{name}"')
+        if not marker:
+            raise AssertionError(f"missing committed supervisor fixture: {name}")
+        suffix = suffix.replace(
+            "enabled = false\nactive = false",
+            "enabled = true\nactive = true",
+            1,
+        )
+        profile = prefix + marker + suffix
+    return profile
+
+
 def active_external_supervisor_artifact(
     *,
     candidate_sha: str,
@@ -31,11 +65,7 @@ def active_external_supervisor_artifact(
         task_image_builder_script = candidate / TASK_IMAGE_BUILDER_SCRIPT_PATH
         profile.parent.mkdir(parents=True)
         script.parent.mkdir(parents=True)
-        profile_text = (REPO_ROOT / "deploy/environment-state/staging.toml").read_text(
-            encoding="utf-8"
-        )
-        profile_text = profile_text.replace("materialize = false", "materialize = true", 1)
-        profile.write_text(profile_text, encoding="utf-8")
+        profile.write_text(active_staging_profile_text(), encoding="utf-8")
         shutil.copyfile(
             REPO_ROOT / SCRIPT_PATH,
             script,

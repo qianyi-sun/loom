@@ -20,7 +20,7 @@ _VARIABLES = {
 }
 
 
-def test_staging_activates_only_the_provisioned_native_builder_pool() -> None:
+def test_staging_bootstrap_keeps_provisioned_builders_inert() -> None:
     profile = load_environment_state_profile(
         Path("deploy/environment-state/staging.toml"),
         variables=_VARIABLES,
@@ -40,8 +40,10 @@ def test_staging_activates_only_the_provisioned_native_builder_pool() -> None:
         assert "builder_token_not_provisioned" not in row["activation_blockers"]
         assert "registry_push_credentials_not_provisioned" not in row["activation_blockers"]
         assert "registry_retention_not_provisioned" not in row["activation_blockers"]
-    assert builders["x86_64"]["enabled"] is True
-    assert builders["x86_64"]["activation_blockers"] == []
+    assert builders["x86_64"]["enabled"] is False
+    assert builders["x86_64"]["activation_blockers"] == [
+        "manager_witness_export_bootstrap_pending"
+    ]
     assert builders["x86_64"]["allowed_nodes"] == ["trt-eai-oldlab-6"]
     assert builders["arm64"]["enabled"] is False
     assert builders["arm64"]["allowed_nodes"] == ["trt-gb10-2"]
@@ -65,7 +67,7 @@ def test_staging_activates_only_the_provisioned_native_builder_pool() -> None:
     assert all(row["env_file"] not in trial_env_files for row in builders.values())
 
 
-def test_staging_builder_supervisors_match_proven_native_activation() -> None:
+def test_staging_builder_supervisors_match_bootstrap_policy_inactivation() -> None:
     profile = load_environment_state_profile(
         Path("deploy/environment-state/staging.toml"),
         variables=_VARIABLES,
@@ -97,8 +99,8 @@ def test_staging_builder_supervisors_match_proven_native_activation() -> None:
         assert args.expected_manager_public_key_sha256 == (
             "54b44788af0dc10dc5f0a8277396a35fedf2f143b39e14d5ee35ce09b56b18cd"
         )
-    assert supervisors["task-image-builder-oldlab"]["enabled"] is True
-    assert supervisors["task-image-builder-oldlab"]["active"] is True
+    assert supervisors["task-image-builder-oldlab"]["enabled"] is False
+    assert supervisors["task-image-builder-oldlab"]["active"] is False
     assert supervisors["task-image-builder-gb10"]["enabled"] is False
     assert supervisors["task-image-builder-gb10"]["active"] is False
 
@@ -174,7 +176,7 @@ def test_remote_worker_compose_forwards_builder_lifecycle_settings() -> None:
     )
 
 
-def test_release_manifest_preserves_partial_builder_activation_evidence() -> None:
+def test_release_manifest_preserves_bootstrap_builder_blocker_evidence() -> None:
     summary = _external_worker_summary(
         environment_state_path=Path("deploy/environment-state/staging.toml"),
         image_tag=_VARIABLES["IMAGE_TAG"],
@@ -188,7 +190,9 @@ def test_release_manifest_preserves_partial_builder_activation_evidence() -> Non
         "task-image-builder-oldlab",
     }
     by_arch = {row["cpu_arch"]: row for row in builders}
-    assert by_arch["x86_64"]["enabled"] is True
-    assert by_arch["x86_64"]["activation_blockers"] == []
+    assert by_arch["x86_64"]["enabled"] is False
+    assert by_arch["x86_64"]["activation_blockers"] == [
+        "manager_witness_export_bootstrap_pending"
+    ]
     assert by_arch["arm64"]["enabled"] is False
     assert all(row["exclusive"] is True for row in builders)

@@ -193,6 +193,7 @@ def _external_worker_summary(
             "pools",
             "materialize",
             "require_external_allocation_authority",
+            "manager_witness_export_bootstrap",
         ):
             if field in raw_prerequisites:
                 prerequisites[field] = raw_prerequisites[field]

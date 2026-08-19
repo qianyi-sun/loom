@@ -9,6 +9,9 @@
 
 environment = "staging"
 
+# Manager-first bootstrap: publish the authenticated witness exporter before
+# any external supervisor is allowed to consume it. A follow-up candidate
+# removes these explicit blockers only after the protected manager is live.
 [[worker_pool_autoscaler_policies]]
 # GB10 is managed only by the controller-local Slurm supervisor. Per-node
 # worker agents below remain stopped so there is one capacity authority.
@@ -176,7 +179,7 @@ activation_blockers = [
 
 [[task_image_builder_policies]]
 pool_name = "task-image-builder-oldlab"
-enabled = true
+enabled = false
 slurm_cluster_id = "oldlab"
 cpu_arch = "x86_64"
 allowed_nodes = [
@@ -200,7 +203,9 @@ slurm_account = "loom-staging"
 slurm_qos = "loom-task-image-builder"
 slurm_reservation = "loom-task-image-builder"
 job_output_dir = "/shared_work/loom/staging-rollout/job-output"
-activation_blockers = []
+activation_blockers = [
+  "manager_witness_export_bootstrap_pending",
+]
 
 [[gb10_worker_pool_desired_states]]
 pool_name = "gb10"
@@ -273,6 +278,7 @@ require_clean_repo = true
 require_worker_token_parity = true
 materialize = true
 require_external_allocation_authority = true
+manager_witness_export_bootstrap = true
 env_template = "/var/lib/loom-staging-rollout/generated/staging-gb10-worker-staging-bootstrap.env"
 
 # Worker containers in both Slurm pools reach the OLDLAB-1 private fleet
@@ -329,8 +335,8 @@ args = [
   "--global-execution-manager-kubeconfig", "/var/lib/loom-staging-rollout/kubeconfig",
   "--expected-manager-public-key-sha256", "54b44788af0dc10dc5f0a8277396a35fedf2f143b39e14d5ee35ce09b56b18cd",
 ]
-enabled = true
-active = true
+enabled = false
+active = false
 
 # OLDLAB staging autoscaler supervisor. The shared working directory exists on
 # every Slurm execution node, and the `-rw` service supports kubectl
@@ -364,8 +370,8 @@ args = [
   "--global-execution-manager-kubeconfig", "/var/lib/loom-staging-rollout/kubeconfig",
   "--expected-manager-public-key-sha256", "54b44788af0dc10dc5f0a8277396a35fedf2f143b39e14d5ee35ce09b56b18cd",
 ]
-enabled = true
-active = true
+enabled = false
+active = false
 
 # Builder supervisors are activated per native capacity class only after every
 # policy blocker for that architecture is cleared.
@@ -439,5 +445,5 @@ args = [
   "--global-execution-manager-kubeconfig", "/var/lib/loom-staging-rollout/kubeconfig",
   "--expected-manager-public-key-sha256", "54b44788af0dc10dc5f0a8277396a35fedf2f143b39e14d5ee35ce09b56b18cd",
 ]
-enabled = true
-active = true
+enabled = false
+active = false
