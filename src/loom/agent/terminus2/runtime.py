@@ -19,7 +19,11 @@ from loom.agent.terminus2.harbor_environment import (
     ensure_sandbox_deps,
     make_trial_paths,
 )
-from loom.agent.terminus2.model_switch import install_role_router, seed_fingerprint
+from loom.agent.terminus2.model_switch import (
+    Role,
+    install_role_router,
+    seed_fingerprint,
+)
 from loom.agent.terminus2.provenance import HARBOR_COMPAT_SHA, LOOM_BRIDGE_REVISION
 from loom.driver.base import Driver
 from loom.errors import AgentError
@@ -289,7 +293,7 @@ class _RouterEventSink:
         self.teacher = teacher
 
     async def on_switch(
-        self, *, switch_episode: int, from_role: str, to_role: str,
+        self, *, switch_episode: int, from_role: Role, to_role: Role,
     ) -> None:
         await self.bridge.emit_model_switch(
             switch_episode=switch_episode,
@@ -305,7 +309,7 @@ class _RouterEventSink:
         client_call_id: str,
         episode: int,
         call_ordinal: int,
-        role: str,
+        role: Role,
         requested_model: str,
         first_of_role: bool,
     ) -> None:
@@ -319,7 +323,7 @@ class _RouterEventSink:
                 client_call_id=UUID(client_call_id),
                 episode=episode,
                 call_ordinal=call_ordinal,
-                role=role,  # type: ignore[arg-type]
+                role=role,
                 requested_model=requested_model,
             ),
         )
@@ -330,7 +334,7 @@ class _RouterEventSink:
         client_call_id: str,
         episode: int,
         call_ordinal: int,
-        role: str,
+        role: Role,
         requested_model: str,
         response_model: str | None,
     ) -> None:
@@ -343,7 +347,7 @@ class _RouterEventSink:
                 client_call_id=UUID(client_call_id),
                 episode=episode,
                 call_ordinal=call_ordinal,
-                role=role,  # type: ignore[arg-type]
+                role=role,
                 requested_model=requested_model,
                 response_model=response_model,
             ),
@@ -355,7 +359,7 @@ class _RouterEventSink:
         client_call_id: str,
         episode: int,
         call_ordinal: int,
-        role: str,
+        role: Role,
         requested_model: str,
         error: str,
     ) -> None:
@@ -368,7 +372,7 @@ class _RouterEventSink:
                 client_call_id=UUID(client_call_id),
                 episode=episode,
                 call_ordinal=call_ordinal,
-                role=role,  # type: ignore[arg-type]
+                role=role,
                 requested_model=requested_model,
                 error=error,
             ),
@@ -534,12 +538,15 @@ class LoomTerminus2Runtime:
                     "multi-model session mid-run; a new Harbor start would "
                     "merge a second episode-1 onto this trial's trajectory",
                 )
+            last_call_ordinal = recovery.get("last_call_ordinal")
             router_kwargs: dict[str, Any] = {
                 "teacher_model_name": _harbor_model_name(teacher),
                 "student_model_name": _harbor_model_name(student),
                 "agent_execution_id": str(recovery.get("agent_execution_id") or ""),
                 "agent_run_attempt_id": str(recovery.get("agent_run_attempt_id") or ""),
-                "starting_call_ordinal": int(recovery.get("last_call_ordinal") or 0),
+                "starting_call_ordinal": (
+                    last_call_ordinal if isinstance(last_call_ordinal, int) else 0
+                ),
             }
             if mix_mode == "beta_mixture":
                 beta = plan.get("beta")

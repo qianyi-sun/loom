@@ -124,7 +124,7 @@ def role_for_beta_episode(
     return "teacher" if draw < beta else "student"
 
 
-class LoomRoleRouter(_HarborBaseLLM):
+class LoomRoleRouter(_HarborBaseLLM):  # type: ignore[misc]
     """Instance-local ``BaseLLM`` that forwards to student or teacher LiteLLM."""
 
     def __init__(
@@ -229,7 +229,10 @@ class LoomRoleRouter(_HarborBaseLLM):
         return int(self._active().get_model_context_limit())
 
     def get_model_output_limit(self) -> int | None:
-        return self._active().get_model_output_limit()
+        limit = self._active().get_model_output_limit()
+        if limit is None:
+            return None
+        return int(limit)
 
     def requested_model_name(self, role: Role | None = None) -> str:
         active = role if role is not None else self.role()

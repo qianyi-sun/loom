@@ -133,7 +133,7 @@ async def reclaim_terminus_execution(
             attempt_number=next_number,
             recovery="recovery_failed",
             last_episode=latest.episode,
-            active_role=latest.active_role,  # type: ignore[arg-type]
+            active_role=latest.active_role,
             last_call_ordinal=latest.last_call_ordinal,
             last_seq=latest.last_seq,
             checksum=latest.checksum,
@@ -161,7 +161,7 @@ async def reclaim_terminus_execution(
         attempt_number=next_number,
         recovery="resumed",
         last_episode=latest.episode,
-        active_role=latest.active_role,  # type: ignore[arg-type]
+        active_role=latest.active_role,
         last_call_ordinal=latest.last_call_ordinal,
         last_seq=latest.last_seq,
         checksum=latest.checksum,

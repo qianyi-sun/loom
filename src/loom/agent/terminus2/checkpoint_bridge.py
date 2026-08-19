@@ -7,7 +7,7 @@ import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from uuid import UUID, uuid4
 
 from loom.agent.terminus2.agent_message import parse_agent_message
@@ -321,8 +321,8 @@ class HarborCheckpointBridge:
         switch_episode: int,
         from_model: ModelSpec,
         to_model: ModelSpec,
-        from_role: str = "student",
-        to_role: str = "teacher",
+        from_role: Literal["student", "teacher"] = "student",
+        to_role: Literal["student", "teacher"] = "teacher",
     ) -> None:
         await self._trajectory.append(
             Terminus2ModelSwitchEvent(
@@ -331,8 +331,8 @@ class HarborCheckpointBridge:
                 step_id=self._step_id,
                 seq=self._next_seq(),
                 switch_episode=switch_episode,
-                from_role=from_role,  # type: ignore[arg-type]
-                to_role=to_role,  # type: ignore[arg-type]
+                from_role=from_role,
+                to_role=to_role,
                 from_model=from_model,
                 to_model=to_model,
             ),

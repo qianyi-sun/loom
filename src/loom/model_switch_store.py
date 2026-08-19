@@ -24,7 +24,7 @@ def plan_snapshot_from_row(row: ModelSwitchPlan) -> ModelSwitchPlanSnapshot:
         id=row.id,
         trial_id=row.trial_id,
         combination_idx=row.combination_idx,
-        mix_mode=mix_mode,  # type: ignore[arg-type]
+        mix_mode=mix_mode,
         k1=row.k1,
         k2=row.k2,
         teacher_episodes=row.teacher_episodes,

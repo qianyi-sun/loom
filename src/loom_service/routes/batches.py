@@ -1003,10 +1003,8 @@ async def _create_batch_record(
         else:
             agent_name = trial_config.get("agent_name")
             model_raw = trial_config.get("agent_model")
-            model: ModelSpec | None
-            if model_raw is None:
-                model = None
-            else:
+            model = None
+            if model_raw is not None:
                 try:
                     model = ModelSpec.model_validate(model_raw)
                 except Exception as exc:
