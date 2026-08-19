@@ -97,8 +97,12 @@ the builder policy and registry are configured. Registration may enqueue while
 the policy is disabled, but trials requiring an unbuilt image remain queued
 rather than failing after claim. Existing prebuilt-image tasks are unaffected.
 The old task-Dockerfile build fallback remains available to explicit local/CLI
-workflows; service trial workers are pull-only for task-authored Dockerfile
-components once builder readiness gating is active.
+workflows (`loom run`); service trial workers are pull-only for task-authored
+Dockerfile components. `loom service up --environment local` runs a loopback
+registry plus a laptop Docker builder sidecar so native-arch Dockerfile
+materializations can become `ready` without Slurm. That sidecar is not the
+production exclusive-builder design. Until it is present and has published a
+digest, Dockerfile-backed local batches stay queued.
 
 ## Verification
 

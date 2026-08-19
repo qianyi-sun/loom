@@ -150,6 +150,30 @@ def test_dev_compose_published_ports_default_to_loopback() -> None:
     )
 
 
+def test_dev_compose_runs_loopback_task_image_builder() -> None:
+    """Local service-up must produce native-arch task images without
+    putting builds on the pull-only trial worker (#1462)."""
+    data = yaml.safe_load(_DEV_COMPOSE.read_text(encoding="utf-8"))
+    services = data["services"]
+    assert "registry" in services
+    assert "task-image-builder" in services
+    builder = services["task-image-builder"]
+    env = _env_map(builder["environment"])
+    worker_env = _env_map(services["worker"]["environment"])
+    assert builder["command"] == ["python", "-m", "loom_worker.task_image_builder"]
+    assert env["LOOM_WORKER_TOKEN"] == (
+        "${LOOM_TASK_IMAGE_BUILDER_TOKEN:-placeholder}"
+    )
+    assert "localhost:${LOOM_DEV_REGISTRY_PORT:-55000}/loom-task-images" in (
+        env["LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO"]
+    )
+    assert worker_env["LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO"] == (
+        env["LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO"]
+    )
+    assert "/var/run/docker.sock:/var/run/docker.sock" in builder["volumes"]
+    assert "build_if_missing" not in _DEV_COMPOSE.read_text(encoding="utf-8")
+
+
 def test_remote_worker_compose_has_no_environment_specific_hosts() -> None:
     text = _COMPOSE.read_text(encoding="utf-8")
     forbidden = (

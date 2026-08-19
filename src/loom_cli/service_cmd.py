@@ -65,6 +65,10 @@ _ENDPOINTS = {
     "minio_console": ("http://localhost:9001", "browse trajectory / artifact buckets"),
     "minio_s3": ("http://localhost:9000", "S3 API"),
     "postgres": ("postgresql://loom:loom@localhost:5432/loom", "DB"),
+    "task_registry": (
+        "http://localhost:55000",
+        "loopback task-image registry (laptop builder only)",
+    ),
 }
 
 
@@ -390,6 +394,12 @@ def _print_summary(tokens: dict[str, str]) -> None:
         print(f"  curl -H 'Authorization: Bearer {tokens['team']}' \\")
         print("       http://localhost:8090/api/v1/trials")
         print()
+    print(
+        "Dockerfile-backed local batches stay queued until the laptop "
+        "task-image-builder publishes a ready native-arch digest. Trial "
+        "workers remain pull-only."
+    )
+    print()
     print("Shut down:")
     print("  loom service down")
     print()
@@ -507,6 +517,19 @@ def _up_local(args: argparse.Namespace) -> int:
             ],
             check=False,
         )
+        if tokens.get("builder"):
+            print(
+                "→ recreating task-image-builder so it picks up "
+                "LOOM_TASK_IMAGE_BUILDER_TOKEN"
+            )
+            _run(
+                [
+                    *_compose_args(compose_file, env_file),
+                    "up", "-d", "--force-recreate", "--no-deps",
+                    "task-image-builder",
+                ],
+                check=False,
+            )
 
         if batch_runner_token:
             # loom-service booted without LOOM_SVC_BATCH_RUNNER_CP_TOKEN
@@ -781,6 +804,7 @@ def _up(args: argparse.Namespace) -> int:
 _ENV_TOKEN_KEYS: dict[str, str] = {
     "team": "LOOM_TEAM_TOKEN",
     "worker": "LOOM_WORKER_TOKEN",
+    "builder": "LOOM_TASK_IMAGE_BUILDER_TOKEN",
     "admin": "LOOM_ADMIN_TOKEN",
     "batch_runner_cp": "LOOM_SVC_BATCH_RUNNER_CP_TOKEN",
     "secret_store_master_key": "LOOM_SECRET_STORE_MASTER_KEY",

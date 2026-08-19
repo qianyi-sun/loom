@@ -5,9 +5,9 @@ Two modes:
 - `--mode test` (default) — system-test fixture: hello-world Task,
   card-e2e RateCard, + team/worker/builder tokens. Existing tests rely on these
   rows.
-- `--mode dev` — what `loom service up` calls: team/worker tokens + every shipped
-  benchmark adapter registered from HF Hub so the SPA dropdown is
-  populated and submittable out of the box, plus a checked-in, network-free
+- `--mode dev` — what `loom service up` calls: team/worker/builder tokens +
+  every shipped benchmark adapter registered from HF Hub so the SPA dropdown
+  is populated and submittable out of the box, plus a checked-in, network-free
   25-SLB + 3-SkillFlow family-runs smoke slate. Skips the hello-world Task
   + card-e2e RateCard. The family-runs rows are deterministic upserts.
 
@@ -547,15 +547,15 @@ def main() -> None:
             team_id=None,
             issued_at=now, expires_at=None,
         ))
+        s.execute(insert(Token).values(
+            token_hash=hashlib.sha256(raw_builder.encode()).digest(),
+            type="worker",
+            scopes=["task-image:build"],
+            team_id=None,
+            issued_at=now,
+            expires_at=None,
+        ))
         if args.mode == "test":
-            s.execute(insert(Token).values(
-                token_hash=hashlib.sha256(raw_builder.encode()).digest(),
-                type="worker",
-                scopes=["task-image:build"],
-                team_id=None,
-                issued_at=now,
-                expires_at=None,
-            ))
             # Task may already exist if called twice for the same
             # fixture (e.g., stack_up + a second test re-seeding).
             # Skip in that case so repeated calls don't crash the
@@ -691,6 +691,7 @@ def main() -> None:
     else:  # "all"
         print(f"team: {raw_team}")
         print(f"worker: {raw_worker}")
+        print(f"builder: {raw_builder}")
 
 
 if __name__ == "__main__":
