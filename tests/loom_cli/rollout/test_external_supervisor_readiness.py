@@ -220,6 +220,7 @@ def _candidate(
     supervisors: list[str] | None = None,
     control_plane_environment: str | None = None,
     protected_pools: tuple[str, ...] = (),
+    manager_witness_export_bootstrap: bool = False,
 ) -> Path:
     root = tmp_path / "candidate"
     profile = root / PROFILE_PATH
@@ -229,11 +230,12 @@ def _candidate(
     profile_header = 'environment = "staging"\n'
     if control_plane_environment is not None:
         profile_header += f'control_plane_environment = "{control_plane_environment}"\n'
-    if protected_pools:
-        profile_header += (
-            "\n[external_slurm_runner_prerequisites]\n"
-            f"pools = {json.dumps(list(protected_pools))}\n"
-        )
+    if protected_pools or manager_witness_export_bootstrap:
+        profile_header += "\n[external_slurm_runner_prerequisites]\n"
+        if protected_pools:
+            profile_header += f"pools = {json.dumps(list(protected_pools))}\n"
+        if manager_witness_export_bootstrap:
+            profile_header += "manager_witness_export_bootstrap = true\n"
     profile.write_text(
         profile_header + "\n" + "\n\n".join(supervisors or [_supervisor()]) + "\n",
         encoding="utf-8",
@@ -442,6 +444,36 @@ def test_artifact_retains_disabled_protected_pool_without_validation_command(
     assert "# LoomDesiredState=disabled" in supervisor.timer_unit
     assert artifact.validation_argv("loom-rehearsal-abc123", REHEARSAL_KUBECONFIG) == {}
     assert ExternalSupervisorArtifact.from_bytes(artifact.to_bytes()) == artifact
+
+
+def test_manager_witness_bootstrap_retains_every_disabled_supervisor_for_deactivation(
+    tmp_path: Path,
+) -> None:
+    root = _candidate(
+        tmp_path,
+        supervisors=[
+            _supervisor(enabled=False, active=False),
+            _supervisor(
+                name="oldlab-staging",
+                service_name="loom-autoscaler-oldlab-staging.service",
+                timer_name="loom-autoscaler-oldlab-staging.timer",
+                pool_name="oldlab",
+                port=15448,
+                enabled=False,
+                active=False,
+            ),
+        ],
+        protected_pools=("gb10",),
+        manager_witness_export_bootstrap=True,
+    )
+
+    artifact = _build(root)
+
+    assert [item.name for item in artifact.supervisors] == [
+        "gb10-staging",
+        "oldlab-staging",
+    ]
+    assert artifact.validation_argv("loom-rehearsal-abc123", REHEARSAL_KUBECONFIG) == {}
 
 
 @pytest.mark.parametrize(("enabled", "active"), [(True, False), (False, True)])

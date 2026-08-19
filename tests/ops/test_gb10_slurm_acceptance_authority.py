@@ -182,6 +182,51 @@ def test_candidate_contract_rejects_retired_worker_service_endpoint(
         authority._load_contract(candidate_sha, "staging-aaaaaaa")
 
 
+def test_candidate_contract_accepts_exact_manager_witness_bootstrap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _load_authority()
+    candidate_sha = "a" * 40
+    profile = tmp_path / candidate_sha / "repo/deploy/environment-state/staging.toml"
+    profile.parent.mkdir(parents=True)
+    profile.write_text(
+        Path("deploy/environment-state/staging.toml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(authority, "CANDIDATE_ROOT", tmp_path)
+
+    contract = authority._load_contract(candidate_sha, "staging-aaaaaaa")
+
+    assert contract["repo_dir"].name == "loom-remote-worker-staging-aaaaaaa"
+    assert contract["env_file"].name == "staging-gb10-worker-staging-aaaaaaa.env"
+
+
+def test_candidate_contract_rejects_active_non_gb10_supervisor_during_manager_bootstrap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = _load_authority()
+    candidate_sha = "a" * 40
+    profile = tmp_path / candidate_sha / "repo/deploy/environment-state/staging.toml"
+    profile.parent.mkdir(parents=True)
+    payload = Path("deploy/environment-state/staging.toml").read_text(encoding="utf-8")
+    prefix, marker, suffix = payload.partition(
+        'name = "task-image-builder-oldlab-staging"'
+    )
+    assert marker
+    suffix = suffix.replace(
+        "enabled = false\nactive = false",
+        "enabled = true\nactive = true",
+        1,
+    )
+    profile.write_text(prefix + marker + suffix, encoding="utf-8")
+    monkeypatch.setattr(authority, "CANDIDATE_ROOT", tmp_path)
+
+    with pytest.raises(authority.AcceptanceError, match="bootstrap supervisors are not inert"):
+        authority._load_contract(candidate_sha, "staging-aaaaaaa")
+
+
 def test_candidate_contract_rejects_job_ceiling_beyond_accepted_nodes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

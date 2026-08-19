@@ -29,6 +29,7 @@ from loom_cli.rollout.operator.protected_external_supervisor_transport import (
     canonical_external_supervisor_runtime_ready,
     classify_external_supervisor_live_state,
 )
+from tests.loom_cli.rollout.rehearsal_fixtures import active_staging_profile_text
 
 
 def _artifact(
@@ -44,7 +45,7 @@ def _artifact(
     profile.parent.mkdir(parents=True)
     script.parent.mkdir(parents=True)
     repository = Path(__file__).resolve().parents[4]
-    shutil.copyfile(repository / "deploy/environment-state/staging.toml", profile)
+    profile.write_text(active_staging_profile_text(), encoding="utf-8")
     shutil.copyfile(repository / "scripts/ops/worker_pool_autoscaler_external_once.py", script)
     profile_text = profile.read_text(encoding="utf-8")
     policy_marker = "\n[[task_image_builder_policies]]"
@@ -65,7 +66,6 @@ def _artifact(
     )
     assert separator
     profile_text += "\n"
-    profile_text = profile_text.replace("materialize = false", "materialize = true", 1)
     if timer_on_unit_active_sec != 30:
         enablement = "enabled = true\nactive = true\n"
         profile_text = profile_text.replace(

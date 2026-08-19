@@ -1176,6 +1176,13 @@ def build_external_supervisor_artifact(
         for pool in profile.external_slurm_runner_prerequisites.get("pools", ())
         if isinstance(pool, str) and pool
     }
+    manager_witness_export_bootstrap = (
+        profile.external_slurm_runner_prerequisites.get(
+            "manager_witness_export_bootstrap",
+            False,
+        )
+        is True
+    )
     desired_execution_host = (
         execution_host.split(".", 1)[0].casefold() if execution_host is not None else None
     )
@@ -1189,6 +1196,7 @@ def build_external_supervisor_artifact(
                         raw.get("enabled") is True
                         or raw.get("active") is True
                         or raw.get("pool_name") in protected_pools
+                        or manager_witness_export_bootstrap
                     )
                     and (
                         desired_execution_host is None

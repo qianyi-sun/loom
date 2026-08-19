@@ -156,17 +156,25 @@ def _load_contract(candidate_sha: str, image_tag: str) -> dict[str, Any]:
     if not isinstance(prerequisites, dict) or (
         prerequisites.get("materialize") is not True
         or prerequisites.get("require_external_allocation_authority") is not True
+        or type(prerequisites.get("manager_witness_export_bootstrap", False)) is not bool
         or "gb10" not in prerequisites.get("pools", [])
         or prerequisites.get("worker_service_env") != PRIVATE_WORKER_SERVICE_ENV
     ):
         raise AcceptanceError("external Slurm authority prerequisites are incomplete")
     supervisors = profile.get("external_slurm_autoscaler_supervisors")
     supervisor = _one_row(supervisors, pool_name="gb10")
-    if (
-        supervisor.get("execution_host") != CONTROLLER_HOST
-        or supervisor.get("enabled") is not True
-        or supervisor.get("active") is not True
-    ):
+    manager_bootstrap = prerequisites.get("manager_witness_export_bootstrap") is True
+    if supervisor.get("execution_host") != CONTROLLER_HOST:
+        raise AcceptanceError("GB10 supervisor is not controller-bound and active")
+    if manager_bootstrap:
+        if not isinstance(supervisors, list) or any(
+            not isinstance(row, dict)
+            or row.get("enabled") is not False
+            or row.get("active") is not False
+            for row in supervisors
+        ):
+            raise AcceptanceError("manager witness bootstrap supervisors are not inert")
+    elif supervisor.get("enabled") is not True or supervisor.get("active") is not True:
         raise AcceptanceError("GB10 supervisor is not controller-bound and active")
     return {
         "profile_path": profile_path,
