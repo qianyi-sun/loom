@@ -59,13 +59,15 @@ def test_seed_test_data_does_not_create_db_admin_tokens(postgres_url: str) -> No
         for line in result.stdout.splitlines()
         if ":" in line
     }
-    assert printed == {"team", "worker"}
+    assert printed == {"team", "worker", "builder"}
     printed_tokens = dict(
         line.split(":", 1)
         for line in result.stdout.splitlines()
         if ":" in line
     )
     assert printed_tokens["team"].strip().startswith("loom_api_")
+    assert printed_tokens["worker"].strip().startswith("loom_w_")
+    assert printed_tokens["builder"].strip().startswith("loom_tib_")
 
     with session_factory() as s:
         rows = s.execute(
