@@ -14,4 +14,4 @@ def task_checksum(task_dir: Path) -> str:
     """
     from loom_benchmarks.util import sha256_of_dir
 
-    return sha256_of_dir(task_dir)
+    return str(sha256_of_dir(task_dir))
