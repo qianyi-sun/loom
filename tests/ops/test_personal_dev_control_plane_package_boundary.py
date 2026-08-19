@@ -775,6 +775,37 @@ def test_personal_dev_builder_runtime_embedded_programs_parse() -> None:
     assert shell.returncode == 0, shell.stderr
 
 
+def test_personal_dev_builder_runtime_hostname_identity_uses_dns_case_rules() -> None:
+    runbook = _read("docs/runbooks/personal-dev-builder-runtime.md")
+    marker = "assert_dns_hostname_identity() {"
+    start = runbook.index(marker)
+    function = runbook[start:].split("\n}", 1)[0] + "\n}"
+    assert (
+        runbook.count(
+            'assert_dns_hostname_identity "$observed_hostname" "$node"'
+        )
+        == 2
+    )
+
+    behavior = subprocess.run(
+        ["bash", "-seu", "--"],
+        input=(
+            function
+            + "\n"
+            + "assert_dns_hostname_identity "
+            + "trt-EAI-OLDLAB-2 trt-eai-oldlab-2\n"
+            + "if assert_dns_hostname_identity "
+            + "trt-eai-oldlab-3 trt-eai-oldlab-2; then exit 1; fi\n"
+            + "if assert_dns_hostname_identity "
+            + "trt-eai-oldlab-2. trt-eai-oldlab-2; then exit 1; fi\n"
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert behavior.returncode == 0, behavior.stderr
+
+
 def test_personal_dev_builder_runtime_runbook_is_indexed_and_architecture_linked() -> None:
     for document in (
         _read("docs/runbooks/README.md"),
