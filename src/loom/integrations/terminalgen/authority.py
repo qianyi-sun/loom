@@ -8,12 +8,21 @@ drift on pool, profile, network, node, or validation requirements.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
+from typing import Any
 from uuid import UUID, uuid5
 
+from loom.integrations.terminalgen.validation_policy import (
+    TERMINALGEN_VALIDATION_POLICY_DIGEST,
+    parse_terminalgen_validation_argv,
+    terminalgen_validation_argv,
+)
 from loom.pipeline.keys import canonical_digest
+from loom.pipeline.spec import BindingSetV1
 from loom.pipeline.work_protocol import (
+    ResourceProfileV1,
     TerminalGenAuthoringGrantV1,
     TerminalTaskValidationGrantV1,
 )
@@ -21,6 +30,7 @@ from loom.pipeline.work_protocol import (
 TERMINALGEN_RECIPE_NAME = "terminalgen-authoring"
 TERMINALGEN_RECIPE_VERSION = 1
 _AUTHORIZATION_NAMESPACE = UUID("3effb864-af98-5c2b-bca8-0eb4388d1b23")
+_VALIDATION_AUTHORIZATION_NAMESPACE = UUID("7a1e8ceb-d22e-56ab-8908-2d2168d843cb")
 
 
 class TerminalGenAuthorityError(RuntimeError):
@@ -104,6 +114,95 @@ TERMINALGEN_RUNTIME_POLICY_DIGEST = canonical_digest(
         ],
     }
 )
+
+def _validation_argv_authority(
+    *,
+    node_key: str,
+    argv: list[object],
+) -> tuple[str, str, str]:
+    try:
+        return parse_terminalgen_validation_argv(node_key=node_key, argv=argv)
+    except ValueError as exc:
+        raise TerminalGenAuthorityError("terminalgen_validation_argv_mismatch") from exc
+
+
+def build_terminal_task_validation_grant(
+    *,
+    pipeline_run_id: UUID,
+    stage_run_id: UUID,
+    execution_attempt_id: UUID,
+    node_key: str,
+    node: Mapping[str, Any],
+    resource_profile: Mapping[str, Any],
+    input_bindings: Sequence[Mapping[str, Any]],
+) -> TerminalTaskValidationGrantV1:
+    """Derive the closed validation grant from one immutable ExecutionSpec."""
+
+    if re.fullmatch(r"validate_card_(?:0[0-9]|1[0-7])", node_key) is None:
+        raise TerminalGenAuthorityError("terminalgen_validation_node_mismatch")
+    if node.get("node_key") != node_key or node.get("network_profile") != "none":
+        raise TerminalGenAuthorityError("terminalgen_validation_node_mismatch")
+    argv = node.get("argv")
+    if not isinstance(argv, list):
+        raise TerminalGenAuthorityError("terminalgen_validation_argv_mismatch")
+    task_base_image, dependency_resolver_image, dependency_allowlist_digest = (
+        _validation_argv_authority(node_key=node_key, argv=argv)
+    )
+    validator_image = node.get("image")
+    if not isinstance(validator_image, str):
+        raise TerminalGenAuthorityError("terminalgen_validation_image_missing")
+
+    try:
+        profile = ResourceProfileV1.model_validate(resource_profile)
+        bindings = [BindingSetV1.model_validate(item) for item in input_bindings]
+    except ValueError as exc:
+        raise TerminalGenAuthorityError("terminalgen_validation_snapshot_invalid") from exc
+    if (
+        f"{profile.name}@{profile.version}" != "terminalgen-validate-none@1"
+        or profile.pids_limit is None
+        or profile.network_profile != "none"
+    ):
+        raise TerminalGenAuthorityError("terminalgen_validation_profile_mismatch")
+    task_bundle_items = [
+        item
+        for binding in bindings
+        if binding.binding_name == "task_bundle"
+        and binding.artifact_type == "terminalgen_task_bundle.v1"
+        for item in binding.items
+    ]
+    if len(task_bundle_items) != 1:
+        raise TerminalGenAuthorityError("terminalgen_validation_task_bundle_mismatch")
+
+    authorization_name = canonical_digest(
+        {
+            "schema_version": "loom.terminal-task-validation-authorization-name.v1",
+            "execution_attempt_id": str(execution_attempt_id),
+            "task_bundle_content_sha256": task_bundle_items[0].content_sha256,
+            "validator_image": validator_image,
+            "task_base_image": task_base_image,
+            "dependency_resolver_image": dependency_resolver_image,
+            "policy_digest": TERMINALGEN_VALIDATION_POLICY_DIGEST,
+            "dependency_allowlist_digest": dependency_allowlist_digest,
+        }
+    )
+    return TerminalTaskValidationGrantV1(
+        authorization_id=uuid5(_VALIDATION_AUTHORIZATION_NAMESPACE, authorization_name),
+        pipeline_run_id=pipeline_run_id,
+        stage_run_id=stage_run_id,
+        execution_attempt_id=execution_attempt_id,
+        task_bundle_content_sha256=task_bundle_items[0].content_sha256,
+        validator_image=validator_image,
+        task_base_image=task_base_image,
+        dependency_resolver_image=dependency_resolver_image,
+        policy_digest=TERMINALGEN_VALIDATION_POLICY_DIGEST,
+        dependency_allowlist_digest=dependency_allowlist_digest,
+        repeat_count=2,
+        cpu_cores=profile.cpu_cores,
+        memory_bytes=profile.memory_bytes,
+        pids_limit=profile.pids_limit,
+        timeout_seconds=min(int(node.get("timeout_seconds", 0)), profile.timeout_seconds_max),
+        network_profile="none",
+    )
 
 
 def policy_for_pool(pool_name: str) -> TerminalGenPoolPolicy:
@@ -198,9 +297,12 @@ __all__ = [
     "TERMINALGEN_RECIPE_NAME",
     "TERMINALGEN_RECIPE_VERSION",
     "TERMINALGEN_RUNTIME_POLICY_DIGEST",
+    "TERMINALGEN_VALIDATION_POLICY_DIGEST",
     "TerminalGenAuthorityError",
     "TerminalGenPoolPolicy",
+    "build_terminal_task_validation_grant",
     "build_terminalgen_authoring_grant",
     "policy_for_attempt",
     "policy_for_pool",
+    "terminalgen_validation_argv",
 ]

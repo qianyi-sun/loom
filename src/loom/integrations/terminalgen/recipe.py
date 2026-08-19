@@ -16,6 +16,7 @@ from loom.integrations.terminalgen.contracts import (
     AuthoringImageLockV1,
     AuthoringParametersV1,
 )
+from loom.integrations.terminalgen.validation_policy import terminalgen_validation_argv
 from loom.pipeline.spec import Digest, PipelineModel, RecipeIdentityV1, RunGraphSpecV1
 
 
@@ -57,6 +58,7 @@ def _container(
     outputs: list[dict[str, object]],
     timeout_seconds: int,
     request_renderer: dict[str, object] | None = None,
+    argv: list[str] | None = None,
     fanout: dict[str, object] | None = None,
     fanout_commit: dict[str, object] | None = None,
     failure_policy: str = "fail_run",
@@ -65,7 +67,8 @@ def _container(
         "node_kind": "container",
         "node_key": node_key,
         "image": image,
-        "argv": ["python", "-m", "loom.integrations.terminalgen.cli", "run", node_key],
+        "argv": argv
+        or ["python", "-m", "loom.integrations.terminalgen.cli", "run", node_key],
         "workdir": "/workspace",
         "resource_profile": profile,
         "network_profile": network,
@@ -159,6 +162,7 @@ def build_terminalgen_authoring_graph(
     *,
     images: AuthoringImageLockV1,
     renderers: TerminalGenRendererLocksV1,
+    dependency_allowlist_digest: Digest,
 ) -> RunGraphSpecV1:
     """Build the complete 18-partition graph without registering it for submission."""
 
@@ -350,6 +354,12 @@ def build_terminalgen_authoring_graph(
                         _output("validation_terminal", "terminalgen.validation-terminal.v1"),
                     ],
                     fanout=fanout,
+                    argv=terminalgen_validation_argv(
+                        node_key=validate_node,
+                        task_base_image=images.task_base,
+                        dependency_resolver_image=images.dependency_resolver,
+                        dependency_allowlist_digest=dependency_allowlist_digest,
+                    ),
                     timeout_seconds=7_200,
                     failure_policy="continue",
                 ),

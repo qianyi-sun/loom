@@ -18,6 +18,7 @@ from loom.db.schema import Worker
 from loom.integrations.terminalgen.authority import (
     TERMINALGEN_POOL_POLICIES,
     TerminalGenAuthorityError,
+    build_terminal_task_validation_grant,
     build_terminalgen_authoring_grant,
 )
 from loom.models.capabilities import Capabilities
@@ -89,6 +90,18 @@ async def _terminalgen_authorization_for_claim(
         ):
             raise TerminalGenAuthorityError("terminalgen_authorization_snapshot_drift")
 
+    validation = None
+    if profile.get("name") == "terminalgen-validate-none":
+        validation = build_terminal_task_validation_grant(
+            pipeline_run_id=attempt_row["pipeline_run_id"],
+            stage_run_id=attempt_row["stage_run_id"],
+            execution_attempt_id=attempt_row["id"],
+            node_key=attempt_row["node_key"],
+            node=node,
+            resource_profile=profile,
+            input_bindings=attempt_row["resolved_input_bindings_json"],
+        )
+
     expected = build_terminalgen_authoring_grant(
         recipe_name=attempt_row["recipe_name"],
         recipe_version=attempt_row["recipe_version"],
@@ -103,7 +116,7 @@ async def _terminalgen_authorization_for_claim(
         resolved_input_bindings_digest=spec["resolved_input_bindings_digest"],
         network_profile=node["network_profile"],
         provider_connection_ref=attempt_row["provider_connection_ref"],
-        validation=persisted.validation if persisted is not None else None,
+        validation=validation,
     )
     if persisted is not None:
         if persisted != expected:

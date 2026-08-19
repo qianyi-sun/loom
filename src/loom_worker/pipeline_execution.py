@@ -33,6 +33,8 @@ from loom.integrations.behavior.stages.rollout import (
 from loom.integrations.terminalgen.authority import (
     TERMINALGEN_POOL_POLICIES,
     TERMINALGEN_RUNTIME_POLICY_DIGEST,
+    TerminalGenAuthorityError,
+    build_terminal_task_validation_grant,
     policy_for_pool,
 )
 from loom.pipeline.artifact_commit import (
@@ -353,6 +355,20 @@ def _require_terminalgen_claim(
             not in claim.worker_capability_snapshot.container_runtime_features
         ):
             raise RuntimeError("pipeline_terminalgen_validation_backend_missing")
+        try:
+            expected_validation = build_terminal_task_validation_grant(
+                pipeline_run_id=claim.pipeline_run_id,
+                stage_run_id=claim.stage_run_id,
+                execution_attempt_id=claim.execution_attempt_id,
+                node_key=claim.node_key,
+                node=node.model_dump(mode="python"),
+                resource_profile=claim.resource_profile_snapshot.model_dump(mode="python"),
+                input_bindings=[item.model_dump(mode="python") for item in claim.input_bindings],
+            )
+        except TerminalGenAuthorityError as exc:
+            raise RuntimeError("pipeline_terminalgen_validation_grant_drift") from exc
+        if grant.validation != expected_validation:
+            raise RuntimeError("pipeline_terminalgen_validation_grant_drift")
     elif grant.validation is not None:
         raise RuntimeError("pipeline_terminalgen_validation_grant_drift")
 

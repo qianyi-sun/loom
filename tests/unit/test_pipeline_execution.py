@@ -115,6 +115,27 @@ def test_terminalgen_validation_pool_rejects_unattested_backend() -> None:
         ExecutionAttemptClaimV1.model_validate(value)
 
 
+def test_terminalgen_validation_pool_rederives_the_frozen_grant() -> None:
+    value = terminalgen_validation_claim()
+    value["terminalgen_authoring"]["validation"]["policy_digest"] = (
+        "sha256:" + "f" * 64
+    )
+    parsed = ExecutionAttemptClaimV1.model_validate(value)
+    settings = SimpleNamespace(
+        pool_name="terminalgen-validate-none",
+        pipeline_terminalgen_authoring_enabled=True,
+        require_cgroup_parent=True,
+        cgroup_parent="loom-job-42.slice",
+        slurm_job_id="42",
+        sandbox_identity="terminalgen-authoring",
+        candidate_sha="a" * 40,
+        compose_project="loom-terminalgen-validate-none",
+    )
+
+    with pytest.raises(RuntimeError, match="validation_grant_drift"):
+        _require_terminalgen_claim(parsed, settings)  # type: ignore[arg-type]
+
+
 def test_container_pid_limit_comes_from_the_frozen_resource_profile(tmp_path: Path) -> None:
     attempt_id = UUID("00000000-0000-0000-0000-000000000173")
     payload = SimpleNamespace(

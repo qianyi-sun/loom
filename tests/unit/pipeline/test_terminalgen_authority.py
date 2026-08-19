@@ -9,14 +9,17 @@ import pytest
 from loom.integrations.terminalgen.authority import (
     TERMINALGEN_POOL_POLICIES,
     TERMINALGEN_RUNTIME_POLICY_DIGEST,
+    TERMINALGEN_VALIDATION_POLICY_DIGEST,
     TerminalGenAuthorityError,
     build_terminalgen_authoring_grant,
     policy_for_attempt,
+    terminalgen_validation_argv,
 )
 from loom.pipeline.resource_profiles import load_resource_profiles
 from loom_control_plane.routes.workers import _terminalgen_authorization_for_claim
 
 DIGEST = "sha256:" + "a" * 64
+IMAGE = "registry.example.invalid/loom/terminalgen@sha256:" + "b" * 64
 
 
 class _FrozenResult:
@@ -52,6 +55,52 @@ def _attempt_row() -> dict[str, Any]:
         "execution_authorization_json": None,
         "execution_authorization_bytes": None,
         "execution_authorization_digest": None,
+    }
+
+
+def _validation_attempt_row() -> dict[str, Any]:
+    row = _attempt_row()
+    row.update(
+        node_key="validate_card_00",
+        resource_profile_json=(
+            load_resource_profiles().get("terminalgen-validate-none@1").profile.model_dump(
+                mode="json"
+            )
+        ),
+        resolved_input_bindings_json=[
+            {
+                "binding_name": "task_bundle",
+                "artifact_type": "terminalgen_task_bundle.v1",
+                "cardinality": "one",
+                "items": [
+                    {
+                        "item_key": "singleton",
+                        "artifact_id": UUID(int=20),
+                        "content_sha256": DIGEST,
+                        "manifest_sha256": DIGEST,
+                        "stored_size_bytes": 1,
+                        "unpacked_size_bytes": 1,
+                        "file_count": 1,
+                    }
+                ],
+            }
+        ],
+    )
+    return row
+
+
+def _validation_node() -> dict[str, Any]:
+    return {
+        "node_key": "validate_card_00",
+        "image": IMAGE,
+        "network_profile": "none",
+        "timeout_seconds": 7_200,
+        "argv": terminalgen_validation_argv(
+            node_key="validate_card_00",
+            task_base_image=IMAGE,
+            dependency_resolver_image=IMAGE,
+            dependency_allowlist_digest=DIGEST,
+        ),
     }
 
 
@@ -148,6 +197,64 @@ async def test_claim_authorization_is_frozen_once_and_replayed_byte_exact() -> N
             replay_session,  # type: ignore[arg-type]
             attempt_row=row,
             spec=spec,
+            node=node,
+        )
+
+
+async def test_validation_claim_freezes_exact_bundle_images_policy_and_limits() -> None:
+    session = _FreezeSession()
+    row = _validation_attempt_row()
+
+    grant = await _terminalgen_authorization_for_claim(
+        session,  # type: ignore[arg-type]
+        attempt_row=row,
+        spec={"resolved_input_bindings_digest": DIGEST},
+        node=_validation_node(),
+    )
+
+    assert grant is not None and grant.validation is not None
+    validation = grant.validation
+    assert validation.task_bundle_content_sha256 == DIGEST
+    assert validation.validator_image == IMAGE
+    assert validation.task_base_image == IMAGE
+    assert validation.dependency_resolver_image == IMAGE
+    assert validation.policy_digest == TERMINALGEN_VALIDATION_POLICY_DIGEST
+    assert validation.dependency_allowlist_digest == DIGEST
+    assert (validation.cpu_cores, validation.memory_bytes, validation.pids_limit) == (
+        4,
+        16 << 30,
+        2_048,
+    )
+    assert validation.timeout_seconds == 7_200
+    assert session.params is not None
+
+
+@pytest.mark.parametrize(
+    "mutation,reason",
+    [
+        ("argv", "validation_argv_mismatch"),
+        ("bundle", "validation_task_bundle_mismatch"),
+        ("network", "validation_node_mismatch"),
+    ],
+)
+async def test_validation_claim_rejects_mutable_authority(
+    mutation: str,
+    reason: str,
+) -> None:
+    row = _validation_attempt_row()
+    node = _validation_node()
+    if mutation == "argv":
+        node["argv"][-1] = DIGEST
+    elif mutation == "bundle":
+        row["resolved_input_bindings_json"] = []
+    else:
+        node["network_profile"] = "gateway"
+
+    with pytest.raises(TerminalGenAuthorityError, match=reason):
+        await _terminalgen_authorization_for_claim(
+            _FreezeSession(),  # type: ignore[arg-type]
+            attempt_row=row,
+            spec={"resolved_input_bindings_digest": DIGEST},
             node=node,
         )
 

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from loom.integrations.terminalgen.authority import (
+    TERMINALGEN_VALIDATION_POLICY_DIGEST,
+    terminalgen_validation_argv,
+)
 from loom.integrations.terminalgen.contracts import AuthoringImageLockV1
 from loom.integrations.terminalgen.recipe import (
     TerminalGenRendererLocksV1,
@@ -38,6 +42,7 @@ def _graph(*, slots_per_card: int = 500):
             authoring_package=DIGEST,
             runtime_package=DIGEST,
         ),
+        dependency_allowlist_digest=DIGEST,
     )
 
 
@@ -70,6 +75,13 @@ def test_each_card_is_an_independent_bounded_fanout_and_validation_lineage() -> 
         assert validate.fanout is not None and validate.fanout.max_items == 500
         assert generate.network_profile == "gateway"
         assert validate.network_profile == "none"
+        assert validate.argv == terminalgen_validation_argv(
+            node_key=f"validate_card_{suffix}",
+            task_base_image=IMAGE,
+            dependency_resolver_image=IMAGE,
+            dependency_allowlist_digest=DIGEST,
+        )
+        assert validate.argv[-1] == TERMINALGEN_VALIDATION_POLICY_DIGEST
         assert finalize.fanout is None
 
 
@@ -99,6 +111,7 @@ def test_graph_factory_rejects_local_concurrency_and_scales_bound_with_test_quot
                 authoring_package=DIGEST,
                 runtime_package=DIGEST,
             ),
+            dependency_allowlist_digest=DIGEST,
         )
     except ValueError as exc:
         assert "Extra inputs are not permitted" in str(exc)
