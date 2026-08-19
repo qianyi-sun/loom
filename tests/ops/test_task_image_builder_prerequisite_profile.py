@@ -90,6 +90,13 @@ def test_phase_one_policy_is_dynamic_bounded_and_cannot_certify_production() -> 
     assert storage["cache_enabled"] is False
     assert storage["cleanup_required"] is True
 
+    assert policy["control_plane_services"] == {
+        "repository_scoped_renewable_credential_broker": True,
+        "reference_aware_registry_retention": True,
+        "publication_signer": True,
+        "publication_verification_keyset_lifecycle": True,
+    }
+
     network = policy["network"]
     for key in (
         "ingress_bytes_per_second",
@@ -120,9 +127,7 @@ def test_phase_one_policy_is_dynamic_bounded_and_cannot_certify_production() -> 
     assert clusters["gb10"]["controller"] == "gx10-01c7"
     assert clusters["gb10"]["trial_partition"] == "gb10"
     assert clusters["gb10"]["trial_priority_tier"] == 100
-    assert clusters["gb10"]["builder_nodes"] == [
-        f"trt-gb10-{number}" for number in range(1, 16)
-    ]
+    assert clusters["gb10"]["builder_nodes"] == [f"trt-gb10-{number}" for number in range(1, 16)]
     for cluster in clusters.values():
         assert cluster["builder_partition"] == "loom-task-builder"
         assert cluster["builder_priority_tier"] == 200

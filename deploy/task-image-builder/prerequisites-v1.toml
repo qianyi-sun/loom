@@ -65,6 +65,12 @@ required_quota_kinds = ["project"]
 cache_enabled = false
 cleanup_required = true
 
+[control_plane_services]
+repository_scoped_renewable_credential_broker = true
+reference_aware_registry_retention = true
+publication_signer = true
+publication_verification_keyset_lifecycle = true
+
 [network]
 bpffs_required = true
 ipv4_default_deny = true

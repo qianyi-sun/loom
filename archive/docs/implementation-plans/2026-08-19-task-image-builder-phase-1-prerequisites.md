@@ -164,7 +164,8 @@ git commit -m "ops(builder): pin rootless prerequisite policy"
 **Interfaces:**
 
 - Produces `load_policy(path: Path) -> PrerequisitePolicy`.
-- Produces `verify_evidence(evidence: Mapping[str, object], policy: PrerequisitePolicy) -> list[str]`.
+- Produces `verify_evidence(evidence: Mapping[str, object], policy: PrerequisitePolicy) -> list[str]` and
+  `certification_blockers(policy: PrerequisitePolicy) -> tuple[str, ...]`.
 - CLI: `plan --policy PATH`, `verify --policy PATH --evidence PATH`, and
   `canonicalize --policy PATH --evidence PATH --output PATH`.
 - The CLI has no SSH, Slurm subprocess, Docker, systemd, write-to-host, or
@@ -173,8 +174,9 @@ git commit -m "ops(builder): pin rootless prerequisite policy"
 - [ ] **Step 1: Write failing schema and semantic-verifier tests**
 
 Build a complete hand-derived two-cluster evidence fixture. Prove that the real
-verifier accepts its syntax but returns the unconditional Phase 1 certification
-blocker. Parameterize failures for wrong policy digest, incomplete node set,
+verifier accepts its prerequisite syntax/semantics while the separate
+certification result returns the unconditional Phase 1 blocker. Parameterize
+failures for wrong policy digest, incomplete node set,
 wrong controller/architecture, any disabled cgroup constraint, lower/equal
 partition tier, non-overlapping partition nodes, loose QoS, legacy builder
 identity, missing subordinate IDs/tool digests/network flags/quota/bpffs,
@@ -199,7 +201,8 @@ reported pass booleans. Require exact partition overlap and tier ordering,
 aggregate QoS limits, Slurm plugins/cgroup constraints, identity/subordinate
 IDs, runtime binary digests, exact RootlessKit/slirp flags, quota storage,
 network-controller prerequisites, absent forbidden sockets, and all expected
-nodes. Always append the Phase 2 blocker and reject any attempt to self-certify.
+nodes. Reject any attempt to self-certify; report the Phase 2 blocker separately
+so a valid Phase 1 inventory is distinguishable from production eligibility.
 
 - [ ] **Step 5: Implement deterministic plan/verify/canonicalize CLI behavior**
 

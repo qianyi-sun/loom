@@ -1,0 +1,597 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://loom.example/schemas/task-image-builder-prerequisite-conformance-v1.schema.json",
+  "title": "Task-image builder Phase 1 prerequisite conformance evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "collected_at",
+    "policy_version",
+    "policy_sha256",
+    "production_certification_allowed",
+    "certified_nodes",
+    "control_plane_services",
+    "clusters"
+  ],
+  "properties": {
+    "schema": {
+      "const": "loom.task-image-builder-prerequisite-conformance/v1"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "collected_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "policy_version": {
+      "const": "task-image-builder-prerequisites-v1"
+    },
+    "policy_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "production_certification_allowed": {
+      "const": false
+    },
+    "certified_nodes": {
+      "type": "array",
+      "maxItems": 0
+    },
+    "control_plane_services": {
+      "$ref": "#/$defs/controlPlaneServices"
+    },
+    "clusters": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "$ref": "#/$defs/cluster"
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "positiveInteger": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "nodeNames": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/name"
+      }
+    },
+    "controlPlaneServices": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository_scoped_renewable_credential_broker",
+        "reference_aware_registry_retention",
+        "publication_signer",
+        "publication_verification_keyset_lifecycle"
+      ],
+      "properties": {
+        "repository_scoped_renewable_credential_broker": {
+          "const": true
+        },
+        "reference_aware_registry_retention": {
+          "const": true
+        },
+        "publication_signer": {
+          "const": true
+        },
+        "publication_verification_keyset_lifecycle": {
+          "const": true
+        }
+      }
+    },
+    "partition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "priority_tier", "nodes"],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/name"
+        },
+        "priority_tier": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "nodes": {
+          "$ref": "#/$defs/nodeNames"
+        }
+      }
+    },
+    "qos": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "flags",
+        "max_jobs_per_user",
+        "max_submit_jobs_per_user",
+        "max_wall",
+        "group_tres"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/name"
+        },
+        "flags": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/name"
+          }
+        },
+        "max_jobs_per_user": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "max_submit_jobs_per_user": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "max_wall": {
+          "type": "string",
+          "pattern": "^[0-9]{2}:[0-9]{2}:[0-9]{2}$"
+        },
+        "group_tres": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cpu", "memory_mib", "nodes"],
+          "properties": {
+            "cpu": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "memory_mib": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "nodes": {
+              "$ref": "#/$defs/positiveInteger"
+            }
+          }
+        }
+      }
+    },
+    "association": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["user", "account", "partition", "qos", "default_qos"],
+      "properties": {
+        "user": {
+          "$ref": "#/$defs/name"
+        },
+        "account": {
+          "$ref": "#/$defs/name"
+        },
+        "partition": {
+          "$ref": "#/$defs/name"
+        },
+        "qos": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/name"
+          }
+        },
+        "default_qos": {
+          "$ref": "#/$defs/name"
+        }
+      }
+    },
+    "slurm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_plugin",
+        "proctrack_type",
+        "cgroup_version",
+        "constrain_cores",
+        "constrain_ram_space",
+        "constrain_swap_space",
+        "constrain_devices",
+        "trial_partition",
+        "builder_partition",
+        "qos",
+        "association"
+      ],
+      "properties": {
+        "task_plugin": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "proctrack_type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "cgroup_version": {
+          "const": 2
+        },
+        "constrain_cores": {
+          "type": "boolean"
+        },
+        "constrain_ram_space": {
+          "type": "boolean"
+        },
+        "constrain_swap_space": {
+          "type": "boolean"
+        },
+        "constrain_devices": {
+          "type": "boolean"
+        },
+        "trial_partition": {
+          "$ref": "#/$defs/partition"
+        },
+        "builder_partition": {
+          "$ref": "#/$defs/partition"
+        },
+        "qos": {
+          "$ref": "#/$defs/qos"
+        },
+        "association": {
+          "$ref": "#/$defs/association"
+        }
+      }
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "user",
+        "uid",
+        "group",
+        "gid",
+        "supplementary_groups",
+        "subuid_start",
+        "subuid_count",
+        "subgid_start",
+        "subgid_count",
+        "newuidmap_setuid_root",
+        "newgidmap_setuid_root"
+      ],
+      "properties": {
+        "user": {
+          "$ref": "#/$defs/name"
+        },
+        "uid": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "group": {
+          "$ref": "#/$defs/name"
+        },
+        "gid": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "supplementary_groups": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/name"
+          }
+        },
+        "subuid_start": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "subuid_count": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "subgid_start": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "subgid_count": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "newuidmap_setuid_root": {
+          "type": "boolean"
+        },
+        "newgidmap_setuid_root": {
+          "type": "boolean"
+        }
+      }
+    },
+    "kernel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cgroup_version",
+        "controllers",
+        "unprivileged_user_namespaces",
+        "pidfd_open",
+        "sealed_memfd",
+        "clone3_into_cgroup",
+        "bpffs_mounted_root_only"
+      ],
+      "properties": {
+        "cgroup_version": {
+          "const": 2
+        },
+        "controllers": {
+          "type": "array",
+          "minItems": 5,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/name"
+          }
+        },
+        "unprivileged_user_namespaces": {
+          "type": "boolean"
+        },
+        "pidfd_open": {
+          "type": "boolean"
+        },
+        "sealed_memfd": {
+          "type": "boolean"
+        },
+        "clone3_into_cgroup": {
+          "type": "boolean"
+        },
+        "bpffs_mounted_root_only": {
+          "type": "boolean"
+        }
+      }
+    },
+    "binaryDigests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "buildctl",
+        "buildkit-runc",
+        "buildkitd",
+        "fuse-overlayfs",
+        "rootlessctl",
+        "rootlesskit",
+        "slirp4netns"
+      ],
+      "properties": {
+        "buildctl": {
+          "$ref": "#/$defs/sha256"
+        },
+        "buildkit-runc": {
+          "$ref": "#/$defs/sha256"
+        },
+        "buildkitd": {
+          "$ref": "#/$defs/sha256"
+        },
+        "fuse-overlayfs": {
+          "$ref": "#/$defs/sha256"
+        },
+        "rootlessctl": {
+          "$ref": "#/$defs/sha256"
+        },
+        "rootlesskit": {
+          "$ref": "#/$defs/sha256"
+        },
+        "slirp4netns": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "release",
+        "binary_sha256",
+        "snapshotter",
+        "network_driver",
+        "rootlesskit_flags",
+        "insecure_entitlements"
+      ],
+      "properties": {
+        "release": {
+          "$ref": "#/$defs/name"
+        },
+        "binary_sha256": {
+          "$ref": "#/$defs/binaryDigests"
+        },
+        "snapshotter": {
+          "$ref": "#/$defs/name"
+        },
+        "network_driver": {
+          "$ref": "#/$defs/name"
+        },
+        "rootlesskit_flags": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 128
+          }
+        },
+        "insecure_entitlements": {
+          "type": "array",
+          "maxItems": 0
+        }
+      }
+    },
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "filesystem",
+        "project_quota",
+        "empty_job_root",
+        "cleanup_supported"
+      ],
+      "properties": {
+        "filesystem": {
+          "enum": ["ext4", "xfs"]
+        },
+        "project_quota": {
+          "type": "boolean"
+        },
+        "empty_job_root": {
+          "type": "boolean"
+        },
+        "cleanup_supported": {
+          "type": "boolean"
+        }
+      }
+    },
+    "network": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ipv4_default_deny",
+        "ipv6_default_deny",
+        "ingress_bytes_per_second",
+        "egress_bytes_per_second",
+        "ingress_packets_per_second",
+        "egress_packets_per_second",
+        "concurrent_flows",
+        "new_flows_per_second",
+        "dns_queries_per_second"
+      ],
+      "properties": {
+        "ipv4_default_deny": {
+          "type": "boolean"
+        },
+        "ipv6_default_deny": {
+          "type": "boolean"
+        },
+        "ingress_bytes_per_second": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "egress_bytes_per_second": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "ingress_packets_per_second": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "egress_packets_per_second": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "concurrent_flows": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "new_flows_per_second": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "dns_queries_per_second": {
+          "$ref": "#/$defs/positiveInteger"
+        }
+      }
+    },
+    "nodeGuard": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["installed", "active"],
+      "properties": {
+        "installed": {
+          "type": "boolean"
+        },
+        "active": {
+          "type": "boolean"
+        }
+      }
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "architecture",
+        "identity",
+        "kernel",
+        "runtime",
+        "storage",
+        "network",
+        "forbidden_paths_present",
+        "node_guard"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/name"
+        },
+        "architecture": {
+          "enum": ["x86_64", "aarch64"]
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "kernel": {
+          "$ref": "#/$defs/kernel"
+        },
+        "runtime": {
+          "$ref": "#/$defs/runtime"
+        },
+        "storage": {
+          "$ref": "#/$defs/storage"
+        },
+        "network": {
+          "$ref": "#/$defs/network"
+        },
+        "forbidden_paths_present": {
+          "type": "array",
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^/[^\\u0000]{1,255}$"
+          }
+        },
+        "node_guard": {
+          "$ref": "#/$defs/nodeGuard"
+        }
+      }
+    },
+    "cluster": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "slurm_cluster",
+        "controller",
+        "architecture",
+        "slurm",
+        "nodes"
+      ],
+      "properties": {
+        "id": {
+          "enum": ["oldlab", "gb10"]
+        },
+        "slurm_cluster": {
+          "$ref": "#/$defs/name"
+        },
+        "controller": {
+          "$ref": "#/$defs/name"
+        },
+        "architecture": {
+          "enum": ["x86_64", "aarch64"]
+        },
+        "slurm": {
+          "$ref": "#/$defs/slurm"
+        },
+        "nodes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/node"
+          }
+        }
+      }
+    }
+  }
+}
