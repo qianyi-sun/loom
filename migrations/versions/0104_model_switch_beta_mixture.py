@@ -1,13 +1,13 @@
 """Allow beta-mixture plans alongside K1/K2 model_switch_plans.
 
-Revision ID: 0100
-Revises: 0099
+Revision ID: 0104
+Revises: 0103
 """
 
 from alembic import op
 
-revision = "0100"
-down_revision = "0099"
+revision = "0104"
+down_revision = "0103"
 branch_labels = None
 depends_on = None
 

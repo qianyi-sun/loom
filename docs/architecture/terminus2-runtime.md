@@ -179,6 +179,15 @@ episodes K2 .. N    → student
 `K2 = K1 + teacher_episodes` (default teacher_episodes = 2). At least two
 role cuts if the run reaches K2.
 
+Second policy `beta_mixture` (`--multi-model-beta`): each Harbor episode
+hashes `seed:trial_id:episode` into `[0, 1)` and runs the **teacher if
+`draw < beta`**, else student. Episode grain matches Path A (parse retries
+stay on the same actor). This is **not** DAgger: the teacher is not queried
+for a label on student-driven episodes. `beta = 1` is all teacher, including
+episode 1. Emits `terminus2_model_mix_planned` instead of the two K1/K2
+planned cuts. Applied `terminus2_model_switch` still fires when consecutive
+episodes change role.
+
 Constraints:
 
 - Same BYO `provider_connection_id` for both models.

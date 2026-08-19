@@ -1570,12 +1570,20 @@ loom run
     --multi-model-secondary <teacher> \
     [--multi-model-switch-episode 3] \
     [--multi-model-teacher-episodes 2] \
+    [--multi-model-beta 0.6] \
     ...
   ```
 
-  Same BYO connection. Student until K1, teacher for `teacher_episodes`, then
-  student from K2 to the end. K1 is sampled if the switch-episode flag is
-  omitted. Not supported with `--combinations-json`.
+  Same BYO connection. Default policy: student until K1, teacher for
+  `teacher_episodes`, then student from K2. K1 is sampled if the
+  switch-episode flag is omitted.
+
+  Alternative mix (`--multi-model-beta 0.6`): each Harbor episode the teacher
+  drives with probability beta (replay-safe hash of plan seed + trial +
+  episode). Cannot be combined with K1/K2 flags. Optional
+  `--multi-model-seed`. This is who acts, not DAgger teacher labels.
+
+  Not supported with `--combinations-json`.
 
   If a worker dies after the agent has already written episode checkpoints,
   Loom **does not** restart Harbor from episode 1 on the same trial

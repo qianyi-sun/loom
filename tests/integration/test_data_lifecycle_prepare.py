@@ -62,7 +62,7 @@ def test_digest_approved_prepare_migrates_and_bootstraps_epoch_zero(
         scope = GcScope(environment="staging", namespace="loom-staging")
         plan = preparer.inventory(scope=scope)
         assert plan.current_revision == "0065"
-        assert plan.target_revision == "0102"
+        assert plan.target_revision == "0104"
         assert plan.applicable
         assert plan.lifecycle_tables == ()
         assert plan.linked_execution_tables == ()
@@ -116,7 +116,7 @@ def test_digest_approved_prepare_migrates_and_bootstraps_epoch_zero(
             plan=partial,
             approved_inventory_digest=partial.inventory_digest,
         )
-        assert converged.current_revision == "0102"
+        assert converged.current_revision == "0104"
         assert converged.converged
         assert preparer.apply(
             plan=converged,
@@ -135,7 +135,7 @@ def test_digest_approved_prepare_migrates_and_bootstraps_epoch_zero(
             events = connection.execute(
                 text("SELECT count(*) FROM staging_mutation_epoch_events")
             ).scalar_one()
-        assert revision == "0102"
+        assert revision == "0104"
         assert tuple(epoch) == ("staging", "loom-staging", 0, "bootstrap", None, None)
         assert events == 0
     finally:

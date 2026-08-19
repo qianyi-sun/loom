@@ -626,30 +626,61 @@ def _batch_create(args: argparse.Namespace) -> int:
                     args.workspace_staging_policy
                 )
             if multi_model:
-                # #1380: student → teacher → student (terminus-2 only).
+                # #1380: K1/K2 blocks or beta_mixture (terminus-2 only).
                 assert conn is not None
                 assert args.multi_model_secondary is not None
+                schedule_flags = (
+                    args.multi_model_switch_episode is not None
+                    or getattr(args, "multi_model_teacher_episodes", None) is not None
+                    or args.multi_model_episode_ceiling is not None
+                )
+                beta = getattr(args, "multi_model_beta", None)
+                mix_seed = getattr(args, "multi_model_seed", None)
+                if beta is not None and schedule_flags:
+                    sys.stderr.write(
+                        "error: --multi-model-beta cannot be combined with "
+                        "--multi-model-switch-episode, "
+                        "--multi-model-teacher-episodes, or "
+                        "--multi-model-episode-ceiling.\n",
+                    )
+                    return 2
+                if mix_seed is not None and beta is None:
+                    sys.stderr.write(
+                        "error: --multi-model-seed requires --multi-model-beta.\n",
+                    )
+                    return 2
+                if beta is not None and not 0.0 <= float(beta) <= 1.0:
+                    sys.stderr.write(
+                        "error: --multi-model-beta must be in [0, 1].\n",
+                    )
+                    return 2
                 multi_model_block: dict[str, Any] = {
                     "enabled": True,
-                    "policy": "student_teacher_student",
                     "secondary_model": _build_agent_model(
                         conn["type"],
                         args.multi_model_secondary,
                         agent_provider_override=args.agent_provider,
                     ),
                 }
-                if args.multi_model_switch_episode is not None:
-                    multi_model_block["switch_episode"] = (
-                        args.multi_model_switch_episode
-                    )
-                if getattr(args, "multi_model_teacher_episodes", None) is not None:
-                    multi_model_block["teacher_episodes"] = (
-                        args.multi_model_teacher_episodes
-                    )
-                if args.multi_model_episode_ceiling is not None:
-                    multi_model_block["episode_ceiling"] = (
-                        args.multi_model_episode_ceiling
-                    )
+                if beta is not None:
+                    multi_model_block["policy"] = "beta_mixture"
+                    multi_model_block["beta"] = float(beta)
+                    if mix_seed is not None:
+                        multi_model_block["mix_seed"] = str(mix_seed)
+                else:
+                    multi_model_block["policy"] = "student_teacher_student"
+                    if args.multi_model_switch_episode is not None:
+                        multi_model_block["switch_episode"] = (
+                            args.multi_model_switch_episode
+                        )
+                    if getattr(args, "multi_model_teacher_episodes", None) is not None:
+                        multi_model_block["teacher_episodes"] = (
+                            args.multi_model_teacher_episodes
+                        )
+                    if args.multi_model_episode_ceiling is not None:
+                        multi_model_block["episode_ceiling"] = (
+                            args.multi_model_episode_ceiling
+                        )
                 trial_config["multi_model"] = multi_model_block
             # --benchmark / --task-set are shortcuts for common task_filter
             # shapes. Operators wanting richer filters use --task-filter JSON
@@ -1520,12 +1551,13 @@ def dispatch(argv: list[str]) -> int:
         action="store_true",
         default=False,
         help=(
-            "Enable terminus-2 student/teacher/student model switch (#1380). "
+            "Enable terminus-2 student/teacher model mix (#1380). "
             "Default is off (single-model trial). Requires "
             "--agent terminus-2, --provider/--model (student), and "
             "--multi-model-secondary (teacher). Same BYO provider connection. "
-            "Student runs until K1, teacher for teacher_episodes, then student "
-            "returns at K2. K1 is --multi-model-switch-episode or sampled."
+            "Default policy is student until K1, teacher for teacher_episodes, "
+            "then student from K2. Pass --multi-model-beta instead for a "
+            "per-episode teacher coin (teacher if draw < beta)."
         ),
     )
     p_bc.add_argument(
@@ -1565,7 +1597,28 @@ def dispatch(argv: list[str]) -> int:
         default=None,
         help=(
             "How many Harbor episodes the teacher keeps (default 2). "
-            "K2 = K1 + this value; student then continues to the end."
+            "K2 = K1 + this value; student then continues to the end. "
+            "Incompatible with --multi-model-beta."
+        ),
+    )
+    p_bc.add_argument(
+        "--multi-model-beta",
+        dest="multi_model_beta",
+        type=float,
+        default=None,
+        help=(
+            "Per-episode mix: P(teacher drives) = this value in [0, 1]. "
+            "Teacher if hash(seed, trial, episode) < beta, else student. "
+            "Incompatible with K1/K2 flags. Not DAgger labels."
+        ),
+    )
+    p_bc.add_argument(
+        "--multi-model-seed",
+        dest="multi_model_seed",
+        default=None,
+        help=(
+            "Optional mix seed stored on the plan (beta_mixture only). "
+            "Omit to let the server generate one. Replays inherit this seed."
         ),
     )
     p_bc.set_defaults(handler=_batch_create)

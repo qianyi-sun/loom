@@ -98,14 +98,18 @@ export function humanizeTrialConfig(
           ? modelLabel(mm.secondary_model)
           : "teacher";
       items.push(
-        `Multi-model: student/teacher/student (teacher ${teacher}` +
-          (typeof mm.switch_episode === "number"
-            ? `, K1=${mm.switch_episode}`
-            : "") +
-          (typeof mm.return_switch_episode === "number"
-            ? `, K2=${mm.return_switch_episode}`
-            : "") +
-          ")",
+        mm.policy === "beta_mixture"
+          ? `Multi-model: beta mixture (teacher ${teacher}` +
+              (typeof mm.beta === "number" ? `, beta=${mm.beta}` : "") +
+              ")"
+          : `Multi-model: student/teacher/student (teacher ${teacher}` +
+              (typeof mm.switch_episode === "number"
+                ? `, K1=${mm.switch_episode}`
+                : "") +
+              (typeof mm.return_switch_episode === "number"
+                ? `, K2=${mm.return_switch_episode}`
+                : "") +
+              ")",
       );
     }
   }
