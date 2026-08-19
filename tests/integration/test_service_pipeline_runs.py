@@ -26,6 +26,9 @@ class _Result:
     def scalars(self) -> list[object]:
         return self.values
 
+    def all(self) -> list[object]:
+        return self.values
+
 
 class _Session:
     def __init__(self, *results: _Result, get_result: object | None = None) -> None:
@@ -272,6 +275,7 @@ async def test_get_run_projects_stages_artifacts_and_budget_without_internal_fie
     )
     session = _Session(
         _Result(run),
+        _Result([(run.id, "evaluate", "failed", "infra_error", 1)]),
         _Result([stage]),
         _Result([artifact]),
         get_result=ledger,
@@ -313,6 +317,7 @@ async def test_get_run_hides_restricted_artifacts_from_unrelated_members() -> No
     session = _Session(
         _Result(run),
         _Result([]),
+        _Result([]),
         _Result([restricted]),
         get_result=None,
     )
@@ -344,3 +349,146 @@ async def test_list_run_pagination_returns_an_opaque_signed_cursor() -> None:
     assert [item["id"] for item in body["items"]] == [str(first.id)]
     assert isinstance(body["next_cursor"], str)
     assert str(first.id) not in body["next_cursor"]
+
+
+def _stage(run_id: UUID, *, shard_key: str, state: str = "succeeded") -> SimpleNamespace:
+    return SimpleNamespace(
+        id=uuid4(),
+        pipeline_run_id=run_id,
+        node_key="evaluate",
+        shard_key=shard_key,
+        node_kind="container",
+        state=state,
+        domain_outcome="accepted" if state == "succeeded" else None,
+        reason_code=None,
+        attempt_count=1,
+        resource_profile_json={"resource_profile": "terminalgen-validate-none@1"},
+    )
+
+
+async def test_stage_run_page_is_bounded_and_returns_durable_progress() -> None:
+    run = _run()
+    run.graph_spec_json = {"nodes": [{"node_key": "evaluate", "needs": []}]}
+    first = _stage(run.id, shard_key="slot-0001")
+    second = _stage(run.id, shard_key="slot-0002")
+    aggregate = [(run.id, "evaluate", "succeeded", "accepted", 2)]
+    session = _Session(_Result(run), _Result([first, second]), _Result(aggregate))
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(session, _context(team_id=run.team_id))),
+        base_url="http://svc",
+    ) as client:
+        response = await client.get(
+            f"/api/v1/pipeline-runs/{run.id}/stages", params={"limit": 1}
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert [item["id"] for item in body["items"]] == [str(first.id)]
+    assert isinstance(body["next_cursor"], str)
+    assert "slot-0001" not in body["next_cursor"]
+    assert body["progress"] == {
+        "total_stage_runs": 2,
+        "completed_stage_runs": 2,
+        "states": {"succeeded": 2},
+        "domain_outcomes": {"accepted": 2},
+        "nodes": {
+            "evaluate": {
+                "total_stage_runs": 2,
+                "completed_stage_runs": 2,
+                "states": {"succeeded": 2},
+                "domain_outcomes": {"accepted": 2},
+            }
+        },
+    }
+
+
+async def test_stage_run_cursor_is_signed_and_filter_bound() -> None:
+    run = _run()
+    run.graph_spec_json = {"nodes": [{"node_key": "evaluate", "needs": []}]}
+    first = _stage(run.id, shard_key="slot-0001")
+    second = _stage(run.id, shard_key="slot-0002")
+    aggregate = [(run.id, "evaluate", "succeeded", "accepted", 2)]
+    first_session = _Session(_Result(run), _Result([first, second]), _Result(aggregate))
+    context = _context(team_id=run.team_id)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(first_session, context)),
+        base_url="http://svc",
+    ) as client:
+        first_response = await client.get(
+            f"/api/v1/pipeline-runs/{run.id}/stages", params={"limit": 1}
+        )
+    cursor = first_response.json()["next_cursor"]
+
+    second_session = _Session(_Result(run), _Result([second]), _Result(aggregate))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(second_session, context)),
+        base_url="http://svc",
+    ) as client:
+        second_response = await client.get(
+            f"/api/v1/pipeline-runs/{run.id}/stages",
+            params={"limit": 1, "cursor": cursor},
+        )
+    assert second_response.status_code == 200, second_response.text
+    assert [item["id"] for item in second_response.json()["items"]] == [str(second.id)]
+
+    tampered_session = _Session(_Result(run))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(tampered_session, context)),
+        base_url="http://svc",
+    ) as client:
+        tampered = await client.get(
+            f"/api/v1/pipeline-runs/{run.id}/stages",
+            params={"limit": 1, "cursor": cursor[:-1] + ("A" if cursor[-1] != "A" else "B")},
+        )
+    assert tampered.status_code == 422
+    assert tampered.json()["detail"]["reason_code"] == "invalid_cursor"
+
+
+def _artifact(run_id: UUID, *, created_at: datetime, access_class: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=uuid4(),
+        pipeline_run_id=run_id,
+        pipeline_stage_run_id=uuid4(),
+        execution_attempt_id=uuid4(),
+        name="corpus",
+        artifact_type="terminalgen_corpus.v1",
+        content_hash="4" * 64,
+        manifest_sha256="5" * 64,
+        stored_size_bytes=256,
+        file_count=1,
+        safety_state="verified_internal",
+        visibility="team",
+        share_status="pending_scan",
+        access_class=access_class,
+        producer_kind="pipeline",
+        created_at=created_at,
+    )
+
+
+async def test_artifact_page_preserves_restricted_access_and_cursor_scope() -> None:
+    run = _run()
+    restricted = _artifact(
+        run.id,
+        created_at=datetime(2026, 8, 12, 12, 2, tzinfo=UTC),
+        access_class="authoring_restricted",
+    )
+    member_context = _context(team_id=run.team_id, user_id=uuid4(), role="member")
+    member_session = _Session(_Result(run), _Result([restricted]))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(member_session, member_context)),
+        base_url="http://svc",
+    ) as client:
+        hidden = await client.get(f"/api/v1/pipeline-runs/{run.id}/artifacts")
+    assert hidden.status_code == 200, hidden.text
+    assert hidden.json() == {"items": [], "next_cursor": None}
+
+    owner_context = _context(team_id=run.team_id, user_id=uuid4(), role="owner")
+    owner_session = _Session(_Result(run), _Result([restricted]))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(owner_session, owner_context)),
+        base_url="http://svc",
+    ) as client:
+        visible = await client.get(f"/api/v1/pipeline-runs/{run.id}/artifacts")
+    assert visible.status_code == 200, visible.text
+    assert [item["id"] for item in visible.json()["items"]] == [str(restricted.id)]
