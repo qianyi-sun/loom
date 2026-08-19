@@ -91,7 +91,9 @@ async def test_kubectl_builder_uses_native_ephemeral_jobs_and_secret_stdin(
     )
     assert "minio.example" not in nonsecret
     assert "automountServiceAccountToken: false" in nonsecret
-    assert "hostUsers: false" in nonsecret
+    assert "hostUsers:" not in nonsecret
+    assert "nodeSelector:" not in nonsecret
+    assert "runtimeClassName: loom-personal-dev-builder" in nonsecret
 
     await executor.cleanup(registration)
     assert cluster.deleted == [
