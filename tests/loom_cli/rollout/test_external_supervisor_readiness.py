@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -446,7 +447,7 @@ def test_artifact_retains_disabled_protected_pool_without_validation_command(
     assert ExternalSupervisorArtifact.from_bytes(artifact.to_bytes()) == artifact
 
 
-def test_manager_witness_bootstrap_retains_every_disabled_supervisor_for_deactivation(
+def test_manager_witness_bootstrap_does_not_expand_to_unprotected_supervisors(
     tmp_path: Path,
 ) -> None:
     root = _candidate(
@@ -469,11 +470,58 @@ def test_manager_witness_bootstrap_retains_every_disabled_supervisor_for_deactiv
 
     artifact = _build(root)
 
-    assert [item.name for item in artifact.supervisors] == [
-        "gb10-staging",
-        "oldlab-staging",
-    ]
+    assert [item.name for item in artifact.supervisors] == ["gb10-staging"]
     assert artifact.validation_argv("loom-rehearsal-abc123", REHEARSAL_KUBECONFIG) == {}
+
+
+def _committed_staging_candidate(tmp_path: Path) -> Path:
+    repository = Path(__file__).resolve().parents[3]
+    candidate = tmp_path / "candidate"
+    for relative_path, mode in (
+        (PROFILE_PATH, 0o644),
+        (SCRIPT_PATH, 0o755),
+        (_TASK_IMAGE_BUILDER_SCRIPT, 0o755),
+    ):
+        target = candidate / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(repository / relative_path, target)
+        target.chmod(mode)
+    return candidate
+
+
+def test_committed_bootstrap_gb10_artifact_stays_within_controller_authority(
+    tmp_path: Path,
+) -> None:
+    candidate = _committed_staging_candidate(tmp_path)
+
+    artifact = build_external_supervisor_artifact(
+        candidate,
+        candidate_sha=_SHA,
+        candidate_tree=_TREE,
+        image_tag=_TAG,
+        execution_host="gx10-01c7",
+    )
+
+    assert [item.pool_name for item in artifact.supervisors] == ["gb10"]
+
+
+def test_committed_bootstrap_retains_oldlab_builder_for_deactivation(
+    tmp_path: Path,
+) -> None:
+    candidate = _committed_staging_candidate(tmp_path)
+
+    artifact = build_external_supervisor_artifact(
+        candidate,
+        candidate_sha=_SHA,
+        candidate_tree=_TREE,
+        image_tag=_TAG,
+        execution_host="TRT-EAI-OLDLAB-1",
+    )
+
+    assert [item.pool_name for item in artifact.supervisors] == [
+        "oldlab",
+        "task-image-builder-oldlab",
+    ]
 
 
 @pytest.mark.parametrize(("enabled", "active"), [(True, False), (False, True)])

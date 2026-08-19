@@ -1183,6 +1183,13 @@ def build_external_supervisor_artifact(
         )
         is True
     )
+    bootstrap_deactivation_pools = {
+        str(policy["pool_name"])
+        for policy in profile.task_image_builder_policies
+        if manager_witness_export_bootstrap
+        and "manager_witness_export_bootstrap_pending"
+        in policy.get("activation_blockers", ())
+    }
     desired_execution_host = (
         execution_host.split(".", 1)[0].casefold() if execution_host is not None else None
     )
@@ -1196,7 +1203,7 @@ def build_external_supervisor_artifact(
                         raw.get("enabled") is True
                         or raw.get("active") is True
                         or raw.get("pool_name") in protected_pools
-                        or manager_witness_export_bootstrap
+                        or raw.get("pool_name") in bootstrap_deactivation_pools
                     )
                     and (
                         desired_execution_host is None
