@@ -54,6 +54,7 @@ class HostRunner:
     k3s_version: str = "v1.36.2+k3s1"
     containerd_version: str = "v2.3.2-k3s2"
     runsc_version: str = "release-20260810.0"
+    runsc_spec_version: str = "1.2.1"
     main_pid: int = 4242
 
     def run(
@@ -97,7 +98,8 @@ class HostRunner:
         elif executable == "runsc" and call[1:] == ("--version",):
             result = CommandResult(
                 0,
-                f"runsc version {self.runsc_version}\nspec: 1.1.0\n",
+                f"runsc version {self.runsc_version}\n"
+                f"spec: {self.runsc_spec_version}\n",
             )
         if check and result.returncode != 0:
             raise PersonalDevBuilderRuntimeInstallError("command_failed")
@@ -755,12 +757,22 @@ def test_active_verification_requires_exact_generated_containerd_runtime(
         installer.verify_active()
 
 
-def test_active_verification_requires_exact_runsc_release(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "runner",
+    (
+        HostRunner(runsc_version="release-20260811.0"),
+        HostRunner(runsc_spec_version="1.1.0"),
+    ),
+)
+def test_active_verification_requires_exact_runsc_release(
+    tmp_path: Path,
+    runner: HostRunner,
+) -> None:
     profile, _, installer = _install(tmp_path)
     active = _mapped(installer, _ACTIVE_CONTAINERD_CONFIG)
     active.parent.mkdir(parents=True, exist_ok=True)
     active.write_bytes(_active_config(profile))
-    installer.runner = HostRunner(runsc_version="release-20260811.0")
+    installer.runner = runner
 
     with pytest.raises(
         PersonalDevBuilderRuntimeInstallError,

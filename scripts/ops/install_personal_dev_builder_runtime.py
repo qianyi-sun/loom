@@ -927,7 +927,7 @@ class PersonalDevBuilderRuntimeInstaller:
             or version.stderr
             or version_lines[:1] != [f"runsc version {self.profile.version}"]
             or len(version_lines) != 2
-            or re.fullmatch(r"spec: 1[.]1[.]0(?:-rc[.][0-9]+)?", version_lines[1]) is None
+            or version_lines[1] != "spec: 1.2.1"
         ):
             raise PersonalDevBuilderRuntimeInstallError("runsc_version_invalid")
         return self._receipt("verify-active", state="active")
