@@ -522,11 +522,15 @@ async def reconcile_slurm_worker_job_records(
 @router.get("/slurm-worker-jobs/status")
 async def get_slurm_worker_job_status(
     request: Request,
+    active_only: bool = False,
     authorization: str | None = Header(default=None),
 ) -> dict[str, object]:
     await _require_admin_scope(request, authorization, "admin:slurm_workers")
     async with request.app.state.session_factory() as session:
-        summary, jobs = await fetch_slurm_worker_job_status(session)
+        summary, jobs = await fetch_slurm_worker_job_status(
+            session,
+            active_only=active_only,
+        )
     return {
         "summary": summary.as_list(),
         "jobs": jobs,

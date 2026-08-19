@@ -469,7 +469,10 @@ class HttpxProtectedEnvironmentStateTransport:
                 "/admin/gb10-worker-pools/status",
                 params={"environment": profile.control_plane_environment},
             )
-            slurm = client.get("/admin/slurm-worker-jobs/status")
+            slurm = client.get(
+                "/admin/slurm-worker-jobs/status",
+                params={"active_only": "true"},
+            )
         return {
             "autoscaler_status": self._response_json(autoscaler),
             "gb10_status": self._response_json(gb10),
