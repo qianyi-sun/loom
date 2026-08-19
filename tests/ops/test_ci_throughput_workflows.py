@@ -203,6 +203,8 @@ def test_hosted_only_amd64_builds_bypass_live_lease_routes(tmp_path: Path) -> No
                     {"image": "capacity-executor", "architecture": "arm64"},
                     {"image": "capacity-manager", "architecture": "amd64"},
                     {"image": "capacity-manager", "architecture": "arm64"},
+                    {"image": "personal-dev-scanner-cache", "architecture": "amd64"},
+                    {"image": "personal-dev-scanner-cache", "architecture": "arm64"},
                     {"image": "pipeline-core-fixture", "architecture": "amd64"},
                     {"image": "pipeline-core-fixture", "architecture": "arm64"},
                     {"image": "worker", "architecture": "amd64"},

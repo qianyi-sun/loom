@@ -373,6 +373,7 @@ jobs:
                   "capacity-manager",
                   "personal-dev-activation-agent",
                   "personal-dev-builder",
+                  "personal-dev-scanner-cache",
                   "pipeline-core-fixture",
                   "pipeline-orchestrator",
               }
