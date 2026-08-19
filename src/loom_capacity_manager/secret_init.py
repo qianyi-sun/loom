@@ -18,6 +18,7 @@ _PROFILE_FILES: dict[CredentialProfile, frozenset[str]] = {
         {
             "client-ca.pem",
             "database-url",
+            "global-execution-signing-key",
             "health-certificate.pem",
             "health-private-key.pem",
             "ownership-public-keys.json",

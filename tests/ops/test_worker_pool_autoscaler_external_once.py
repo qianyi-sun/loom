@@ -19,6 +19,9 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from loom_capacity_manager.global_execution_witness import (
+    build_global_execution_witness_export,
+)
 from loom_control_plane.global_execution_fence import (
     GlobalExecutionWitness,
     canonical_global_execution_witness_bytes,
@@ -64,6 +67,34 @@ def _args(module: Any, *extra: str):
             "/run/loom/global-execution-manager.pub",
             "--expected-manager-public-key-sha256",
             "a" * 64,
+            *extra,
+        ]
+    )
+
+
+def _direct_args(module: Any, *extra: str, pin: str = "a" * 64):
+    return module._parser().parse_args(
+        [
+            "--environment",
+            "staging",
+            "--pool-name",
+            "gb10",
+            "--expected-slurm-cluster-name",
+            "trt-gb10",
+            "--expected-slurm-controller-host",
+            "gx10-01c7",
+            "--namespace",
+            "loom-staging",
+            "--kubeconfig",
+            "/etc/loom/kubeconfig/staging.yaml",
+            "--global-execution-manager-export",
+            "deployment/loom-capacity-manager",
+            "--global-execution-manager-namespace",
+            "loom-dev",
+            "--global-execution-manager-kubeconfig",
+            "/var/lib/loom-staging-rollout/kubeconfig",
+            "--expected-manager-public-key-sha256",
+            pin,
             *extra,
         ]
     )
@@ -158,6 +189,146 @@ def test_parser_defaults_follow_service_home_and_concrete_database_service(
 
     assert args.kubeconfig == "/var/lib/loom-staging-rollout/.kube/config"
     assert args.db_service == "service/loom-postgres-rw"
+
+
+def test_parser_accepts_manager_export_without_local_witness_files(module: Any) -> None:
+    args = _direct_args(module)
+
+    assert args.global_execution_manager_export == "deployment/loom-capacity-manager"
+    assert args.global_execution_witness_json is None
+    assert args.manager_public_key is None
+    assert args.expected_manager_public_key_sha256 == "a" * 64
+    assert args.global_execution_manager_namespace == "loom-dev"
+    assert args.global_execution_manager_kubeconfig == (
+        "/var/lib/loom-staging-rollout/kubeconfig"
+    )
+
+    with pytest.raises(SystemExit):
+        _direct_args(
+            module,
+            "--global-execution-witness-json",
+            "/run/loom/witness.json",
+        )
+
+
+def test_file_witness_source_rejects_manager_export_transport_arguments(module: Any) -> None:
+    args = _args(
+        module,
+        "--global-execution-manager-namespace",
+        "loom-dev",
+    )
+
+    with pytest.raises(
+        module.ExternalAutoscalerConfigurationError,
+        match="file source",
+    ):
+        module._load_current_global_execution_witness(args, pool_id="gb10")
+
+
+def test_manager_export_subprocess_reader_returns_only_bounded_output(
+    module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(module, "_MAX_GLOBAL_EXECUTION_EXPORT_BYTES", 32)
+    monkeypatch.setattr(module, "_MAX_GLOBAL_EXECUTION_EXPORT_ERROR_BYTES", 16)
+    monkeypatch.setattr(module, "_GLOBAL_EXECUTION_EXPORT_TIMEOUT_SEC", 1.0)
+
+    result = module._run_bounded_global_execution_export(
+        [
+            sys.executable,
+            "-c",
+            "import os; os.write(1, b'x' * 32); os.write(2, b'y' * 16)",
+        ]
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == b"x" * 32
+    assert result.stderr == b"y" * 16
+
+
+@pytest.mark.parametrize("descriptor", [1, 2])
+def test_manager_export_subprocess_reader_stops_oversized_output(
+    module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    descriptor: int,
+) -> None:
+    monkeypatch.setattr(module, "_MAX_GLOBAL_EXECUTION_EXPORT_BYTES", 8)
+    monkeypatch.setattr(module, "_MAX_GLOBAL_EXECUTION_EXPORT_ERROR_BYTES", 8)
+    monkeypatch.setattr(module, "_GLOBAL_EXECUTION_EXPORT_TIMEOUT_SEC", 1.0)
+
+    with pytest.raises(module.GlobalExecutionFenceError, match="unavailable"):
+        module._run_bounded_global_execution_export(
+            [sys.executable, "-c", f"import os; os.write({descriptor}, b'x' * 9)"]
+        )
+
+
+def test_manager_export_subprocess_reader_stops_at_timeout(
+    module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(module, "_GLOBAL_EXECUTION_EXPORT_TIMEOUT_SEC", 0.05)
+
+    with pytest.raises(module.GlobalExecutionFenceError, match="unavailable"):
+        module._run_bounded_global_execution_export(
+            [sys.executable, "-c", "import time; time.sleep(1)"]
+        )
+
+
+def test_manager_export_uses_fixed_shell_free_bounded_kubernetes_command(
+    module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_key = Ed25519PrivateKey.from_private_bytes(bytes([53]) * 32)
+    public_key = private_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    pin = hashlib.sha256(public_key).hexdigest()
+    encoded = build_global_execution_witness_export(
+        private_key=private_key,
+        signing_key_id="global-capacity-manager-2026-08",
+        pool_id="gb10",
+        execution_epoch=0,
+        execution_state="shadow",
+        executable_new_capacity_ceiling=0,
+        expires_at=datetime.now(UTC) + timedelta(seconds=30),
+    )
+    captured: dict[str, object] = {}
+
+    def run(argv: list[str]) -> object:
+        captured["argv"] = argv
+        return SimpleNamespace(returncode=0, stdout=encoded, stderr=b"")
+
+    monkeypatch.setattr(module, "_run_bounded_global_execution_export", run)
+    witness = module._load_current_global_execution_witness(
+        _direct_args(
+            module,
+            pin=pin,
+        ),
+        pool_id="gb10",
+    )
+
+    assert witness.pool_id == "gb10"
+    assert captured["argv"] == [
+        "/usr/local/bin/kubectl",
+        "--kubeconfig",
+        "/var/lib/loom-staging-rollout/kubeconfig",
+        "--request-timeout=10s",
+        "-n",
+        "loom-dev",
+        "exec",
+        "deployment/loom-capacity-manager",
+        "-c",
+        "manager",
+        "--",
+        "python",
+        "-I",
+        "-B",
+        "-m",
+        "loom_capacity_manager.global_execution_witness",
+        "--pool-id",
+        "gb10",
+    ]
 
 
 def test_slurm_authority_probe_accepts_exact_local_cluster_and_controller(
@@ -757,7 +928,7 @@ def test_denied_parsed_witness_commits_drain_safe_reconcile_before_failure(
     assert events.index("reconcile") < events.index("commit") < events.index("dispose")
 
 
-def test_validate_only_uses_exact_tunnel_and_read_only_policy_query(
+def test_validate_only_refuses_missing_manager_witness_after_policy_query(
     module: Any,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -852,26 +1023,12 @@ def test_validate_only_uses_exact_tunnel_and_read_only_policy_query(
     monkeypatch.setattr(module, "reconcile_worker_pool_autoscaler_once", _unexpected_reconcile)
     monkeypatch.setattr(module, "load_global_execution_witness", lambda *_args, **_kwargs: None)
 
-    asyncio.run(module._main_async(_args(module, "--db-local-port", "15451", "--validate-only")))
+    with pytest.raises(module.ExternalAutoscalerError, match="witness is unavailable"):
+        asyncio.run(
+            module._main_async(_args(module, "--db-local-port", "15451", "--validate-only"))
+        )
 
     output = capsys.readouterr()
-    payload = json.loads(output.out)
-    assert payload == {
-        "database_reachable": True,
-        "mode": "validate-only",
-        "slurm_authority": {
-            "cluster_name": "trt-gb10",
-            "controller_host": "gx10-01c7",
-            "local_hostname": "gx10-01c7",
-        },
-        "pools": [
-            {
-                "enabled_external_policy_count": 1,
-                "environment": "staging",
-                "pool_name": "gb10",
-            }
-        ],
-    }
     assert secret not in output.out + output.err
     assert events == [
         "slurm-authority",

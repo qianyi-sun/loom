@@ -127,6 +127,7 @@ def test_validate_only_succeeds_before_runtime_materialization(
     monkeypatch.setattr(module, "_validate_builder_runtime_files", forbidden)
     monkeypatch.setattr(module, "_validate_builder_credentials", forbidden)
     monkeypatch.setattr(module.transport, "_load_cp_db_url", forbidden)
+    monkeypatch.setattr(module, "_global_execution_scale_up_allowed", lambda *_args, **_kwargs: True)
 
     asyncio.run(module._main_async(_args(module, tmp_path, "--validate-only")))
 
@@ -136,6 +137,28 @@ def test_validate_only_succeeds_before_runtime_materialization(
     assert payload["request_nodes"] == ["trt-gb10-1"]
     assert len(payload["request_set_sha256"]) == 64
     assert not Path(config.env_file).exists()
+
+
+def test_validate_only_refuses_missing_manager_witness(
+    module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _enabled_config(module, tmp_path)
+    monkeypatch.setattr(module, "_load_enabled_builder_config", lambda _args: config)
+    monkeypatch.setattr(
+        module.transport,
+        "_validate_local_slurm_authority",
+        lambda _args: SimpleNamespace(cluster_name="trt-gb10"),
+    )
+    monkeypatch.setattr(
+        module,
+        "_global_execution_scale_up_allowed",
+        lambda *_args, **_kwargs: False,
+    )
+
+    with pytest.raises(module.TaskImageBuilderPolicyError, match="witness is unavailable"):
+        asyncio.run(module._main_async(_args(module, tmp_path, "--validate-only")))
 
 
 def test_committed_disabled_policy_cannot_reconcile(

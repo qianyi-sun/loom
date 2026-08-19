@@ -32,12 +32,14 @@ def _args(module: Any, *extra: str) -> Any:
             "loom-rehearsal-abc123",
             "--kubeconfig",
             "/var/lib/loom-staging-rollout/credentials/rehearsal-kubeconfig",
-            "--global-execution-witness-json",
-            "/etc/loom/credentials/global-execution/gb10-witness.json",
-            "--manager-public-key",
-            "/etc/loom/credentials/global-execution/manager-ed25519.pub",
-            "--expected-manager-public-key-sha256-file",
-            "/etc/loom/credentials/global-execution/manager-ed25519.pub.sha256",
+            "--global-execution-manager-export",
+            "deployment/loom-capacity-manager",
+            "--global-execution-manager-namespace",
+            "loom-dev",
+            "--global-execution-manager-kubeconfig",
+            "/var/lib/loom-staging-rollout/kubeconfig",
+            "--expected-manager-public-key-sha256",
+            "a" * 64,
             "--validate-only",
             *extra,
         ]
@@ -49,6 +51,7 @@ def test_rehearsal_policy_validation_is_read_only_and_does_not_claim_local_slurm
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
+    witness = object()
 
     async def validate(args: Any, *, authority: Any) -> list[dict[str, object]]:
         captured["args"] = args
@@ -64,6 +67,21 @@ def test_rehearsal_policy_validation_is_read_only_and_does_not_claim_local_slurm
     monkeypatch.setattr(module.external_once, "_validate_external_policies_once", validate)
     monkeypatch.setattr(
         module.external_once,
+        "_load_current_global_execution_witness",
+        lambda args, *, pool_id: (
+            captured.update({"witness_args": args, "witness_pool_id": pool_id})
+            or witness
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "assert_legacy_scale_up_allowed",
+        lambda value, **kwargs: captured.update(
+            {"asserted_witness": value, "witness_expectations": kwargs}
+        ),
+    )
+    monkeypatch.setattr(
+        module.external_once,
         "_validate_local_slurm_authority",
         lambda _args: (_ for _ in ()).throw(
             AssertionError("rehearsal policy validation must not probe local Slurm")
@@ -77,6 +95,13 @@ def test_rehearsal_policy_validation_is_read_only_and_does_not_claim_local_slurm
         cluster_name="trt-gb10",
         controller_host="gx10-01c7",
     )
+    assert captured["witness_args"] is captured["args"]
+    assert captured["witness_pool_id"] == "gb10"
+    assert captured["asserted_witness"] is witness
+    assert captured["witness_expectations"]["expected_authority"] == (
+        "global-capacity-manager"
+    )
+    assert captured["witness_expectations"]["expected_pool_id"] == "gb10"
     assert result == {
         "database_reachable": True,
         "expected_slurm_authority": {
@@ -93,6 +118,28 @@ def test_rehearsal_policy_validation_is_read_only_and_does_not_claim_local_slurm
         ],
     }
     assert "local_hostname" not in str(result)
+
+
+def test_rehearsal_policy_validation_blocks_when_manager_export_is_unavailable(
+    module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def validate(*_args: object, **_kwargs: object) -> list[dict[str, object]]:
+        return []
+
+    monkeypatch.setattr(module.external_once, "_validate_external_policies_once", validate)
+    monkeypatch.setattr(
+        module.external_once,
+        "_load_current_global_execution_witness",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            module.GlobalExecutionFenceError(
+                "global execution witness export is unavailable"
+            )
+        ),
+    )
+
+    with pytest.raises(module.RehearsalPolicyValidationError, match="witness"):
+        asyncio.run(module._main_async(_args(module)))
 
 
 @pytest.mark.parametrize(

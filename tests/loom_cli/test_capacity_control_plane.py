@@ -1364,6 +1364,29 @@ def test_renderer_pins_images_credentials_security_and_runtime_commands() -> Non
     }
     environment = {item["name"]: item["value"] for item in manager_container["env"]}
     assert environment["LOOM_CAPACITY_EXPECTED_AUTHORITY_INCARNATION"] == str(_AUTHORITY)
+    assert environment["LOOM_CAPACITY_GLOBAL_EXECUTION_SIGNING_KEY_FILE"] == (
+        "/var/run/loom-capacity-manager/runtime/credentials/global-execution-signing-key"
+    )
+    assert environment["LOOM_CAPACITY_GLOBAL_EXECUTION_SIGNING_KEY_ID"] == (
+        "global-capacity-manager-2026-08"
+    )
+    projected = next(
+        volume
+        for volume in manager["spec"]["template"]["spec"]["volumes"]
+        if volume["name"] == "projected"
+    )
+    assert {item["key"] for item in projected["secret"]["items"]} == {
+        "client-ca.pem",
+        "database-url",
+        "global-execution-signing-key",
+        "health-certificate.pem",
+        "health-private-key.pem",
+        "ownership-public-keys.json",
+        "principals.json",
+        "server-ca.pem",
+        "server-certificate.pem",
+        "server-private-key.pem",
+    }
     assert "CEILING" not in " ".join(environment)
     health_command = [
         "python",

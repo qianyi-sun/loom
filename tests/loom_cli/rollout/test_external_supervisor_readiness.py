@@ -108,12 +108,14 @@ def _args(
         "10",
         "--freshness-sec",
         "120",
-        "--global-execution-witness-json",
-        f"/etc/loom/credentials/global-execution/{pool_name}-witness.json",
-        "--manager-public-key",
-        "/etc/loom/credentials/global-execution/manager-ed25519.pub",
-        "--expected-manager-public-key-sha256-file",
-        "/etc/loom/credentials/global-execution/manager-ed25519.pub.sha256",
+        "--global-execution-manager-export",
+        "deployment/loom-capacity-manager",
+        "--global-execution-manager-namespace",
+        "loom-dev",
+        "--global-execution-manager-kubeconfig",
+        STAGING_KUBECONFIG,
+        "--expected-manager-public-key-sha256",
+        "a" * 64,
     ]
     if pool_name == "gb10":
         args.extend(["--db-secret-name", "loom-external-slurm-autoscaler-db"])
@@ -158,12 +160,14 @@ def _task_image_builder_args(*, port: int = 15453) -> list[str]:
         "10",
         "--freshness-sec",
         "120",
-        "--global-execution-witness-json",
-        "/etc/loom/credentials/global-execution/oldlab-witness.json",
-        "--manager-public-key",
-        "/etc/loom/credentials/global-execution/manager-ed25519.pub",
-        "--expected-manager-public-key-sha256-file",
-        "/etc/loom/credentials/global-execution/manager-ed25519.pub.sha256",
+        "--global-execution-manager-export",
+        "deployment/loom-capacity-manager",
+        "--global-execution-manager-namespace",
+        "loom-dev",
+        "--global-execution-manager-kubeconfig",
+        STAGING_KUBECONFIG,
+        "--expected-manager-public-key-sha256",
+        "a" * 64,
     ]
 
 
@@ -768,21 +772,10 @@ def test_builder_rejects_source_drift_during_build(
         ),
         ('"10.0"', '"61"', "out of bounds"),
         ('"5432"', '"5433"', "remote port drifted"),
-        (
-            '"/etc/loom/credentials/global-execution/gb10-witness.json"',
-            '"/etc/loom/credentials/global-execution/oldlab-witness.json"',
-            "global execution authority",
-        ),
-        (
-            '"/etc/loom/credentials/global-execution/manager-ed25519.pub"',
-            '"/tmp/manager-ed25519.pub"',
-            "global execution authority",
-        ),
-        (
-            '"/etc/loom/credentials/global-execution/manager-ed25519.pub.sha256"',
-            '"/tmp/manager-ed25519.pub.sha256"',
-            "global execution authority",
-        ),
+        ('"deployment/loom-capacity-manager"', '"deployment/foreign"', "global execution"),
+        ('"loom-dev"', '"foreign-manager"', "global execution"),
+        ('"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"',
+         '"invalid-pin"', "global execution"),
     ],
 )
 def test_builder_rejects_unsafe_or_noncanonical_identity(
@@ -817,9 +810,10 @@ def test_builder_rejects_missing_duplicate_or_validate_only_arguments(tmp_path: 
 @pytest.mark.parametrize(
     "flag",
     [
-        "--global-execution-witness-json",
-        "--manager-public-key",
-        "--expected-manager-public-key-sha256-file",
+        "--global-execution-manager-export",
+        "--global-execution-manager-namespace",
+        "--global-execution-manager-kubeconfig",
+        "--expected-manager-public-key-sha256",
     ],
 )
 def test_builder_requires_global_execution_fence_arguments(

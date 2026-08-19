@@ -21,6 +21,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 _MAX_WITNESS_BYTES = 64 * 1024
+_MAX_WITNESS_EXPORT_BYTES = 64 * 1024
 _MAX_PUBLIC_KEY_BYTES = 32
 _MAX_PUBLIC_KEY_FINGERPRINT_BYTES = 65
 _IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,127}$")
@@ -38,6 +39,12 @@ _SIGNED_FIELDS = frozenset(
     }
 )
 _ENVELOPE_FIELDS = _SIGNED_FIELDS | {"canonical_digest", "signature_base64"}
+_EXPORT_FIELDS = {
+    "manager_public_key_base64",
+    "manager_public_key_sha256",
+    "schema_version",
+    "witness",
+}
 
 
 class GlobalExecutionFenceError(ValueError):
@@ -342,6 +349,83 @@ def load_global_execution_witness(
     )
 
 
+def _unique_export_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise GlobalExecutionFenceError("global execution witness export is invalid")
+        value[key] = item
+    return value
+
+
+def parse_global_execution_witness_export(
+    payload: bytes,
+    *,
+    expected_manager_public_key_sha256: str,
+) -> GlobalExecutionWitness:
+    """Verify one bounded direct manager export against a reviewed key pin."""
+
+    if (
+        not isinstance(payload, bytes)
+        or not 0 < len(payload) <= _MAX_WITNESS_EXPORT_BYTES
+        or not isinstance(expected_manager_public_key_sha256, str)
+        or _DIGEST.fullmatch(expected_manager_public_key_sha256) is None
+    ):
+        raise GlobalExecutionFenceError("global execution witness export is invalid")
+    try:
+        decoded = json.loads(payload, object_pairs_hook=_unique_export_object)
+    except (
+        GlobalExecutionFenceError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+    ) as exc:
+        raise GlobalExecutionFenceError("global execution witness export is invalid") from exc
+    if (
+        not isinstance(decoded, dict)
+        or set(decoded) != _EXPORT_FIELDS
+        or type(decoded["schema_version"]) is not int
+        or decoded["schema_version"] != 1
+        or not isinstance(decoded["manager_public_key_base64"], str)
+        or not isinstance(decoded["manager_public_key_sha256"], str)
+        or not isinstance(decoded["witness"], dict)
+    ):
+        raise GlobalExecutionFenceError("global execution witness export is invalid")
+    try:
+        public_key_bytes = base64.b64decode(
+            decoded["manager_public_key_base64"],
+            validate=True,
+        )
+    except (ValueError, binascii.Error) as exc:
+        raise GlobalExecutionFenceError("global execution witness export is invalid") from exc
+    actual_fingerprint = hashlib.sha256(public_key_bytes).hexdigest()
+    if (
+        len(public_key_bytes) != _MAX_PUBLIC_KEY_BYTES
+        or base64.b64encode(public_key_bytes).decode("ascii")
+        != decoded["manager_public_key_base64"]
+        or _DIGEST.fullmatch(decoded["manager_public_key_sha256"]) is None
+        or not hmac.compare_digest(
+            actual_fingerprint,
+            decoded["manager_public_key_sha256"],
+        )
+        or not hmac.compare_digest(
+            actual_fingerprint,
+            expected_manager_public_key_sha256,
+        )
+    ):
+        raise GlobalExecutionFenceError(
+            "manager public key does not match the pinned fingerprint"
+        )
+    try:
+        public_key = Ed25519PublicKey.from_public_bytes(public_key_bytes)
+    except ValueError as exc:  # pragma: no cover - backend validation
+        raise GlobalExecutionFenceError("global execution witness export is invalid") from exc
+    return GlobalExecutionWitness.from_mapping(
+        cast(Mapping[str, object], decoded["witness"]),
+        public_key=public_key,
+        expected_public_key_sha256=expected_manager_public_key_sha256,
+    )
+
+
 def assert_legacy_scale_up_allowed(
     witness: GlobalExecutionWitness | None,
     *,
@@ -376,4 +460,5 @@ __all__ = [
     "assert_legacy_scale_up_allowed",
     "canonical_global_execution_witness_bytes",
     "load_global_execution_witness",
+    "parse_global_execution_witness_export",
 ]

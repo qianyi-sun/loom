@@ -29,6 +29,8 @@ class CapacityManagerSettings(BaseSettings):
     ownership_public_keys_file: Path | None = None
     execution_policy_file: Path | None = None
     execution_policy_sha256: str | None = None
+    global_execution_signing_key_file: Path | None = None
+    global_execution_signing_key_id: str | None = None
     host: str = "127.0.0.1"
     port: int = Field(default=8443, ge=1, le=65535)
     freshness_seconds: int = Field(default=120, ge=1, le=3600)
@@ -44,6 +46,17 @@ class CapacityManagerSettings(BaseSettings):
             or self.execution_policy_sha256 == "0" * 64
         ):
             raise ValueError("execution policy digest must be a nonzero SHA-256")
+        if (self.global_execution_signing_key_file is None) != (
+            self.global_execution_signing_key_id is None
+        ):
+            raise ValueError(
+                "global execution signing key path and id must be configured together"
+            )
+        if self.global_execution_signing_key_id is not None and re.fullmatch(
+            r"[a-z0-9][a-z0-9_.-]{0,127}",
+            self.global_execution_signing_key_id,
+        ) is None:
+            raise ValueError("global execution signing key id is invalid")
         return self
 
 
