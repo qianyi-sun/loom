@@ -197,3 +197,15 @@ def test_profile_rejects_excessive_json_nesting_with_the_public_error(
 
     with pytest.raises(RuntimeProfileError, match="profile"):
         load_runtime_profile(path)
+
+
+@pytest.mark.parametrize("constant", (b"NaN", b"Infinity", b"-Infinity"))
+def test_profile_rejects_nonfinite_json_constants_with_the_public_error(
+    tmp_path: Path,
+    constant: bytes,
+) -> None:
+    path = tmp_path / "nonfinite.json"
+    path.write_bytes(b'{"schema":' + constant + b"}\n")
+
+    with pytest.raises(RuntimeProfileError, match="profile"):
+        load_runtime_profile(path)

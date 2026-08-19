@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, NoReturn
 
 _MAX_PROFILE_BYTES = 64 * 1024
 _DIGEST = "0123456789abcdef"
@@ -136,6 +136,11 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
+def _reject_json_constant(value: str) -> NoReturn:
+    del value
+    raise RuntimeProfileError("runtime profile is not valid JSON")
+
+
 def _canonical(value: object) -> bytes:
     return (
         json.dumps(value, sort_keys=True, indent=2, ensure_ascii=True, allow_nan=False)
@@ -259,7 +264,11 @@ class RuntimeProfile:
 def load_runtime_profile(path: Path) -> RuntimeProfile:
     payload = _read_profile(path)
     try:
-        value = json.loads(payload.decode("ascii"), object_pairs_hook=_unique_object)
+        value = json.loads(
+            payload.decode("ascii"),
+            object_pairs_hook=_unique_object,
+            parse_constant=_reject_json_constant,
+        )
     except (
         RecursionError,
         UnicodeDecodeError,
