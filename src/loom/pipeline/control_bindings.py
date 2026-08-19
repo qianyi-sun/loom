@@ -22,11 +22,23 @@ ProfileStatus = Literal["active", "disabled"]
 _Slug = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_]{0,62}$")]
 _ProfileName = Annotated[
     str,
-    StringConstraints(
-        pattern=r"^(?:[a-z][a-z0-9_]{0,62}|behavior-judge-codex-gpt-5\.6-sol-v1)$"
-    ),
+    StringConstraints(pattern=r"^(?:[a-z][a-z0-9_]{0,62}|behavior-judge-codex-gpt-5\.6-sol-v1)$"),
 ]
 _Text = Annotated[str, StringConstraints(min_length=1, max_length=512)]
+_TerminalGenNodeKey = Annotated[
+    str,
+    StringConstraints(pattern=r"^generate_card_(?:0[0-9]|1[0-7])$"),
+]
+_ImageDigest = Annotated[
+    str,
+    StringConstraints(
+        pattern=(
+            r"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?"
+            r"(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}$"
+        )
+    ),
+]
+
 
 class _JudgeAdapterRegistration(TypedDict):
     agent: str
@@ -191,22 +203,95 @@ class RecipeProviderBindingV1(RecipeProviderBindingApplyV1):
     updated_at: datetime
 
 
+class TerminalGenProviderBindingApplyV2(PipelineModel):
+    status: ProfileStatus
+    recipe_digest: Digest
+    environment: _Slug
+    provider_connection_id: UUID
+    provider: Literal["openai"]
+    model: _Text
+    wire_api: Literal["responses"]
+    runtime_adapter: Literal["terminalgen_openai_responses_v1"]
+    runtime_adapter_sha256: Digest
+    runner_lock_sha256: Digest
+    adapter_image_digest: _ImageDigest
+    request_schema_sha256: Digest
+    response_schema_sha256: Digest
+    provider_request_limit_per_attempt: PositiveSafeInt
+    provider_cost_limit_microusd_per_attempt: PositiveSafeInt
+    per_call_timeout_seconds: PositiveSafeInt
+    allowed_team_ids: Annotated[list[UUID], Field(max_length=10_000)]
+
+    @model_validator(mode="after")
+    def closed_terminalgen_binding(self) -> TerminalGenProviderBindingApplyV2:
+        if self.provider_request_limit_per_attempt > 8:
+            raise ValueError("TerminalGen request limit exceeds 8")
+        if self.provider_cost_limit_microusd_per_attempt > 10_000_000:
+            raise ValueError("TerminalGen cost limit exceeds 10000000 microusd")
+        if self.per_call_timeout_seconds > 600:
+            raise ValueError("TerminalGen call timeout exceeds 600 seconds")
+        teams = [str(item) for item in self.allowed_team_ids]
+        if teams != sorted(teams, key=lambda item: item.encode("utf-8")) or len(teams) != len(
+            set(teams)
+        ):
+            raise ValueError("allowed teams must be bytewise-UUID-sorted and unique")
+        return self
+
+
+class TerminalGenProviderBindingV2(TerminalGenProviderBindingApplyV2):
+    schema_version: Literal["loom.recipe-provider-binding.v2"]
+    binding_id: UUID
+    logical_name: _TerminalGenNodeKey
+    version: PositiveVersion
+    recipe_name: Literal["terminalgen-authoring"]
+    recipe_version: Literal[1]
+    node_key: _TerminalGenNodeKey
+    created_by: UUID
+    created_at: datetime
+    updated_by: UUID
+    updated_at: datetime
+
+    @model_validator(mode="after")
+    def logical_name_matches_node(self) -> TerminalGenProviderBindingV2:
+        if self.logical_name != self.node_key:
+            raise ValueError("TerminalGen binding logical name must match node key")
+        return self
+
+
+RecipeProviderBindingApply = RecipeProviderBindingApplyV1 | TerminalGenProviderBindingApplyV2
+RecipeProviderBindingSnapshot = RecipeProviderBindingV1 | TerminalGenProviderBindingV2
+
+
 class ControlBindingSnapshotDocumentV1(PipelineModel):
-    logical_name: Literal["behavior_offline_judge", "behavior_recovery_primitive"]
+    logical_name: Annotated[
+        str,
+        StringConstraints(
+            pattern=(
+                r"^(?:behavior_offline_judge|behavior_recovery_primitive|"
+                r"generate_card_(?:0[0-9]|1[0-7]))$"
+            )
+        ),
+    ]
     kind: Literal["judge_profile", "provider"]
-    node_key: Literal["offline_judge", "recovery_primitive"]
+    node_key: Annotated[
+        str,
+        StringConstraints(
+            pattern=r"^(?:offline_judge|recovery_primitive|generate_card_(?:0[0-9]|1[0-7]))$"
+        ),
+    ]
     object_id: UUID
     version: PositiveVersion
     snapshot_sha256: Digest
-    snapshot: JudgeExecutionProfileV1 | RecipeProviderBindingV1
+    snapshot: JudgeExecutionProfileV1 | RecipeProviderBindingV1 | TerminalGenProviderBindingV2
 
     @model_validator(mode="after")
     def reference_matches_snapshot(self) -> ControlBindingSnapshotDocumentV1:
-        expected = (
-            ("behavior_offline_judge", "judge_profile", "offline_judge")
-            if isinstance(self.snapshot, JudgeExecutionProfileV1)
-            else ("behavior_recovery_primitive", "provider", "recovery_primitive")
-        )
+        if isinstance(self.snapshot, JudgeExecutionProfileV1):
+            expected = ("behavior_offline_judge", "judge_profile", "offline_judge")
+        elif isinstance(self.snapshot, RecipeProviderBindingV1):
+            expected = ("behavior_recovery_primitive", "provider", "recovery_primitive")
+        else:
+            expected = (self.snapshot.logical_name, "provider", self.snapshot.node_key)
         object_id = (
             self.snapshot.profile_id
             if isinstance(self.snapshot, JudgeExecutionProfileV1)
@@ -221,11 +306,13 @@ class ControlBindingSnapshotDocumentV1(PipelineModel):
         return self
 
 
-def snapshot_bytes(value: JudgeExecutionProfileV1 | RecipeProviderBindingV1) -> bytes:
+def snapshot_bytes(value: JudgeExecutionProfileV1 | RecipeProviderBindingSnapshot) -> bytes:
     return canonical_document(value.model_dump(mode="json", exclude_none=False))
 
 
-def control_snapshot_digest(value: JudgeExecutionProfileV1 | RecipeProviderBindingV1) -> Digest:
+def control_snapshot_digest(
+    value: JudgeExecutionProfileV1 | RecipeProviderBindingSnapshot,
+) -> Digest:
     return canonical_digest(value.model_dump(mode="json", exclude_none=False))
 
 
@@ -282,8 +369,12 @@ __all__ = [
     "JudgeExecutionProfileV1",
     "McpServerLockV1",
     "ProviderAssetLockV1",
+    "RecipeProviderBindingApply",
     "RecipeProviderBindingApplyV1",
+    "RecipeProviderBindingSnapshot",
     "RecipeProviderBindingV1",
+    "TerminalGenProviderBindingApplyV2",
+    "TerminalGenProviderBindingV2",
     "control_snapshot_digest",
     "registered_judge_adapter_digest",
     "snapshot_bytes",

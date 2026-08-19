@@ -10,6 +10,7 @@ from loom.integrations.terminalgen.recipe import (
     build_terminalgen_authoring_graph,
 )
 from loom.pipeline.spec import RecipeIdentityV1, declared_stage_run_upper_bound
+from loom_service.pipeline_api_service import _logical_control_slots
 
 DIGEST = "sha256:" + "a" * 64
 IMAGE = "registry.example.invalid/loom/terminalgen@sha256:" + "b" * 64
@@ -83,6 +84,12 @@ def test_each_card_is_an_independent_bounded_fanout_and_validation_lineage() -> 
         )
         assert validate.argv[-1] == TERMINALGEN_VALIDATION_POLICY_DIGEST
         assert finalize.fanout is None
+
+
+def test_gateway_nodes_require_all_eighteen_card_bindings_in_bytewise_order() -> None:
+    assert _logical_control_slots(_graph()) == tuple(
+        (f"generate_card_{ordinal:02d}", f"generate_card_{ordinal:02d}") for ordinal in range(18)
+    )
 
 
 def test_graph_factory_rejects_local_concurrency_and_scales_bound_with_test_quota() -> None:

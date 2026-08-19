@@ -580,7 +580,7 @@ async def create_retry_run(
                 )
             ).scalars()
         )
-        if len(source_rows) != 2:
+        if len(source_rows) != len(logical_slots):
             raise PipelineApiError(409, "binding_drift", "Control binding rows are incomplete")
     candidate_graph = graph.model_dump(mode="python")
     candidate_graph["budget"] = request.budget.model_dump(mode="python")
