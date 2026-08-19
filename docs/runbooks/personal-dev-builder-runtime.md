@@ -521,10 +521,9 @@ assert_node_staging() {
     "$installer_sha256"
   test "$(ssh "${ssh_options[@]}" "$target" sudo -n -- /usr/bin/sha256sum \
     "$root_stage/scripts/ops/personal_dev_builder_runtime_profile.py" | awk '{print $1}')" = \
-    "$profile_module_sha256"
+  "$profile_module_sha256"
   for staged_path in \
     "$root_stage/personal-dev-builder-runtime-profile.json" \
-    "$root_stage/gvisor-release-20260810.0.tar.bz2" \
     "$root_stage/scripts/ops/install_personal_dev_builder_runtime.py" \
     "$root_stage/scripts/ops/personal_dev_builder_runtime_profile.py"
   do
@@ -533,6 +532,11 @@ assert_node_staging() {
       -c '%F:%u:%g:%a:%h' "$staged_path")" = \
       'regular file:0:0:400:1'
   done
+  test "$(ssh "${ssh_options[@]}" "$target" sudo -n -- \
+    /usr/bin/env LC_ALL=C /usr/bin/stat \
+    -c '%F:%u:%g:%a:%h' \
+    "$root_stage/gvisor-release-20260810.0.tar.bz2")" = \
+    "regular file:0:0:600:1"
 }
 
 k3s_agent_invocation_id() {
@@ -762,7 +766,7 @@ ssh "${ssh_options[@]}" "$target" \
 assert_remote_staging "$node"
 printf '%s\n' "$root_stage" > "$evidence_dir/$node.root-stage.txt"
 ssh "${ssh_options[@]}" "$target" \
-  "sudo -n -- /usr/bin/test ! -e '$root_stage_base' && sudo -n -- /usr/bin/install -d -o root -g root -m 0700 '$root_stage/scripts/ops' && sudo -n -- /usr/bin/install -o root -g root -m 0400 '$remote_stage/personal-dev-builder-runtime-profile.json' '$root_stage/personal-dev-builder-runtime-profile.json' && sudo -n -- /usr/bin/install -o root -g root -m 0400 '$remote_stage/gvisor-release-20260810.0.tar.bz2' '$root_stage/gvisor-release-20260810.0.tar.bz2' && sudo -n -- /usr/bin/install -o root -g root -m 0400 '$remote_stage/scripts/ops/install_personal_dev_builder_runtime.py' '$root_stage/scripts/ops/install_personal_dev_builder_runtime.py' && sudo -n -- /usr/bin/install -o root -g root -m 0400 '$remote_stage/scripts/ops/personal_dev_builder_runtime_profile.py' '$root_stage/scripts/ops/personal_dev_builder_runtime_profile.py'"
+  "sudo -n -- /usr/bin/test ! -e '$root_stage_base' && sudo -n -- /usr/bin/install -d -o root -g root -m 0700 '$root_stage/scripts/ops' && sudo -n -- /usr/bin/install -o root -g root -m 0400 '$remote_stage/personal-dev-builder-runtime-profile.json' '$root_stage/personal-dev-builder-runtime-profile.json' && sudo -n -- /usr/bin/install -o root -g root -m 0600 '$remote_stage/gvisor-release-20260810.0.tar.bz2' '$root_stage/gvisor-release-20260810.0.tar.bz2' && sudo -n -- /usr/bin/install -o root -g root -m 0400 '$remote_stage/scripts/ops/install_personal_dev_builder_runtime.py' '$root_stage/scripts/ops/install_personal_dev_builder_runtime.py' && sudo -n -- /usr/bin/install -o root -g root -m 0400 '$remote_stage/scripts/ops/personal_dev_builder_runtime_profile.py' '$root_stage/scripts/ops/personal_dev_builder_runtime_profile.py'"
 assert_node_staging "$node"
 
 kubectl --kubeconfig "$kubeconfig" --request-timeout=10s \

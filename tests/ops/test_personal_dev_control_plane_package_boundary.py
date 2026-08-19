@@ -593,6 +593,11 @@ def test_personal_dev_builder_runtime_runbook_is_exact_and_inert() -> None:
     assert "/root/loom-personal-dev-builder-runtime-rollout" in runbook
     assert "installer_sha256" in runbook
     assert "profile_module_sha256" in runbook
+    assert (
+        "/usr/bin/install -o root -g root -m 0600 "
+        "'$remote_stage/gvisor-release-20260810.0.tar.bz2'"
+    ) in normalized
+    assert '"regular file:0:0:600:1"' in runbook
     assert "PYTHONPATH='$remote_stage'" not in runbook
     assert "cd '$root_stage' && sudo" not in runbook
     assert "assert_no_runtimeclass_consumers" in runbook
