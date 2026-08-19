@@ -21,6 +21,7 @@ from loom.pipeline.spec import Digest, PipelineModel, RecipeIdentityV1, RunGraph
 
 
 class TerminalGenRendererLocksV1(PipelineModel):
+    stage: Digest
     plan_audit: Digest
     card_finalize: Digest
     global_finalize: Digest
@@ -517,6 +518,14 @@ def build_terminalgen_authoring_graph(
             timeout_seconds=900,
         )
     )
+
+    for node in nodes:
+        if node.get("node_kind") == "container" and node.get("request_renderer") is None:
+            node["request_renderer"] = _renderer(
+                "terminalgen_stage_request",
+                renderers.stage,
+                [],
+            )
 
     return RunGraphSpecV1.model_validate(
         {

@@ -14,13 +14,18 @@ from loom.trajectory.storage import MinioObjectStore
 from loom_pipeline_orchestrator.fanout_runtime import FanoutExpansionRuntime
 from loom_pipeline_orchestrator.health import start_health_server
 from loom_pipeline_orchestrator.main_loop import OrchestratorContext, run
-from loom_pipeline_orchestrator.reconciler import PipelineReconciler
+from loom_pipeline_orchestrator.reconciler import (
+    CompositeReadinessRuntime,
+    PairedReadinessRuntime,
+    PipelineReconciler,
+)
 from loom_pipeline_orchestrator.repository import PipelineRepository
 from loom_pipeline_orchestrator.settings import PipelineOrchestratorSettings
 from loom_pipeline_orchestrator.stage1_runtime import (
     Stage1ReadinessResolver,
     Stage1RequestRenderer,
 )
+from loom_pipeline_orchestrator.terminalgen_runtime import TerminalGenReadinessRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -49,12 +54,23 @@ async def _amain() -> None:
             store=artifact_store,
             bucket=settings.artifacts_bucket,
         ),
-        readiness_resolver=Stage1ReadinessResolver(
-            repo_root=repo_root,
-            resource_profiles=resource_profiles,
-            image_runtime=image_runtime,
+        readiness_runtime=CompositeReadinessRuntime(
+            (
+                PairedReadinessRuntime(
+                    resolver=Stage1ReadinessResolver(
+                        repo_root=repo_root,
+                        resource_profiles=resource_profiles,
+                        image_runtime=image_runtime,
+                    ),
+                    renderer=Stage1RequestRenderer(),
+                ),
+                TerminalGenReadinessRuntime(
+                    repo_root=repo_root,
+                    resource_profiles=resource_profiles,
+                    image_runtime=image_runtime,
+                ),
+            )
         ),
-        request_renderer=Stage1RequestRenderer(),
     )
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
