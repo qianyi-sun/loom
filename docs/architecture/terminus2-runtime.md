@@ -87,6 +87,7 @@ The Harbor-embedded runtime emits these events for operators and debuggers:
 | `terminus2_context_boundary` | Context/window boundary marker |
 | `terminus2_artifact_ref` | Pointer to Harbor artifact (e.g. `recording.cast`) |
 | `terminus2_model_switch_planned` | Durable K1/K2 cuts from the plan (before Harbor runs) |
+| `terminus2_model_mix_planned` | Durable `beta_mixture` plan (`beta`, seed fingerprint) |
 | `terminus2_model_switch` | Applied student↔teacher cut |
 | `terminus2_llm_call_started` / `_completed` / `_failed` | Per-call correlation around the router |
 | `terminus2_episode_checkpoint` | Episode snapshot used on worker retry |
@@ -199,6 +200,10 @@ Constraints:
 - Router keys off Harbor `_n_episodes` so parse retries stay on the same role.
 - Emits a `terminus2_model_switch` event per applied cut.
 - Workers that do not advertise `terminus2_model_switch` cannot claim these trials.
+- The worker claim payload must include `model_switch_plan` (seed, `mix_mode`,
+  K1/K2 or `beta`). Both `POST /work/claim` and the local-compose legacy
+  `POST /trials/claim` attach the same snapshot. `beta_mixture` cannot
+  recover the mix seed from `trial_config.mix_seed` at runtime.
 
 ### Worker retry: fail closed (no merged Harbor rerun)
 
@@ -229,7 +234,7 @@ That merge is forbidden.
 v1 therefore **fails the trial attempt** (`terminus2_recovery_failed`,
 `AgentError` whose message starts with `terminus-2 recovery_failed`) instead
 of stitching. A later exact replay is a **new trial** that **inherits** the
-plan (same K1/K2), not a continuation of the crashed session.
+plan (same K1/K2, or the same `beta_mixture` seed), not a continuation of the crashed session.
 
 This is intentional, not a missing Harbor hook. True mid-session resume
 (same tmux, same episode, same role) would need a Harbor resume path,
@@ -250,6 +255,7 @@ Related: `src/loom_control_plane/terminus_recovery.py`,
 | `src/loom/agent/terminus2/mapper.py` | TB2 v2 projection |
 | `src/loom_service/delivery_export_tb2_v2.py` | TB2 v2 export framework |
 | `src/loom_service/multi_model.py` | Batch validation / materialization |
+| `src/loom_control_plane/routes/workers.py` | Claim payload `model_switch_plan` (`/work/claim` and `/trials/claim`) |
 | `src/loom_control_plane/terminus_recovery.py` | Execution reclaim; fail closed if a checkpoint exists |
 | `packages/loom-launcher/loom_launcher/terminus_2_runner.py` | Import-stability stub; exits with current runtime guidance |
 | `tests/conformance/terminus2/README.md` | Local conformance notes |

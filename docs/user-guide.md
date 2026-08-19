@@ -1558,10 +1558,12 @@ loom run
   `loom-launcher` or per-trial `install_script`. See
   [`architecture/terminus2-runtime.md`](architecture/terminus2-runtime.md).
 
-  Optional student/teacher/student switch (#1380): default remains a
-  **single-model** trial. Opt in on `loom eval batch create` with:
+  Optional student/teacher mix (#1380): default remains a **single-model**
+  trial. Opt in on `loom eval batch create` with **one** of the two
+  policies (they cannot be combined):
 
   ```bash
+  # Path A — K1/K2 blocks (default when --multi-model is set without --beta)
   loom eval batch create \
     --agent terminus-2 \
     --provider <name> \
@@ -1570,18 +1572,33 @@ loom run
     --multi-model-secondary <teacher> \
     [--multi-model-switch-episode 3] \
     [--multi-model-teacher-episodes 2] \
-    [--multi-model-beta 0.6] \
+    ...
+
+  # Path B — per-episode teacher coin
+  loom eval batch create \
+    --agent terminus-2 \
+    --provider <name> \
+    --model <student> \
+    --multi-model \
+    --multi-model-secondary <teacher> \
+    --multi-model-beta 0.6 \
+    [--multi-model-seed 42] \
     ...
   ```
 
-  Same BYO connection. Default policy: student until K1, teacher for
+  Same BYO connection. Path A: student until K1, teacher for
   `teacher_episodes`, then student from K2. K1 is sampled if the
   switch-episode flag is omitted.
 
-  Alternative mix (`--multi-model-beta 0.6`): each Harbor episode the teacher
-  drives with probability beta (replay-safe hash of plan seed + trial +
-  episode). Cannot be combined with K1/K2 flags. Optional
-  `--multi-model-seed`. This is who acts, not DAgger teacher labels.
+  Path B (`--multi-model-beta`): each Harbor episode the teacher drives
+  if `hash(seed:trial_id:episode) < beta`. Optional `--multi-model-seed`
+  is stored on `model_switch_plans.seed` (not on `trial_config` as
+  `seed`). This is who acts, not DAgger teacher labels.
+
+  `raw-harbor-tb2-v2` packs applied cuts in
+  `agent_runs/.../trajectory.json` → `model_switches`, and per-step
+  `role` on agent steps. Gateway `llm_calls.role` / `requested_model`
+  are the call-grain evidence.
 
   Not supported with `--combinations-json`.
 
@@ -1589,7 +1606,8 @@ loom run
   Loom **does not** restart Harbor from episode 1 on the same trial
   trajectory (that would glue a new student run onto a partial
   student/teacher log). The attempt fails with `terminus-2 recovery_failed`.
-  Retry the task as a new trial that inherits the same K1/K2 plan. See
+  Retry the task as a new trial that inherits the same plan (K1/K2 or
+  beta mix seed). See
   [terminus2-runtime.md](architecture/terminus2-runtime.md)
   (mid-trajectory switch, worker retry).
 - any other name — resolved via `loom_launcher.get_adapter(name)` from the
