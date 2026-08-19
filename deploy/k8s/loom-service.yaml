@@ -164,7 +164,13 @@ spec:
           value: loom-personal-dev-builder
         - name: LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_CACHE_DIR
           value: /var/lib/loom-personal-dev-scanner
+        - name: LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_CACHE_IDENTITY_SHA256
+          value: ''
+        - name: LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_DATABASE_METADATA_SHA256
+          value: ''
         - name: LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_IDENTITY
+          value: ''
+        - name: LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_JAVA_DATABASE_METADATA_SHA256
           value: ''
         - name: LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_PATH
           value: /usr/local/bin/trivy

@@ -71,7 +71,12 @@ def test_every_normal_job_consumes_its_ci_route_dependency() -> None:
 def test_image_and_smoke_jobs_consume_only_their_route_maps() -> None:
     images = _workflow("images")["jobs"]
     build = images["build"]
-    assert set(build["needs"]) == {"plan", "image-route", "trivy-binary"}
+    assert set(build["needs"]) == {
+        "plan",
+        "image-route",
+        "trivy-binary",
+        "personal-dev-scanner-cache-assets",
+    }
     assert "ubuntu-24.04-arm" in build["runs-on"]
     assert "needs.image-route.outputs.routes" in build["runs-on"]
 
