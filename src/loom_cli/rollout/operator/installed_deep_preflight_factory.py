@@ -287,8 +287,25 @@ def _external_supervisor_predecessor_source(
         if observation_source is None:
             assert store is not None and control is not None
             canonical = store.read_canonical()
-            unit_names = set(store.list_units()) | set(
-                legacy.unit_sha256 if canonical is None else canonical.unit_sha256
+            candidate_unit_names: set[str] = set()
+            if execution_host == STAGING_ROLLOUT_EXECUTION_HOST:
+                # Final apply observes every target unit name, including units
+                # that are not installed yet. Bind preflight to that same live
+                # view so absent candidate units cannot change the evidence
+                # shape between admission and protected apply.
+                artifact = build_external_supervisor_artifact(
+                    candidate_root,
+                    candidate_sha=candidate_sha,
+                    candidate_tree=candidate_tree,
+                    image_tag=f"staging-{candidate_sha[:7]}",
+                    environment="staging",
+                    execution_host=execution_host,
+                )
+                candidate_unit_names.update(artifact.unit_sha256)
+            unit_names = (
+                candidate_unit_names
+                | set(store.list_units())
+                | set(legacy.unit_sha256 if canonical is None else canonical.unit_sha256)
             )
             units = {name: store.read_unit(name) for name in sorted(unit_names)}
             timers = {

@@ -444,8 +444,9 @@ class _OldlabLegacyExternalSupervisorStore:
     def list_units(self) -> tuple[str, ...]:
         return tuple(self.manifest.unit_sha256)
 
-    def read_unit(self, name: str) -> bytes:
-        return self.manifest.unit_payloads[name].encode()
+    def read_unit(self, name: str) -> bytes | None:
+        payload = self.manifest.unit_payloads.get(name)
+        return None if payload is None else payload.encode()
 
     def read_canonical(self):
         return None
@@ -535,6 +536,45 @@ class _ReadyGb10LegacyExternalSupervisorControl:
             result="success",
             exec_main_status=0,
             fragment_path=str(Path(GB10_CANONICAL_UNIT_DIR) / name),
+            need_daemon_reload="no",
+        )
+
+
+class _ReadyOldlabLegacyExternalSupervisorControl:
+    def __init__(self) -> None:
+        self.manifest = load_predecessor_manifest(execution_host="TRT-EAI-OLDLAB-1")
+
+    def timer_status(self, name: str) -> TimerRuntimeStatus:
+        if name not in self.manifest.unit_sha256:
+            return TimerRuntimeStatus(
+                load_state="not-found",
+                unit_file_state="not-found",
+                active_state="inactive",
+                fragment_path="",
+                need_daemon_reload="no",
+            )
+        return TimerRuntimeStatus(
+            load_state="loaded",
+            unit_file_state="enabled",
+            active_state="active",
+            fragment_path=str(PROTECTED_USER_UNIT_DIR / name),
+            need_daemon_reload="no",
+        )
+
+    def service_status(self, name: str) -> ServiceRuntimeStatus:
+        if name not in self.manifest.unit_sha256:
+            return ServiceRuntimeStatus(
+                load_state="not-found",
+                result="",
+                exec_main_status=None,
+                fragment_path="",
+                need_daemon_reload="no",
+            )
+        return ServiceRuntimeStatus(
+            load_state="loaded",
+            result="success",
+            exec_main_status=0,
+            fragment_path=str(PROTECTED_USER_UNIT_DIR / name),
             need_daemon_reload="no",
         )
 
@@ -747,8 +787,9 @@ def test_installed_external_supervisor_predecessor_source_binds_merged_provenanc
 
 def test_installed_predecessor_recognizes_exact_oldlab_activation_on_oldlab_host(
     monkeypatch: pytest.MonkeyPatch,
+    secure_candidate_root: Path,
 ) -> None:
-    candidate_root = Path(__file__).resolve().parents[4]
+    candidate_root = secure_candidate_root
     store = _OldlabLegacyExternalSupervisorStore()
     monkeypatch.setattr(
         installed_deep_preflight_factory,
@@ -758,7 +799,7 @@ def test_installed_predecessor_recognizes_exact_oldlab_activation_on_oldlab_host
     monkeypatch.setattr(
         installed_deep_preflight_factory,
         "FixedUserSystemdControl",
-        lambda **_kwargs: _ReadyLegacyExternalSupervisorControl(),
+        lambda **_kwargs: _ReadyOldlabLegacyExternalSupervisorControl(),
     )
 
     source = installed_deep_preflight_factory._external_supervisor_predecessor_source(
@@ -784,6 +825,64 @@ def test_installed_predecessor_recognizes_exact_oldlab_activation_on_oldlab_host
     assert snapshot.authority_digest == store.manifest.manifest_digest
     assert dict(snapshot.unit_sha256) == dict(store.manifest.unit_sha256)
     assert snapshot.transition_clear is True
+    assert snapshot.runtime_ready is True
+
+
+def test_installed_oldlab_preflight_observes_the_final_candidate_unit_set(
+    monkeypatch: pytest.MonkeyPatch,
+    secure_candidate_root: Path,
+) -> None:
+    candidate_root = secure_candidate_root
+    context = _installed_predecessor_context(
+        candidate_root,
+        backup_schema_revision="0088",
+        database_schema_revision="0088",
+    )
+    artifact = build_external_supervisor_artifact(
+        candidate_root,
+        candidate_sha=str(context.bindings["candidate.sha"]),
+        candidate_tree=str(context.bindings["candidate.tree"]),
+        image_tag=f"staging-{str(context.bindings['candidate.sha'])[:7]}",
+        environment="staging",
+        execution_host="TRT-EAI-OLDLAB-1",
+    )
+    store = _OldlabLegacyExternalSupervisorStore()
+    control = _ReadyOldlabLegacyExternalSupervisorControl()
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "AtomicUserUnitStore",
+        lambda **_kwargs: store,
+    )
+    monkeypatch.setattr(
+        installed_deep_preflight_factory,
+        "FixedUserSystemdControl",
+        lambda **_kwargs: control,
+    )
+    source = installed_deep_preflight_factory._external_supervisor_predecessor_source(
+        candidate_root=candidate_root,
+        git_run=_git_run,
+        service_uid=501,
+        pool_identity_source=lambda: _pool_identity(
+            "0088",
+            legacy_count=0,
+            target_count=1,
+        ),
+        execution_host="TRT-EAI-OLDLAB-1",
+    )
+
+    snapshot = source(context)
+    final_observation = transport_module.FixedExternalSupervisorTransport(
+        store=store,
+        control=control,
+    ).observe(artifact)
+
+    assert set(final_observation.unit_payloads) == {
+        "loom-autoscaler-oldlab-staging.service",
+        "loom-autoscaler-oldlab-staging.timer",
+        "loom-task-image-builder-oldlab-staging.service",
+        "loom-task-image-builder-oldlab-staging.timer",
+    }
+    assert snapshot.live_evidence_digest == final_observation.evidence_digest
     assert snapshot.runtime_ready is True
 
 
