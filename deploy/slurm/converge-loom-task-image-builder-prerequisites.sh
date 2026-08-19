@@ -7,6 +7,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 LOOM_DEFAULT_POLICY_PATH="$REPO_ROOT/deploy/task-image-builder/prerequisites-v1.toml"
 LOOM_DEFAULT_STATE_ROOT="/var/lib/loom-task-builder/slurm-authority"
+LOOM_SLURM_READBACK="$REPO_ROOT/scripts/ops/task_image_builder_slurm_readback.py"
 LOOM_POLICY_PATH="${LOOM_POLICY_PATH:-$LOOM_DEFAULT_POLICY_PATH}"
 LOOM_STATE_ROOT="${LOOM_STATE_ROOT:-$LOOM_DEFAULT_STATE_ROOT}"
 LOOM_STATE_OWNER="${LOOM_STATE_OWNER:-root}"
@@ -51,9 +52,27 @@ if len(clusters) != 1:
 cluster = clusters[0]
 identity = policy["identity"]
 resources = policy["resource_profile"]
+legacy = policy["legacy_guard"]
 
-if identity.get("user") != "loom-builder" or identity.get("group") != "loom-task-builder":
+if (
+    identity.get("user") != "loom-builder"
+    or identity.get("uid") != 993
+    or identity.get("group") != "loom-task-builder"
+    or identity.get("gid") != 980
+    or identity.get("home") != "/nonexistent"
+    or identity.get("shell") != "/usr/sbin/nologin"
+):
     raise SystemExit("builder identity is not exact")
+if legacy != {
+    "qos": "loom-task-image-builder",
+    "reservation": "loom-task-image-builder",
+    "account": "loom-staging",
+    "user": "loom-rollout",
+    "max_jobs_per_user": 1,
+    "max_submit_jobs_per_user": 1,
+    "max_wall": "04:00:00",
+}:
+    raise SystemExit("legacy builder guard is not exact")
 if (
     resources.get("cpus") != 8
     or resources.get("memory_mib") != 32768
@@ -71,9 +90,19 @@ if (
 if (
     cluster.get("builder_partition") != "loom-task-builder"
     or cluster.get("slurm_account") != "loom-task-builder"
-    or cluster.get("slurm_qos") != "loom-task-image-builder"
+    or not isinstance(cluster.get("slurm_qos"), str)
+    or not cluster["slurm_qos"]
 ):
     raise SystemExit("builder Slurm identity is not exact")
+if cluster["slurm_qos"] == legacy["qos"]:
+    raise SystemExit("rootless QoS collides with legacy")
+for key in (
+    "legacy_base_qos",
+    "legacy_reservation_node",
+    "legacy_reservation_partition",
+):
+    if not isinstance(cluster.get(key), str) or not cluster[key]:
+        raise SystemExit("legacy cluster guard is not exact")
 
 values = (
     cluster["slurm_cluster"],
@@ -94,11 +123,26 @@ values = (
     cluster["slurm_config_group"],
     cluster["slurm_config_mode"],
     identity["user"],
+    identity["group"],
+    str(identity["uid"]),
+    str(identity["gid"]),
+    identity["home"],
+    identity["shell"],
     str(resources["cpus"]),
     str(resources["memory_mib"]),
     resources["wall_time"],
     str(resources["max_jobs_per_user"]),
     str(resources["max_submit_jobs_per_user"]),
+    legacy["qos"],
+    legacy["reservation"],
+    legacy["account"],
+    legacy["user"],
+    str(legacy["max_jobs_per_user"]),
+    str(legacy["max_submit_jobs_per_user"]),
+    legacy["max_wall"],
+    cluster["legacy_base_qos"],
+    cluster["legacy_reservation_node"],
+    cluster["legacy_reservation_partition"],
 )
 for value in values:
     if not isinstance(value, str) or not value or "\n" in value or "\r" in value:
@@ -110,7 +154,7 @@ PY
     return
   fi
   mapfile -t values <<<"$output"
-  if [[ "${#values[@]}" -ne 23 ]]; then
+  if [[ "${#values[@]}" -ne 38 ]]; then
     loom_builder_slurm_error "prerequisite policy output is incomplete"
     return
   fi
@@ -133,11 +177,26 @@ PY
   LOOM_SLURM_CONFIG_GROUP="${values[15]}"
   LOOM_SLURM_CONFIG_MODE="${values[16]}"
   LOOM_BUILDER_USER="${values[17]}"
-  LOOM_BUILDER_CPUS="${values[18]}"
-  LOOM_BUILDER_MEMORY_MIB="${values[19]}"
-  LOOM_BUILDER_WALL="${values[20]}"
-  LOOM_BUILDER_MAX_JOBS="${values[21]}"
-  LOOM_BUILDER_MAX_SUBMIT="${values[22]}"
+  LOOM_BUILDER_GROUP="${values[18]}"
+  LOOM_BUILDER_UID="${values[19]}"
+  LOOM_BUILDER_GID="${values[20]}"
+  LOOM_BUILDER_HOME="${values[21]}"
+  LOOM_BUILDER_SHELL="${values[22]}"
+  LOOM_BUILDER_CPUS="${values[23]}"
+  LOOM_BUILDER_MEMORY_MIB="${values[24]}"
+  LOOM_BUILDER_WALL="${values[25]}"
+  LOOM_BUILDER_MAX_JOBS="${values[26]}"
+  LOOM_BUILDER_MAX_SUBMIT="${values[27]}"
+  LOOM_LEGACY_QOS="${values[28]}"
+  LOOM_LEGACY_RESERVATION="${values[29]}"
+  LOOM_LEGACY_ACCOUNT="${values[30]}"
+  LOOM_LEGACY_USER="${values[31]}"
+  LOOM_LEGACY_MAX_JOBS="${values[32]}"
+  LOOM_LEGACY_MAX_SUBMIT="${values[33]}"
+  LOOM_LEGACY_WALL="${values[34]}"
+  LOOM_LEGACY_BASE_QOS="${values[35]}"
+  LOOM_LEGACY_RESERVATION_NODE="${values[36]}"
+  LOOM_LEGACY_RESERVATION_PARTITION="${values[37]}"
   LOOM_BACKUP="$LOOM_STATE_ROOT/slurm.conf.before-loom-task-builder"
 
   if [[ "$LOOM_HOST_ARCH" != "$LOOM_EXPECTED_ARCH" ]]; then
@@ -165,6 +224,45 @@ loom_builder_slurm_validate_controller() {
     "^SlurmctldHost\[0\][[:space:]]*=[[:space:]]*$LOOM_EXPECTED_CONTROLLER(\(|$)" \
     <<<"$live_config"; then
     loom_builder_slurm_error "Slurm controller readback does not match policy"
+    return
+  fi
+}
+
+loom_builder_slurm_validate_controller_identity() {
+  local passwd_by_name passwd_by_id group_by_name group_by_id supplementary
+  local passwd_name _passwd uid gid _gecos home shell passwd_extra
+  local group_name _group_password group_gid _members group_extra
+
+  if ! passwd_by_name="$(getent passwd "$LOOM_BUILDER_USER")" \
+    || ! passwd_by_id="$(getent passwd "$LOOM_BUILDER_UID")" \
+    || ! group_by_name="$(getent group "$LOOM_BUILDER_GROUP")" \
+    || ! group_by_id="$(getent group "$LOOM_BUILDER_GID")" \
+    || ! supplementary="$(id -G "$LOOM_BUILDER_USER")"; then
+    loom_builder_slurm_error "controller builder identity is unavailable or unsafe"
+    return
+  fi
+  if [[ -z "$passwd_by_name" || "$passwd_by_name" == *$'\n'* \
+    || "$passwd_by_name" != "$passwd_by_id" \
+    || -z "$group_by_name" || "$group_by_name" == *$'\n'* \
+    || "$group_by_name" != "$group_by_id" ]]; then
+    loom_builder_slurm_error "controller builder identity is unavailable or unsafe"
+    return
+  fi
+  IFS=: read -r passwd_name _passwd uid gid _gecos home shell passwd_extra \
+    <<<"$passwd_by_name"
+  IFS=: read -r group_name _group_password group_gid _members group_extra \
+    <<<"$group_by_name"
+  if [[ "$passwd_name" != "$LOOM_BUILDER_USER" \
+    || "$uid" != "$LOOM_BUILDER_UID" \
+    || "$gid" != "$LOOM_BUILDER_GID" \
+    || "$home" != "$LOOM_BUILDER_HOME" \
+    || "$shell" != "$LOOM_BUILDER_SHELL" \
+    || -n "$passwd_extra" \
+    || "$group_name" != "$LOOM_BUILDER_GROUP" \
+    || "$group_gid" != "$LOOM_BUILDER_GID" \
+    || -n "$group_extra" \
+    || "$supplementary" != "$LOOM_BUILDER_GID" ]]; then
+    loom_builder_slurm_error "controller builder identity is unavailable or unsafe"
     return
   fi
 }
@@ -282,8 +380,78 @@ loom_builder_slurm_validate_live_partitions() {
   fi
 }
 
+loom_builder_slurm_read_legacy_fingerprint() {
+  local qos_raw association_raw reservation_raw
+  local qos_json association_json reservation_json checksum fingerprint remainder
+
+  if ! qos_raw="$(timeout 30 sacctmgr --noheader --parsable2 \
+    show qos where "name=$LOOM_LEGACY_QOS" \
+    format=Name,Flags,Priority,MaxJobsPU,MaxSubmitJobsPU,MaxWall,GrpTRES \
+    </dev/null)" \
+    || ! association_raw="$(timeout 30 sacctmgr --noheader --parsable2 \
+      show association where "cluster=$LOOM_SLURM_CLUSTER" \
+      "account=$LOOM_LEGACY_ACCOUNT" "user=$LOOM_LEGACY_USER" \
+      format=Cluster,Account,User,QOS,DefaultQOS </dev/null)" \
+    || ! reservation_raw="$(timeout 30 scontrol show reservation \
+      "$LOOM_LEGACY_RESERVATION" -o </dev/null)"; then
+    loom_builder_slurm_error "legacy builder readback is unavailable"
+    return
+  fi
+  if ! qos_json="$(printf '%s' "$qos_raw" | python3 "$LOOM_SLURM_READBACK" qos \
+    --name "$LOOM_LEGACY_QOS" --flags DenyOnLimit --priority 0 \
+    --max-jobs "$LOOM_LEGACY_MAX_JOBS" \
+    --max-submit "$LOOM_LEGACY_MAX_SUBMIT" --max-wall "$LOOM_LEGACY_WALL" \
+    --group-tres '')" \
+    || ! association_json="$(printf '%s' "$association_raw" \
+      | python3 "$LOOM_SLURM_READBACK" association \
+        --cluster "$LOOM_SLURM_CLUSTER" --account "$LOOM_LEGACY_ACCOUNT" \
+        --user "$LOOM_LEGACY_USER" \
+        --qos "$LOOM_LEGACY_BASE_QOS,$LOOM_LEGACY_QOS" \
+        --default-qos "$LOOM_LEGACY_BASE_QOS")" \
+    || ! reservation_json="$(printf '%s' "$reservation_raw" \
+      | python3 "$LOOM_SLURM_READBACK" reservation \
+        --name "$LOOM_LEGACY_RESERVATION" \
+        --node "$LOOM_LEGACY_RESERVATION_NODE" --node-count 1 \
+        --partition "$LOOM_LEGACY_RESERVATION_PARTITION" \
+        --users "$LOOM_LEGACY_USER" --accounts "$LOOM_LEGACY_ACCOUNT" \
+        --state ACTIVE --flags IGNORE_JOBS,SPEC_NODES)"; then
+    loom_builder_slurm_error "legacy builder readback is invalid"
+    return
+  fi
+  if ! checksum="$(
+    printf '%s\n%s\n%s\n' "$qos_json" "$association_json" "$reservation_json" \
+      | sha256sum
+  )"; then
+    loom_builder_slurm_error "legacy builder fingerprint is unavailable"
+    return
+  fi
+  read -r fingerprint remainder <<<"$checksum"
+  if [[ ! "$fingerprint" =~ ^[0-9a-f]{64}$ || -z "$remainder" ]]; then
+    loom_builder_slurm_error "legacy builder fingerprint is unavailable"
+    return
+  fi
+  printf '%s\n' "$fingerprint"
+}
+
+loom_builder_slurm_capture_legacy_fingerprint() {
+  if ! LOOM_LEGACY_FINGERPRINT="$(loom_builder_slurm_read_legacy_fingerprint)"; then
+    return 1
+  fi
+}
+
+loom_builder_slurm_verify_legacy_fingerprint() {
+  local current
+  if ! current="$(loom_builder_slurm_read_legacy_fingerprint)"; then
+    return 1
+  fi
+  if [[ "$current" != "$LOOM_LEGACY_FINGERPRINT" ]]; then
+    loom_builder_slurm_error "legacy builder fingerprint changed during convergence"
+    return
+  fi
+}
+
 loom_builder_slurm_read_accounting() {
-  local desired_association desired_qos legacy_qos
+  local account_json qos_json association_json
   if ! LOOM_ACCOUNT_ROW="$(timeout 30 sacctmgr --noheader --parsable2 \
     show account where "name=$LOOM_SLURM_ACCOUNT" format=Account </dev/null)"; then
     loom_builder_slurm_error "Slurm account readback is unavailable"
@@ -304,33 +472,45 @@ loom_builder_slurm_read_accounting() {
     return
   fi
 
-  desired_qos="$LOOM_SLURM_QOS|DenyOnLimit|0|$LOOM_BUILDER_MAX_JOBS|$LOOM_BUILDER_MAX_SUBMIT|$LOOM_BUILDER_WALL|cpu=$LOOM_BUILDER_CPUS,mem=${LOOM_BUILDER_MEMORY_MIB}M,node=1|"
-  legacy_qos="$LOOM_SLURM_QOS|DenyOnLimit|0|1|1|04:00:00||"
-  desired_association="$LOOM_SLURM_CLUSTER|$LOOM_SLURM_ACCOUNT|$LOOM_BUILDER_USER|$LOOM_BUILDER_PARTITION|$LOOM_SLURM_QOS|$LOOM_SLURM_QOS|"
+  if ! account_json="$(printf '%s' "$LOOM_ACCOUNT_ROW" \
+    | python3 "$LOOM_SLURM_READBACK" account --name "$LOOM_SLURM_ACCOUNT" \
+      --allow-absent)"; then
+    loom_builder_slurm_error "rootless account readback drift is unsafe"
+    return
+  fi
+  if ! qos_json="$(printf '%s' "$LOOM_QOS_ROW" \
+    | python3 "$LOOM_SLURM_READBACK" qos --name "$LOOM_SLURM_QOS" \
+      --flags DenyOnLimit --priority 0 --max-jobs "$LOOM_BUILDER_MAX_JOBS" \
+      --max-submit "$LOOM_BUILDER_MAX_SUBMIT" --max-wall "$LOOM_BUILDER_WALL" \
+      --group-tres "cpu=$LOOM_BUILDER_CPUS,mem=${LOOM_BUILDER_MEMORY_MIB}M,node=1" \
+      --allow-absent)"; then
+    loom_builder_slurm_error "rootless QoS readback drift is unsafe"
+    return
+  fi
+  if ! association_json="$(printf '%s' "$LOOM_ASSOCIATION_ROW" \
+    | python3 "$LOOM_SLURM_READBACK" association \
+      --cluster "$LOOM_SLURM_CLUSTER" --account "$LOOM_SLURM_ACCOUNT" \
+      --user "$LOOM_BUILDER_USER" --partition "$LOOM_BUILDER_PARTITION" \
+      --qos "$LOOM_SLURM_QOS" --default-qos "$LOOM_SLURM_QOS" \
+      --allow-absent)"; then
+    loom_builder_slurm_error "rootless association readback drift is unsafe"
+    return
+  fi
 
-  if [[ -z "$LOOM_ACCOUNT_ROW" ]]; then
+  if [[ "$account_json" == "null" ]]; then
     LOOM_ACCOUNT_CONVERGED=0
-  elif [[ "$LOOM_ACCOUNT_ROW" == "$LOOM_SLURM_ACCOUNT|" ]]; then
+  else
     LOOM_ACCOUNT_CONVERGED=1
-  else
-    loom_builder_slurm_error "Slurm account drift is unsafe"
-    return
   fi
-  if [[ "$LOOM_QOS_ROW" == "$legacy_qos" ]]; then
+  if [[ "$qos_json" == "null" ]]; then
     LOOM_QOS_CONVERGED=0
-  elif [[ "$LOOM_QOS_ROW" == "$desired_qos" ]]; then
+  else
     LOOM_QOS_CONVERGED=1
-  else
-    loom_builder_slurm_error "Slurm QoS drift is unsafe"
-    return
   fi
-  if [[ -z "$LOOM_ASSOCIATION_ROW" ]]; then
+  if [[ "$association_json" == "null" ]]; then
     LOOM_ASSOCIATION_CONVERGED=0
-  elif [[ "$LOOM_ASSOCIATION_ROW" == "$desired_association" ]]; then
-    LOOM_ASSOCIATION_CONVERGED=1
   else
-    loom_builder_slurm_error "Slurm association drift is unsafe"
-    return
+    LOOM_ASSOCIATION_CONVERGED=1
   fi
 }
 
@@ -338,8 +518,10 @@ loom_builder_slurm_preflight() {
   local cluster_id="$1"
   loom_builder_slurm_load_policy "$cluster_id"
   loom_builder_slurm_validate_controller
+  loom_builder_slurm_validate_controller_identity
   loom_builder_slurm_validate_durable_config
   loom_builder_slurm_validate_live_partitions
+  loom_builder_slurm_capture_legacy_fingerprint
   loom_builder_slurm_read_accounting
 }
 
@@ -409,13 +591,13 @@ loom_builder_slurm_apply_accounting() {
     fi
   fi
   if [[ "$LOOM_QOS_CONVERGED" == "0" ]]; then
-    if ! sacctmgr --immediate modify qos where "name=$LOOM_SLURM_QOS" set \
-      Flags=DenyOnLimit Priority=0 \
+    if ! sacctmgr --immediate add qos "name=$LOOM_SLURM_QOS" \
+      flags=DenyOnLimit Priority=0 \
       "MaxJobsPU=$LOOM_BUILDER_MAX_JOBS" \
       "MaxSubmitJobsPU=$LOOM_BUILDER_MAX_SUBMIT" \
       "MaxWall=$LOOM_BUILDER_WALL" \
       "GrpTRES=cpu=$LOOM_BUILDER_CPUS,mem=${LOOM_BUILDER_MEMORY_MIB}M,node=1"; then
-      loom_builder_slurm_error "failed to narrow the builder Slurm QoS"
+      loom_builder_slurm_error "failed to add the rootless builder Slurm QoS"
       return
     fi
   fi
@@ -459,6 +641,7 @@ loom_builder_slurm_apply() {
   loom_builder_slurm_validate_durable_config
   loom_builder_slurm_validate_live_partitions
   loom_builder_slurm_read_accounting
+  loom_builder_slurm_verify_legacy_fingerprint
   if [[ "$LOOM_PARTITION_CONVERGED" != "1" \
     || "$LOOM_ACCOUNT_CONVERGED" != "1" \
     || "$LOOM_QOS_CONVERGED" != "1" \
