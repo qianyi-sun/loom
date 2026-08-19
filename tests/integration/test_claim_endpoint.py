@@ -12,6 +12,7 @@ from loom.db.schema import (
     AdminAuditEvent,
     GB10WorkerNodeStatus,
     GB10WorkerPoolDesiredState,
+    ModelSwitchPlan,
     Task,
     TaskImageMaterialization,
     Team,
@@ -22,6 +23,7 @@ from loom.db.schema import (
     Worker,
     WorkerPoolAutoscalerPolicy,
 )
+from loom.models.model_switch_plan import PRNG_VERSION
 from loom_control_plane.app import create_app
 from loom_control_plane.config import ControlPlaneSettings
 
@@ -131,6 +133,67 @@ def test_claim_returns_trial(app, claim_seed):  # type: ignore[no-untyped-def]
         assert "trial_id" in body
         assert body["state"] == "claimed"
         assert body["attempt_count"] == 1
+        # Ordinary trials stay on this endpoint; plan is optional/null.
+        assert body["model_switch_plan"] is None
+
+
+def test_claim_includes_persisted_model_switch_plan(
+    app,
+    claim_seed,
+    postgres_url: str,
+):  # type: ignore[no-untyped-def]
+    worker_id, raw_worker, _ = claim_seed
+    plan_id = uuid4()
+    engine = create_engine(postgres_url)
+    with sessionmaker(engine)() as session:
+        trial_id = session.execute(select(Trial.id)).scalar_one()
+        session.execute(
+            insert(ModelSwitchPlan).values(
+                id=plan_id,
+                trial_id=trial_id,
+                combination_idx=0,
+                mix_mode="beta_mixture",
+                k1=None,
+                k2=None,
+                teacher_episodes=None,
+                beta=0.6,
+                seed="42",
+                prng_version=PRNG_VERSION,
+                student_model_snapshot={
+                    "provider": "openai",
+                    "name": "glm-5.2",
+                    "source": "api",
+                },
+                teacher_model_snapshot={
+                    "provider": "openai",
+                    "name": "glm-5.2-urg",
+                    "source": "api",
+                },
+                pricing_snapshot={},
+                capability_snapshot={},
+            )
+        )
+        session.commit()
+    engine.dispose()
+    with TestClient(app) as client:
+        r = client.post(
+            "/trials/claim",
+            headers={"Authorization": f"Bearer {raw_worker}"},
+            json={"worker_id": str(worker_id), "caps": [_LINUX_PUBLIC_CAP]},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["trial_id"] == str(trial_id)
+        assert body["state"] == "claimed"
+        assert body["attempt_count"] == 1
+        plan = body["model_switch_plan"]
+        assert plan is not None
+        assert plan["id"] == str(plan_id)
+        assert plan["mix_mode"] == "beta_mixture"
+        assert plan["beta"] == 0.6
+        assert plan["seed"] == "42"
+        assert plan["k1"] is None
+        assert plan["k2"] is None
 
 
 def test_claim_carries_frozen_task_image_execution_grant(

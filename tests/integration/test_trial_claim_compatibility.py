@@ -36,7 +36,12 @@ def test_unified_trial_payload_preserves_legacy_claim_fields_exactly() -> None:
     }
     claim = TrialClaimV1.model_validate(legacy)
     assert claim.task_image_materialization is None
-    assert set(claim.model_dump()) == {*legacy, "task_image_materialization"}
+    assert claim.model_switch_plan is None
+    assert set(claim.model_dump()) == {
+        *legacy,
+        "task_image_materialization",
+        "model_switch_plan",
+    }
     envelope = WorkClaimV1(schema_version="loom.work-claim.v1", work_kind="trial", payload=claim)
     assert envelope.payload == claim
 

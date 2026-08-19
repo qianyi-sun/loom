@@ -240,6 +240,7 @@ async def claim_trial(
             enforce_shared_slot=True,
         )
         task_image_materialization = None
+        model_switch_plan = None
         if row is not None:
             try:
                 task_image_materialization = await get_trial_task_image_execution_grant(
@@ -250,6 +251,10 @@ async def claim_trial(
             except RuntimeError:
                 await session.rollback()
                 return Response(status_code=204)
+            # Same snapshot as POST /work/claim. Local compose still uses
+            # this legacy endpoint; without the plan, beta_mixture cannot
+            # recover mix seed from trial_config.
+            model_switch_plan = await _model_switch_plan_payload(session, row["id"])
         await session.commit()
     elapsed = _time.perf_counter() - t0
 
@@ -283,6 +288,7 @@ async def claim_trial(
                 if task_image_materialization is not None
                 else None
             ),
+            "model_switch_plan": model_switch_plan,
             "state": "claimed",
         }
     )
