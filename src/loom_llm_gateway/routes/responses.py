@@ -12,7 +12,7 @@ import json
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 import httpx
@@ -20,10 +20,21 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from sqlalchemy import update
 from starlette.responses import StreamingResponse
 
+from loom.auth import AuthContext
 from loom.db.schema import ProviderConnection as ProviderConnectionRow
 from loom.models.types import ModelSpec
+from loom.pipeline.keys import CanonicalizationError, canonical_digest
 from loom_llm_gateway.dialect import DIALECTS, TokenUsage
 from loom_llm_gateway.llm_calls import record_call, record_failed_call
+from loom_llm_gateway.provider_dispatch import (
+    ProviderDispatchError,
+    ProviderDispatchGrant,
+    cost_microusd,
+    mark_provider_dispatch_sent,
+    release_provider_dispatch_unsent,
+    reserve_provider_dispatch,
+    settle_provider_dispatch,
+)
 from loom_llm_gateway.rate_card import (
     compute_cost_usd,
     hash_table,
@@ -95,7 +106,8 @@ async def _persist_probe_outcome(
             await session.commit()
     except Exception:
         logger.exception(
-            "failed to persist responses_probe outcome for %s", connection_id,
+            "failed to persist responses_probe outcome for %s",
+            connection_id,
         )
 
 
@@ -220,6 +232,7 @@ async def _dispatch_via_chat_translator(
         body_or_stream,
     )
 
+
 OPENAI_BASE_URL = "https://api.openai.com"
 _OPENAI_SHAPED_TYPES = frozenset({"openai-compatible", "custom"})
 _LOOM_REQUEST_PARAMS_QUERY_PARAM = "loom_request_params"
@@ -234,6 +247,10 @@ async def responses(
     x_loom_provider_connection_id: str | None = Header(
         default=None,
         alias="x-loom-provider-connection-id",
+    ),
+    x_loom_provider_request_id: str | None = Header(
+        default=None,
+        alias="x-loom-provider-request-id",
     ),
 ) -> dict[str, Any] | StreamingResponse:
     settings = request.app.state.settings
@@ -257,12 +274,22 @@ async def responses(
     model_name = payload.get("model")
     if not isinstance(model_name, str) or not model_name:
         raise HTTPException(status_code=400, detail="`model` is required")
+    provider_request_id = _execution_attempt_provider_request_id(
+        ctx,
+        x_loom_provider_request_id,
+        payload,
+    )
 
     connection_id = None
     if ctx.provider_connection_id is not None or x_loom_provider_connection_id:
         connection_id = resolve_provider_connection_id(
             ctx,
             x_loom_provider_connection_id,
+        )
+    if provider_request_id is not None and connection_id is None:
+        raise HTTPException(
+            status_code=403,
+            detail="execution-attempt calls require a bound provider connection",
         )
 
     if connection_id is not None:
@@ -278,6 +305,19 @@ async def responses(
 
         upstream_url = f"{row.base_url.rstrip('/')}/responses"
         upstream: httpx.AsyncClient = await request.app.state.egress_client_pool.get(row.id)
+
+        if provider_request_id is not None:
+            return await _dispatch_execution_attempt_responses(
+                request=request,
+                ctx=ctx,
+                row=row,
+                payload=payload,
+                api_key=api_key,
+                model_name=model_name,
+                upstream=upstream,
+                upstream_url=upstream_url,
+                provider_request_id=provider_request_id,
+            )
 
         async def _record_responses_transport_failure(
             category: str,
@@ -477,6 +517,243 @@ async def responses(
             request_params=normalize_request_params(payload),
         )
     return _responses_result(upstream_response, body_or_stream)
+
+
+def _execution_attempt_provider_request_id(
+    ctx: AuthContext,
+    raw: str | None,
+    payload: dict[str, Any],
+) -> UUID | None:
+    if ctx.execution_attempt_id is None:
+        return None
+    if payload.get("stream"):
+        raise HTTPException(
+            status_code=400,
+            detail="execution-attempt Responses calls do not support streaming",
+        )
+    if raw is None:
+        raise HTTPException(
+            status_code=400,
+            detail="x-loom-provider-request-id is required for execution-attempt calls",
+        )
+    try:
+        return UUID(raw)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="x-loom-provider-request-id must be a UUID",
+        ) from exc
+
+
+async def _dispatch_execution_attempt_responses(
+    *,
+    request: Request,
+    ctx: AuthContext,
+    row: ProviderConnectionRow,
+    payload: dict[str, Any],
+    api_key: str,
+    model_name: str,
+    upstream: httpx.AsyncClient,
+    upstream_url: str,
+    provider_request_id: UUID,
+) -> dict[str, Any]:
+    """Dispatch one attempt call with a pre-send durable accounting fence."""
+
+    if row.responses_api_supported is not True or not _probe_result_is_fresh(
+        row.responses_api_probed_at
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="execution-attempt calls require fresh native Responses support",
+        )
+    if row.pricing_source != "rate-card" or row.rate_card_provider != "openai":
+        raise HTTPException(
+            status_code=409,
+            detail="execution-attempt calls require configured OpenAI pricing",
+        )
+    try:
+        request_digest = canonical_digest(payload, persisted=False)
+    except CanonicalizationError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="execution-attempt request is not canonical JSON",
+        ) from exc
+
+    provider = "openai" if row.provider_type == "openai-compatible" else row.provider_type
+    try:
+        async with request.app.state.session_factory() as session:
+            grant = await reserve_provider_dispatch(
+                session,
+                ctx=ctx,
+                provider_request_id=provider_request_id,
+                request_digest=request_digest,
+                provider_connection_id=row.id,
+                provider=provider,
+                model=model_name,
+                wire_api="responses",
+            )
+    except ProviderDispatchError as exc:
+        raise _provider_dispatch_http_error(exc) from exc
+
+    try:
+        async with request.app.state.session_factory() as session:
+            await mark_provider_dispatch_sent(session, ctx=ctx, dispatch_id=grant.dispatch_id)
+    except ProviderDispatchError as exc:
+        await _release_attempt_reservation(request, ctx, grant)
+        raise _provider_dispatch_http_error(exc) from exc
+
+    headers = _upstream_headers(request, api_key)
+    try:
+        upstream_response = await upstream.post(
+            upstream_url,
+            json=payload,
+            headers=headers,
+            timeout=min(
+                float(request.app.state.settings.upstream_timeout_sec),
+                float(grant.timeout_seconds),
+            ),
+            follow_redirects=False,
+        )
+    except httpx.TimeoutException as exc:
+        await _settle_attempt_failure(
+            request,
+            ctx,
+            grant,
+            outcome="uncertain",
+            category="upstream_timeout",
+        )
+        raise HTTPException(status_code=504, detail="provider dispatch timed out") from exc
+    except httpx.RequestError as exc:
+        await _settle_attempt_failure(
+            request,
+            ctx,
+            grant,
+            outcome="uncertain",
+            category="upstream_transport",
+        )
+        raise HTTPException(status_code=502, detail="provider dispatch transport failure") from exc
+
+    if upstream_response.status_code >= 400:
+        await _settle_attempt_failure(
+            request,
+            ctx,
+            grant,
+            outcome="failed",
+            category=http_failure_category(upstream_response.status_code),
+        )
+        raise HTTPException(
+            status_code=upstream_response.status_code,
+            detail=f"provider dispatch failed with status {upstream_response.status_code}",
+        )
+
+    accounting_category = "response_decode_invalid"
+    try:
+        body = _decode_response_body(upstream_response)
+        if not isinstance(body, dict):
+            raise ValueError("streaming response is forbidden")
+        usage = _extract_responses_usage(body)
+        accounting_category = "response_pricing_invalid"
+        estimate = await compute_facade_cost_estimate(
+            row,
+            model_name,
+            usage,
+            rate_card_cache=request.app.state.rate_card_cache,
+        )
+        if estimate.confidence != "configured" or estimate.currency != "USD":
+            raise ValueError("configured USD pricing is required")
+        usage = token_usage_with_cost_metadata(usage, estimate)
+        accounting_category = "response_digest_invalid"
+        actual_cost = cost_microusd(estimate.cost_usd)
+        response_digest = canonical_digest(body, persisted=False)
+    except (CanonicalizationError, ProviderDispatchError, ValueError) as exc:
+        await _settle_attempt_failure(
+            request,
+            ctx,
+            grant,
+            outcome="uncertain",
+            category=accounting_category,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"provider response could not be durably accounted: {accounting_category}",
+        ) from exc
+
+    try:
+        async with request.app.state.session_factory() as session:
+            await settle_provider_dispatch(
+                session,
+                ctx=ctx,
+                dispatch_id=grant.dispatch_id,
+                outcome="succeeded",
+                usage=usage,
+                actual_cost_microusd=actual_cost,
+                rate_card_hash=estimate.rate_card_hash,
+                request_params=normalize_request_params(payload),
+                response_digest=response_digest,
+            )
+    except ProviderDispatchError as exc:
+        raise _provider_dispatch_http_error(exc, status_code=502) from exc
+    return body
+
+
+async def _release_attempt_reservation(
+    request: Request,
+    ctx: AuthContext,
+    grant: ProviderDispatchGrant,
+) -> None:
+    try:
+        async with request.app.state.session_factory() as session:
+            await release_provider_dispatch_unsent(
+                session,
+                ctx=ctx,
+                dispatch_id=grant.dispatch_id,
+            )
+    except ProviderDispatchError:
+        logger.warning(
+            "provider_dispatch_unsent_release_failed dispatch_id=%s",
+            grant.dispatch_id,
+        )
+
+
+async def _settle_attempt_failure(
+    request: Request,
+    ctx: AuthContext,
+    grant: ProviderDispatchGrant,
+    *,
+    outcome: Literal["failed", "uncertain"],
+    category: str,
+) -> None:
+    try:
+        async with request.app.state.session_factory() as session:
+            await settle_provider_dispatch(
+                session,
+                ctx=ctx,
+                dispatch_id=grant.dispatch_id,
+                outcome=outcome,
+                usage=TokenUsage(input_tokens=0, output_tokens=0),
+                actual_cost_microusd=grant.reserved_cost_microusd,
+                rate_card_hash="pipeline:conservative-reservation",
+                request_params={},
+                response_digest=None,
+                failure_category=category,
+            )
+    except ProviderDispatchError:
+        logger.exception(
+            "provider_dispatch_failure_settlement_failed dispatch_id=%s category=%s",
+            grant.dispatch_id,
+            category,
+        )
+
+
+def _provider_dispatch_http_error(
+    exc: ProviderDispatchError,
+    *,
+    status_code: int | None = None,
+) -> HTTPException:
+    return HTTPException(
+        status_code=status_code or exc.status_code,
+        detail=exc.reason,
+    )
 
 
 def _merge_query_request_params(

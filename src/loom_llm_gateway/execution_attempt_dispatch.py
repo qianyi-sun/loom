@@ -32,6 +32,8 @@ def _control_binding_digest(execution_spec: dict[str, object] | None) -> str | N
 async def authorize_execution_attempt_dispatch(
     session: AsyncSession,
     ctx: AuthContext,
+    *,
+    lock: bool = False,
 ) -> None:
     """Fail closed unless an attempt JWT still names the live DB authority.
 
@@ -42,14 +44,15 @@ async def authorize_execution_attempt_dispatch(
 
     if ctx.execution_attempt_id is None:
         return
-    row = (
-        await session.execute(
-            select(ExecutionAttempt, PipelineStageRun, PipelineRun)
-            .join(PipelineStageRun, PipelineStageRun.id == ExecutionAttempt.stage_run_id)
-            .join(PipelineRun, PipelineRun.id == PipelineStageRun.pipeline_run_id)
-            .where(ExecutionAttempt.id == ctx.execution_attempt_id)
-        )
-    ).one_or_none()
+    statement = (
+        select(ExecutionAttempt, PipelineStageRun, PipelineRun)
+        .join(PipelineStageRun, PipelineStageRun.id == ExecutionAttempt.stage_run_id)
+        .join(PipelineRun, PipelineRun.id == PipelineStageRun.pipeline_run_id)
+        .where(ExecutionAttempt.id == ctx.execution_attempt_id)
+    )
+    if lock:
+        statement = statement.with_for_update(of=(ExecutionAttempt, PipelineStageRun, PipelineRun))
+    row = (await session.execute(statement)).one_or_none()
     if row is None:
         raise HTTPException(status_code=403, detail="execution attempt dispatch forbidden")
     attempt, stage, run = row
@@ -63,6 +66,7 @@ async def authorize_execution_attempt_dispatch(
             ctx.step_jwt_id is not None
             and ctx.execution_attempt_lease_epoch is not None
             and ctx.execution_spec_digest is not None
+            and ctx.execution_authorization_digest is not None
             and ctx.provider_connection_id_bound
             and run.team_id == ctx.team_id
             and run.state == "running"
@@ -77,8 +81,7 @@ async def authorize_execution_attempt_dispatch(
             and attempt.lease_expires_at > datetime.now(UTC)
             and attempt.lease_epoch == ctx.execution_attempt_lease_epoch
             and attempt.step_jwt_id == ctx.step_jwt_id
-            and attempt.execution_authorization_digest
-            == ctx.execution_authorization_digest
+            and attempt.execution_authorization_digest == ctx.execution_authorization_digest
             and control_binding_digest == ctx.control_binding_snapshot_digest
         )
     except (AttributeError, TypeError, ValueError):

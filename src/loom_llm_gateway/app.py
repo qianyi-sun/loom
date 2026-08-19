@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
+from datetime import UTC, datetime, timedelta
 
 import httpx
 from fastapi import FastAPI
@@ -23,6 +26,7 @@ from loom.startup_retry import retry_startup_dependency
 from loom_llm_gateway.config import GatewaySettings
 from loom_llm_gateway.drain import ensure_drain_state, install_drain_middleware
 from loom_llm_gateway.egress_client_pool import EgressClientPool
+from loom_llm_gateway.provider_dispatch import settle_stale_provider_dispatches
 from loom_llm_gateway.rate_card import RateCardCache
 from loom_llm_gateway.routes import (
     admin,
@@ -36,6 +40,38 @@ from loom_llm_gateway.routes import (
     messages,
     responses,
 )
+
+logger = logging.getLogger(__name__)
+_PROVIDER_DISPATCH_SWEEP_INTERVAL_SECONDS = 15.0
+_PROVIDER_DISPATCH_SETTLEMENT_GRACE_SECONDS = 5.0
+
+
+async def _reconcile_provider_dispatches(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    upstream_timeout_seconds: float,
+) -> None:
+    stale_after = max(1.0, upstream_timeout_seconds) + _PROVIDER_DISPATCH_SETTLEMENT_GRACE_SECONDS
+    while True:
+        # Do not race startup/short-lived probes or shutdown with a recovery
+        # transaction. Rows are already held past the upstream timeout plus a
+        # grace period, so one bounded sweep interval preserves semantics.
+        await asyncio.sleep(_PROVIDER_DISPATCH_SWEEP_INTERVAL_SECONDS)
+        try:
+            async with session_factory() as session:
+                settled = await settle_stale_provider_dispatches(
+                    session,
+                    stale_before=datetime.now(UTC) - timedelta(seconds=stale_after),
+                )
+            if settled:
+                logger.warning(
+                    "provider_dispatch_recovered_uncertain count=%d",
+                    settled,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("provider_dispatch_reconciliation_failed")
 
 
 def _load_admin_secret_verifier(
@@ -99,15 +135,27 @@ def create_app(settings: GatewaySettings) -> FastAPI:
             proxy_url=settings.egress_proxy_url,
             upstream_timeout_sec=settings.upstream_timeout_sec,
         )
+        provider_dispatch_reconciler = asyncio.create_task(
+            _reconcile_provider_dispatches(
+                app.state.session_factory,
+                upstream_timeout_seconds=float(settings.upstream_timeout_sec),
+            ),
+            name="pipeline-provider-dispatch-reconciler",
+        )
         try:
             yield
         finally:
+            provider_dispatch_reconciler.cancel()
+            with suppress(asyncio.CancelledError):
+                await provider_dispatch_reconciler
             await app.state.egress_client_pool.aclose()
             await app.state.upstream_client.aclose()
             await engine.dispose()
 
     app: FastAPI = FastAPI(
-        title="Loom LLM Gateway", version="0.0.1", lifespan=lifespan,
+        title="Loom LLM Gateway",
+        version="0.0.1",
+        lifespan=lifespan,
     )
     # #547: attach before middleware registration so the first request
     # (including ASGI-transport integration tests that skip lifespan)

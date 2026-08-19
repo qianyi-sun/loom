@@ -71,6 +71,11 @@ async def messages(
     assert ctx.team_id is not None
     assert ctx.step_id is not None
     request.state.execution_attempt_id = ctx.execution_attempt_id
+    if ctx.execution_attempt_id is not None:
+        raise HTTPException(
+            status_code=403,
+            detail="execution-attempt tokens are restricted to the fenced Responses route",
+        )
 
     if settings.anthropic_api_key is None:
         raise HTTPException(
