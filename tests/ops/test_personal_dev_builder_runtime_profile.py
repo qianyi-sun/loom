@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import tomllib
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ from scripts.ops.personal_dev_builder_runtime_profile import (
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PROFILE_PATH = _REPO_ROOT / "deploy/dev-fleet/personal-dev-builder-runtime-profile.json"
 _RUNTIME_CLASS_PATH = _REPO_ROOT / "deploy/dev-fleet/personal-dev-builder-runtime-class.yaml"
+_CONTROL_PLANE_PROFILE_PATH = _REPO_ROOT / "deploy/dev-fleet/personal-dev-control-plane.toml"
 _ARCHIVE_SHA512 = (
     "3de91138cda15682c11807387f6ecad9e7c8932262018a2813277e1b4efa03efe"
     "33b0a948e148c6b1ccfe7345bfab5d5e0d072519505465751273898bae19c62"
@@ -123,6 +125,22 @@ def test_checked_in_runtime_class_is_derived_only_from_the_profile() -> None:
     assert yaml.safe_load(_RUNTIME_CLASS_PATH.read_text(encoding="ascii")) == (
         render_runtime_class(profile)
     )
+
+
+def test_control_plane_profile_is_bound_to_the_checked_in_runtime_profile() -> None:
+    profile = load_runtime_profile(_PROFILE_PATH)
+    control_plane = tomllib.loads(_CONTROL_PLANE_PROFILE_PATH.read_text(encoding="utf-8"))
+    binding = control_plane["builder"]
+
+    assert {
+        "runtime_class_name": binding["runtime_class_name"],
+        "runtime_handler": binding["runtime_handler"],
+        "runtime_profile_sha256": binding["runtime_profile_sha256"],
+    } == {
+        "runtime_class_name": profile.runtime_class_name,
+        "runtime_handler": profile.handler,
+        "runtime_profile_sha256": profile.sha256,
+    }
 
 
 def _mutate_unknown(value: dict[str, Any]) -> None:
