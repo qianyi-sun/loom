@@ -512,6 +512,273 @@ def test_zero_capacity_acceptance_runbook_is_indexed_and_current() -> None:
     assert "worker_available=false" in architecture
 
 
+def test_personal_dev_builder_runtime_runbook_is_exact_and_inert() -> None:
+    runbook = _read("docs/runbooks/personal-dev-builder-runtime.md")
+    normalized = " ".join(runbook.split())
+    lowered = runbook.casefold()
+
+    assert "set -euo pipefail" in runbook
+    assert "umask 077" in runbook
+    assert 'test "$(id -u)" != 0' in runbook
+    assert "&& test ! -L" not in runbook
+    assert 'test ! -e "$archive" &&' not in runbook
+    assert "< <(" not in runbook
+    assert "assert_pod_continuity()" in runbook
+    assert runbook.count("assert_pod_continuity") >= 4
+    assert "capture_runtime_node_state()" in runbook
+    assert runbook.count("capture_runtime_node_state") >= 3
+    assert "assert_node_cordon_state()" in runbook
+    assert runbook.count("assert_node_cordon_state") >= 8
+    assert (
+        'get "node/$node" -o json > "$evidence_dir/$node.node-after.json"'
+        not in normalized
+    )
+    assert 'test -z "$(git status' not in runbook
+    assert "<absolute-existing-owner-only-evidence-root-outside-repository>" in runbook
+    assert "artifacts/personal-dev" not in runbook
+    assert 'test "$(stat -c %a "$evidence_root")" = 700' in runbook
+    assert "deploy/dev-fleet/personal-dev-builder-runtime-profile.json" in runbook
+    assert "deploy/dev-fleet/personal-dev-builder-runtime-class.yaml" in runbook
+    assert "scripts/ops/install_personal_dev_builder_runtime.py" in runbook
+    assert "release-20260810.0" in runbook
+    assert (
+        "3de91138cda15682c11807387f6ecad9e7c8932262018a2813277e1b4efa03efe"
+        "33b0a948e148c6b1ccfe7345bfab5d5e0d072519505465751273898bae19c62"
+    ) in runbook
+    assert "trt-eai-oldlab-2" in runbook
+    assert "trt-eai-oldlab-3" in runbook
+    assert "trt-eai-oldlab-4" in runbook
+    assert "trt-eai-oldlab-5" in runbook
+    assert "control-plane node is never eligible" in lowered
+    assert '"node-role.kubernetes.io/control-plane"' in runbook
+    assert "expected_agent_names" in runbook
+    assert 'kubectl --kubeconfig "$kubeconfig" cordon "$node"' in normalized
+    assert normalized.count('kubectl --kubeconfig "$kubeconfig" cordon "$node"') >= 3
+    assert "do not drain" in lowered
+    assert "a failure on one node stops the fleet rollout" in lowered
+    assert "verify-staged" in runbook
+    assert "verify-active" in runbook
+    assert " remove " in normalized
+    assert "systemctl restart k3s-agent" in normalized
+    assert (
+        "loom.dev/personal-dev-runtime-profile-a="
+        "880b7c79013e38b016046c732209574d"
+    ) in runbook
+    assert (
+        "loom.dev/personal-dev-runtime-profile-b="
+        "48d6ae5a008164906f9951ba27765b76"
+    ) in runbook
+    assert (
+        "loom.dev/personal-dev-runtime-profile-sha256="
+        "880b7c79013e38b016046c732209574d48d6ae5a008164906f9951ba27765b76"
+    ) in runbook
+    assert "/proc/gvisor/kernel_is_gvisor" in runbook
+    assert "rootless buildkit" in lowered
+    assert "buildkit-qemu-aarch64" in runbook
+    assert "linux/amd64" in runbook
+    assert "linux/arm64" in runbook
+    assert 'kubectl --kubeconfig "$kubeconfig" diff --server-side' in normalized
+    assert 'kubectl --kubeconfig "$kubeconfig" apply --server-side' in normalized
+    assert "executable-new-capacity ceiling remains exactly `0`" in runbook
+    assert "no `loom-dev-<owner>` namespace" in runbook
+    assert "no `loom-build-*` namespace" in runbook
+    assert "loom-runtime-smoke" in runbook
+    assert 'runtimeClassName: "loom-personal-dev-builder"' in runbook
+    assert "automountServiceAccountToken: false" in runbook
+    assert "build-egress" in runbook
+    assert "_load_safe_kubeconfig" in runbook
+    assert "render_runtime_class" in runbook
+    assert "sudo -n --" in runbook
+    assert "personal-dev-runtime\\.[A-Za-z0-9]{8}" in runbook
+    assert "/root/loom-personal-dev-builder-runtime-rollout" in runbook
+    assert "installer_sha256" in runbook
+    assert "profile_module_sha256" in runbook
+    assert "PYTHONPATH='$remote_stage'" not in runbook
+    assert "cd '$root_stage' && sudo" not in runbook
+    assert "assert_no_runtimeclass_consumers" in runbook
+    assert runbook.count("assert_no_runtimeclass_consumers") >= 5
+    assert "assert_runtimeclass_absent" in runbook
+    assert runbook.count("assert_runtimeclass_absent") >= 6
+    runtimeclass_absence_check = runbook.split(
+        "assert_runtimeclass_absent() {", 1
+    )[1].split("\n}", 1)[0]
+    assert "--ignore-not-found -o name" in " ".join(
+        runtimeclass_absence_check.split()
+    )
+    assert "> /dev/null 2>&1" not in runtimeclass_absence_check
+    assert "assert_node_staging()" in runbook
+    assert runbook.count('assert_node_staging "$node"') >= 4
+    assert "assert_remote_staging()" in runbook
+    assert runbook.count('assert_remote_staging "$node"') >= 2
+    assert "assert_runtime_receipt()" in runbook
+    assert runbook.count("assert_runtime_receipt") >= 10
+    assert 'test ! -e "$root_stage_base"' in runbook
+    assert "InvocationID" in runbook
+    assert "await_fresh_node_lease()" in runbook
+    assert runbook.count("await_fresh_node_lease") >= 4
+    assert "kube-node-lease" in runbook
+    assert "/usr/bin/env LC_ALL=C /usr/bin/stat" in normalized
+    assert runbook.count("k3s-invocation.before.txt") >= 3
+    assert runbook.count("k3s-invocation.after.txt") >= 3
+    assert "runtime_class_sha256" in runbook
+    assert "remove_node_runtime_identity" in runbook
+    assert runbook.count('remove_node_runtime_identity "$node"') >= 2
+    assert 'loom.dev/personal-dev-runtime-profile-a-' not in runbook
+    assert 'loom.dev/personal-dev-runtime-profile-b-' not in runbook
+    assert 'loom.dev/personal-dev-runtime-profile-sha256-' not in runbook
+    assert "--type=merge" in runbook
+    assert "reviewed_runtime_diff_sha256='<reviewed-runtime-diff-sha256>'" in runbook
+    assert 'test "$runtime_diff_status" -eq 1' in runbook
+    assert "<ssh-user>@$node" not in runbook
+    assert "assert_smoke_namespace_owned" in runbook
+    assert runbook.count("assert_smoke_namespace_owned") >= 3
+    assert 'delete "pod/$pod"' not in runbook
+    assert "assert_smoke_namespace_absent" in runbook
+    assert runbook.count("assert_smoke_namespace_absent") >= 4
+    assert 'create -f "$smoke_namespace_manifest"' in normalized
+    assert "--field-manager=loom-personal-dev-runtime-smoke" not in runbook
+    assert 'test -z "$(kubectl' not in runbook
+    assert "loom.dev/runtime-rollout-source-sha" in runbook
+    assert runbook.count("loom-personal-dev-runtime-smoke") >= 8
+    assert runbook.count(".spec.nodeSelector == {") >= 2
+    assert runbook.count(".scheduling.nodeSelector == {") >= 3
+    assert '"pod-security.kubernetes.io/enforce-version": "v1.36"' in runbook
+    assert 'configMap: {name: "buildkit-conformance", defaultMode: 292}' in runbook
+    assert "get secrets -o name" in normalized
+    assert "services,secrets" not in normalized
+    assert "apply --server-side --force-conflicts" not in normalized
+    assert "|| true" not in runbook
+    assert "PYTHONPATH='$root_stage'" in runbook
+    assert runbook.count(" remove --profile ") >= 2
+
+    assert "loom-dev-shared" not in runbook
+    assert "kubectl drain" not in lowered
+    assert "kubectl create namespace" not in lowered
+    assert "loom service up" not in lowered
+    for command in ("salloc", "sbatch", "scancel", "scontrol", "sinfo", "squeue"):
+        assert command not in lowered
+
+
+def test_personal_dev_builder_runtime_embedded_programs_parse() -> None:
+    runbook = _read("docs/runbooks/personal-dev-builder-runtime.md")
+    bash_blocks = re.findall(r"^```bash\n(.*?)^```$", runbook, flags=re.DOTALL | re.MULTILINE)
+    python_programs = re.findall(r"<<'PY'\n(.*?)\nPY\n", runbook, flags=re.DOTALL)
+    jq_filters = re.findall(r"\bjq\b[^']*'(.*?)'", runbook, flags=re.DOTALL)
+
+    assert bash_blocks
+    bash = subprocess.run(
+        ["bash", "-n"],
+        input="\n".join(bash_blocks),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert bash.returncode == 0, bash.stderr
+    assert python_programs
+    for program in python_programs:
+        compile(program, "personal-dev-builder-runtime.md", "exec")
+    assert jq_filters
+    for jq_filter in jq_filters:
+        jq = subprocess.run(
+            ["jq", "-n", f"def candidate: {jq_filter}; empty"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert jq.returncode == 0, jq.stderr
+
+    node_filters = [
+        value for value in jq_filters if "node-role.kubernetes.io/control-plane" in value
+    ]
+    assert len(node_filters) == 1
+    agent_names = [f"trt-eai-oldlab-{number}" for number in range(2, 6)]
+
+    def node(name: str, *, control_plane: bool = False) -> dict[str, object]:
+        labels = {"node-role.kubernetes.io/control-plane": ""} if control_plane else {}
+        return {
+            "metadata": {"annotations": {}, "labels": labels, "name": name},
+            "status": {
+                "conditions": [
+                    {"status": "True", "type": "Ready"},
+                    {"status": "False", "type": "DiskPressure"},
+                ]
+            },
+        }
+
+    healthy_nodes = {
+        "items": [node("control", control_plane=True)]
+        + [node(name) for name in agent_names]
+    }
+
+    def evaluate_nodes(payload: dict[str, object]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                "jq",
+                "-e",
+                "--argjson",
+                "agents",
+                json.dumps(agent_names),
+                node_filters[0],
+            ],
+            input=json.dumps(payload),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    healthy = evaluate_nodes(healthy_nodes)
+    assert healthy.returncode == 0, healthy.stderr
+    drifted_nodes = json.loads(json.dumps(healthy_nodes))
+    drifted_control_labels = drifted_nodes["items"][0]["metadata"]["labels"]
+    drifted_control_labels["loom.dev/personal-dev-runtime-profile-a"] = "unexpected"
+    assert evaluate_nodes(drifted_nodes).returncode != 0
+
+    smoke_filters = [value for value in jq_filters if "kernel_is_gvisor" in value]
+    assert len(smoke_filters) == 1
+    rendered = subprocess.run(
+        [
+            "jq",
+            "-n",
+            "--arg",
+            "namespace",
+            "loom-runtime-smoke",
+            "--arg",
+            "node",
+            "trt-eai-oldlab-2",
+            "--arg",
+            "pod",
+            "gvisor-smoke-2",
+            "--arg",
+            "image",
+            "example.invalid/smoke@sha256:" + "1" * 64,
+            "--arg",
+            "source",
+            "2" * 40,
+            smoke_filters[0],
+        ],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    command = json.loads(rendered.stdout)["spec"]["containers"][0]["args"][0]
+    shell = subprocess.run(
+        ["/bin/sh", "-n", "-c", command],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert shell.returncode == 0, shell.stderr
+
+
+def test_personal_dev_builder_runtime_runbook_is_indexed_and_architecture_linked() -> None:
+    for document in (
+        _read("docs/runbooks/README.md"),
+        _read("deploy/dev-fleet/README.md"),
+        _read("docs/architecture/personal-dev-management-plane-deployment.md"),
+    ):
+        assert "personal-dev-builder-runtime.md" in document
+
+
 def test_release_bound_scanner_cache_is_architecture_linked_and_inert() -> None:
     management = _read(
         "docs/architecture/personal-dev-management-plane-deployment.md"

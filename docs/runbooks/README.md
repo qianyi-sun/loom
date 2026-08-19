@@ -24,6 +24,9 @@ capacity workflow.
 - **[Personal-development management-plane shadow](personal-dev-management-plane-shadow.md)**
   — exact render, deploy, readiness, rollback, and stop conditions for the
   inert shared management foundation in `loom-dev`.
+- **[Personal-development builder runtime](personal-dev-builder-runtime.md)**
+  — measured gVisor installation, sequential OLDLAB agent rollout,
+  RuntimeClass proof, cross-platform BuildKit conformance, and exact rollback.
 - **[Personal-development zero-capacity acceptance](personal-dev-zero-capacity-acceptance.md)**
   — plan-bound enablement, two-owner candidate lifecycle acceptance, exact
   zero-ceiling observation, manager-first teardown, and byte-reviewed rollback.

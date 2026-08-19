@@ -151,13 +151,18 @@ would require a separate signed-manifest admission authority; partially
 reimplementing its constructors in CEL would not contain a process that
 already holds the lifecycle, publisher, and shared-storage credentials.
 
-The builder RuntimeClass is an independently installed cluster capability. The
-shadow package records its exact future name and prepares the release-bound
+The builder RuntimeClass is an independently installed measured gVisor cluster
+capability, specified by the
+[builder runtime design](personal-dev-builder-runtime.md) and installed through
+its [protected rollout](../runbooks/personal-dev-builder-runtime.md). It does
+not supply Kubernetes host user namespaces. The shadow package records the
+exact class, handler, and runtime-profile digest and prepares the release-bound
 scanner cache, while builder preparation remains false. The protected trusted
 release binds the scanner binary, both databases and metadata files, cache
 identity, checked-in source lock, and immutable cache image. The later
-acceptance plan additionally binds the reviewed RuntimeClass handler/profile
-and finding policy. Acceptance status fails until all observed values match.
+acceptance plan additionally binds the same RuntimeClass profile and finding
+policy. Shadow and acceptance status both fail until the observed handler,
+annotation, and complete scheduling selector match.
 
 ## Configuration and immutable release binding
 

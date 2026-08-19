@@ -199,14 +199,9 @@ staged. Each node uses this bounded transaction:
 5. Require the node to return Ready with no DiskPressure, the previous running
    Pods to remain healthy, Longhorn to remain healthy, and `verify-active` to
    pass.
-6. Run one digest-pinned smoke Pod directly selected to this node through the
-   RuntimeClass. Require `/proc/gvisor/kernel_is_gvisor`, KVM gVisor evidence,
-   nonroot identity, no effective capabilities, and sandbox networking.
-7. On the first node, additionally run rootless BuildKit conformance for both
-   `linux/amd64` and `linux/arm64`, including one arm64 `RUN` step through the
-   image's trusted QEMU helper.
-8. Apply the exact profile labels and annotation, uncordon the node, and
-   re-prove all guardrails before moving to the next agent.
+6. Apply the exact profile labels and annotation, uncordon the node, and
+   re-prove all guardrails before moving to the next agent. The RuntimeClass is
+   still absent, so the labels alone cannot schedule a builder.
 
 If any step fails, keep the node cordoned, remove no evidence, use `remove` to
 return only byte-identical managed files to their previously absent state,
@@ -214,9 +209,16 @@ restart the agent, and require the baseline before proceeding. A failure on one
 node stops the fleet rollout.
 
 After all four nodes pass, server-side diff and apply the exact RuntimeClass.
-The smoke namespace and Pods are temporary operator-owned resources and are
-deleted after their terminal state and logs are captured. No personal or build
-namespace is used for smoke testing.
+Then run one digest-pinned, node-bound smoke Pod on each agent and require
+`/proc/gvisor/kernel_is_gvisor`, nonroot identity, no effective capabilities,
+and the exact RuntimeClass binding. On the first node, additionally run
+rootless BuildKit conformance for both `linux/amd64` and `linux/arm64`,
+including one arm64 `RUN` step through the image's trusted QEMU helper. This
+ordering avoids referring to a RuntimeClass before it exists while keeping the
+class absent until all nodes are actively verified. The smoke namespace and
+Pods are temporary operator-owned resources and are deleted after their
+terminal state and logs are captured. No personal or build namespace is used
+for smoke testing.
 
 ## Evidence and readiness
 

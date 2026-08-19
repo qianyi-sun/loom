@@ -488,6 +488,8 @@ templates, rootless BuildKit, GitHub Actions trusted image releases.
 - Create: `docs/runbooks/personal-dev-builder-runtime.md`
 - Modify: `docs/runbooks/README.md`
 - Modify: `deploy/dev-fleet/README.md`
+- Modify: `docs/architecture/personal-dev-builder-runtime.md`
+- Modify: `docs/architecture/personal-dev-builder-runtime-implementation-plan.md`
 - Modify: `docs/architecture/personal-dev-management-plane-deployment.md`
 - Modify: `tests/ops/test_personal_dev_control_plane_package_boundary.py`
 
@@ -530,10 +532,12 @@ templates, rootless BuildKit, GitHub Actions trusted image releases.
   `git diff --check`. Commit:
 
   ```bash
-  git add docs/runbooks/personal-dev-builder-runtime.md docs/runbooks/README.md \
-    deploy/dev-fleet/README.md \
-    docs/architecture/personal-dev-management-plane-deployment.md \
-    tests/ops/test_personal_dev_control_plane_package_boundary.py
+    git add docs/runbooks/personal-dev-builder-runtime.md docs/runbooks/README.md \
+      deploy/dev-fleet/README.md \
+      docs/architecture/personal-dev-builder-runtime.md \
+      docs/architecture/personal-dev-builder-runtime-implementation-plan.md \
+      docs/architecture/personal-dev-management-plane-deployment.md \
+      tests/ops/test_personal_dev_control_plane_package_boundary.py
   git commit -m "docs(dev): add measured runtime rollout"
   ```
 
@@ -601,21 +605,23 @@ templates, rootless BuildKit, GitHub Actions trusted image releases.
 
   For one node at a time, capture Pods, cordon, stage, verify staged, restart
   only `k3s-agent`, wait Ready, verify active, prove Pod/Longhorn continuity,
-  run digest-pinned gVisor smoke, apply exact node labels/annotation, and
-  uncordon. Re-run global stop conditions before advancing.
+  apply exact node labels/annotation, and uncordon. The RuntimeClass remains
+  absent. Re-run global stop conditions before advancing.
 
-- [ ] **Step 5: Prove BuildKit on the canary**
+- [ ] **Step 5: Apply the exact RuntimeClass and prove every node**
+
+  After all four agents pass, save the complete server-side dry-run/diff, audit
+  every byte, apply the static asset server-side, and require live handler,
+  annotation, and scheduling to equal the profile. Run a digest-pinned,
+  node-bound gVisor smoke Pod on every agent. Keep all personal feature flags
+  disabled.
+
+- [ ] **Step 6: Prove BuildKit on the canary**
 
   Use the digest-pinned trusted builder image and its existing
   `buildkit-qemu-aarch64`. Build a minimal digest-pinned base through one RUN
   step for both target platforms inside gVisor. Verify OCI platform metadata and
   `uname -m` output, then delete only the temporary smoke resources.
-
-- [ ] **Step 6: Apply the exact RuntimeClass**
-
-  Save complete server-side dry-run/diff, audit every byte, apply the static
-  asset server-side, and require live handler, annotation, and scheduling to
-  equal the profile. Keep all personal feature flags disabled.
 
 - [ ] **Step 7: Close runtime rollout evidence**
 
