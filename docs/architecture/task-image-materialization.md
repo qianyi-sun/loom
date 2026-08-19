@@ -16,7 +16,9 @@ references remain pull-only inputs and do not create build work.
 ## Architecture
 
 The control plane owns a durable, content-addressed materialization row for each
-`(task_id, task_checksum, cpu_arch)` tuple. `cpu_arch = "any"` expands to native
+`(task_id, task_checksum, cpu_arch)` tuple. `task_checksum` is the
+NUL-delimited relative-path plus file-bytes digest from
+`loom_benchmarks.util.sha256_of_dir` (not `dirhash`). `cpu_arch = "any"` expands to native
 `x86_64` and `arm64` variants. The row snapshots the task config and bundle
 source so a later task update cannot change an in-flight build.
 
