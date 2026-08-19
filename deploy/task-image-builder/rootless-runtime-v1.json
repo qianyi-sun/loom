@@ -1,0 +1,80 @@
+{
+  "schema": "loom.task-image-builder-rootless-runtime/v1",
+  "release": "rootless-runtime-v1",
+  "versions": {
+    "buildkit": "v0.32.2",
+    "rootlesskit": "v3.1.0",
+    "slirp4netns": "v1.3.4",
+    "fuse-overlayfs": "v1.17"
+  },
+  "architectures": {
+    "x86_64": {
+      "platform": "linux-amd64",
+      "artifacts": [
+        {
+          "name": "buildkit-v0.32.2.linux-amd64.tar.gz",
+          "url": "https://github.com/moby/buildkit/releases/download/v0.32.2/buildkit-v0.32.2.linux-amd64.tar.gz",
+          "sha256": "2975d0f651ad96ba8b80b9992ae1f9a964f4408569af5b6dc36544165c3926af"
+        },
+        {
+          "name": "rootlesskit-x86_64.tar.gz",
+          "url": "https://github.com/rootless-containers/rootlesskit/releases/download/v3.1.0/rootlesskit-x86_64.tar.gz",
+          "sha256": "b1302b7395918266d561b9e3053771253f20761807e042ae80a1868d6e86b71c"
+        },
+        {
+          "name": "slirp4netns-x86_64",
+          "url": "https://github.com/rootless-containers/slirp4netns/releases/download/v1.3.4/slirp4netns-x86_64",
+          "sha256": "e8d0440de8d8c87072138883bc27cfa02f8b0e8a504badbf335c41f794788cc2"
+        },
+        {
+          "name": "fuse-overlayfs-x86_64",
+          "url": "https://github.com/containers/fuse-overlayfs/releases/download/v1.17/fuse-overlayfs-x86_64",
+          "sha256": "1684ef18c337702a0378a4e9942802770c83b11aed6a93c445d43e641a1f3c90"
+        }
+      ],
+      "binaries": {
+        "buildctl": "b7acceb232210fcb77e775f462ce76801bd1af4309ac53676bc63659d1106142",
+        "buildkit-runc": "b886d74fee2529334f7dcdd75a0a7a9e4935efb5554f96d2cdd26a564aa91c8c",
+        "buildkitd": "6cae65f47adf3ba75baae9be84fccb7ee6dba3dcf3fcc2012793d2a78bf266c0",
+        "fuse-overlayfs": "1684ef18c337702a0378a4e9942802770c83b11aed6a93c445d43e641a1f3c90",
+        "rootlessctl": "afcc747cc0940d753c65f002444a8df4804739013d4eb8cf69f569cbf99152b7",
+        "rootlesskit": "b31adda5a5a882e44ac022be2fd6a92450532e15eddfca4cda875ebff4965565",
+        "slirp4netns": "e8d0440de8d8c87072138883bc27cfa02f8b0e8a504badbf335c41f794788cc2"
+      }
+    },
+    "aarch64": {
+      "platform": "linux-arm64",
+      "artifacts": [
+        {
+          "name": "buildkit-v0.32.2.linux-arm64.tar.gz",
+          "url": "https://github.com/moby/buildkit/releases/download/v0.32.2/buildkit-v0.32.2.linux-arm64.tar.gz",
+          "sha256": "9e8f46bf309ec0ab262967be5538a4dbe06be756a82621f98253933bac5dcf92"
+        },
+        {
+          "name": "rootlesskit-aarch64.tar.gz",
+          "url": "https://github.com/rootless-containers/rootlesskit/releases/download/v3.1.0/rootlesskit-aarch64.tar.gz",
+          "sha256": "42d1c22a34be7bb458f9ae7363d68dd05d553422d95392b44d0be7fa1fd76bf0"
+        },
+        {
+          "name": "slirp4netns-aarch64",
+          "url": "https://github.com/rootless-containers/slirp4netns/releases/download/v1.3.4/slirp4netns-aarch64",
+          "sha256": "fbd8a9cabc716dc53e7c5a00bc7b3e91dbe0eab6b40e6d606b1b34c2ce80cfc0"
+        },
+        {
+          "name": "fuse-overlayfs-aarch64",
+          "url": "https://github.com/containers/fuse-overlayfs/releases/download/v1.17/fuse-overlayfs-aarch64",
+          "sha256": "34c9995c929dd52f45cca985858d7e58d9a9626104bc2610db218aaa11115c23"
+        }
+      ],
+      "binaries": {
+        "buildctl": "84e81b61e9a3ed8ec31d2ee3df19919bb43194b67e75cdfb51b0e7aa7ccf7484",
+        "buildkit-runc": "1f04f37ef4b2fba6fbbcc13c910b0f94ca067902daa59727edbccf75b5d9d441",
+        "buildkitd": "c7ad41c0557b4ec475974cb64c5ae6599a52c6debe6afc6eccaa2e4682a36331",
+        "fuse-overlayfs": "34c9995c929dd52f45cca985858d7e58d9a9626104bc2610db218aaa11115c23",
+        "rootlessctl": "7892fa3f7ddad19cbd9503ee57dc8246aa6d8402a0b799dc128a726fed46d7ce",
+        "rootlesskit": "ee86577eb92a0dc5fbab5e3d78ec8317c48ce5f0d871a5f74f785e3c69aa1fda",
+        "slirp4netns": "fbd8a9cabc716dc53e7c5a00bc7b3e91dbe0eab6b40e6d606b1b34c2ce80cfc0"
+      }
+    }
+  }
+}
