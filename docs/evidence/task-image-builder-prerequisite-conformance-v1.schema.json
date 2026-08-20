@@ -8,10 +8,18 @@
     "schema",
     "schema_version",
     "collected_at",
+    "candidate_sha256",
     "policy_version",
     "policy_sha256",
+    "policy_file_sha256",
+    "release_name",
+    "release_sha256",
+    "runtime_manifest_sha256",
+    "authority_manifest_sha256",
+    "authority_component_digests",
     "production_certification_allowed",
     "certified_nodes",
+    "blockers",
     "control_plane_services",
     "clusters"
   ],
@@ -26,11 +34,32 @@
       "type": "string",
       "format": "date-time"
     },
+    "candidate_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
     "policy_version": {
       "const": "task-image-builder-prerequisites-v1"
     },
     "policy_sha256": {
       "$ref": "#/$defs/sha256"
+    },
+    "policy_file_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "release_name": {
+      "const": "host-release-v1"
+    },
+    "release_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "runtime_manifest_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "authority_manifest_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "authority_component_digests": {
+      "$ref": "#/$defs/authorityComponentDigests"
     },
     "production_certification_allowed": {
       "const": false
@@ -38,6 +67,16 @@
     "certified_nodes": {
       "type": "array",
       "maxItems": 0
+    },
+    "blockers": {
+      "type": "array",
+      "prefixItems": [
+        {
+          "const": "phase2_guard_provider_release_missing"
+        }
+      ],
+      "minItems": 1,
+      "maxItems": 1
     },
     "control_plane_services": {
       "$ref": "#/$defs/controlPlaneServices"
@@ -64,6 +103,36 @@
       "type": "integer",
       "minimum": 1
     },
+    "authorityComponentDigests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authority_manifest_parser",
+        "host_bundle_verifier",
+        "host_converger",
+        "node_prerequisite_installer",
+        "slurm_bash_converger",
+        "controller_identity_installer",
+        "slurm_readback_parser",
+        "slurm_receipt_producer",
+        "node_maintenance_producer",
+        "evidence_collector",
+        "conformance_verifier"
+      ],
+      "properties": {
+        "authority_manifest_parser": {"$ref": "#/$defs/sha256"},
+        "host_bundle_verifier": {"$ref": "#/$defs/sha256"},
+        "host_converger": {"$ref": "#/$defs/sha256"},
+        "node_prerequisite_installer": {"$ref": "#/$defs/sha256"},
+        "slurm_bash_converger": {"$ref": "#/$defs/sha256"},
+        "controller_identity_installer": {"$ref": "#/$defs/sha256"},
+        "slurm_readback_parser": {"$ref": "#/$defs/sha256"},
+        "slurm_receipt_producer": {"$ref": "#/$defs/sha256"},
+        "node_maintenance_producer": {"$ref": "#/$defs/sha256"},
+        "evidence_collector": {"$ref": "#/$defs/sha256"},
+        "conformance_verifier": {"$ref": "#/$defs/sha256"}
+      }
+    },
     "nodeNames": {
       "type": "array",
       "minItems": 1,
@@ -71,6 +140,388 @@
       "uniqueItems": true,
       "items": {
         "$ref": "#/$defs/name"
+      }
+    },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha256", "document"],
+      "properties": {
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "document": {
+          "type": "object",
+          "minProperties": 1
+        }
+      }
+    },
+    "commandReadback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command", "returncode", "stdout", "stderr"],
+      "properties": {
+        "command": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "returncode": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "stdout": {
+          "type": "string",
+          "maxLength": 1048576
+        },
+        "stderr": {
+          "type": "string",
+          "maxLength": 1048576
+        }
+      }
+    },
+    "fileReadback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "contents", "sha256"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^/[^\\u0000]{1,255}$"
+        },
+        "contents": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "kernelRaw": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "unprivileged_user_namespaces",
+        "pidfd_open",
+        "sealed_memfd",
+        "clone3_into_cgroup",
+        "cgroup_mount",
+        "bpffs_mount",
+        "bpffs_metadata",
+        "controllers",
+        "delegation"
+      ],
+      "properties": {
+        "unprivileged_user_namespaces": {"$ref": "#/$defs/commandReadback"},
+        "pidfd_open": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["pid", "flags", "outcome"],
+          "properties": {
+            "pid": {"$ref": "#/$defs/positiveInteger"},
+            "flags": {"const": 0},
+            "outcome": {"const": "opened"}
+          }
+        },
+        "sealed_memfd": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["required_seals", "observed_seals", "outcome"],
+          "properties": {
+            "required_seals": {"const": 15},
+            "observed_seals": {"const": 15},
+            "outcome": {"const": "sealed"}
+          }
+        },
+        "clone3_into_cgroup": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["flags", "cgroup_fd", "returncode", "errno", "errno_name"],
+          "properties": {
+            "flags": {"const": "CLONE_INTO_CGROUP"},
+            "cgroup_fd": {"const": -1},
+            "returncode": {"const": -1},
+            "errno": {"const": 9},
+            "errno_name": {"const": "EBADF"}
+          }
+        },
+        "cgroup_mount": {"$ref": "#/$defs/commandReadback"},
+        "bpffs_mount": {"$ref": "#/$defs/commandReadback"},
+        "bpffs_metadata": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "uid", "gid", "mode"],
+          "properties": {
+            "path": {"const": "/sys/fs/bpf"},
+            "uid": {"const": 0},
+            "gid": {"const": 0},
+            "mode": {"const": "0700"}
+          }
+        },
+        "controllers": {"$ref": "#/$defs/fileReadback"},
+        "delegation": {"$ref": "#/$defs/fileReadback"}
+      }
+    },
+    "storageRaw": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["findmnt", "lsblk", "jobs_root", "lsattr", "repquota", "cleanup"],
+      "properties": {
+        "findmnt": {"$ref": "#/$defs/commandReadback"},
+        "lsblk": {"$ref": "#/$defs/commandReadback"},
+        "jobs_root": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "uid", "gid", "mode", "entries"],
+          "properties": {
+            "path": {"const": "/var/lib/loom-task-builder/jobs"},
+            "uid": {"const": 993},
+            "gid": {"const": 980},
+            "mode": {"const": "0700"},
+            "entries": {"type": "array", "maxItems": 0}
+          }
+        },
+        "lsattr": {"$ref": "#/$defs/commandReadback"},
+        "repquota": {"$ref": "#/$defs/commandReadback"},
+        "cleanup": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "command",
+            "returncode",
+            "stdout",
+            "stderr",
+            "processes_absent",
+            "mounts_absent",
+            "job_directory_absent"
+          ],
+          "properties": {
+            "command": {"type": "array", "minItems": 5, "maxItems": 5, "items": {"type": "string", "minLength": 1, "maxLength": 512}},
+            "returncode": {"const": 0},
+            "stdout": {"type": "string", "maxLength": 1048576},
+            "stderr": {"const": ""},
+            "processes_absent": {"const": true},
+            "mounts_absent": {"const": true},
+            "job_directory_absent": {"const": true}
+          }
+        }
+      }
+    },
+    "packageSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "os_id",
+        "version_id",
+        "suite",
+        "component",
+        "signer_fingerprint",
+        "keyring_sha256"
+      ],
+      "properties": {
+        "os_id": {
+          "const": "ubuntu"
+        },
+        "version_id": {
+          "const": "24.04"
+        },
+        "suite": {
+          "const": "noble-updates"
+        },
+        "component": {
+          "const": "main"
+        },
+        "signer_fingerprint": {
+          "type": "string",
+          "pattern": "^[A-F0-9]{40}$"
+        },
+        "keyring_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "installedPackage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version",
+        "architecture",
+        "filename",
+        "size",
+        "artifact_sha256"
+      ],
+      "properties": {
+        "name": {
+          "enum": ["libsubid4", "quota", "uidmap"]
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "architecture": {
+          "enum": ["amd64", "arm64"]
+        },
+        "filename": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[^/][^\\u0000]*\\.deb$"
+        },
+        "size": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "artifact_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "uidMapHelper": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "uid",
+        "gid",
+        "mode",
+        "sha256",
+        "file_capabilities"
+      ],
+      "properties": {
+        "path": {
+          "enum": ["/usr/bin/newgidmap", "/usr/bin/newuidmap"]
+        },
+        "uid": {
+          "const": 0
+        },
+        "gid": {
+          "const": 0
+        },
+        "mode": {
+          "const": "4755"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "file_capabilities": {
+          "type": "array",
+          "maxItems": 0
+        }
+      }
+    },
+    "packages": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "installed", "helpers"],
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/packageSource"
+        },
+        "installed": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/installedPackage"
+          }
+        },
+        "helpers": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/uidMapHelper"
+          }
+        }
+      }
+    },
+    "quotaReadback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "storage_root_exists",
+        "storage_root_uid",
+        "storage_root_gid",
+        "storage_root_mode",
+        "storage_root_entries",
+        "project_id",
+        "project_inherit",
+        "block_used",
+        "block_soft_limit",
+        "block_hard_limit",
+        "inode_used",
+        "inode_soft_limit",
+        "inode_hard_limit"
+      ],
+      "properties": {
+        "storage_root_exists": {
+          "const": true
+        },
+        "storage_root_uid": {
+          "const": 993
+        },
+        "storage_root_gid": {
+          "const": 980
+        },
+        "storage_root_mode": {
+          "const": 448
+        },
+        "storage_root_entries": {
+          "type": "array",
+          "maxItems": 0
+        },
+        "project_id": {
+          "const": 300993
+        },
+        "project_inherit": {
+          "const": true
+        },
+        "block_used": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "block_soft_limit": {
+          "const": 0
+        },
+        "block_hard_limit": {
+          "const": 104857600
+        },
+        "inode_used": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "inode_soft_limit": {
+          "const": 0
+        },
+        "inode_hard_limit": {
+          "const": 1000000
+        }
+      }
+    },
+    "slurmCgroupReadback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "contents"],
+      "properties": {
+        "path": {
+          "const": "/etc/slurm/cgroup.conf"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "contents": {
+          "const": "CgroupPlugin=autodetect\nConstrainCores=yes\nConstrainRAMSpace=yes\nConstrainSwapSpace=yes\nConstrainDevices=yes\n"
+        }
       }
     },
     "controlPlaneServices": {
@@ -251,8 +702,10 @@
         "node_hostname",
         "node_addr",
         "resolved_addresses",
+        "resolution",
         "local_hostnames",
-        "local_addresses"
+        "local_addresses",
+        "readback"
       ],
       "properties": {
         "node_name": {
@@ -275,6 +728,27 @@
             "$ref": "#/$defs/address"
           }
         },
+        "resolution": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["query", "addresses"],
+          "properties": {
+            "query": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
+            },
+            "addresses": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 16,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/address"
+              }
+            }
+          }
+        },
         "local_hostnames": {
           "type": "array",
           "minItems": 1,
@@ -292,6 +766,9 @@
           "items": {
             "$ref": "#/$defs/address"
           }
+        },
+        "readback": {
+          "$ref": "#/$defs/commandReadback"
         }
       }
     },
@@ -510,6 +987,8 @@
         "uid",
         "group",
         "gid",
+        "home",
+        "shell",
         "supplementary_groups",
         "subuid_start",
         "subuid_count",
@@ -530,6 +1009,12 @@
         },
         "gid": {
           "$ref": "#/$defs/positiveInteger"
+        },
+        "home": {
+          "const": "/nonexistent"
+        },
+        "shell": {
+          "const": "/usr/sbin/nologin"
         },
         "supplementary_groups": {
           "type": "array",
@@ -569,7 +1054,11 @@
         "pidfd_open",
         "sealed_memfd",
         "clone3_into_cgroup",
-        "bpffs_mounted_root_only"
+        "bpffs_mounted_root_only",
+        "cgroup_filesystem",
+        "delegated_controllers",
+        "slurm_cgroup_readback",
+        "raw"
       ],
       "properties": {
         "cgroup_version": {
@@ -598,6 +1087,28 @@
         },
         "bpffs_mounted_root_only": {
           "type": "boolean"
+        },
+        "cgroup_filesystem": {
+          "const": "cgroup2"
+        },
+        "delegated_controllers": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "const": "io"
+            },
+            {
+              "const": "pids"
+            }
+          ],
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "slurm_cgroup_readback": {
+          "$ref": "#/$defs/slurmCgroupReadback"
+        },
+        "raw": {
+          "$ref": "#/$defs/kernelRaw"
         }
       }
     },
@@ -642,7 +1153,10 @@
       "additionalProperties": false,
       "required": [
         "release",
+        "manifest_sha256",
         "binary_sha256",
+        "dependency_sha256",
+        "elf_dynamic_readback",
         "snapshotter",
         "network_driver",
         "rootlesskit_flags",
@@ -652,8 +1166,38 @@
         "release": {
           "$ref": "#/$defs/name"
         },
+        "manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
         "binary_sha256": {
           "$ref": "#/$defs/binaryDigests"
+        },
+        "dependency_sha256": {
+          "type": "object",
+          "additionalProperties": false,
+          "maxProperties": 0
+        },
+        "elf_dynamic_readback": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "buildctl",
+            "buildkit-runc",
+            "buildkitd",
+            "fuse-overlayfs",
+            "rootlessctl",
+            "rootlesskit",
+            "slirp4netns"
+          ],
+          "properties": {
+            "buildctl": {"$ref": "#/$defs/commandReadback"},
+            "buildkit-runc": {"$ref": "#/$defs/commandReadback"},
+            "buildkitd": {"$ref": "#/$defs/commandReadback"},
+            "fuse-overlayfs": {"$ref": "#/$defs/commandReadback"},
+            "rootlessctl": {"$ref": "#/$defs/commandReadback"},
+            "rootlesskit": {"$ref": "#/$defs/commandReadback"},
+            "slirp4netns": {"$ref": "#/$defs/commandReadback"}
+          }
         },
         "snapshotter": {
           "$ref": "#/$defs/name"
@@ -685,7 +1229,13 @@
         "filesystem",
         "project_quota",
         "empty_job_root",
-        "cleanup_supported"
+        "cleanup_supported",
+        "mountpoint",
+        "source",
+        "mount_options",
+        "dedicated",
+        "quota",
+        "raw"
       ],
       "properties": {
         "filesystem": {
@@ -699,6 +1249,34 @@
         },
         "cleanup_supported": {
           "type": "boolean"
+        },
+        "mountpoint": {
+          "const": "/var/lib/loom-task-builder"
+        },
+        "source": {
+          "type": "string",
+          "pattern": "^/dev/(?!loop)[^\\u0000]{1,255}$"
+        },
+        "mount_options": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "contains": {
+            "const": "prjquota"
+          },
+          "items": {
+            "$ref": "#/$defs/name"
+          }
+        },
+        "dedicated": {
+          "const": true
+        },
+        "quota": {
+          "$ref": "#/$defs/quotaReadback"
+        },
+        "raw": {
+          "$ref": "#/$defs/storageRaw"
         }
       }
     },
@@ -749,14 +1327,81 @@
     "nodeGuard": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["installed", "active"],
+      "required": [
+        "installed",
+        "active",
+        "artifacts",
+        "unit_readback",
+        "process_readback"
+      ],
       "properties": {
         "installed": {
-          "type": "boolean"
+          "const": false
         },
         "active": {
-          "type": "boolean"
+          "const": false
+        },
+        "artifacts": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "present"],
+            "properties": {
+              "path": {
+                "enum": [
+                  "/usr/libexec/loom-task-builder-allocation-supervisor",
+                  "/usr/libexec/loom-task-builder-node-guard",
+                  "/usr/libexec/loom-task-builder-provider"
+                ]
+              },
+              "present": {"const": false}
+            }
+          }
+        },
+        "unit_readback": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {"$ref": "#/$defs/namedCommandReadback"}
+        },
+        "process_readback": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {"$ref": "#/$defs/namedCommandReadback"}
         }
+      }
+    },
+    "namedCommandReadback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "command", "returncode", "stdout", "stderr"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "command": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "returncode": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "stdout": {"type": "string", "maxLength": 1048576},
+        "stderr": {"type": "string", "maxLength": 1048576}
       }
     },
     "node": {
@@ -765,14 +1410,27 @@
       "required": [
         "name",
         "architecture",
+        "observed_at",
+        "candidate_sha256",
+        "policy_version",
+        "policy_sha256",
+        "policy_file_sha256",
+        "release_name",
+        "release_sha256",
+        "runtime_manifest_sha256",
+        "authority_manifest_sha256",
+        "authority_component_digests",
         "slurm_identity",
         "identity",
+        "packages",
         "kernel",
         "runtime",
         "storage",
         "network",
         "forbidden_paths_present",
-        "node_guard"
+        "node_guard",
+        "host_receipt",
+        "maintenance_receipt"
       ],
       "properties": {
         "name": {
@@ -781,11 +1439,45 @@
         "architecture": {
           "enum": ["x86_64", "aarch64"]
         },
+        "observed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "candidate_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "policy_version": {
+          "const": "task-image-builder-prerequisites-v1"
+        },
+        "policy_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "policy_file_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "release_name": {
+          "const": "host-release-v1"
+        },
+        "release_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "runtime_manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "authority_manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "authority_component_digests": {
+          "$ref": "#/$defs/authorityComponentDigests"
+        },
         "slurm_identity": {
           "$ref": "#/$defs/slurmIdentity"
         },
         "identity": {
           "$ref": "#/$defs/identity"
+        },
+        "packages": {
+          "$ref": "#/$defs/packages"
         },
         "kernel": {
           "$ref": "#/$defs/kernel"
@@ -810,6 +1502,12 @@
         },
         "node_guard": {
           "$ref": "#/$defs/nodeGuard"
+        },
+        "host_receipt": {
+          "$ref": "#/$defs/receipt"
+        },
+        "maintenance_receipt": {
+          "$ref": "#/$defs/receipt"
         }
       }
     },
@@ -821,8 +1519,19 @@
         "slurm_cluster",
         "controller",
         "architecture",
+        "observed_at",
+        "candidate_sha256",
+        "policy_version",
+        "policy_sha256",
+        "policy_file_sha256",
+        "release_name",
+        "release_sha256",
+        "runtime_manifest_sha256",
+        "authority_manifest_sha256",
+        "authority_component_digests",
         "controller_identity",
         "slurm",
+        "slurm_receipt",
         "nodes"
       ],
       "properties": {
@@ -838,11 +1547,45 @@
         "architecture": {
           "enum": ["x86_64", "aarch64"]
         },
+        "observed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "candidate_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "policy_version": {
+          "const": "task-image-builder-prerequisites-v1"
+        },
+        "policy_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "policy_file_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "release_name": {
+          "const": "host-release-v1"
+        },
+        "release_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "runtime_manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "authority_manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "authority_component_digests": {
+          "$ref": "#/$defs/authorityComponentDigests"
+        },
         "controller_identity": {
           "$ref": "#/$defs/controllerIdentity"
         },
         "slurm": {
           "$ref": "#/$defs/slurm"
+        },
+        "slurm_receipt": {
+          "$ref": "#/$defs/receipt"
         },
         "nodes": {
           "type": "array",

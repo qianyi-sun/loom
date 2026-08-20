@@ -316,30 +316,71 @@ receipt_payload = json.dumps(receipt, sort_keys=True, separators=(",", ":")).enc
 release_dir = install_base / "releases" / manifest["release"]
 current = install_base / "current"
 
+try:
+    owner = pwd.getpwnam(owner_name).pw_uid
+    group = grp.getgrnam(group_name).gr_gid
+except KeyError:
+    fail("installation owner or group is unavailable")
+
 def verify_installed() -> bool:
     if not release_dir.exists():
+        if release_dir.is_symlink() or current.exists() or current.is_symlink():
+            fail("installed release drift has an incomplete release marker")
         return False
     if release_dir.is_symlink() or not release_dir.is_dir():
         fail("installed release drift is unsafe")
+    release_metadata = release_dir.stat()
+    if (
+        stat.S_IMODE(release_metadata.st_mode) != 0o755
+        or release_metadata.st_uid != owner
+        or release_metadata.st_gid != group
+    ):
+        fail("installed release drift changed release metadata")
     binary_dir = release_dir / "bin"
+    if binary_dir.is_symlink() or not binary_dir.is_dir():
+        fail("installed release drift changed the binary directory type")
     try:
         entries = list(binary_dir.iterdir())
     except OSError:
         fail("installed release drift is incomplete")
+    binary_dir_metadata = binary_dir.stat()
+    if (
+        stat.S_IMODE(binary_dir_metadata.st_mode) != 0o755
+        or binary_dir_metadata.st_uid != owner
+        or binary_dir_metadata.st_gid != group
+    ):
+        fail("installed release drift changed binary directory metadata")
     if {item.name for item in entries} != set(expected_binaries):
         fail("installed release drift changed the binary set")
     for item in entries:
         if item.is_symlink() or not item.is_file():
             fail("installed release drift changed a binary type")
+        metadata = item.stat()
+        if (
+            stat.S_IMODE(metadata.st_mode) != 0o755
+            or metadata.st_uid != owner
+            or metadata.st_gid != group
+        ):
+            fail("installed release drift changed binary metadata")
         if digest(item.read_bytes()) != expected_binaries[item.name]:
             fail("installed release drift changed a binary digest")
     receipt_path = release_dir / "receipt.json"
     if receipt_path.is_symlink() or not receipt_path.is_file():
         fail("installed release drift removed its receipt")
+    receipt_metadata = receipt_path.stat()
+    if (
+        stat.S_IMODE(receipt_metadata.st_mode) != 0o644
+        or receipt_metadata.st_uid != owner
+        or receipt_metadata.st_gid != group
+    ):
+        fail("installed release drift changed receipt metadata")
     if receipt_path.read_bytes() != receipt_payload:
         fail("installed release drift changed its receipt")
     if current.is_symlink():
-        if current.resolve() != release_dir.resolve():
+        current_metadata = current.lstat()
+        if current_metadata.st_uid != owner or current_metadata.st_gid != group:
+            fail("installed release drift changed the current link metadata")
+        if os.readlink(current) != str(pathlib.Path("releases") / manifest["release"]):
             fail("installed release drift changed the current link")
     elif current.exists():
         fail("installed release drift changed the current link type")
@@ -347,7 +388,7 @@ def verify_installed() -> bool:
         fail("installed release drift removed the current link")
     return True
 
-if release_dir.exists():
+if release_dir.exists() or release_dir.is_symlink() or current.exists() or current.is_symlink():
     verify_installed()
     print(json.dumps({"release": manifest["release"], "state": "present"}, sort_keys=True))
     raise SystemExit(0)
@@ -359,11 +400,6 @@ if mode in {"check", "validate"}:
 if mode != "install":
     fail("runtime operation is invalid")
 
-try:
-    owner = pwd.getpwnam(owner_name).pw_uid
-    group = grp.getgrnam(group_name).gr_gid
-except KeyError:
-    fail("installation owner or group is unavailable")
 releases = install_base / "releases"
 releases.mkdir(parents=True, mode=0o755, exist_ok=True)
 stage = pathlib.Path(tempfile.mkdtemp(prefix=f".{manifest['release']}.", dir=releases))
@@ -386,6 +422,7 @@ try:
     receipt_path.chmod(0o644)
     os.chown(receipt_path, owner, group)
     os.chown(binary_dir, owner, group)
+    stage.chmod(0o755)
     os.chown(stage, owner, group)
     stage.rename(release_dir)
 except BaseException:
@@ -550,8 +587,7 @@ loom_node_host_checks() {
     return
   fi
   options="$(findmnt -n -T /var/lib/loom-task-builder -o FSTYPE,OPTIONS 2>/dev/null || true)"
-  if [[ "$options" != ext4* && "$options" != xfs* ]] \
-    || [[ "$options" != *prjquota* && "$options" != *pquota* ]]; then
+  if [[ "$options" != ext4* || "$options" != *prjquota* ]]; then
     loom_node_error "project-quota builder storage is unavailable"
     return
   fi
@@ -589,6 +625,7 @@ loom_node_apply() {
   loom_node_verify_slurm_identity "$slurm_node"
   loom_node_runtime validate "$artifact_dir" >/dev/null
   loom_node_identity_preflight
+  loom_node_host_checks
   loom_node_apply_identity
   loom_node_runtime install "$artifact_dir" >/dev/null
   loom_node_check "$cluster_id" "$slurm_node" "$artifact_dir"

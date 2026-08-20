@@ -12,6 +12,9 @@ capacity workflow.
   required before production promotion.
 - **[Multi-node staging on k3s](deploy-staging-k3s.md)** — topology,
   prerequisites, authorized host helper, verification, and recovery.
+- **[Task-image builder Phase 1 site convergence](task-image-builder-phase1-site-convergence.md)**
+  — inert, check/plan-first prerequisite staging, controller and one-node
+  convergence order, receipts, evidence, and the closed Phase 2 boundary.
 
 ## Capacity and development environments
 

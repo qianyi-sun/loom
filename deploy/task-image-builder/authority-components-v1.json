@@ -1,0 +1,62 @@
+{
+  "schema": "loom.task-image-builder-authority-components/v1",
+  "version": 1,
+  "component_count": 11,
+  "components": [
+    {
+      "name": "authority_manifest_parser",
+      "path": "scripts/ops/task_image_builder_authority.py",
+      "authorities": ["slurm", "host", "maintenance", "collection", "conformance"]
+    },
+    {
+      "name": "host_bundle_verifier",
+      "path": "scripts/ops/task_image_builder_host_release.py",
+      "authorities": ["host", "collection", "conformance"]
+    },
+    {
+      "name": "host_converger",
+      "path": "scripts/ops/task_image_builder_host_converge.py",
+      "authorities": ["host", "maintenance", "collection", "conformance"]
+    },
+    {
+      "name": "node_prerequisite_installer",
+      "path": "deploy/slurm/install-loom-task-image-builder-node-prerequisites.sh",
+      "authorities": ["host", "collection", "conformance"]
+    },
+    {
+      "name": "slurm_bash_converger",
+      "path": "deploy/slurm/converge-loom-task-image-builder-prerequisites.sh",
+      "authorities": ["slurm", "collection", "conformance"]
+    },
+    {
+      "name": "controller_identity_installer",
+      "path": "deploy/slurm/install-loom-task-image-builder-controller-identity.sh",
+      "authorities": ["slurm", "collection", "conformance"]
+    },
+    {
+      "name": "slurm_readback_parser",
+      "path": "scripts/ops/task_image_builder_slurm_readback.py",
+      "authorities": ["slurm", "collection", "conformance"]
+    },
+    {
+      "name": "slurm_receipt_producer",
+      "path": "scripts/ops/task_image_builder_slurm_converge.py",
+      "authorities": ["slurm", "collection", "conformance"]
+    },
+    {
+      "name": "node_maintenance_producer",
+      "path": "scripts/ops/task_image_builder_node_maintenance.py",
+      "authorities": ["maintenance", "collection", "conformance"]
+    },
+    {
+      "name": "evidence_collector",
+      "path": "scripts/ops/task_image_builder_prerequisite_evidence.py",
+      "authorities": ["collection", "conformance"]
+    },
+    {
+      "name": "conformance_verifier",
+      "path": "scripts/ops/task_image_builder_prerequisite_conformance.py",
+      "authorities": ["conformance"]
+    }
+  ]
+}
