@@ -638,13 +638,39 @@ assert_global_stop_conditions() {
           .metadata.annotations["loom.dev/personal-dev-runtime-profile-sha256"] == null)
       ' >/dev/null
   kubectl --kubeconfig "$kubeconfig" --request-timeout=10s \
+    --namespace longhorn-system get deployments.apps,daemonsets.apps -o json \
+    | jq -e '
+        ([.items[] | select(.kind == "Deployment")]) as $deployments |
+        ([.items[] | select(.kind == "DaemonSet")]) as $daemon_sets |
+        ($deployments | length) > 0 and
+        ($daemon_sets | length) > 0 and
+        all($deployments[];
+          (.spec.replicas | type) == "number" and
+          .spec.replicas > 0 and
+          .status.observedGeneration == .metadata.generation and
+          .status.updatedReplicas == .spec.replicas and
+          .status.readyReplicas == .spec.replicas and
+          .status.availableReplicas == .spec.replicas and
+          (.status.unavailableReplicas // 0) == 0) and
+        all($daemon_sets[];
+          .status.desiredNumberScheduled > 0 and
+          .status.observedGeneration == .metadata.generation and
+          .status.updatedNumberScheduled == .status.desiredNumberScheduled and
+          .status.numberReady == .status.desiredNumberScheduled and
+          .status.numberAvailable == .status.desiredNumberScheduled and
+          (.status.numberUnavailable // 0) == 0)
+      ' >/dev/null
+  kubectl --kubeconfig "$kubeconfig" --request-timeout=10s \
     --namespace longhorn-system get pods -o json \
     | jq -e '
-        .items | length > 0 and all(.[];
-          .status.phase == "Succeeded" or
-          (.status.phase == "Running" and
-           (.status.containerStatuses | type == "array" and length > 0) and
-           all(.status.containerStatuses[]; .ready == true)))
+        .items as $pods |
+        ($pods | length) > 0 and
+        any($pods[]; .status.phase == "Running") and
+        all($pods[] |
+          select(.status.phase != "Succeeded" and .status.phase != "Failed");
+          .status.phase == "Running" and
+          (.status.containerStatuses | type == "array" and length > 0) and
+          all(.status.containerStatuses[]; .ready == true))
       ' >/dev/null
   kubectl --kubeconfig "$kubeconfig" --request-timeout=10s \
     --namespace longhorn-system get volumes.longhorn.io -o json \
