@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -798,6 +799,156 @@ def test_personal_dev_builder_runtime_hostname_identity_uses_dns_case_rules() ->
             + "trt-eai-oldlab-3 trt-eai-oldlab-2; then exit 1; fi\n"
             + "if assert_dns_hostname_identity "
             + "trt-eai-oldlab-2. trt-eai-oldlab-2; then exit 1; fi\n"
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert behavior.returncode == 0, behavior.stderr
+
+
+def test_personal_dev_builder_runtime_separates_ssh_stdin_from_scp_options() -> None:
+    runbook = _read("docs/runbooks/personal-dev-builder-runtime.md")
+    options = re.search(
+        r"^ssh_options=\([^\n]+\)\nssh_run_options=\([^\n]+\)$",
+        runbook,
+        flags=re.MULTILINE,
+    )
+    assert options is not None
+
+    behavior = subprocess.run(
+        ["bash", "-seu", "--"],
+        input=(
+            options.group(0)
+            + "\n"
+            + "ssh() {\n"
+            + '  test "$1" = -n\n'
+            + "}\n"
+            + "scp() {\n"
+            + '  for argument in "$@"; do test "$argument" != -n; done\n'
+            + "}\n"
+            + 'ssh "${ssh_run_options[@]}" target /bin/true\n'
+            + 'scp "${ssh_options[@]}" -- source target:/tmp/\n'
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert behavior.returncode == 0, behavior.stderr
+    assert 'ssh "${ssh_options[@]}"' not in runbook
+    assert 'scp "${ssh_run_options[@]}"' not in runbook
+
+
+def test_personal_dev_builder_runtime_remote_staging_directories_are_private(
+    tmp_path: Path,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-builder-runtime.md")
+    command = re.search(
+        r'^ssh "\$\{ssh_run_options\[@\]\}" "\$target" \\\n'
+        r'  "/usr/bin/install -d -m 0700 [^"]+"$',
+        runbook,
+        flags=re.MULTILINE,
+    )
+    assert command is not None
+
+    remote_stage = tmp_path / "remote-stage"
+    remote_stage.mkdir(mode=0o700)
+    remote_stage.chmod(0o700)
+    behavior = subprocess.run(
+        ["bash", "-seu", "--"],
+        input=(
+            "umask 022\n"
+            f"remote_stage={shlex.quote(str(remote_stage))}\n"
+            "ssh_run_options=()\n"
+            "target=target\n"
+            "ssh() {\n"
+            '  test "$#" -eq 2\n'
+            '  test "$1" = target\n'
+            '  /bin/bash -ceu -- "$2"\n'
+            "}\n"
+            + command.group(0)
+            + "\n"
+            + 'for directory in "$remote_stage" '
+            '"$remote_stage/scripts" "$remote_stage/scripts/ops"; do\n'
+            + '  mode="$(stat -c %a "$directory")"\n'
+            + '  test "$mode" = 700 || { '
+            'printf "%s mode=%s\\n" "$directory" "$mode" >&2; exit 1; }\n'
+            + "done\n"
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert behavior.returncode == 0, behavior.stderr
+
+
+def test_personal_dev_builder_runtime_root_staging_directories_are_private(
+    tmp_path: Path,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-builder-runtime.md")
+    root_stage_evidence = (
+        'printf \'%s\\n\' "$root_stage" > '
+        '"$evidence_dir/$node.root-stage.txt"'
+    )
+    command_start = runbook.index(
+        'ssh "${ssh_run_options[@]}" "$target" \\\n',
+        runbook.index(root_stage_evidence),
+    )
+    command_end = runbook.index("\nassert_node_staging", command_start)
+    command = runbook[command_start:command_end]
+
+    remote_stage = tmp_path / "remote-stage"
+    remote_ops = remote_stage / "scripts" / "ops"
+    remote_ops.mkdir(parents=True)
+    for relative in (
+        "personal-dev-builder-runtime-profile.json",
+        "gvisor-release-20260810.0.tar.bz2",
+        "scripts/ops/install_personal_dev_builder_runtime.py",
+        "scripts/ops/personal_dev_builder_runtime_profile.py",
+    ):
+        (remote_stage / relative).write_bytes(b"test fixture\n")
+    root_stage_base = tmp_path / "root-stage"
+    root_stage_parent = root_stage_base / "source-sha"
+    root_stage = root_stage_parent / "trt-eai-oldlab-2"
+    behavior = subprocess.run(
+        ["bash", "-seu", "--"],
+        input=(
+            "umask 022\n"
+            f"remote_stage={shlex.quote(str(remote_stage))}\n"
+            f"root_stage_base={shlex.quote(str(root_stage_base))}\n"
+            f"root_stage_parent={shlex.quote(str(root_stage_parent))}\n"
+            f"root_stage={shlex.quote(str(root_stage))}\n"
+            "ssh_run_options=()\n"
+            "target=target\n"
+            "sudo() {\n"
+            '  test "$1" = -n\n'
+            '  test "$2" = --\n'
+            "  shift 2\n"
+            '  if test "$1" != /usr/bin/install; then "$@"; return; fi\n'
+            "  shift\n"
+            "  install_arguments=()\n"
+            '  while test "$#" -gt 0; do\n'
+            '    case "$1" in\n'
+            "      -o|-g) shift 2 ;;\n"
+            '      *) install_arguments+=("$1"); shift ;;\n'
+            "    esac\n"
+            "  done\n"
+            '  /usr/bin/install "${install_arguments[@]}"\n'
+            "}\n"
+            "ssh() {\n"
+            '  test "$#" -eq 2\n'
+            '  test "$1" = target\n'
+            '  eval "$2"\n'
+            "}\n"
+            + command
+            + "\n"
+            + 'for directory in "$root_stage_base" '
+            '"${root_stage%/*}" "$root_stage" '
+            '"$root_stage/scripts" "$root_stage/scripts/ops"; do\n'
+            + '  mode="$(stat -c %a "$directory")"\n'
+            + '  test "$mode" = 700 || { '
+            'printf "%s mode=%s\\n" "$directory" "$mode" >&2; exit 1; }\n'
+            + "done\n"
         ),
         text=True,
         capture_output=True,
