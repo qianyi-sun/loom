@@ -777,7 +777,7 @@ def test_stage1_image_uses_separate_candidate_and_trusted_release_authorities() 
     assert "docker builder prune" not in publish_scripts
     assert "scripts/ci_registry_readback.py raw" in publish_scripts
     assert "type=docker,dest=" not in publish_scripts
-    assert "docker push" in publish_scripts
+    assert "scripts/ops/docker_push_with_retry.sh" in publish_scripts
     assert index["runs-on"] == "ubuntu-24.04"
     assert index["needs"] == ["plan", "stage1-publish"]
     assert "--deny-self-hosted-runners" in "\n".join(
@@ -1195,12 +1195,11 @@ def test_release_images_are_scanned_attested_and_verified_before_manifest_join()
     }
     assert trusted_scan["run"] == build_scan["run"]
     assert architecture_publish["id"] == "architecture-publish"
-    assert 'push_output=$(docker push "$target" 2>&1)' in architecture_publish["run"]
+    push_command = 'push_output=$(scripts/ops/docker_push_with_retry.sh "$target")'
+    assert push_command in architecture_publish["run"]
     assert "subject_name=$image" in architecture_publish["run"]
     assert "subject_digest=$digest" in architecture_publish["run"]
-    push_tail = architecture_publish["run"].split(
-        'push_output=$(docker push "$target" 2>&1)', maxsplit=1
-    )[1]
+    push_tail = architecture_publish["run"].split(push_command, maxsplit=1)[1]
     assert 'imagetools inspect --raw "${image}@${digest}"' in push_tail
     assert 'imagetools inspect "$target"' not in push_tail
     assert architecture_attestation["uses"].startswith("actions/attest-build-provenance@")
@@ -1472,9 +1471,27 @@ def test_image_candidate_index_stays_untrusted_and_is_not_release_input() -> Non
         "${{ fromJSON(needs.plan.outputs.native_builds) }}"
     )
     assert 'docker tag "$local_image" "$target"' in publish_script
-    assert 'docker push "$target"' in publish_script
+    assert 'scripts/ops/docker_push_with_retry.sh "$target"' in publish_script
     assert ".release.docker.tar" in publish_script
     assert 'docker load --input "$archive"' in publish_script
+
+
+def test_all_release_child_pushes_use_the_bounded_observable_retry_helper() -> None:
+    jobs = _workflow(".github/workflows/images.yml")["jobs"]
+    architecture_push = next(
+        step["run"]
+        for step in jobs["publish"]["steps"]
+        if step.get("name") == "Publish scanned architecture image"
+    )
+    stage1_push = next(
+        step["run"]
+        for step in jobs["stage1-publish"]["steps"]
+        if step.get("name") == "Log in and publish exact Stage 1 child"
+    )
+
+    expected = 'push_output=$(scripts/ops/docker_push_with_retry.sh "$target")'
+    assert expected in architecture_push
+    assert expected in stage1_push
 
 
 def test_manifest_image_build_and_publish_pass_exact_full_head_sha() -> None:
