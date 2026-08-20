@@ -804,7 +804,17 @@ def test_personal_dev_builder_runtime_runbook_is_exact_and_inert() -> None:
     assert runbook.count("loom-personal-dev-runtime-smoke") >= 8
     assert runbook.count(".spec.nodeSelector == {") >= 2
     assert runbook.count(".scheduling.nodeSelector == {") >= 3
+    assert '"pod-security.kubernetes.io/enforce": "baseline"' in runbook
     assert '"pod-security.kubernetes.io/enforce-version": "v1.36"' in runbook
+    assert '"pod-security.kubernetes.io/audit": "restricted"' in runbook
+    assert 'restartPolicy: "Always"' in runbook
+    assert 'command: ["/usr/local/bin/loom-personal-dev-buildkitd"]' in runbook
+    assert 'capabilities: {drop: ["ALL"], add: ["SETGID", "SETUID"]}' in runbook
+    assert 'seccompProfile: {type: "Unconfined"}' in runbook
+    assert "shareProcessNamespace: false" in runbook
+    assert "/usr/bin/buildctl" in runbook
+    assert "/usr/bin/buildctl-daemonless.sh" not in runbook
+    assert "loom-nnp=1" in runbook
     assert 'configMap: {name: "buildkit-conformance", defaultMode: 292}' in runbook
     assert "get secrets -o name" in normalized
     assert "services,secrets" not in normalized
@@ -930,6 +940,53 @@ def test_personal_dev_builder_runtime_embedded_programs_parse() -> None:
         check=False,
     )
     assert shell.returncode == 0, shell.stderr
+
+    buildkit_filters = [
+        value
+        for value in jq_filters
+        if 'restartPolicy: "Always"' in value and 'name: "buildkitd"' in value
+    ]
+    assert len(buildkit_filters) == 1
+    buildkit_pod = json.loads(
+        subprocess.run(
+            [
+                "jq",
+                "-n",
+                "--arg",
+                "namespace",
+                "loom-runtime-smoke",
+                "--arg",
+                "image",
+                "example.invalid/builder@sha256:" + "3" * 64,
+                "--arg",
+                "base",
+                "example.invalid/base@sha256:" + "4" * 64,
+                "--arg",
+                "source",
+                "5" * 40,
+                buildkit_filters[0],
+            ],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout
+    )
+    spec = buildkit_pod["spec"]
+    assert spec["shareProcessNamespace"] is False
+    assert len(spec["containers"]) == 1
+    assert len(spec["initContainers"]) == 1
+    client = spec["containers"][0]
+    sidecar = spec["initContainers"][0]
+    assert client["name"] == "conformance"
+    assert sidecar["name"] == "buildkitd"
+    client_mounts = {mount["name"] for mount in client["volumeMounts"]}
+    sidecar_mounts = {mount["name"] for mount in sidecar["volumeMounts"]}
+    assert client_mounts == {"buildkit-run", "script", "tmp-client", "workspace"}
+    assert sidecar_mounts == {"buildkit-run", "buildkit-state", "tmp-buildkit"}
+    assert not {"attempt-capability", "contract", "script", "workspace"} & (
+        sidecar_mounts
+    )
+    assert not {"buildkit-state", "tmp-buildkit"} & client_mounts
 
 
 def test_personal_dev_builder_runtime_hostname_identity_uses_dns_case_rules() -> None:

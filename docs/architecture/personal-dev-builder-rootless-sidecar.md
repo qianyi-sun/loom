@@ -144,6 +144,11 @@ RootlessKit version and binary plus the exact `newuidmap`/`newgidmap` file
 capabilities. The fail-closed sidecar launcher is a checked-in trusted-image
 source and its preflight marker is captured in bounded sidecar logs. These are
 part of trusted image publication evidence, not mutable node prerequisites.
+The RootlessKit binary binding is architecture-specific: SHA-256
+`79e43c95bb160488b6cb839da16750f7c590fb307b9c2e2d0421dd73fdc557cc`
+for amd64 and
+`27dfdece833e7ababf64ac5ac37b55b631d614e51e23d2f3505b2881f22c1fce`
+for arm64 in the pinned multi-platform base.
 
 ## Data and authority flow
 

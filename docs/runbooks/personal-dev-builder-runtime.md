@@ -251,7 +251,7 @@ assert_smoke_namespace_owned() {
         .metadata.annotations["loom.dev/runtime-rollout-source-sha"] == $source and
         .metadata.labels["pod-security.kubernetes.io/audit"] == "restricted" and
         .metadata.labels["pod-security.kubernetes.io/audit-version"] == "v1.36" and
-        .metadata.labels["pod-security.kubernetes.io/enforce"] == "restricted" and
+        .metadata.labels["pod-security.kubernetes.io/enforce"] == "baseline" and
         .metadata.labels["pod-security.kubernetes.io/enforce-version"] == "v1.36" and
         .metadata.labels["pod-security.kubernetes.io/warn"] == "restricted" and
         .metadata.labels["pod-security.kubernetes.io/warn-version"] == "v1.36"
@@ -1076,7 +1076,7 @@ jq -n --arg namespace "$smoke_namespace" --arg source "$merged_source_sha" '{
       "app.kubernetes.io/managed-by": "loom-personal-dev-runtime-smoke",
       "pod-security.kubernetes.io/audit": "restricted",
       "pod-security.kubernetes.io/audit-version": "v1.36",
-      "pod-security.kubernetes.io/enforce": "restricted",
+      "pod-security.kubernetes.io/enforce": "baseline",
       "pod-security.kubernetes.io/enforce-version": "v1.36",
       "pod-security.kubernetes.io/warn": "restricted",
       "pod-security.kubernetes.io/warn-version": "v1.36"
@@ -1222,8 +1222,12 @@ Use the separately reviewed immutable `personal_dev_builder` image digest; do
 not substitute a tag. Its rootless BuildKit contains
 `buildkit-qemu-aarch64`. The conformance builds a digest-pinned base through a
 `RUN` step for both `linux/amd64` and `linux/arm64`. The step checks the actual
-`uname -m`; the verifier then reads each OCI config and requires the requested
-platform metadata.
+`uname -m` and inherited no-new-privileges; the verifier then reads each OCI
+config and requires the requested platform metadata. The restricted client and
+native sidecar use separate PID and mount namespaces. A bounded operator gate
+keeps the client alive while BuildKit's own `NoNewPrivs=1` status is captured,
+then releases both builds. Neither container receives a service-account token,
+and the sidecar receives no script, workspace, contract, or capability mount.
 
 ```bash
 builder_image='<reviewed-personal-dev-builder-image@sha256:64-lowercase-hex>'
@@ -1236,10 +1240,39 @@ cat > "$buildkit_script" <<'SH'
 #!/bin/sh
 set -eu
 test -f /proc/gvisor/kernel_is_gvisor
-test -x /usr/bin/buildctl-daemonless.sh
+test "$(id -u)" = 1000
+test "$(id -g)" = 1000
+status_value() {
+  sed -n "s/^$1:[[:space:]]*//p" /proc/self/status | tr '\t' ' '
+}
+test "$(status_value Uid)" = "1000 1000 1000 1000"
+test "$(status_value Gid)" = "1000 1000 1000 1000"
+test "$(status_value CapEff)" = 0000000000000000
+test "$(status_value CapBnd)" = 0000000000000000
+test "$(status_value NoNewPrivs)" = 1
+test "$(status_value Seccomp)" = 2
+test -x /usr/bin/buildctl
 test -x /usr/bin/buildkit-qemu-aarch64
-mkdir -p "$HOME" "$XDG_RUNTIME_DIR"
-chmod 0700 "$HOME" "$XDG_RUNTIME_DIR"
+for cmdline in /proc/[0-9]*/cmdline; do
+  if command_line="$(tr '\000' ' ' < "$cmdline" 2>/dev/null)"; then
+    case "$command_line" in
+      *rootlesskit*|*buildkitd*)
+        printf 'sidecar process visible in client PID namespace\n' >&2
+        exit 1
+        ;;
+    esac
+  fi
+done
+printf 'loom-client-preflight uid=1000 gid=1000 capeff=0000000000000000 capbnd=0000000000000000 nnp=1 seccomp=2 pid-isolation=pass\n'
+
+operator_gate=/workspace/operator-continue
+waited=0
+until test -f "$operator_gate"; do
+  waited=$((waited + 1))
+  test "$waited" -le 600
+  sleep 1
+done
+rm "$operator_gate"
 
 build_one() {
   platform="$1"
@@ -1252,10 +1285,11 @@ build_one() {
   chmod 0700 "$directory"
   cat > "$directory/Dockerfile" <<EOF
 FROM ${BASE_IMAGE}
-RUN actual="\$(uname -m)"; printf 'loom-uname=%s\\n' "\$actual"; test "\$actual" = "${expected_uname}"
+RUN actual="\$(uname -m)"; nnp="\$(sed -n 's/^NoNewPrivs:[[:space:]]*//p' /proc/self/status)"; printf 'loom-uname=%s loom-nnp=%s\\n' "\$actual" "\$nnp"; test "\$actual" = "${expected_uname}"; test "\$nnp" = 1
 EOF
-  BUILDKITD_FLAGS="--oci-worker-no-process-sandbox --oci-worker-snapshotter=native" \
-    /usr/bin/buildctl-daemonless.sh build \
+  /usr/bin/buildctl \
+      --addr=unix:///var/run/loom-buildkit/buildkitd.sock \
+      build \
       --frontend=dockerfile.v0 \
       --local "context=$directory" \
       --local "dockerfile=$directory" \
@@ -1329,6 +1363,7 @@ jq -n --arg namespace "$smoke_namespace" --arg image "$builder_image" \
       nodeName: "trt-eai-oldlab-2",
       restartPolicy: "Never",
       runtimeClassName: "loom-personal-dev-builder",
+      shareProcessNamespace: false,
       terminationGracePeriodSeconds: 30,
       securityContext: {
         runAsNonRoot: true,
@@ -1338,19 +1373,14 @@ jq -n --arg namespace "$smoke_namespace" --arg image "$builder_image" \
         seccompProfile: {type: "RuntimeDefault"}
       },
       containers: [{
-        name: "buildkit",
+        name: "conformance",
         image: $image,
         imagePullPolicy: "IfNotPresent",
         command: ["/bin/sh", "/var/run/loom-conformance/run.sh"],
-        env: [
-          {name: "BASE_IMAGE", value: $base},
-          {name: "HOME", value: "/workspace/home"},
-          {name: "TMPDIR", value: "/tmp"},
-          {name: "XDG_RUNTIME_DIR", value: "/workspace/run"}
-        ],
+        env: [{name: "BASE_IMAGE", value: $base}],
         resources: {
-          requests: {cpu: "500m", memory: "1Gi", "ephemeral-storage": "4Gi"},
-          limits: {cpu: "4", memory: "8Gi", "ephemeral-storage": "20Gi"}
+          requests: {cpu: "250m", memory: "512Mi", "ephemeral-storage": "4Gi"},
+          limits: {cpu: "2", memory: "4Gi", "ephemeral-storage": "20Gi"}
         },
         securityContext: {
           allowPrivilegeEscalation: false,
@@ -1361,13 +1391,54 @@ jq -n --arg namespace "$smoke_namespace" --arg image "$builder_image" \
         volumeMounts: [
           {name: "script", mountPath: "/var/run/loom-conformance", readOnly: true},
           {name: "workspace", mountPath: "/workspace"},
-          {name: "tmp", mountPath: "/tmp"}
+          {name: "tmp-client", mountPath: "/tmp"},
+          {name: "buildkit-run", mountPath: "/var/run/loom-buildkit", readOnly: true}
+        ]
+      }],
+      initContainers: [{
+        name: "buildkitd",
+        image: $image,
+        imagePullPolicy: "IfNotPresent",
+        restartPolicy: "Always",
+        command: ["/usr/local/bin/loom-personal-dev-buildkitd"],
+        resources: {
+          requests: {cpu: "500m", memory: "1Gi", "ephemeral-storage": "4Gi"},
+          limits: {cpu: "4", memory: "8Gi", "ephemeral-storage": "20Gi"}
+        },
+        securityContext: {
+          allowPrivilegeEscalation: true,
+          capabilities: {drop: ["ALL"], add: ["SETGID", "SETUID"]},
+          readOnlyRootFilesystem: true,
+          runAsNonRoot: true,
+          seccompProfile: {type: "Unconfined"}
+        },
+        startupProbe: {
+          exec: {
+            command: [
+              "/usr/bin/buildctl",
+              "--addr",
+              "unix:///var/run/loom-buildkit/buildkitd.sock",
+              "debug",
+              "workers"
+            ]
+          },
+          failureThreshold: 60,
+          periodSeconds: 2,
+          timeoutSeconds: 1
+        },
+        volumeMounts: [
+          {name: "buildkit-run", mountPath: "/var/run/loom-buildkit"},
+          {name: "buildkit-state", mountPath: "/var/lib/loom-buildkit"},
+          {name: "tmp-buildkit", mountPath: "/tmp"}
         ]
       }],
       volumes: [
         {name: "script", configMap: {name: "buildkit-conformance", defaultMode: 292}},
         {name: "workspace", emptyDir: {sizeLimit: "20Gi"}},
-        {name: "tmp", emptyDir: {sizeLimit: "2Gi"}}
+        {name: "tmp-client", emptyDir: {sizeLimit: "2Gi"}},
+        {name: "buildkit-run", emptyDir: {sizeLimit: "64Mi"}},
+        {name: "buildkit-state", emptyDir: {sizeLimit: "20Gi"}},
+        {name: "tmp-buildkit", emptyDir: {sizeLimit: "2Gi"}}
       ]
     }
   }' > "$evidence_dir/buildkit-conformance.pod.json"
@@ -1375,8 +1446,42 @@ chmod 0600 "$evidence_dir/buildkit-conformance.pod.json"
 kubectl --kubeconfig "$kubeconfig" create \
   -f "$evidence_dir/buildkit-conformance.pod.json"
 kubectl --kubeconfig "$kubeconfig" --namespace "$smoke_namespace" \
+  wait --for=condition=Ready --timeout=10m pod/buildkit-conformance
+kubectl --kubeconfig "$kubeconfig" --namespace "$smoke_namespace" \
+  exec -i pod/buildkit-conformance -c buildkitd -- python3 - \
+  > "$evidence_dir/buildkit-conformance.buildkit-nnp.txt" <<'PY'
+from pathlib import Path
+
+matches = []
+for cmdline in Path("/proc").glob("[0-9]*/cmdline"):
+    try:
+        payload = cmdline.read_bytes()
+    except (FileNotFoundError, PermissionError, ProcessLookupError):
+        continue
+    arguments = [value for value in payload.split(b"\0") if value]
+    if arguments and arguments[0] == b"/usr/bin/buildkitd":
+        matches.append(cmdline.parent)
+if len(matches) != 1:
+    raise SystemExit("exact BuildKit process is unavailable")
+status = {}
+for line in (matches[0] / "status").read_text(encoding="ascii").splitlines():
+    name, separator, value = line.partition(":")
+    if separator:
+        status[name] = value.strip()
+if status.get("NoNewPrivs") != "1":
+    raise SystemExit("BuildKit no_new_privs is not set")
+print("loom-buildkit-nnp=1")
+PY
+test "$(< "$evidence_dir/buildkit-conformance.buildkit-nnp.txt")" = \
+  loom-buildkit-nnp=1
+kubectl --kubeconfig "$kubeconfig" --namespace "$smoke_namespace" \
+  exec pod/buildkit-conformance -c conformance -- \
+  /bin/sh -ceu -- \
+  'test ! -e /workspace/operator-continue; : > /workspace/operator-continue'
+conformance_wait_status=0
+kubectl --kubeconfig "$kubeconfig" --namespace "$smoke_namespace" \
   wait --for=jsonpath='{.status.phase}'=Succeeded --timeout=20m \
-  pod/buildkit-conformance
+  pod/buildkit-conformance || conformance_wait_status=$?
 kubectl --kubeconfig "$kubeconfig" --namespace "$smoke_namespace" \
   get pod/buildkit-conformance -o json \
   > "$evidence_dir/buildkit-conformance.live.json"
@@ -1392,23 +1497,70 @@ jq -e --arg image "$builder_image" --arg source "$merged_source_sha" \
       "loom.dev/personal-dev-runtime-profile-b": $b
     } and
     .spec.automountServiceAccountToken == false and
+    .spec.shareProcessNamespace == false and
+    (.spec | has("hostUsers") | not) and
     .metadata.labels["app.kubernetes.io/managed-by"] == "loom-personal-dev-runtime-smoke" and
     .metadata.annotations["loom.dev/runtime-rollout-source-sha"] == $source and
+    (.spec.containers | length) == 1 and
+    (.spec.initContainers | length) == 1 and
+    .spec.containers[0].name == "conformance" and
     .spec.containers[0].image == $image and
     .spec.containers[0].securityContext.allowPrivilegeEscalation == false and
     .spec.containers[0].securityContext.capabilities.drop == ["ALL"] and
     .spec.containers[0].securityContext.readOnlyRootFilesystem == true and
-    .spec.containers[0].securityContext.runAsNonRoot == true
+    .spec.containers[0].securityContext.runAsNonRoot == true and
+    ([.spec.containers[0].volumeMounts[].name] | sort) ==
+      ["buildkit-run", "script", "tmp-client", "workspace"] and
+    (.spec.containers[0].volumeMounts[] |
+      select(.name == "buildkit-run") | .readOnly == true) and
+    .spec.initContainers[0].name == "buildkitd" and
+    .spec.initContainers[0].image == $image and
+    .spec.initContainers[0].restartPolicy == "Always" and
+    .spec.initContainers[0].command ==
+      ["/usr/local/bin/loom-personal-dev-buildkitd"] and
+    (.spec.initContainers[0] | has("args") | not) and
+    (.spec.initContainers[0] | has("env") | not) and
+    .spec.initContainers[0].securityContext.allowPrivilegeEscalation == true and
+    .spec.initContainers[0].securityContext.capabilities ==
+      {"add":["SETGID","SETUID"],"drop":["ALL"]} and
+    .spec.initContainers[0].securityContext.readOnlyRootFilesystem == true and
+    .spec.initContainers[0].securityContext.runAsNonRoot == true and
+    .spec.initContainers[0].securityContext.seccompProfile.type == "Unconfined" and
+    ([.spec.initContainers[0].volumeMounts[].name] | sort) ==
+      ["buildkit-run", "buildkit-state", "tmp-buildkit"] and
+    ([.spec.volumes[].name] | sort) ==
+      ["buildkit-run", "buildkit-state", "script", "tmp-buildkit", "tmp-client", "workspace"] and
+    all(.spec.volumes[]; (has("secret") or has("projected") or has("csi")) | not) and
+    (.status.containerStatuses | length) == 1 and
+    .status.containerStatuses[0].name == "conformance" and
+    .status.containerStatuses[0].restartCount == 0 and
+    .status.containerStatuses[0].state.terminated.exitCode == 0 and
+    (.status.containerStatuses[0].imageID | test("@sha256:[0-9a-f]{64}$")) and
+    (.status.initContainerStatuses | length) == 1 and
+    .status.initContainerStatuses[0].name == "buildkitd" and
+    .status.initContainerStatuses[0].restartCount == 0 and
+    (.status.initContainerStatuses[0].state | has("terminated")) and
+    (.status.initContainerStatuses[0].imageID | test("@sha256:[0-9a-f]{64}$"))
   ' "$evidence_dir/buildkit-conformance.live.json" >/dev/null
 kubectl --kubeconfig "$kubeconfig" --namespace "$smoke_namespace" \
-  logs --limit-bytes=8388608 pod/buildkit-conformance \
-  > "$evidence_dir/buildkit-conformance.log"
-grep -F 'loom-uname=x86_64' "$evidence_dir/buildkit-conformance.log" >/dev/null
-grep -F 'loom-uname=aarch64' "$evidence_dir/buildkit-conformance.log" >/dev/null
+  logs --limit-bytes=16777216 pod/buildkit-conformance -c conformance \
+  > "$evidence_dir/buildkit-conformance.client.log"
+kubectl --kubeconfig "$kubeconfig" --namespace "$smoke_namespace" \
+  logs --limit-bytes=8388608 pod/buildkit-conformance -c buildkitd \
+  > "$evidence_dir/buildkit-conformance.sidecar.log"
+test "$conformance_wait_status" -eq 0
+grep -F 'loom-client-preflight uid=1000 gid=1000 capeff=0000000000000000 capbnd=0000000000000000 nnp=1 seccomp=2 pid-isolation=pass' \
+  "$evidence_dir/buildkit-conformance.client.log" >/dev/null
+grep -F 'loom-uname=x86_64 loom-nnp=1' \
+  "$evidence_dir/buildkit-conformance.client.log" >/dev/null
+grep -F 'loom-uname=aarch64 loom-nnp=1' \
+  "$evidence_dir/buildkit-conformance.client.log" >/dev/null
 grep -F '"architecture": "amd64", "platform": "linux/amd64"' \
-  "$evidence_dir/buildkit-conformance.log" >/dev/null
+  "$evidence_dir/buildkit-conformance.client.log" >/dev/null
 grep -F '"architecture": "arm64", "platform": "linux/arm64"' \
-  "$evidence_dir/buildkit-conformance.log" >/dev/null
+  "$evidence_dir/buildkit-conformance.client.log" >/dev/null
+grep -F 'loom-buildkitd-preflight uid=1000 gid=1000 capeff=0000000000000000 capbnd=00000000000000c0 nnp=0 seccomp=0' \
+  "$evidence_dir/buildkit-conformance.sidecar.log" >/dev/null
 assert_global_stop_conditions
 ```
 
