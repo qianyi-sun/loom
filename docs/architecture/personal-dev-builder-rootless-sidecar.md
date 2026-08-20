@@ -111,11 +111,15 @@ the management principal it binds the exact trusted image digest and measured
 RuntimeClass, the single restricted client plus single native sidecar shape,
 separate PID namespace, disabled service-account token and service links,
 non-host namespaces, exact security contexts, exact volume separation, and
-finite resource envelope. The management RBAC cannot create Pods directly;
-the Job controller can create only Pods from a template that passed this
-policy. Only the management service account can create workloads in the
-namespace, the ResourceQuota still permits exactly two Jobs and two Pods, and
-candidate code receives no Kubernetes credential.
+finite resource envelope. The same policy binds `default-deny` and
+`builder-egress` to their exact generated selectors, peers, ports, and
+private/reserved-network exclusions; a permitted resource name cannot be used
+to install wider egress. Deletes remain shape-independent so the controller
+can remove an object drifted by a higher-authority principal. The management
+RBAC cannot create Pods directly; the Job controller can create only Pods from
+a template that passed this policy. Only the management service account can
+create workloads in the namespace, the ResourceQuota still permits exactly
+two Jobs and two Pods, and candidate code receives no Kubernetes credential.
 
 ### Trusted client container
 
@@ -182,7 +186,8 @@ for arm64 in the pinned multi-platform base.
 3. `buildctl` sends the selected source context to BuildKit over the Unix
    socket. The source directory is not mounted into the sidecar.
 4. BuildKit executes the untrusted Dockerfile in its rootless subordinate-ID
-   namespace behind the KVM gVisor boundary and existing NetworkPolicy.
+   namespace behind the KVM gVisor boundary and admission-bound
+   NetworkPolicies.
 5. The OCI exporter streams the result back over the session to the client's
    bounded destination file. The sidecar does not mount that output path.
 6. The client verifies platform metadata, digests, sizes, and archive structure,
@@ -217,6 +222,9 @@ Repository tests must prove:
 - the management admission policy binds builder Jobs to the release's trusted
   image, measured RuntimeClass, exact two-container security shape, isolated
   mounts, non-host namespaces, and finite resources;
+- the same policy admits only the exact builder default-deny and egress shapes,
+  denies selector/peer/port/CIDR widening, and permits cleanup of drifted
+  policies;
 - explicit false shared PID namespace and absent service-account token;
 - the client retains the restricted security context and is the sole consumer
   of contract, capability, workspace, and output volumes;

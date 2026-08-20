@@ -245,7 +245,7 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
     assert rendered.runtime_handler == profile.builder.runtime_handler
     assert rendered.runtime_profile_sha256 == profile.builder.runtime_profile_sha256
     assert hashlib.sha256(rendered.yaml_text.encode("utf-8")).hexdigest() == (
-        "85614f87502349e51827f2b9beee0adab14d95c62a096c1ca45cea80730b4fbe"
+        "4d8afe06e5def04d2a608d22e910137c616a63217d40b6b75606eefb3119bcdf"
     )
 
     identities = {_identity(document) for document in documents}
@@ -1090,6 +1090,63 @@ def test_builder_admission_binds_privileged_exception_to_exact_job_contract(
     assert "attempt-capability" in contract
     assert "buildkit-state" in contract
     assert "readOnly == true" in contract
+
+
+def test_builder_admission_binds_network_policies_to_exact_specs(
+    tmp_path: Path,
+) -> None:
+    _, _, _, documents = _render(tmp_path)
+    policy = next(
+        item
+        for item in documents
+        if item["kind"] == "ValidatingAdmissionPolicy"
+        and item["metadata"]["name"] == "loom-personal-dev-management-resources"
+    )
+    boundaries = {
+        item["message"]: item["expression"]
+        for item in policy["spec"]["validations"]
+        if item["message"].startswith("builder NetworkPolicy ")
+    }
+
+    assert set(boundaries) == {
+        "builder NetworkPolicy default deny differs from its exact contract",
+        "builder NetworkPolicy egress base differs from its exact contract",
+        "builder NetworkPolicy DNS egress differs from its exact contract",
+        "builder NetworkPolicy MinIO egress differs from its exact contract",
+        "builder NetworkPolicy public egress differs from its exact contract",
+    }
+    assert all(
+        expression.startswith("request.operation == 'DELETE' ||")
+        for expression in boundaries.values()
+    )
+    contract = "\n".join(boundaries.values())
+    for value in (
+        "request.resource.group == 'networking.k8s.io'",
+        "metadata.name == 'default-deny'",
+        "metadata.name == 'builder-egress'",
+        "apiVersion == 'networking.k8s.io/v1'",
+        "kind == 'NetworkPolicy'",
+        "spec.policyTypes == ['Ingress','Egress']",
+        "spec.policyTypes == ['Egress']",
+        "spec.podSelector.matchLabels['loom.dev/builder-role'] == 'sandbox'",
+        "namespaceSelector.matchLabels['kubernetes.io/metadata.name'] == 'kube-system'",
+        "podSelector.matchLabels['k8s-app'] == 'kube-dns'",
+        "namespaceSelector.matchLabels['kubernetes.io/metadata.name'] == 'loom-dev'",
+        "podSelector.matchLabels['app'] == 'loom-dev-minio'",
+        "cidr == '0.0.0.0/0'",
+        "cidr == '::/0'",
+        "['0.0.0.0/8','10.0.0.0/8','100.64.0.0/10'",
+        "'198.18.0.0/15','198.51.100.0/24','203.0.113.0/24'",
+        "['::/128','::1/128','2001:db8::/32','fc00::/7'",
+        "ports[0].protocol == 'UDP'",
+        "ports[0].port == 53",
+        "ports[0].port == 9000",
+        "ports[0].port == 80",
+        "ports[1].port == 443",
+    ):
+        assert value in contract
+    assert contract.count("!has(") >= 20
+    assert contract.count(".ipBlock.except)") == 2
 
 
 def test_management_admission_blocks_indirect_personal_secret_reads(

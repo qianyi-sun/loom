@@ -55,7 +55,7 @@ def test_shadow_package_is_pure_render_only_and_has_no_legacy_extension() -> Non
     assert "def apply" not in source
     assert "def activate" not in source
     assert "loom-dev-shared" not in source
-    assert "0.0.0.0/0" not in source
+    assert '"cidr": "0.0.0.0/0"' not in source
 
 
 def test_dynamic_personal_and_builder_namespaces_bind_read_authority_locally() -> None:

@@ -16,7 +16,8 @@ workspace, verification, and upload; the sidecar owns only disposable BuildKit
 state and the shared Unix socket. The KVM gVisor RuntimeClass remains the host
 boundary. Because Kubernetes Baseline rejects explicit seccomp `Unconfined`,
 the dynamic build namespace uses PSA privileged enforcement with restricted
-audit and warning plus an exact Loom admission contract for builder Jobs.
+audit and warning plus an exact Loom admission contract for builder Jobs and
+their network policies.
 
 **Tech Stack:** Python 3.11, pytest, Kubernetes 1.36 native sidecars,
 ValidatingAdmissionPolicy CEL, gVisor/runsc, RootlessKit 3.0.1, BuildKit 0.32.2,
@@ -42,6 +43,9 @@ Bash, jq, Docker/OCI.
 - Every builder Job is admission-bound to the trusted image, measured
   RuntimeClass, non-host namespaces, exact client/sidecar security contexts,
   isolated mounts, and finite resources.
+- Builder NetworkPolicies are admission-bound to exact selectors, DNS and
+  shared-MinIO peers, public HTTP(S) ports, and private/reserved-network
+  exclusions; their deletion remains shape-independent for safe cleanup.
 - RootlessKit runs BuildKit through `/bin/setpriv --nnp`; BuildKit and every
   Dockerfile `RUN` descendant must observe `NoNewPrivs=1`.
 - `shareProcessNamespace` is explicitly false and `hostUsers` remains absent.
@@ -524,8 +528,8 @@ git commit -m "docs(dev): prove isolated rootless sidecar"
 - Consumes: `release.images.personal_dev_builder` and the runtime class from
   the shadow profile or exact acceptance plan.
 - Produces: privileged/restricted-versioned builder namespace labels and
-  management admission validations that bind every builder Job to the exact
-  trusted two-container contract.
+  management admission validations that bind every builder Job and both
+  builder NetworkPolicies to their exact contracts.
 
 - [ ] **Step 1: Write failing regression tests for the real PSA boundary**
 
@@ -553,6 +557,12 @@ client, one native sidecar, exact commands, no sidecar environment or
 authority-bearing mounts, exact emptyDir/configMap/Secret volume families,
 and explicit finite resource requests and limits.
 
+Require separate builder-only validations for the exact `default-deny` and
+`builder-egress` NetworkPolicy shapes. The latter must bind the sandbox Pod
+selector, DNS and shared-MinIO selectors and ports, both public IP blocks,
+HTTP(S) ports, and every private/reserved CIDR exclusion. Shape validations
+must allow `DELETE` so higher-authority drift cannot wedge cleanup.
+
 - [ ] **Step 2: Run the focused tests and verify RED**
 
 ```bash
@@ -572,9 +582,9 @@ Set builder and smoke namespaces to PSA privileged enforcement pinned to
 `v1.36`, retaining restricted audit/warn at `v1.36`. Set
 `enableServiceLinks: false` on builder Pods. Pass the exact trusted builder
 image and active runtime class into `_management_resource_admission()` and add
-builder-only CEL validations for the fields listed in Step 1. Keep the
-existing Secret and resource-family validations and all personal-namespace
-behavior unchanged.
+builder-only CEL validations for the Job and NetworkPolicy fields listed in
+Step 1. Keep the existing Secret and resource-family validations and all
+personal-namespace behavior unchanged.
 
 - [ ] **Step 4: Run the focused tests and verify GREEN**
 
@@ -585,7 +595,10 @@ Run the Step 2 command. Expected: all selected tests pass.
 Use server-side dry-run against the protected cluster to compile the rendered
 ValidatingAdmissionPolicy and dry-run the exact builder namespace and Job. A
 mutated privileged container, host namespace, image, RuntimeClass, mount, or
-sidecar Secret reference must be denied. No object may be persisted.
+sidecar Secret reference must be denied. Also admit the exact two generated
+NetworkPolicies, deny selector, internal-peer, public-exclusion, and
+default-deny widening, and prove that deletion remains possible after an admin
+drifts a policy. No protected-cluster object may be persisted.
 
 - [ ] **Step 6: Commit Task 5**
 

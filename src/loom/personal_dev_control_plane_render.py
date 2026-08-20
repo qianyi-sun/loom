@@ -777,6 +777,153 @@ def _builder_job_admission_validations(
     )
 
 
+def _builder_network_policy_admission_validations(
+    *,
+    target: str,
+    builder_namespace: str,
+) -> tuple[dict[str, str], ...]:
+    builder_network_policy = (
+        f"({builder_namespace} && "
+        "request.resource.group == 'networking.k8s.io' && "
+        "request.resource.resource == 'networkpolicies')"
+    )
+    spec = f"{target}.spec"
+
+    def exact_selector(selector: str, *, key: str, value: str) -> str:
+        return (
+            f"has({selector}.matchLabels) && "
+            f"{selector}.matchLabels.size() == 1 && "
+            f"{selector}.matchLabels['{key}'] == '{value}' && "
+            f"(!has({selector}.matchExpressions) || "
+            f"{selector}.matchExpressions.size() == 0)"
+        )
+
+    def empty_selector(selector: str) -> str:
+        return (
+            f"(!has({selector}.matchLabels) || "
+            f"{selector}.matchLabels.size() == 0) && "
+            f"(!has({selector}.matchExpressions) || "
+            f"{selector}.matchExpressions.size() == 0)"
+        )
+
+    def exact_port(port: str, *, protocol: str, number: int) -> str:
+        return (
+            f"{port}.protocol == '{protocol}' && {port}.port == {number} && "
+            f"!has({port}.endPort)"
+        )
+
+    def guarded(name: str, contract: str) -> str:
+        return (
+            "request.operation == 'DELETE' || "
+            f"!{builder_network_policy} || {target}.metadata.name != '{name}' || "
+            f"({target}.metadata.name == '{name}' && ({contract}))"
+        )
+
+    common_identity = (
+        f"{target}.apiVersion == 'networking.k8s.io/v1' && "
+        f"{target}.kind == 'NetworkPolicy'"
+    )
+    default_deny = guarded(
+        "default-deny",
+        f"{common_identity} && {empty_selector(f'{spec}.podSelector')} && "
+        f"{spec}.policyTypes == ['Ingress','Egress'] && "
+        f"(!has({spec}.ingress) || {spec}.ingress.size() == 0) && "
+        f"(!has({spec}.egress) || {spec}.egress.size() == 0)",
+    )
+
+    egress = f"{spec}.egress"
+    egress_base = guarded(
+        "builder-egress",
+        f"{common_identity} && "
+        f"{exact_selector(f'{spec}.podSelector', key='loom.dev/builder-role', value='sandbox')} && "
+        f"{spec}.policyTypes == ['Egress'] && "
+        f"(!has({spec}.ingress) || {spec}.ingress.size() == 0) && "
+        f"has({egress}) && {egress}.size() == 3",
+    )
+
+    dns = f"{egress}[0]"
+    dns_peer = f"{dns}.to[0]"
+    dns_egress = guarded(
+        "builder-egress",
+        f"has({egress}) && {egress}.size() == 3 && "
+        f"has({dns}.to) && {dns}.to.size() == 1 && "
+        f"has({dns_peer}.namespaceSelector) && "
+        f"{exact_selector(f'{dns_peer}.namespaceSelector', key='kubernetes.io/metadata.name', value='kube-system')} && "
+        f"has({dns_peer}.podSelector) && "
+        f"{exact_selector(f'{dns_peer}.podSelector', key='k8s-app', value='kube-dns')} && "
+        f"!has({dns_peer}.ipBlock) && "
+        f"has({dns}.ports) && {dns}.ports.size() == 2 && "
+        f"{exact_port(f'{dns}.ports[0]', protocol='UDP', number=53)} && "
+        f"{exact_port(f'{dns}.ports[1]', protocol='TCP', number=53)}",
+    )
+
+    minio = f"{egress}[1]"
+    minio_peer = f"{minio}.to[0]"
+    minio_egress = guarded(
+        "builder-egress",
+        f"has({egress}) && {egress}.size() == 3 && "
+        f"has({minio}.to) && {minio}.to.size() == 1 && "
+        f"has({minio_peer}.namespaceSelector) && "
+        f"{exact_selector(f'{minio_peer}.namespaceSelector', key='kubernetes.io/metadata.name', value='loom-dev')} && "
+        f"has({minio_peer}.podSelector) && "
+        f"{exact_selector(f'{minio_peer}.podSelector', key='app', value='loom-dev-minio')} && "
+        f"!has({minio_peer}.ipBlock) && "
+        f"has({minio}.ports) && {minio}.ports.size() == 1 && "
+        f"{exact_port(f'{minio}.ports[0]', protocol='TCP', number=9000)}",
+    )
+
+    public = f"{egress}[2]"
+    ipv4 = f"{public}.to[0]"
+    ipv6 = f"{public}.to[1]"
+    ipv4_except = (
+        "['0.0.0.0/8','10.0.0.0/8','100.64.0.0/10','127.0.0.0/8',"
+        "'169.254.0.0/16','172.16.0.0/12','192.0.0.0/24','192.0.2.0/24',"
+        "'192.168.0.0/16','198.18.0.0/15','198.51.100.0/24',"
+        "'203.0.113.0/24','224.0.0.0/4','240.0.0.0/4']"
+    )
+    ipv6_except = (
+        "['::/128','::1/128','2001:db8::/32','fc00::/7','fe80::/10','ff00::/8']"
+    )
+    public_egress = guarded(
+        "builder-egress",
+        f"has({egress}) && {egress}.size() == 3 && "
+        f"has({public}.to) && {public}.to.size() == 2 && "
+        f"has({ipv4}.ipBlock) && {ipv4}.ipBlock.cidr == '0.0.0.0/0' && "
+        f"has({ipv4}.ipBlock.except) && "
+        f"{ipv4}.ipBlock.except == {ipv4_except} && "
+        f"!has({ipv4}.namespaceSelector) && !has({ipv4}.podSelector) && "
+        f"has({ipv6}.ipBlock) && {ipv6}.ipBlock.cidr == '::/0' && "
+        f"has({ipv6}.ipBlock.except) && "
+        f"{ipv6}.ipBlock.except == {ipv6_except} && "
+        f"!has({ipv6}.namespaceSelector) && !has({ipv6}.podSelector) && "
+        f"has({public}.ports) && {public}.ports.size() == 2 && "
+        f"{exact_port(f'{public}.ports[0]', protocol='TCP', number=80)} && "
+        f"{exact_port(f'{public}.ports[1]', protocol='TCP', number=443)}",
+    )
+    return (
+        {
+            "expression": default_deny,
+            "message": "builder NetworkPolicy default deny differs from its exact contract",
+        },
+        {
+            "expression": egress_base,
+            "message": "builder NetworkPolicy egress base differs from its exact contract",
+        },
+        {
+            "expression": dns_egress,
+            "message": "builder NetworkPolicy DNS egress differs from its exact contract",
+        },
+        {
+            "expression": minio_egress,
+            "message": "builder NetworkPolicy MinIO egress differs from its exact contract",
+        },
+        {
+            "expression": public_egress,
+            "message": "builder NetworkPolicy public egress differs from its exact contract",
+        },
+    )
+
+
 def _management_resource_admission(
     context: _RenderContext,
     *,
@@ -1031,6 +1178,10 @@ def _management_resource_admission(
                     ),
                     "message": "management RoleBinding is outside its exact delegated roles",
                 },
+                *_builder_network_policy_admission_validations(
+                    target=target,
+                    builder_namespace=builder_namespace,
+                ),
                 *_builder_job_admission_validations(
                     target=target,
                     builder_namespace=builder_namespace,
