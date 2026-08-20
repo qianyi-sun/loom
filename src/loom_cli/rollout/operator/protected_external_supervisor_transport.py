@@ -1532,10 +1532,23 @@ class FixedUserSystemdControl:
         )
 
     def reset_service_failure(self, service_name: str) -> None:
-        self._run_checked(
-            ("systemctl", "--user", "reset-failed", _unit_name(service_name, ".service")),
-            timeout_seconds=30,
-        )
+        # ResetFailedUnit deliberately does not load an unloaded unit. A clean,
+        # disabled oneshot may be garbage-collected after stop, so only reset a
+        # failure result that systemd must keep loaded.
+        before = self.service_status(service_name)
+        try:
+            _normalized_disabled_service_status(before)
+        except ValueError:
+            self._run_checked(
+                ("systemctl", "--user", "reset-failed", _unit_name(service_name, ".service")),
+                timeout_seconds=30,
+            )
+        try:
+            _normalized_disabled_service_status(self.service_status(service_name))
+        except ValueError as exc:
+            raise RuntimeError(
+                "protected external supervisor failure state did not clear safely"
+            ) from exc
 
     def start_service(self, service_name: str, *, timeout_seconds: float) -> None:
         if not 0 < timeout_seconds <= 7215:
