@@ -13,10 +13,11 @@ update may therefore rerun pull-request validation before merge.
 
 ## Target topology
 
-`.github/workflows/admission.yml` is the only pull-request admission entrypoint.
-It calls the repository, image, cluster-smoke, and staging-smoke workflows as
-reusable workflows. Its final `admission` job runs with `if: always()` and
-fails unless every called validation workflow succeeds.
+`.github/workflows/ci.yml` is the only pull-request admission entrypoint. It
+runs the repository validation jobs directly and calls the image,
+cluster-smoke, and staging-smoke workflows as reusable workflows. Its final
+`admission` job runs with `if: always()` and fails unless the repository
+aggregate and every called validation workflow succeeds.
 
 The source workflows retain their existing path planner and selected-lane
 aggregates. Workflow-level path filters are not used, so the final required
@@ -41,7 +42,7 @@ The migration preserves merge protection throughout:
    GitHub-Actions-app-bound `admission` check and set
    `strict_required_status_checks_policy=true`. Keep the bypass actor list
    empty and read the ruleset back after the update.
-4. Remove the direct pull-request triggers from the four source workflows,
+4. Remove the direct pull-request triggers from the three reusable workflows,
    `.github/workflows/authoritative-gates.yml`,
    `scripts/ops/authoritative_gate.py`, its publisher-only metrics and tests,
    and `.github/workflows/auto-merge.yml`. Remove publisher generation and

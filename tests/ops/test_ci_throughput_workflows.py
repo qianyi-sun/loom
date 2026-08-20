@@ -100,7 +100,6 @@ GATE_CONTRACTS = {
 }
 
 ADMISSION_LANES = {
-    "repository-validation": ".github/workflows/ci.yml",
     "image-validation": ".github/workflows/images.yml",
     "cluster-validation": ".github/workflows/cluster-smoke.yml",
     "staging-validation": ".github/workflows/staging-smoke.yml",
@@ -334,10 +333,9 @@ def test_source_workflows_share_authoritative_generation_marker() -> None:
 
 
 def test_native_admission_aggregates_reusable_validation_workflows() -> None:
-    workflow = _workflow(".github/workflows/admission.yml")
+    workflow = _workflow(".github/workflows/ci.yml")
     on_config = _workflow_on(workflow)
 
-    assert set(on_config) == {"pull_request"}
     assert set(on_config["pull_request"]["types"]) == {
         "opened",
         "synchronize",
@@ -349,18 +347,16 @@ def test_native_admission_aggregates_reusable_validation_workflows() -> None:
         "edited",
     }
     assert workflow["permissions"] == {"contents": "read"}
-    assert workflow["concurrency"] == {
-        "group": "admission-${{ github.event.pull_request.number }}",
-        "cancel-in-progress": True,
-    }
 
     jobs = workflow["jobs"]
-    assert set(jobs) == {*ADMISSION_LANES, "admission"}
     for job_id, source_path in ADMISSION_LANES.items():
         lane = jobs[job_id]
         assert lane["uses"] == f"./{source_path}"
         assert lane["with"] == {"admission_call": True}
-        assert lane["if"] == "${{ !github.event.pull_request.draft }}"
+        assert lane["needs"] == "workflow-plan"
+        assert "github.event_name == 'pull_request'" in lane["if"]
+        assert "!github.event.pull_request.draft" in lane["if"]
+        assert "needs.workflow-plan.outputs.gate_mode == 'full'" in lane["if"]
 
         source = _workflow(source_path)
         workflow_call = _workflow_on(source)["workflow_call"]
@@ -379,8 +375,15 @@ def test_native_admission_aggregates_reusable_validation_workflows() -> None:
 
     aggregate = jobs["admission"]
     assert aggregate["name"] == "admission"
-    assert aggregate["if"] == "${{ always() && !github.event.pull_request.draft }}"
-    assert set(aggregate["needs"]) == set(ADMISSION_LANES)
+    assert "always()" in aggregate["if"]
+    assert "github.event_name == 'pull_request'" in aggregate["if"]
+    assert "!github.event.pull_request.draft" in aggregate["if"]
+    assert "needs.workflow-plan.outputs.gate_mode == 'full'" in aggregate["if"]
+    assert set(aggregate["needs"]) == {
+        "workflow-plan",
+        "repository-checks",
+        *ADMISSION_LANES,
+    }
     assert aggregate["runs-on"] == "ubuntu-latest"
     assert aggregate["timeout-minutes"] == 5
     assert "github.token" not in json.dumps(aggregate)
@@ -400,7 +403,7 @@ def test_native_admission_fails_closed_on_lane_results(
     results: tuple[str, str, str, str],
     expected_returncode: int,
 ) -> None:
-    aggregate = _workflow(".github/workflows/admission.yml")["jobs"]["admission"]
+    aggregate = _workflow(".github/workflows/ci.yml")["jobs"]["admission"]
     script = aggregate["steps"][0]["run"]
     result = subprocess.run(
         ["bash"],
@@ -421,7 +424,8 @@ def test_native_admission_fails_closed_on_lane_results(
 
 
 def test_admission_calls_bypass_metadata_filtering_inside_source_workflows() -> None:
-    for workflow_path, (plan_job_id, _plan_step_id) in SOURCE_PLAN_CONTRACTS.items():
+    for workflow_path in ADMISSION_LANES.values():
+        plan_job_id, _plan_step_id = SOURCE_PLAN_CONTRACTS[workflow_path]
         event_step = _workflow(workflow_path)["jobs"][plan_job_id]["steps"][0]
         filter_expression = event_step["env"]["FILTERED_EVENT"]
 

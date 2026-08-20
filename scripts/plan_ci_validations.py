@@ -132,28 +132,16 @@ def _pull_request_gate_mode(
 ) -> tuple[bool, bool, str]:
     """Return event relevance, full-gate eligibility, and the gate context mode.
 
-    Every relevant non-draft PR event emits the four protected contexts. Drafts
-    and unrelated metadata changes are filtered. Validation labels remain
-    additive selectors, but no label, author, reviewer, or coordinator grants
-    merge authority.
+    Every non-draft PR event reruns admission. This intentionally trades extra
+    work on metadata changes for one simple authority rule: no newly emitted
+    skipped check can satisfy admission without executing the selected lanes.
+    Validation labels remain additive selectors, but no label, author,
+    reviewer, or coordinator grants merge authority.
     """
 
+    del labels, action, action_label, base_changed
+
     if draft:
-        return False, False, "filtered"
-
-    if action in {"labeled", "unlabeled"}:
-        event_relevant = action_label in LABEL_TO_CHECK
-    elif action == "edited":
-        event_relevant = base_changed
-    else:
-        event_relevant = action in {
-            "opened",
-            "ready_for_review",
-            "reopened",
-            "synchronize",
-        }
-
-    if not event_relevant:
         return False, False, "filtered"
     return True, True, "full"
 
