@@ -34,7 +34,8 @@ Bash, jq, Docker/OCI.
 - The client container remains UID/GID 1000, RuntimeDefault-seccomp,
   `allowPrivilegeEscalation=false`, read-only-rootfs, and capability-free.
 - The sidecar is non-privileged and gets only `SETUID` and `SETGID` in its
-  capability bounding set; its initial effective set must remain empty.
+  capability bounding set; its initial inheritable, permitted, effective, and
+  ambient sets must remain empty.
 - The sidecar receives no contract, Secret, source workspace, output path,
   service-account token, projected volume, CSI volume, or image-pull Secret.
 - PSA privileged is permitted only in exact attempt-bound builder namespaces
@@ -42,7 +43,8 @@ Bash, jq, Docker/OCI.
   restricted.
 - Every builder Job is admission-bound to the trusted image, measured
   RuntimeClass, non-host namespaces, exact client/sidecar security contexts,
-  isolated mounts, and finite resources.
+  isolated mounts, one completion, no auxiliary execution path, and finite
+  resources compared with Kubernetes Quantity semantics.
 - Builder NetworkPolicies are admission-bound to exact selectors, DNS and
   shared-MinIO peers, public HTTP(S) ports, and private/reserved-network
   exclusions; their deletion remains shape-independent for safe cleanup.
@@ -260,8 +262,8 @@ Assert no command or environment contains `buildctl-daemonless`, `BUILDKITD`,
 `BUILDKITD_FLAGS`, `ROOTLESSKIT`, or `XDG_RUNTIME_DIR`. Add rejection tests for
 a relative buildctl path and any address other than the exact Unix address.
 Add a client-identity test using temporary marker/status files that requires
-UID/GID 1000, `CapEff=0`, `CapBnd=0`, `NoNewPrivs=1`, and seccomp mode 2, and
-rejects each drift independently.
+UID/GID 1000, `CapInh=0`, `CapPrm=0`, `CapEff=0`, `CapBnd=0`, `CapAmb=0`,
+`NoNewPrivs=1`, and seccomp mode 2, and rejects each drift independently.
 
 - [ ] **Step 2: Run the client tests and verify RED**
 
@@ -276,8 +278,9 @@ Expected: `_build_images` has the old daemonless parameter and command.
 
 Add a fail-closed client identity check before either capability file is read.
 The check must require `/proc/gvisor/kernel_is_gvisor`, UID/GID 1000, empty
-effective and bounding capability sets, `NoNewPrivs=1`, and seccomp mode 2.
-Keep its parser independently testable with explicit marker/status inputs.
+inheritable, permitted, effective, bounding, and ambient capability sets,
+`NoNewPrivs=1`, and seccomp mode 2. Keep its parser independently testable with
+explicit marker/status inputs.
 
 Rename the parameter and CLI option to `buildctl_path` /
 `--buildctl-path`; add `buildkit_address` / `--buildkit-address`; validate the
@@ -348,10 +351,12 @@ assert "COPY deploy/personal-dev-builder/loom-personal-dev-buildkitd" in dockerf
 ```
 
 Add launcher assertions that require the gVisor marker, UID/GID 1000,
-`CapEff=0000000000000000`, `CapBnd=00000000000000c0`, `NoNewPrivs=0`,
-`Seccomp=0`, `/bin/setpriv --nnp`, the exact BuildKit socket, native
-snapshotter, and no-process-sandbox flag. Execute the launcher in a shell test
-with fixture commands/status so each drift fails before RootlessKit exec.
+`CapInh=0000000000000000`, `CapPrm=0000000000000000`,
+`CapEff=0000000000000000`, `CapBnd=00000000000000c0`,
+`CapAmb=0000000000000000`, `NoNewPrivs=0`, `Seccomp=0`, `/bin/setpriv --nnp`,
+the exact BuildKit socket, native snapshotter, and no-process-sandbox flag.
+Execute the launcher in a shell test with fixture commands/status so each drift
+fails before RootlessKit exec.
 
 - [ ] **Step 2: Run the ops test and verify RED**
 
@@ -470,7 +475,8 @@ and RuntimeDefault seccomp. Set `shareProcessNamespace=false` explicitly.
 The conformance script must:
 
 - require the gVisor marker and UID/GID 1000;
-- require client `CapEff=0`, `CapBnd=0`, `NoNewPrivs=1`, and seccomp mode 2;
+- require client `CapInh=0`, `CapPrm=0`, `CapEff=0`, `CapBnd=0`, `CapAmb=0`,
+  `NoNewPrivs=1`, and seccomp mode 2;
 - prove no `/proc/*/cmdline` exposes RootlessKit or BuildKit;
 - call `/usr/bin/buildctl --addr=unix:///var/run/loom-buildkit/buildkitd.sock`;
 - run digest-pinned amd64 and QEMU arm64 Dockerfile steps;
@@ -480,8 +486,9 @@ The conformance script must:
 Capture bounded logs for both `container/conformance` and
 `container/buildkitd`, exact image IDs, init/regular container statuses, and
 the canonical live Pod. Require the launcher's bounded preflight marker to
-record UID/GID 1000, zero effective caps, bounding set
-`00000000000000c0`, NNP 0, and seccomp mode 0 before accepting the build logs.
+record UID/GID 1000, zero inheritable, permitted, effective, and ambient sets,
+bounding set `00000000000000c0`, NNP 0, and seccomp mode 0 before accepting the
+build logs.
 
 - [ ] **Step 5: Align architecture documentation**
 
@@ -557,6 +564,13 @@ client, one native sidecar, exact commands, no sidecar environment or
 authority-bearing mounts, exact emptyDir/configMap/Secret volume families,
 and explicit finite resource requests and limits.
 
+Require one non-indexed completion and no alternate Job controller,
+failure/success policy, client lifecycle hook, extra client probe,
+termination-message path, resource claim, supplemental group, or alternate Pod
+scheduler. Resource-map and `emptyDir` quantities must use
+`quantity(string(value)).compareTo(quantity(expected)) == 0`; direct Quantity
+equality does not accept the exact Kubernetes 1.36 object.
+
 Require separate builder-only validations for the exact `default-deny` and
 `builder-egress` NetworkPolicy shapes. The latter must bind the sandbox Pod
 selector, DNS and shared-MinIO selectors and ports, both public IP blocks,
@@ -598,7 +612,11 @@ mutated privileged container, host namespace, image, RuntimeClass, mount, or
 sidecar Secret reference must be denied. Also admit the exact two generated
 NetworkPolicies, deny selector, internal-peer, public-exclusion, and
 default-deny widening, and prove that deletion remains possible after an admin
-drifts a policy. No protected-cluster object may be persisted.
+drifts a policy. In a disposable Kubernetes 1.36 cluster, admit the exact Job
+and equivalent `1000m` CPU quantity while denying repeated completions, client
+hooks/probes/termination-file disclosure, sidecar hooks, supplemental root
+groups, alternate scheduling, extended termination grace, and a widened
+resource request. No protected-cluster object may be persisted.
 
 - [ ] **Step 6: Commit Task 5**
 
@@ -661,9 +679,11 @@ seccomp/AppArmor unconfined, read-only-rootfs, with only private state/tmp and a
 named socket volume. Start a separate no-new-privileges, cap-drop ALL,
 read-only-rootfs client container with the socket volume read-only. Require:
 
-- daemon outer `CapEff=0`, `CapBnd=00000000000000c0`, and `NoNewPrivs=0`;
+- daemon outer `CapInh=0`, `CapPrm=0`, `CapEff=0`,
+  `CapBnd=00000000000000c0`, `CapAmb=0`, and `NoNewPrivs=0`;
 - BuildKit worker readiness;
-- client `CapEff=0`, `CapBnd=0`, and `NoNewPrivs=1`;
+- client `CapInh=0`, `CapPrm=0`, `CapEff=0`, `CapBnd=0`, `CapAmb=0`, and
+  `NoNewPrivs=1`;
 - client cannot see `rootlesskit` or `buildkitd` in `/proc`;
 - digest-pinned amd64 and arm64 `RUN` steps both print `loom-nnp=1`; and
 - both OCI configs carry the requested platform.

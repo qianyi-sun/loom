@@ -42,10 +42,10 @@ The previous Pod contract made both required operations impossible:
 RootlessKit `3.1.0` does not change this mechanism, so a version-only update is
 not a correction. A local digest-pinned `RUN` build passes with the exact image
 when seccomp is unconfined and only `SETUID` plus `SETGID` are restored to the
-bounding set. The outer process remains UID/GID 1000 with zero effective
-capabilities. gVisor's `allow-suid=false` remains compatible: it ignores
-set-ID bits, while file capabilities are independently bounded and
-`no_new_privs` still suppresses their elevation.
+bounding set. The outer process remains UID/GID 1000 with zero inheritable,
+permitted, effective, and ambient capability sets. gVisor's `allow-suid=false`
+remains compatible: it ignores set-ID bits, while file capabilities are
+independently bounded and `no_new_privs` still suppresses their elevation.
 
 ## Approaches considered
 
@@ -111,15 +111,21 @@ the management principal it binds the exact trusted image digest and measured
 RuntimeClass, the single restricted client plus single native sidecar shape,
 separate PID namespace, disabled service-account token and service links,
 non-host namespaces, exact security contexts, exact volume separation, and
-finite resource envelope. The same policy binds `default-deny` and
-`builder-egress` to their exact generated selectors, peers, ports, and
-private/reserved-network exclusions; a permitted resource name cannot be used
-to install wider egress. Deletes remain shape-independent so the controller
-can remove an object drifted by a higher-authority principal. The management
-RBAC cannot create Pods directly; the Job controller can create only Pods from
-a template that passed this policy. Only the management service account can
-create workloads in the namespace, the ResourceQuota still permits exactly
-two Jobs and two Pods, and candidate code receives no Kubernetes credential.
+finite resource envelope. It also requires exactly one non-indexed completion,
+forbids alternate Job controllers and failure/success policies, and rejects
+client hooks, extra probes, termination-message path changes, resource claims,
+supplemental groups, and alternate Pod scheduling fields. Quantity comparisons
+use Kubernetes' `Quantity.compareTo` API so equivalent canonical forms are
+accepted while different resource envelopes are denied. The same policy binds
+`default-deny` and `builder-egress` to their exact generated selectors, peers,
+ports, and private/reserved-network exclusions; a permitted resource name
+cannot be used to install wider egress. Deletes remain shape-independent so
+the controller can remove an object drifted by a higher-authority principal.
+The management RBAC cannot create Pods directly; the Job controller can create
+only Pods from a template that passed this policy. Only the management service
+account can create workloads in the namespace, the ResourceQuota still permits
+exactly two Jobs and two Pods, and candidate code receives no Kubernetes
+credential.
 
 ### Trusted client container
 
@@ -128,7 +134,8 @@ The regular `builder` container:
 - runs as UID/GID 1000 and non-root;
 - uses RuntimeDefault seccomp;
 - sets `allowPrivilegeEscalation=false`;
-- drops every Linux capability;
+- drops every Linux capability and fails unless its inheritable, permitted,
+  effective, bounding, and ambient sets are all empty;
 - has a read-only root filesystem;
 - is the only container mounting the immutable contract ConfigMap, the
   per-attempt capability Secret, and the bounded workspace;
@@ -150,11 +157,11 @@ native sidecar on Kubernetes 1.36. It:
 - uses `allowPrivilegeEscalation=true` and seccomp `Unconfined` only inside the
   gVisor sandbox;
 - starts an immutable Loom sidecar launcher that fails unless the gVisor
-  marker, UID/GID 1000, zero effective capabilities, exact
-  `SETUID|SETGID` bounding set, `NoNewPrivs=0`, and seccomp mode 0 are present,
-  then execs `/usr/bin/rootlesskit` with command `/bin/setpriv --nnp
-  /usr/bin/buildkitd`; BuildKit and every descendant therefore have
-  `no_new_privs=1` after the subordinate-ID maps exist;
+  marker, UID/GID 1000, zero inheritable, permitted, effective, and ambient
+  capability sets, exact `SETUID|SETGID` bounding set, `NoNewPrivs=0`, and
+  seccomp mode 0 are present, then execs `/usr/bin/rootlesskit` with command
+  `/bin/setpriv --nnp /usr/bin/buildkitd`; BuildKit and every descendant
+  therefore have `no_new_privs=1` after the subordinate-ID maps exist;
 - uses the native snapshotter and `--oci-worker-no-process-sandbox`;
 - mounts only private BuildKit state, private temporary storage, and the shared
   socket directory; and
@@ -180,9 +187,10 @@ for arm64 in the pinned multi-platform base.
 
 1. The client reads the immutable build contract and presigned capabilities.
 2. Before reading either capability, it fails unless its own gVisor marker,
-   UID/GID 1000, empty effective and bounding capability sets,
-   `NoNewPrivs=1`, and RuntimeDefault seccomp mode are present. It then
-   downloads and verifies the source archive into its private workspace.
+   UID/GID 1000, empty inheritable, permitted, effective, bounding, and ambient
+   capability sets, `NoNewPrivs=1`, and RuntimeDefault seccomp mode are
+   present. It then downloads and verifies the source archive into its private
+   workspace.
 3. `buildctl` sends the selected source context to BuildKit over the Unix
    socket. The source directory is not mounted into the sidecar.
 4. BuildKit executes the untrusted Dockerfile in its rootless subordinate-ID
@@ -222,6 +230,11 @@ Repository tests must prove:
 - the management admission policy binds builder Jobs to the release's trusted
   image, measured RuntimeClass, exact two-container security shape, isolated
   mounts, non-host namespaces, and finite resources;
+- every builder Job has one completion and no auxiliary client execution,
+  termination-file disclosure, supplemental authority, resource claim, or
+  alternate scheduling/controller path;
+- resource and volume quantities use semantic Kubernetes Quantity comparison,
+  admitting equivalent forms such as `1000m` for one CPU but no larger value;
 - the same policy admits only the exact builder default-deny and egress shapes,
   denies selector/peer/port/CIDR widening, and permits cleanup of drifted
   policies;
@@ -237,11 +250,12 @@ Repository tests must prove:
 
 Protected operational conformance must additionally prove:
 
-- the initial sidecar process is UID/GID 1000 with `CapEff=0`,
-  `CapBnd=SETUID|SETGID`, and seccomp disabled inside gVisor;
+- the initial sidecar process is UID/GID 1000 with `CapInh=0`, `CapPrm=0`,
+  `CapEff=0`, `CapBnd=SETUID|SETGID`, `CapAmb=0`, and seccomp disabled inside
+  gVisor;
 - BuildKit and Dockerfile `RUN` observe `NoNewPrivs=1`;
-- the client observes zero effective and bounding capabilities,
-  `NoNewPrivs=1`, and RuntimeDefault seccomp;
+- the client observes zero inheritable, permitted, effective, bounding, and
+  ambient capabilities, `NoNewPrivs=1`, and RuntimeDefault seccomp;
 - the client cannot observe RootlessKit or BuildKit processes in its `/proc`;
 - the sidecar has none of the contract/capability/workspace mounts;
 - digest-pinned amd64 and QEMU arm64 `RUN` steps report the expected machines
