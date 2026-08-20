@@ -529,6 +529,95 @@ async def test_reconcile_cancels_pending_job_without_staling_foreign_pools(
         await engine.dispose()
 
 
+async def test_reconcile_cancels_only_fresh_pending_release_drift_job(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+    try:
+        async with session_factory() as s:
+            await _insert_gb10_pending_policy(
+                s,
+                now=now,
+                job_ids=("16246", "current-release-job"),
+            )
+            stale_job = (
+                await s.execute(
+                    select(SlurmWorkerJob).where(SlurmWorkerJob.job_id == "16246"),
+                )
+            ).scalar_one()
+            stale_job.redacted_env = {
+                "LOOM_REMOTE_WORKER_ENV_FILE": "/shared_work2/loom-staging-rollout/worker-envs/stale.env",
+                "LOOM_REMOTE_WORKER_REPO_DIR": "/shared_work2/loom-staging-rollout/worker-repos/stale",
+            }
+            await s.commit()
+
+        runner = FakeSlurmRunner()
+        runner.job_observation_batches = [
+            [
+                SlurmWorkerJobObservation(
+                    job_id="16246",
+                    slurm_state="PENDING",
+                    pending_reason="(Resources)",
+                    observed_at=now,
+                ),
+                SlurmWorkerJobObservation(
+                    job_id="current-release-job",
+                    slurm_state="PENDING",
+                    pending_reason="(Resources)",
+                    observed_at=now,
+                ),
+            ],
+            [
+                SlurmWorkerJobObservation(
+                    job_id="16246",
+                    slurm_state="CANCELLED",
+                    pending_reason="Cancelled",
+                    observed_at=now,
+                )
+            ],
+        ]
+        async with session_factory() as s:
+            results = await reconcile_worker_pool_autoscaler_once(
+                s,
+                environment="staging",
+                now=now,
+                slurm_runner=runner,
+                global_execution_witness=_witness(now, pool_id="gb10"),
+            )
+            await s.commit()
+
+        assert len(results) == 1
+        assert results[0].action == "cancel_pending"
+        assert results[0].reason == "release_state_drift"
+        assert results[0].blocked_reason is None
+        assert results[0].pending_slots == 1
+        assert runner.pending_cancelled_job_ids == ["16246"]
+
+        async with session_factory() as s:
+            policy = (await s.execute(select(WorkerPoolAutoscalerPolicy))).scalar_one()
+            jobs = (
+                (
+                    await s.execute(
+                        select(SlurmWorkerJob).order_by(SlurmWorkerJob.job_id),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+        assert policy.last_decision == "cancel_pending"
+        assert policy.last_decision_reason == "release_state_drift"
+        assert policy.last_blocked_reason is None
+        assert policy.last_error is None
+        assert [job.job_id for job in jobs] == ["16246", "current-release-job"]
+        assert [job.state for job in jobs] == ["cancelled", "pending"]
+        assert jobs[0].pending_reason == "cancelled after autoscaler release-state drift"
+    finally:
+        await engine.dispose()
+
+
 @pytest.mark.parametrize(
     ("environment", "pool_name"),
     (("staging", None), (None, "gb10")),
