@@ -25,6 +25,9 @@ from loom_pipeline_orchestrator.stage1_runtime import (
     Stage1ReadinessResolver,
     Stage1RequestRenderer,
 )
+from loom_pipeline_orchestrator.terminalgen_publication import (
+    TerminalGenCorpusPublicationRuntime,
+)
 from loom_pipeline_orchestrator.terminalgen_runtime import TerminalGenReadinessRuntime
 
 logger = logging.getLogger(__name__)
@@ -50,6 +53,11 @@ async def _amain() -> None:
     reconciler = PipelineReconciler(
         repository,
         fanout_runtime=FanoutExpansionRuntime(
+            repository=repository,
+            store=artifact_store,
+            bucket=settings.artifacts_bucket,
+        ),
+        publication_runtime=TerminalGenCorpusPublicationRuntime(
             repository=repository,
             store=artifact_store,
             bucket=settings.artifacts_bucket,

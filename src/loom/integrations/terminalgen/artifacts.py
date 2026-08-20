@@ -274,14 +274,41 @@ class CorpusTaskEntryV1(PipelineModel):
     slot_id: _SlotId
     task_id: _TaskId
     task_name: Annotated[str, StringConstraints(min_length=1, max_length=256)]
-    task_tree_sha256: Digest
-    task_artifact: ArtifactRefV1
+    source_task_tree_sha256: Digest
+    projected_task_tree_sha256: Digest
+    source_task_artifact: ArtifactRefV1
     validation_artifact: ArtifactRefV1
+    bundle_relative_path: str
+    bundle_sha256: Digest
+    bundle_size_bytes: PositiveSafeInt
+    verifier_bridge_sha256: Digest
+    files: Annotated[list[TaskBundleFileV1], Field(min_length=5, max_length=10_000)]
 
     @model_validator(mode="after")
-    def task_id_is_canonical(self) -> CorpusTaskEntryV1:
+    def task_projection_is_canonical(self) -> CorpusTaskEntryV1:
         if self.task_id != f"terminalgen-{self.slot_id}":
             raise ValueError("corpus task_id must be the canonical slot projection")
+        expected_path = f"payload/tasks/{self.task_id}.tar"
+        if _safe_payload_path(self.bundle_relative_path) != expected_path:
+            raise ValueError("corpus bundle path must be the canonical task projection")
+        paths = [item.relative_path for item in self.files]
+        if paths != sorted(paths, key=str.encode) or len(paths) != len(set(paths)):
+            raise ValueError("corpus task files must be bytewise sorted and unique")
+        counts: dict[str, int] = {}
+        for item in self.files:
+            counts[item.role] = counts.get(item.role, 0) + 1
+        for role in {
+            "task_config",
+            "instruction",
+            "environment",
+            "dependency_lock",
+            "verifier",
+        }:
+            if counts.get(role) != 1:
+                raise ValueError(f"runtime corpus task requires exactly one {role} file")
+        verifier = next(item for item in self.files if item.role == "verifier")
+        if verifier.sha256 != self.verifier_bridge_sha256:
+            raise ValueError("runtime corpus verifier bridge digest drift")
         return self
 
 
@@ -297,6 +324,7 @@ class TerminalGenCorpusArtifactV1(PipelineModel):
     task_count: Annotated[int, Field(strict=True, ge=1, le=MAX_PLAN_SLOTS)]
     tasks: Annotated[list[CorpusTaskEntryV1], Field(min_length=1, max_length=MAX_PLAN_SLOTS)]
     corpus_tree_sha256: Digest
+    task_archive_format: Literal["tar"]
     provenance: PipelineArtifactProvenanceV1
 
     @model_validator(mode="after")
@@ -309,6 +337,14 @@ class TerminalGenCorpusArtifactV1(PipelineModel):
             raise ValueError("corpus access class does not match corpus kind")
         if self.contains_reference_solutions != expected_solution:
             raise ValueError("runtime corpus must be solution-free")
+        solution_counts = [
+            sum(item.role == "reference_solution" for item in task.files)
+            for task in self.tasks
+        ]
+        if self.corpus_kind == "runtime" and any(solution_counts):
+            raise ValueError("runtime corpus task inventory must be solution-free")
+        if self.corpus_kind == "authoring" and any(count != 1 for count in solution_counts):
+            raise ValueError("authoring corpus tasks require one reference solution")
         if len(self.tasks) != self.task_count:
             raise ValueError("corpus task count drift")
         ids = [item.slot_id for item in self.tasks]
@@ -317,11 +353,83 @@ class TerminalGenCorpusArtifactV1(PipelineModel):
         return self
 
 
+class TerminalGenPublicationRequestV1(PipelineModel):
+    schema_version: Literal["terminalgen.publication-request.v1"]
+    pipeline_run_id: UUID
+    recipe_digest: Digest
+    corpus_id: Annotated[str, StringConstraints(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")]
+    corpus_version: PositiveSafeInt
+    alias: Annotated[str, StringConstraints(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")]
+    expected_previous_version_sha256: Digest | None
+    final_audit_artifact: ArtifactRefV1
+    authoring_corpus_artifact: ArtifactRefV1
+    runtime_corpus_artifact: ArtifactRefV1
+    taskset_smoke_count: Annotated[int, Field(strict=True, ge=1, le=500)]
+
+    @model_validator(mode="after")
+    def references_are_exact(self) -> TerminalGenPublicationRequestV1:
+        expected = {
+            "final_audit_artifact": "terminalgen_final_audit.v1",
+            "authoring_corpus_artifact": "terminalgen_corpus.v1",
+            "runtime_corpus_artifact": "terminalgen_corpus.v1",
+        }
+        for field, artifact_type in expected.items():
+            if getattr(self, field).artifact_type != artifact_type:
+                raise ValueError(f"{field} has the wrong Artifact type")
+        ids = {
+            self.final_audit_artifact.artifact_id,
+            self.authoring_corpus_artifact.artifact_id,
+            self.runtime_corpus_artifact.artifact_id,
+        }
+        if len(ids) != 3:
+            raise ValueError("publication inputs must be distinct Artifacts")
+        return self
+
+
+class TerminalGenTaskSetSmokeV1(PipelineModel):
+    schema_version: Literal["terminalgen.taskset-smoke.v1"]
+    corpus_version_sha256: Digest
+    task_count: Annotated[int, Field(strict=True, ge=1, le=500)]
+    task_ids: Annotated[list[_TaskId], Field(min_length=1, max_length=500)]
+    manifest_sha256: Digest
+    archive_sha256: Digest
+    archive_size_bytes: PositiveSafeInt
+
+    @model_validator(mode="after")
+    def tasks_are_canonical(self) -> TerminalGenTaskSetSmokeV1:
+        if len(self.task_ids) != self.task_count:
+            raise ValueError("TaskSet smoke task count drift")
+        if self.task_ids != sorted(self.task_ids, key=str.encode):
+            raise ValueError("TaskSet smoke task IDs must be bytewise sorted")
+        if len(set(self.task_ids)) != len(self.task_ids):
+            raise ValueError("TaskSet smoke task IDs must be unique")
+        return self
+
+
+class TerminalGenPublicationReceiptV1(PipelineModel):
+    schema_version: Literal["terminalgen.publication-receipt.v1"]
+    publication_id: UUID
+    pipeline_run_id: UUID
+    corpus_version_id: UUID
+    corpus_version_sha256: Digest
+    corpus_id: Annotated[str, StringConstraints(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")]
+    corpus_version: PositiveSafeInt
+    alias: Annotated[str, StringConstraints(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")]
+    alias_generation: PositiveSafeInt
+    previous_corpus_version_id: UUID | None
+    authoring_corpus_artifact: ArtifactRefV1
+    runtime_corpus_artifact: ArtifactRefV1
+    taskset_smoke: TerminalGenTaskSetSmokeV1
+
+
 ARTIFACT_MODELS: dict[str, type[PipelineModel]] = {
     "terminalgen_task_bundle.v1": TerminalTaskBundleArtifactV1,
     "terminalgen_task_validation.v1": TerminalTaskValidationArtifactV1,
     "terminalgen_final_audit.v1": TerminalGenFinalAuditArtifactV1,
     "terminalgen_corpus.v1": TerminalGenCorpusArtifactV1,
+    "terminalgen.publication-request.v1": TerminalGenPublicationRequestV1,
+    "terminalgen.publication-receipt.v1": TerminalGenPublicationReceiptV1,
+    "terminalgen.taskset-smoke.v1": TerminalGenTaskSetSmokeV1,
 }
 
 
@@ -349,6 +457,9 @@ __all__ = [
     "TaskBundleFileV1",
     "TerminalGenCorpusArtifactV1",
     "TerminalGenFinalAuditArtifactV1",
+    "TerminalGenPublicationReceiptV1",
+    "TerminalGenPublicationRequestV1",
+    "TerminalGenTaskSetSmokeV1",
     "TerminalTaskBundleArtifactV1",
     "TerminalTaskIdentityV1",
     "TerminalTaskValidationArtifactV1",

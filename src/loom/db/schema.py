@@ -6104,6 +6104,249 @@ class ArtifactLineageEdge(Base):
     )
 
 
+class TerminalGenCorpusVersion(Base):
+    """Immutable published TerminalGen corpus identity and object boundary."""
+
+    __tablename__ = "terminalgen_corpus_versions"
+    __table_args__ = (
+        CheckConstraint(
+            "corpus_version > 0 AND task_count > 0 AND task_count <= 9000",
+            name="terminalgen_corpus_versions_counts_check",
+        ),
+        CheckConstraint(
+            "version_sha256 ~ '^sha256:[0-9a-f]{64}$' AND "
+            "recipe_digest ~ '^sha256:[0-9a-f]{64}$' AND "
+            "plan_identity_sha256 ~ '^sha256:[0-9a-f]{64}$' AND "
+            "authoring_tree_sha256 ~ '^sha256:[0-9a-f]{64}$' AND "
+            "runtime_tree_sha256 ~ '^sha256:[0-9a-f]{64}$' AND "
+            "taskset_smoke_sha256 ~ '^sha256:[0-9a-f]{64}$' AND "
+            "taskset_manifest_sha256 ~ '^sha256:[0-9a-f]{64}$'",
+            name="terminalgen_corpus_versions_digest_check",
+        ),
+        CheckConstraint(
+            "taskset_smoke_task_count > 0 AND taskset_smoke_task_count <= 500 "
+            "AND taskset_smoke_task_count <= task_count AND taskset_smoke_size_bytes > 0",
+            name="terminalgen_corpus_versions_smoke_check",
+        ),
+        UniqueConstraint(
+            "team_id",
+            "corpus_id",
+            "corpus_version",
+            name="terminalgen_corpus_versions_identity_uidx",
+        ),
+        UniqueConstraint(
+            "team_id",
+            "version_sha256",
+            name="terminalgen_corpus_versions_digest_uidx",
+        ),
+        UniqueConstraint(
+            "pipeline_run_id",
+            name="terminalgen_corpus_versions_run_uidx",
+        ),
+        Index(
+            "terminalgen_corpus_versions_team_created_idx",
+            "team_id",
+            "published_at",
+            "id",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    team_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("teams.id", ondelete="RESTRICT"), nullable=False
+    )
+    pipeline_run_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("pipeline_runs.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    corpus_id: Mapped[str] = mapped_column(Text, nullable=False)
+    corpus_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    version_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    recipe_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    plan_identity_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    final_audit_artifact_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("artifacts.id", ondelete="RESTRICT"), nullable=False
+    )
+    authoring_corpus_artifact_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("artifacts.id", ondelete="RESTRICT"), nullable=False
+    )
+    runtime_corpus_artifact_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("artifacts.id", ondelete="RESTRICT"), nullable=False
+    )
+    authoring_tree_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    runtime_tree_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    task_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    taskset_smoke_task_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    taskset_smoke_object_key: Mapped[str] = mapped_column(Text, nullable=False)
+    taskset_smoke_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    taskset_smoke_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    taskset_manifest_object_key: Mapped[str] = mapped_column(Text, nullable=False)
+    taskset_manifest_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    taskset_manifest_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    published_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class TerminalGenCorpusTask(Base):
+    """Searchable immutable task projection for one published corpus version."""
+
+    __tablename__ = "terminalgen_corpus_tasks"
+    __table_args__ = (
+        CheckConstraint("task_ordinal >= 0", name="terminalgen_corpus_tasks_ordinal_check"),
+        CheckConstraint(
+            "source_task_tree_sha256 ~ '^sha256:[0-9a-f]{64}$' AND "
+            "projected_task_tree_sha256 ~ '^sha256:[0-9a-f]{64}$' AND "
+            "authoring_bundle_sha256 ~ '^sha256:[0-9a-f]{64}$' AND "
+            "runtime_bundle_sha256 ~ '^sha256:[0-9a-f]{64}$' AND "
+            "verifier_bridge_sha256 ~ '^sha256:[0-9a-f]{64}$'",
+            name="terminalgen_corpus_tasks_digest_check",
+        ),
+        CheckConstraint(
+            "authoring_bundle_size_bytes > 0 AND runtime_bundle_size_bytes > 0",
+            name="terminalgen_corpus_tasks_size_check",
+        ),
+        UniqueConstraint(
+            "corpus_version_id",
+            "slot_id",
+            name="terminalgen_corpus_tasks_slot_uidx",
+        ),
+        UniqueConstraint(
+            "corpus_version_id",
+            "task_id",
+            name="terminalgen_corpus_tasks_task_uidx",
+        ),
+        UniqueConstraint(
+            "corpus_version_id",
+            "task_ordinal",
+            name="terminalgen_corpus_tasks_ordinal_uidx",
+        ),
+        Index("terminalgen_corpus_tasks_task_id_idx", "task_id"),
+    )
+
+    corpus_version_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("terminalgen_corpus_versions.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    task_ordinal: Mapped[int] = mapped_column(Integer, primary_key=True)
+    slot_id: Mapped[str] = mapped_column(Text, nullable=False)
+    task_id: Mapped[str] = mapped_column(Text, nullable=False)
+    task_name: Mapped[str] = mapped_column(Text, nullable=False)
+    source_task_tree_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    projected_task_tree_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    source_task_artifact_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("artifacts.id", ondelete="RESTRICT"), nullable=False
+    )
+    validation_artifact_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("artifacts.id", ondelete="RESTRICT"), nullable=False
+    )
+    authoring_bundle_path: Mapped[str] = mapped_column(Text, nullable=False)
+    authoring_bundle_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    authoring_bundle_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    runtime_bundle_path: Mapped[str] = mapped_column(Text, nullable=False)
+    runtime_bundle_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    runtime_bundle_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    verifier_bridge_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class TerminalGenCorpusAlias(Base):
+    """Team-scoped logical alias switched only after immutable version readback."""
+
+    __tablename__ = "terminalgen_corpus_aliases"
+    __table_args__ = (
+        CheckConstraint("generation > 0", name="terminalgen_corpus_aliases_generation_check"),
+        UniqueConstraint(
+            "team_id",
+            "alias",
+            name="terminalgen_corpus_aliases_identity_uidx",
+        ),
+    )
+
+    team_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("teams.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    alias: Mapped[str] = mapped_column(Text, primary_key=True)
+    corpus_version_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("terminalgen_corpus_versions.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    previous_corpus_version_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("terminalgen_corpus_versions.id", ondelete="RESTRICT"),
+    )
+    generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class TerminalGenCorpusPublication(Base):
+    """Durable idempotency and terminal receipt for a server-owned publication."""
+
+    __tablename__ = "terminalgen_corpus_publications"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('published','failed')",
+            name="terminalgen_corpus_publications_state_check",
+        ),
+        CheckConstraint(
+            "request_sha256 ~ '^sha256:[0-9a-f]{64}$'",
+            name="terminalgen_corpus_publications_request_digest_check",
+        ),
+        CheckConstraint(
+            "(state='published' AND corpus_version_id IS NOT NULL AND reason_code IS NULL "
+            "AND receipt_json IS NOT NULL AND receipt_bytes IS NOT NULL "
+            "AND receipt_sha256 ~ '^sha256:[0-9a-f]{64}$') OR "
+            "(state='failed' AND corpus_version_id IS NULL AND reason_code IS NOT NULL "
+            "AND receipt_json IS NULL AND receipt_bytes IS NULL AND receipt_sha256 IS NULL)",
+            name="terminalgen_corpus_publications_terminal_group_check",
+        ),
+        UniqueConstraint(
+            "pipeline_run_id",
+            name="terminalgen_corpus_publications_run_uidx",
+        ),
+        UniqueConstraint(
+            "request_artifact_id",
+            name="terminalgen_corpus_publications_request_uidx",
+        ),
+        Index(
+            "terminalgen_corpus_publications_team_state_idx",
+            "team_id",
+            "state",
+            "finished_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    team_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("teams.id", ondelete="RESTRICT"), nullable=False
+    )
+    pipeline_run_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("pipeline_runs.id", ondelete="RESTRICT"), nullable=False
+    )
+    request_artifact_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("artifacts.id", ondelete="RESTRICT"), nullable=False
+    )
+    request_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[str] = mapped_column(Text, nullable=False)
+    corpus_version_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("terminalgen_corpus_versions.id", ondelete="RESTRICT"),
+    )
+    reason_code: Mapped[str | None] = mapped_column(Text)
+    receipt_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    receipt_bytes: Mapped[bytes | None] = mapped_column(LargeBinary)
+    receipt_sha256: Mapped[str | None] = mapped_column(Text)
+    finished_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class Token(Base):
     __tablename__ = "tokens"
     token_hash: Mapped[bytes] = mapped_column(LargeBinary, primary_key=True)

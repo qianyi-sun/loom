@@ -55,6 +55,10 @@ class ReadinessResolverV1(Protocol):
     async def resolve(self, candidate: ReadinessCandidate) -> FrozenReadiness: ...
 
 
+class PublicationRuntimeV1(Protocol):
+    async def reconcile(self, lease: RunLease) -> bool: ...
+
+
 class StageRequestRendererV1(Protocol):
     def render(
         self, candidate: ReadinessCandidate, frozen: FrozenReadiness
@@ -130,6 +134,7 @@ class PipelineReconciler:
         readiness_resolver: ReadinessResolverV1 | None = None,
         request_renderer: StageRequestRendererV1 | None = None,
         fanout_runtime: FanoutRuntimeV1 | None = None,
+        publication_runtime: PublicationRuntimeV1 | None = None,
     ) -> None:
         if readiness_runtime is not None and (
             readiness_resolver is not None or request_renderer is not None
@@ -139,6 +144,7 @@ class PipelineReconciler:
             raise ValueError("readiness resolver and renderer must be injected together")
         self._repository = repository
         self._fanout_runtime = fanout_runtime
+        self._publication_runtime = publication_runtime
         self._readiness_runtime: ReadinessRuntimeV1 | None
         if readiness_runtime is not None:
             self._readiness_runtime = readiness_runtime
@@ -215,6 +221,8 @@ class PipelineReconciler:
                     provider_budget=rendered.provider_budget,
                     fault_pending=rendered.fault_pending,
                 )
+        if self._publication_runtime is not None:
+            await self._publication_runtime.reconcile(lease)
         await self._repository.project_run_result(lease)
 
 
