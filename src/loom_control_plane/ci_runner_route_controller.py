@@ -21,6 +21,7 @@ import zipfile
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from http.client import HTTPMessage
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -47,7 +48,8 @@ MAX_ROUTE_ARTIFACTS = 100
 MAX_ARTIFACT_PAGES = 5
 MAX_PUBLISHER_PAYLOAD_BYTES = 40 * 1024
 PUBLISHER_POLL_SECONDS = 2.0
-PUBLISHER_POLL_ATTEMPTS = 90
+PUBLISHER_POLL_ATTEMPTS = 60
+OLDLAB_REQUEST_MAX_AGE_SECONDS = 30
 PUBLISHER_WORKFLOW = "ci-runner-route-publisher.yml"
 ALLOWED_EVENTS = {"pull_request", "merge_group", "workflow_dispatch", "push"}
 WORKFLOW_PATHS = {
@@ -464,6 +466,18 @@ def _workflow_name_for_id(workflow_id: int) -> str:
     return matches[0]
 
 
+def _github_timestamp(value: object, field: str) -> datetime:
+    if not isinstance(value, str) or not value:
+        raise RouteControllerError(f"{field} is missing or invalid")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise RouteControllerError(f"{field} is missing or invalid") from exc
+    if parsed.tzinfo is None:
+        raise RouteControllerError(f"{field} is missing or invalid")
+    return parsed.astimezone(UTC)
+
+
 class CiRunnerRouteController:
     def __init__(
         self,
@@ -476,6 +490,7 @@ class CiRunnerRouteController:
         publisher_poll_attempts: int = PUBLISHER_POLL_ATTEMPTS,
         publisher_poll_seconds: float = PUBLISHER_POLL_SECONDS,
         sleep: Callable[[float], None] = time.sleep,
+        now: Callable[[], datetime] | None = None,
     ) -> None:
         if _SHA_RE.fullmatch(candidate_sha) is None:
             raise RouteControllerError("candidate SHA must be a full lowercase commit SHA")
@@ -491,6 +506,7 @@ class CiRunnerRouteController:
         self.publisher_poll_attempts = publisher_poll_attempts
         self.publisher_poll_seconds = publisher_poll_seconds
         self.sleep = sleep
+        self.now = now or (lambda: datetime.now(UTC))
 
     def initialize_cursor(self) -> int:
         if self.cursor_file.exists() or self.cursor_file.is_symlink():
@@ -528,13 +544,19 @@ class CiRunnerRouteController:
             run = self.api.workflow_run(request.workflow_run_id)
             self._validate_run(run, request)
             if run.get("status") == "completed" and not self._route_check_exists(request):
-                raise RouteControllerError(
-                    "terminal workflow run has no previously published route"
-                )
+                _write_artifact_cursor(self.cursor_file, artifact_id)
+                continue
             workflow_path = WORKFLOW_PATHS[request.workflow_name]
             head_blob = self.api.content_blob_sha(workflow_path, request.head_sha)
             trusted_blob = self.api.content_blob_sha(workflow_path, self.candidate_sha)
-            allow_oldlab = head_blob == trusted_blob
+            created_at = _github_timestamp(artifact.get("created_at"), "artifact.created_at")
+            observed_at = self.now()
+            if observed_at.tzinfo is None:
+                raise RouteControllerError("controller observation time is invalid")
+            age_seconds = (observed_at.astimezone(UTC) - created_at).total_seconds()
+            allow_oldlab = (
+                head_blob == trusted_blob and 0 <= age_seconds <= OLDLAB_REQUEST_MAX_AGE_SECONDS
+            )
             document = self.broker.allocate_route(request, allow_oldlab=allow_oldlab)
             if self._publish_route(document, allow_oldlab=allow_oldlab):
                 published += 1
