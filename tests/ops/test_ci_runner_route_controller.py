@@ -7,6 +7,8 @@ import io
 import json
 import urllib.error
 import zipfile
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -18,6 +20,7 @@ HEAD_SHA = "a" * 40
 CANDIDATE_SHA = "c" * 40
 WORKFLOW_BLOB_SHA = "d" * 40
 PUBLISHER_KEY = b"route-publisher-test-key-with-32-bytes"
+NOW = datetime(2026, 8, 20, 18, 0, tzinfo=UTC)
 
 
 def _config() -> leases.LeaseBrokerConfig:
@@ -72,6 +75,7 @@ class FakeRouteAPI:
                     f"{request.workflow_run_id}-{request.run_attempt}"
                 ),
                 "expired": False,
+                "created_at": NOW.isoformat().replace("+00:00", "Z"),
                 "workflow_run": {
                     "id": request.workflow_run_id,
                     "head_sha": request.head_sha,
@@ -163,6 +167,7 @@ def _controller(
         cursor_file=cursor_file,
         publisher_key=PUBLISHER_KEY,
         publisher_poll_seconds=0,
+        now=lambda: NOW,
     )
     return controller, api, broker
 
@@ -211,6 +216,50 @@ def test_changed_workflow_blob_forces_every_job_to_hosted(tmp_path: Path) -> Non
     assert summary["oldlab_eligible"] is False
     assert {item["target"] for item in summary["assignments"]} == {"github_hosted"}
     assert broker.status()["classes"]["normal"]["available"] == 5
+
+
+def test_stale_request_forces_hosted_without_consuming_oldlab(tmp_path: Path) -> None:
+    request = _request(job_count=3)
+    controller, api, broker = _controller(tmp_path, request)
+    api.artifacts[0]["created_at"] = (
+        (NOW - timedelta(seconds=routes.OLDLAB_REQUEST_MAX_AGE_SECONDS + 1))
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+    controller.reconcile()
+
+    summary = json.loads(api.created_checks[0]["output"]["summary"])
+    assert summary["oldlab_eligible"] is False
+    assert {item["target"] for item in summary["assignments"]} == {"github_hosted"}
+    assert broker.status()["classes"]["normal"]["available"] == 5
+
+
+def test_future_request_fails_safe_to_hosted(tmp_path: Path) -> None:
+    request = _request(job_count=1)
+    controller, api, broker = _controller(tmp_path, request)
+    api.artifacts[0]["created_at"] = (NOW + timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
+
+    controller.reconcile()
+
+    summary = json.loads(api.created_checks[0]["output"]["summary"])
+    assert summary["oldlab_eligible"] is False
+    assert summary["assignments"][0]["target"] == "github_hosted"
+    assert broker.status()["classes"]["normal"]["available"] == 5
+
+
+def test_invalid_artifact_time_fails_before_cursor_or_capacity_mutation(
+    tmp_path: Path,
+) -> None:
+    request = _request(job_count=1)
+    controller, api, broker = _controller(tmp_path, request)
+    api.artifacts[0]["created_at"] = "not-a-timestamp"
+
+    with pytest.raises(routes.RouteControllerError, match=r"artifact\.created_at"):
+        controller.reconcile()
+
+    assert routes._read_artifact_cursor(controller.cursor_file) == 0
+    assert broker.active_assignments() == ()
 
 
 def test_cursor_skips_processed_artifact_and_cursor_loss_replays_safely(
@@ -279,13 +328,42 @@ def test_terminal_jobs_release_exact_leases(tmp_path: Path) -> None:
     assert broker.active_assignments() == ()
 
 
-def test_terminal_run_without_a_published_route_is_rejected(tmp_path: Path) -> None:
+def test_new_workflow_attempt_releases_superseded_assignments(tmp_path: Path) -> None:
+    request = _request(job_count=3)
+    controller, api, broker = _controller(tmp_path, request)
+    controller.reconcile()
+    api.runs[request.workflow_run_id]["run_attempt"] = 2
+    api.runs[request.workflow_run_id]["status"] = "queued"
+
+    result = controller.reconcile()
+
+    assert result.assignments_released == 3
+    assert broker.active_assignments() == ()
+
+
+def test_workflow_attempt_regression_fails_closed(tmp_path: Path) -> None:
+    request = replace(_request(job_count=1), run_attempt=2)
+    controller, api, broker = _controller(tmp_path, request)
+    controller.reconcile()
+    api.runs[request.workflow_run_id]["run_attempt"] = 1
+
+    with pytest.raises(routes.RouteControllerError, match="attempt does not match"):
+        controller.reconcile()
+
+    assert len(broker.active_assignments()) == 1
+
+
+def test_terminal_hosted_fallback_without_a_route_advances_cursor(tmp_path: Path) -> None:
     request = _request(job_count=1)
-    controller, api, _ = _controller(tmp_path, request)
+    controller, api, broker = _controller(tmp_path, request)
     api.runs[request.workflow_run_id]["status"] = "completed"
 
-    with pytest.raises(routes.RouteControllerError, match="no previously published route"):
-        controller.reconcile()
+    result = controller.reconcile()
+
+    assert result.artifacts_seen == 1
+    assert result.routes_published == 0
+    assert routes._read_artifact_cursor(controller.cursor_file) == 71
+    assert broker.active_assignments() == ()
 
 
 def test_route_artifact_identity_and_shape_fail_closed(tmp_path: Path) -> None:

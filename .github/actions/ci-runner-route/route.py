@@ -24,7 +24,7 @@ DISABLED_MODE = "disabled"
 CHECK_PREFIX = "loom-ci-route-v1"
 MAX_JSON_BYTES = 4 * 1024 * 1024
 POLL_SECONDS = 2
-POLL_TIMEOUT_SECONDS = 240
+POLL_TIMEOUT_SECONDS = 180
 SHARED_OLDLAB_LABELS = (
     "self-hosted",
     "linux",
@@ -172,14 +172,20 @@ def _write_output(path: Path, name: str, value: object) -> None:
         handle.write(f"{name}={serialized}\n")
 
 
+def _hosted_routes(request: Mapping[str, object]) -> dict[str, list[str]]:
+    workflow_name = cast(str, request["workflow_name"])
+    contract = CONTRACTS[workflow_name]
+    hosted = cast(tuple[str, ...], contract["hosted"])
+    return {key: list(hosted) for key in cast(list[str], request["job_keys"])}
+
+
 def prepare(environment: Mapping[str, str], output_path: Path) -> dict[str, object]:
     request, mode = build_request(environment)
     request_path = Path(environment.get("ROUTE_REQUEST_PATH", ""))
     if not request_path.is_absolute():
         raise RouteActionError("route request path must be absolute")
     if mode == DISABLED_MODE:
-        contract = CONTRACTS[cast(str, request["workflow_name"])]
-        routes = {key: list(contract["hosted"]) for key in request["job_keys"]}
+        routes = _hosted_routes(request)
         _write_output(output_path, "active", "false")
         _write_output(output_path, "routes", routes)
         return routes
@@ -415,7 +421,14 @@ def poll(environment: Mapping[str, str], output_path: Path) -> dict[str, list[st
             _write_output(output_path, "routes", routes)
             return routes
         time.sleep(POLL_SECONDS)
-    raise RouteActionError("timed out waiting for trusted route assignment")
+    routes = _hosted_routes(request)
+    _write_output(output_path, "routes", routes)
+    print(
+        "::warning title=OLDLAB route unavailable::"
+        "No trusted assignment arrived before the bounded deadline; "
+        "this run is frozen onto GitHub-hosted capacity."
+    )
+    return routes
 
 
 def _parser() -> argparse.ArgumentParser:
