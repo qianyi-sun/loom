@@ -695,8 +695,19 @@ class CiRunnerRouteController:
             run = self.api.workflow_run(run_id)
             workflow_id = _exact_int(run.get("workflow_id"), "workflow_run.workflow_id")
             workflow_name = _workflow_name_for_id(workflow_id)
-            if run.get("run_attempt") != attempt:
+            observed_attempt = _exact_int(run.get("run_attempt"), "workflow_run.run_attempt")
+            if observed_attempt < attempt:
                 raise RouteControllerError("active assignment run attempt does not match")
+            if observed_attempt > attempt:
+                for assignment in assignments:
+                    self.broker.release(
+                        assignment_id=assignment.assignment_id,
+                        lease_epoch=assignment.lease_epoch,
+                        reason="superseded",
+                        terminal_observed=True,
+                    )
+                    released += 1
+                continue
             jobs = self.api.workflow_jobs(run_id, attempt)
             jobs_by_name: dict[str, list[Mapping[str, object]]] = defaultdict(list)
             for job in jobs:

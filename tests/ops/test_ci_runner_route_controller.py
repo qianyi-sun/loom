@@ -7,6 +7,7 @@ import io
 import json
 import urllib.error
 import zipfile
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -325,6 +326,31 @@ def test_terminal_jobs_release_exact_leases(tmp_path: Path) -> None:
 
     assert result.assignments_released == 3
     assert broker.active_assignments() == ()
+
+
+def test_new_workflow_attempt_releases_superseded_assignments(tmp_path: Path) -> None:
+    request = _request(job_count=3)
+    controller, api, broker = _controller(tmp_path, request)
+    controller.reconcile()
+    api.runs[request.workflow_run_id]["run_attempt"] = 2
+    api.runs[request.workflow_run_id]["status"] = "queued"
+
+    result = controller.reconcile()
+
+    assert result.assignments_released == 3
+    assert broker.active_assignments() == ()
+
+
+def test_workflow_attempt_regression_fails_closed(tmp_path: Path) -> None:
+    request = replace(_request(job_count=1), run_attempt=2)
+    controller, api, broker = _controller(tmp_path, request)
+    controller.reconcile()
+    api.runs[request.workflow_run_id]["run_attempt"] = 1
+
+    with pytest.raises(routes.RouteControllerError, match="attempt does not match"):
+        controller.reconcile()
+
+    assert len(broker.active_assignments()) == 1
 
 
 def test_terminal_hosted_fallback_without_a_route_advances_cursor(tmp_path: Path) -> None:
