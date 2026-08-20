@@ -846,9 +846,7 @@ def _bound_absent(tmp_path: Path):
     payload = plan.to_dict()
     payload.pop("plan_digest")
     target_units = {
-        name: digest
-        for name, digest in plan.systemd_unit_digests.items()
-        if name not in UNIT_PATHS
+        name: digest for name, digest in plan.systemd_unit_digests.items() if name not in UNIT_PATHS
     }
     aggregate_transition_digest = external_supervisor_transition_digest(
         unit_directory=GB10_CANONICAL_UNIT_DIR,
@@ -879,9 +877,7 @@ def _bound_absent(tmp_path: Path):
             f"{artifact.supervisors[0].execution_host}/authority-digest": (
                 ABSENT_PREDECESSOR_DIGEST
             ),
-            f"{artifact.supervisors[0].execution_host}/pointer-digest": (
-                ABSENT_PREDECESSOR_DIGEST
-            ),
+            f"{artifact.supervisors[0].execution_host}/pointer-digest": (ABSENT_PREDECESSOR_DIGEST),
             f"{artifact.supervisors[0].execution_host}/unit-set-digest": absent_unit_set,
             f"{artifact.supervisors[0].execution_host}/live-evidence-digest": (
                 predecessor_live.evidence_digest
@@ -1141,6 +1137,7 @@ class _Control:
         self.fail_timer_start = False
         self.fail_stop = False
         self.fail_disable = False
+        self.preserve_failed_result_on_stop = False
 
     def _present(self, name: str) -> bool:
         if self.store is None:
@@ -1196,8 +1193,14 @@ class _Control:
 
     def stop_service(self, name):
         self.calls.append(f"stop-service:{name}")
-        self.result = "success"
-        self.status = 0
+        if not self.preserve_failed_result_on_stop:
+            self.result = "success"
+            self.status = 0
+
+    def reset_service_failure(self, name):
+        self.calls.append(f"reset-failed:{name}")
+        self.result = ""
+        self.status = None
 
     def start_service(self, name, *, timeout_seconds):
         self.calls.append(f"service:{name}:{timeout_seconds}")
@@ -1320,15 +1323,70 @@ def test_fixed_transport_converges_active_canonical_to_disabled_target(
 
     after = transport.observe(disabled_artifact)
     assert classify_external_supervisor_live_state(disabled_artifact, after) == "exact"
-    assert control.calls[-4:] == [
+    assert control.calls[-5:] == [
         "daemon-reload",
         f"stop:{disabled.timer_name}",
         f"disable:{disabled.timer_name}",
         f"stop-service:{disabled.service_name}",
+        f"reset-failed:{disabled.service_name}",
     ]
     assert [record.reason for record in store.compensations if record.phase == "activated"] == [
         "timer-active",
         "timer-disabled",
+    ]
+    assert store.compensation_blockers() == {}
+
+
+def test_fixed_transport_clears_cached_failure_for_disabled_candidate(
+    tmp_path: Path,
+) -> None:
+    plan, candidate_root, active_artifact = _bound_artifact(tmp_path)
+    profile = candidate_root / "deploy/environment-state/staging.toml"
+    profile.write_text(
+        profile.read_text(encoding="utf-8").replace(
+            "enabled = true\nactive = true",
+            "enabled = false\nactive = false",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    disabled_artifact = _build_active_artifact(
+        candidate_root,
+        candidate_sha=plan.candidate_sha,
+        candidate_tree=plan.candidate_tree,
+        image_tag=f"staging-{plan.candidate_sha[:7]}",
+        environment=plan.environment,
+        execution_host="gx10-01c7",
+    )
+    disabled = disabled_artifact.supervisors[0]
+    assert not disabled.enabled
+    assert not disabled.active
+
+    store = _Store()
+    control = _Control(active_artifact, store)
+    control.result = "exit-code"
+    control.status = 1
+    control.preserve_failed_result_on_stop = True
+    transport = FixedExternalSupervisorTransport(store=store, control=control)
+    before = transport.observe(disabled_artifact, _absent_authority())
+    assert classify_external_supervisor_live_state(disabled_artifact, before) == "ready"
+
+    transport.apply(
+        disabled_artifact,
+        before,
+        plan_digest="a" * 64,
+        attestation_digest="b" * 64,
+        transition_digest="c" * 64,
+    )
+
+    after = transport.observe(disabled_artifact)
+    assert classify_external_supervisor_live_state(disabled_artifact, after) == "exact"
+    assert control.calls == [
+        "daemon-reload",
+        f"stop:{disabled.timer_name}",
+        f"disable:{disabled.timer_name}",
+        f"stop-service:{disabled.service_name}",
+        f"reset-failed:{disabled.service_name}",
     ]
     assert store.compensation_blockers() == {}
 
@@ -1923,6 +1981,7 @@ def test_systemd_control_exposes_only_fixed_user_unit_operations(
     control.start_timer(timer)
     control.stop_timer(timer)
     control.disable_timer(timer)
+    control.reset_service_failure(service)
     control.start_service(service, timeout_seconds=20)
 
     assert calls[2:] == [
@@ -1931,6 +1990,7 @@ def test_systemd_control_exposes_only_fixed_user_unit_operations(
         ("systemctl", "--user", "start", timer),
         ("systemctl", "--user", "stop", timer),
         ("systemctl", "--user", "disable", timer),
+        ("systemctl", "--user", "reset-failed", service),
         ("systemctl", "--user", "start", service),
     ]
     with pytest.raises(ValueError, match="unit name is invalid"):

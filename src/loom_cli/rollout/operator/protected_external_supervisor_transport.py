@@ -674,6 +674,8 @@ class UserSystemdControl(Protocol):
 
     def stop_service(self, service_name: str) -> None: ...
 
+    def reset_service_failure(self, service_name: str) -> None: ...
+
     def start_service(self, service_name: str, *, timeout_seconds: float) -> None: ...
 
 
@@ -1529,6 +1531,12 @@ class FixedUserSystemdControl:
             timeout_seconds=30,
         )
 
+    def reset_service_failure(self, service_name: str) -> None:
+        self._run_checked(
+            ("systemctl", "--user", "reset-failed", _unit_name(service_name, ".service")),
+            timeout_seconds=30,
+        )
+
     def start_service(self, service_name: str, *, timeout_seconds: float) -> None:
         if not 0 < timeout_seconds <= 7215:
             raise ValueError("protected external supervisor service timeout is invalid")
@@ -1762,6 +1770,7 @@ class FixedExternalSupervisorTransport:
                     self.control.stop_timer(supervisor.timer_name)
                     self.control.disable_timer(supervisor.timer_name)
                     self.control.stop_service(supervisor.service_name)
+                    self.control.reset_service_failure(supervisor.service_name)
             for supervisor in artifact.supervisors:
                 if _supervisor_desired_active(supervisor):
                     self.control.enable_timer(supervisor.timer_name)
@@ -1881,6 +1890,7 @@ class FixedExternalSupervisorTransport:
                     self.control.stop_timer(timer_name)
                     self.control.disable_timer(timer_name)
                     self.control.stop_service(service_name)
+                    self.control.reset_service_failure(service_name)
                 self.store.restore_transition(
                     {name: (current[name], desired_payloads[name]) for name in target.unit_payloads}
                 )
@@ -1900,6 +1910,7 @@ class FixedExternalSupervisorTransport:
                         self.control.stop_timer(timer_name)
                         self.control.disable_timer(timer_name)
                         self.control.stop_service(service_name)
+                        self.control.reset_service_failure(service_name)
             else:
                 operation_failed = False
                 for timer_name in sorted(
