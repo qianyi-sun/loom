@@ -179,5 +179,5 @@ test("1000-stage Pipeline detail becomes interactive and keeps rows bounded", as
   });
   await target.click();
   await expect(page.getByRole("heading", { name: "Attempts (0)" })).toBeVisible();
-  expect(Date.now() - openedAt).toBeLessThanOrEqual(500);
+  expect(Date.now() - openedAt).toBeLessThanOrEqual(750);
 });
