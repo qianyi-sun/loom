@@ -178,11 +178,13 @@ members = [
   "packages/loom-launcher",
   "packages/loom-benchmarks",
   "packages/loom-benchmark-terminal-bench-2",
+  "packages/loom-terminalgen",
 ]
 
 [tool.uv.sources]
 loom-benchmarks = { workspace = true }
 loom-benchmark-terminal-bench-2 = { workspace = true }
+loom-terminalgen = { workspace = true }
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "N", "RUF"]
@@ -191,6 +193,14 @@ select = ["E", "F", "I", "B", "UP", "N", "RUF"]
 #   the spec and plan docs use × (multiplication sign) and similar
 #   notation in code docstrings/comments intentionally.
 ignore = ["E501", "RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.per-file-ignores]
+# Preserve the explicitly authorized TerminalGen delivery byte-for-byte. These
+# are modernization/style findings only; functional and security checks remain
+# enabled, and Loom's production runtime never invokes the legacy CLI directly.
+"packages/loom-terminalgen/src/terminalgen/*.py" = [
+  "B008", "I001", "RUF100", "UP017", "UP033", "UP035", "UP037", "UP042",
+]
 
 [tool.mypy]
 python_version = "3.11"

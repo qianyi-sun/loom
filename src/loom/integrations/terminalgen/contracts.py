@@ -1,8 +1,9 @@
 """Closed v1 contracts for durable synthetic terminal-task authoring.
 
-The delivered TerminalGen snapshot is deliberately not imported here.  These
-contracts are Loom-owned and require an independently auditable source and data
-authority before a catalog can enter an official authoring run.
+The TerminalGen Python source is owned in ``packages/loom-terminalgen``. These
+contracts remain Loom-owned runtime authority: importing source does not waive
+the immutable catalog, data-license, image, dependency, or SBOM locks required
+before an official authoring run.
 """
 
 from __future__ import annotations
