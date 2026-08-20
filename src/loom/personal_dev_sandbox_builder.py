@@ -41,6 +41,10 @@ _DOCKERFILES = {
     "web": "deploy/Dockerfile.web",
     "worker": "deploy/Dockerfile.worker",
 }
+_BUILDCTL_PATH = Path("/usr/bin/buildctl")
+_BUILDKIT_ADDRESS = "unix:///var/run/loom-buildkit/buildkitd.sock"
+_CLIENT_GVISOR_MARKER = Path("/proc/gvisor/kernel_is_gvisor")
+_CLIENT_STATUS_FILE = Path("/proc/self/status")
 
 
 class PersonalDevSandboxBuildError(RuntimeError):
@@ -184,6 +188,72 @@ def _read_file(path: Path, *, max_bytes: int) -> bytes:
         os.close(descriptor)
 
 
+def _read_identity_file(path: Path) -> bytes:
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+        )
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise PersonalDevSandboxBuildError(
+                    "builder client runtime identity is invalid"
+                )
+            value = bytearray()
+            while chunk := os.read(descriptor, 64 * 1024 + 1 - len(value)):
+                value.extend(chunk)
+                if len(value) > 64 * 1024:
+                    raise PersonalDevSandboxBuildError(
+                        "builder client runtime identity is invalid"
+                    )
+            return bytes(value)
+        finally:
+            os.close(descriptor)
+    except PersonalDevSandboxBuildError:
+        raise
+    except OSError as exc:
+        raise PersonalDevSandboxBuildError(
+            "builder client runtime identity is invalid"
+        ) from exc
+
+
+def _verify_client_identity(
+    *,
+    gvisor_marker: Path = _CLIENT_GVISOR_MARKER,
+    status_file: Path = _CLIENT_STATUS_FILE,
+) -> None:
+    _read_identity_file(gvisor_marker)
+    try:
+        status_payload = _read_identity_file(status_file).decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise PersonalDevSandboxBuildError(
+            "builder client runtime identity is invalid"
+        ) from exc
+    required = {"Uid", "Gid", "CapEff", "CapBnd", "NoNewPrivs", "Seccomp"}
+    observed: dict[str, str] = {}
+    for line in status_payload.splitlines():
+        name, separator, value = line.partition(":")
+        if not separator or name not in required:
+            continue
+        if name in observed:
+            raise PersonalDevSandboxBuildError(
+                "builder client runtime identity is invalid"
+            )
+        observed[name] = value.strip()
+    if (
+        set(observed) != required
+        or observed["Uid"].split() != ["1000"] * 4
+        or observed["Gid"].split() != ["1000"] * 4
+        or observed["CapEff"] != "0000000000000000"
+        or observed["CapBnd"] != "0000000000000000"
+        or observed["NoNewPrivs"] != "1"
+        or observed["Seccomp"] != "2"
+    ):
+        raise PersonalDevSandboxBuildError(
+            "builder client runtime identity is invalid"
+        )
+
+
 def _download_source(url: str, destination: Path, contract: PersonalDevSandboxBuildContract) -> None:
     parsed = urlsplit(url)
     if (
@@ -280,21 +350,20 @@ def _build_images(
     *,
     source_directory: Path,
     output_directory: Path,
-    buildctl_daemonless_path: Path,
+    buildctl_path: Path,
+    buildkit_address: str,
 ) -> dict[str, tuple[Path, str]]:
-    if not buildctl_daemonless_path.is_absolute():
-        raise PersonalDevSandboxBuildError("buildctl path must be absolute")
+    if buildctl_path != _BUILDCTL_PATH or buildkit_address != _BUILDKIT_ADDRESS:
+        raise PersonalDevSandboxBuildError("buildctl endpoint is invalid")
     output_directory.mkdir(mode=0o700)
     outputs: dict[str, tuple[Path, str]] = {}
     total = 0
     environment = {
-        "BUILDKITD_FLAGS": "--oci-worker-snapshotter=native",
         "HOME": str(source_directory.parent / "home"),
         "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         "TMPDIR": str(source_directory.parent / "tmp"),
-        "XDG_RUNTIME_DIR": str(source_directory.parent / "run"),
     }
-    for directory in (Path(environment["HOME"]), Path(environment["XDG_RUNTIME_DIR"])):
+    for directory in (Path(environment["HOME"]), Path(environment["TMPDIR"])):
         directory.mkdir(mode=0o700, exist_ok=True)
     for component in PERSONAL_DEV_COMPONENTS:
         dockerfile = source_directory / _DOCKERFILES[component]
@@ -306,7 +375,8 @@ def _build_images(
         try:
             result = subprocess.run(
                 [
-                    str(buildctl_daemonless_path),
+                    str(buildctl_path),
+                    f"--addr={buildkit_address}",
                     "build",
                     "--frontend=dockerfile.v0",
                     f"--local=context={source_directory}",
@@ -568,8 +638,10 @@ def run_personal_dev_sandbox_build(
     contract_file: Path,
     capability_directory: Path,
     workspace: Path,
-    buildctl_daemonless_path: Path = Path("/usr/bin/buildctl-daemonless.sh"),
+    buildctl_path: Path = _BUILDCTL_PATH,
+    buildkit_address: str = _BUILDKIT_ADDRESS,
 ) -> None:
+    _verify_client_identity()
     contract = PersonalDevSandboxBuildContract.parse(
         _read_file(contract_file, max_bytes=1024 * 1024)
     )
@@ -599,7 +671,8 @@ def run_personal_dev_sandbox_build(
         contract,
         source_directory=source_directory,
         output_directory=images_directory,
-        buildctl_daemonless_path=buildctl_daemonless_path,
+        buildctl_path=buildctl_path,
+        buildkit_address=buildkit_address,
     )
     create_personal_dev_build_artifact(contract, images, artifact)
     _upload_artifact(upload, artifact, expected_max_bytes=contract.max_artifact_bytes)
@@ -613,16 +686,18 @@ def main(argv: list[str] | None = None) -> int:
     build.add_argument("--capability-directory", type=Path, required=True)
     build.add_argument("--workspace", type=Path, required=True)
     build.add_argument(
-        "--buildctl-daemonless-path",
+        "--buildctl-path",
         type=Path,
-        default=Path("/usr/bin/buildctl-daemonless.sh"),
+        default=_BUILDCTL_PATH,
     )
+    build.add_argument("--buildkit-address", default=_BUILDKIT_ADDRESS)
     args = parser.parse_args(argv)
     run_personal_dev_sandbox_build(
         contract_file=args.contract_file,
         capability_directory=args.capability_directory,
         workspace=args.workspace,
-        buildctl_daemonless_path=args.buildctl_daemonless_path,
+        buildctl_path=args.buildctl_path,
+        buildkit_address=args.buildkit_address,
     )
     return 0
 
