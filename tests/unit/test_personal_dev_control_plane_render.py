@@ -245,7 +245,7 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
     assert rendered.runtime_handler == profile.builder.runtime_handler
     assert rendered.runtime_profile_sha256 == profile.builder.runtime_profile_sha256
     assert hashlib.sha256(rendered.yaml_text.encode("utf-8")).hexdigest() == (
-        "4d8afe06e5def04d2a608d22e910137c616a63217d40b6b75606eefb3119bcdf"
+        "e7251880bd9c2d70e03de2bf99899259fc916cba3ce10f82e7ed48bc36eea719"
     )
 
     identities = {_identity(document) for document in documents}
@@ -1075,12 +1075,14 @@ def test_builder_admission_binds_privileged_exception_to_exact_job_contract(
         "initContainers[0].volumeMounts.size() == 3",
         "containers[0].volumeMounts.size() == 5",
         "spec.template.spec.volumes.size() == 7",
-        "resources.requests['cpu'] == quantity('1')",
-        "resources.limits['cpu'] == quantity('4')",
-        "resources.requests['memory'] == quantity('1Gi')",
-        "resources.limits['memory'] == quantity('8Gi')",
-        "resources.requests['ephemeral-storage'] == quantity('4Gi')",
-        "resources.limits['ephemeral-storage'] == quantity('20Gi')",
+        "quantity(string((request.operation == 'DELETE' ? oldObject : object).spec.template.spec.containers[0].resources.requests['cpu'])).compareTo(quantity('1')) == 0",
+        "quantity(string((request.operation == 'DELETE' ? oldObject : object).spec.template.spec.containers[0].resources.limits['cpu'])).compareTo(quantity('4')) == 0",
+        "quantity(string((request.operation == 'DELETE' ? oldObject : object).spec.template.spec.containers[0].resources.requests['memory'])).compareTo(quantity('1Gi')) == 0",
+        "quantity(string((request.operation == 'DELETE' ? oldObject : object).spec.template.spec.containers[0].resources.limits['memory'])).compareTo(quantity('8Gi')) == 0",
+        "quantity(string((request.operation == 'DELETE' ? oldObject : object).spec.template.spec.containers[0].resources.requests['ephemeral-storage'])).compareTo(quantity('4Gi')) == 0",
+        "quantity(string((request.operation == 'DELETE' ? oldObject : object).spec.template.spec.containers[0].resources.limits['ephemeral-storage'])).compareTo(quantity('20Gi')) == 0",
+        "quantity(string((request.operation == 'DELETE' ? oldObject : object).spec.template.spec.volumes[2].emptyDir.sizeLimit)).compareTo(quantity('20Gi')) == 0",
+        "quantity(string((request.operation == 'DELETE' ? oldObject : object).spec.template.spec.volumes[4].emptyDir.sizeLimit)).compareTo(quantity('64Mi')) == 0",
     ):
         assert value in contract
     assert "!has(" in contract
@@ -1090,6 +1092,152 @@ def test_builder_admission_binds_privileged_exception_to_exact_job_contract(
     assert "attempt-capability" in contract
     assert "buildkit-state" in contract
     assert "readOnly == true" in contract
+
+
+def test_builder_admission_limits_each_job_to_one_cleanup_safe_execution(
+    tmp_path: Path,
+) -> None:
+    _, _, _, documents = _render(tmp_path)
+    policy = next(
+        item
+        for item in documents
+        if item["kind"] == "ValidatingAdmissionPolicy"
+        and item["metadata"]["name"] == "loom-personal-dev-management-resources"
+    )
+    job_boundaries = {
+        item["message"]: item["expression"]
+        for item in policy["spec"]["validations"]
+        if item["message"].startswith("builder Job ")
+    }
+    execution = job_boundaries[
+        "builder Job execution count differs from its exact privileged exception"
+    ]
+
+    assert all(
+        "request.operation != 'DELETE'" in expression
+        for expression in job_boundaries.values()
+    )
+    for value in (
+        "spec.parallelism == 1",
+        "spec.completions == 1",
+        "spec.completionMode == 'NonIndexed'",
+        "spec.manualSelector == false",
+        "spec.suspend == false",
+        "spec.backoffLimitPerIndex",
+        "spec.maxFailedIndexes",
+        "spec.podFailurePolicy",
+        "spec.podReplacementPolicy",
+        "spec.successPolicy",
+        "spec.managedBy",
+    ):
+        assert value in execution
+    assert execution.count("!has(") >= 8
+
+
+def test_builder_admission_blocks_client_and_sidecar_auxiliary_execution(
+    tmp_path: Path,
+) -> None:
+    _, _, _, documents = _render(tmp_path)
+    policy = next(
+        item
+        for item in documents
+        if item["kind"] == "ValidatingAdmissionPolicy"
+        and item["metadata"]["name"] == "loom-personal-dev-management-resources"
+    )
+    boundaries = {
+        item["message"]: item["expression"]
+        for item in policy["spec"]["validations"]
+        if item["message"].startswith("builder Job ")
+    }
+    client = boundaries[
+        "builder Job client auxiliary execution differs from its exact privileged exception"
+    ]
+    sidecar = boundaries[
+        "builder Job sidecar auxiliary execution differs from its exact privileged exception"
+    ]
+
+    for expression in (client, sidecar):
+        for field in (
+            "lifecycle",
+            "livenessProbe",
+            "ports",
+            "readinessProbe",
+            "resizePolicy",
+            "restartPolicyRules",
+            "stdin",
+            "stdinOnce",
+            "terminationMessagePath",
+            "terminationMessagePolicy",
+            "tty",
+            "volumeDevices",
+            "workingDir",
+        ):
+            assert field in expression
+        assert "resources.claims" in expression
+        assert "'/dev/termination-log'" in expression
+        assert "'File'" in expression
+    assert ".startupProbe)" in client
+    assert ".restartPolicy)" in client
+    assert ".startupProbe)" not in sidecar
+    assert ".restartPolicy)" not in sidecar
+
+
+def test_builder_admission_blocks_pod_auxiliary_authority(
+    tmp_path: Path,
+) -> None:
+    _, _, _, documents = _render(tmp_path)
+    policy = next(
+        item
+        for item in documents
+        if item["kind"] == "ValidatingAdmissionPolicy"
+        and item["metadata"]["name"] == "loom-personal-dev-management-resources"
+    )
+    boundaries = {
+        item["message"]: item["expression"]
+        for item in policy["spec"]["validations"]
+        if item["message"].startswith("builder Job ")
+    }
+    pod = boundaries[
+        "builder Job pod auxiliary fields differ from its exact privileged exception"
+    ]
+    security = boundaries[
+        "builder Job pod supplemental security differs from its exact privileged exception"
+    ]
+
+    for field in (
+        "activeDeadlineSeconds",
+        "dnsConfig",
+        "dnsPolicy",
+        "hostAliases",
+        "hostname",
+        "hostnameOverride",
+        "os",
+        "overhead",
+        "preemptionPolicy",
+        "priority",
+        "priorityClassName",
+        "readinessGates",
+        "resourceClaims",
+        "resources",
+        "schedulerName",
+        "schedulingGates",
+        "schedulingGroup",
+        "serviceAccount",
+        "setHostnameAsFQDN",
+        "subdomain",
+        "terminationGracePeriodSeconds",
+        "topologySpreadConstraints",
+    ):
+        assert field in pod
+    for field in (
+        "appArmorProfile",
+        "fsGroupChangePolicy",
+        "seLinuxChangePolicy",
+        "supplementalGroups",
+        "supplementalGroupsPolicy",
+        "windowsOptions",
+    ):
+        assert field in security
 
 
 def test_builder_admission_binds_network_policies_to_exact_specs(

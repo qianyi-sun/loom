@@ -525,12 +525,18 @@ def _builder_job_admission_validations(
     runtime_class_name: str,
 ) -> tuple[dict[str, str], ...]:
     builder_job = (
-        f"({builder_namespace} && request.resource.resource == 'jobs')"
+        f"({builder_namespace} && request.resource.resource == 'jobs' && "
+        "request.operation != 'DELETE')"
     )
     template = f"{target}.spec.template"
     pod = f"{template}.spec"
     client = f"{pod}.containers[0]"
     sidecar = f"{pod}.initContainers[0]"
+
+    def exact_quantity(value: str, expected: str) -> str:
+        return (
+            f"quantity(string({value})).compareTo(quantity('{expected}')) == 0"
+        )
 
     def exact_resources(container: str) -> str:
         requests = f"{container}.resources.requests"
@@ -538,14 +544,28 @@ def _builder_job_admission_validations(
         return (
             f"has({container}.resources) && has({requests}) && "
             f"{requests}.size() == 3 && "
-            f"{requests}['cpu'] == quantity('1') && "
-            f"{requests}['memory'] == quantity('1Gi') && "
-            f"{requests}['ephemeral-storage'] == quantity('4Gi') && "
+            + exact_quantity(f"{requests}['cpu']", "1")
+            + " && "
+            + exact_quantity(f"{requests}['memory']", "1Gi")
+            + " && "
+            + exact_quantity(f"{requests}['ephemeral-storage']", "4Gi")
+            + " && "
             f"has({limits}) && {limits}.size() == 3 && "
-            f"{limits}['cpu'] == quantity('4') && "
-            f"{limits}['memory'] == quantity('8Gi') && "
-            f"{limits}['ephemeral-storage'] == quantity('20Gi')"
+            + exact_quantity(f"{limits}['cpu']", "4")
+            + " && "
+            + exact_quantity(f"{limits}['memory']", "8Gi")
+            + " && "
+            + exact_quantity(f"{limits}['ephemeral-storage']", "20Gi")
+            + " && "
+            f"(!has({container}.resources.claims) || "
+            f"{container}.resources.claims.size() == 0)"
         )
+
+    def absent_or_equal(field: str, expected: str) -> str:
+        return f"(!has({field}) || {field} == {expected})"
+
+    def absent_or_empty(field: str) -> str:
+        return f"(!has({field}) || {field}.size() == 0)"
 
     pod_boundary = (
         f"!{builder_job} || ("
@@ -586,6 +606,79 @@ def _builder_job_admission_validations(
         f"{pod}.initContainers.size() == 1 && "
         f"!has({pod}.ephemeralContainers))"
     )
+    execution_count_boundary = (
+        f"!{builder_job} || ("
+        + absent_or_equal(f"{target}.spec.parallelism", "1")
+        + " && "
+        + absent_or_equal(f"{target}.spec.completions", "1")
+        + " && "
+        + absent_or_equal(f"{target}.spec.completionMode", "'NonIndexed'")
+        + " && "
+        + absent_or_equal(f"{target}.spec.manualSelector", "false")
+        + " && "
+        + absent_or_equal(f"{target}.spec.suspend", "false")
+        + " && "
+        f"!has({target}.spec.backoffLimitPerIndex) && "
+        f"!has({target}.spec.maxFailedIndexes) && "
+        f"!has({target}.spec.podFailurePolicy) && "
+        + absent_or_equal(
+            f"{target}.spec.podReplacementPolicy", "'TerminatingOrFailed'"
+        )
+        + " && "
+        f"!has({target}.spec.successPolicy) && "
+        f"!has({target}.spec.managedBy))"
+    )
+    pod_auxiliary_boundary = (
+        f"!{builder_job} || ("
+        f"!has({pod}.activeDeadlineSeconds) && !has({pod}.dnsConfig) && "
+        + absent_or_equal(f"{pod}.dnsPolicy", "'ClusterFirst'")
+        + " && "
+        + absent_or_empty(f"{pod}.hostAliases")
+        + " && "
+        f"!has({pod}.hostname) && !has({pod}.hostnameOverride) && "
+        f"!has({pod}.os) && !has({pod}.overhead) && "
+        + absent_or_equal(f"{pod}.preemptionPolicy", "'PreemptLowerPriority'")
+        + " && "
+        + absent_or_equal(f"{pod}.priority", "0")
+        + " && "
+        f"!has({pod}.priorityClassName) && "
+        + absent_or_empty(f"{pod}.readinessGates")
+        + " && "
+        + absent_or_empty(f"{pod}.resourceClaims")
+        + " && "
+        f"!has({pod}.resources) && "
+        + absent_or_equal(f"{pod}.schedulerName", "'default-scheduler'")
+        + " && "
+        + absent_or_empty(f"{pod}.schedulingGates")
+        + " && "
+        f"!has({pod}.schedulingGroup) && "
+        + absent_or_equal(f"{pod}.serviceAccount", "'default'")
+        + " && "
+        + absent_or_equal(f"{pod}.setHostnameAsFQDN", "false")
+        + " && "
+        f"!has({pod}.subdomain) && "
+        + absent_or_equal(f"{pod}.terminationGracePeriodSeconds", "30")
+        + " && "
+        + absent_or_empty(f"{pod}.topologySpreadConstraints")
+        + ")"
+    )
+    pod_supplemental_security_boundary = (
+        f"!{builder_job} || ("
+        f"!has({pod}.securityContext.appArmorProfile) && "
+        + absent_or_equal(
+            f"{pod}.securityContext.fsGroupChangePolicy", "'Always'"
+        )
+        + " && "
+        f"!has({pod}.securityContext.seLinuxChangePolicy) && "
+        f"!has({pod}.securityContext.seccompProfile.localhostProfile) && "
+        + absent_or_empty(f"{pod}.securityContext.supplementalGroups")
+        + " && "
+        + absent_or_equal(
+            f"{pod}.securityContext.supplementalGroupsPolicy", "'Merge'"
+        )
+        + " && "
+        f"!has({pod}.securityContext.windowsOptions))"
+    )
     client_definition_boundary = (
         f"!{builder_job} || ("
         f"{client}.name == 'builder' && {client}.image == '{builder_image}' && "
@@ -597,6 +690,35 @@ def _builder_job_admission_validations(
         "'--workspace','/workspace'] && "
         f"(!has({client}.env) || {client}.env.size() == 0) && "
         f"(!has({client}.envFrom) || {client}.envFrom.size() == 0))"
+    )
+    client_auxiliary_boundary = (
+        f"!{builder_job} || ("
+        f"!has({client}.lifecycle) && !has({client}.livenessProbe) && "
+        + absent_or_empty(f"{client}.ports")
+        + " && "
+        f"!has({client}.readinessProbe) && "
+        + absent_or_empty(f"{client}.resizePolicy")
+        + " && "
+        f"!has({client}.restartPolicy) && !has({client}.restartPolicyRules) && "
+        f"!has({client}.startupProbe) && "
+        + absent_or_equal(f"{client}.stdin", "false")
+        + " && "
+        + absent_or_equal(f"{client}.stdinOnce", "false")
+        + " && "
+        + absent_or_equal(
+            f"{client}.terminationMessagePath", "'/dev/termination-log'"
+        )
+        + " && "
+        + absent_or_equal(f"{client}.terminationMessagePolicy", "'File'")
+        + " && "
+        + absent_or_equal(f"{client}.tty", "false")
+        + " && "
+        + absent_or_empty(f"{client}.volumeDevices")
+        + " && "
+        + absent_or_equal(f"{client}.workingDir", "''")
+        + " && "
+        + absent_or_empty(f"{client}.resources.claims")
+        + ")"
     )
     client_security_boundary = (
         f"!{builder_job} || ("
@@ -610,7 +732,13 @@ def _builder_job_admission_validations(
         f"!has({client}.securityContext.capabilities.add) && "
         f"!has({client}.securityContext.procMount) && "
         f"!has({client}.securityContext.seccompProfile) && "
-        f"!has({client}.securityContext.appArmorProfile))"
+        f"!has({client}.securityContext.appArmorProfile) && "
+        + absent_or_equal(f"{client}.securityContext.runAsUser", "1000")
+        + " && "
+        + absent_or_equal(f"{client}.securityContext.runAsGroup", "1000")
+        + " && "
+        f"!has({client}.securityContext.seLinuxOptions) && "
+        f"!has({client}.securityContext.windowsOptions))"
     )
     client_resources_boundary = (
         f"!{builder_job} || ({exact_resources(client)})"
@@ -648,6 +776,34 @@ def _builder_job_admission_validations(
         f"(!has({sidecar}.env) || {sidecar}.env.size() == 0) && "
         f"(!has({sidecar}.envFrom) || {sidecar}.envFrom.size() == 0))"
     )
+    sidecar_auxiliary_boundary = (
+        f"!{builder_job} || ("
+        f"!has({sidecar}.lifecycle) && !has({sidecar}.livenessProbe) && "
+        + absent_or_empty(f"{sidecar}.ports")
+        + " && "
+        f"!has({sidecar}.readinessProbe) && "
+        + absent_or_empty(f"{sidecar}.resizePolicy")
+        + " && "
+        f"!has({sidecar}.restartPolicyRules) && "
+        + absent_or_equal(f"{sidecar}.stdin", "false")
+        + " && "
+        + absent_or_equal(f"{sidecar}.stdinOnce", "false")
+        + " && "
+        + absent_or_equal(
+            f"{sidecar}.terminationMessagePath", "'/dev/termination-log'"
+        )
+        + " && "
+        + absent_or_equal(f"{sidecar}.terminationMessagePolicy", "'File'")
+        + " && "
+        + absent_or_equal(f"{sidecar}.tty", "false")
+        + " && "
+        + absent_or_empty(f"{sidecar}.volumeDevices")
+        + " && "
+        + absent_or_equal(f"{sidecar}.workingDir", "''")
+        + " && "
+        + absent_or_empty(f"{sidecar}.resources.claims")
+        + ")"
+    )
     sidecar_security_boundary = (
         f"!{builder_job} || ("
         f"has({sidecar}.securityContext) && "
@@ -660,7 +816,14 @@ def _builder_job_admission_validations(
         f"{sidecar}.securityContext.capabilities.add == ['SETGID','SETUID'] && "
         f"!has({sidecar}.securityContext.procMount) && "
         f"{sidecar}.securityContext.seccompProfile.type == 'Unconfined' && "
-        f"!has({sidecar}.securityContext.appArmorProfile))"
+        f"!has({sidecar}.securityContext.seccompProfile.localhostProfile) && "
+        f"!has({sidecar}.securityContext.appArmorProfile) && "
+        + absent_or_equal(f"{sidecar}.securityContext.runAsUser", "1000")
+        + " && "
+        + absent_or_equal(f"{sidecar}.securityContext.runAsGroup", "1000")
+        + " && "
+        f"!has({sidecar}.securityContext.seLinuxOptions) && "
+        f"!has({sidecar}.securityContext.windowsOptions))"
     )
     sidecar_resources_boundary = (
         f"!{builder_job} || ({exact_resources(sidecar)})"
@@ -670,8 +833,16 @@ def _builder_job_admission_validations(
         f"{sidecar}.startupProbe.exec.command == ['/usr/bin/buildctl','--addr',"
         "'unix:///var/run/loom-buildkit/buildkitd.sock','debug','workers'] && "
         f"{sidecar}.startupProbe.failureThreshold == 60 && "
+        + absent_or_equal(f"{sidecar}.startupProbe.initialDelaySeconds", "0")
+        + " && "
         f"{sidecar}.startupProbe.periodSeconds == 2 && "
-        f"{sidecar}.startupProbe.timeoutSeconds == 1)"
+        + absent_or_equal(f"{sidecar}.startupProbe.successThreshold", "1")
+        + " && "
+        f"{sidecar}.startupProbe.timeoutSeconds == 1 && "
+        f"!has({sidecar}.startupProbe.terminationGracePeriodSeconds) && "
+        f"!has({sidecar}.startupProbe.grpc) && "
+        f"!has({sidecar}.startupProbe.httpGet) && "
+        f"!has({sidecar}.startupProbe.tcpSocket))"
     )
     sidecar_mount_boundary = (
         f"!{builder_job} || ("
@@ -701,15 +872,20 @@ def _builder_job_admission_validations(
         "'^build-capability-(amd64|arm64)-l[0-9a-f]{16}$') && "
         f"{pod}.volumes[1].secret.defaultMode == 256 && "
         f"{pod}.volumes[2].name == 'workspace' && "
-        f"{pod}.volumes[2].emptyDir.sizeLimit == quantity('20Gi') && "
+        + exact_quantity(f"{pod}.volumes[2].emptyDir.sizeLimit", "20Gi")
+        + " && "
         f"{pod}.volumes[3].name == 'tmp-client' && "
-        f"{pod}.volumes[3].emptyDir.sizeLimit == quantity('1Gi') && "
+        + exact_quantity(f"{pod}.volumes[3].emptyDir.sizeLimit", "1Gi")
+        + " && "
         f"{pod}.volumes[4].name == 'buildkit-run' && "
-        f"{pod}.volumes[4].emptyDir.sizeLimit == quantity('64Mi') && "
+        + exact_quantity(f"{pod}.volumes[4].emptyDir.sizeLimit", "64Mi")
+        + " && "
         f"{pod}.volumes[5].name == 'buildkit-state' && "
-        f"{pod}.volumes[5].emptyDir.sizeLimit == quantity('20Gi') && "
+        + exact_quantity(f"{pod}.volumes[5].emptyDir.sizeLimit", "20Gi")
+        + " && "
         f"{pod}.volumes[6].name == 'tmp-buildkit' && "
-        f"{pod}.volumes[6].emptyDir.sizeLimit == quantity('1Gi'))"
+        + exact_quantity(f"{pod}.volumes[6].emptyDir.sizeLimit", "1Gi")
+        + ")"
     )
     return (
         {
@@ -717,9 +893,35 @@ def _builder_job_admission_validations(
             "message": "builder Job pod boundary differs from its exact privileged exception",
         },
         {
+            "expression": execution_count_boundary,
+            "message": (
+                "builder Job execution count differs from its exact privileged exception"
+            ),
+        },
+        {
+            "expression": pod_auxiliary_boundary,
+            "message": (
+                "builder Job pod auxiliary fields differ from its exact privileged exception"
+            ),
+        },
+        {
+            "expression": pod_supplemental_security_boundary,
+            "message": (
+                "builder Job pod supplemental security differs from its exact privileged "
+                "exception"
+            ),
+        },
+        {
             "expression": client_definition_boundary,
             "message": (
                 "builder Job client definition differs from its exact privileged exception"
+            ),
+        },
+        {
+            "expression": client_auxiliary_boundary,
+            "message": (
+                "builder Job client auxiliary execution differs from its exact privileged "
+                "exception"
             ),
         },
         {
@@ -744,6 +946,13 @@ def _builder_job_admission_validations(
             "expression": sidecar_definition_boundary,
             "message": (
                 "builder Job sidecar definition differs from its exact privileged exception"
+            ),
+        },
+        {
+            "expression": sidecar_auxiliary_boundary,
+            "message": (
+                "builder Job sidecar auxiliary execution differs from its exact privileged "
+                "exception"
             ),
         },
         {
