@@ -571,6 +571,12 @@ scheduler. Resource-map and `emptyDir` quantities must use
 `quantity(string(value)).compareTo(quantity(expected)) == 0`; direct Quantity
 equality does not accept the exact Kubernetes 1.36 object.
 
+Bind Job and Pod-template metadata so finalizers, owner references, generated
+names, or extra workload-selecting labels cannot widen or wedge the exception.
+Couple each Job platform to the same-lease contract and capability volume.
+Forbid ConfigMap/Secret item remapping or optionality, alternate `emptyDir`
+media, and recursive-read-only mount overrides.
+
 Require separate builder-only validations for the exact `default-deny` and
 `builder-egress` NetworkPolicy shapes. The latter must bind the sandbox Pod
 selector, DNS and shared-MinIO selectors and ports, both public IP blocks,
@@ -615,8 +621,10 @@ default-deny widening, and prove that deletion remains possible after an admin
 drifts a policy. In a disposable Kubernetes 1.36 cluster, admit the exact Job
 and equivalent `1000m` CPU quantity while denying repeated completions, client
 hooks/probes/termination-file disclosure, sidecar hooks, supplemental root
-groups, alternate scheduling, extended termination grace, and a widened
-resource request. No protected-cluster object may be persisted.
+groups, alternate scheduling, extended termination grace, a widened resource
+request, volume-source remapping/optionality/media changes, platform-volume
+cross-wiring, recursive mount changes, finalizers, and extra Pod labels. No
+protected-cluster object may be persisted.
 
 - [ ] **Step 6: Commit Task 5**
 

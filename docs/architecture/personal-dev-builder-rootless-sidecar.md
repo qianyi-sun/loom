@@ -114,13 +114,17 @@ non-host namespaces, exact security contexts, exact volume separation, and
 finite resource envelope. It also requires exactly one non-indexed completion,
 forbids alternate Job controllers and failure/success policies, and rejects
 client hooks, extra probes, termination-message path changes, resource claims,
-supplemental groups, and alternate Pod scheduling fields. Quantity comparisons
-use Kubernetes' `Quantity.compareTo` API so equivalent canonical forms are
-accepted while different resource envelopes are denied. The same policy binds
-`default-deny` and `builder-egress` to their exact generated selectors, peers,
-ports, and private/reserved-network exclusions; a permitted resource name
-cannot be used to install wider egress. Deletes remain shape-independent so
-the controller can remove an object drifted by a higher-authority principal.
+supplemental groups, and alternate Pod scheduling fields. It also binds the
+Job and Pod-template metadata, couples each platform to the same-lease contract
+and capability volumes, forbids ConfigMap/Secret item remapping or optionality,
+and keeps every `emptyDir` disk-backed with no recursive mount override.
+Quantity comparisons use Kubernetes' `Quantity.compareTo` API so equivalent
+canonical forms are accepted while different resource envelopes are denied.
+The same policy binds `default-deny` and `builder-egress` to their exact
+generated selectors, peers, ports, and private/reserved-network exclusions; a
+permitted resource name cannot be used to install wider egress. Deletes remain
+shape-independent so the controller can remove an object drifted by a
+higher-authority principal.
 The management RBAC cannot create Pods directly; the Job controller can create
 only Pods from a template that passed this policy. Only the management service
 account can create workloads in the namespace, the ResourceQuota still permits
@@ -233,6 +237,10 @@ Repository tests must prove:
 - every builder Job has one completion and no auxiliary client execution,
   termination-file disclosure, supplemental authority, resource claim, or
   alternate scheduling/controller path;
+- Job and Pod-template metadata cannot add finalizers or workload-selecting
+  labels, each platform uses its same-lease contract/capability pair, and
+  volume sources cannot become optional, remapped, memory-backed, or
+  recursively remounted;
 - resource and volume quantities use semantic Kubernetes Quantity comparison,
   admitting equivalent forms such as `1000m` for one CPU but no larger value;
 - the same policy admits only the exact builder default-deny and egress shapes,

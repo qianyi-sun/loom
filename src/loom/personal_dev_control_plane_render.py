@@ -532,6 +532,8 @@ def _builder_job_admission_validations(
     pod = f"{template}.spec"
     client = f"{pod}.containers[0]"
     sidecar = f"{pod}.initContainers[0]"
+    job_labels = f"{target}.metadata.labels"
+    pod_labels = f"{template}.metadata.labels"
 
     def exact_quantity(value: str, expected: str) -> str:
         return (
@@ -605,6 +607,64 @@ def _builder_job_admission_validations(
         f"{pod}.containers.size() == 1 && "
         f"{pod}.initContainers.size() == 1 && "
         f"!has({pod}.ephemeralContainers))"
+    )
+    identity_labels = (
+        "app.kubernetes.io/managed-by",
+        "app.kubernetes.io/part-of",
+        "loom.dev/candidate",
+        "loom.dev/subject",
+        "loom.dev/incarnation",
+        "loom.dev/operation",
+        "loom.dev/attempt",
+        "loom.dev/operation-epoch",
+        "loom.dev/build-attempt-sequence",
+        "loom.dev/build-lease-epoch",
+    )
+    labels_match = " && ".join(
+        f"{pod_labels}['{label}'] == {job_labels}['{label}']"
+        for label in identity_labels
+    )
+    system_job_labels = (
+        f"{pod_labels}.size() == 16 && "
+        f"{pod_labels}['job-name'] == {target}.metadata.name && "
+        f"{pod_labels}['batch.kubernetes.io/job-name'] == {target}.metadata.name && "
+        f"{pod_labels}['controller-uid'] == "
+        f"{pod_labels}['batch.kubernetes.io/controller-uid'] && "
+        f"{pod_labels}['controller-uid'].matches("
+        "'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')"
+    )
+    metadata_boundary = (
+        f"!{builder_job} || ("
+        f"(!has({target}.metadata.annotations) || "
+        f"{target}.metadata.annotations.size() == 0) && "
+        f"(!has({target}.metadata.finalizers) || "
+        f"{target}.metadata.finalizers.size() == 0) && "
+        f"!has({target}.metadata.generateName) && "
+        f"(!has({target}.metadata.ownerReferences) || "
+        f"{target}.metadata.ownerReferences.size() == 0) && "
+        f"{job_labels}.size() == 10 && "
+        f"{job_labels}['app.kubernetes.io/managed-by'] == "
+        "'loom-personal-dev-builder-controller' && "
+        f"{job_labels}['app.kubernetes.io/part-of'] == 'loom' && "
+        f"{job_labels}['loom.dev/candidate'].matches('^[0-9a-f]{{12}}$') && "
+        f"{job_labels}['loom.dev/subject'].matches("
+        "'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') && "
+        f"{job_labels}['loom.dev/incarnation'].matches("
+        "'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') && "
+        f"{job_labels}['loom.dev/operation'].matches("
+        "'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') && "
+        f"{job_labels}['loom.dev/attempt'].matches("
+        "'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') && "
+        f"{job_labels}['loom.dev/operation-epoch'].matches('^[1-9][0-9]*$') && "
+        f"{job_labels}['loom.dev/build-attempt-sequence'].matches('^[0-9]+$') && "
+        f"{job_labels}['loom.dev/build-lease-epoch'].matches('^[1-9][0-9]*$') && "
+        f"(!has({template}.metadata.finalizers) || "
+        f"{template}.metadata.finalizers.size() == 0) && "
+        f"!has({template}.metadata.generateName) && "
+        f"(!has({template}.metadata.ownerReferences) || "
+        f"{template}.metadata.ownerReferences.size() == 0) && "
+        f"({pod_labels}.size() == 12 || ({system_job_labels})) && "
+        f"{labels_match})"
     )
     execution_count_boundary = (
         f"!{builder_job} || ("
@@ -764,7 +824,9 @@ def _builder_job_admission_validations(
         f"{client}.volumeMounts[4].mountPath == '/var/run/loom-buildkit' && "
         f"{client}.volumeMounts[4].readOnly == true && "
         f"{client}.volumeMounts.all(mount, !has(mount.subPath) && "
-        "!has(mount.subPathExpr) && !has(mount.mountPropagation)))"
+        "!has(mount.subPathExpr) && !has(mount.mountPropagation) && "
+        "(!has(mount.recursiveReadOnly) || "
+        "mount.recursiveReadOnly == 'Disabled')))"
     )
     sidecar_definition_boundary = (
         f"!{builder_job} || ("
@@ -856,7 +918,22 @@ def _builder_job_admission_validations(
         f"{sidecar}.volumeMounts.all(mount, "
         "(!has(mount.readOnly) || mount.readOnly == false) && "
         "!has(mount.subPath) && !has(mount.subPathExpr) && "
-        "!has(mount.mountPropagation)))"
+        "!has(mount.mountPropagation) && "
+        "(!has(mount.recursiveReadOnly) || "
+        "mount.recursiveReadOnly == 'Disabled')))"
+    )
+    platform_volume_boundary = (
+        f"!{builder_job} || ("
+        f"(({target}.metadata.name == 'build-amd64' && "
+        f"{pod}.volumes[0].configMap.name == "
+        "'build-contract-amd64-' + request.namespace.substring(44) && "
+        f"{pod}.volumes[1].secret.secretName == "
+        "'build-capability-amd64-' + request.namespace.substring(44)) || "
+        f"({target}.metadata.name == 'build-arm64' && "
+        f"{pod}.volumes[0].configMap.name == "
+        "'build-contract-arm64-' + request.namespace.substring(44) && "
+        f"{pod}.volumes[1].secret.secretName == "
+        "'build-capability-arm64-' + request.namespace.substring(44))))"
     )
     volumes_boundary = (
         f"!{builder_job} || ("
@@ -867,23 +944,41 @@ def _builder_job_admission_validations(
         f"{pod}.volumes[0].configMap.name.matches("
         "'^build-contract-(amd64|arm64)-l[0-9a-f]{16}$') && "
         f"{pod}.volumes[0].configMap.defaultMode == 256 && "
+        + absent_or_empty(f"{pod}.volumes[0].configMap.items")
+        + " && "
+        + absent_or_equal(f"{pod}.volumes[0].configMap.optional", "false")
+        + " && "
         f"{pod}.volumes[1].name == 'attempt-capability' && "
         f"{pod}.volumes[1].secret.secretName.matches("
         "'^build-capability-(amd64|arm64)-l[0-9a-f]{16}$') && "
         f"{pod}.volumes[1].secret.defaultMode == 256 && "
+        + absent_or_empty(f"{pod}.volumes[1].secret.items")
+        + " && "
+        + absent_or_equal(f"{pod}.volumes[1].secret.optional", "false")
+        + " && "
         f"{pod}.volumes[2].name == 'workspace' && "
+        + absent_or_equal(f"{pod}.volumes[2].emptyDir.medium", "''")
+        + " && "
         + exact_quantity(f"{pod}.volumes[2].emptyDir.sizeLimit", "20Gi")
         + " && "
         f"{pod}.volumes[3].name == 'tmp-client' && "
+        + absent_or_equal(f"{pod}.volumes[3].emptyDir.medium", "''")
+        + " && "
         + exact_quantity(f"{pod}.volumes[3].emptyDir.sizeLimit", "1Gi")
         + " && "
         f"{pod}.volumes[4].name == 'buildkit-run' && "
+        + absent_or_equal(f"{pod}.volumes[4].emptyDir.medium", "''")
+        + " && "
         + exact_quantity(f"{pod}.volumes[4].emptyDir.sizeLimit", "64Mi")
         + " && "
         f"{pod}.volumes[5].name == 'buildkit-state' && "
+        + absent_or_equal(f"{pod}.volumes[5].emptyDir.medium", "''")
+        + " && "
         + exact_quantity(f"{pod}.volumes[5].emptyDir.sizeLimit", "20Gi")
         + " && "
         f"{pod}.volumes[6].name == 'tmp-buildkit' && "
+        + absent_or_equal(f"{pod}.volumes[6].emptyDir.medium", "''")
+        + " && "
         + exact_quantity(f"{pod}.volumes[6].emptyDir.sizeLimit", "1Gi")
         + ")"
     )
@@ -891,6 +986,10 @@ def _builder_job_admission_validations(
         {
             "expression": pod_boundary,
             "message": "builder Job pod boundary differs from its exact privileged exception",
+        },
+        {
+            "expression": metadata_boundary,
+            "message": "builder Job metadata differs from its exact privileged exception",
         },
         {
             "expression": execution_count_boundary,
@@ -977,6 +1076,12 @@ def _builder_job_admission_validations(
             "expression": sidecar_mount_boundary,
             "message": (
                 "builder Job sidecar mounts differ from its exact privileged exception"
+            ),
+        },
+        {
+            "expression": platform_volume_boundary,
+            "message": (
+                "builder Job platform volumes differ from its exact privileged exception"
             ),
         },
         {

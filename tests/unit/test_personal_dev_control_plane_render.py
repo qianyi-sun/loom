@@ -245,7 +245,7 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
     assert rendered.runtime_handler == profile.builder.runtime_handler
     assert rendered.runtime_profile_sha256 == profile.builder.runtime_profile_sha256
     assert hashlib.sha256(rendered.yaml_text.encode("utf-8")).hexdigest() == (
-        "e7251880bd9c2d70e03de2bf99899259fc916cba3ce10f82e7ed48bc36eea719"
+        "8341bf3fc3d315cdcc9cd6a235640258d5051574efdffc8c543f148894eb8649"
     )
 
     identities = {_identity(document) for document in documents}
@@ -1238,6 +1238,92 @@ def test_builder_admission_blocks_pod_auxiliary_authority(
         "windowsOptions",
     ):
         assert field in security
+
+
+def test_builder_admission_binds_volume_source_and_mount_auxiliary_fields(
+    tmp_path: Path,
+) -> None:
+    _, _, _, documents = _render(tmp_path)
+    policy = next(
+        item
+        for item in documents
+        if item["kind"] == "ValidatingAdmissionPolicy"
+        and item["metadata"]["name"] == "loom-personal-dev-management-resources"
+    )
+    boundaries = {
+        item["message"]: item["expression"]
+        for item in policy["spec"]["validations"]
+        if item["message"].startswith("builder Job ")
+    }
+    volumes = boundaries[
+        "builder Job volumes differ from its exact privileged exception"
+    ]
+    client_mounts = boundaries[
+        "builder Job client mounts differ from its exact privileged exception"
+    ]
+    sidecar_mounts = boundaries[
+        "builder Job sidecar mounts differ from its exact privileged exception"
+    ]
+
+    assert ".configMap.items" in volumes
+    assert ".configMap.optional" in volumes
+    assert ".secret.items" in volumes
+    assert ".secret.optional" in volumes
+    assert volumes.count(".emptyDir.medium") == 10
+    assert "mount.recursiveReadOnly" in client_mounts
+    assert "mount.recursiveReadOnly" in sidecar_mounts
+
+
+def test_builder_admission_couples_platform_capabilities_and_metadata(
+    tmp_path: Path,
+) -> None:
+    _, _, _, documents = _render(tmp_path)
+    policy = next(
+        item
+        for item in documents
+        if item["kind"] == "ValidatingAdmissionPolicy"
+        and item["metadata"]["name"] == "loom-personal-dev-management-resources"
+    )
+    boundaries = {
+        item["message"]: item["expression"]
+        for item in policy["spec"]["validations"]
+        if item["message"].startswith("builder Job ")
+    }
+    metadata = boundaries[
+        "builder Job metadata differs from its exact privileged exception"
+    ]
+    platform = boundaries[
+        "builder Job platform volumes differ from its exact privileged exception"
+    ]
+
+    for field in (
+        ".metadata.annotations",
+        ".metadata.finalizers",
+        ".metadata.generateName",
+        ".metadata.ownerReferences",
+        ".spec.template.metadata.finalizers",
+        ".spec.template.metadata.generateName",
+        ".spec.template.metadata.ownerReferences",
+    ):
+        assert field in metadata
+    assert ".spec.template.metadata.labels.size()" in metadata
+    for label in (
+        "app.kubernetes.io/managed-by",
+        "app.kubernetes.io/part-of",
+        "loom.dev/attempt",
+        "loom.dev/build-attempt-sequence",
+        "loom.dev/build-lease-epoch",
+        "loom.dev/candidate",
+        "loom.dev/incarnation",
+        "loom.dev/operation",
+        "loom.dev/operation-epoch",
+        "loom.dev/subject",
+    ):
+        assert label in metadata
+    assert "build-contract-amd64-" in platform
+    assert "build-capability-amd64-" in platform
+    assert "build-contract-arm64-" in platform
+    assert "build-capability-arm64-" in platform
 
 
 def test_builder_admission_binds_network_policies_to_exact_specs(
