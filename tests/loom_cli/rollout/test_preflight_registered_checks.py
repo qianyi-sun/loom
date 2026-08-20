@@ -2028,6 +2028,7 @@ def test_registered_gb10_candidate_source_binds_exact_shared_checkout(
     assert result.evidence["candidate-sha"] == "1" * 40
     assert result.evidence["candidate-tree"] == "2" * 40
     assert result.evidence["host-count"] == 1
+    assert check.spec.timeout_seconds == 510
     assert len(observed) == 1
     assert set(observed[0]["unit_sha256"]) == {
         "deploy/worker-pools/gb10/loom-gb10-node-agent.service",

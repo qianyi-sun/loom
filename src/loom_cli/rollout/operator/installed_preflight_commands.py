@@ -94,14 +94,13 @@ class InstalledPreflightCommands:
 
         The candidate-source check serializes the GB10 fleet to avoid amplifying
         NFS reads. A generic 120-second subprocess timeout can therefore outlive
-        the check's 180-second DAG budget and force the entire runner to exit
-        during cancellation. Healthy full-tree reads on the protected shared
-        mount can take roughly nine seconds, so keep a twelve-second command
-        bound: long enough for the live NFS path while fourteen successful
-        first attempts still fit below the DAG budget. The probe's two-attempt
+        the check's DAG budget and force the entire runner to exit during
+        cancellation. Live full-tree reads can exceed twelve seconds even when
+        the immutable checkout is healthy, so admit a bounded thirty-second
+        command before classifying the host as drifted. The probe's two-attempt
         fail-fast policy bounds a failed first host separately.
         """
-        return self._execute(argv, timeout=12)
+        return self._execute(argv, timeout=30)
 
     def gb10_fleet(self, argv: Sequence[str]) -> CommandResult:
         """Keep two complete four-wave fleet attempts inside the 60s DAG bound."""
