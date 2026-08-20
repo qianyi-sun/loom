@@ -61,7 +61,17 @@ def _verify_preflight(
         status_payload = _read_identity_file(status_file).decode("ascii")
     except UnicodeDecodeError as exc:
         raise _preflight_error() from exc
-    required = {"Uid", "Gid", "CapEff", "CapBnd", "NoNewPrivs", "Seccomp"}
+    required = {
+        "Uid",
+        "Gid",
+        "CapInh",
+        "CapPrm",
+        "CapEff",
+        "CapBnd",
+        "CapAmb",
+        "NoNewPrivs",
+        "Seccomp",
+    }
     observed: dict[str, str] = {}
     for line in status_payload.splitlines():
         name, separator, value = line.partition(":")
@@ -78,8 +88,11 @@ def _verify_preflight(
         or actual_gid != 1000
         or observed["Uid"].split() != ["1000"] * 4
         or observed["Gid"].split() != ["1000"] * 4
+        or observed["CapInh"] != "0000000000000000"
+        or observed["CapPrm"] != "0000000000000000"
         or observed["CapEff"] != "0000000000000000"
         or observed["CapBnd"] != "00000000000000c0"
+        or observed["CapAmb"] != "0000000000000000"
         or observed["NoNewPrivs"] != "0"
         or observed["Seccomp"] != "0"
     ):
@@ -128,7 +141,9 @@ def _main(
     print(
         "loom-buildkitd-preflight "
         f"uid={actual_uid} gid={actual_gid} "
+        f"capinh={observed['CapInh']} capprm={observed['CapPrm']} "
         f"capeff={observed['CapEff']} capbnd={observed['CapBnd']} "
+        f"capamb={observed['CapAmb']} "
         f"nnp={observed['NoNewPrivs']} seccomp={observed['Seccomp']}",
         flush=True,
     )

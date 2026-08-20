@@ -229,7 +229,17 @@ def _verify_client_identity(
         raise PersonalDevSandboxBuildError(
             "builder client runtime identity is invalid"
         ) from exc
-    required = {"Uid", "Gid", "CapEff", "CapBnd", "NoNewPrivs", "Seccomp"}
+    required = {
+        "Uid",
+        "Gid",
+        "CapInh",
+        "CapPrm",
+        "CapEff",
+        "CapBnd",
+        "CapAmb",
+        "NoNewPrivs",
+        "Seccomp",
+    }
     observed: dict[str, str] = {}
     for line in status_payload.splitlines():
         name, separator, value = line.partition(":")
@@ -244,8 +254,11 @@ def _verify_client_identity(
         set(observed) != required
         or observed["Uid"].split() != ["1000"] * 4
         or observed["Gid"].split() != ["1000"] * 4
+        or observed["CapInh"] != "0000000000000000"
+        or observed["CapPrm"] != "0000000000000000"
         or observed["CapEff"] != "0000000000000000"
         or observed["CapBnd"] != "0000000000000000"
+        or observed["CapAmb"] != "0000000000000000"
         or observed["NoNewPrivs"] != "1"
         or observed["Seccomp"] != "2"
     ):

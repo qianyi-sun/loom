@@ -162,8 +162,11 @@ def _client_status(**changes: str) -> bytes:
     fields = {
         "Uid": "1000\t1000\t1000\t1000",
         "Gid": "1000\t1000\t1000\t1000",
+        "CapInh": "0000000000000000",
+        "CapPrm": "0000000000000000",
         "CapEff": "0000000000000000",
         "CapBnd": "0000000000000000",
+        "CapAmb": "0000000000000000",
         "NoNewPrivs": "1",
         "Seccomp": "2",
     }
@@ -192,8 +195,11 @@ def test_client_identity_accepts_only_restricted_gvisor_process(
     [
         ("Uid", "1001\t1001\t1001\t1001"),
         ("Gid", "1001\t1001\t1001\t1001"),
+        ("CapInh", "00000000000000c0"),
+        ("CapPrm", "00000000000000c0"),
         ("CapEff", "00000000000000c0"),
         ("CapBnd", "00000000000000c0"),
+        ("CapAmb", "00000000000000c0"),
         ("NoNewPrivs", "0"),
         ("Seccomp", "0"),
     ],

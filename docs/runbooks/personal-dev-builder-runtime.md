@@ -1252,8 +1252,11 @@ status_value() {
 }
 test "$(status_value Uid)" = "1000 1000 1000 1000"
 test "$(status_value Gid)" = "1000 1000 1000 1000"
+test "$(status_value CapInh)" = 0000000000000000
+test "$(status_value CapPrm)" = 0000000000000000
 test "$(status_value CapEff)" = 0000000000000000
 test "$(status_value CapBnd)" = 0000000000000000
+test "$(status_value CapAmb)" = 0000000000000000
 test "$(status_value NoNewPrivs)" = 1
 test "$(status_value Seccomp)" = 2
 test -x /usr/bin/buildctl
@@ -1268,7 +1271,7 @@ for cmdline in /proc/[0-9]*/cmdline; do
     esac
   fi
 done
-printf 'loom-client-preflight uid=1000 gid=1000 capeff=0000000000000000 capbnd=0000000000000000 nnp=1 seccomp=2 pid-isolation=pass\n'
+printf 'loom-client-preflight uid=1000 gid=1000 capinh=0000000000000000 capprm=0000000000000000 capeff=0000000000000000 capbnd=0000000000000000 capamb=0000000000000000 nnp=1 seccomp=2 pid-isolation=pass\n'
 
 operator_gate=/workspace/operator-continue
 waited=0
@@ -1554,7 +1557,7 @@ kubectl --kubeconfig "$kubeconfig" --namespace "$smoke_namespace" \
   logs --limit-bytes=8388608 pod/buildkit-conformance -c buildkitd \
   > "$evidence_dir/buildkit-conformance.sidecar.log"
 test "$conformance_wait_status" -eq 0
-grep -F 'loom-client-preflight uid=1000 gid=1000 capeff=0000000000000000 capbnd=0000000000000000 nnp=1 seccomp=2 pid-isolation=pass' \
+grep -F 'loom-client-preflight uid=1000 gid=1000 capinh=0000000000000000 capprm=0000000000000000 capeff=0000000000000000 capbnd=0000000000000000 capamb=0000000000000000 nnp=1 seccomp=2 pid-isolation=pass' \
   "$evidence_dir/buildkit-conformance.client.log" >/dev/null
 grep -F 'loom-uname=x86_64 loom-nnp=1' \
   "$evidence_dir/buildkit-conformance.client.log" >/dev/null
@@ -1564,7 +1567,7 @@ grep -F '"architecture": "amd64", "platform": "linux/amd64"' \
   "$evidence_dir/buildkit-conformance.client.log" >/dev/null
 grep -F '"architecture": "arm64", "platform": "linux/arm64"' \
   "$evidence_dir/buildkit-conformance.client.log" >/dev/null
-grep -F 'loom-buildkitd-preflight uid=1000 gid=1000 capeff=0000000000000000 capbnd=00000000000000c0 nnp=0 seccomp=0' \
+grep -F 'loom-buildkitd-preflight uid=1000 gid=1000 capinh=0000000000000000 capprm=0000000000000000 capeff=0000000000000000 capbnd=00000000000000c0 capamb=0000000000000000 nnp=0 seccomp=0' \
   "$evidence_dir/buildkit-conformance.sidecar.log" >/dev/null
 assert_global_stop_conditions
 ```
