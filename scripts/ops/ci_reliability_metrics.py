@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from scripts.ops.authoritative_gate_metrics import MetricsError, parse_timestamp
+from scripts.ops.github_actions_metrics import MetricsError, parse_timestamp
 
 WORKFLOWS = {"CI", "images", "cluster-smoke", "staging-smoke"}
 CAUSES = {"platform_transient", "external_dependency", "code_failure", "capacity_queue"}

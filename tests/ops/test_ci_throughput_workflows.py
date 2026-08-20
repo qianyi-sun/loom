@@ -271,7 +271,7 @@ def test_coverage_artifacts_map_hosted_and_oldlab_checkout_roots() -> None:
         ]
 
 
-def test_source_workflows_share_authoritative_generation_marker() -> None:
+def test_source_workflows_share_native_run_identity() -> None:
     workflows = {path: _workflow(path) for path in GATE_CONTRACTS}
     common_run_names = {
         workflow["run-name"]
@@ -284,9 +284,8 @@ def test_source_workflows_share_authoritative_generation_marker() -> None:
     assert "gate=trusted-publish / head={0} / base={1}" in image_run_name
     assert "inputs.trusted_publish == true" in image_run_name
     for run_name in (common_run_names.pop(), image_run_name):
-        assert "github.event.pull_request.base.sha == " in run_name
-        assert "28aa5257927a3468ebc35ec7f245fecaf3226dbf" in run_name
-        assert "' ' ||" in run_name
+        assert "28aa5257927a3468ebc35ec7f245fecaf3226dbf" not in run_name
+        assert "' ' ||" not in run_name
         for mode in ("manual", "filtered", "full"):
             assert f"gate={mode} / head={{0}} / base={{1}}" in run_name
         for field in ("updated={2}", "action={3}", "label={4}", "labels={5}", "pull={6}"):
@@ -325,34 +324,17 @@ def test_source_workflows_share_authoritative_generation_marker() -> None:
         assert set(_workflow_on(workflow)["pull_request"]["types"]) == expected_pr_types
 
 
-def test_source_workflows_detect_publisher_from_base_or_trusted_promotion() -> None:
-    bootstrap_fragments: set[str] = set()
-
+def test_source_workflows_have_no_publisher_generation_contract() -> None:
     for workflow_path, (plan_job_id, plan_step_id) in SOURCE_PLAN_CONTRACTS.items():
         workflow = _workflow(workflow_path)
         plan_job = workflow["jobs"][plan_job_id]
         plan_step = next(step for step in plan_job["steps"] if step.get("id") == plan_step_id)
-        publisher_output = plan_job["outputs"]["publisher_active"]
-        assert f"steps.{plan_step_id}.outputs.publisher_active" in publisher_output
-        assert "steps.event.outputs.publisher_active" in publisher_output
-        assert plan_step["env"]["BASE_SHA"].startswith("${{ ")
-        assert plan_step["env"]["TRUSTED_PROMOTION"] == (
-            "${{ github.event_name == 'pull_request' && "
-            "github.event.pull_request.head.repo.full_name == github.repository && "
-            "github.event.pull_request.head.ref == 'dev' && "
-            "github.event.pull_request.base.ref == 'main' }}"
-        )
-        assert "publisher_active=false" in plan_step["run"]
-        fragment = plan_step["run"].split("publisher_active=false", maxsplit=1)[1]
-        bootstrap_fragments.add(fragment)
-        assert 'git cat-file -e "${BASE_SHA}^{tree}"' in fragment
-        assert '[[ "$TRUSTED_PROMOTION" == "true" ]]' in fragment
-        assert '[[ "$BASE_SHA" == "28aa5257927a3468ebc35ec7f245fecaf3226dbf" ]]' in fragment
-        assert '"${BASE_SHA}:.github/workflows/authoritative-gates.yml"' in fragment
-        assert "publisher-contract: dynamic-run-name-v[123]" in fragment
-        assert "HEAD_SHA" not in fragment
 
-    assert len(bootstrap_fragments) == 1
+        assert "publisher_active" not in plan_job["outputs"]
+        assert plan_step["env"]["BASE_SHA"].startswith("${{ ")
+        assert "TRUSTED_PROMOTION" not in plan_step["env"]
+        assert "publisher_active" not in plan_step["run"]
+        assert "authoritative-gates.yml" not in plan_step["run"]
 
 
 def test_filtered_metadata_events_finish_before_checkout_or_gate() -> None:
@@ -401,10 +383,10 @@ def test_filtered_metadata_classifier_emits_no_checkout_contract(tmp_path: Path)
         outputs = github_output.read_text(encoding="utf-8")
         assert "checkout_required=false" in outputs
         assert "gate_mode=filtered" in outputs
-        assert "publisher_active=false" in outputs
+        assert "publisher_active" not in outputs
 
 
-def test_source_gate_names_switch_only_after_base_publisher_is_active() -> None:
+def test_source_gate_names_are_native_and_stable() -> None:
     for workflow_path, (gate_id, protected_name) in GATE_CONTRACTS.items():
         workflow = _workflow(workflow_path)
         plan_job_id, _ = SOURCE_PLAN_CONTRACTS[workflow_path]
@@ -423,13 +405,12 @@ def test_source_gate_names_switch_only_after_base_publisher_is_active() -> None:
             f"{trusted_recovery}"
             f"github.event_name == 'workflow_dispatch' && '{protected_name}-manual' || "
             f"github.event_name == 'push' && '{protected_name}-push' || "
-            f"{plan_ref}.gate_mode == 'full' && "
-            f"{plan_ref}.publisher_active == 'false' && "
-            f"'{protected_name}' || "
-            f"{plan_ref}.gate_mode == 'full' && '{protected_name}-attempt' || "
+            f"{plan_ref}.gate_mode == 'full' && '{protected_name}' || "
             f"'{protected_name}-filtered' "
             "}}"
         )
+        assert "publisher_active" not in expression
+        assert f"{protected_name}-attempt" not in expression
 
 
 def test_push_aggregates_cannot_duplicate_protected_names_on_promotion_heads() -> None:
@@ -437,25 +418,6 @@ def test_push_aggregates_cannot_duplicate_protected_names_on_promotion_heads() -
         expression = _normalized_expression(_workflow(workflow_path)["jobs"][gate_id]["name"])
 
         assert f"github.event_name == 'push' && '{protected_name}-push'" in expression
-
-
-def test_trusted_dev_to_main_promotion_activates_the_publisher() -> None:
-    for workflow_path, (gate_id, _protected_name) in GATE_CONTRACTS.items():
-        workflow = _workflow(workflow_path)
-        plan_job_id, plan_step_id = SOURCE_PLAN_CONTRACTS[workflow_path]
-        plan_step = next(
-            step
-            for step in workflow["jobs"][plan_job_id]["steps"]
-            if step.get("id") == plan_step_id
-        )
-        assert (
-            "github.event.pull_request.head.ref == 'dev'" in plan_step["env"]["TRUSTED_PROMOTION"]
-        )
-        assert (
-            "github.event.pull_request.base.ref == 'main'" in plan_step["env"]["TRUSTED_PROMOTION"]
-        )
-        assert "publisher_active=true" in plan_step["run"]
-        assert "-attempt" in workflow["jobs"][gate_id]["name"]
 
 
 def test_no_workflow_can_write_custom_authoritative_states() -> None:
@@ -2071,7 +2033,7 @@ def test_protected_workflows_isolate_irrelevant_metadata_pending_runs() -> None:
         workflow = _workflow(workflow_path)
         group = workflow["concurrency"]["group"]
 
-        assert "authoritative" in group
+        assert "admission" in group
         assert "background" in group
         assert "github.event_name == 'pull_request'" in group
         assert "synchronize" in group

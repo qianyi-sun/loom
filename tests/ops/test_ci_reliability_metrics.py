@@ -3,8 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from scripts.ops.authoritative_gate_metrics import MetricsError
 from scripts.ops.ci_reliability_metrics import summarize_reliability
+from scripts.ops.github_actions_metrics import MetricsError
 
 
 def _job(

@@ -1,10 +1,7 @@
 name: staging-smoke
 
 run-name: >-
-  ${{ github.event_name == 'pull_request' &&
-      github.event.pull_request.base.sha == '28aa5257927a3468ebc35ec7f245fecaf3226dbf' &&
-      ' ' ||
-      github.event_name == 'workflow_dispatch' &&
+  ${{ github.event_name == 'workflow_dispatch' &&
       format('gate=manual / head={0} / base={1} / updated={2} / action={3} / label={4} / labels={5} / pull={6}',
              github.sha,
              github.event.before || github.sha,
@@ -78,7 +75,7 @@ permissions:
 
 concurrency:
   # Irrelevant metadata runs use a separate pending slot. Otherwise GitHub's
-  # one-pending-run rule lets a filtered event evict the authoritative
+  # one-pending-run rule lets a filtered event evict the admission
   # replacement that must follow a canceled full run.
   group: >-
     staging-smoke-${{ github.event.pull_request.number || github.ref }}-${{
@@ -87,7 +84,7 @@ concurrency:
        (contains(fromJSON('["labeled","unlabeled"]'), github.event.action) &&
         contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'), github.event.label.name)) ||
        (github.event.action == 'edited' && github.event.changes.base != null)) &&
-      'authoritative' || 'background'
+      'admission' || 'background'
     }}
   cancel-in-progress: >-
     ${{ github.event_name == 'pull_request' &&
@@ -103,7 +100,6 @@ jobs:
     outputs:
       required: ${{ steps.plan.outputs.staging_smoke || steps.event.outputs.required }}
       gate_mode: ${{ steps.plan.outputs.gate_mode || steps.event.outputs.gate_mode }}
-      publisher_active: ${{ steps.plan.outputs.publisher_active || steps.event.outputs.publisher_active }}
     steps:
       - name: Classify metadata event before checkout
         id: event
@@ -122,7 +118,6 @@ jobs:
             {
               echo 'checkout_required=false'
               echo 'gate_mode=filtered'
-              echo 'publisher_active=false'
               echo 'required=false'
             } >> "$GITHUB_OUTPUT"
           else
@@ -148,7 +143,6 @@ jobs:
           PR_ACTION_LABEL: ${{ github.event.label.name }}
           PR_DRAFT: ${{ github.event.pull_request.draft || false }}
           PR_BASE_CHANGED: ${{ github.event.changes.base != null }}
-          TRUSTED_PROMOTION: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'dev' && github.event.pull_request.base.ref == 'main' }}
         run: |
           set -euo pipefail
           case "$EVENT_NAME" in
@@ -183,22 +177,6 @@ jobs:
             --pull-request-draft "$PR_DRAFT" \
             --pull-request-base-changed "$PR_BASE_CHANGED" \
             --github-output "$GITHUB_OUTPUT"
-          publisher_active=false
-          if [[ "$TRUSTED_PROMOTION" == "true" ]]; then
-            publisher_active=true
-          elif [[ "$BASE_SHA" == "28aa5257927a3468ebc35ec7f245fecaf3226dbf" ]]; then
-            # One-time bridge: this base has the publisher but predates its
-            # dynamic run-name support. Whitespace run-name restores the fixed
-            # workflow identity while the PR title carries the generation.
-            publisher_active=true
-          elif [[ -n "$BASE_SHA" && ! "$BASE_SHA" =~ ^0+$ ]]; then
-            git cat-file -e "${BASE_SHA}^{tree}"
-            if git show "${BASE_SHA}:.github/workflows/authoritative-gates.yml" \
-                2>/dev/null | grep -Eq '^# publisher-contract: dynamic-run-name-v[123]$'; then
-              publisher_active=true
-            fi
-          fi
-          printf 'publisher_active=%s\n' "$publisher_active" >> "$GITHUB_OUTPUT"
 
   staging-route:
     name: resolve oldlab-first staging route
@@ -315,10 +293,7 @@ jobs:
     name: >-
       ${{ github.event_name == 'workflow_dispatch' && 'staging-smoke-gate-manual' ||
           github.event_name == 'push' && 'staging-smoke-gate-push' ||
-          needs.plan.outputs.gate_mode == 'full' &&
-          needs.plan.outputs.publisher_active == 'false' &&
-          'staging-smoke-gate' ||
-          needs.plan.outputs.gate_mode == 'full' && 'staging-smoke-gate-attempt' ||
+          needs.plan.outputs.gate_mode == 'full' && 'staging-smoke-gate' ||
           'staging-smoke-gate-filtered' }}
     runs-on: ubuntu-latest
     if: always() && needs.plan.outputs.gate_mode != 'filtered'

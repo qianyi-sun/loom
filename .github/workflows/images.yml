@@ -1,10 +1,7 @@
 name: images
 
 run-name: >-
-  ${{ github.event_name == 'pull_request' &&
-      github.event.pull_request.base.sha == '28aa5257927a3468ebc35ec7f245fecaf3226dbf' &&
-      ' ' ||
-      github.event_name == 'workflow_dispatch' &&
+  ${{ github.event_name == 'workflow_dispatch' &&
       inputs.trusted_publish == true &&
       format('gate=trusted-publish / head={0} / base={1} / updated=none / action=workflow_dispatch / label=none / labels=000000 / pull=none',
              github.sha,
@@ -100,7 +97,7 @@ permissions:
 
 concurrency:
   # Irrelevant metadata runs use a separate pending slot. Otherwise GitHub's
-  # one-pending-run rule lets a filtered event evict the authoritative
+  # one-pending-run rule lets a filtered event evict the admission
   # replacement that must follow a canceled full run.
   group: >-
     images-${{ github.workflow }}-${{ github.ref }}-${{
@@ -109,7 +106,7 @@ concurrency:
        (contains(fromJSON('["labeled","unlabeled"]'), github.event.action) &&
         contains(fromJSON('["ci:integration","ci:integration-docker","ci:images","cluster-smoke","staging-smoke","ci:coverage-summary"]'), github.event.label.name)) ||
        (github.event.action == 'edited' && github.event.changes.base != null)) &&
-      'authoritative' || 'background'
+      'admission' || 'background'
     }}
   cancel-in-progress: >-
     ${{ github.event_name == 'pull_request' &&
@@ -125,7 +122,6 @@ jobs:
     outputs:
       required: ${{ steps.plan.outputs.required || steps.event.outputs.required }}
       gate_mode: ${{ steps.required.outputs.gate_mode || steps.event.outputs.gate_mode }}
-      publisher_active: ${{ steps.required.outputs.publisher_active || steps.event.outputs.publisher_active }}
       images: ${{ steps.plan.outputs.images || steps.event.outputs.images }}
       native_builds: ${{ steps.plan.outputs.native_builds || steps.event.outputs.native_builds }}
       stage1_images: ${{ steps.plan.outputs.stage1_images || steps.event.outputs.stage1_images }}
@@ -148,7 +144,6 @@ jobs:
             {
               echo 'checkout_required=false'
               echo 'gate_mode=filtered'
-              echo 'publisher_active=false'
               echo 'required=false'
               echo 'images=[]'
               echo 'native_builds=[]'
@@ -222,7 +217,6 @@ jobs:
           PR_ACTION_LABEL: ${{ github.event.label.name }}
           PR_DRAFT: ${{ github.event.pull_request.draft || false }}
           PR_BASE_CHANGED: ${{ github.event.changes.base != null }}
-          TRUSTED_PROMOTION: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'dev' && github.event.pull_request.base.ref == 'main' }}
         run: |
           set -euo pipefail
           case "$EVENT_NAME" in
@@ -271,22 +265,6 @@ jobs:
             --pull-request-draft "$PR_DRAFT" \
             --pull-request-base-changed "$PR_BASE_CHANGED" \
             --github-output "$GITHUB_OUTPUT"
-          publisher_active=false
-          if [[ "$TRUSTED_PROMOTION" == "true" ]]; then
-            publisher_active=true
-          elif [[ "$BASE_SHA" == "28aa5257927a3468ebc35ec7f245fecaf3226dbf" ]]; then
-            # One-time bridge: this base has the publisher but predates its
-            # dynamic run-name support. Whitespace run-name restores the fixed
-            # workflow identity while the PR title carries the generation.
-            publisher_active=true
-          elif [[ -n "$BASE_SHA" && ! "$BASE_SHA" =~ ^0+$ ]]; then
-            git cat-file -e "${BASE_SHA}^{tree}"
-            if git show "${BASE_SHA}:.github/workflows/authoritative-gates.yml" \
-                2>/dev/null | grep -Eq '^# publisher-contract: dynamic-run-name-v[123]$'; then
-              publisher_active=true
-            fi
-          fi
-          printf 'publisher_active=%s\n' "$publisher_active" >> "$GITHUB_OUTPUT"
 
       - name: Select affected images
         id: plan
@@ -2622,10 +2600,7 @@ jobs:
           'images-gate-trusted-publish' ||
           github.event_name == 'workflow_dispatch' && 'images-gate-manual' ||
           github.event_name == 'push' && 'images-gate-push' ||
-          needs.plan.outputs.gate_mode == 'full' &&
-          needs.plan.outputs.publisher_active == 'false' &&
-          'images-gate' ||
-          needs.plan.outputs.gate_mode == 'full' && 'images-gate-attempt' ||
+          needs.plan.outputs.gate_mode == 'full' && 'images-gate' ||
           'images-gate-filtered' }}
     runs-on: ubuntu-latest
     if: always() && needs.plan.outputs.gate_mode != 'filtered'
