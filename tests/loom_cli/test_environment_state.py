@@ -2395,7 +2395,7 @@ def test_committed_development_profile_ships_fail_closed_supervisors() -> None:
     )
 
 
-def test_committed_staging_profile_bootstraps_manager_before_supervisor_activation() -> None:
+def test_committed_staging_profile_activates_only_core_signed_witness_supervisors() -> None:
     profile = load_environment_state_profile(
         Path("deploy/environment-state/staging.toml"),
         variables={
@@ -2414,16 +2414,19 @@ def test_committed_staging_profile_bootstraps_manager_before_supervisor_activati
         "task-image-builder-gb10-staging",
         "task-image-builder-oldlab-staging",
     }
-    assert not any(
-        supervisor["enabled"] or supervisor["active"] for supervisor in supervisors
+    assert "manager_witness_export_bootstrap" not in (
+        profile.external_slurm_runner_prerequisites
     )
+    assert profile.external_slurm_runner_prerequisites[
+        "retained_inactive_supervisor_pools"
+    ] == ["task-image-builder-oldlab"]
 
     gb10 = by_name["gb10-staging"]
     assert gb10["pool_name"] == "gb10"
     assert gb10["service_name"] == "loom-autoscaler-gb10-staging.service"
     assert gb10["timer_name"] == "loom-autoscaler-gb10-staging.timer"
-    assert gb10["enabled"] is False
-    assert gb10["active"] is False
+    assert gb10["enabled"] is True
+    assert gb10["active"] is True
     assert "15451" in gb10["args"]
     assert "loom-external-slurm-autoscaler-db" in gb10["args"]
     _assert_manager_trust_arguments(gb10, pool_name="gb10")
@@ -2432,8 +2435,8 @@ def test_committed_staging_profile_bootstraps_manager_before_supervisor_activati
     assert oldlab["pool_name"] == "oldlab"
     assert oldlab["service_name"] == "loom-autoscaler-oldlab-staging.service"
     assert oldlab["timer_name"] == "loom-autoscaler-oldlab-staging.timer"
-    assert oldlab["enabled"] is False
-    assert oldlab["active"] is False
+    assert oldlab["enabled"] is True
+    assert oldlab["active"] is True
     assert "15448" in oldlab["args"]
     assert "service/loom-postgres-rw" in oldlab["args"]
     assert oldlab["working_directory"].startswith("/opt/loom-staging-runner/candidates/")
@@ -2444,11 +2447,15 @@ def test_committed_staging_profile_bootstraps_manager_before_supervisor_activati
     assert builder["service_name"] == "loom-task-image-builder-oldlab-staging.service"
     assert builder["timer_name"] == "loom-task-image-builder-oldlab-staging.timer"
     assert "15453" in builder["args"]
+    assert builder["enabled"] is False
+    assert builder["active"] is False
     _assert_manager_trust_arguments(builder, pool_name="oldlab")
 
     gb10_builder = by_name["task-image-builder-gb10-staging"]
     assert gb10_builder["pool_name"] == "task-image-builder-gb10"
     assert "15454" in gb10_builder["args"]
+    assert gb10_builder["enabled"] is False
+    assert gb10_builder["active"] is False
     _assert_manager_trust_arguments(gb10_builder, pool_name="gb10")
 
 
@@ -2588,6 +2595,50 @@ def test_staging_manager_export_bootstrap_requires_every_supervisor_inactive() -
         **base,
         supervisors=[*inactive, {"pool_name": "other", "enabled": True, "active": True}],
     ) == ("external_slurm_manager_bootstrap_supervisor_active",)
+
+
+def test_staging_retained_inactive_supervisor_pools_require_exact_disabled_match() -> None:
+    base = {
+        "environment": "staging",
+        "autoscaler_policies": [],
+        "prerequisites": {
+            "retained_inactive_supervisor_pools": ["task-image-builder-oldlab"],
+        },
+    }
+
+    assert (
+        staging_gb10_external_activation_blockers(
+            **base,
+            supervisors=[
+                {
+                    "pool_name": "task-image-builder-oldlab",
+                    "enabled": False,
+                    "active": False,
+                }
+            ],
+        )
+        == ()
+    )
+    assert staging_gb10_external_activation_blockers(
+        **base,
+        supervisors=[
+            {
+                "pool_name": "task-image-builder-oldlab",
+                "enabled": True,
+                "active": True,
+            }
+        ],
+    ) == ("external_slurm_retained_inactive_supervisors_invalid",)
+    assert staging_gb10_external_activation_blockers(
+        **base,
+        supervisors=[],
+    ) == ("external_slurm_retained_inactive_supervisors_invalid",)
+    assert staging_gb10_external_activation_blockers(
+        environment="staging",
+        autoscaler_policies=[],
+        prerequisites={"retained_inactive_supervisor_pools": [["nested"]]},
+        supervisors=[],
+    ) == ("external_slurm_retained_inactive_supervisors_invalid",)
 
 
 def test_staging_manager_export_bootstrap_rejects_active_supervisor_without_gb10() -> None:

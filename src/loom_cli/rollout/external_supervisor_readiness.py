@@ -1176,6 +1176,28 @@ def build_external_supervisor_artifact(
         for pool in profile.external_slurm_runner_prerequisites.get("pools", ())
         if isinstance(pool, str) and pool
     }
+    raw_retained_inactive_pools = profile.external_slurm_runner_prerequisites.get(
+        "retained_inactive_supervisor_pools",
+        (),
+    )
+    if (
+        not isinstance(raw_retained_inactive_pools, list | tuple)
+        or any(
+            not isinstance(pool, str) or not pool.strip() for pool in raw_retained_inactive_pools
+        )
+        or len(raw_retained_inactive_pools) != len(set(raw_retained_inactive_pools))
+    ):
+        raise ValueError("retained inactive external supervisor pools are invalid")
+    retained_inactive_pools = set(raw_retained_inactive_pools)
+    retained_matches = {
+        str(raw.get("pool_name"))
+        for raw in profile.external_slurm_autoscaler_supervisors
+        if raw.get("pool_name") in retained_inactive_pools
+        and raw.get("enabled") is False
+        and raw.get("active") is False
+    }
+    if retained_matches != retained_inactive_pools:
+        raise ValueError("retained inactive external supervisor pools are invalid")
     manager_witness_export_bootstrap = (
         profile.external_slurm_runner_prerequisites.get(
             "manager_witness_export_bootstrap",
@@ -1203,6 +1225,7 @@ def build_external_supervisor_artifact(
                         raw.get("enabled") is True
                         or raw.get("active") is True
                         or raw.get("pool_name") in protected_pools
+                        or raw.get("pool_name") in retained_inactive_pools
                         or raw.get("pool_name") in bootstrap_deactivation_pools
                     )
                     and (

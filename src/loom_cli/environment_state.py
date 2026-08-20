@@ -433,6 +433,29 @@ def staging_gb10_external_activation_blockers(
         not isinstance(pools, list) or not pools or "gb10" in pools
     )
     supervisor_rows = supervisors if isinstance(supervisors, list) else []
+    retained_inactive_pools = prereq.get("retained_inactive_supervisor_pools", [])
+    retained_inactive_valid = (
+        isinstance(retained_inactive_pools, list)
+        and all(
+            isinstance(pool_name, str) and bool(pool_name.strip())
+            for pool_name in retained_inactive_pools
+        )
+        and len(retained_inactive_pools) == len(set(retained_inactive_pools))
+    )
+    if retained_inactive_valid:
+        for pool_name in retained_inactive_pools:
+            matches = [
+                raw
+                for raw in supervisor_rows
+                if isinstance(raw, dict) and raw.get("pool_name") == pool_name
+            ]
+            if len(matches) != 1 or (
+                matches[0].get("enabled") is not False or matches[0].get("active") is not False
+            ):
+                retained_inactive_valid = False
+                break
+    if not retained_inactive_valid:
+        blockers.append("external_slurm_retained_inactive_supervisors_invalid")
     if manager_bootstrap and any(
         raw.get("enabled") is not False or raw.get("active") is not False
         for raw in supervisor_rows
