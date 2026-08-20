@@ -99,6 +99,7 @@ class AutoscalerObservation:
     drained_worker_ids: tuple[str, ...]
     release_drift_slots: int = 0
     release_drift_job_ids: tuple[str, ...] = ()
+    release_drift_pending_job_ids: tuple[str, ...] = ()
     release_drift_worker_ids_to_drain: tuple[str, ...] = ()
     release_drift_worker_ids_to_release: tuple[str, ...] = ()
 
@@ -357,6 +358,15 @@ def compute_autoscaler_decision(
                 blocked_reason="release_state_drift",
                 idle_since_at=None,
                 error_message=f"release-state drift in Slurm job(s): {job_ids}",
+            )
+        if observation.release_drift_pending_job_ids:
+            return _base_decision(
+                action="cancel_pending",
+                reason="release_state_drift",
+                policy=policy,
+                observation=observation,
+                desired_slots=max(policy.min_slots, observation.active_slots),
+                idle_since_at=None,
             )
         return _base_decision(
             action="blocked",
@@ -1131,6 +1141,7 @@ async def _load_observation(
     pending_slots = int(row.last_pending_slots or 0)
     release_drift_slots = 0
     release_drift_job_ids: list[str] = []
+    release_drift_pending_job_ids: list[str] = []
     release_drift_worker_ids: set[Any] = set()
     release_drift_hostnames: set[str] = set()
     release_drift_worker_ids_to_drain: set[str] = set()
@@ -1200,6 +1211,8 @@ async def _load_observation(
                 if linked_worker is not None and str(linked_worker.hostname) != str(nodelist):
                     linked_worker = None
                 job_state = str(_field(job, "state", "")).strip().lower()
+                if job_state == "pending":
+                    release_drift_pending_job_ids.append(job_id)
                 if (
                     job_state == "running"
                     and linked_worker is not None
@@ -1363,6 +1376,7 @@ async def _load_observation(
         drained_worker_ids=tuple(drained_worker_ids),
         release_drift_slots=release_drift_slots,
         release_drift_job_ids=tuple(release_drift_job_ids),
+        release_drift_pending_job_ids=tuple(release_drift_pending_job_ids),
         release_drift_worker_ids_to_drain=tuple(
             sorted(release_drift_worker_ids_to_drain),
         ),
@@ -2162,6 +2176,8 @@ async def _apply_slurm_cancel_pending(
     row: WorkerPoolAutoscalerPolicy,
     *,
     job_ids: tuple[str, ...],
+    freshly_pending_job_ids: tuple[str, ...],
+    pending_reason: str,
     runner: SlurmWorkerCommandRunner | None,
     now: datetime,
 ) -> SlurmPendingCancelActuatorResult:
@@ -2193,22 +2209,29 @@ async def _apply_slurm_cancel_pending(
         .all()
     )
     job_by_id = {str(job.job_id): job for job in pending_jobs if job.job_id is not None}
+    freshly_pending_job_id_set = set(freshly_pending_job_ids)
     unobserved_rows = [
         str(job.job_id or job.id)
         for job in pending_jobs
-        if job.job_id is None or str(job.job_id) not in job_ids
+        if job.job_id is None or str(job.job_id) not in freshly_pending_job_id_set
     ]
-    missing_registry_ids = [job_id for job_id in job_ids if job_id not in job_by_id]
-    if unobserved_rows or missing_registry_ids:
+    missing_registry_ids = [job_id for job_id in freshly_pending_job_ids if job_id not in job_by_id]
+    unobserved_target_ids = [
+        job_id for job_id in job_ids if job_id not in freshly_pending_job_id_set
+    ]
+    if unobserved_rows or missing_registry_ids or unobserved_target_ids:
         error = "pending Slurm registry does not match fresh pending observations"
         return SlurmPendingCancelActuatorResult(
-            failed_job_ids=tuple(sorted({*unobserved_rows, *missing_registry_ids})),
+            failed_job_ids=tuple(
+                sorted({*unobserved_rows, *missing_registry_ids, *unobserved_target_ids})
+            ),
             error=error,
             blocked_reason="slurm_pending_observation_missing",
             blocked_details={
                 "reason": "slurm_pending_observation_missing",
                 "unobserved_pending_rows": sorted(unobserved_rows),
                 "missing_registry_job_ids": sorted(missing_registry_ids),
+                "unobserved_target_job_ids": sorted(unobserved_target_ids),
             },
         )
     cancelled_job_ids: list[str] = []
@@ -2245,7 +2268,7 @@ async def _apply_slurm_cancel_pending(
                 raise RuntimeError(
                     f"conditional cancellation left Slurm job in {state} state",
                 )
-            job.pending_reason = "cancelled after autoscaler demand returned to zero"
+            job.pending_reason = pending_reason
             job.finished_at = now
             job.updated_at = now
             cancelled_job_ids.append(job_id)
@@ -2758,10 +2781,22 @@ async def reconcile_worker_pool_autoscaler_once(
                 )
             else:
                 slurm_pending_cancel_attempted = True
+                pending_job_ids_to_cancel = (
+                    observation.release_drift_pending_job_ids
+                    if decision.reason == "release_state_drift"
+                    else freshly_pending_job_ids
+                )
+                pending_reason = (
+                    "cancelled after autoscaler release-state drift"
+                    if decision.reason == "release_state_drift"
+                    else "cancelled after autoscaler demand returned to zero"
+                )
                 cancel_result = await _apply_slurm_cancel_pending(
                     session,
                     row,
-                    job_ids=freshly_pending_job_ids,
+                    job_ids=pending_job_ids_to_cancel,
+                    freshly_pending_job_ids=freshly_pending_job_ids,
+                    pending_reason=pending_reason,
                     runner=slurm_runner,
                     now=now,
                 )

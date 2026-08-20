@@ -673,6 +673,27 @@ def test_decision_blocks_on_release_drift_slurm_capacity() -> None:
     assert decision.error_message == "release-state drift in Slurm job(s): 17928"
 
 
+def test_decision_cancels_pending_release_drift_slurm_capacity() -> None:
+    now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
+
+    decision = compute_autoscaler_decision(
+        _policy(min_slots=1),
+        _observation(
+            active_slots=0,
+            pending_slots=0,
+            release_drift_slots=1,
+            release_drift_job_ids=("17928",),
+            release_drift_pending_job_ids=("17928",),
+        ),
+        now=now,
+    )
+
+    assert decision.action == "cancel_pending"
+    assert decision.reason == "release_state_drift"
+    assert decision.blocked_reason is None
+    assert decision.error_message is None
+
+
 def test_decision_drains_linked_worker_with_release_drift() -> None:
     now = datetime(2026, 6, 27, 12, 0, tzinfo=UTC)
 
