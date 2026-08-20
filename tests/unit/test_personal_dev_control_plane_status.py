@@ -938,7 +938,12 @@ def test_acceptance_permits_only_exact_owned_dynamic_namespace_families(
                         "app.kubernetes.io/managed-by": ("loom-personal-dev-builder-controller"),
                         "app.kubernetes.io/part-of": "loom",
                         "loom.dev/subject": builder_subject,
-                        "pod-security.kubernetes.io/enforce": "restricted",
+                        "pod-security.kubernetes.io/enforce": "baseline",
+                        "pod-security.kubernetes.io/enforce-version": "v1.36",
+                        "pod-security.kubernetes.io/audit": "restricted",
+                        "pod-security.kubernetes.io/audit-version": "v1.36",
+                        "pod-security.kubernetes.io/warn": "restricted",
+                        "pod-security.kubernetes.io/warn-version": "v1.36",
                     },
                 },
             },
@@ -979,6 +984,52 @@ def test_acceptance_permits_only_exact_owned_dynamic_namespace_families(
     assert components["namespaces"].observed == 3
     assert components["namespaces"].ready is True
     assert components["personal-workers"].observed == 0
+
+
+@pytest.mark.parametrize(
+    ("label", "drifted_value"),
+    [
+        ("pod-security.kubernetes.io/enforce", "restricted"),
+        ("pod-security.kubernetes.io/enforce-version", "latest"),
+        ("pod-security.kubernetes.io/audit", "baseline"),
+        ("pod-security.kubernetes.io/audit-version", "latest"),
+        ("pod-security.kubernetes.io/warn", "baseline"),
+        ("pod-security.kubernetes.io/warn-version", "latest"),
+    ],
+)
+def test_acceptance_rejects_builder_namespace_pod_security_drift(
+    tmp_path: Path,
+    label: str,
+    drifted_value: str,
+) -> None:
+    expected, plan, runner = _acceptance_healthy_fixture(tmp_path)
+    labels = {
+        "app.kubernetes.io/managed-by": "loom-personal-dev-builder-controller",
+        "app.kubernetes.io/part-of": "loom",
+        "loom.dev/subject": "00000000-0000-0000-0000-000000000402",
+        "pod-security.kubernetes.io/enforce": "baseline",
+        "pod-security.kubernetes.io/enforce-version": "v1.36",
+        "pod-security.kubernetes.io/audit": "restricted",
+        "pod-security.kubernetes.io/audit-version": "v1.36",
+        "pod-security.kubernetes.io/warn": "restricted",
+        "pod-security.kubernetes.io/warn-version": "v1.36",
+    }
+    labels[label] = drifted_value
+    _items(runner, _NAMESPACES).append(
+        {
+            "apiVersion": "v1",
+            "kind": "Namespace",
+            "metadata": {
+                "name": f"loom-build-{'a' * 32}-l{'b' * 16}",
+                "labels": labels,
+            },
+        }
+    )
+
+    result = _observe_acceptance(expected, plan, runner)
+
+    assert result.ready is False
+    assert "builder_namespace_invalid" in result.blockers
 
 
 @pytest.mark.parametrize(

@@ -34,6 +34,14 @@ _RESERVED_PERSONAL_NAMESPACE = re.compile(
     r"loom-dev-(dev|development|staging|production|prod|local|loom|shared|default)"
 )
 _BUILDER_NAMESPACE = re.compile(r"loom-build-[0-9a-f]{32}-l[0-9a-f]{16}")
+_BUILDER_POD_SECURITY_LABELS = (
+    ("pod-security.kubernetes.io/enforce", "baseline"),
+    ("pod-security.kubernetes.io/enforce-version", "v1.36"),
+    ("pod-security.kubernetes.io/audit", "restricted"),
+    ("pod-security.kubernetes.io/audit-version", "v1.36"),
+    ("pod-security.kubernetes.io/warn", "restricted"),
+    ("pod-security.kubernetes.io/warn-version", "v1.36"),
+)
 _MAX_MIGRATION_HISTORY = 8
 
 _CONTEXT_COMMAND = ("config", "current-context")
@@ -839,14 +847,21 @@ def _dynamic_namespace_valid(
             and _RESERVED_PERSONAL_NAMESPACE.fullmatch(name) is None
         )
         managed_by = "loom-dev-instance-controller"
+        pod_security_valid = (
+            labels.get("pod-security.kubernetes.io/enforce") == "restricted"
+        )
     else:
         name_valid = _BUILDER_NAMESPACE.fullmatch(name) is not None
         managed_by = "loom-personal-dev-builder-controller"
+        pod_security_valid = all(
+            labels.get(label) == expected
+            for label, expected in _BUILDER_POD_SECURITY_LABELS
+        )
     return (
         name_valid
         and labels.get("app.kubernetes.io/managed-by") == managed_by
         and labels.get("app.kubernetes.io/part-of") == "loom"
-        and labels.get("pod-security.kubernetes.io/enforce") == "restricted"
+        and pod_security_valid
         and _canonical_nonzero_uuid(labels.get("loom.dev/subject"))
     )
 

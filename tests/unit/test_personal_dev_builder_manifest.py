@@ -39,7 +39,14 @@ def test_builder_manifest_is_attempt_bound_restricted_and_finite() -> None:
         f"loom-build-{registration.build_attempt.id.hex}-"
         f"l{registration.build_attempt.lease_epoch:016x}"
     )
-    assert namespace["metadata"]["labels"]["pod-security.kubernetes.io/enforce"] == "restricted"
+    assert namespace["metadata"]["labels"] | {
+        "pod-security.kubernetes.io/enforce": "baseline",
+        "pod-security.kubernetes.io/enforce-version": "v1.36",
+        "pod-security.kubernetes.io/audit": "restricted",
+        "pod-security.kubernetes.io/audit-version": "v1.36",
+        "pod-security.kubernetes.io/warn": "restricted",
+        "pod-security.kubernetes.io/warn-version": "v1.36",
+    } == namespace["metadata"]["labels"]
     for document in documents:
         assert document["metadata"]["labels"] | expected_labels == document["metadata"]["labels"]
         assert document["kind"] != "Secret"
@@ -48,11 +55,15 @@ def test_builder_manifest_is_attempt_bound_restricted_and_finite() -> None:
     assert pod["metadata"]["labels"] | expected_labels == pod["metadata"]["labels"]
     spec = pod["spec"]
     assert spec["automountServiceAccountToken"] is False
+    assert spec["shareProcessNamespace"] is False
     assert "hostUsers" not in spec
     assert spec["runtimeClassName"] == "loom-personal-dev-builder"
     assert "nodeSelector" not in spec
     assert job["spec"]["activeDeadlineSeconds"] == 3600
+    assert len(spec["containers"]) == 1
+    assert len(spec["initContainers"]) == 1
     container = spec["containers"][0]
+    assert container["name"] == "builder"
     assert container["image"].endswith("@sha256:" + "a" * 64)
     assert container["securityContext"] == {
         "allowPrivilegeEscalation": False,
@@ -64,6 +75,13 @@ def test_builder_manifest_is_attempt_bound_restricted_and_finite() -> None:
         "cpu": "4",
         "ephemeral-storage": "20Gi",
         "memory": "8Gi",
+    }
+    assert {mount["name"] for mount in container["volumeMounts"]} == {
+        "attempt-capability",
+        "buildkit-run",
+        "contract",
+        "tmp-client",
+        "workspace",
     }
     capability = next(
         volume for volume in spec["volumes"] if volume["name"] == "attempt-capability"
@@ -87,6 +105,62 @@ def test_builder_manifest_is_attempt_bound_restricted_and_finite() -> None:
             "namespace": "loom-dev",
         }
     ]
+
+
+def test_buildkit_sidecar_has_only_rootless_startup_authority() -> None:
+    documents = personal_dev_builder_manifest_documents(
+        _registration(),
+        platform="linux/amd64",
+        config=_config(),
+    )
+    job = next(document for document in documents if document["kind"] == "Job")
+    spec = job["spec"]["template"]["spec"]
+    client = spec["containers"][0]
+    sidecar = spec["initContainers"][0]
+
+    assert sidecar["name"] == "buildkitd"
+    assert sidecar["image"] == client["image"]
+    assert sidecar["restartPolicy"] == "Always"
+    assert sidecar["command"] == ["/usr/local/bin/loom-personal-dev-buildkitd"]
+    assert "args" not in sidecar
+    assert sidecar["securityContext"] == {
+        "allowPrivilegeEscalation": True,
+        "capabilities": {"drop": ["ALL"], "add": ["SETGID", "SETUID"]},
+        "readOnlyRootFilesystem": True,
+        "runAsNonRoot": True,
+        "seccompProfile": {"type": "Unconfined"},
+    }
+    assert {mount["name"] for mount in sidecar["volumeMounts"]} == {
+        "buildkit-run",
+        "buildkit-state",
+        "tmp-buildkit",
+    }
+    assert sidecar["startupProbe"] == {
+        "exec": {
+            "command": [
+                "/usr/bin/buildctl",
+                "--addr",
+                "unix:///var/run/loom-buildkit/buildkitd.sock",
+                "debug",
+                "workers",
+            ]
+        },
+        "failureThreshold": 60,
+        "periodSeconds": 2,
+        "timeoutSeconds": 1,
+    }
+    mounts = {
+        container["name"]: {mount["name"]: mount for mount in container["volumeMounts"]}
+        for container in (client, sidecar)
+    }
+    assert mounts["builder"]["buildkit-run"]["readOnly"] is True
+    assert "readOnly" not in mounts["buildkitd"]["buildkit-run"]
+    assert not {
+        "attempt-capability",
+        "contract",
+        "workspace",
+    } & set(mounts["buildkitd"])
+    assert "env" not in sidecar
 
 
 def test_builder_network_policy_denies_internal_authority_and_allows_exact_routes() -> None:

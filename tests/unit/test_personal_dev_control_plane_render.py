@@ -245,7 +245,7 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
     assert rendered.runtime_handler == profile.builder.runtime_handler
     assert rendered.runtime_profile_sha256 == profile.builder.runtime_profile_sha256
     assert hashlib.sha256(rendered.yaml_text.encode("utf-8")).hexdigest() == (
-        "42610f0cfa47eeb7a08789f62457e8f56439ebd15aad421bf537248658ad4f5e"
+        "f614c53be1d1c1ede6eec93edbe4a9eb0a9802ab0e9e8421deadb9b68721c186"
     )
 
     identities = {_identity(document) for document in documents}
@@ -913,6 +913,21 @@ def test_rbac_uses_dynamic_rolebindings_and_fail_closed_principal_policies(
     assert exact_management in resource_policy
     assert "startsWith('loom-dev-')" in namespace_policy
     assert "startsWith('loom-build-')" in namespace_policy
+    assert (
+        "pod-security.kubernetes.io/enforce'] == 'restricted'" in namespace_policy
+    )
+    assert "pod-security.kubernetes.io/enforce'] == 'baseline'" in namespace_policy
+    assert "pod-security.kubernetes.io/enforce-version'] == 'v1.36'" in (
+        namespace_policy
+    )
+    assert "pod-security.kubernetes.io/audit'] == 'restricted'" in namespace_policy
+    assert "pod-security.kubernetes.io/audit-version'] == 'v1.36'" in (
+        namespace_policy
+    )
+    assert "pod-security.kubernetes.io/warn'] == 'restricted'" in namespace_policy
+    assert "pod-security.kubernetes.io/warn-version'] == 'v1.36'" in (
+        namespace_policy
+    )
     assert "matches('^loom-dev-[a-z]([-a-z0-9]{0,18}[a-z0-9])?$')" in namespace_policy
     assert "matches('^loom-build-[0-9a-f]{32}-l[0-9a-f]{16}$')" in namespace_policy
     assert (

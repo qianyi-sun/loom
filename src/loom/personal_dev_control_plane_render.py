@@ -481,10 +481,24 @@ def _management_namespace_admission(context: _RenderContext) -> tuple[dict[str, 
                 },
                 {
                     "expression": (
-                        f"{target}.metadata.labels['pod-security.kubernetes.io/enforce'] "
-                        "== 'restricted'"
+                        f"({personal_namespace} && "
+                        f"{target}.metadata.labels["
+                        "'pod-security.kubernetes.io/enforce'] == 'restricted') || "
+                        f"({builder_namespace} && "
+                        f"{target}.metadata.labels["
+                        "'pod-security.kubernetes.io/enforce'] == 'baseline' && "
+                        f"{target}.metadata.labels["
+                        "'pod-security.kubernetes.io/enforce-version'] == 'v1.36' && "
+                        f"{target}.metadata.labels["
+                        "'pod-security.kubernetes.io/audit'] == 'restricted' && "
+                        f"{target}.metadata.labels["
+                        "'pod-security.kubernetes.io/audit-version'] == 'v1.36' && "
+                        f"{target}.metadata.labels["
+                        "'pod-security.kubernetes.io/warn'] == 'restricted' && "
+                        f"{target}.metadata.labels["
+                        "'pod-security.kubernetes.io/warn-version'] == 'v1.36')"
                     ),
-                    "message": "managed namespaces must enforce restricted pod security",
+                    "message": "managed namespace pod security differs from its family",
                 },
                 {
                     "expression": (
