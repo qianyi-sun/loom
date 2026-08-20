@@ -296,6 +296,44 @@ class PipelineStageRunSummaryV1(PipelineReadModel):
     retry_ineligible_reason: PipelineRetryIneligibleReason | None
 
 
+class PipelineNodeProgressV1(PipelineReadModel):
+    total_stage_runs: NonNegativeSafeInt
+    completed_stage_runs: NonNegativeSafeInt
+    states: dict[PipelineStageRunState, NonNegativeSafeInt]
+    domain_outcomes: dict[str, NonNegativeSafeInt]
+
+
+class PipelineNodeTopologyV1(PipelineReadModel):
+    node_key: NodeKey
+    node_kind: PipelineNodeKind
+    topological_level: NonNegativeSafeInt
+    upstream_node_keys: list[NodeKey]
+
+
+class PipelineRunProgressV1(PipelineReadModel):
+    total_stage_runs: NonNegativeSafeInt
+    completed_stage_runs: NonNegativeSafeInt
+    states: dict[PipelineStageRunState, NonNegativeSafeInt]
+    domain_outcomes: dict[str, NonNegativeSafeInt]
+    nodes: dict[str, PipelineNodeProgressV1]
+
+
+class PipelineStageRunListQueryV1(PipelineModel):
+    node_key: NodeKey | None = None
+    state: PipelineStageRunState | None = None
+    domain_outcome: (
+        Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_.-]{0,127}$")] | None
+    ) = None
+    cursor: Annotated[str, StringConstraints(min_length=1, max_length=4096)] | None = None
+    limit: Annotated[int, Field(strict=True, ge=1, le=500)] = 200
+
+
+class PipelineStageRunListResponseV1(PipelineReadModel):
+    items: Annotated[list[PipelineStageRunSummaryV1], Field(max_length=500)]
+    next_cursor: str | None
+    progress: PipelineRunProgressV1
+
+
 class PipelineArtifactSummaryV1(PipelineReadModel):
     id: UUID
     name: str
@@ -314,6 +352,16 @@ class PipelineArtifactSummaryV1(PipelineReadModel):
     execution_attempt_id: UUID | None
     producer_kind: str | None
     detail_path: str
+
+
+class PipelineArtifactListQueryV1(PipelineModel):
+    cursor: Annotated[str, StringConstraints(min_length=1, max_length=4096)] | None = None
+    limit: Annotated[int, Field(strict=True, ge=1, le=200)] = 100
+
+
+class PipelineArtifactListResponseV1(PipelineReadModel):
+    items: Annotated[list[PipelineArtifactSummaryV1], Field(max_length=200)]
+    next_cursor: str | None
 
 
 class PipelineArtifactFileProjectionV1(PipelineReadModel):
@@ -389,8 +437,12 @@ class PipelineRunDetailV1(PipelineReadModel):
     finished_at: datetime | None
     cancellation_requested_at: datetime | None
     source_budget: RunBudgetV1
-    stages: list[PipelineStageRunSummaryV1]
-    artifacts: list[PipelineArtifactSummaryV1]
+    progress: PipelineRunProgressV1
+    topology: Annotated[list[PipelineNodeTopologyV1], Field(max_length=128)]
+    stages: Annotated[list[PipelineStageRunSummaryV1], Field(max_length=500)]
+    stages_next_cursor: str | None
+    artifacts: Annotated[list[PipelineArtifactSummaryV1], Field(max_length=200)]
+    artifacts_next_cursor: str | None
     budget: PipelineBudgetLedgerProjectionV1 | None
 
 
@@ -711,11 +763,15 @@ __all__ = [
     "OfficialRecipeSubmissionGrantV1",
     "OfficialRecipeSubmissionRequestV1",
     "PipelineAcceptanceRecipeSubmitter",
+    "PipelineArtifactListQueryV1",
+    "PipelineArtifactListResponseV1",
     "PipelineCancelResultV1",
     "PipelineExecutionAttemptListV1",
     "PipelineExecutionAttemptV1",
     "PipelineIdempotencyEndpoint",
     "PipelineMutationResultV1",
+    "PipelineNodeProgressV1",
+    "PipelineNodeTopologyV1",
     "PipelineOfficialRecipeSubmitter",
     "PipelineRecipeBindingResolver",
     "PipelineRunCancelRequestV1",
@@ -725,10 +781,13 @@ __all__ = [
     "PipelineRunEventsResponseV1",
     "PipelineRunListQueryV1",
     "PipelineRunListResponseV1",
+    "PipelineRunProgressV1",
     "PipelineRunRetryRequestV1",
     "PipelineRunSubmitRequestV1",
     "PipelineStageRetryRequestV1",
     "PipelineStageRunDetailV1",
+    "PipelineStageRunListQueryV1",
+    "PipelineStageRunListResponseV1",
     "PipelineStageRunSummaryV1",
     "ResolvedRecipeControlBindingV1",
     "ResolvedRecipeControlBindingsV1",

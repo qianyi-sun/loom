@@ -213,6 +213,12 @@ export type PipelineRunListItem = PipelineRunListResponse["items"][number];
 export type PipelineRunDetail =
   paths["/api/v1/pipeline-runs/{run_id}"]["get"]["responses"][200]["content"]["application/json"];
 export type PipelineStageRunSummary = PipelineRunDetail["stages"][number];
+export type PipelineNodeTopology = PipelineRunDetail["topology"][number];
+export type PipelineStageRunListResponse =
+  paths["/api/v1/pipeline-runs/{run_id}/stages"]["get"]["responses"][200]["content"]["application/json"];
+export type PipelineArtifactListResponse =
+  paths["/api/v1/pipeline-runs/{run_id}/artifacts"]["get"]["responses"][200]["content"]["application/json"];
+export type PipelineArtifactSummary = PipelineArtifactListResponse["items"][number];
 export type PipelineStageRunDetail =
   paths["/api/v1/pipeline-stage-runs/{stage_run_id}"]["get"]["responses"][200]["content"]["application/json"];
 export type PipelineExecutionAttemptList =
@@ -268,6 +274,30 @@ export function getPipelineRun(runId: string): Promise<PipelineRunDetail> {
   );
 }
 
+export function listPipelineStageRuns(
+  runId: string,
+  params: {
+    node_key?: string;
+    state?: PipelineStageRunSummary["state"];
+    domain_outcome?: string;
+    cursor?: string;
+    limit: number;
+  },
+): Promise<PipelineStageRunListResponse> {
+  return apiFetch<PipelineStageRunListResponse>(
+    `/api/v1/pipeline-runs/${encodeURIComponent(runId)}/stages${pipelineQuery(params)}`,
+  );
+}
+
+export function listPipelineArtifacts(
+  runId: string,
+  params: { cursor?: string; limit: number },
+): Promise<PipelineArtifactListResponse> {
+  return apiFetch<PipelineArtifactListResponse>(
+    `/api/v1/pipeline-runs/${encodeURIComponent(runId)}/artifacts${pipelineQuery(params)}`,
+  );
+}
+
 export function getPipelineStageRun(
   stageRunId: string,
 ): Promise<PipelineStageRunDetail> {
@@ -312,6 +342,10 @@ export function pipelineArtifactFileUrl(
   fileIndex: number,
 ): string {
   return `${getApiBase()}/api/v1/pipeline-artifacts/${encodeURIComponent(artifactId)}/files/${fileIndex}`;
+}
+
+export function pipelineArtifactDownloadUrl(artifactId: string): string {
+  return `${getApiBase()}/api/v1/pipeline-artifacts/${encodeURIComponent(artifactId)}/download`;
 }
 
 function livePreviewBasePath(
@@ -1233,6 +1267,8 @@ function qs(
 export const api = {
   listPipelineRuns,
   getPipelineRun,
+  listPipelineStageRuns,
+  listPipelineArtifacts,
   getPipelineStageRun,
   listPipelineStageAttempts,
   listPipelineEvents,

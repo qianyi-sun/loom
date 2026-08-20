@@ -16,6 +16,7 @@ const generic: PipelineArtifactDetail = {
   safety_state: "verified_internal",
   visibility: "team",
   share_status: "pending_scan",
+  access_class: "team_runtime",
   download_path: "/api/v1/pipeline-artifacts/artifact-1/download",
   detail_path: "/pipelines/run-1/stages/stage-1/artifacts/artifact-1",
   pipeline_run_id: "run-1",

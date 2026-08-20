@@ -474,6 +474,42 @@ export interface paths {
       };
     };
   };
+  "/api/v1/pipeline-runs/{run_id}/stages": {
+    get: {
+      parameters: {
+        path: { run_id: string };
+        query?: {
+          node_key?: string;
+          state?: components["schemas"]["PipelineStageState"];
+          domain_outcome?: string;
+          cursor?: string;
+          limit?: number;
+        };
+      };
+      responses: {
+        200: {
+          content: {
+            "application/json": components["schemas"]["PipelineStageRunListResponseV1"];
+          };
+        };
+      };
+    };
+  };
+  "/api/v1/pipeline-runs/{run_id}/artifacts": {
+    get: {
+      parameters: {
+        path: { run_id: string };
+        query?: { cursor?: string; limit?: number };
+      };
+      responses: {
+        200: {
+          content: {
+            "application/json": components["schemas"]["PipelineArtifactListResponseV1"];
+          };
+        };
+      };
+    };
+  };
   "/api/v1/pipeline-runs/{run_id}/cancel": {
     post: {
       parameters: { path: { run_id: string } };
@@ -1366,6 +1402,26 @@ export interface components {
         | "budget_invalid"
         | null;
     };
+    PipelineNodeProgressV1: {
+      total_stage_runs: number;
+      completed_stage_runs: number;
+      states: Partial<Record<components["schemas"]["PipelineStageState"], number>>;
+      domain_outcomes: Record<string, number>;
+    };
+    PipelineRunProgressV1: components["schemas"]["PipelineNodeProgressV1"] & {
+      nodes: Record<string, components["schemas"]["PipelineNodeProgressV1"]>;
+    };
+    PipelineNodeTopologyV1: {
+      node_key: string;
+      node_kind: "container" | "gate";
+      topological_level: number;
+      upstream_node_keys: string[];
+    };
+    PipelineStageRunListResponseV1: {
+      items: components["schemas"]["PipelineStageRunSummaryV1"][];
+      next_cursor: string | null;
+      progress: components["schemas"]["PipelineRunProgressV1"];
+    };
     PipelineArtifactSummaryV1: {
       id: string;
       name: string;
@@ -1377,6 +1433,7 @@ export interface components {
       safety_state: string;
       visibility: string;
       share_status: string;
+      access_class: "team_runtime" | "authoring_restricted" | "sanitized_audit";
       download_path: string;
       pipeline_run_id: string | null;
       pipeline_stage_run_id: string | null;
@@ -1398,6 +1455,10 @@ export interface components {
       lineage_artifact_ids: string[];
       lineage_digests: string[];
       files: components["schemas"]["PipelineArtifactFileProjectionV1"][];
+    };
+    PipelineArtifactListResponseV1: {
+      items: components["schemas"]["PipelineArtifactSummaryV1"][];
+      next_cursor: string | null;
     };
     PipelineRunListItemV1: {
       id: string;
@@ -1435,8 +1496,12 @@ export interface components {
       finished_at: string | null;
       cancellation_requested_at: string | null;
       source_budget: components["schemas"]["RunBudgetV1"];
+      progress: components["schemas"]["PipelineRunProgressV1"];
+      topology: components["schemas"]["PipelineNodeTopologyV1"][];
       stages: components["schemas"]["PipelineStageRunSummaryV1"][];
+      stages_next_cursor: string | null;
       artifacts: components["schemas"]["PipelineArtifactSummaryV1"][];
+      artifacts_next_cursor: string | null;
       budget: components["schemas"]["PipelineBudgetLedgerProjectionV1"] | null;
     };
     PipelineStageRunDetailV1: components["schemas"]["PipelineStageRunSummaryV1"] & {

@@ -161,6 +161,35 @@ describe("apiFetch", () => {
     );
   });
 
+  it("uses run-scoped cursor pages for StageRuns and Artifacts", async () => {
+    const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      new Response(JSON.stringify({ items: [], next_cursor: null }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    await api.listPipelineStageRuns("run/one", {
+      node_key: "generate_card_00",
+      state: "succeeded",
+      domain_outcome: "accepted",
+      cursor: "opaque",
+      limit: 200,
+    });
+    await api.listPipelineArtifacts("run/one", { cursor: "opaque", limit: 100 });
+
+    expect(spy).toHaveBeenNthCalledWith(
+      1,
+      "/api/v1/pipeline-runs/run%2Fone/stages?node_key=generate_card_00&state=succeeded&domain_outcome=accepted&cursor=opaque&limit=200",
+      expect.objectContaining({ credentials: "include" }),
+    );
+    expect(spy).toHaveBeenNthCalledWith(
+      2,
+      "/api/v1/pipeline-runs/run%2Fone/artifacts?cursor=opaque&limit=100",
+      expect.objectContaining({ credentials: "include" }),
+    );
+  });
+
   it("sends admin actor header when approving a team registration", async () => {
     const spy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify({ registration: { id: "reg-1" } }), {

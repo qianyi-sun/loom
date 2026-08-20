@@ -61,7 +61,29 @@ test("Stage 1 preview is bounded, accessible, conditional, and hands off to the 
           finished_at: null, cancellation_requested_at: null,
           source_budget: { max_wall_seconds: 60, max_gpu_seconds: 60, max_provider_cost_usd: "0.000000", max_artifact_bytes: 1_000_000, max_stage_runs: 1, max_attempts_total: 1 },
           stages: [stage], artifacts: [], budget: null,
+          progress: {
+            total_stage_runs: 1, completed_stage_runs: 0,
+            states: { running: 1 }, domain_outcomes: {},
+            nodes: { rollout: {
+              total_stage_runs: 1, completed_stage_runs: 0,
+              states: { running: 1 }, domain_outcomes: {},
+            } },
+          },
+          topology: [{
+            node_key: "rollout", node_kind: "container", topological_level: 1,
+            upstream_node_keys: [],
+          }],
         } },
+      },
+      {
+        name: "active StageRun page", method: "GET",
+        path: `/api/v1/pipeline-runs/${runId}/stages?limit=200`,
+        response: { kind: "json", status: 200, body: { items: [stage], next_cursor: null } },
+      },
+      {
+        name: "empty Artifact page", method: "GET",
+        path: `/api/v1/pipeline-runs/${runId}/artifacts?limit=100`,
+        response: { kind: "json", status: 200, body: { items: [], next_cursor: null } },
       },
       {
         name: "terminal event cursor", method: "GET", path: `/api/v1/pipeline-runs/${runId}/events?after_seq=0&limit=500`,
