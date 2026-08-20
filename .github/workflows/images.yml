@@ -1269,7 +1269,7 @@ jobs:
           image="ghcr.io/${owner_lower}/${IMAGE_DIGEST_NAME}"
           target="${image}:build-${HEAD_SHA}-${ARCHITECTURE}"
           docker tag "$local_image" "$target"
-          push_output=$(docker push "$target" 2>&1)
+          push_output=$(scripts/ops/docker_push_with_retry.sh "$target")
           printf '%s\n' "$push_output"
           mapfile -t push_digests < <(
             sed -nE 's/^.*digest: (sha256:[0-9a-f]{64}) size: [0-9]+.*$/\1/p' \
@@ -1996,7 +1996,7 @@ jobs:
             --username "$GHCR_ACTOR" --password-stdin
           target="${SUBJECT_NAME}:build-${HEAD_SHA}-amd64"
           docker tag "$LOCAL_IMAGE" "$target"
-          push_output=$(docker push "$target" 2>&1)
+          push_output=$(scripts/ops/docker_push_with_retry.sh "$target")
           printf '%s\n' "$push_output"
           mapfile -t digests < <(sed -nE \
             's/^.*digest: (sha256:[0-9a-f]{64}) size: [0-9]+.*$/\1/p' <<< "$push_output")
