@@ -1990,11 +1990,89 @@ def test_systemd_control_exposes_only_fixed_user_unit_operations(
         ("systemctl", "--user", "start", timer),
         ("systemctl", "--user", "stop", timer),
         ("systemctl", "--user", "disable", timer),
-        ("systemctl", "--user", "reset-failed", service),
+        (
+            "systemctl",
+            "--user",
+            "show",
+            service,
+            "--no-pager",
+            "--property=LoadState",
+            "--property=Result",
+            "--property=ExecMainStatus",
+            "--property=FragmentPath",
+            "--property=NeedDaemonReload",
+        ),
+        (
+            "systemctl",
+            "--user",
+            "show",
+            service,
+            "--no-pager",
+            "--property=LoadState",
+            "--property=Result",
+            "--property=ExecMainStatus",
+            "--property=FragmentPath",
+            "--property=NeedDaemonReload",
+        ),
         ("systemctl", "--user", "start", service),
     ]
     with pytest.raises(ValueError, match="unit name is invalid"):
         control.start_timer("other.timer")
+
+
+def test_systemd_control_resets_dirty_service_and_verifies_clean_postcondition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = "loom-autoscaler-test.service"
+    calls: list[tuple[str, ...]] = []
+    statuses = iter((("exit-code", 1), ("success", 0)))
+
+    def run(command, **kwargs):
+        calls.append(tuple(command))
+        if "show" not in command:
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        result, status = next(statuses)
+        fragment = str(PROTECTED_USER_UNIT_DIR / service)
+        return SimpleNamespace(
+            returncode=0,
+            stdout=(
+                f"LoadState=loaded\nResult={result}\nExecMainStatus={status}\n"
+                f"FragmentPath={fragment}\nNeedDaemonReload=no\n"
+            ).encode(),
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(transport_module.subprocess, "run", run)
+    control = FixedUserSystemdControl(service_uid=os.geteuid())
+
+    control.reset_service_failure(service)
+
+    assert [command[2] for command in calls] == ["show", "reset-failed", "show"]
+
+
+def test_systemd_control_rejects_dirty_service_after_reset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = "loom-autoscaler-test.service"
+
+    def run(command, **kwargs):
+        if "show" not in command:
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        fragment = str(PROTECTED_USER_UNIT_DIR / service)
+        return SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "LoadState=loaded\nResult=exit-code\nExecMainStatus=1\n"
+                f"FragmentPath={fragment}\nNeedDaemonReload=no\n"
+            ).encode(),
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(transport_module.subprocess, "run", run)
+    control = FixedUserSystemdControl(service_uid=os.geteuid())
+
+    with pytest.raises(RuntimeError, match="failure state did not clear safely"):
+        control.reset_service_failure(service)
 
 
 def test_systemd_control_redacts_failed_operation(
