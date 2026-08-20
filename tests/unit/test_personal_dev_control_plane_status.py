@@ -907,13 +907,44 @@ def test_acceptance_queries_the_runtime_class_bound_by_the_plan(
     assert runtime_command in [command for command, _timeout in runner.calls]
 
 
+def _exact_builder_namespace() -> dict[str, object]:
+    name = f"loom-build-{'a' * 32}-l{'b' * 16}"
+    return {
+        "apiVersion": "v1",
+        "kind": "Namespace",
+        "metadata": {
+            "name": name,
+            "labels": {
+                "app.kubernetes.io/managed-by": (
+                    "loom-personal-dev-builder-controller"
+                ),
+                "app.kubernetes.io/part-of": "loom",
+                "kubernetes.io/metadata.name": name,
+                "loom.dev/candidate": "c" * 12,
+                "loom.dev/subject": "00000000-0000-0000-0000-000000000402",
+                "loom.dev/incarnation": "00000000-0000-0000-0000-000000000403",
+                "loom.dev/operation": "00000000-0000-0000-0000-000000000404",
+                "loom.dev/attempt": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "loom.dev/operation-epoch": "1",
+                "loom.dev/build-attempt-sequence": "0",
+                "loom.dev/build-lease-epoch": "1",
+                "pod-security.kubernetes.io/enforce": "privileged",
+                "pod-security.kubernetes.io/enforce-version": "v1.36",
+                "pod-security.kubernetes.io/audit": "restricted",
+                "pod-security.kubernetes.io/audit-version": "v1.36",
+                "pod-security.kubernetes.io/warn": "restricted",
+                "pod-security.kubernetes.io/warn-version": "v1.36",
+            },
+        },
+    }
+
+
 def test_acceptance_permits_only_exact_owned_dynamic_namespace_families(
     tmp_path: Path,
 ) -> None:
     expected, plan, runner = _acceptance_healthy_fixture(tmp_path)
     namespaces = _items(runner, _NAMESPACES)
     personal_subject = "00000000-0000-0000-0000-000000000401"
-    builder_subject = "00000000-0000-0000-0000-000000000402"
     namespaces.extend(
         [
             {
@@ -929,24 +960,7 @@ def test_acceptance_permits_only_exact_owned_dynamic_namespace_families(
                     },
                 },
             },
-            {
-                "apiVersion": "v1",
-                "kind": "Namespace",
-                "metadata": {
-                    "name": f"loom-build-{'a' * 32}-l{'b' * 16}",
-                    "labels": {
-                        "app.kubernetes.io/managed-by": ("loom-personal-dev-builder-controller"),
-                        "app.kubernetes.io/part-of": "loom",
-                        "loom.dev/subject": builder_subject,
-                        "pod-security.kubernetes.io/enforce": "privileged",
-                        "pod-security.kubernetes.io/enforce-version": "v1.36",
-                        "pod-security.kubernetes.io/audit": "restricted",
-                        "pod-security.kubernetes.io/audit-version": "v1.36",
-                        "pod-security.kubernetes.io/warn": "restricted",
-                        "pod-security.kubernetes.io/warn-version": "v1.36",
-                    },
-                },
-            },
+            _exact_builder_namespace(),
         ]
     )
     deployments = _items(runner, _DEPLOYMENTS)
@@ -1003,28 +1017,60 @@ def test_acceptance_rejects_builder_namespace_pod_security_drift(
     drifted_value: str,
 ) -> None:
     expected, plan, runner = _acceptance_healthy_fixture(tmp_path)
-    labels = {
-        "app.kubernetes.io/managed-by": "loom-personal-dev-builder-controller",
-        "app.kubernetes.io/part-of": "loom",
-        "loom.dev/subject": "00000000-0000-0000-0000-000000000402",
-        "pod-security.kubernetes.io/enforce": "privileged",
-        "pod-security.kubernetes.io/enforce-version": "v1.36",
-        "pod-security.kubernetes.io/audit": "restricted",
-        "pod-security.kubernetes.io/audit-version": "v1.36",
-        "pod-security.kubernetes.io/warn": "restricted",
-        "pod-security.kubernetes.io/warn-version": "v1.36",
-    }
-    labels[label] = drifted_value
-    _items(runner, _NAMESPACES).append(
-        {
-            "apiVersion": "v1",
-            "kind": "Namespace",
-            "metadata": {
-                "name": f"loom-build-{'a' * 32}-l{'b' * 16}",
-                "labels": labels,
-            },
-        }
-    )
+    namespace = _exact_builder_namespace()
+    namespace["metadata"]["labels"][label] = drifted_value  # type: ignore[index]
+    _items(runner, _NAMESPACES).append(namespace)
+
+    result = _observe_acceptance(expected, plan, runner)
+
+    assert result.ready is False
+    assert "builder_namespace_invalid" in result.blockers
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "annotation",
+        "finalizer",
+        "generated-name",
+        "owner-reference",
+        "extra-label",
+        "attempt-mismatch",
+        "injected-name-mismatch",
+    ],
+)
+def test_acceptance_rejects_builder_namespace_metadata_drift(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    expected, plan, runner = _acceptance_healthy_fixture(tmp_path)
+    namespace = _exact_builder_namespace()
+    metadata = namespace["metadata"]
+    assert isinstance(metadata, dict)
+    labels = metadata["labels"]
+    assert isinstance(labels, dict)
+    if mutation == "annotation":
+        metadata["annotations"] = {"example.invalid/drift": "true"}
+    elif mutation == "finalizer":
+        metadata["finalizers"] = ["example.invalid/drift"]
+    elif mutation == "generated-name":
+        metadata["generateName"] = "loom-build-"
+    elif mutation == "owner-reference":
+        metadata["ownerReferences"] = [
+            {
+                "apiVersion": "v1",
+                "kind": "Namespace",
+                "name": "other",
+                "uid": "00000000-0000-0000-0000-000000000405",
+            }
+        ]
+    elif mutation == "extra-label":
+        labels["example.invalid/drift"] = "true"
+    elif mutation == "attempt-mismatch":
+        labels["loom.dev/attempt"] = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+    else:
+        labels["kubernetes.io/metadata.name"] = "loom-build-mismatch"
+    _items(runner, _NAMESPACES).append(namespace)
 
     result = _observe_acceptance(expected, plan, runner)
 

@@ -598,7 +598,7 @@ cleanup_node_staging() {
   assert_remote_staging "$node"
   assert_node_staging "$node"
   ssh "${ssh_run_options[@]}" "$target" \
-    "sudo -n -- /usr/bin/rm -rf -- '$root_stage' && sudo -n -- /usr/bin/test ! -e '$root_stage' && sudo -n -- /usr/bin/rmdir '$root_stage_parent' '$root_stage_base' && /usr/bin/rm -rf -- '$remote_stage' && /usr/bin/test ! -e '$remote_stage'"
+    "sudo -n -- /usr/bin/rm -rf -- '$root_stage' && sudo -n -- /usr/bin/test ! -e '$root_stage' && sudo -n -- /usr/bin/rmdir --ignore-fail-on-non-empty '$root_stage_parent' '$root_stage_base' && /usr/bin/rm -rf -- '$remote_stage' && /usr/bin/test ! -e '$remote_stage'"
   printf '%s\n' "$node staging=absent" \
     > "$evidence_dir/$node.staging-cleanup.txt"
 }
@@ -1064,7 +1064,11 @@ Kubernetes Baseline rejects the conformance sidecar's explicit seccomp
 `Unconfined` setting, so this operator-owned namespace declares privileged PSA
 enforcement and keeps restricted audit/warn. The JSON checks below enforce the
 exact workload shape, and the whole namespace is deleted before the window can
-close.
+close. Egress is default-deny: DNS is limited to kube-dns, while HTTPS is
+limited to IPv4 with private/reserved/special ranges removed and IPv6 global
+unicast `2000::/3` with its IETF-special, documentation, and 6to4 ranges
+removed. The smoke workload has no route to cluster-private or IPv6 transition
+destinations.
 
 ```bash
 smoke_namespace=loom-runtime-smoke
@@ -1120,13 +1124,43 @@ jq -n --arg namespace "$smoke_namespace" --arg source "$merged_source_sha" '{
       spec: {
         podSelector: {},
         policyTypes: ["Egress"],
-        egress: [{
-          ports: [
-            {protocol: "UDP", port: 53},
-            {protocol: "TCP", port: 53},
-            {protocol: "TCP", port: 443}
-          ]
-        }]
+        egress: [
+          {
+            to: [{
+              namespaceSelector: {
+                matchLabels: {"kubernetes.io/metadata.name": "kube-system"}
+              },
+              podSelector: {matchLabels: {"k8s-app": "kube-dns"}}
+            }],
+            ports: [
+              {protocol: "UDP", port: 53},
+              {protocol: "TCP", port: 53}
+            ]
+          },
+          {
+            to: [
+              {ipBlock: {
+                cidr: "0.0.0.0/0",
+                except: [
+                  "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10",
+                  "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12",
+                  "192.0.0.0/24", "192.0.2.0/24", "192.88.99.0/24",
+                  "192.168.0.0/16", "198.18.0.0/15",
+                  "198.51.100.0/24", "203.0.113.0/24",
+                  "224.0.0.0/4", "240.0.0.0/4"
+                ]
+              }},
+              {ipBlock: {
+                cidr: "2000::/3",
+                except: [
+                  "2001::/23", "2001:db8::/32", "2002::/16",
+                  "3fff::/20"
+                ]
+              }}
+            ],
+            ports: [{protocol: "TCP", port: 443}]
+          }
+        ]
       }
     }
   ]
@@ -1184,13 +1218,17 @@ for node in "${nodes[@]}"; do
           }
         }]
       }
-    }' > "$manifest"
+  }' > "$manifest"
   chmod 0600 "$manifest"
   kubectl --kubeconfig "$kubeconfig" create -f "$manifest"
+  smoke_wait_status=0
   kubectl --kubeconfig "$kubeconfig" --namespace "$smoke_namespace" \
-    wait --for=jsonpath='{.status.phase}'=Succeeded --timeout=5m "pod/$pod"
+    wait --for=jsonpath='{.status.phase}'=Succeeded --timeout=5m "pod/$pod" \
+    || smoke_wait_status=$?
   kubectl --kubeconfig "$kubeconfig" --namespace "$smoke_namespace" \
     get "pod/$pod" -o json > "$evidence_dir/$pod.live.json"
+  kubectl --kubeconfig "$kubeconfig" --namespace "$smoke_namespace" \
+    logs --limit-bytes=1048576 "$pod" > "$evidence_dir/$pod.log"
   jq -e --arg image "$smoke_image" --arg node "$node" \
     --arg source "$merged_source_sha" --arg a "$profile_label_a" \
     --arg b "$profile_label_b" '
@@ -1212,8 +1250,7 @@ for node in "${nodes[@]}"; do
       .spec.containers[0].securityContext.readOnlyRootFilesystem == true and
       .spec.containers[0].securityContext.runAsNonRoot == true
     ' "$evidence_dir/$pod.live.json" >/dev/null
-  kubectl --kubeconfig "$kubeconfig" --namespace "$smoke_namespace" \
-    logs --limit-bytes=1048576 "$pod" > "$evidence_dir/$pod.log"
+  test "$smoke_wait_status" -eq 0
   test "$(tr -d '\n' < "$evidence_dir/$pod.log")" = \
     'gvisor-marker=present uid=65532 capeff=0000000000000000'
   assert_smoke_namespace_owned
@@ -1368,6 +1405,7 @@ jq -n --arg namespace "$smoke_namespace" --arg image "$builder_image" \
     spec: {
       activeDeadlineSeconds: 1200,
       automountServiceAccountToken: false,
+      enableServiceLinks: false,
       nodeName: "trt-eai-oldlab-2",
       restartPolicy: "Never",
       runtimeClassName: "loom-personal-dev-builder",
@@ -1493,6 +1531,12 @@ kubectl --kubeconfig "$kubeconfig" --namespace "$smoke_namespace" \
 kubectl --kubeconfig "$kubeconfig" --namespace "$smoke_namespace" \
   get pod/buildkit-conformance -o json \
   > "$evidence_dir/buildkit-conformance.live.json"
+kubectl --kubeconfig "$kubeconfig" --namespace "$smoke_namespace" \
+  logs --limit-bytes=16777216 pod/buildkit-conformance -c conformance \
+  > "$evidence_dir/buildkit-conformance.client.log"
+kubectl --kubeconfig "$kubeconfig" --namespace "$smoke_namespace" \
+  logs --limit-bytes=8388608 pod/buildkit-conformance -c buildkitd \
+  > "$evidence_dir/buildkit-conformance.sidecar.log"
 jq -e --arg image "$builder_image" --arg source "$merged_source_sha" \
   --arg a "$profile_label_a" --arg b "$profile_label_b" '
     .status.phase == "Succeeded" and
@@ -1505,6 +1549,7 @@ jq -e --arg image "$builder_image" --arg source "$merged_source_sha" \
       "loom.dev/personal-dev-runtime-profile-b": $b
     } and
     .spec.automountServiceAccountToken == false and
+    .spec.enableServiceLinks == false and
     .spec.shareProcessNamespace == false and
     (.spec | has("hostUsers") | not) and
     .metadata.labels["app.kubernetes.io/managed-by"] == "loom-personal-dev-runtime-smoke" and
@@ -1550,12 +1595,6 @@ jq -e --arg image "$builder_image" --arg source "$merged_source_sha" \
     (.status.initContainerStatuses[0].state | has("terminated")) and
     (.status.initContainerStatuses[0].imageID | test("@sha256:[0-9a-f]{64}$"))
   ' "$evidence_dir/buildkit-conformance.live.json" >/dev/null
-kubectl --kubeconfig "$kubeconfig" --namespace "$smoke_namespace" \
-  logs --limit-bytes=16777216 pod/buildkit-conformance -c conformance \
-  > "$evidence_dir/buildkit-conformance.client.log"
-kubectl --kubeconfig "$kubeconfig" --namespace "$smoke_namespace" \
-  logs --limit-bytes=8388608 pod/buildkit-conformance -c buildkitd \
-  > "$evidence_dir/buildkit-conformance.sidecar.log"
 test "$conformance_wait_status" -eq 0
 grep -F 'loom-client-preflight uid=1000 gid=1000 capinh=0000000000000000 capprm=0000000000000000 capeff=0000000000000000 capbnd=0000000000000000 capamb=0000000000000000 nnp=1 seccomp=2 pid-isolation=pass' \
   "$evidence_dir/buildkit-conformance.client.log" >/dev/null

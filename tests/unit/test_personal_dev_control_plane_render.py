@@ -245,7 +245,7 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
     assert rendered.runtime_handler == profile.builder.runtime_handler
     assert rendered.runtime_profile_sha256 == profile.builder.runtime_profile_sha256
     assert hashlib.sha256(rendered.yaml_text.encode("utf-8")).hexdigest() == (
-        "8341bf3fc3d315cdcc9cd6a235640258d5051574efdffc8c543f148894eb8649"
+        "7515f64e3f1b231656c4941cd8abf3861c1cbf37dbc70350eba161249dc070e9"
     )
 
     identities = {_identity(document) for document in documents}
@@ -1011,6 +1011,57 @@ def test_admission_requires_exact_namespace_shapes_for_every_mutation(
     )
 
 
+def test_builder_namespace_admission_binds_metadata_without_wedging_delete(
+    tmp_path: Path,
+) -> None:
+    _, _, _, documents = _render(tmp_path)
+    policy = next(
+        item
+        for item in documents
+        if item["kind"] == "ValidatingAdmissionPolicy"
+        and item["metadata"]["name"] == "loom-personal-dev-management-namespaces"
+    )
+    validation = next(
+        item
+        for item in policy["spec"]["validations"]
+        if item["message"] == "builder namespace metadata differs from its exact contract"
+    )
+    expression = validation["expression"]
+
+    for shape_validation in policy["spec"]["validations"][1:]:
+        assert shape_validation["expression"].startswith(
+            "request.operation == 'DELETE' || "
+        )
+    assert expression.startswith("request.operation == 'DELETE' || ")
+    for fragment in (
+        ".metadata.annotations.size() == 0",
+        ".metadata.finalizers.size() == 0",
+        ".metadata.generateName",
+        ".metadata.ownerReferences.size() == 0",
+        ".metadata.labels.size() == 16",
+        ".metadata.labels.size() == 17",
+        ".metadata.labels['kubernetes.io/metadata.name'] == ",
+        ".metadata.labels['app.kubernetes.io/managed-by'] == "
+        "'loom-personal-dev-builder-controller'",
+        ".metadata.labels['app.kubernetes.io/part-of'] == 'loom'",
+        ".metadata.labels['loom.dev/candidate'].matches('^[0-9a-f]{12}$')",
+        ".metadata.labels['loom.dev/subject'].matches(",
+        ".metadata.labels['loom.dev/incarnation'].matches(",
+        ".metadata.labels['loom.dev/operation'].matches(",
+        ".metadata.labels['loom.dev/attempt'].matches(",
+        ".metadata.labels['loom.dev/operation-epoch'].matches('^[1-9][0-9]*$')",
+        ".metadata.labels['loom.dev/build-attempt-sequence'].matches('^[0-9]+$')",
+        ".metadata.labels['loom.dev/build-lease-epoch'].matches('^[1-9][0-9]*$')",
+        ".metadata.labels['pod-security.kubernetes.io/enforce'] == 'privileged'",
+        ".metadata.labels['pod-security.kubernetes.io/enforce-version'] == 'v1.36'",
+        ".metadata.labels['pod-security.kubernetes.io/audit'] == 'restricted'",
+        ".metadata.labels['pod-security.kubernetes.io/audit-version'] == 'v1.36'",
+        ".metadata.labels['pod-security.kubernetes.io/warn'] == 'restricted'",
+        ".metadata.labels['pod-security.kubernetes.io/warn-version'] == 'v1.36'",
+    ):
+        assert fragment in expression
+
+
 def test_management_admission_binds_resource_names_to_each_family_contract(
     tmp_path: Path,
 ) -> None:
@@ -1326,6 +1377,34 @@ def test_builder_admission_couples_platform_capabilities_and_metadata(
     assert "build-capability-arm64-" in platform
 
 
+def test_builder_admission_couples_all_resource_attempt_labels_to_namespace(
+    tmp_path: Path,
+) -> None:
+    _, _, _, documents = _render(tmp_path)
+    policy = next(
+        item
+        for item in documents
+        if item["kind"] == "ValidatingAdmissionPolicy"
+        and item["metadata"]["name"] == "loom-personal-dev-management-resources"
+    )
+    boundaries = {
+        item["message"]: item["expression"]
+        for item in policy["spec"]["validations"]
+    }
+    attempt_namespace_coupling = "request.namespace.substring(11, 43) =="
+
+    for message in (
+        "builder Job metadata differs from its exact privileged exception",
+        "builder NetworkPolicy metadata differs from its exact contract",
+        "builder RoleBinding metadata differs from its exact contract",
+        "builder support ConfigMap differs from its exact contract",
+        "builder support Secret differs from its exact contract",
+        "builder support LimitRange differs from its exact contract",
+        "builder support ResourceQuota differs from its exact contract",
+    ):
+        assert attempt_namespace_coupling in boundaries[message]
+
+
 def test_builder_admission_binds_network_policies_to_exact_specs(
     tmp_path: Path,
 ) -> None:
@@ -1343,6 +1422,7 @@ def test_builder_admission_binds_network_policies_to_exact_specs(
     }
 
     assert set(boundaries) == {
+        "builder NetworkPolicy metadata differs from its exact contract",
         "builder NetworkPolicy default deny differs from its exact contract",
         "builder NetworkPolicy egress base differs from its exact contract",
         "builder NetworkPolicy DNS egress differs from its exact contract",
@@ -1358,6 +1438,10 @@ def test_builder_admission_binds_network_policies_to_exact_specs(
         "request.resource.group == 'networking.k8s.io'",
         "metadata.name == 'default-deny'",
         "metadata.name == 'builder-egress'",
+        "metadata.annotations.size() == 0",
+        "metadata.finalizers.size() == 0",
+        "metadata.ownerReferences.size() == 0",
+        "metadata.labels.size() == 10",
         "apiVersion == 'networking.k8s.io/v1'",
         "kind == 'NetworkPolicy'",
         "spec.policyTypes == ['Ingress','Egress']",
@@ -1368,10 +1452,11 @@ def test_builder_admission_binds_network_policies_to_exact_specs(
         "namespaceSelector.matchLabels['kubernetes.io/metadata.name'] == 'loom-dev'",
         "podSelector.matchLabels['app'] == 'loom-dev-minio'",
         "cidr == '0.0.0.0/0'",
-        "cidr == '::/0'",
+        "cidr == '2000::/3'",
         "['0.0.0.0/8','10.0.0.0/8','100.64.0.0/10'",
         "'198.18.0.0/15','198.51.100.0/24','203.0.113.0/24'",
-        "['::/128','::1/128','2001:db8::/32','fc00::/7'",
+        "'192.88.99.0/24'",
+        "['2001::/23','2001:db8::/32','2002::/16','3fff::/20']",
         "ports[0].protocol == 'UDP'",
         "ports[0].port == 53",
         "ports[0].port == 9000",
@@ -1381,6 +1466,146 @@ def test_builder_admission_binds_network_policies_to_exact_specs(
         assert value in contract
     assert contract.count("!has(") >= 20
     assert contract.count(".ipBlock.except)") == 2
+
+
+def test_builder_admission_binds_rolebinding_metadata_to_exact_shape(
+    tmp_path: Path,
+) -> None:
+    _, _, _, documents = _render(tmp_path)
+    policy = next(
+        item
+        for item in documents
+        if item["kind"] == "ValidatingAdmissionPolicy"
+        and item["metadata"]["name"] == "loom-personal-dev-management-resources"
+    )
+    boundary = next(
+        item["expression"]
+        for item in policy["spec"]["validations"]
+        if item["message"]
+        == "builder RoleBinding metadata differs from its exact contract"
+    )
+
+    assert boundary.startswith("request.operation == 'DELETE' ||")
+    for value in (
+        "request.resource.group == 'rbac.authorization.k8s.io'",
+        "metadata.name == 'loom-personal-dev-management'",
+        "metadata.namespace == request.namespace",
+        "metadata.annotations.size() == 0",
+        "metadata.finalizers.size() == 0",
+        "metadata.ownerReferences.size() == 0",
+        "metadata.labels.size() == 10",
+        "app.kubernetes.io/managed-by",
+        "loom.dev/build-lease-epoch",
+    ):
+        assert value in boundary
+
+
+def test_builder_admission_binds_support_resources_to_exact_shapes(
+    tmp_path: Path,
+) -> None:
+    _, _, _, documents = _render(tmp_path)
+    policy = next(
+        item
+        for item in documents
+        if item["kind"] == "ValidatingAdmissionPolicy"
+        and item["metadata"]["name"] == "loom-personal-dev-management-resources"
+    )
+    boundaries = {
+        item["message"]: item["expression"]
+        for item in policy["spec"]["validations"]
+        if item["message"].startswith("builder support ")
+    }
+
+    assert set(boundaries) == {
+        "builder support ConfigMap differs from its exact contract",
+        "builder support Secret differs from its exact contract",
+        "builder support LimitRange differs from its exact contract",
+        "builder support ResourceQuota differs from its exact contract",
+    }
+    assert all(
+        expression.startswith("request.operation == 'DELETE' ||")
+        for expression in boundaries.values()
+    )
+    common = "\n".join(boundaries.values())
+    for value in (
+        "metadata.annotations.size() == 0",
+        "metadata.finalizers.size() == 0",
+        "metadata.ownerReferences.size() == 0",
+        "metadata.labels.size() == 10",
+        "metadata.namespace == request.namespace",
+        "app.kubernetes.io/managed-by",
+        "loom.dev/build-lease-epoch",
+    ):
+        assert value in common
+
+    config_map = boundaries[
+        "builder support ConfigMap differs from its exact contract"
+    ]
+    assert "apiVersion == 'v1'" in config_map
+    assert "kind == 'ConfigMap'" in config_map
+    assert "immutable == true" in config_map
+    assert "data.size() == 1" in config_map
+    assert "data['contract.json']" in config_map
+    assert "binaryData" in config_map
+    assert "build-contract-amd64-" in config_map
+    assert "build-contract-arm64-" in config_map
+
+    secret = boundaries["builder support Secret differs from its exact contract"]
+    assert "kind == 'Secret'" in secret
+    assert "type == 'Opaque'" in secret
+    assert "immutable == true" in secret
+    assert "data.size() == 2" in secret
+    assert "data['artifact-upload.json']" in secret
+    assert "data['source-get-url']" in secret
+    assert "stringData" in secret
+    assert "build-capability-amd64-" in secret
+    assert "build-capability-arm64-" in secret
+
+    limit_range = boundaries[
+        "builder support LimitRange differs from its exact contract"
+    ]
+    assert "kind == 'LimitRange'" in limit_range
+    assert "spec.limits.size() == 1" in limit_range
+    assert "defaultRequest.size() == 3" in limit_range
+    assert "default.size() == 3" in limit_range
+    assert "quantity('20Gi')" in limit_range
+    assert "maxLimitRequestRatio" in limit_range
+
+    quota = boundaries[
+        "builder support ResourceQuota differs from its exact contract"
+    ]
+    assert "kind == 'ResourceQuota'" in quota
+    assert "spec.hard.size() == 4" in quota
+    for resource in ("configmaps", "count/jobs.batch", "pods", "secrets"):
+        assert resource in quota
+    assert "quantity('3')" in quota
+    assert "spec.scopes" in quota
+    assert "spec.scopeSelector" in quota
+
+
+def test_management_admission_keeps_mutable_shape_checks_out_of_delete(
+    tmp_path: Path,
+) -> None:
+    _, _, _, documents = _render(tmp_path)
+    policy = next(
+        item
+        for item in documents
+        if item["kind"] == "ValidatingAdmissionPolicy"
+        and item["metadata"]["name"] == "loom-personal-dev-management-resources"
+    )
+    expressions = {
+        item["message"]: item["expression"] for item in policy["spec"]["validations"]
+    }
+
+    for message in (
+        "management resource lacks its namespace-family ownership",
+        "personal workload can reference only fixed lifecycle Secrets; builder "
+        "workload cannot acquire API or unrelated Secret authority",
+    ):
+        assert "|| request.operation == 'DELETE' ||" in expressions[message]
+    assert expressions[
+        "management RoleBinding is outside its exact delegated roles"
+    ].startswith("request.operation == 'DELETE' || ")
 
 
 def test_management_admission_blocks_indirect_personal_secret_reads(

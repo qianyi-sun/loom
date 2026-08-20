@@ -59,8 +59,11 @@ attempt-bound builder namespaces declare PSA `privileged` enforcement at
 then supplies the narrower application-specific contract: it binds each
 management-created Job to the trusted builder digest, measured RuntimeClass,
 non-host namespaces, exact client and sidecar security contexts, separated
-mounts, and finite resource quantities. Personal namespaces remain restricted;
-candidate code cannot create or mutate Kubernetes resources.
+mounts, finite resource quantities, immutable supporting ConfigMap/Secret
+shapes, exact limits and quotas, and direct-public-only egress. Each completed
+Job is inspected immediately and publication is rejected if either container
+restarted. Personal namespaces remain restricted; candidate code cannot create
+or mutate Kubernetes resources.
 
 ## Measured release and profile
 

@@ -104,6 +104,9 @@ def test_personal_dev_builder_image_binds_rootless_sidecar_prerequisites() -> No
     )
     assert "ARG TARGETARCH" in dockerfile
     assert "/usr/bin/buildctl" in dockerfile
+    assert "qemu_path=/usr/bin/buildkit-qemu-aarch64" in dockerfile
+    assert "qemu_path=/usr/bin/buildkit-qemu-x86_64" in dockerfile
+    assert 'test -x "$qemu_path"' in dockerfile
     assert "/bin/setpriv" in dockerfile
     assert "/usr/bin/newuidmap" in dockerfile
     assert "0100000280000000000000000000000000000000" in dockerfile
@@ -817,6 +820,7 @@ def test_personal_dev_builder_runtime_runbook_is_exact_and_inert() -> None:
     assert 'command: ["/usr/local/bin/loom-personal-dev-buildkitd"]' in runbook
     assert 'capabilities: {drop: ["ALL"], add: ["SETGID", "SETUID"]}' in runbook
     assert 'seccompProfile: {type: "Unconfined"}' in runbook
+    assert "enableServiceLinks: false" in runbook
     assert "shareProcessNamespace: false" in runbook
     assert "/usr/bin/buildctl" in runbook
     assert "/usr/bin/buildctl-daemonless.sh" not in runbook
@@ -911,6 +915,90 @@ def test_personal_dev_builder_runtime_embedded_programs_parse() -> None:
     drifted_control_labels["loom.dev/personal-dev-runtime-profile-a"] = "unexpected"
     assert evaluate_nodes(drifted_nodes).returncode != 0
 
+    network_policy_filters = [
+        value
+        for value in jq_filters
+        if 'kind: "List"' in value and 'name: "build-egress"' in value
+    ]
+    assert len(network_policy_filters) == 1
+    smoke_policies = json.loads(
+        subprocess.run(
+            [
+                "jq",
+                "-n",
+                "--arg",
+                "namespace",
+                "loom-runtime-smoke",
+                "--arg",
+                "source",
+                "2" * 40,
+                network_policy_filters[0],
+            ],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout
+    )
+    policies = {item["metadata"]["name"]: item for item in smoke_policies["items"]}
+    assert policies["default-deny"]["spec"] == {
+        "podSelector": {},
+        "policyTypes": ["Ingress", "Egress"],
+    }
+    assert policies["build-egress"]["spec"]["egress"] == [
+        {
+            "to": [
+                {
+                    "namespaceSelector": {
+                        "matchLabels": {"kubernetes.io/metadata.name": "kube-system"}
+                    },
+                    "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}},
+                }
+            ],
+            "ports": [
+                {"protocol": "UDP", "port": 53},
+                {"protocol": "TCP", "port": 53},
+            ],
+        },
+        {
+            "to": [
+                {
+                    "ipBlock": {
+                        "cidr": "0.0.0.0/0",
+                        "except": [
+                            "0.0.0.0/8",
+                            "10.0.0.0/8",
+                            "100.64.0.0/10",
+                            "127.0.0.0/8",
+                            "169.254.0.0/16",
+                            "172.16.0.0/12",
+                            "192.0.0.0/24",
+                            "192.0.2.0/24",
+                            "192.88.99.0/24",
+                            "192.168.0.0/16",
+                            "198.18.0.0/15",
+                            "198.51.100.0/24",
+                            "203.0.113.0/24",
+                            "224.0.0.0/4",
+                            "240.0.0.0/4",
+                        ],
+                    }
+                },
+                {
+                    "ipBlock": {
+                        "cidr": "2000::/3",
+                        "except": [
+                            "2001::/23",
+                            "2001:db8::/32",
+                            "2002::/16",
+                            "3fff::/20",
+                        ],
+                    }
+                },
+            ],
+            "ports": [{"protocol": "TCP", "port": 443}],
+        },
+    ]
+
     smoke_filters = [value for value in jq_filters if "kernel_is_gvisor" in value]
     assert len(smoke_filters) == 1
     rendered = subprocess.run(
@@ -978,6 +1066,7 @@ def test_personal_dev_builder_runtime_embedded_programs_parse() -> None:
         ).stdout
     )
     spec = buildkit_pod["spec"]
+    assert spec["enableServiceLinks"] is False
     assert spec["shareProcessNamespace"] is False
     assert len(spec["containers"]) == 1
     assert len(spec["initContainers"]) == 1
@@ -1221,6 +1310,183 @@ def test_personal_dev_builder_runtime_root_staging_directories_are_private(
         check=False,
     )
     assert behavior.returncode == 0, behavior.stderr
+
+
+def test_personal_dev_builder_runtime_staging_cleanup_handles_live_siblings(
+    tmp_path: Path,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-builder-runtime.md")
+    marker = "cleanup_node_staging() {"
+    cleanup_function = runbook[runbook.index(marker) :].split("\n}", 1)[0] + "\n}"
+    source_sha = "a" * 40
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    actual_root_base = tmp_path / "root-stage"
+    actual_root_parent = actual_root_base / source_sha
+    for number in (2, 3):
+        (actual_root_parent / f"trt-eai-oldlab-{number}").mkdir(parents=True)
+
+    behavior = subprocess.run(
+        ["bash", "-seu", "--"],
+        input=(
+            f"{cleanup_function}\n"
+            f"evidence_dir={shlex.quote(str(evidence_dir))}\n"
+            f"merged_source_sha={source_sha}\n"
+            f"actual_root_base={shlex.quote(str(actual_root_base))}\n"
+            "hard_root_base=/root/loom-personal-dev-builder-runtime-rollout\n"
+            "ssh_run_options=()\n"
+            "declare -A ssh_targets=(\n"
+            "  [trt-eai-oldlab-2]=target\n"
+            "  [trt-eai-oldlab-3]=target\n"
+            ")\n"
+            "assert_remote_staging() { :; }\n"
+            "assert_node_staging() { :; }\n"
+            "sudo() {\n"
+            '  test "$1" = -n\n'
+            '  test "$2" = --\n'
+            "  shift 2\n"
+            '  "$@"\n'
+            "}\n"
+            "ssh() {\n"
+            '  test "$1" = target\n'
+            '  command="$2"\n'
+            '  command="${command//$hard_root_base/$actual_root_base}"\n'
+            '  eval "$command"\n'
+            "}\n"
+            "for number in 2 3; do\n"
+            '  node="trt-eai-oldlab-$number"\n'
+            '  remote_stage="$(mktemp -d /tmp/loom-personal-dev-runtime.XXXXXXXX)"\n'
+            '  printf "%s\\n" "$remote_stage" > "$evidence_dir/$node.remote-stage.txt"\n'
+            '  printf "/root/loom-personal-dev-builder-runtime-rollout/%s/%s\\n" '
+            '"$merged_source_sha" "$node" > "$evidence_dir/$node.root-stage.txt"\n'
+            '  cleanup_node_staging "$node"\n'
+            '  test ! -e "$remote_stage"\n'
+            '  test ! -e "$actual_root_base/$merged_source_sha/$node"\n'
+            "  if test \"$number\" = 2; then\n"
+            '    test -d "$actual_root_base/$merged_source_sha/trt-eai-oldlab-3"\n'
+            "  fi\n"
+            "done\n"
+            'test ! -e "$actual_root_base"\n'
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert behavior.returncode == 0, behavior.stderr
+
+
+def test_personal_dev_builder_runtime_captures_logs_before_failed_conformance_stops(
+    tmp_path: Path,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-builder-runtime.md")
+    start = runbook.index("conformance_wait_status=0")
+    end_marker = 'test "$conformance_wait_status" -eq 0'
+    end = runbook.index(end_marker, start) + len(end_marker)
+    failure_path = runbook[start:end]
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+
+    behavior = subprocess.run(
+        ["bash", "-seu", "--"],
+        input=(
+            f"evidence_dir={shlex.quote(str(evidence_dir))}\n"
+            "kubeconfig=/dev/null\n"
+            "smoke_namespace=loom-runtime-smoke\n"
+            "builder_image=example.invalid/builder@sha256:"
+            + "3" * 64
+            + "\n"
+            + "merged_source_sha="
+            + "5" * 40
+            + "\n"
+            + "profile_label_a="
+            + "6" * 32
+            + "\n"
+            + "profile_label_b="
+            + "7" * 32
+            + "\n"
+            + "kubectl() {\n"
+            + '  case " $* " in\n'
+            + '    *" wait "*) return 1 ;;\n'
+            + '    *" get pod/buildkit-conformance "*) '
+            + "printf '%s\\n' '{\"status\":{\"phase\":\"Failed\"}}' ;;\n"
+            + '    *" logs "*" -c conformance "*) printf "client failure\\n" ;;\n'
+            + '    *" logs "*" -c buildkitd "*) printf "sidecar failure\\n" ;;\n'
+            + "    *) return 1 ;;\n"
+            + "  esac\n"
+            + "}\n"
+            + failure_path
+            + "\n"
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert behavior.returncode != 0
+    assert (evidence_dir / "buildkit-conformance.client.log").read_text(
+        encoding="utf-8"
+    ) == "client failure\n"
+    assert (evidence_dir / "buildkit-conformance.sidecar.log").read_text(
+        encoding="utf-8"
+    ) == "sidecar failure\n"
+
+
+def test_personal_dev_builder_runtime_captures_log_before_failed_gvisor_probe_stops(
+    tmp_path: Path,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-builder-runtime.md")
+    loop = runbook.index('for node in "${nodes[@]}"; do', runbook.index("## 6."))
+    start = runbook.index(
+        'kubectl --kubeconfig "$kubeconfig" create -f "$manifest"', loop
+    )
+    end = runbook.index("  assert_smoke_namespace_owned", start)
+    failure_path = runbook[start:end]
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+
+    behavior = subprocess.run(
+        ["bash", "-seu", "--"],
+        input=(
+            f"evidence_dir={shlex.quote(str(evidence_dir))}\n"
+            "kubeconfig=/dev/null\n"
+            "smoke_namespace=loom-runtime-smoke\n"
+            "manifest=/dev/null\n"
+            "pod=gvisor-smoke-2\n"
+            "node=trt-eai-oldlab-2\n"
+            "smoke_image=example.invalid/smoke@sha256:"
+            + "3" * 64
+            + "\n"
+            + "merged_source_sha="
+            + "5" * 40
+            + "\n"
+            + "profile_label_a="
+            + "6" * 32
+            + "\n"
+            + "profile_label_b="
+            + "7" * 32
+            + "\n"
+            + "kubectl() {\n"
+            + '  case " $* " in\n'
+            + '    *" create "*) return 0 ;;\n'
+            + '    *" wait "*) return 1 ;;\n'
+            + '    *" get pod/gvisor-smoke-2 "*) '
+            + "printf '%s\\n' '{\"status\":{\"phase\":\"Failed\"}}' ;;\n"
+            + '    *" logs "*) printf "gvisor failure\\n" ;;\n'
+            + "    *) return 1 ;;\n"
+            + "  esac\n"
+            + "}\n"
+            + failure_path
+            + "\n"
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert behavior.returncode != 0
+    assert (evidence_dir / "gvisor-smoke-2.log").read_text(
+        encoding="utf-8"
+    ) == "gvisor failure\n"
 
 
 def test_personal_dev_builder_runtime_longhorn_health_requires_live_readiness() -> None:

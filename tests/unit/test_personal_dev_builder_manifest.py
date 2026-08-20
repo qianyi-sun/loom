@@ -190,20 +190,61 @@ def test_builder_network_policy_denies_internal_authority_and_allows_exact_route
     )
     public_blocks = [peer["ipBlock"] for rule in egress for peer in rule["to"] if "ipBlock" in peer]
     ipv4 = next(block for block in public_blocks if block["cidr"] == "0.0.0.0/0")
-    assert "10.0.0.0/8" in ipv4["except"]
-    assert "169.254.0.0/16" in ipv4["except"]
-    assert "192.0.2.0/24" in ipv4["except"]
-    assert "198.18.0.0/15" in ipv4["except"]
-    assert "198.51.100.0/24" in ipv4["except"]
-    assert "203.0.113.0/24" in ipv4["except"]
-    ipv6 = next(block for block in public_blocks if block["cidr"] == "::/0")
-    assert "2001:db8::/32" in ipv6["except"]
+    assert ipv4["except"] == [
+        "0.0.0.0/8",
+        "10.0.0.0/8",
+        "100.64.0.0/10",
+        "127.0.0.0/8",
+        "169.254.0.0/16",
+        "172.16.0.0/12",
+        "192.0.0.0/24",
+        "192.0.2.0/24",
+        "192.88.99.0/24",
+        "192.168.0.0/16",
+        "198.18.0.0/15",
+        "198.51.100.0/24",
+        "203.0.113.0/24",
+        "224.0.0.0/4",
+        "240.0.0.0/4",
+    ]
+    ipv6 = next(block for block in public_blocks if block["cidr"] == "2000::/3")
+    assert ipv6["except"] == [
+        "2001::/23",
+        "2001:db8::/32",
+        "2002::/16",
+        "3fff::/20",
+    ]
     assert all(
         port["port"] in {80, 443}
         for rule in egress
         if any("ipBlock" in peer for peer in rule["to"])
         for port in rule["ports"]
     )
+
+
+def test_builder_quota_reserves_the_kubernetes_root_ca_configmap() -> None:
+    registration = _registration()
+    platform_documents = [
+        personal_dev_builder_manifest_documents(
+            registration,
+            platform=platform,
+            config=_config(),
+        )
+        for platform in ("linux/amd64", "linux/arm64")
+    ]
+    contract_names = {
+        document["metadata"]["name"]
+        for documents in platform_documents
+        for document in documents
+        if document["kind"] == "ConfigMap"
+    }
+    quota = next(
+        document
+        for document in platform_documents[0]
+        if document["kind"] == "ResourceQuota"
+    )
+
+    assert int(quota["spec"]["hard"]["configmaps"]) == len(contract_names) + 1
 
 
 def test_builder_contract_is_canonical_and_contains_no_capability() -> None:

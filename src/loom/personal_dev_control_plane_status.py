@@ -42,6 +42,19 @@ _BUILDER_POD_SECURITY_LABELS = (
     ("pod-security.kubernetes.io/warn", "restricted"),
     ("pod-security.kubernetes.io/warn-version", "v1.36"),
 )
+_BUILDER_IDENTITY_LABELS = {
+    "app.kubernetes.io/managed-by",
+    "app.kubernetes.io/part-of",
+    "loom.dev/candidate",
+    "loom.dev/subject",
+    "loom.dev/incarnation",
+    "loom.dev/operation",
+    "loom.dev/attempt",
+    "loom.dev/operation-epoch",
+    "loom.dev/build-attempt-sequence",
+    "loom.dev/build-lease-epoch",
+    *(label for label, _expected in _BUILDER_POD_SECURITY_LABELS),
+}
 _MAX_MIGRATION_HISTORY = 8
 
 _CONTEXT_COMMAND = ("config", "current-context")
@@ -831,6 +844,70 @@ def _canonical_nonzero_uuid(value: object) -> bool:
     return parsed.int != 0 and str(parsed) == value
 
 
+def _builder_dynamic_namespace_valid(
+    name: str,
+    metadata: Mapping[str, Any],
+    labels: Mapping[str, Any],
+) -> bool:
+    label_names = set(labels)
+    if label_names not in (
+        _BUILDER_IDENTITY_LABELS,
+        _BUILDER_IDENTITY_LABELS | {"kubernetes.io/metadata.name"},
+    ):
+        return False
+    annotations = metadata.get("annotations")
+    finalizers = metadata.get("finalizers")
+    owner_references = metadata.get("ownerReferences")
+    if (
+        (annotations is not None and (not isinstance(annotations, Mapping) or annotations))
+        or (finalizers is not None and (not isinstance(finalizers, list) or finalizers))
+        or metadata.get("generateName") is not None
+        or (
+            owner_references is not None
+            and (not isinstance(owner_references, list) or owner_references)
+        )
+        or metadata.get("deletionTimestamp") is not None
+    ):
+        return False
+    attempt = labels.get("loom.dev/attempt")
+    return (
+        _BUILDER_NAMESPACE.fullmatch(name) is not None
+        and labels.get("app.kubernetes.io/managed-by")
+        == "loom-personal-dev-builder-controller"
+        and labels.get("app.kubernetes.io/part-of") == "loom"
+        and labels.get("kubernetes.io/metadata.name", name) == name
+        and isinstance(labels.get("loom.dev/candidate"), str)
+        and re.fullmatch(r"[0-9a-f]{12}", labels["loom.dev/candidate"])
+        is not None
+        and all(
+            _canonical_nonzero_uuid(labels.get(label))
+            for label in (
+                "loom.dev/subject",
+                "loom.dev/incarnation",
+                "loom.dev/operation",
+                "loom.dev/attempt",
+            )
+        )
+        and isinstance(attempt, str)
+        and attempt.replace("-", "") == name[11:43]
+        and isinstance(labels.get("loom.dev/operation-epoch"), str)
+        and re.fullmatch(r"[1-9][0-9]*", labels["loom.dev/operation-epoch"])
+        is not None
+        and isinstance(labels.get("loom.dev/build-attempt-sequence"), str)
+        and re.fullmatch(
+            r"[0-9]+", labels["loom.dev/build-attempt-sequence"]
+        )
+        is not None
+        and isinstance(labels.get("loom.dev/build-lease-epoch"), str)
+        and re.fullmatch(r"[1-9][0-9]*", labels["loom.dev/build-lease-epoch"])
+        is not None
+        and all(
+            labels.get(label) == expected
+            for label, expected in _BUILDER_POD_SECURITY_LABELS
+        )
+    )
+
+
 def _dynamic_namespace_valid(
     name: str,
     item: Mapping[str, Any],
@@ -838,7 +915,9 @@ def _dynamic_namespace_valid(
     personal: bool,
 ) -> bool:
     metadata = _metadata(item)
-    labels = metadata.get("labels") if metadata is not None else None
+    if metadata is None:
+        return False
+    labels = metadata.get("labels")
     if not isinstance(labels, Mapping):
         return False
     if personal:
@@ -851,12 +930,7 @@ def _dynamic_namespace_valid(
             labels.get("pod-security.kubernetes.io/enforce") == "restricted"
         )
     else:
-        name_valid = _BUILDER_NAMESPACE.fullmatch(name) is not None
-        managed_by = "loom-personal-dev-builder-controller"
-        pod_security_valid = all(
-            labels.get(label) == expected
-            for label, expected in _BUILDER_POD_SECURITY_LABELS
-        )
+        return _builder_dynamic_namespace_valid(name, metadata, labels)
     return (
         name_valid
         and labels.get("app.kubernetes.io/managed-by") == managed_by

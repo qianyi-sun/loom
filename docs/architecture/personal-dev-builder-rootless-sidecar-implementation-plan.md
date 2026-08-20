@@ -48,6 +48,9 @@ Bash, jq, Docker/OCI.
 - Builder NetworkPolicies are admission-bound to exact selectors, DNS and
   shared-MinIO peers, public HTTP(S) ports, and private/reserved-network
   exclusions; their deletion remains shape-independent for safe cleanup.
+- Builder ConfigMaps, Secrets, LimitRanges, and ResourceQuotas are
+  admission-bound to immutable, attempt-named, finite shapes; their deletion
+  remains shape-independent.
 - RootlessKit runs BuildKit through `/bin/setpriv --nnp`; BuildKit and every
   Dockerfile `RUN` descendant must observe `NoNewPrivs=1`.
 - `shareProcessNamespace` is explicitly false and `hostUsers` remains absent.
@@ -332,6 +335,9 @@ git commit -m "fix(dev): connect builder client to isolated daemon"
   BusyBox `setpriv`, and the two exact helper file-capability xattrs exist.
 - Produces: `/usr/local/bin/loom-personal-dev-buildkitd`, a checked-in launcher
   that validates its exact gVisor/security identity before execing RootlessKit.
+- Produces: build-time failure unless the amd64 image contains
+  `buildkit-qemu-aarch64` and the arm64 image contains
+  `buildkit-qemu-x86_64`, so either native image can build the other target.
 
 - [ ] **Step 1: Write failing Dockerfile contract assertions**
 
@@ -577,11 +583,27 @@ Couple each Job platform to the same-lease contract and capability volume.
 Forbid ConfigMap/Secret item remapping or optionality, alternate `emptyDir`
 media, and recursive-read-only mount overrides.
 
+Require the supporting ConfigMap and Secret to be immutable, same-lease and
+same-platform named, exact-keyed, bounded, and metadata constrained. Require
+the exact LimitRange container defaults and ResourceQuota hard counts,
+including three ConfigMaps so Kubernetes' injected `kube-root-ca.crt` and both
+platform contract ConfigMaps can coexist. These support-object shape
+validations must allow `DELETE`.
+
 Require separate builder-only validations for the exact `default-deny` and
 `builder-egress` NetworkPolicy shapes. The latter must bind the sandbox Pod
 selector, DNS and shared-MinIO selectors and ports, both public IP blocks,
-HTTP(S) ports, and every private/reserved CIDR exclusion. Shape validations
-must allow `DELETE` so higher-authority drift cannot wedge cleanup.
+HTTP(S) ports, and every private/reserved CIDR exclusion. NetworkPolicy and
+delegated RoleBinding metadata must reject annotations, finalizers, owner
+references, generated names, and extra labels. Shape validations must allow
+`DELETE` so higher-authority drift cannot wedge cleanup.
+
+Require the builder Namespace's non-delete metadata to reject annotations,
+finalizers, owner references, generated names, and extra labels; permit only
+the exact attempt/PSA labels plus Kubernetes' matching injected Namespace-name
+label, and couple the attempt UUID label to the Namespace name. Namespace
+deletion must remain shape-independent so higher-authority drift cannot wedge
+cleanup.
 
 - [ ] **Step 2: Run the focused tests and verify RED**
 
@@ -614,8 +636,10 @@ Run the Step 2 command. Expected: all selected tests pass.
 
 Use server-side dry-run against the protected cluster to compile the rendered
 ValidatingAdmissionPolicy and dry-run the exact builder namespace and Job. A
-mutated privileged container, host namespace, image, RuntimeClass, mount, or
-sidecar Secret reference must be denied. Also admit the exact two generated
+builder Namespace annotation, finalizer, owner reference, generated name, extra
+label, or mismatched attempt label and a mutated privileged container, host
+namespace, image, RuntimeClass, mount, or sidecar Secret reference must be
+denied. Also admit the exact two generated
 NetworkPolicies, deny selector, internal-peer, public-exclusion, and
 default-deny widening, and prove that deletion remains possible after an admin
 drifts a policy. In a disposable Kubernetes 1.36 cluster, admit the exact Job

@@ -12,6 +12,11 @@ from urllib.parse import urlsplit
 import yaml  # type: ignore[import-untyped]
 
 from loom.dev_instance import INGRESS_HOST
+from loom.personal_dev_builder_manifest import (
+    PUBLIC_EGRESS_IPV4_EXCEPTIONS,
+    PUBLIC_EGRESS_IPV6_CIDR,
+    PUBLIC_EGRESS_IPV6_EXCEPTIONS,
+)
 from loom.personal_dev_control_plane_config import (
     PersonalDevAcceptancePlan,
     PersonalDevControlPlaneProfile,
@@ -220,6 +225,55 @@ def _personal_namespace_cel(value: str) -> str:
 
 def _builder_namespace_cel(value: str) -> str:
     return f"({value}.startsWith('loom-build-') && {value}.matches('{_BUILDER_NAMESPACE_PATTERN}'))"
+
+
+def _builder_attempt_matches_namespace(*, labels: str, namespace: str) -> str:
+    attempt = f"{labels}['loom.dev/attempt']"
+    return (
+        f"{namespace}.substring(11, 43) == "
+        f"{attempt}.substring(0, 8) + "
+        f"{attempt}.substring(9, 13) + "
+        f"{attempt}.substring(14, 18) + "
+        f"{attempt}.substring(19, 23) + "
+        f"{attempt}.substring(24, 36)"
+    )
+
+
+def _builder_namespace_metadata_contract(target: str) -> str:
+    metadata = f"{target}.metadata"
+    labels = f"{metadata}.labels"
+    uuid_pattern = "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+
+    def absent_or_empty(field: str) -> str:
+        return f"(!has({field}) || {field}.size() == 0)"
+
+    return (
+        f"{absent_or_empty(f'{metadata}.annotations')} && "
+        f"{absent_or_empty(f'{metadata}.finalizers')} && "
+        f"!has({metadata}.generateName) && "
+        f"{absent_or_empty(f'{metadata}.ownerReferences')} && "
+        f"({labels}.size() == 16 || "
+        f"({labels}.size() == 17 && "
+        f"{labels}['kubernetes.io/metadata.name'] == {metadata}.name)) && "
+        f"{labels}['app.kubernetes.io/managed-by'] == "
+        "'loom-personal-dev-builder-controller' && "
+        f"{labels}['app.kubernetes.io/part-of'] == 'loom' && "
+        f"{labels}['loom.dev/candidate'].matches('^[0-9a-f]{{12}}$') && "
+        f"{labels}['loom.dev/subject'].matches('{uuid_pattern}') && "
+        f"{labels}['loom.dev/incarnation'].matches('{uuid_pattern}') && "
+        f"{labels}['loom.dev/operation'].matches('{uuid_pattern}') && "
+        f"{labels}['loom.dev/attempt'].matches('{uuid_pattern}') && "
+        f"{_builder_attempt_matches_namespace(labels=labels, namespace=f'{metadata}.name')} && "
+        f"{labels}['loom.dev/operation-epoch'].matches('^[1-9][0-9]*$') && "
+        f"{labels}['loom.dev/build-attempt-sequence'].matches('^[0-9]+$') && "
+        f"{labels}['loom.dev/build-lease-epoch'].matches('^[1-9][0-9]*$') && "
+        f"{labels}['pod-security.kubernetes.io/enforce'] == 'privileged' && "
+        f"{labels}['pod-security.kubernetes.io/enforce-version'] == 'v1.36' && "
+        f"{labels}['pod-security.kubernetes.io/audit'] == 'restricted' && "
+        f"{labels}['pod-security.kubernetes.io/audit-version'] == 'v1.36' && "
+        f"{labels}['pod-security.kubernetes.io/warn'] == 'restricted' && "
+        f"{labels}['pod-security.kubernetes.io/warn-version'] == 'v1.36'"
+    )
 
 
 def _service_account(
@@ -481,6 +535,7 @@ def _management_namespace_admission(context: _RenderContext) -> tuple[dict[str, 
                 },
                 {
                     "expression": (
+                        "request.operation == 'DELETE' || "
                         f"({personal_namespace} && "
                         f"{target}.metadata.labels["
                         "'pod-security.kubernetes.io/enforce'] == 'restricted') || "
@@ -502,6 +557,7 @@ def _management_namespace_admission(context: _RenderContext) -> tuple[dict[str, 
                 },
                 {
                     "expression": (
+                        "request.operation == 'DELETE' || "
                         f"({target}.metadata.name.startsWith('loom-dev-') && "
                         f"{target}.metadata.labels['app.kubernetes.io/managed-by'] == "
                         "'loom-dev-instance-controller') || "
@@ -511,10 +567,51 @@ def _management_namespace_admission(context: _RenderContext) -> tuple[dict[str, 
                     ),
                     "message": "managed namespace family and authority label differ",
                 },
+                {
+                    "expression": (
+                        "request.operation == 'DELETE' || "
+                        f"!{builder_namespace} || "
+                        f"({_builder_namespace_metadata_contract(target)})"
+                    ),
+                    "message": "builder namespace metadata differs from its exact contract",
+                },
             ],
         },
     }
     return policy, _admission_binding(context, name)
+
+
+def _builder_resource_metadata_contract(target: str) -> str:
+    metadata = f"{target}.metadata"
+    labels = f"{metadata}.labels"
+
+    def absent_or_empty(field: str) -> str:
+        return f"(!has({field}) || {field}.size() == 0)"
+
+    return (
+        f"{metadata}.namespace == request.namespace && "
+        f"{absent_or_empty(f'{metadata}.annotations')} && "
+        f"{absent_or_empty(f'{metadata}.finalizers')} && "
+        f"!has({metadata}.generateName) && "
+        f"{absent_or_empty(f'{metadata}.ownerReferences')} && "
+        f"{labels}.size() == 10 && "
+        f"{labels}['app.kubernetes.io/managed-by'] == "
+        "'loom-personal-dev-builder-controller' && "
+        f"{labels}['app.kubernetes.io/part-of'] == 'loom' && "
+        f"{labels}['loom.dev/candidate'].matches('^[0-9a-f]{{12}}$') && "
+        f"{labels}['loom.dev/subject'].matches("
+        "'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') && "
+        f"{labels}['loom.dev/incarnation'].matches("
+        "'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') && "
+        f"{labels}['loom.dev/operation'].matches("
+        "'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') && "
+        f"{labels}['loom.dev/attempt'].matches("
+        "'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') && "
+        f"{_builder_attempt_matches_namespace(labels=labels, namespace='request.namespace')} && "
+        f"{labels}['loom.dev/operation-epoch'].matches('^[1-9][0-9]*$') && "
+        f"{labels}['loom.dev/build-attempt-sequence'].matches('^[0-9]+$') && "
+        f"{labels}['loom.dev/build-lease-epoch'].matches('^[1-9][0-9]*$')"
+    )
 
 
 def _builder_job_admission_validations(
@@ -655,6 +752,7 @@ def _builder_job_admission_validations(
         "'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') && "
         f"{job_labels}['loom.dev/attempt'].matches("
         "'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') && "
+        f"{_builder_attempt_matches_namespace(labels=job_labels, namespace='request.namespace')} && "
         f"{job_labels}['loom.dev/operation-epoch'].matches('^[1-9][0-9]*$') && "
         f"{job_labels}['loom.dev/build-attempt-sequence'].matches('^[0-9]+$') && "
         f"{job_labels}['loom.dev/build-lease-epoch'].matches('^[1-9][0-9]*$') && "
@@ -1137,6 +1235,12 @@ def _builder_network_policy_admission_validations(
         f"{target}.apiVersion == 'networking.k8s.io/v1' && "
         f"{target}.kind == 'NetworkPolicy'"
     )
+    metadata_boundary = (
+        "request.operation == 'DELETE' || "
+        f"!{builder_network_policy} || "
+        f"({target}.metadata.name in ['default-deny','builder-egress'] && "
+        f"{_builder_resource_metadata_contract(target)})"
+    )
     default_deny = guarded(
         "default-deny",
         f"{common_identity} && {empty_selector(f'{spec}.podSelector')} && "
@@ -1189,15 +1293,12 @@ def _builder_network_policy_admission_validations(
     public = f"{egress}[2]"
     ipv4 = f"{public}.to[0]"
     ipv6 = f"{public}.to[1]"
-    ipv4_except = (
-        "['0.0.0.0/8','10.0.0.0/8','100.64.0.0/10','127.0.0.0/8',"
-        "'169.254.0.0/16','172.16.0.0/12','192.0.0.0/24','192.0.2.0/24',"
-        "'192.168.0.0/16','198.18.0.0/15','198.51.100.0/24',"
-        "'203.0.113.0/24','224.0.0.0/4','240.0.0.0/4']"
-    )
-    ipv6_except = (
-        "['::/128','::1/128','2001:db8::/32','fc00::/7','fe80::/10','ff00::/8']"
-    )
+    ipv4_except = "[" + ",".join(
+        f"'{value}'" for value in PUBLIC_EGRESS_IPV4_EXCEPTIONS
+    ) + "]"
+    ipv6_except = "[" + ",".join(
+        f"'{value}'" for value in PUBLIC_EGRESS_IPV6_EXCEPTIONS
+    ) + "]"
     public_egress = guarded(
         "builder-egress",
         f"has({egress}) && {egress}.size() == 3 && "
@@ -1206,7 +1307,8 @@ def _builder_network_policy_admission_validations(
         f"has({ipv4}.ipBlock.except) && "
         f"{ipv4}.ipBlock.except == {ipv4_except} && "
         f"!has({ipv4}.namespaceSelector) && !has({ipv4}.podSelector) && "
-        f"has({ipv6}.ipBlock) && {ipv6}.ipBlock.cidr == '::/0' && "
+        f"has({ipv6}.ipBlock) && "
+        f"{ipv6}.ipBlock.cidr == '{PUBLIC_EGRESS_IPV6_CIDR}' && "
         f"has({ipv6}.ipBlock.except) && "
         f"{ipv6}.ipBlock.except == {ipv6_except} && "
         f"!has({ipv6}.namespaceSelector) && !has({ipv6}.podSelector) && "
@@ -1215,6 +1317,10 @@ def _builder_network_policy_admission_validations(
         f"{exact_port(f'{public}.ports[1]', protocol='TCP', number=443)}",
     )
     return (
+        {
+            "expression": metadata_boundary,
+            "message": "builder NetworkPolicy metadata differs from its exact contract",
+        },
         {
             "expression": default_deny,
             "message": "builder NetworkPolicy default deny differs from its exact contract",
@@ -1234,6 +1340,127 @@ def _builder_network_policy_admission_validations(
         {
             "expression": public_egress,
             "message": "builder NetworkPolicy public egress differs from its exact contract",
+        },
+    )
+
+
+def _builder_support_resource_admission_validations(
+    *,
+    target: str,
+    builder_namespace: str,
+) -> tuple[dict[str, str], ...]:
+    metadata = f"{target}.metadata"
+
+    def exact_quantity(value: str, expected: str) -> str:
+        return f"quantity(string({value})).compareTo(quantity('{expected}')) == 0"
+
+    def absent_or_empty(field: str) -> str:
+        return f"(!has({field}) || {field}.size() == 0)"
+
+    def builder_resource(resource: str) -> str:
+        return (
+            f"({builder_namespace} && request.resource.group == '' && "
+            "request.resource.version == 'v1' && "
+            f"request.resource.resource == '{resource}')"
+        )
+
+    def guarded(resource: str, contract: str) -> str:
+        return (
+            "request.operation == 'DELETE' || "
+            f"!{builder_resource(resource)} || ({contract})"
+        )
+
+    common_metadata = _builder_resource_metadata_contract(target)
+    lease_suffix = "request.namespace.substring(44)"
+    config_map_name = (
+        f"({metadata}.name == 'build-contract-amd64-' + {lease_suffix} || "
+        f"{metadata}.name == 'build-contract-arm64-' + {lease_suffix})"
+    )
+    secret_name = (
+        f"({metadata}.name == 'build-capability-amd64-' + {lease_suffix} || "
+        f"{metadata}.name == 'build-capability-arm64-' + {lease_suffix})"
+    )
+    config_map = guarded(
+        "configmaps",
+        f"{target}.apiVersion == 'v1' && {target}.kind == 'ConfigMap' && "
+        f"{common_metadata} && {config_map_name} && "
+        f"{target}.immutable == true && has({target}.data) && "
+        f"{target}.data.size() == 1 && "
+        f"{target}.data['contract.json'].size() > 0 && "
+        f"{target}.data['contract.json'].size() <= 65536 && "
+        f"{absent_or_empty(f'{target}.binaryData')}",
+    )
+    secret = guarded(
+        "secrets",
+        f"{target}.apiVersion == 'v1' && {target}.kind == 'Secret' && "
+        f"{common_metadata} && {secret_name} && "
+        f"{target}.immutable == true && {target}.type == 'Opaque' && "
+        f"has({target}.data) && {target}.data.size() == 2 && "
+        f"{target}.data['artifact-upload.json'].size() > 0 && "
+        f"{target}.data['artifact-upload.json'].size() <= 65536 && "
+        f"{target}.data['source-get-url'].size() > 0 && "
+        f"{target}.data['source-get-url'].size() <= 8192 && "
+        f"{absent_or_empty(f'{target}.stringData')}",
+    )
+    limit = f"{target}.spec.limits[0]"
+    default_request = f"{limit}.defaultRequest"
+    default_limit = f"{limit}.default"
+    limit_range = guarded(
+        "limitranges",
+        f"{target}.apiVersion == 'v1' && {target}.kind == 'LimitRange' && "
+        f"{common_metadata} && {metadata}.name == 'builder-limits' && "
+        f"{target}.spec.limits.size() == 1 && {limit}.type == 'Container' && "
+        f"has({default_request}) && {default_request}.size() == 3 && "
+        + exact_quantity(f"{default_request}['cpu']", "1")
+        + " && "
+        + exact_quantity(f"{default_request}['memory']", "1Gi")
+        + " && "
+        + exact_quantity(f"{default_request}['ephemeral-storage']", "4Gi")
+        + " && "
+        f"has({default_limit}) && {default_limit}.size() == 3 && "
+        + exact_quantity(f"{default_limit}['cpu']", "4")
+        + " && "
+        + exact_quantity(f"{default_limit}['memory']", "8Gi")
+        + " && "
+        + exact_quantity(f"{default_limit}['ephemeral-storage']", "20Gi")
+        + " && "
+        f"{absent_or_empty(f'{limit}.max')} && "
+        f"{absent_or_empty(f'{limit}.min')} && "
+        f"{absent_or_empty(f'{limit}.maxLimitRequestRatio')}",
+    )
+    hard = f"{target}.spec.hard"
+    resource_quota = guarded(
+        "resourcequotas",
+        f"{target}.apiVersion == 'v1' && {target}.kind == 'ResourceQuota' && "
+        f"{common_metadata} && {metadata}.name == 'builder-quota' && "
+        f"has({hard}) && {hard}.size() == 4 && "
+        + exact_quantity(f"{hard}['configmaps']", "3")
+        + " && "
+        + exact_quantity(f"{hard}['count/jobs.batch']", "2")
+        + " && "
+        + exact_quantity(f"{hard}['pods']", "2")
+        + " && "
+        + exact_quantity(f"{hard}['secrets']", "2")
+        + " && "
+        f"{absent_or_empty(f'{target}.spec.scopes')} && "
+        f"!has({target}.spec.scopeSelector)",
+    )
+    return (
+        {
+            "expression": config_map,
+            "message": "builder support ConfigMap differs from its exact contract",
+        },
+        {
+            "expression": secret,
+            "message": "builder support Secret differs from its exact contract",
+        },
+        {
+            "expression": limit_range,
+            "message": "builder support LimitRange differs from its exact contract",
+        },
+        {
+            "expression": resource_quota,
+            "message": "builder support ResourceQuota differs from its exact contract",
         },
     )
 
@@ -1366,6 +1593,17 @@ def _management_resource_admission(
         f"{container_without_secret_references('containers')} && "
         f"{container_without_secret_references('initContainers')})"
     )
+    builder_role_binding_metadata = (
+        "request.operation == 'DELETE' || "
+        f"!({builder_namespace} && "
+        "request.resource.group == 'rbac.authorization.k8s.io' && "
+        "request.resource.version == 'v1' && "
+        "request.resource.resource == 'rolebindings') || "
+        f"({target}.apiVersion == 'rbac.authorization.k8s.io/v1' && "
+        f"{target}.kind == 'RoleBinding' && "
+        f"{target}.metadata.name == 'loom-personal-dev-management' && "
+        f"{_builder_resource_metadata_contract(target)})"
+    )
     policy = {
         "apiVersion": "admissionregistration.k8s.io/v1",
         "kind": "ValidatingAdmissionPolicy",
@@ -1421,6 +1659,7 @@ def _management_resource_admission(
                 {
                     "expression": (
                         f"{shared_minio_exec} || "
+                        "request.operation == 'DELETE' || "
                         f"({personal_namespace} && "
                         f"(({capacity_owned_resource} && "
                         f"{target}.metadata.labels['app.kubernetes.io/managed-by'] == "
@@ -1437,6 +1676,7 @@ def _management_resource_admission(
                 {
                     "expression": (
                         f"{shared_minio_exec} || "
+                        "request.operation == 'DELETE' || "
                         "!(request.resource.resource in ['deployments','jobs']) || "
                         f"({personal_namespace} && "
                         "((request.resource.resource == 'deployments' && "
@@ -1473,6 +1713,7 @@ def _management_resource_admission(
                 },
                 {
                     "expression": (
+                        "request.operation == 'DELETE' || "
                         "request.resource.resource != 'rolebindings' || "
                         f"({target}.metadata.name == 'loom-personal-dev-management' && "
                         f"{target}.roleRef.kind == 'ClusterRole' && "
@@ -1492,7 +1733,17 @@ def _management_resource_admission(
                     ),
                     "message": "management RoleBinding is outside its exact delegated roles",
                 },
+                {
+                    "expression": builder_role_binding_metadata,
+                    "message": (
+                        "builder RoleBinding metadata differs from its exact contract"
+                    ),
+                },
                 *_builder_network_policy_admission_validations(
+                    target=target,
+                    builder_namespace=builder_namespace,
+                ),
+                *_builder_support_resource_admission_validations(
                     target=target,
                     builder_namespace=builder_namespace,
                 ),

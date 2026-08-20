@@ -120,11 +120,26 @@ and capability volumes, forbids ConfigMap/Secret item remapping or optionality,
 and keeps every `emptyDir` disk-backed with no recursive mount override.
 Quantity comparisons use Kubernetes' `Quantity.compareTo` API so equivalent
 canonical forms are accepted while different resource envelopes are denied.
+The same policy requires immutable, attempt/platform-named ConfigMaps and
+Secrets with exact key inventories and bounded values, plus the exact
+container defaults and hard counts in the builder LimitRange and
+ResourceQuota. The ConfigMap quota is exactly three: one slot for Kubernetes'
+injected `kube-root-ca.crt` plus one immutable contract for each target
+platform. Their variable contract and capability values remain visible only to
+the client; a permitted object name is not permission to change the supporting
+object's authority shape. Every namespaced builder resource also couples its
+attempt label to the enclosing attempt Namespace.
 The same policy binds `default-deny` and `builder-egress` to their exact
 generated selectors, peers, ports, and private/reserved-network exclusions; a
-permitted resource name cannot be used to install wider egress. Deletes remain
-shape-independent so the controller can remove an object drifted by a
-higher-authority principal.
+permitted resource name cannot be used to install wider egress. NetworkPolicy
+and delegated RoleBinding metadata also reject finalizers, owner references,
+annotations, or extra labels that could delegate authority or wedge teardown.
+The privileged builder Namespace itself has the same non-delete metadata
+boundary: its exact attempt labels are required, the attempt UUID is coupled to
+the Namespace name, and only Kubernetes' matching injected
+`kubernetes.io/metadata.name` label is optional. Namespace and namespaced-object
+deletes remain shape-independent so the controller can remove an object drifted
+by a higher-authority principal.
 The management RBAC cannot create Pods directly; the Job controller can create
 only Pods from a template that passed this policy. Only the management service
 account can create workloads in the namespace, the ResourceQuota still permits
@@ -178,7 +193,9 @@ semantics terminate the sidecar without keeping the Job alive.
 
 The trusted image build fails unless the base still supplies the expected
 RootlessKit version and binary plus the exact `newuidmap`/`newgidmap` file
-capabilities. The fail-closed sidecar launcher is a checked-in trusted-image
+capabilities and the executable foreign-architecture QEMU helper:
+`buildkit-qemu-aarch64` in the amd64 image and `buildkit-qemu-x86_64` in the
+arm64 image. The fail-closed sidecar launcher is a checked-in trusted-image
 source and its preflight marker is captured in bounded sidecar logs. These are
 part of trusted image publication evidence, not mutable node prerequisites.
 The RootlessKit binary binding is architecture-specific: SHA-256
@@ -206,19 +223,29 @@ for arm64 in the pinned multi-platform base.
    creates the canonical artifact, and uploads it with its one-attempt
    capability.
 
-The shared Pod network is necessary for base-image egress. The trusted client
-opens no listener, and its capability files are absent from the sidecar mount
-namespace. A build can exfiltrate its own source or fail its attempt; it cannot
-obtain the upload capability or Kubernetes authority.
+The shared Pod network is necessary for base-image egress. Exact policies
+separate DNS and shared MinIO from public HTTP(S), exclude IPv4 private,
+reserved, documentation, benchmark, multicast, and deprecated transition
+space, and admit IPv6 only from `2000::/3` after excluding its IETF-special,
+documentation, 6to4, and documentation-expansion ranges. IPv4-mapped, NAT64,
+Teredo, ULA, link-local, multicast, and unallocated IPv6 therefore cannot turn
+public egress into an internal route. The trusted client opens no listener,
+and its capability files are absent from the sidecar mount namespace. A build
+can exfiltrate its own source or fail its attempt; it cannot obtain the upload
+capability or Kubernetes authority.
 
 ## Failure and cleanup behavior
 
-The client uses a bounded readiness wait before the first build. Socket absence,
-worker-probe failure, daemon exit, build failure, output verification failure,
-or sidecar restart makes the attempt fail closed. Jobs retain `backoffLimit: 0`,
-the attempt lease fences late results, and the existing controller removes the
-ephemeral namespace. BuildKit state and both temporary volumes are `emptyDir`
-and disappear with the Pod.
+The client uses a bounded readiness wait before the first build. Socket
+absence, worker-probe failure, daemon exit, build failure, or output
+verification failure makes the attempt fail closed. As soon as each Job
+completes, the controller reads its single Pod and requires the client to have
+exited zero and both client and sidecar restart counts to remain zero before
+publication; this happens before the completed-Job TTL can remove an early
+platform Pod. Jobs retain `backoffLimit: 0`, the attempt lease fences late
+results, and the existing controller removes the ephemeral namespace.
+BuildKit state and both temporary volumes are `emptyDir` and disappear with
+the Pod.
 
 The runtime rollout remains fail-closed. A new trusted release and issue #1280
 window must install the exact RuntimeClass, prove all four gVisor nodes, then
@@ -244,8 +271,10 @@ Repository tests must prove:
 - resource and volume quantities use semantic Kubernetes Quantity comparison,
   admitting equivalent forms such as `1000m` for one CPU but no larger value;
 - the same policy admits only the exact builder default-deny and egress shapes,
-  denies selector/peer/port/CIDR widening, and permits cleanup of drifted
-  policies;
+  denies selector/peer/port/CIDR or metadata widening, constrains the delegated
+  RoleBinding metadata, and permits cleanup of drifted policies;
+- the contract ConfigMap, capability Secret, LimitRange, and ResourceQuota
+  retain their immutable, attempt-bound, finite shapes;
 - explicit false shared PID namespace and absent service-account token;
 - the client retains the restricted security context and is the sole consumer
   of contract, capability, workspace, and output volumes;
@@ -253,8 +282,11 @@ Repository tests must prove:
   seccomp, privilege escalation, private state/tmp mounts, native-sidecar
   lifecycle, and no authority-bearing mounts;
 - the client calls `buildctl` directly at the exact Unix address;
-- trusted-image checks bind RootlessKit and both helper file capabilities; and
-- status and cleanup logic accept only the exact two-container contract.
+- trusted-image checks bind RootlessKit and both helper file capabilities;
+- trusted-image checks bind the target-architecture-specific foreign QEMU
+  helper; and
+- status, completion, and cleanup logic accept only the exact two-container
+  contract with zero restarts.
 
 Protected operational conformance must additionally prove:
 
