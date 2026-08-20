@@ -333,9 +333,8 @@ def test_witness_loader_rejects_a_file_whose_security_identity_changes_during_re
         nonlocal changed
         if not changed:
             changed = True
-            transient_link = tmp_path / "witness-transient-link.json"
-            os.link(witness, transient_link)
-            transient_link.unlink()
+            hard_link = tmp_path / "witness-hard-link.json"
+            os.link(witness, hard_link)
         return original_read(descriptor, amount)
 
     monkeypatch.setattr(os, "read", read_and_change_security_identity)

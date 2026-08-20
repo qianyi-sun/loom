@@ -185,13 +185,21 @@ def encode_pipeline_cursor(
     return base64.urlsafe_b64encode(payload + signature).decode().rstrip("=")
 
 
+def _decode_canonical_urlsafe_base64(value: str) -> bytes:
+    import base64
+
+    raw = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    canonical = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    if not hmac.compare_digest(value, canonical):
+        raise ValueError("non-canonical base64url")
+    return raw
+
+
 def decode_pipeline_cursor(
     value: str, *, filter_digest: str, signing_key: bytes
 ) -> tuple[datetime, UUID]:
-    import base64
-
     try:
-        raw = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+        raw = _decode_canonical_urlsafe_base64(value)
         payload, signature = raw[:-32], raw[-32:]
         if not hmac.compare_digest(
             signature, hmac.new(signing_key, payload, hashlib.sha256).digest()
@@ -227,10 +235,8 @@ def encode_pipeline_stage_cursor(
 def decode_pipeline_stage_cursor(
     value: str, *, filter_digest: str, signing_key: bytes
 ) -> tuple[str, str]:
-    import base64
-
     try:
-        raw = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+        raw = _decode_canonical_urlsafe_base64(value)
         payload, signature = raw[:-32], raw[-32:]
         if not hmac.compare_digest(
             signature, hmac.new(signing_key, payload, hashlib.sha256).digest()
