@@ -89,7 +89,7 @@ def probe_kubernetes_client(
     context_ready = False
     if context_result is not None and context_result.returncode == 0:
         candidate = context_result.stdout.strip()
-        if candidate in {cluster_name, f"kind-{cluster_name}"} and "\n" not in candidate:
+        if candidate == cluster_name and "\n" not in candidate:
             context = candidate
             context_ready = True
     namespace_result = _run(

@@ -30,7 +30,7 @@ from loom_cli.rollout.steps.s02_build_images import (
     rollout_images,
     rollout_images_from_candidate,
 )
-from loom_cli.rollout.steps.s03_kind_load_images import (
+from loom_cli.rollout.steps.s04_publish_images import (
     _registry_publication,
     registry_image_digests,
 )

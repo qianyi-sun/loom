@@ -54,7 +54,7 @@ class TestStepRecord:
     """A single row in state.json's `steps` list."""
 
     def test_dataclass_defaults(self) -> None:
-        rec = StepRecord(number=4, name="kind-load")
+        rec = StepRecord(number=4, name="publish-images")
         assert rec.state is StepState.NOT_STARTED
         assert rec.inputs_hash is None
         assert rec.started_at is None
@@ -64,7 +64,7 @@ class TestStepRecord:
     def test_to_dict_roundtrip(self) -> None:
         rec = StepRecord(
             number=4,
-            name="kind-load",
+            name="publish-images",
             state=StepState.DONE,
             inputs_hash="abc123",
             started_at="2026-07-02T22:00:00Z",
@@ -73,7 +73,7 @@ class TestStepRecord:
         data = rec.to_dict()
         assert data == {
             "number": 4,
-            "name": "kind-load",
+            "name": "publish-images",
             "state": "done",
             "inputs_hash": "abc123",
             "started_at": "2026-07-02T22:00:00Z",

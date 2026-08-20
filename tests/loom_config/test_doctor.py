@@ -87,7 +87,7 @@ def test_router_proxy_pods_are_not_classified_as_a_service() -> None:
     # `loom-worker-router` / `loom-minio-router` socat pods share a name
     # prefix with the `worker` / `minio` schema services but carry none of
     # their env. Doctor must not flag every declared env var as missing on
-    # them (regression: kind staging smoke storage-lifecycle round-trip).
+    # them (regression: staging smoke storage-lifecycle round-trip).
     schema = load_schema(Path("config/loom-schema.toml"))
     secret_keys = set()
     for name in schema.service_config:

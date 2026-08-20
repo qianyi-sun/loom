@@ -212,7 +212,7 @@ them. Lazy-route fixtures must wire `RouteRecoveryBoundary` with
 Retry policy.
 
 The staging admin browser flow remains a broker-owned, candidate-bound healthy
-acceptance check. Ephemeral kind remains a non-protected development cluster
+acceptance check. Disposable local environments remain non-protected development
 with only the credential-free deny probe. Neither path may inject recovery
 faults, mint or read an admin session for local tests, relax its console guard,
 or substitute for the local browser matrix. Protected rollout acceptance

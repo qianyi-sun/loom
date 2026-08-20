@@ -586,7 +586,7 @@ spec:
               watchers + admin slack`.
             runbook_url: "https://github.com/qianyi-sun/loom/blob/dev/docs/architecture/pgbouncer.md"
 
-        # pgbouncer pod is unreachable. Under normal operation, kind's
+        # pgbouncer pod is unreachable. Under normal operation, the cluster's
         # Service should route between the 2 replicas; both being
         # scrape-unreachable means the whole path is down. Same tier
         # as Postgres SPOF — every SQLAlchemy engine returns 5xx until

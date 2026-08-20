@@ -14,7 +14,6 @@ contracts.
 
 ## Superseded designs and specifications
 
-- [`auth-registration-spec.md`](auth-registration-spec.md)
 - [`auth-threat-model-design.md`](auth-threat-model-design.md)
 - [`config-consolidation.md`](config-consolidation.md)
 - [`family-runs-design.md`](family-runs-design.md)
@@ -25,10 +24,8 @@ contracts.
 - [`loom-spa-v3.md`](loom-spa-v3.md)
 - [`multi-dev-env-design.md`](multi-dev-env-design.md)
 - [`multi-server-local-llm-design.md`](multi-server-local-llm-design.md)
-- [`pgbouncer-transaction-mode-design.md`](pgbouncer-transaction-mode-design.md)
 - [`responses-api-support-probe.md`](responses-api-support-probe.md)
 - [`rollout-reconciler.md`](rollout-reconciler.md)
-- [`sandbox-isolation-design.md`](sandbox-isolation-design.md)
 - [`self-service-runtime-registration.md`](self-service-runtime-registration.md)
 - [`storage-backend-pluggability.md`](storage-backend-pluggability.md)
 - [`storage-retention-design.md`](storage-retention-design.md)
@@ -46,10 +43,7 @@ contracts.
 
 ## Historical and status records
 
-- [`ci-runner-acceleration-history.md`](ci-runner-acceleration-history.md)
-- [`cluster-deploy-history.md`](cluster-deploy-history.md)
 - [`global-dev-fleet-autoscaler-status.md`](global-dev-fleet-autoscaler-status.md)
 - [`global-fleet-capacity-manager-status.md`](global-fleet-capacity-manager-status.md)
-- [`multi-node-topology-history.md`](multi-node-topology-history.md)
 - [`pr-ci-assessment-2026-08-04.md`](pr-ci-assessment-2026-08-04.md)
 - [`staging-data-lifecycle-history.md`](staging-data-lifecycle-history.md)

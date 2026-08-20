@@ -16,7 +16,7 @@ multi-doc YAML and flags:
 
 The auditor is read-only and pure — it takes rendered YAML as input
 and emits a list of violations. `loom cluster audit` wraps it with
-a config loader + render call, and the kind smoke (#107) runs it
+a config loader + render call, and the cluster smoke (#107) runs it
 before apply so a boundary regression fails CI loudly instead of
 landing silently.
 """

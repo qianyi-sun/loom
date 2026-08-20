@@ -90,15 +90,15 @@ class TestEvidenceDirectory:
             elif operation == "append-driver-log":
                 ev.append_driver_log("safe diagnostic\n")
             else:
-                ev.step_dir(4, "kind-load")
+                ev.step_dir(4, "publish-images")
 
         assert list(outside.iterdir()) == []
 
     def test_step_dir_creates_zero_padded_prefix(self, tmp_path: Path) -> None:
         ev = EvidenceDirectory(tmp_path, "rid")
         ev.ensure()
-        s4 = ev.step_dir(4, "kind-load")
-        assert s4.path.name == "04-kind-load"
+        s4 = ev.step_dir(4, "publish-images")
+        assert s4.path.name == "04-publish-images"
         assert s4.path.is_dir()
         s12 = ev.step_dir(10, "cluster-up")
         assert s12.path.name == "10-cluster-up"
@@ -296,7 +296,7 @@ class TestEvidenceDirectory:
     def test_write_and_read_step_result(self, tmp_path: Path) -> None:
         ev = EvidenceDirectory(tmp_path, "rid")
         ev.ensure()
-        s = ev.step_dir(4, "kind-load")
+        s = ev.step_dir(4, "publish-images")
         assert ev.read_step_result(s) is None
         ev.write_step_result(
             s,
@@ -320,7 +320,7 @@ class TestEvidenceDirectory:
     def test_step_result_refuses_a_step_directory_symlink(self, tmp_path: Path) -> None:
         ev = EvidenceDirectory(tmp_path, "rid")
         ev.ensure()
-        step = ev.step_dir(4, "kind-load")
+        step = ev.step_dir(4, "publish-images")
         step.path.rmdir()
         outside = tmp_path / "outside-step"
         outside.mkdir()
@@ -338,7 +338,7 @@ class TestEvidenceDirectory:
         secret = "opaque-evidence-secret"
         ev = EvidenceDirectory(tmp_path, "rid")
         ev.ensure()
-        step_dir = ev.step_dir(4, "kind-load")
+        step_dir = ev.step_dir(4, "publish-images")
 
         with rollout_redaction_scope((secret,)):
             ev.write_step_result(
@@ -358,21 +358,21 @@ class TestEvidenceDirectory:
     def test_existing_step_dir_returns_none_if_missing(self, tmp_path: Path) -> None:
         ev = EvidenceDirectory(tmp_path, "rid")
         ev.ensure()
-        assert ev.existing_step_dir(4, "kind-load") is None
-        ev.step_dir(4, "kind-load")
-        got = ev.existing_step_dir(4, "kind-load")
+        assert ev.existing_step_dir(4, "publish-images") is None
+        ev.step_dir(4, "publish-images")
+        got = ev.existing_step_dir(4, "publish-images")
         assert got is not None
-        assert got.path.name == "04-kind-load"
+        assert got.path.name == "04-publish-images"
 
     def test_existing_step_dir_refuses_a_symlink(self, tmp_path: Path) -> None:
         ev = EvidenceDirectory(tmp_path, "rid")
         ev.ensure()
         outside = tmp_path / "outside-step"
         outside.mkdir()
-        (ev.path / "04-kind-load").symlink_to(outside, target_is_directory=True)
+        (ev.path / "04-publish-images").symlink_to(outside, target_is_directory=True)
 
         with pytest.raises(OSError):
-            ev.existing_step_dir(4, "kind-load")
+            ev.existing_step_dir(4, "publish-images")
 
 
 class TestResumeDocuments:
