@@ -82,18 +82,40 @@ IDs for correct extraction and output. Forking RootlessKit to implement
 security-critical multi-ID mapping would create more privileged code than the
 two pinned, established helpers and would still require namespace syscalls.
 
+### Rejected: an allow-all Localhost seccomp profile
+
+Baseline permits a `Localhost` seccomp profile, so a node-installed profile
+with `SCMP_ACT_ALLOW` could preserve the Baseline label while reporting
+seccomp mode 2. It would not reduce the permitted syscall set, would add a
+mutable prerequisite to every eligible node, and would make the label imply a
+restriction that does not exist. The explicit `privileged` PSA label plus an
+exact Loom admission contract is simpler, fail-closed, and auditable in the
+same protected release as the workload.
+
 ## Pod and namespace contract
 
 Each target-platform Job keeps one Pod and uses the exact measured gVisor
 RuntimeClass. `shareProcessNamespace` is explicitly false and
 `automountServiceAccountToken` is false.
 
-The dynamic build namespace uses Pod Security Admission `baseline` enforcement
-at `v1.36`, with `restricted` audit and warning at `v1.36`. Baseline is the
-narrowest standard that admits RootlessKit's required startup contract. Only
-the management service account can create workloads there, the ResourceQuota
-still permits exactly two Jobs and two Pods, and candidate code receives no
-Kubernetes credential.
+The dynamic build namespace uses Pod Security Admission `privileged`
+enforcement at `v1.36`, with `restricted` audit and warning at `v1.36`.
+Kubernetes Baseline explicitly rejects a container whose seccomp type is
+`Unconfined`; describing this exception as Baseline would therefore make every
+builder Job fail admission. The namespace label is an honest statement about
+the one standard-policy exception, not the workload's effective authority.
+
+A Loom ValidatingAdmissionPolicy supplies the application-specific boundary
+that the standard policies do not express. For every builder Job submitted by
+the management principal it binds the exact trusted image digest and measured
+RuntimeClass, the single restricted client plus single native sidecar shape,
+separate PID namespace, disabled service-account token and service links,
+non-host namespaces, exact security contexts, exact volume separation, and
+finite resource envelope. The management RBAC cannot create Pods directly;
+the Job controller can create only Pods from a template that passed this
+policy. Only the management service account can create workloads in the
+namespace, the ResourceQuota still permits exactly two Jobs and two Pods, and
+candidate code receives no Kubernetes credential.
 
 ### Trusted client container
 
@@ -191,7 +213,10 @@ sidecar, capacity-ceiling change, or personal acceptance.
 
 Repository tests must prove:
 
-- exact PSA baseline enforcement and restricted audit/warn versions;
+- exact PSA privileged enforcement and restricted audit/warn versions;
+- the management admission policy binds builder Jobs to the release's trusted
+  image, measured RuntimeClass, exact two-container security shape, isolated
+  mounts, non-host namespaces, and finite resources;
 - explicit false shared PID namespace and absent service-account token;
 - the client retains the restricted security context and is the sole consumer
   of contract, capability, workspace, and output volumes;

@@ -251,7 +251,7 @@ assert_smoke_namespace_owned() {
         .metadata.annotations["loom.dev/runtime-rollout-source-sha"] == $source and
         .metadata.labels["pod-security.kubernetes.io/audit"] == "restricted" and
         .metadata.labels["pod-security.kubernetes.io/audit-version"] == "v1.36" and
-        .metadata.labels["pod-security.kubernetes.io/enforce"] == "baseline" and
+        .metadata.labels["pod-security.kubernetes.io/enforce"] == "privileged" and
         .metadata.labels["pod-security.kubernetes.io/enforce-version"] == "v1.36" and
         .metadata.labels["pod-security.kubernetes.io/warn"] == "restricted" and
         .metadata.labels["pod-security.kubernetes.io/warn-version"] == "v1.36"
@@ -1060,6 +1060,11 @@ multi-architecture Python base already pinned by this repository is suitable.
 The temporary namespace is `loom-runtime-smoke`, never a personal or builder
 namespace. The Pod is bound directly to each reviewed node and still names the
 exact RuntimeClass. `/proc/gvisor/kernel_is_gvisor` is the in-sandbox marker.
+Kubernetes Baseline rejects the conformance sidecar's explicit seccomp
+`Unconfined` setting, so this operator-owned namespace declares privileged PSA
+enforcement and keeps restricted audit/warn. The JSON checks below enforce the
+exact workload shape, and the whole namespace is deleted before the window can
+close.
 
 ```bash
 smoke_namespace=loom-runtime-smoke
@@ -1076,7 +1081,7 @@ jq -n --arg namespace "$smoke_namespace" --arg source "$merged_source_sha" '{
       "app.kubernetes.io/managed-by": "loom-personal-dev-runtime-smoke",
       "pod-security.kubernetes.io/audit": "restricted",
       "pod-security.kubernetes.io/audit-version": "v1.36",
-      "pod-security.kubernetes.io/enforce": "baseline",
+      "pod-security.kubernetes.io/enforce": "privileged",
       "pod-security.kubernetes.io/enforce-version": "v1.36",
       "pod-security.kubernetes.io/warn": "restricted",
       "pod-security.kubernetes.io/warn-version": "v1.36"

@@ -35,7 +35,7 @@ _RESERVED_PERSONAL_NAMESPACE = re.compile(
 )
 _BUILDER_NAMESPACE = re.compile(r"loom-build-[0-9a-f]{32}-l[0-9a-f]{16}")
 _BUILDER_POD_SECURITY_LABELS = (
-    ("pod-security.kubernetes.io/enforce", "baseline"),
+    ("pod-security.kubernetes.io/enforce", "privileged"),
     ("pod-security.kubernetes.io/enforce-version", "v1.36"),
     ("pod-security.kubernetes.io/audit", "restricted"),
     ("pod-security.kubernetes.io/audit-version", "v1.36"),

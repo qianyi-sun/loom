@@ -53,6 +53,15 @@ its authority-bearing files. Network policy remains default-deny, and runsc
 uses its sandbox network stack with host UDS/FIFO and raw packet writes
 disabled.
 
+Kubernetes Baseline PSA rejects explicit seccomp `Unconfined`, so exact
+attempt-bound builder namespaces declare PSA `privileged` enforcement at
+`v1.36` and retain restricted audit/warn. A Loom ValidatingAdmissionPolicy
+then supplies the narrower application-specific contract: it binds each
+management-created Job to the trusted builder digest, measured RuntimeClass,
+non-host namespaces, exact client and sidecar security contexts, separated
+mounts, and finite resource quantities. Personal namespaces remain restricted;
+candidate code cannot create or mutate Kubernetes resources.
+
 ## Measured release and profile
 
 The checked-in runtime profile is the complete public, non-secret description
@@ -228,10 +237,12 @@ proves the client cannot see RootlessKit or BuildKit through `/proc`, and runs
 both `linux/amd64` and `linux/arm64` Dockerfile steps with `NoNewPrivs=1`,
 including arm64 through the image's trusted QEMU helper. This ordering avoids
 referring to a RuntimeClass before it exists while keeping the class absent
-until all nodes are actively verified. The baseline-enforced smoke namespace,
-with restricted audit/warn, and its Pods are temporary operator-owned resources
-and are deleted after both container logs, the canonical Pod, and terminal
-status are captured. No personal or build namespace is used for smoke testing.
+until all nodes are actively verified. Baseline would reject the conformance
+sidecar's explicit seccomp exception, so the smoke namespace uses privileged
+enforcement with restricted audit/warn. Its exact Pods are temporary
+operator-owned resources and are deleted after both container logs, the
+canonical Pod, and terminal status are captured. No personal or build namespace
+is used for smoke testing.
 
 ## Evidence and readiness
 

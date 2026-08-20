@@ -486,7 +486,7 @@ def _management_namespace_admission(context: _RenderContext) -> tuple[dict[str, 
                         "'pod-security.kubernetes.io/enforce'] == 'restricted') || "
                         f"({builder_namespace} && "
                         f"{target}.metadata.labels["
-                        "'pod-security.kubernetes.io/enforce'] == 'baseline' && "
+                        "'pod-security.kubernetes.io/enforce'] == 'privileged' && "
                         f"{target}.metadata.labels["
                         "'pod-security.kubernetes.io/enforce-version'] == 'v1.36' && "
                         f"{target}.metadata.labels["
@@ -517,7 +517,272 @@ def _management_namespace_admission(context: _RenderContext) -> tuple[dict[str, 
     return policy, _admission_binding(context, name)
 
 
-def _management_resource_admission(context: _RenderContext) -> tuple[dict[str, Any], ...]:
+def _builder_job_admission_validations(
+    *,
+    target: str,
+    builder_namespace: str,
+    builder_image: str,
+    runtime_class_name: str,
+) -> tuple[dict[str, str], ...]:
+    builder_job = (
+        f"({builder_namespace} && request.resource.resource == 'jobs')"
+    )
+    template = f"{target}.spec.template"
+    pod = f"{template}.spec"
+    client = f"{pod}.containers[0]"
+    sidecar = f"{pod}.initContainers[0]"
+
+    def exact_resources(container: str) -> str:
+        requests = f"{container}.resources.requests"
+        limits = f"{container}.resources.limits"
+        return (
+            f"has({container}.resources) && has({requests}) && "
+            f"{requests}.size() == 3 && "
+            f"{requests}['cpu'] == quantity('1') && "
+            f"{requests}['memory'] == quantity('1Gi') && "
+            f"{requests}['ephemeral-storage'] == quantity('4Gi') && "
+            f"has({limits}) && {limits}.size() == 3 && "
+            f"{limits}['cpu'] == quantity('4') && "
+            f"{limits}['memory'] == quantity('8Gi') && "
+            f"{limits}['ephemeral-storage'] == quantity('20Gi')"
+        )
+
+    pod_boundary = (
+        f"!{builder_job} || ("
+        f"{target}.apiVersion == 'batch/v1' && {target}.kind == 'Job' && "
+        f"{target}.spec.backoffLimit == 0 && "
+        f"{target}.spec.activeDeadlineSeconds == 3600 && "
+        f"{target}.spec.ttlSecondsAfterFinished == 600 && "
+        f"{pod}.restartPolicy == 'Never' && "
+        f"{pod}.runtimeClassName == '{runtime_class_name}' && "
+        f"{pod}.automountServiceAccountToken == false && "
+        f"{pod}.enableServiceLinks == false && "
+        f"{pod}.shareProcessNamespace == false && "
+        f"(!has({pod}.hostNetwork) || {pod}.hostNetwork == false) && "
+        f"(!has({pod}.hostPID) || {pod}.hostPID == false) && "
+        f"(!has({pod}.hostIPC) || {pod}.hostIPC == false) && "
+        f"!has({pod}.hostUsers) && !has({pod}.nodeName) && "
+        f"!has({pod}.nodeSelector) && !has({pod}.affinity) && "
+        f"!has({pod}.tolerations) && "
+        f"(!has({pod}.serviceAccountName) || "
+        f"{pod}.serviceAccountName == 'default') && "
+        f"!has({pod}.imagePullSecrets) && "
+        f"has({pod}.securityContext) && "
+        f"{pod}.securityContext.runAsNonRoot == true && "
+        f"{pod}.securityContext.runAsUser == 1000 && "
+        f"{pod}.securityContext.runAsGroup == 1000 && "
+        f"{pod}.securityContext.fsGroup == 1000 && "
+        f"{pod}.securityContext.seccompProfile.type == 'RuntimeDefault' && "
+        f"!has({pod}.securityContext.sysctls) && "
+        f"!has({pod}.securityContext.seLinuxOptions) && "
+        f"(!has({template}.metadata.annotations) || "
+        f"{template}.metadata.annotations.size() == 0) && "
+        f"{template}.metadata.labels['loom.dev/builder-role'] == 'sandbox' && "
+        f"(({target}.metadata.name == 'build-amd64' && "
+        f"{template}.metadata.labels['loom.dev/platform'] == 'amd64') || "
+        f"({target}.metadata.name == 'build-arm64' && "
+        f"{template}.metadata.labels['loom.dev/platform'] == 'arm64')) && "
+        f"{pod}.containers.size() == 1 && "
+        f"{pod}.initContainers.size() == 1 && "
+        f"!has({pod}.ephemeralContainers))"
+    )
+    client_definition_boundary = (
+        f"!{builder_job} || ("
+        f"{client}.name == 'builder' && {client}.image == '{builder_image}' && "
+        f"{client}.imagePullPolicy == 'IfNotPresent' && "
+        f"!has({client}.command) && "
+        f"{client}.args == ['build','--contract-file',"
+        "'/var/run/loom-builder-contract/contract.json',"
+        "'--capability-directory','/var/run/loom-builder-capability',"
+        "'--workspace','/workspace'] && "
+        f"(!has({client}.env) || {client}.env.size() == 0) && "
+        f"(!has({client}.envFrom) || {client}.envFrom.size() == 0))"
+    )
+    client_security_boundary = (
+        f"!{builder_job} || ("
+        f"has({client}.securityContext) && "
+        f"{client}.securityContext.allowPrivilegeEscalation == false && "
+        f"{client}.securityContext.readOnlyRootFilesystem == true && "
+        f"{client}.securityContext.runAsNonRoot == true && "
+        f"(!has({client}.securityContext.privileged) || "
+        f"{client}.securityContext.privileged == false) && "
+        f"{client}.securityContext.capabilities.drop == ['ALL'] && "
+        f"!has({client}.securityContext.capabilities.add) && "
+        f"!has({client}.securityContext.procMount) && "
+        f"!has({client}.securityContext.seccompProfile) && "
+        f"!has({client}.securityContext.appArmorProfile))"
+    )
+    client_resources_boundary = (
+        f"!{builder_job} || ({exact_resources(client)})"
+    )
+    client_mount_boundary = (
+        f"!{builder_job} || ("
+        f"{client}.volumeMounts.size() == 5 && "
+        f"{client}.volumeMounts[0].name == 'contract' && "
+        f"{client}.volumeMounts[0].mountPath == '/var/run/loom-builder-contract' && "
+        f"{client}.volumeMounts[0].readOnly == true && "
+        f"{client}.volumeMounts[1].name == 'attempt-capability' && "
+        f"{client}.volumeMounts[1].mountPath == '/var/run/loom-builder-capability' && "
+        f"{client}.volumeMounts[1].readOnly == true && "
+        f"{client}.volumeMounts[2].name == 'workspace' && "
+        f"{client}.volumeMounts[2].mountPath == '/workspace' && "
+        f"(!has({client}.volumeMounts[2].readOnly) || "
+        f"{client}.volumeMounts[2].readOnly == false) && "
+        f"{client}.volumeMounts[3].name == 'tmp-client' && "
+        f"{client}.volumeMounts[3].mountPath == '/tmp' && "
+        f"(!has({client}.volumeMounts[3].readOnly) || "
+        f"{client}.volumeMounts[3].readOnly == false) && "
+        f"{client}.volumeMounts[4].name == 'buildkit-run' && "
+        f"{client}.volumeMounts[4].mountPath == '/var/run/loom-buildkit' && "
+        f"{client}.volumeMounts[4].readOnly == true && "
+        f"{client}.volumeMounts.all(mount, !has(mount.subPath) && "
+        "!has(mount.subPathExpr) && !has(mount.mountPropagation)))"
+    )
+    sidecar_definition_boundary = (
+        f"!{builder_job} || ("
+        f"{sidecar}.name == 'buildkitd' && {sidecar}.image == '{builder_image}' && "
+        f"{sidecar}.imagePullPolicy == 'IfNotPresent' && "
+        f"{sidecar}.restartPolicy == 'Always' && "
+        f"{sidecar}.command == ['/usr/local/bin/loom-personal-dev-buildkitd'] && "
+        f"!has({sidecar}.args) && "
+        f"(!has({sidecar}.env) || {sidecar}.env.size() == 0) && "
+        f"(!has({sidecar}.envFrom) || {sidecar}.envFrom.size() == 0))"
+    )
+    sidecar_security_boundary = (
+        f"!{builder_job} || ("
+        f"has({sidecar}.securityContext) && "
+        f"{sidecar}.securityContext.allowPrivilegeEscalation == true && "
+        f"{sidecar}.securityContext.readOnlyRootFilesystem == true && "
+        f"{sidecar}.securityContext.runAsNonRoot == true && "
+        f"(!has({sidecar}.securityContext.privileged) || "
+        f"{sidecar}.securityContext.privileged == false) && "
+        f"{sidecar}.securityContext.capabilities.drop == ['ALL'] && "
+        f"{sidecar}.securityContext.capabilities.add == ['SETGID','SETUID'] && "
+        f"!has({sidecar}.securityContext.procMount) && "
+        f"{sidecar}.securityContext.seccompProfile.type == 'Unconfined' && "
+        f"!has({sidecar}.securityContext.appArmorProfile))"
+    )
+    sidecar_resources_boundary = (
+        f"!{builder_job} || ({exact_resources(sidecar)})"
+    )
+    sidecar_probe_boundary = (
+        f"!{builder_job} || ("
+        f"{sidecar}.startupProbe.exec.command == ['/usr/bin/buildctl','--addr',"
+        "'unix:///var/run/loom-buildkit/buildkitd.sock','debug','workers'] && "
+        f"{sidecar}.startupProbe.failureThreshold == 60 && "
+        f"{sidecar}.startupProbe.periodSeconds == 2 && "
+        f"{sidecar}.startupProbe.timeoutSeconds == 1)"
+    )
+    sidecar_mount_boundary = (
+        f"!{builder_job} || ("
+        f"{sidecar}.volumeMounts.size() == 3 && "
+        f"{sidecar}.volumeMounts[0].name == 'buildkit-run' && "
+        f"{sidecar}.volumeMounts[0].mountPath == '/var/run/loom-buildkit' && "
+        f"{sidecar}.volumeMounts[1].name == 'buildkit-state' && "
+        f"{sidecar}.volumeMounts[1].mountPath == '/var/lib/loom-buildkit' && "
+        f"{sidecar}.volumeMounts[2].name == 'tmp-buildkit' && "
+        f"{sidecar}.volumeMounts[2].mountPath == '/tmp' && "
+        f"{sidecar}.volumeMounts.all(mount, "
+        "(!has(mount.readOnly) || mount.readOnly == false) && "
+        "!has(mount.subPath) && !has(mount.subPathExpr) && "
+        "!has(mount.mountPropagation)))"
+    )
+    volumes_boundary = (
+        f"!{builder_job} || ("
+        f"{pod}.volumes.size() == 7 && "
+        f"{pod}.volumes.all(volume, !has(volume.hostPath) && "
+        "!has(volume.projected) && !has(volume.csi)) && "
+        f"{pod}.volumes[0].name == 'contract' && "
+        f"{pod}.volumes[0].configMap.name.matches("
+        "'^build-contract-(amd64|arm64)-l[0-9a-f]{16}$') && "
+        f"{pod}.volumes[0].configMap.defaultMode == 256 && "
+        f"{pod}.volumes[1].name == 'attempt-capability' && "
+        f"{pod}.volumes[1].secret.secretName.matches("
+        "'^build-capability-(amd64|arm64)-l[0-9a-f]{16}$') && "
+        f"{pod}.volumes[1].secret.defaultMode == 256 && "
+        f"{pod}.volumes[2].name == 'workspace' && "
+        f"{pod}.volumes[2].emptyDir.sizeLimit == quantity('20Gi') && "
+        f"{pod}.volumes[3].name == 'tmp-client' && "
+        f"{pod}.volumes[3].emptyDir.sizeLimit == quantity('1Gi') && "
+        f"{pod}.volumes[4].name == 'buildkit-run' && "
+        f"{pod}.volumes[4].emptyDir.sizeLimit == quantity('64Mi') && "
+        f"{pod}.volumes[5].name == 'buildkit-state' && "
+        f"{pod}.volumes[5].emptyDir.sizeLimit == quantity('20Gi') && "
+        f"{pod}.volumes[6].name == 'tmp-buildkit' && "
+        f"{pod}.volumes[6].emptyDir.sizeLimit == quantity('1Gi'))"
+    )
+    return (
+        {
+            "expression": pod_boundary,
+            "message": "builder Job pod boundary differs from its exact privileged exception",
+        },
+        {
+            "expression": client_definition_boundary,
+            "message": (
+                "builder Job client definition differs from its exact privileged exception"
+            ),
+        },
+        {
+            "expression": client_security_boundary,
+            "message": (
+                "builder Job client security differs from its exact privileged exception"
+            ),
+        },
+        {
+            "expression": client_resources_boundary,
+            "message": (
+                "builder Job client resources differ from its exact privileged exception"
+            ),
+        },
+        {
+            "expression": client_mount_boundary,
+            "message": (
+                "builder Job client mounts differ from its exact privileged exception"
+            ),
+        },
+        {
+            "expression": sidecar_definition_boundary,
+            "message": (
+                "builder Job sidecar definition differs from its exact privileged exception"
+            ),
+        },
+        {
+            "expression": sidecar_security_boundary,
+            "message": (
+                "builder Job sidecar security differs from its exact privileged exception"
+            ),
+        },
+        {
+            "expression": sidecar_resources_boundary,
+            "message": (
+                "builder Job sidecar resources differ from its exact privileged exception"
+            ),
+        },
+        {
+            "expression": sidecar_probe_boundary,
+            "message": (
+                "builder Job sidecar probe differs from its exact privileged exception"
+            ),
+        },
+        {
+            "expression": sidecar_mount_boundary,
+            "message": (
+                "builder Job sidecar mounts differ from its exact privileged exception"
+            ),
+        },
+        {
+            "expression": volumes_boundary,
+            "message": "builder Job volumes differ from its exact privileged exception",
+        },
+    )
+
+
+def _management_resource_admission(
+    context: _RenderContext,
+    *,
+    builder_image: str,
+    runtime_class_name: str,
+) -> tuple[dict[str, Any], ...]:
     name = "loom-personal-dev-management-resources"
     target = "(request.operation == 'DELETE' ? oldObject : object)"
     personal_namespace = _personal_namespace_cel("request.namespace")
@@ -766,6 +1031,12 @@ def _management_resource_admission(context: _RenderContext) -> tuple[dict[str, A
                     ),
                     "message": "management RoleBinding is outside its exact delegated roles",
                 },
+                *_builder_job_admission_validations(
+                    target=target,
+                    builder_namespace=builder_namespace,
+                    builder_image=builder_image,
+                    runtime_class_name=runtime_class_name,
+                ),
             ],
         },
     }
@@ -2126,6 +2397,7 @@ def _render_documents(
     plan: PersonalDevAcceptancePlan | None = None,
 ) -> RenderedPersonalDevControlPlane:
     shared_role, shared_binding = _shared_role(context)
+    runtime = plan.builder if plan is not None else profile.builder
     documents = [
         _namespace(context),
         _management_mutation_role(context),
@@ -2133,7 +2405,11 @@ def _render_documents(
         _managed_namespace_role(context),
         _activation_role(context),
         *_management_namespace_admission(context),
-        *_management_resource_admission(context),
+        *_management_resource_admission(
+            context,
+            builder_image=release.images.personal_dev_builder,
+            runtime_class_name=runtime.runtime_class_name,
+        ),
         *_activation_admission(context, profile),
         _service_account(context, profile.identities.management_service_account),
         _service_account(context, profile.identities.activation_service_account),
@@ -2155,7 +2431,6 @@ def _render_documents(
         sort_keys=False,
         default_flow_style=False,
     )
-    runtime = plan.builder if plan is not None else profile.builder
     return RenderedPersonalDevControlPlane(
         yaml_text=yaml_text,
         input_sha256=context.input_sha256,

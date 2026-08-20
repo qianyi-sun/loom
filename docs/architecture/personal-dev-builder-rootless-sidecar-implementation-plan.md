@@ -14,8 +14,9 @@ a restartable init-container BuildKit sidecar in separate PID and mount
 namespaces. The client alone owns the contract, presigned capabilities,
 workspace, verification, and upload; the sidecar owns only disposable BuildKit
 state and the shared Unix socket. The KVM gVisor RuntimeClass remains the host
-boundary, and the dynamic build namespace uses PSA baseline enforcement with
-restricted audit and warning.
+boundary. Because Kubernetes Baseline rejects explicit seccomp `Unconfined`,
+the dynamic build namespace uses PSA privileged enforcement with restricted
+audit and warning plus an exact Loom admission contract for builder Jobs.
 
 **Tech Stack:** Python 3.11, pytest, Kubernetes 1.36 native sidecars,
 ValidatingAdmissionPolicy CEL, gVisor/runsc, RootlessKit 3.0.1, BuildKit 0.32.2,
@@ -35,6 +36,12 @@ Bash, jq, Docker/OCI.
   capability bounding set; its initial effective set must remain empty.
 - The sidecar receives no contract, Secret, source workspace, output path,
   service-account token, projected volume, CSI volume, or image-pull Secret.
+- PSA privileged is permitted only in exact attempt-bound builder namespaces
+  and the temporary operator smoke namespace; personal namespaces remain
+  restricted.
+- Every builder Job is admission-bound to the trusted image, measured
+  RuntimeClass, non-host namespaces, exact client/sidecar security contexts,
+  isolated mounts, and finite resources.
 - RootlessKit runs BuildKit through `/bin/setpriv --nnp`; BuildKit and every
   Dockerfile `RUN` descendant must observe `NoNewPrivs=1`.
 - `shareProcessNamespace` is explicitly false and `hostUsers` remains absent.
@@ -64,7 +71,7 @@ Bash, jq, Docker/OCI.
   container is `buildkitd`, and whose socket address is
   `unix:///var/run/loom-buildkit/buildkitd.sock`.
 - Produces: `_dynamic_namespace_valid()` behavior that accepts restricted
-  personal namespaces and only exact baseline/restricted-versioned builder
+  personal namespaces and only exact privileged/restricted-versioned builder
   namespaces.
 
 - [ ] **Step 1: Write failing manifest tests for authority separation**
@@ -76,7 +83,7 @@ equivalent to:
 ```python
 labels = namespace["metadata"]["labels"]
 assert labels | {
-    "pod-security.kubernetes.io/enforce": "baseline",
+    "pod-security.kubernetes.io/enforce": "privileged",
     "pod-security.kubernetes.io/enforce-version": "v1.36",
     "pod-security.kubernetes.io/audit": "restricted",
     "pod-security.kubernetes.io/audit-version": "v1.36",
@@ -133,14 +140,14 @@ select exact security labels by family:
 assert "startsWith('loom-dev-')" in expression
 assert "pod-security.kubernetes.io/enforce'] == 'restricted'" in expression
 assert "startsWith('loom-build-')" in expression
-assert "pod-security.kubernetes.io/enforce'] == 'baseline'" in expression
+assert "pod-security.kubernetes.io/enforce'] == 'privileged'" in expression
 assert "pod-security.kubernetes.io/enforce-version'] == 'v1.36'" in expression
 assert "pod-security.kubernetes.io/audit-version'] == 'v1.36'" in expression
 assert "pod-security.kubernetes.io/warn-version'] == 'v1.36'" in expression
 ```
 
 In `test_personal_dev_control_plane_status.py`, change the healthy builder
-namespace fixture to the exact six PSA labels and add mutations for baseline,
+namespace fixture to the exact six PSA labels and add mutations for privileged,
 audit/warn, and version drift. Personal namespace fixtures must remain
 restricted and continue passing.
 
@@ -157,7 +164,7 @@ PYTHONPATH=src:. /home/hongjian/loom/.venv/bin/pytest \
 
 Expected: failures show the existing restricted builder namespace, absent
 native sidecar, absent explicit PID isolation, unconditional restricted CEL,
-and status rejection of baseline builder namespaces.
+and status rejection of privileged builder namespaces.
 
 - [ ] **Step 4: Implement the minimal manifest contract**
 
@@ -187,7 +194,7 @@ Change the namespace policy validation to one parenthesized CEL expression:
 
 ```text
 (personal-family && enforce == 'restricted') ||
-(builder-family && enforce == 'baseline' && enforce-version == 'v1.36' &&
+(builder-family && enforce == 'privileged' && enforce-version == 'v1.36' &&
  audit == 'restricted' && audit-version == 'v1.36' &&
  warn == 'restricted' && warn-version == 'v1.36')
 ```
@@ -418,7 +425,7 @@ git commit -m "fix(dev): bind rootless builder prerequisites"
 Require the runbook to contain all of these exact contracts:
 
 ```python
-assert '"pod-security.kubernetes.io/enforce": "baseline"' in runbook
+assert '"pod-security.kubernetes.io/enforce": "privileged"' in runbook
 assert '"pod-security.kubernetes.io/audit": "restricted"' in runbook
 assert 'restartPolicy: "Always"' in runbook
 assert 'command: ["/usr/local/bin/loom-personal-dev-buildkitd"]' in runbook
@@ -442,7 +449,7 @@ restricted smoke namespace assertions fail.
 
 - [ ] **Step 3: Update the rollout smoke namespace**
 
-Change only the temporary operator-owned smoke namespace to baseline
+Change only the temporary operator-owned smoke namespace to privileged
 enforcement at `v1.36`, retaining restricted audit and warning at `v1.36`.
 Update `assert_smoke_namespace_owned()` to require the exact labels. The four
 simple node-pinned gVisor probes retain their restricted container contexts.
@@ -475,10 +482,11 @@ record UID/GID 1000, zero effective caps, bounding set
 - [ ] **Step 5: Align architecture documentation**
 
 Remove claims that the one trusted wrapper both holds authority and runs
-daemonless BuildKit. Document PSA baseline as the necessary standard admission
-level, the authority-free sidecar, the exact helper capability mechanism, NNP
-after mapping, separate PID/mount namespaces, and the unchanged KVM gVisor
-host boundary.
+daemonless BuildKit. Document why explicit seccomp `Unconfined` requires PSA
+privileged, how the Loom admission policy replaces Baseline with an exact
+application-specific boundary, the authority-free sidecar, the exact helper
+capability mechanism, NNP after mapping, separate PID/mount namespaces, and
+the unchanged KVM gVisor host boundary.
 
 - [ ] **Step 6: Run the ops tests and verify GREEN**
 
@@ -497,7 +505,108 @@ git commit -m "docs(dev): prove isolated rootless sidecar"
 
 ---
 
-### Task 5: Verify the implementation and prepare the protected release
+### Task 5: Correct the PSA and application-specific admission boundary
+
+**Files:**
+
+- Modify: `tests/unit/test_personal_dev_builder_manifest.py`
+- Modify: `tests/unit/test_personal_dev_control_plane_render.py`
+- Modify: `tests/unit/test_personal_dev_control_plane_status.py`
+- Modify: `tests/ops/test_personal_dev_control_plane_package_boundary.py`
+- Modify: `src/loom/personal_dev_builder_manifest.py`
+- Modify: `src/loom/personal_dev_control_plane_render.py`
+- Modify: `src/loom/personal_dev_control_plane_status.py`
+- Modify: `docs/architecture/personal-dev-builder-runtime.md`
+- Modify: `docs/runbooks/personal-dev-builder-runtime.md`
+
+**Interfaces:**
+
+- Consumes: `release.images.personal_dev_builder` and the runtime class from
+  the shadow profile or exact acceptance plan.
+- Produces: privileged/restricted-versioned builder namespace labels and
+  management admission validations that bind every builder Job to the exact
+  trusted two-container contract.
+
+- [ ] **Step 1: Write failing regression tests for the real PSA boundary**
+
+Change the manifest, render, status, and runbook expectations from Baseline to
+privileged at `v1.36`. Add render assertions requiring the builder-Job
+validation to contain the literal trusted builder image and measured runtime
+class and to constrain all of these observable fields:
+
+```python
+assert "spec.template.spec.runtimeClassName" in builder_contract
+assert release.images.personal_dev_builder in builder_contract
+assert profile.builder.runtime_class_name in builder_contract
+assert "spec.template.spec.containers.size() == 1" in builder_contract
+assert "spec.template.spec.initContainers.size() == 1" in builder_contract
+assert "shareProcessNamespace == false" in builder_contract
+assert "automountServiceAccountToken == false" in builder_contract
+assert "enableServiceLinks == false" in builder_contract
+assert "seccompProfile.type == 'Unconfined'" in builder_contract
+assert "capabilities.add == ['SETGID','SETUID']" in builder_contract
+assert "readOnly == true" in builder_contract
+```
+
+Also require non-host network/PID/IPC, absent `hostUsers`, one restricted
+client, one native sidecar, exact commands, no sidecar environment or
+authority-bearing mounts, exact emptyDir/configMap/Secret volume families,
+and explicit finite resource requests and limits.
+
+- [ ] **Step 2: Run the focused tests and verify RED**
+
+```bash
+PYTHONPATH=src:. .venv/bin/pytest \
+  tests/unit/test_personal_dev_builder_manifest.py \
+  tests/unit/test_personal_dev_control_plane_render.py \
+  tests/unit/test_personal_dev_control_plane_status.py \
+  tests/ops/test_personal_dev_control_plane_package_boundary.py -q
+```
+
+Expected: the old Baseline labels fail, the builder Job has no exact custom
+admission validation, and service links are not explicitly disabled.
+
+- [ ] **Step 3: Implement the minimal exact boundary**
+
+Set builder and smoke namespaces to PSA privileged enforcement pinned to
+`v1.36`, retaining restricted audit/warn at `v1.36`. Set
+`enableServiceLinks: false` on builder Pods. Pass the exact trusted builder
+image and active runtime class into `_management_resource_admission()` and add
+builder-only CEL validations for the fields listed in Step 1. Keep the
+existing Secret and resource-family validations and all personal-namespace
+behavior unchanged.
+
+- [ ] **Step 4: Run the focused tests and verify GREEN**
+
+Run the Step 2 command. Expected: all selected tests pass.
+
+- [ ] **Step 5: Compile the policy against Kubernetes without mutation**
+
+Use server-side dry-run against the protected cluster to compile the rendered
+ValidatingAdmissionPolicy and dry-run the exact builder namespace and Job. A
+mutated privileged container, host namespace, image, RuntimeClass, mount, or
+sidecar Secret reference must be denied. No object may be persisted.
+
+- [ ] **Step 6: Commit Task 5**
+
+```bash
+git add src/loom/personal_dev_builder_manifest.py \
+  src/loom/personal_dev_control_plane_render.py \
+  src/loom/personal_dev_control_plane_status.py \
+  tests/unit/test_personal_dev_builder_manifest.py \
+  tests/unit/test_personal_dev_control_plane_render.py \
+  tests/unit/test_personal_dev_control_plane_status.py \
+  tests/ops/test_personal_dev_control_plane_package_boundary.py \
+  docs/architecture/personal-dev-builder-rootless-sidecar.md \
+  docs/architecture/personal-dev-builder-rootless-sidecar-implementation-plan.md \
+  docs/architecture/personal-dev-builder-runtime.md \
+  docs/runbooks/personal-dev-builder-runtime.md
+git commit -m "fix(dev): bind privileged builder admission"
+```
+
+---
+
+### Task 6: Verify the implementation and prepare the protected release
 
 **Files:**
 
@@ -505,7 +614,7 @@ git commit -m "docs(dev): prove isolated rootless sidecar"
 
 **Interfaces:**
 
-- Consumes: all Task 1–4 commits.
+- Consumes: all Task 1–5 commits.
 - Produces: fresh test, local image, local rootless two-container, review, and
   protected-PR evidence. It does not produce a live cluster rollout from an
   unmerged commit.

@@ -190,7 +190,7 @@ def personal_dev_builder_manifest_documents(
             "name": namespace,
             "labels": {
                 **_labels(registration),
-                "pod-security.kubernetes.io/enforce": "baseline",
+                "pod-security.kubernetes.io/enforce": "privileged",
                 "pod-security.kubernetes.io/enforce-version": "v1.36",
                 "pod-security.kubernetes.io/audit": "restricted",
                 "pod-security.kubernetes.io/audit-version": "v1.36",
@@ -368,6 +368,7 @@ def personal_dev_builder_manifest_documents(
                 "spec": {
                     "restartPolicy": "Never",
                     "automountServiceAccountToken": False,
+                    "enableServiceLinks": False,
                     "shareProcessNamespace": False,
                     "runtimeClassName": config.runtime_class_name,
                     "securityContext": {

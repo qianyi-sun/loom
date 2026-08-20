@@ -804,7 +804,7 @@ def test_personal_dev_builder_runtime_runbook_is_exact_and_inert() -> None:
     assert runbook.count("loom-personal-dev-runtime-smoke") >= 8
     assert runbook.count(".spec.nodeSelector == {") >= 2
     assert runbook.count(".scheduling.nodeSelector == {") >= 3
-    assert '"pod-security.kubernetes.io/enforce": "baseline"' in runbook
+    assert '"pod-security.kubernetes.io/enforce": "privileged"' in runbook
     assert '"pod-security.kubernetes.io/enforce-version": "v1.36"' in runbook
     assert '"pod-security.kubernetes.io/audit": "restricted"' in runbook
     assert 'restartPolicy: "Always"' in runbook

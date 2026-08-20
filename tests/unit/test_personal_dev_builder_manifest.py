@@ -40,7 +40,7 @@ def test_builder_manifest_is_attempt_bound_restricted_and_finite() -> None:
         f"l{registration.build_attempt.lease_epoch:016x}"
     )
     assert namespace["metadata"]["labels"] | {
-        "pod-security.kubernetes.io/enforce": "baseline",
+        "pod-security.kubernetes.io/enforce": "privileged",
         "pod-security.kubernetes.io/enforce-version": "v1.36",
         "pod-security.kubernetes.io/audit": "restricted",
         "pod-security.kubernetes.io/audit-version": "v1.36",
@@ -55,6 +55,7 @@ def test_builder_manifest_is_attempt_bound_restricted_and_finite() -> None:
     assert pod["metadata"]["labels"] | expected_labels == pod["metadata"]["labels"]
     spec = pod["spec"]
     assert spec["automountServiceAccountToken"] is False
+    assert spec["enableServiceLinks"] is False
     assert spec["shareProcessNamespace"] is False
     assert "hostUsers" not in spec
     assert spec["runtimeClassName"] == "loom-personal-dev-builder"

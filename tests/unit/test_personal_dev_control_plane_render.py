@@ -245,7 +245,7 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
     assert rendered.runtime_handler == profile.builder.runtime_handler
     assert rendered.runtime_profile_sha256 == profile.builder.runtime_profile_sha256
     assert hashlib.sha256(rendered.yaml_text.encode("utf-8")).hexdigest() == (
-        "f614c53be1d1c1ede6eec93edbe4a9eb0a9802ab0e9e8421deadb9b68721c186"
+        "85614f87502349e51827f2b9beee0adab14d95c62a096c1ca45cea80730b4fbe"
     )
 
     identities = {_identity(document) for document in documents}
@@ -916,7 +916,7 @@ def test_rbac_uses_dynamic_rolebindings_and_fail_closed_principal_policies(
     assert (
         "pod-security.kubernetes.io/enforce'] == 'restricted'" in namespace_policy
     )
-    assert "pod-security.kubernetes.io/enforce'] == 'baseline'" in namespace_policy
+    assert "pod-security.kubernetes.io/enforce'] == 'privileged'" in namespace_policy
     assert "pod-security.kubernetes.io/enforce-version'] == 'v1.36'" in (
         namespace_policy
     )
@@ -1032,6 +1032,64 @@ def test_management_admission_binds_resource_names_to_each_family_contract(
     assert "matches('^build-capability-(amd64|arm64)-l[0-9a-f]{16}$')" in expressions
     assert "['build-amd64','build-arm64']" in expressions
     assert "['default-deny','builder-egress']" in expressions
+
+
+def test_builder_admission_binds_privileged_exception_to_exact_job_contract(
+    tmp_path: Path,
+) -> None:
+    profile, release, _rendered, documents = _render(tmp_path)
+    policy = next(
+        item
+        for item in documents
+        if item["kind"] == "ValidatingAdmissionPolicy"
+        and item["metadata"]["name"] == "loom-personal-dev-management-resources"
+    )
+    contract = "\n".join(
+        item["expression"]
+        for item in policy["spec"]["validations"]
+        if item["message"].startswith("builder Job ")
+    )
+
+    for value in (
+        release.images.personal_dev_builder,
+        profile.builder.runtime_class_name,
+        "spec.template.spec.runtimeClassName",
+        "spec.template.spec.containers.size() == 1",
+        "spec.template.spec.initContainers.size() == 1",
+        "spec.template.spec.shareProcessNamespace == false",
+        "spec.template.spec.automountServiceAccountToken == false",
+        "spec.template.spec.enableServiceLinks == false",
+        "spec.template.spec.hostNetwork",
+        "spec.template.spec.hostPID",
+        "spec.template.spec.hostIPC",
+        "!has((request.operation == 'DELETE' ? oldObject : object).spec.template.spec.hostUsers)",
+        "containers[0].name == 'builder'",
+        "containers[0].securityContext.allowPrivilegeEscalation == false",
+        "containers[0].securityContext.capabilities.drop == ['ALL']",
+        "initContainers[0].name == 'buildkitd'",
+        "initContainers[0].restartPolicy == 'Always'",
+        "initContainers[0].command == ['/usr/local/bin/loom-personal-dev-buildkitd']",
+        "initContainers[0].securityContext.allowPrivilegeEscalation == true",
+        "initContainers[0].securityContext.capabilities.add == ['SETGID','SETUID']",
+        "initContainers[0].securityContext.seccompProfile.type == 'Unconfined'",
+        "initContainers[0].volumeMounts.size() == 3",
+        "containers[0].volumeMounts.size() == 5",
+        "spec.template.spec.volumes.size() == 7",
+        "resources.requests['cpu'] == quantity('1')",
+        "resources.limits['cpu'] == quantity('4')",
+        "resources.requests['memory'] == quantity('1Gi')",
+        "resources.limits['memory'] == quantity('8Gi')",
+        "resources.requests['ephemeral-storage'] == quantity('4Gi')",
+        "resources.limits['ephemeral-storage'] == quantity('20Gi')",
+    ):
+        assert value in contract
+    assert "!has(" in contract
+    assert "hostPath" in contract
+    assert "projected" in contract
+    assert "csi" in contract
+    assert "attempt-capability" in contract
+    assert "buildkit-state" in contract
+    assert "readOnly == true" in contract
 
 
 def test_management_admission_blocks_indirect_personal_secret_reads(
