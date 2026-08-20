@@ -2016,6 +2016,7 @@ def test_registered_gb10_candidate_source_binds_exact_shared_checkout(
             _passing_dependency("candidate.identity"),
             _passing_dependency("gb10.ssh-topology"),
             _passing_dependency("gb10.shared-mount"),
+            _passing_dependency("gb10.host-readiness"),
             check,
         )
     )
@@ -2029,6 +2030,11 @@ def test_registered_gb10_candidate_source_binds_exact_shared_checkout(
     assert result.evidence["candidate-tree"] == "2" * 40
     assert result.evidence["host-count"] == 1
     assert check.spec.timeout_seconds == 510
+    assert check.spec.dependencies == (
+        "candidate.identity",
+        "gb10.shared-mount",
+        "gb10.host-readiness",
+    )
     assert len(observed) == 1
     assert set(observed[0]["unit_sha256"]) == {
         "deploy/worker-pools/gb10/loom-gb10-node-agent.service",

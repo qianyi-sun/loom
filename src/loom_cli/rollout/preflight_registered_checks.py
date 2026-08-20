@@ -1946,7 +1946,11 @@ def build_gb10_candidate_source_check(
             failure_code="gb10.candidate-source.drift",
             tier=0,
             stage=StageCapability.STATIC,
-            dependencies=("candidate.identity", "gb10.shared-mount"),
+            dependencies=(
+                "candidate.identity",
+                "gb10.shared-mount",
+                "gb10.host-readiness",
+            ),
             mutation_class=MutationClass.NONE,
             input_keys=(
                 "candidate.sha",
@@ -1974,7 +1978,7 @@ def build_gb10_candidate_source_check(
             ),
             secret_redaction_policy=SecretRedactionPolicy.NO_SECRET_INPUTS,
         ),
-        implementation_version="v2",
+        implementation_version="v3",
         operations={CheckOperation.PROBE: probe},
     )
 
