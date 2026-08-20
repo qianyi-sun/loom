@@ -989,6 +989,53 @@ def test_personal_dev_builder_runtime_embedded_programs_parse() -> None:
     assert not {"buildkit-state", "tmp-buildkit"} & client_mounts
 
 
+def test_personal_dev_builder_runtime_configmap_rendering_executes(
+    tmp_path: Path,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-builder-runtime.md")
+    start = runbook.index(
+        'buildkit_configmap="$evidence_dir/buildkit-conformance.configmap.json"'
+    )
+    end_marker = 'chmod 0600 "$buildkit_configmap"'
+    end = runbook.index(end_marker, start) + len(end_marker)
+    rendering = runbook[start:end]
+
+    buildkit_script = tmp_path / "run.sh"
+    buildkit_script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    merged_source_sha = "0123456789abcdef0123456789abcdef01234567"
+    behavior = subprocess.run(
+        ["bash", "-seu", "--"],
+        input=(
+            "kubeconfig=/dev/null\n"
+            "smoke_namespace=loom-runtime-smoke\n"
+            f"buildkit_script={shlex.quote(str(buildkit_script))}\n"
+            f"evidence_dir={shlex.quote(str(evidence_dir))}\n"
+            f"merged_source_sha={merged_source_sha}\n"
+            f"{rendering}\n"
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert behavior.returncode == 0, behavior.stderr
+
+    rendered = json.loads(
+        (evidence_dir / "buildkit-conformance.configmap.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert rendered["metadata"]["namespace"] == "loom-runtime-smoke"
+    assert rendered["metadata"]["labels"] == {
+        "app.kubernetes.io/managed-by": "loom-personal-dev-runtime-smoke"
+    }
+    assert rendered["metadata"]["annotations"] == {
+        "loom.dev/runtime-rollout-source-sha": merged_source_sha
+    }
+    assert rendered["data"] == {"run.sh": "#!/bin/sh\nexit 0\n"}
+
+
 def test_personal_dev_builder_runtime_hostname_identity_uses_dns_case_rules() -> None:
     runbook = _read("docs/runbooks/personal-dev-builder-runtime.md")
     marker = "assert_dns_hostname_identity() {"
