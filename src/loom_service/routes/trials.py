@@ -772,6 +772,11 @@ async def download_artifact(
 class _SubmitReq(BaseModel):
     task_id: str
     config: dict[str, Any]
+    # Direct release smokes may pin one trial to an exact worker pool and
+    # replay safely. The Control Plane owns validation and persistence for
+    # both fields; the Service must preserve them at the proxy boundary.
+    required_worker_pool: str | None = None
+    idempotency_key: str | None = None
     # cluster-deploy.md §Schema additions: optional per-trial provider
     # override. When set, gateway uses this connection's decrypted
     # api_key + base_url; otherwise platform default. UUID is
