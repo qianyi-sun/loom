@@ -923,7 +923,7 @@ jobs:
     runs-on: >-
       ${{ fromJSON(needs.ci-route.outputs.routes)[format('integration-{0}', matrix.shard)] }}
     needs: [workflow-plan, ci-route]
-    timeout-minutes: 20
+    timeout-minutes: 30
     if: >-
       needs.workflow-plan.outputs.gate_mode == 'full' &&
       needs.workflow-plan.outputs.integration == 'true'

@@ -168,7 +168,7 @@ def test_systemd_preflight_is_allowlisted_and_uses_short_timeout(tmp_path: Path)
         commands.systemd_preflight(("cat", "/etc/passwd"))
 
 
-def test_candidate_source_ssh_has_sub_dag_cancellation_timeout(tmp_path: Path) -> None:
+def test_candidate_source_ssh_admits_slow_healthy_nfs_read(tmp_path: Path) -> None:
     calls: list[dict[str, object]] = []
 
     def run(argv, **kwargs):
@@ -184,7 +184,7 @@ def test_candidate_source_ssh_has_sub_dag_cancellation_timeout(tmp_path: Path) -
     commands.candidate_source(("ssh", "trt-gb10-1", "probe"))
 
     assert calls[0]["argv"] == ("ssh", "trt-gb10-1", "probe")
-    assert calls[0]["timeout"] == 12
+    assert calls[0]["timeout"] == 30
 
 
 def test_gb10_fleet_ssh_is_bounded_below_dag_timeout(tmp_path: Path) -> None:

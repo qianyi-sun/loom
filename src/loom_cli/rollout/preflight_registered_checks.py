@@ -1963,7 +1963,11 @@ def build_gb10_candidate_source_check(
                 EvidenceField("unit-set-digest", "sha256"),
                 EvidenceField("source-digest", "sha256"),
             ),
-            timeout_seconds=180,
+            # Fourteen 30-second successful reads plus two attempts on the
+            # final failing host consume at most 480 seconds. Keep enough
+            # scheduling margin for the serialized fail-fast probe to return
+            # ordinary drift evidence before DAG cancellation.
+            timeout_seconds=510,
             freshness_ttl_seconds=120,
             remediation=(
                 "restore the exact immutable shared candidate checkout and candidate unit bytes"
