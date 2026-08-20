@@ -193,6 +193,7 @@ declare -A ssh_targets=(
   [trt-eai-oldlab-5]='<ssh-user>@trt-eai-oldlab-5'
 )
 ssh_options=(-o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10)
+ssh_run_options=(-n "${ssh_options[@]}")
 
 secret_keys() {
   kubectl --kubeconfig "$kubeconfig" --request-timeout=10s \
@@ -454,8 +455,8 @@ assert_remote_staging() {
   target="${ssh_targets[$node]}"
   remote_stage="$(< "$evidence_dir/$node.remote-stage.txt")"
   [[ "$remote_stage" =~ ^/tmp/loom-personal-dev-runtime\.[A-Za-z0-9]{8}$ ]]
-  remote_uid="$(ssh "${ssh_options[@]}" "$target" /usr/bin/id -u)"
-  remote_gid="$(ssh "${ssh_options[@]}" "$target" /usr/bin/id -g)"
+  remote_uid="$(ssh "${ssh_run_options[@]}" "$target" /usr/bin/id -u)"
+  remote_gid="$(ssh "${ssh_run_options[@]}" "$target" /usr/bin/id -g)"
   [[ "$remote_uid" =~ ^[0-9]+$ ]]
   [[ "$remote_gid" =~ ^[0-9]+$ ]]
   test "$remote_uid" != 0
@@ -466,7 +467,7 @@ assert_remote_staging() {
     scripts/ops \
     scripts/ops/install_personal_dev_builder_runtime.py \
     scripts/ops/personal_dev_builder_runtime_profile.py)"
-  observed_inventory="$(ssh "${ssh_options[@]}" "$target" \
+  observed_inventory="$(ssh "${ssh_run_options[@]}" "$target" \
     "/usr/bin/find '$remote_stage' -xdev -mindepth 1 -printf '%P\\n' | LC_ALL=C /usr/bin/sort")"
   test "$observed_inventory" = "$expected_inventory"
   for staged_dir in \
@@ -474,7 +475,7 @@ assert_remote_staging() {
     "$remote_stage/scripts" \
     "$remote_stage/scripts/ops"
   do
-    test "$(ssh "${ssh_options[@]}" "$target" \
+    test "$(ssh "${ssh_run_options[@]}" "$target" \
       /usr/bin/env LC_ALL=C /usr/bin/stat -c '%F:%u:%g:%a' "$staged_dir")" = \
       "directory:$remote_uid:$remote_gid:700"
   done
@@ -484,7 +485,7 @@ assert_remote_staging() {
     "$remote_stage/scripts/ops/install_personal_dev_builder_runtime.py" \
     "$remote_stage/scripts/ops/personal_dev_builder_runtime_profile.py"
   do
-    test "$(ssh "${ssh_options[@]}" "$target" \
+    test "$(ssh "${ssh_run_options[@]}" "$target" \
       /usr/bin/env LC_ALL=C /usr/bin/stat -c '%F:%u:%g:%a:%h' "$staged_path")" = \
       "regular file:$remote_uid:$remote_gid:600:1"
   done
@@ -507,20 +508,20 @@ assert_node_staging() {
     "$root_stage/scripts" \
     "$root_stage/scripts/ops"
   do
-    test "$(ssh "${ssh_options[@]}" "$target" sudo -n -- \
+    test "$(ssh "${ssh_run_options[@]}" "$target" sudo -n -- \
       /usr/bin/env LC_ALL=C /usr/bin/stat \
       -c '%F:%u:%g:%a' "$staged_dir")" = directory:0:0:700
   done
-  test "$(ssh "${ssh_options[@]}" "$target" sudo -n -- /usr/bin/sha256sum \
+  test "$(ssh "${ssh_run_options[@]}" "$target" sudo -n -- /usr/bin/sha256sum \
     "$root_stage/personal-dev-builder-runtime-profile.json" | awk '{print $1}')" = \
     "$profile_sha256"
-  test "$(ssh "${ssh_options[@]}" "$target" sudo -n -- /usr/bin/sha512sum \
+  test "$(ssh "${ssh_run_options[@]}" "$target" sudo -n -- /usr/bin/sha512sum \
     "$root_stage/gvisor-release-20260810.0.tar.bz2" | awk '{print $1}')" = \
     "$archive_sha512"
-  test "$(ssh "${ssh_options[@]}" "$target" sudo -n -- /usr/bin/sha256sum \
+  test "$(ssh "${ssh_run_options[@]}" "$target" sudo -n -- /usr/bin/sha256sum \
     "$root_stage/scripts/ops/install_personal_dev_builder_runtime.py" | awk '{print $1}')" = \
     "$installer_sha256"
-  test "$(ssh "${ssh_options[@]}" "$target" sudo -n -- /usr/bin/sha256sum \
+  test "$(ssh "${ssh_run_options[@]}" "$target" sudo -n -- /usr/bin/sha256sum \
     "$root_stage/scripts/ops/personal_dev_builder_runtime_profile.py" | awk '{print $1}')" = \
   "$profile_module_sha256"
   for staged_path in \
@@ -528,12 +529,12 @@ assert_node_staging() {
     "$root_stage/scripts/ops/install_personal_dev_builder_runtime.py" \
     "$root_stage/scripts/ops/personal_dev_builder_runtime_profile.py"
   do
-    test "$(ssh "${ssh_options[@]}" "$target" sudo -n -- \
+    test "$(ssh "${ssh_run_options[@]}" "$target" sudo -n -- \
       /usr/bin/env LC_ALL=C /usr/bin/stat \
       -c '%F:%u:%g:%a:%h' "$staged_path")" = \
       'regular file:0:0:400:1'
   done
-  test "$(ssh "${ssh_options[@]}" "$target" sudo -n -- \
+  test "$(ssh "${ssh_run_options[@]}" "$target" sudo -n -- \
     /usr/bin/env LC_ALL=C /usr/bin/stat \
     -c '%F:%u:%g:%a:%h' \
     "$root_stage/gvisor-release-20260810.0.tar.bz2")" = \
@@ -547,7 +548,7 @@ k3s_agent_invocation_id() {
     *) return 1 ;;
   esac
   target="${ssh_targets[$node]}"
-  invocation="$(ssh "${ssh_options[@]}" "$target" sudo -n -- \
+  invocation="$(ssh "${ssh_run_options[@]}" "$target" sudo -n -- \
     /usr/bin/systemctl show --property=InvocationID --value k3s-agent)"
   [[ "$invocation" =~ ^[0-9a-f]{32}$ ]]
   printf '%s\n' "$invocation"
@@ -596,7 +597,7 @@ cleanup_node_staging() {
   test "$root_stage" = "$root_stage_parent/$node"
   assert_remote_staging "$node"
   assert_node_staging "$node"
-  ssh "${ssh_options[@]}" "$target" \
+  ssh "${ssh_run_options[@]}" "$target" \
     "sudo -n -- /usr/bin/rm -rf -- '$root_stage' && sudo -n -- /usr/bin/test ! -e '$root_stage' && sudo -n -- /usr/bin/rmdir '$root_stage_parent' '$root_stage_base' && /usr/bin/rm -rf -- '$remote_stage' && /usr/bin/test ! -e '$remote_stage'"
   printf '%s\n' "$node staging=absent" \
     > "$evidence_dir/$node.staging-cleanup.txt"
@@ -720,7 +721,7 @@ for node in "${nodes[@]}"; do
   target="${ssh_targets[$node]}"
   [[ "$target" =~ ^[A-Za-z_][A-Za-z0-9._-]*@trt-eai-oldlab-[2-5]$ ]]
   test "${target#*@}" = "$node"
-  observed_hostname="$(ssh "${ssh_options[@]}" "$target" /bin/hostname -f)"
+  observed_hostname="$(ssh "${ssh_run_options[@]}" "$target" /bin/hostname -f)"
   assert_dns_hostname_identity "$observed_hostname" "$node"
   printf '%s\n' "$observed_hostname" >> "$ssh_host_evidence"
 done
@@ -774,7 +775,7 @@ case "$node" in
   trt-eai-oldlab-2|trt-eai-oldlab-3|trt-eai-oldlab-4|trt-eai-oldlab-5) ;;
   *) exit 1 ;;
 esac
-observed_hostname="$(ssh "${ssh_options[@]}" "$target" /bin/hostname -f)"
+observed_hostname="$(ssh "${ssh_run_options[@]}" "$target" /bin/hostname -f)"
 assert_dns_hostname_identity "$observed_hostname" "$node"
 assert_global_stop_conditions
 assert_no_runtimeclass_consumers
@@ -784,15 +785,15 @@ assert_node_cordon_state "$node" false
 root_stage_base=/root/loom-personal-dev-builder-runtime-rollout
 root_stage_parent="$root_stage_base/$merged_source_sha"
 root_stage="$root_stage_parent/$node"
-ssh "${ssh_options[@]}" "$target" \
+ssh "${ssh_run_options[@]}" "$target" \
   sudo -n -- /usr/bin/test ! -e "$root_stage_base"
 
-remote_stage="$(ssh "${ssh_options[@]}" "$target" \
+remote_stage="$(ssh "${ssh_run_options[@]}" "$target" \
   'umask 077; /usr/bin/mktemp -d /tmp/loom-personal-dev-runtime.XXXXXXXX')"
 [[ "$remote_stage" =~ ^/tmp/loom-personal-dev-runtime\.[A-Za-z0-9]{8}$ ]]
 printf '%s\n' "$remote_stage" > "$evidence_dir/$node.remote-stage.txt"
-ssh "${ssh_options[@]}" "$target" \
-  "/usr/bin/install -d -m 0700 '$remote_stage/scripts/ops'"
+ssh "${ssh_run_options[@]}" "$target" \
+  "/usr/bin/install -d -m 0700 '$remote_stage/scripts' '$remote_stage/scripts/ops'"
 scp "${ssh_options[@]}" -- \
   "$profile_source" \
   "$archive" \
@@ -801,12 +802,12 @@ scp "${ssh_options[@]}" -- \
   "$installer_source" \
   "$profile_module_source" \
   "$target:$remote_stage/scripts/ops/"
-ssh "${ssh_options[@]}" "$target" \
+ssh "${ssh_run_options[@]}" "$target" \
   "/usr/bin/chmod 0600 '$remote_stage/personal-dev-builder-runtime-profile.json' '$remote_stage/gvisor-release-20260810.0.tar.bz2' '$remote_stage/scripts/ops/install_personal_dev_builder_runtime.py' '$remote_stage/scripts/ops/personal_dev_builder_runtime_profile.py'"
 assert_remote_staging "$node"
 printf '%s\n' "$root_stage" > "$evidence_dir/$node.root-stage.txt"
-ssh "${ssh_options[@]}" "$target" \
-  "sudo -n -- /usr/bin/test ! -e '$root_stage_base' && sudo -n -- /usr/bin/install -d -o root -g root -m 0700 '$root_stage/scripts/ops' && sudo -n -- /usr/bin/install -o root -g root -m 0400 '$remote_stage/personal-dev-builder-runtime-profile.json' '$root_stage/personal-dev-builder-runtime-profile.json' && sudo -n -- /usr/bin/install -o root -g root -m 0600 '$remote_stage/gvisor-release-20260810.0.tar.bz2' '$root_stage/gvisor-release-20260810.0.tar.bz2' && sudo -n -- /usr/bin/install -o root -g root -m 0400 '$remote_stage/scripts/ops/install_personal_dev_builder_runtime.py' '$root_stage/scripts/ops/install_personal_dev_builder_runtime.py' && sudo -n -- /usr/bin/install -o root -g root -m 0400 '$remote_stage/scripts/ops/personal_dev_builder_runtime_profile.py' '$root_stage/scripts/ops/personal_dev_builder_runtime_profile.py'"
+ssh "${ssh_run_options[@]}" "$target" \
+  "sudo -n -- /usr/bin/test ! -e '$root_stage_base' && sudo -n -- /usr/bin/install -d -o root -g root -m 0700 '$root_stage_base' '$root_stage_parent' '$root_stage' '$root_stage/scripts' '$root_stage/scripts/ops' && sudo -n -- /usr/bin/install -o root -g root -m 0400 '$remote_stage/personal-dev-builder-runtime-profile.json' '$root_stage/personal-dev-builder-runtime-profile.json' && sudo -n -- /usr/bin/install -o root -g root -m 0600 '$remote_stage/gvisor-release-20260810.0.tar.bz2' '$root_stage/gvisor-release-20260810.0.tar.bz2' && sudo -n -- /usr/bin/install -o root -g root -m 0400 '$remote_stage/scripts/ops/install_personal_dev_builder_runtime.py' '$root_stage/scripts/ops/install_personal_dev_builder_runtime.py' && sudo -n -- /usr/bin/install -o root -g root -m 0400 '$remote_stage/scripts/ops/personal_dev_builder_runtime_profile.py' '$root_stage/scripts/ops/personal_dev_builder_runtime_profile.py'"
 assert_node_staging "$node"
 
 kubectl --kubeconfig "$kubeconfig" --request-timeout=10s \
@@ -816,15 +817,15 @@ kubectl --kubeconfig "$kubeconfig" --request-timeout=10s \
 
 kubectl --kubeconfig "$kubeconfig" cordon "$node"
 assert_node_cordon_state "$node" true
-ssh "${ssh_options[@]}" "$target" \
+ssh "${ssh_run_options[@]}" "$target" \
   "sudo -n -- /usr/bin/env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH='$root_stage' /usr/bin/python3 '$root_stage/scripts/ops/install_personal_dev_builder_runtime.py' preflight --profile '$root_stage/personal-dev-builder-runtime-profile.json' --archive '$root_stage/gvisor-release-20260810.0.tar.bz2'" \
   > "$evidence_dir/$node.preflight.json"
 assert_runtime_receipt "$evidence_dir/$node.preflight.json" preflight -
-ssh "${ssh_options[@]}" "$target" \
+ssh "${ssh_run_options[@]}" "$target" \
   "sudo -n -- /usr/bin/env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH='$root_stage' /usr/bin/python3 '$root_stage/scripts/ops/install_personal_dev_builder_runtime.py' install --profile '$root_stage/personal-dev-builder-runtime-profile.json' --archive '$root_stage/gvisor-release-20260810.0.tar.bz2'" \
   > "$evidence_dir/$node.install.json"
 assert_runtime_receipt "$evidence_dir/$node.install.json" install staged
-ssh "${ssh_options[@]}" "$target" \
+ssh "${ssh_run_options[@]}" "$target" \
   "sudo -n -- /usr/bin/env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH='$root_stage' /usr/bin/python3 '$root_stage/scripts/ops/install_personal_dev_builder_runtime.py' verify-staged --profile '$root_stage/personal-dev-builder-runtime-profile.json'" \
   > "$evidence_dir/$node.verify-staged.json"
 assert_runtime_receipt \
@@ -832,8 +833,8 @@ assert_runtime_receipt \
 
 k3s_agent_invocation_id "$node" \
   > "$evidence_dir/$node.k3s-invocation.before.txt"
-ssh "${ssh_options[@]}" "$target" sudo -n -- /usr/bin/systemctl restart k3s-agent
-ssh "${ssh_options[@]}" "$target" sudo -n -- \
+ssh "${ssh_run_options[@]}" "$target" sudo -n -- /usr/bin/systemctl restart k3s-agent
+ssh "${ssh_run_options[@]}" "$target" sudo -n -- \
   /usr/bin/systemctl is-active --quiet k3s-agent
 k3s_agent_invocation_id "$node" \
   > "$evidence_dir/$node.k3s-invocation.after.txt"
@@ -847,7 +848,7 @@ kubectl --kubeconfig "$kubeconfig" get "node/$node" -o json \
       any(.status.conditions[]?; .type == "Ready" and .status == "True") and
       any(.status.conditions[]?; .type == "DiskPressure" and .status == "False")
     ' >/dev/null
-ssh "${ssh_options[@]}" "$target" \
+ssh "${ssh_run_options[@]}" "$target" \
   "sudo -n -- /usr/bin/env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH='$root_stage' /usr/bin/python3 '$root_stage/scripts/ops/install_personal_dev_builder_runtime.py' verify-active --profile '$root_stage/personal-dev-builder-runtime-profile.json'" \
   > "$evidence_dir/$node.verify-active.json"
 assert_runtime_receipt \
@@ -917,19 +918,19 @@ kubectl --kubeconfig "$kubeconfig" \
 remove_node_runtime_identity "$node"
 if test -s "$evidence_dir/$node.install.json"; then
   assert_runtime_receipt "$evidence_dir/$node.install.json" install staged
-  ssh "${ssh_options[@]}" "$target" \
+  ssh "${ssh_run_options[@]}" "$target" \
     "sudo -n -- /usr/bin/env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH='$root_stage' /usr/bin/python3 '$root_stage/scripts/ops/install_personal_dev_builder_runtime.py' verify-staged --profile '$root_stage/personal-dev-builder-runtime-profile.json'" \
     > "$evidence_dir/$node.rollback-verify-staged.json"
   assert_runtime_receipt \
     "$evidence_dir/$node.rollback-verify-staged.json" verify-staged staged
-  ssh "${ssh_options[@]}" "$target" \
+  ssh "${ssh_run_options[@]}" "$target" \
     "sudo -n -- /usr/bin/env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH='$root_stage' /usr/bin/python3 '$root_stage/scripts/ops/install_personal_dev_builder_runtime.py' remove --profile '$root_stage/personal-dev-builder-runtime-profile.json'" \
     > "$evidence_dir/$node.remove.json"
   assert_runtime_receipt "$evidence_dir/$node.remove.json" remove absent
   k3s_agent_invocation_id "$node" \
     > "$evidence_dir/$node.rollback-k3s-invocation.before.txt"
-  ssh "${ssh_options[@]}" "$target" sudo -n -- /usr/bin/systemctl restart k3s-agent
-  ssh "${ssh_options[@]}" "$target" sudo -n -- \
+  ssh "${ssh_run_options[@]}" "$target" sudo -n -- /usr/bin/systemctl restart k3s-agent
+  ssh "${ssh_run_options[@]}" "$target" sudo -n -- \
     /usr/bin/systemctl is-active --quiet k3s-agent
   k3s_agent_invocation_id "$node" \
     > "$evidence_dir/$node.rollback-k3s-invocation.after.txt"
@@ -937,7 +938,7 @@ if test -s "$evidence_dir/$node.install.json"; then
     "$(< "$evidence_dir/$node.rollback-k3s-invocation.before.txt")"
   await_fresh_node_lease "$node" "$evidence_dir/$node.rollback"
 else
-  ssh "${ssh_options[@]}" "$target" \
+  ssh "${ssh_run_options[@]}" "$target" \
     "sudo -n -- /usr/bin/test ! -e /opt/loom/gvisor/release-20260810.0 && sudo -n -- /usr/bin/test ! -e /etc/loom/personal-dev-builder-runtime-profile.json && sudo -n -- /usr/bin/test ! -e /etc/containerd/runsc-personal-dev.toml && sudo -n -- /usr/bin/test ! -e /var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.tmpl && sudo -n -- /usr/bin/test ! -e /usr/local/bin/containerd-shim-runsc-v1"
 fi
 kubectl --kubeconfig "$kubeconfig" wait --for=condition=Ready \
@@ -1552,19 +1553,19 @@ for node in trt-eai-oldlab-5 trt-eai-oldlab-4 trt-eai-oldlab-3 trt-eai-oldlab-2;
         .metadata.annotations["loom.dev/personal-dev-runtime-profile-sha256"] == $digest
       ' >/dev/null
   remove_node_runtime_identity "$node"
-  ssh "${ssh_options[@]}" "$target" \
+  ssh "${ssh_run_options[@]}" "$target" \
     "sudo -n -- /usr/bin/env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH='$root_stage' /usr/bin/python3 '$root_stage/scripts/ops/install_personal_dev_builder_runtime.py' verify-staged --profile '$root_stage/personal-dev-builder-runtime-profile.json'" \
     > "$evidence_dir/$node.fleet-rollback-verify-staged.json"
   assert_runtime_receipt \
     "$evidence_dir/$node.fleet-rollback-verify-staged.json" verify-staged staged
-  ssh "${ssh_options[@]}" "$target" \
+  ssh "${ssh_run_options[@]}" "$target" \
     "sudo -n -- /usr/bin/env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH='$root_stage' /usr/bin/python3 '$root_stage/scripts/ops/install_personal_dev_builder_runtime.py' remove --profile '$root_stage/personal-dev-builder-runtime-profile.json'" \
     > "$evidence_dir/$node.fleet-remove.json"
   assert_runtime_receipt "$evidence_dir/$node.fleet-remove.json" remove absent
   k3s_agent_invocation_id "$node" \
     > "$evidence_dir/$node.fleet-rollback-k3s-invocation.before.txt"
-  ssh "${ssh_options[@]}" "$target" sudo -n -- /usr/bin/systemctl restart k3s-agent
-  ssh "${ssh_options[@]}" "$target" sudo -n -- \
+  ssh "${ssh_run_options[@]}" "$target" sudo -n -- /usr/bin/systemctl restart k3s-agent
+  ssh "${ssh_run_options[@]}" "$target" sudo -n -- \
     /usr/bin/systemctl is-active --quiet k3s-agent
   k3s_agent_invocation_id "$node" \
     > "$evidence_dir/$node.fleet-rollback-k3s-invocation.after.txt"
