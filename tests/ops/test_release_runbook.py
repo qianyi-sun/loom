@@ -91,7 +91,7 @@ def test_current_release_docs_separate_merge_and_release_authority() -> None:
     operator = _read(OPERATOR_RUNBOOK)
     normalized = " ".join(operator.split()).lower()
 
-    assert "trusted controller enables squash auto-merge" in normalized
+    assert "enable github's native squash auto-merge" in normalized
     assert "only merge authority" in normalized
     assert "release_owner_approval" in normalized
     assert "production environment approval" in normalized

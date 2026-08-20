@@ -89,7 +89,7 @@ The production release remains evidence-gated and may only promote `dev` to
 - `release_owner_approval` evidence URL (candidate/evidence decision):
 - Production Environment approver (deployment-secret release):
 - I confirm this PR targets `main` only for release promotion from validated `dev`.
-- I confirm the trusted controller enabled squash auto-merge and the protected
+- I confirm GitHub native squash auto-merge is enabled and the protected
   current-head CI gates are the only merge authority.
 - I confirm `release_owner_approval` evidence and Production Environment
   approval are distinct controls and are not interchangeable with CI.
