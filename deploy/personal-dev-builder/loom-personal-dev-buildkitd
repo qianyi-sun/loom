@@ -1,0 +1,148 @@
+#!/usr/bin/python3
+"""Fail-closed RootlessKit launcher for the authority-free BuildKit sidecar."""
+
+from __future__ import annotations
+
+import os
+import stat
+from collections.abc import Callable
+from pathlib import Path
+
+_GVISOR_MARKER = Path("/proc/gvisor/kernel_is_gvisor")
+_STATUS_FILE = Path("/proc/self/status")
+_HOME = Path("/var/lib/loom-buildkit/home")
+_RUNTIME_DIRECTORY = Path("/tmp/loom-rootlesskit")
+_ROOTLESSKIT = "/usr/bin/rootlesskit"
+_ROOTLESSKIT_ARGV = [
+    _ROOTLESSKIT,
+    "/bin/setpriv",
+    "--nnp",
+    "/usr/bin/buildkitd",
+    "--addr=unix:///var/run/loom-buildkit/buildkitd.sock",
+    "--oci-worker-no-process-sandbox",
+    "--oci-worker-snapshotter=native",
+]
+_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+def _preflight_error() -> RuntimeError:
+    return RuntimeError("loom-buildkitd preflight rejected the runtime identity")
+
+
+def _read_identity_file(path: Path) -> bytes:
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise _preflight_error()
+            value = bytearray()
+            while chunk := os.read(descriptor, 64 * 1024 + 1 - len(value)):
+                value.extend(chunk)
+                if len(value) > 64 * 1024:
+                    raise _preflight_error()
+            return bytes(value)
+        finally:
+            os.close(descriptor)
+    except RuntimeError:
+        raise
+    except OSError as exc:
+        raise _preflight_error() from exc
+
+
+def _verify_preflight(
+    *,
+    gvisor_marker: Path = _GVISOR_MARKER,
+    status_file: Path = _STATUS_FILE,
+    uid: int | None = None,
+    gid: int | None = None,
+) -> dict[str, str]:
+    _read_identity_file(gvisor_marker)
+    try:
+        status_payload = _read_identity_file(status_file).decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise _preflight_error() from exc
+    required = {"Uid", "Gid", "CapEff", "CapBnd", "NoNewPrivs", "Seccomp"}
+    observed: dict[str, str] = {}
+    for line in status_payload.splitlines():
+        name, separator, value = line.partition(":")
+        if not separator or name not in required:
+            continue
+        if name in observed:
+            raise _preflight_error()
+        observed[name] = value.strip()
+    actual_uid = os.getuid() if uid is None else uid
+    actual_gid = os.getgid() if gid is None else gid
+    if (
+        set(observed) != required
+        or actual_uid != 1000
+        or actual_gid != 1000
+        or observed["Uid"].split() != ["1000"] * 4
+        or observed["Gid"].split() != ["1000"] * 4
+        or observed["CapEff"] != "0000000000000000"
+        or observed["CapBnd"] != "00000000000000c0"
+        or observed["NoNewPrivs"] != "0"
+        or observed["Seccomp"] != "0"
+    ):
+        raise _preflight_error()
+    return observed
+
+
+def _ensure_private_directory(path: Path, *, uid: int, gid: int) -> None:
+    try:
+        path.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise _preflight_error() from exc
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+        or metadata.st_uid != uid
+        or metadata.st_gid != gid
+    ):
+        raise _preflight_error()
+
+
+def _main(
+    *,
+    gvisor_marker: Path = _GVISOR_MARKER,
+    status_file: Path = _STATUS_FILE,
+    uid: int | None = None,
+    gid: int | None = None,
+    home: Path = _HOME,
+    runtime_directory: Path = _RUNTIME_DIRECTORY,
+    execve: Callable[[str, list[str], dict[str, str]], object] | None = None,
+) -> None:
+    actual_uid = os.getuid() if uid is None else uid
+    actual_gid = os.getgid() if gid is None else gid
+    observed = _verify_preflight(
+        gvisor_marker=gvisor_marker,
+        status_file=status_file,
+        uid=actual_uid,
+        gid=actual_gid,
+    )
+    _ensure_private_directory(home, uid=actual_uid, gid=actual_gid)
+    _ensure_private_directory(runtime_directory, uid=actual_uid, gid=actual_gid)
+    print(
+        "loom-buildkitd-preflight "
+        f"uid={actual_uid} gid={actual_gid} "
+        f"capeff={observed['CapEff']} capbnd={observed['CapBnd']} "
+        f"nnp={observed['NoNewPrivs']} seccomp={observed['Seccomp']}",
+        flush=True,
+    )
+    environment = {
+        "HOME": str(home),
+        "PATH": _PATH,
+        "TMPDIR": "/tmp",
+        "USER": "user",
+        "XDG_RUNTIME_DIR": str(runtime_directory),
+    }
+    executor = os.execve if execve is None else execve
+    executor(_ROOTLESSKIT, list(_ROOTLESSKIT_ARGV), environment)
+    raise RuntimeError("loom-buildkitd exec unexpectedly returned")
+
+
+if __name__ == "__main__":
+    _main()

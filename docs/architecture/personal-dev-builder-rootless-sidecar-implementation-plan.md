@@ -311,8 +311,10 @@ git commit -m "fix(dev): connect builder client to isolated daemon"
 
 - Consumes: immutable `moby/buildkit:rootless` base digest already checked in.
 - Produces: build-time failure unless `/usr/bin/buildctl`, RootlessKit `3.0.1`,
-  RootlessKit SHA-256
-  `79e43c95bb160488b6cb839da16750f7c590fb307b9c2e2d0421dd73fdc557cc`,
+  the architecture-bound RootlessKit SHA-256 (`amd64`:
+  `79e43c95bb160488b6cb839da16750f7c590fb307b9c2e2d0421dd73fdc557cc`;
+  `arm64`:
+  `27dfdece833e7ababf64ac5ac37b55b631d614e51e23d2f3505b2881f22c1fce`),
   BusyBox `setpriv`, and the two exact helper file-capability xattrs exist.
 - Produces: `/usr/local/bin/loom-personal-dev-buildkitd`, a checked-in launcher
   that validates its exact gVisor/security identity before execing RootlessKit.
@@ -324,6 +326,8 @@ Add an ops test that requires the Dockerfile to bind:
 ```python
 assert "rootlesskit version 3.0.1" in dockerfile
 assert "79e43c95bb160488b6cb839da16750f7c590fb307b9c2e2d0421dd73fdc557cc" in dockerfile
+assert "27dfdece833e7ababf64ac5ac37b55b631d614e51e23d2f3505b2881f22c1fce" in dockerfile
+assert "ARG TARGETARCH" in dockerfile
 assert "/bin/setpriv" in dockerfile
 assert "/usr/bin/newuidmap" in dockerfile
 assert "0100000280000000000000000000000000000000" in dockerfile

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import re
+import runpy
 import shlex
 import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 from tests.unit.test_dev_instance_manifest import _immutable_config
 from tests.unit.test_personal_dev_builder import _registration
 from tests.unit.test_personal_dev_builder_manifest import _config as _builder_config
@@ -20,6 +22,28 @@ _ROOT = Path(__file__).resolve().parents[2]
 
 def _read(relative: str) -> str:
     return (_ROOT / relative).read_text(encoding="utf-8")
+
+
+def _sidecar_status(**changes: str) -> bytes:
+    fields = {
+        "Uid": "1000\t1000\t1000\t1000",
+        "Gid": "1000\t1000\t1000\t1000",
+        "CapEff": "0000000000000000",
+        "CapBnd": "00000000000000c0",
+        "NoNewPrivs": "0",
+        "Seccomp": "0",
+    }
+    fields.update(changes)
+    return "".join(f"{name}:\t{value}\n" for name, value in fields.items()).encode(
+        "ascii"
+    )
+
+
+def _sidecar_launcher() -> dict[str, object]:
+    return runpy.run_path(
+        str(_ROOT / "deploy/personal-dev-builder/loom-personal-dev-buildkitd"),
+        run_name="loom_personal_dev_buildkitd_test",
+    )
 
 
 def test_shadow_package_is_pure_render_only_and_has_no_legacy_extension() -> None:
@@ -60,6 +84,138 @@ def test_dynamic_personal_and_builder_namespaces_bind_read_authority_locally() -
                 "namespace": "loom-dev",
             }
         ]
+
+
+def test_personal_dev_builder_image_binds_rootless_sidecar_prerequisites() -> None:
+    dockerfile = _read("deploy/Dockerfile.personal-dev-builder")
+    ownership = _read("config/component-ownership.toml")
+
+    assert "rootlesskit version 3.0.1" in dockerfile
+    assert (
+        "79e43c95bb160488b6cb839da16750f7c590fb307b9c2e2d0421dd73fdc557cc"
+        in dockerfile
+    )
+    assert (
+        "27dfdece833e7ababf64ac5ac37b55b631d614e51e23d2f3505b2881f22c1fce"
+        in dockerfile
+    )
+    assert "ARG TARGETARCH" in dockerfile
+    assert "/usr/bin/buildctl" in dockerfile
+    assert "/bin/setpriv" in dockerfile
+    assert "/usr/bin/newuidmap" in dockerfile
+    assert "0100000280000000000000000000000000000000" in dockerfile
+    assert "/usr/bin/newgidmap" in dockerfile
+    assert "0100000240000000000000000000000000000000" in dockerfile
+    assert (
+        "COPY --chown=0:0 --chmod=0555 "
+        "deploy/personal-dev-builder/loom-personal-dev-buildkitd" in dockerfile
+    )
+    assert '"deploy/personal-dev-builder/loom-personal-dev-buildkitd"' in ownership
+
+
+def test_rootless_sidecar_launcher_execs_only_the_fixed_buildkit_command(
+    tmp_path: Path,
+) -> None:
+    launcher = _sidecar_launcher()
+    marker = tmp_path / "kernel_is_gvisor"
+    marker.write_bytes(b"1\n")
+    status = tmp_path / "status"
+    status.write_bytes(_sidecar_status())
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    recorded: list[tuple[str, list[str], dict[str, str]]] = []
+
+    def execve(path: str, argv: list[str], environment: dict[str, str]) -> None:
+        recorded.append((path, argv, environment))
+
+    def accept_private_directory(path: Path, *, uid: int, gid: int) -> None:
+        assert path in {state / "home", tmp_path / "runtime"}
+        assert (uid, gid) == (1000, 1000)
+
+    launcher["_main"].__globals__["_ensure_private_directory"] = (
+        accept_private_directory
+    )
+    with pytest.raises(RuntimeError, match="returned"):
+        launcher["_main"](
+            gvisor_marker=marker,
+            status_file=status,
+            uid=1000,
+            gid=1000,
+            home=state / "home",
+            runtime_directory=tmp_path / "runtime",
+            execve=execve,
+        )
+
+    assert recorded == [
+        (
+            "/usr/bin/rootlesskit",
+            [
+                "/usr/bin/rootlesskit",
+                "/bin/setpriv",
+                "--nnp",
+                "/usr/bin/buildkitd",
+                "--addr=unix:///var/run/loom-buildkit/buildkitd.sock",
+                "--oci-worker-no-process-sandbox",
+                "--oci-worker-snapshotter=native",
+            ],
+            {
+                "HOME": str(state / "home"),
+                "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "TMPDIR": "/tmp",
+                "USER": "user",
+                "XDG_RUNTIME_DIR": str(tmp_path / "runtime"),
+            },
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "uid", "gid"),
+    [
+        ("Uid", "1001\t1001\t1001\t1001", 1000, 1000),
+        ("Gid", "1001\t1001\t1001\t1001", 1000, 1000),
+        ("CapEff", "00000000000000c0", 1000, 1000),
+        ("CapBnd", "0000000000000000", 1000, 1000),
+        ("NoNewPrivs", "1", 1000, 1000),
+        ("Seccomp", "2", 1000, 1000),
+        ("Uid", "1000\t1000\t1000\t1000", 1001, 1000),
+        ("Gid", "1000\t1000\t1000\t1000", 1000, 1001),
+    ],
+)
+def test_rootless_sidecar_launcher_rejects_each_identity_drift(
+    tmp_path: Path,
+    field: str,
+    value: str,
+    uid: int,
+    gid: int,
+) -> None:
+    launcher = _sidecar_launcher()
+    marker = tmp_path / "kernel_is_gvisor"
+    marker.write_bytes(b"1\n")
+    status = tmp_path / "status"
+    status.write_bytes(_sidecar_status(**{field: value}))
+
+    with pytest.raises(RuntimeError, match="preflight"):
+        launcher["_verify_preflight"](
+            gvisor_marker=marker,
+            status_file=status,
+            uid=uid,
+            gid=gid,
+        )
+
+
+def test_rootless_sidecar_launcher_requires_gvisor_marker(tmp_path: Path) -> None:
+    launcher = _sidecar_launcher()
+    status = tmp_path / "status"
+    status.write_bytes(_sidecar_status())
+
+    with pytest.raises(RuntimeError, match="preflight"):
+        launcher["_verify_preflight"](
+            gvisor_marker=tmp_path / "missing",
+            status_file=status,
+            uid=1000,
+            gid=1000,
+        )
 
 
 def test_dev_fleet_package_never_creates_a_second_shared_namespace() -> None:

@@ -4,9 +4,27 @@
 # reviewed trusted-fleet change; candidate source cannot select this image.
 FROM moby/buildkit:rootless@sha256:504731e577c20559c00f968f33219f30115e70be29ab96728d1d06e963fc494b
 
+ARG TARGETARCH
 USER root
+COPY --chown=0:0 --chmod=0555 deploy/personal-dev-builder/loom-personal-dev-buildkitd /usr/local/bin/loom-personal-dev-buildkitd
 RUN apk add --no-cache ca-certificates python3 \
-    && test -x /usr/bin/buildctl-daemonless.sh
+    && test -x /usr/bin/buildctl \
+    && test -x /usr/bin/buildkitd \
+    && test -x /usr/bin/rootlesskit \
+    && test "$(rootlesskit --version)" = "rootlesskit version 3.0.1" \
+    && case "$TARGETARCH" in \
+        amd64) rootlesskit_sha256=79e43c95bb160488b6cb839da16750f7c590fb307b9c2e2d0421dd73fdc557cc ;; \
+        arm64) rootlesskit_sha256=27dfdece833e7ababf64ac5ac37b55b631d614e51e23d2f3505b2881f22c1fce ;; \
+        *) exit 1 ;; \
+    esac \
+    && printf '%s  %s\n' \
+        "$rootlesskit_sha256" \
+        /usr/bin/rootlesskit | sha256sum -c - \
+    && test -x /bin/setpriv \
+    && test -x /usr/bin/newuidmap \
+    && test -x /usr/bin/newgidmap \
+    && python3 -c "import os; expected={'/usr/bin/newuidmap':'0100000280000000000000000000000000000000','/usr/bin/newgidmap':'0100000240000000000000000000000000000000'}; observed={path:os.getxattr(path,'security.capability').hex() for path in expected}; assert observed == expected, observed" \
+    && python3 -c "compile(open('/usr/local/bin/loom-personal-dev-buildkitd','rb').read(),'/usr/local/bin/loom-personal-dev-buildkitd','exec')"
 
 WORKDIR /opt/loom-personal-dev-builder
 COPY src/loom/__init__.py ./loom/__init__.py
@@ -21,7 +39,6 @@ RUN python3 -m compileall -q /opt/loom-personal-dev-builder \
 USER 1000:1000
 ENV HOME=/workspace/home \
     PYTHONPATH=/opt/loom-personal-dev-builder \
-    TMPDIR=/tmp \
-    XDG_RUNTIME_DIR=/workspace/run
+    TMPDIR=/tmp
 
 ENTRYPOINT ["python3", "-m", "loom.personal_dev_sandbox_builder"]
