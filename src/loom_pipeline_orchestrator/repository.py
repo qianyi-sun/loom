@@ -12,6 +12,15 @@ from sqlalchemy import text
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from loom.integrations.terminalgen.artifacts import (
+    TerminalGenPublicationReceiptV1,
+    TerminalGenTaskSetSmokeV1,
+)
+from loom.integrations.terminalgen.publication import (
+    TerminalGenPublicationError,
+    TerminalGenPublicationMaterial,
+)
+from loom.pipeline.artifact_commit import ArtifactCommitManifestV1, ArtifactCommitMarkerV1
 from loom.pipeline.budget import (
     AttemptProviderBudgetExceededError,
     BudgetExceededError,
@@ -183,6 +192,46 @@ class FanoutSourceCandidate:
     committed_marker_key: str
     committed_marker_sha256: str
     parameters_contract_digest: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class PublicationStoredFile:
+    relative_path: str
+    role: str
+    archive_format: str
+    media_type: str
+    size_bytes: int
+    sha256: str
+    storage_key: str
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalGenPublicationArtifactSource:
+    artifact_id: UUID
+    artifact_name: str
+    artifact_type: str
+    access_class: str
+    manifest_sha256: str
+    content_sha256: str
+    node_key: str
+    root_manifest_bytes: bytes
+    root_manifest_sha256: str
+    root_manifest_key: str
+    committed_marker_bytes: bytes
+    committed_marker_sha256: str
+    committed_marker_key: str
+    files: tuple[PublicationStoredFile, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalGenPublicationCandidate:
+    pipeline_run_id: UUID
+    team_id: UUID
+    recipe_digest: str
+    request: TerminalGenPublicationArtifactSource
+    final_audit: TerminalGenPublicationArtifactSource
+    authoring_corpus: TerminalGenPublicationArtifactSource
+    runtime_corpus: TerminalGenPublicationArtifactSource
 
 
 _COUNTERS: dict[BudgetKind, tuple[str, str, str, TerminalCause]] = {
@@ -3151,6 +3200,609 @@ class PipelineRepository:
                 stage_run_id=stage_run_id,
             )
             return True
+
+    async def terminalgen_publication_candidate(
+        self,
+        lease: RunLease,
+    ) -> TerminalGenPublicationCandidate | None:
+        expected = {
+            ("global_finalize", "final_audit"): (
+                "terminalgen_final_audit.v1",
+                "sanitized_audit",
+            ),
+            ("package_authoring", "corpus"): (
+                "terminalgen_corpus.v1",
+                "authoring_restricted",
+            ),
+            ("package_runtime", "corpus"): (
+                "terminalgen_corpus.v1",
+                "team_runtime",
+            ),
+            ("publish_boundary", "publication_request"): (
+                "terminalgen.publication-request.v1",
+                "authoring_restricted",
+            ),
+        }
+        async with self._sessions() as session, session.begin():
+            await self._lock_fence(session, lease)
+            run = (
+                (
+                    await session.execute(
+                        text("""
+                            SELECT r.team_id, r.recipe_name, r.recipe_version,
+                                   r.recipe_digest, r.result, p.state AS publication_state,
+                                   (
+                                     SELECT s.state
+                                       FROM pipeline_stage_runs s
+                                      WHERE s.pipeline_run_id=r.id
+                                        AND s.node_key='publish_boundary'
+                                        AND s.shard_key='singleton'
+                                   ) AS publish_stage_state
+                              FROM pipeline_runs r
+                              LEFT JOIN terminalgen_corpus_publications p
+                                ON p.pipeline_run_id=r.id
+                             WHERE r.id=:run_id
+                        """),
+                        {"run_id": lease.pipeline_run_id},
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            if (
+                run["result"] is not None
+                or run["publication_state"] == "published"
+                or (run["recipe_name"], run["recipe_version"])
+                != ("terminalgen-authoring", 1)
+            ):
+                return None
+            rows = (
+                (
+                    await session.execute(
+                        text("""
+                            SELECT s.node_key, s.shard_key, s.state AS stage_state,
+                                   a.id AS artifact_id, a.name AS artifact_name,
+                                   a.artifact_type, a.access_class, a.content_hash,
+                                   a.manifest_sha256, u.id AS upload_session_id,
+                                   u.prefix, u.state AS upload_state, u.commit_kind,
+                                   u.canonical_manifest_json, u.manifest_sha256 AS root_sha256,
+                                   u.committed_marker_sha256
+                              FROM pipeline_stage_runs s
+                              JOIN artifacts a ON a.pipeline_stage_run_id=s.id
+                              JOIN artifact_upload_sessions u
+                                ON u.id=a.artifact_upload_session_id
+                             WHERE s.pipeline_run_id=:run_id
+                               AND a.team_id=:team_id
+                               AND s.node_key IN (
+                                 'global_finalize','package_authoring',
+                                 'package_runtime','publish_boundary'
+                               )
+                               AND a.name IN ('final_audit','corpus','publication_request')
+                               AND a.producer_kind IN ('container','platform')
+                             ORDER BY s.node_key, a.name, a.id
+                        """),
+                        {
+                            "run_id": lease.pipeline_run_id,
+                            "team_id": run["team_id"],
+                        },
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            by_identity = {(row["node_key"], row["artifact_name"]): row for row in rows}
+            if set(by_identity) != set(expected):
+                if run["publish_stage_state"] == "succeeded":
+                    await self._fail_terminalgen_candidate_authority(
+                        session,
+                        lease,
+                        reason_code="publication_artifact_set_incomplete",
+                    )
+                return None
+            sources: dict[tuple[str, str], TerminalGenPublicationArtifactSource] = {}
+            for identity, (artifact_type, access_class) in expected.items():
+                row = by_identity[identity]
+                if (
+                    row["shard_key"] != "singleton"
+                    or row["stage_state"] != "succeeded"
+                    or row["artifact_type"] != artifact_type
+                    or row["access_class"] != access_class
+                    or row["upload_state"] != "committed"
+                    or row["commit_kind"] != "final_output"
+                    or row["canonical_manifest_json"] is None
+                    or row["root_sha256"] is None
+                    or row["committed_marker_sha256"] is None
+                    or row["manifest_sha256"] is None
+                ):
+                    await self._fail_terminalgen_candidate_authority(
+                        session,
+                        lease,
+                        reason_code="publication_artifact_authority_drift",
+                    )
+                    return None
+                try:
+                    root = ArtifactCommitManifestV1.model_validate_json(
+                        canonical_document(row["canonical_manifest_json"])
+                    )
+                except ValueError:
+                    await self._fail_terminalgen_candidate_authority(
+                        session,
+                        lease,
+                        reason_code="publication_root_manifest_invalid",
+                    )
+                    return None
+                record = next(
+                    (item for item in root.artifacts if item.artifact_id == row["artifact_id"]),
+                    None,
+                )
+                if (
+                    record is None
+                    or record.artifact_name != row["artifact_name"]
+                    or record.artifact_type != row["artifact_type"]
+                    or record.manifest_sha256 != row["manifest_sha256"]
+                    or record.content_sha256 != row["content_hash"]
+                ):
+                    await self._fail_terminalgen_candidate_authority(
+                        session,
+                        lease,
+                        reason_code="publication_root_manifest_drift",
+                    )
+                    return None
+                semantic_count = sum(
+                    item.role == "semantic_document" for item in record.stored_files
+                )
+                if semantic_count != 1:
+                    await self._fail_terminalgen_candidate_authority(
+                        session,
+                        lease,
+                        reason_code="publication_semantic_document_drift",
+                    )
+                    return None
+                marker = ArtifactCommitMarkerV1(
+                    commit_kind="final_output",
+                    manifest_sha256=row["root_sha256"],
+                    session_id=row["upload_session_id"],
+                )
+                sources[identity] = TerminalGenPublicationArtifactSource(
+                    artifact_id=row["artifact_id"],
+                    artifact_name=row["artifact_name"],
+                    artifact_type=row["artifact_type"],
+                    access_class=row["access_class"],
+                    manifest_sha256=row["manifest_sha256"],
+                    content_sha256=row["content_hash"],
+                    node_key=row["node_key"],
+                    root_manifest_bytes=canonical_document(root),
+                    root_manifest_sha256=row["root_sha256"],
+                    root_manifest_key=f"{row['prefix']}_manifest.json",
+                    committed_marker_bytes=canonical_document(marker),
+                    committed_marker_sha256=row["committed_marker_sha256"],
+                    committed_marker_key=f"{row['prefix']}_COMMITTED",
+                    files=tuple(
+                        PublicationStoredFile(
+                            relative_path=item.relative_path,
+                            role=item.role,
+                            archive_format=item.archive_format,
+                            media_type=item.media_type,
+                            size_bytes=item.size_bytes,
+                            sha256=item.sha256,
+                            storage_key=(
+                                f"{row['prefix']}artifacts/{row['artifact_id']}/"
+                                f"{item.relative_path}"
+                            ),
+                        )
+                        for item in record.stored_files
+                    ),
+                )
+            return TerminalGenPublicationCandidate(
+                pipeline_run_id=lease.pipeline_run_id,
+                team_id=run["team_id"],
+                recipe_digest=run["recipe_digest"],
+                request=sources[("publish_boundary", "publication_request")],
+                final_audit=sources[("global_finalize", "final_audit")],
+                authoring_corpus=sources[("package_authoring", "corpus")],
+                runtime_corpus=sources[("package_runtime", "corpus")],
+            )
+
+    async def _fail_terminalgen_candidate_authority(
+        self,
+        session: AsyncSession,
+        lease: RunLease,
+        *,
+        reason_code: str,
+    ) -> None:
+        await session.execute(
+            text("""
+                UPDATE pipeline_runs
+                   SET state='finished', result='failed', result_reason=:reason,
+                       finished_at=clock_timestamp(), version=version+1
+                 WHERE id=:run_id AND result IS NULL
+            """),
+            {"run_id": lease.pipeline_run_id, "reason": reason_code},
+        )
+        await self._append_event(
+            session,
+            lease,
+            event_type="terminalgen_corpus_publication_failed",
+            payload={"reason_code": reason_code},
+        )
+
+    async def publish_terminalgen_corpus(
+        self,
+        lease: RunLease,
+        *,
+        candidate: TerminalGenPublicationCandidate,
+        request_sha256: str,
+        material: TerminalGenPublicationMaterial,
+        smoke: TerminalGenTaskSetSmokeV1,
+        smoke_object_key: str,
+        taskset_manifest_object_key: str,
+        taskset_manifest_json: dict[str, Any],
+    ) -> TerminalGenPublicationReceiptV1:
+        publication_id = canonical_uuid5(
+            UUID("71114678-0cb8-4844-961e-ac165240a6f8"),
+            {"pipeline_run_id": str(candidate.pipeline_run_id), "request_sha256": request_sha256},
+        )
+        corpus_version_id = canonical_uuid5(
+            UUID("65c62e9d-e233-4948-89bb-aa3d0ea6766b"),
+            {
+                "team_id": str(candidate.team_id),
+                "version_sha256": material.corpus_version_sha256,
+            },
+        )
+        request = material.request
+        async with self._sessions() as session, session.begin():
+            await self._lock_fence(session, lease)
+            existing = (
+                (
+                    await session.execute(
+                        text("""
+                            SELECT request_sha256, state, receipt_json
+                              FROM terminalgen_corpus_publications
+                             WHERE pipeline_run_id=:run_id FOR UPDATE
+                        """),
+                        {"run_id": lease.pipeline_run_id},
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if existing is not None:
+                if existing["request_sha256"] != request_sha256:
+                    raise ValueError("TerminalGen publication idempotency drift")
+                if existing["state"] != "published" or existing["receipt_json"] is None:
+                    raise ValueError("TerminalGen publication replayed a failed terminal result")
+                return TerminalGenPublicationReceiptV1.model_validate_json(
+                    canonical_document(existing["receipt_json"])
+                )
+            await session.execute(
+                text("SELECT id FROM teams WHERE id=:team_id FOR UPDATE"),
+                {"team_id": candidate.team_id},
+            )
+            alias_row = (
+                (
+                    await session.execute(
+                        text("""
+                            SELECT a.corpus_version_id, a.generation, v.version_sha256
+                              FROM terminalgen_corpus_aliases a
+                              JOIN terminalgen_corpus_versions v ON v.id=a.corpus_version_id
+                             WHERE a.team_id=:team_id AND a.alias=:alias FOR UPDATE OF a
+                        """),
+                        {"team_id": candidate.team_id, "alias": request.alias},
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            observed_previous = None if alias_row is None else alias_row["version_sha256"]
+            if observed_previous != request.expected_previous_version_sha256:
+                raise TerminalGenPublicationError("publication_alias_fence_conflict")
+            identity_conflict = (
+                await session.execute(
+                    text("""
+                        SELECT 1 FROM terminalgen_corpus_versions
+                         WHERE team_id=:team_id
+                           AND ((corpus_id=:corpus_id AND corpus_version=:corpus_version)
+                                OR version_sha256=:version_sha256)
+                    """),
+                    {
+                        "team_id": candidate.team_id,
+                        "corpus_id": request.corpus_id,
+                        "corpus_version": request.corpus_version,
+                        "version_sha256": material.corpus_version_sha256,
+                    },
+                )
+            ).one_or_none()
+            if identity_conflict is not None:
+                raise TerminalGenPublicationError("publication_corpus_identity_conflict")
+            expected_task_artifacts: dict[UUID, tuple[str, str, str]] = {}
+            for task in material.runtime_corpus.tasks:
+                for reference, expected_type in (
+                    (task.source_task_artifact, "terminalgen_task_bundle.v1"),
+                    (task.validation_artifact, "terminalgen_task_validation.v1"),
+                ):
+                    expected_value = (
+                        expected_type,
+                        reference.manifest_sha256,
+                        "authoring_restricted",
+                    )
+                    previous = expected_task_artifacts.setdefault(
+                        reference.artifact_id,
+                        expected_value,
+                    )
+                    if previous != expected_value:
+                        raise TerminalGenPublicationError(
+                            "publication_task_artifact_reference_drift"
+                        )
+            artifact_rows = (
+                (
+                    await session.execute(
+                        text("""
+                            SELECT id, artifact_type, manifest_sha256, access_class
+                             FROM artifacts
+                             WHERE pipeline_run_id=:run_id
+                               AND team_id=:team_id
+                               AND artifact_type IN (
+                                 'terminalgen_task_bundle.v1',
+                                 'terminalgen_task_validation.v1'
+                               )
+                        """),
+                        {
+                            "run_id": candidate.pipeline_run_id,
+                            "team_id": candidate.team_id,
+                        },
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            observed_task_artifacts = {
+                row["id"]: (
+                    row["artifact_type"],
+                    row["manifest_sha256"],
+                    row["access_class"],
+                )
+                for row in artifact_rows
+                if row["id"] in expected_task_artifacts
+            }
+            if observed_task_artifacts != expected_task_artifacts:
+                raise TerminalGenPublicationError("publication_task_artifact_lineage_incomplete")
+            await session.execute(
+                text("""
+                    INSERT INTO terminalgen_corpus_versions (
+                        id, team_id, pipeline_run_id, corpus_id, corpus_version,
+                        version_sha256, recipe_digest, plan_identity_sha256,
+                        final_audit_artifact_id, authoring_corpus_artifact_id,
+                        runtime_corpus_artifact_id, authoring_tree_sha256,
+                        runtime_tree_sha256, task_count, taskset_smoke_task_count,
+                        taskset_smoke_object_key, taskset_smoke_sha256,
+                        taskset_smoke_size_bytes, taskset_manifest_object_key,
+                        taskset_manifest_json,
+                        taskset_manifest_sha256
+                    ) VALUES (
+                        :id, :team_id, :run_id, :corpus_id, :corpus_version,
+                        :version_sha256, :recipe_digest, :plan_identity_sha256,
+                        :final_audit, :authoring_corpus, :runtime_corpus,
+                        :authoring_tree, :runtime_tree, :task_count, :smoke_count,
+                        :smoke_key, :smoke_sha256, :smoke_size, :manifest_key,
+                        CAST(:manifest AS jsonb), :manifest_sha256
+                    )
+                """),
+                {
+                    "id": corpus_version_id,
+                    "team_id": candidate.team_id,
+                    "run_id": candidate.pipeline_run_id,
+                    "corpus_id": request.corpus_id,
+                    "corpus_version": request.corpus_version,
+                    "version_sha256": material.corpus_version_sha256,
+                    "recipe_digest": request.recipe_digest,
+                    "plan_identity_sha256": material.final_audit.plan_identity_sha256,
+                    "final_audit": request.final_audit_artifact.artifact_id,
+                    "authoring_corpus": request.authoring_corpus_artifact.artifact_id,
+                    "runtime_corpus": request.runtime_corpus_artifact.artifact_id,
+                    "authoring_tree": material.authoring_corpus.corpus_tree_sha256,
+                    "runtime_tree": material.runtime_corpus.corpus_tree_sha256,
+                    "task_count": material.runtime_corpus.task_count,
+                    "smoke_count": smoke.task_count,
+                    "smoke_key": smoke_object_key,
+                    "smoke_sha256": smoke.archive_sha256,
+                    "smoke_size": smoke.archive_size_bytes,
+                    "manifest_key": taskset_manifest_object_key,
+                    "manifest": _json_text(taskset_manifest_json),
+                    "manifest_sha256": smoke.manifest_sha256,
+                },
+            )
+            task_rows = []
+            for ordinal, (authoring, runtime) in enumerate(
+                zip(material.authoring_corpus.tasks, material.runtime_corpus.tasks, strict=True)
+            ):
+                task_rows.append(
+                    {
+                        "version_id": corpus_version_id,
+                        "ordinal": ordinal,
+                        "slot_id": runtime.slot_id,
+                        "task_id": runtime.task_id,
+                        "task_name": runtime.task_name,
+                        "source_tree": runtime.source_task_tree_sha256,
+                        "projected_tree": runtime.projected_task_tree_sha256,
+                        "source_artifact": runtime.source_task_artifact.artifact_id,
+                        "validation_artifact": runtime.validation_artifact.artifact_id,
+                        "authoring_path": authoring.bundle_relative_path,
+                        "authoring_sha256": authoring.bundle_sha256,
+                        "authoring_size": authoring.bundle_size_bytes,
+                        "runtime_path": runtime.bundle_relative_path,
+                        "runtime_sha256": runtime.bundle_sha256,
+                        "runtime_size": runtime.bundle_size_bytes,
+                        "verifier_sha256": runtime.verifier_bridge_sha256,
+                    }
+                )
+            await session.execute(
+                text("""
+                    INSERT INTO terminalgen_corpus_tasks (
+                        corpus_version_id, task_ordinal, slot_id, task_id, task_name,
+                        source_task_tree_sha256, projected_task_tree_sha256,
+                        source_task_artifact_id,
+                        validation_artifact_id, authoring_bundle_path,
+                        authoring_bundle_sha256, authoring_bundle_size_bytes,
+                        runtime_bundle_path, runtime_bundle_sha256,
+                        runtime_bundle_size_bytes, verifier_bridge_sha256
+                    ) VALUES (
+                        :version_id, :ordinal, :slot_id, :task_id, :task_name,
+                        :source_tree, :projected_tree, :source_artifact,
+                        :validation_artifact, :authoring_path, :authoring_sha256,
+                        :authoring_size, :runtime_path, :runtime_sha256,
+                        :runtime_size, :verifier_sha256
+                    )
+                """),
+                task_rows,
+            )
+            previous_id = None if alias_row is None else alias_row["corpus_version_id"]
+            generation = 1 if alias_row is None else int(alias_row["generation"]) + 1
+            if alias_row is None:
+                await session.execute(
+                    text("""
+                        INSERT INTO terminalgen_corpus_aliases (
+                            team_id, alias, corpus_version_id,
+                            previous_corpus_version_id, generation
+                        ) VALUES (:team_id, :alias, :version_id, NULL, 1)
+                    """),
+                    {
+                        "team_id": candidate.team_id,
+                        "alias": request.alias,
+                        "version_id": corpus_version_id,
+                    },
+                )
+            else:
+                await session.execute(
+                    text("""
+                        UPDATE terminalgen_corpus_aliases
+                           SET previous_corpus_version_id=corpus_version_id,
+                               corpus_version_id=:version_id,
+                               generation=generation+1,
+                               updated_at=clock_timestamp()
+                         WHERE team_id=:team_id AND alias=:alias
+                    """),
+                    {
+                        "team_id": candidate.team_id,
+                        "alias": request.alias,
+                        "version_id": corpus_version_id,
+                    },
+                )
+            receipt = TerminalGenPublicationReceiptV1(
+                schema_version="terminalgen.publication-receipt.v1",
+                publication_id=publication_id,
+                pipeline_run_id=candidate.pipeline_run_id,
+                corpus_version_id=corpus_version_id,
+                corpus_version_sha256=material.corpus_version_sha256,
+                corpus_id=request.corpus_id,
+                corpus_version=request.corpus_version,
+                alias=request.alias,
+                alias_generation=generation,
+                previous_corpus_version_id=previous_id,
+                authoring_corpus_artifact=request.authoring_corpus_artifact,
+                runtime_corpus_artifact=request.runtime_corpus_artifact,
+                taskset_smoke=smoke,
+            )
+            receipt_json = receipt.model_dump(mode="json")
+            receipt_bytes = canonical_document(receipt_json)
+            await session.execute(
+                text("""
+                    INSERT INTO terminalgen_corpus_publications (
+                        id, team_id, pipeline_run_id, request_artifact_id,
+                        request_sha256, state, corpus_version_id,
+                        receipt_json, receipt_bytes, receipt_sha256
+                    ) VALUES (
+                        :id, :team_id, :run_id, :request_artifact_id,
+                        :request_sha256, 'published', :version_id,
+                        CAST(:receipt AS jsonb), :receipt_bytes, :receipt_sha256
+                    )
+                """),
+                {
+                    "id": publication_id,
+                    "team_id": candidate.team_id,
+                    "run_id": candidate.pipeline_run_id,
+                    "request_artifact_id": candidate.request.artifact_id,
+                    "request_sha256": request_sha256,
+                    "version_id": corpus_version_id,
+                    "receipt": _json_text(receipt_json),
+                    "receipt_bytes": receipt_bytes,
+                    "receipt_sha256": digest_bytes(receipt_bytes),
+                },
+            )
+            await self._append_event(
+                session,
+                lease,
+                event_type="terminalgen_corpus_published",
+                payload={
+                    "alias": request.alias,
+                    "alias_generation": generation,
+                    "corpus_version_id": str(corpus_version_id),
+                    "corpus_version_sha256": material.corpus_version_sha256,
+                    "task_count": material.runtime_corpus.task_count,
+                },
+            )
+            return receipt
+
+    async def fail_terminalgen_publication(
+        self,
+        lease: RunLease,
+        *,
+        candidate: TerminalGenPublicationCandidate,
+        request_sha256: str,
+        reason_code: str,
+    ) -> None:
+        publication_id = canonical_uuid5(
+            UUID("71114678-0cb8-4844-961e-ac165240a6f8"),
+            {"pipeline_run_id": str(candidate.pipeline_run_id), "request_sha256": request_sha256},
+        )
+        async with self._sessions() as session, session.begin():
+            await self._lock_fence(session, lease)
+            existing = (
+                await session.execute(
+                    text("""
+                        SELECT request_sha256, state FROM terminalgen_corpus_publications
+                         WHERE pipeline_run_id=:run_id FOR UPDATE
+                    """),
+                    {"run_id": lease.pipeline_run_id},
+                )
+            ).mappings().one_or_none()
+            if existing is not None:
+                if existing["request_sha256"] != request_sha256:
+                    raise ValueError("TerminalGen publication idempotency drift")
+                return
+            await session.execute(
+                text("""
+                    INSERT INTO terminalgen_corpus_publications (
+                        id, team_id, pipeline_run_id, request_artifact_id,
+                        request_sha256, state, reason_code
+                    ) VALUES (
+                        :id, :team_id, :run_id, :request_artifact_id,
+                        :request_sha256, 'failed', :reason_code
+                    )
+                """),
+                {
+                    "id": publication_id,
+                    "team_id": candidate.team_id,
+                    "run_id": candidate.pipeline_run_id,
+                    "request_artifact_id": candidate.request.artifact_id,
+                    "request_sha256": request_sha256,
+                    "reason_code": reason_code,
+                },
+            )
+            await session.execute(
+                text("""
+                    UPDATE pipeline_runs
+                       SET state='finished', result='failed', result_reason=:reason,
+                           finished_at=clock_timestamp(), version=version+1
+                     WHERE id=:run_id AND result IS NULL
+                """),
+                {"run_id": lease.pipeline_run_id, "reason": reason_code},
+            )
+            await self._append_event(
+                session,
+                lease,
+                event_type="terminalgen_corpus_publication_failed",
+                payload={"reason_code": reason_code},
+            )
 
     async def project_run_result(self, lease: RunLease) -> tuple[str, str | None] | None:
         async with self._sessions() as session, session.begin():

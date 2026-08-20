@@ -97,6 +97,7 @@ from loom_service.routes import (
     tasksets,
     team_registrations,
     teams,
+    terminalgen_corpora,
     tokens,
     trajectory,
     trials,
@@ -537,6 +538,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
     app.include_router(tasks.router, prefix="/api/v1")
     app.include_router(benchmarks.router, prefix="/api/v1")
     app.include_router(tasksets.router, prefix="/api/v1")
+    app.include_router(terminalgen_corpora.router, prefix="/api/v1")
     app.include_router(batches.router, prefix="/api/v1")
     app.include_router(delivery_exports.router, prefix="/api/v1")
     app.include_router(dev_instances.router, prefix="/api/v1")

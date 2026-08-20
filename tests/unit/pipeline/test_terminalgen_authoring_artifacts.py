@@ -230,14 +230,22 @@ def test_final_audit_cannot_call_partial_quota_complete() -> None:
 
 
 def test_runtime_corpus_is_solution_free_and_authoring_corpus_is_restricted() -> None:
-    task = _task_bundle().task
+    bundle = _task_bundle()
+    task = bundle.task
+    runtime_files = [item for item in bundle.files if item.role != "reference_solution"]
     entry = CorpusTaskEntryV1(
         slot_id=task.slot_id,
         task_id=task.task_id,
         task_name=task.task_name,
-        task_tree_sha256=task.task_tree_sha256,
-        task_artifact=_ref(2, "terminalgen_runtime_task.v1"),
+        source_task_tree_sha256=task.task_tree_sha256,
+        projected_task_tree_sha256=DIGEST,
+        source_task_artifact=_ref(2, "terminalgen_task_bundle.v1"),
         validation_artifact=_ref(3, "terminalgen_task_validation.v1"),
+        bundle_relative_path=f"payload/tasks/{task.task_id}.tar",
+        bundle_sha256=DIGEST,
+        bundle_size_bytes=10,
+        verifier_bridge_sha256=task.verifier_bridge_sha256,
+        files=runtime_files,
     )
     runtime = TerminalGenCorpusArtifactV1(
         schema_version="terminalgen_corpus.v1",
@@ -251,6 +259,7 @@ def test_runtime_corpus_is_solution_free_and_authoring_corpus_is_restricted() ->
         task_count=1,
         tasks=[entry],
         corpus_tree_sha256=DIGEST,
+        task_archive_format="tar",
         provenance=_provenance(),
     )
     assert validate_artifact_document(runtime.model_dump(mode="json")) == runtime
@@ -263,6 +272,13 @@ def test_runtime_corpus_is_solution_free_and_authoring_corpus_is_restricted() ->
     payload = runtime.model_dump(mode="json")
     payload["corpus_kind"] = "authoring"
     with pytest.raises(ValidationError, match="access class"):
+        TerminalGenCorpusArtifactV1.model_validate_json(canonical_document(payload))
+
+    payload = runtime.model_dump(mode="json")
+    payload["tasks"][0]["files"] = [
+        item.model_dump(mode="json") for item in bundle.files
+    ]
+    with pytest.raises(ValidationError, match="solution-free"):
         TerminalGenCorpusArtifactV1.model_validate_json(canonical_document(payload))
 
 
