@@ -197,7 +197,7 @@ secrets.
    section with the candidate SHA, immutable prod tag, staging URL, image
    digests, gate workflow run, gate artifact, frontend route evidence, worker
    isolation evidence, raw-delivery/export status, and rollback notes
-5. Let the trusted controller enable squash auto-merge. The promotion remains
+5. Enable GitHub's native squash auto-merge. The promotion remains
    queued until the immutable candidate's required current-head CI gates pass.
    Keep the manifest's `release_owner_approval` evidence and Production
    Environment approval separate; they are not interchangeable with CI merge
@@ -229,15 +229,15 @@ have one place to audit them.
   merges. It has no bypass actors and requires zero human approvals, zero
   CODEOWNER approvals, and zero conversation resolution; these four CI checks
   are its merge authority.
-- **`main` has no active GitHub branch ruleset.** The trusted controller only
-  enables auto-merge for a same-repository `dev` promotion, and the release
-  workflow validates its evidence. Maintainers must preserve that boundary and
-  must not directly push or manually merge other changes to `main`.
-- **Auto-merge is author-neutral.** `allow_auto_merge=true` is paired with the
-  trusted `.github/workflows/auto-merge.yml` base-branch controller. It never
-  checks out PR code and enables squash auto-merge for every eligible non-draft
-  PR. The `dev` ruleset remains merge authority for `dev`; `main` has the
-  workflow and maintainer boundary described above instead of a ruleset.
+- **`main` has no active GitHub branch ruleset.** Only a same-repository `dev`
+  promotion with complete release evidence is eligible for native squash
+  auto-merge. Maintainers must preserve that boundary and must not directly
+  push or manually merge other changes to `main`.
+- **Auto-merge is native and author-neutral.** `allow_auto_merge=true` lets a
+  developer or maintainer enable GitHub's squash auto-merge on every eligible
+  non-draft PR. The four required checks remain merge authority for `dev`;
+  enabling auto-merge grants no bypass. `main` has the release and maintainer
+  boundary described above instead of a ruleset.
   Verify remote rulesets through the GitHub API or repository settings rather
   than treating this checked-in description as live evidence.
 - **Selected Actions sources** restricts third-party actions to the repository

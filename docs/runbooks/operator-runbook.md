@@ -196,9 +196,9 @@ an arbitrary branch or tag.
    and recovery data, and `release_owner_approval`.
 4. Dispatch `.github/workflows/release-promotion-gate.yml` from `dev` with
    `candidate_sha`, `image_tag`, and the base64-encoded evidence manifest.
-5. Open the `dev` to `main` promotion pull request. The trusted controller
-   enables squash auto-merge; the protected current-head CI gates are the only
-   merge authority.
+5. Open the `dev` to `main` promotion pull request and enable GitHub's native
+   squash auto-merge; the protected current-head CI gates are the only merge
+   authority.
 6. Dispatch `.github/workflows/deploy-environment.yml` from `main` with
    `environment=production`, the same `candidate_sha` and `image_tag`, and the
    successful `release_gate_run_id`.

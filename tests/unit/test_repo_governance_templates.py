@@ -111,8 +111,8 @@ def test_main_promotion_is_ci_auto_merged_and_separates_release_approval() -> No
         assert "production environment approval" in normalized_document
         assert "not interchangeable" in normalized_document
 
-    assert ".github/workflows/auto-merge.yml" in contributing
-    assert "author-neutral" in contributing
+    assert ".github/workflows/auto-merge.yml" not in contributing
+    assert "native and author-neutral" in contributing
 
 
 def test_release_promotion_template_requires_first_prod_evidence() -> None:

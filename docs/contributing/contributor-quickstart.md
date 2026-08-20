@@ -243,59 +243,18 @@ the four protected contexts. Drafts and unrelated metadata events use only a
 `*-filtered` context. No label, author, reviewer, or merge coordinator grants
 gate authority; validation labels only add work to the path-inferred plan.
 
-The protected names are owned by the default-branch-trusted authoritative-gate publisher, not
-by an individual validation attempt. Once the publisher is present on the PR's
-base, CI, image, cluster, and staging workflows report `*-attempt` results. A
-relevant same-head event returns the four authoritative checks to `in_progress`
-as soon as the publisher observes it; only the newest full generation may finalize them. Superseded
-attempt cancellation is ignored, while a failure, timeout, cancellation, or
-missing aggregate in the newest generation remains red. The generation marker
-captures the PR identity and complete validation-relevant label snapshot; the
-publisher binds it to an ordered validation-event epoch. The publisher validates
-live state and the exact run attempt before and after a terminal update; if authority
-changed during the CheckRun write, the same check is returned to `in_progress`.
-Mask-aware event occurrences cover observable add/remove sequences whose final
-labels match. Comments and unrelated labels do not replace the epoch or share
-the authoritative source concurrency lane. A pending generation keeps one
-fail-closed required identity. Once the exact source result is terminal, the
-publisher retires that pending identity out of the protected name and creates
-the new required CheckRun already completed. That CheckRun is the signed audit
-ledger; the same-name commit status is the ruleset event carrier, avoiding any
-dependency on which CheckSuite GitHub selected for the custom check. An
-interrupted status, retirement, or creation leaves the required context pending,
-missing, or failed. Do not use an empty or tree-identical commit to repair a
-check rollup.
+Each protected name is the final aggregate job emitted directly by its source
+GitHub Actions workflow. The aggregate runs with `if: always()` and fails when
+the planner fails, a selected lane fails, times out, is cancelled, or is
+unexpectedly skipped. Unselected lanes may be skipped only when the planner's
+explicit boolean says they are not required.
 
-After changing the publisher, verify its identity transition on a disposable
-PR before closing the governance issue. For each protected context, inspect the
-exact head's CheckRuns through the GitHub API. The pending CheckRun ID must be
-renamed to `authoritative-gate-retired (<context> #<id>)` and completed with a
-failure conclusion; a different CheckRun ID must own the original protected
-name and already be terminal when created. The publisher also appends a commit
-status under the protected name after each fail-closed or terminal ledger write;
-that status event makes ruleset evaluation independent of the arbitrary
-CheckSuite to which GitHub attaches custom CheckRuns. All four current protected
-checks and statuses must come from GitHub Actions app `15368` and complete
-successfully before the PR merges through normal squash auto-merge. Keep the
-ruleset active with an empty bypass-actor list throughout this acceptance; a
-green source workflow or an ordinary non-required CheckRun is not equivalent
-evidence.
-
-During a normal auto-merge, GitHub can remove the commit's open-PR association
-before its direct PR snapshot reports the merge. The publisher may preserve an
-already-terminal result through that lag only when the pull number, head/base
-snapshot, authority generation, and source run/attempt all still match exactly.
-It must never synthesize success from an empty association, and any competing
-open association remains a fail-closed authority error.
-
-Acceptance evidence for this boundary must include a post-merge read-back: the
-four exact-head terminal CheckRuns and their latest same-name commit statuses
-must remain successful after the PR closes, not merely at the instant native
-auto-merge becomes eligible.
-
-Same-repository `dev`-to-`main` promotions use this publisher. Branch push
-aggregates use `*-push`, so they never duplicate a protected name on a
-later promotion PR that points at the same commit.
+There is no cross-workflow publisher, custom CheckRun, same-name commit status,
+or retired failure. Inspect the exact head's four CheckRuns when validating CI;
+all must come from the GitHub Actions app and complete successfully before
+native squash auto-merge can merge the PR. Branch push aggregates use `*-push`,
+so they never duplicate a protected name on a later `dev`-to-`main` promotion
+that points at the same commit.
 
 The `slow` marker is applied at module level on the heaviest 9 test
 files (Docker driver lifecycle / exec / io / healthcheck /
@@ -423,19 +382,19 @@ and must link the issue they advance. Maintainers mark actively owned
 issues with a `[WIP] ` title prefix, keep the project status current,
 and follow the normal `dev` auto-merge policy.
 
-Every non-draft `dev` PR uses squash auto-merge. The trusted base-branch
-controller enables it without checking out PR code or considering author or
-reviewer identity. GitHub keeps each candidate queued until `repository-checks`, `images-gate`,
+Every non-draft `dev` PR uses GitHub's native squash auto-merge. A developer or
+maintainer enables it without considering author or reviewer identity. GitHub
+keeps each candidate queued until `repository-checks`, `images-gate`,
 `cluster-smoke-gate`, and `staging-smoke-gate` are visible and successful on
 the current head SHA. Those four strict, GitHub-Actions-app-bound checks are
 the only merge authority: `dev` requires no human approval, no CODEOWNER
 approval, and no conversation resolution. Maintainers should not manually
 merge an eligible `dev` PR just because CI is green.
 
-For `main`, the trusted controller enables squash auto-merge only for a
-same-repository `dev` promotion after release evidence is attached. GitHub has
-no active `main` ruleset, so maintainers must not use a direct push or manual
-merge to bypass the checked-in release flow.
+For `main`, enable native squash auto-merge only for a same-repository `dev`
+promotion after release evidence is attached. GitHub has no active `main`
+ruleset, so maintainers must not use a direct push or manual merge to bypass
+the checked-in release flow.
 
 Current `dev protected admission` ruleset:
 
@@ -443,18 +402,17 @@ Current `dev protected admission` ruleset:
 - `required_linear_history: true`
 - `repository-checks`, `images-gate`, `cluster-smoke-gate`, and
   `staging-smoke-gate` are the required stable status checks
-- `allow_auto_merge: true`; the trusted controller enables it for every
-  non-draft PR, and GitHub holds each candidate until the policy above passes
+- `allow_auto_merge: true`; a developer or maintainer enables it for each
+  non-draft PR, and GitHub holds the candidate until the policy above passes
 - no bypass actors; repository admins go through the gate too
 - no human approval, no CODEOWNER approval, and no conversation resolution
 
 Current `main` promotion boundary:
 
-- the trusted auto-merge controller accepts only a same-repository `dev` ->
-  `main` promotion and the checked-in release flow requires the four
-  current-head checks plus release evidence;
+- only a same-repository `dev` -> `main` promotion with the four current-head
+  checks and release evidence is eligible for native squash auto-merge;
 - GitHub has no active `main` branch ruleset, so maintainers must not bypass the
-  controller with a direct push or manual merge.
+  release flow with a direct push or manual merge.
 
 Secrets and side-effect workflows:
 - Pull request workflows use read-only `GITHUB_TOKEN` permissions and

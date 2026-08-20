@@ -67,13 +67,6 @@ run-name: >-
 # Expected runtime: bounded by the manifest-owned system suite.
 
 on:
-  workflow_call:
-    inputs:
-      admission_call:
-        description: Run as one lane of the native pull-request admission workflow.
-        required: false
-        type: boolean
-        default: false
   workflow_dispatch:
   pull_request:
     types: [labeled, unlabeled, opened, synchronize, reopened, ready_for_review, converted_to_draft, edited]
@@ -117,8 +110,7 @@ jobs:
         shell: bash
         env:
           FILTERED_EVENT: >-
-            ${{ inputs.admission_call != true &&
-                github.event_name == 'pull_request' &&
+            ${{ github.event_name == 'pull_request' &&
                 (github.event.pull_request.draft ||
                  github.event.action == 'converted_to_draft' ||
                  (contains(fromJSON('["labeled","unlabeled"]'), github.event.action) &&

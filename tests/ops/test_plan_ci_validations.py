@@ -19,7 +19,7 @@ def test_every_non_draft_pr_runs_full_protected_gate() -> None:
     assert plan.gate_mode == "full"
 
 
-def test_unknown_label_reruns_admission_without_special_authority() -> None:
+def test_merge_ready_label_has_no_special_authority() -> None:
     plan = plan_validations(
         changed_paths=["src/loom/config.py"],
         labels={"ci:merge-ready"},
@@ -28,9 +28,9 @@ def test_unknown_label_reruns_admission_without_special_authority() -> None:
         pull_request_action_label="ci:merge-ready",
     )
 
-    assert plan.event_relevant is True
-    assert plan.full_gate is True
-    assert plan.gate_mode == "full"
+    assert plan.event_relevant is False
+    assert plan.full_gate is False
+    assert plan.gate_mode == "filtered"
 
 
 def test_draft_pr_is_filtered() -> None:
@@ -69,7 +69,7 @@ def test_converting_to_draft_filters_gate_until_ready_again() -> None:
         ("edited", "", False),
     ],
 )
-def test_pr_metadata_event_reruns_admission(
+def test_irrelevant_pr_metadata_event_is_filtered(
     action: str,
     action_label: str,
     base_changed: bool,
@@ -83,9 +83,8 @@ def test_pr_metadata_event_reruns_admission(
         pull_request_base_changed=base_changed,
     )
 
-    assert plan.event_relevant is True
-    assert plan.full_gate is True
-    assert plan.gate_mode == "full"
+    assert plan.event_relevant is False
+    assert plan.gate_mode == "filtered"
 
 
 def test_docs_only_selects_no_heavy_validation() -> None:
