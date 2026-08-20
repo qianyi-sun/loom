@@ -1726,6 +1726,21 @@ a new full replay PipelineRun from the original immutable inputs and snapshots;
 it never reopens a StageRun or reuses a checkpoint. Artifact downloads use the
 same-origin authorized Loom route and never reveal an internal object-store URL.
 
+`show` returns a bounded first page plus database-aggregated progress and the
+complete bounded node topology. For large fan-out runs, page the durable rows
+without loading the whole run into one response:
+
+```bash
+loom pipeline stages RUN_ID --node-key generate_card_00 --limit 500
+loom pipeline stages RUN_ID --cursor OPAQUE_CURSOR --limit 500
+loom pipeline artifacts RUN_ID --limit 100
+loom pipeline artifacts RUN_ID --cursor OPAQUE_CURSOR --limit 100
+```
+
+Stage cursors are signed and bound to the run and active filters; changing a
+filter starts a new traversal. Artifact pages apply the caller's access scope,
+so solution-bearing restricted artifacts are never made visible by pagination.
+
 Input import is restricted to the current team owner. It validates a local
 manifest and tree before the first HTTP request, creates a deterministic
 `payload.tar.zst`, rotates the upload token, and aborts on interruption. See

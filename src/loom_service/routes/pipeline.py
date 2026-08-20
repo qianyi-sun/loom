@@ -9,7 +9,7 @@ from uuid import UUID
 from fastapi import APIRouter, Header, HTTPException, Path, Query, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import Field, StringConstraints, model_validator
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, func, or_, select
 
 from loom.db.schema import (
     Artifact,
@@ -35,6 +35,8 @@ from loom.pipeline.keys import canonical_digest
 from loom.pipeline.live_preview import LivePreviewMetadataV1, is_stage1_live_preview_eligible
 from loom.pipeline.public_api import (
     PipelineArtifactDetailV1,
+    PipelineArtifactListQueryV1,
+    PipelineArtifactListResponseV1,
     PipelineExecutionAttemptListV1,
     PipelineRunCancelRequestV1,
     PipelineRunDetailV1,
@@ -45,6 +47,8 @@ from loom.pipeline.public_api import (
     PipelineRunRetryRequestV1,
     PipelineRunSubmitRequestV1,
     PipelineStageRunDetailV1,
+    PipelineStageRunListQueryV1,
+    PipelineStageRunListResponseV1,
     validate_idempotency_key,
 )
 from loom.pipeline.recipes import OfficialRecipeRegistry
@@ -57,7 +61,9 @@ from loom_service.pipeline_api_service import (
     create_public_run,
     create_retry_run,
     decode_pipeline_cursor,
+    decode_pipeline_stage_cursor,
     encode_pipeline_cursor,
+    encode_pipeline_stage_cursor,
     request_user_cancellation,
     run_projection,
 )
@@ -374,6 +380,209 @@ async def submit_pipeline_run(
     return body
 
 
+_TERMINAL_STAGE_STATES = frozenset({"succeeded", "failed", "cancelled", "skipped"})
+
+
+def _stage_progress_projection(
+    rows: list[tuple[str, str, str | None, int]],
+) -> dict[str, Any]:
+    states: dict[str, int] = {}
+    outcomes: dict[str, int] = {}
+    nodes: dict[str, dict[str, Any]] = {}
+    total = 0
+    completed = 0
+    for node_key, state, domain_outcome, count in rows:
+        total += count
+        states[state] = states.get(state, 0) + count
+        if state in _TERMINAL_STAGE_STATES:
+            completed += count
+        if state == "succeeded" and domain_outcome is not None:
+            outcomes[domain_outcome] = outcomes.get(domain_outcome, 0) + count
+        node = nodes.setdefault(
+            node_key,
+            {
+                "total_stage_runs": 0,
+                "completed_stage_runs": 0,
+                "states": {},
+                "domain_outcomes": {},
+            },
+        )
+        node["total_stage_runs"] += count
+        if state in _TERMINAL_STAGE_STATES:
+            node["completed_stage_runs"] += count
+        node["states"][state] = node["states"].get(state, 0) + count
+        if state == "succeeded" and domain_outcome is not None:
+            node["domain_outcomes"][domain_outcome] = (
+                node["domain_outcomes"].get(domain_outcome, 0) + count
+            )
+
+    def ordered(value: dict[str, int]) -> dict[str, int]:
+        return dict(sorted(value.items(), key=lambda item: item[0].encode("utf-8")))
+
+    return {
+        "total_stage_runs": total,
+        "completed_stage_runs": completed,
+        "states": ordered(states),
+        "domain_outcomes": ordered(outcomes),
+        "nodes": {
+            key: {
+                **nodes[key],
+                "states": ordered(nodes[key]["states"]),
+                "domain_outcomes": ordered(nodes[key]["domain_outcomes"]),
+            }
+            for key in sorted(nodes, key=lambda value: value.encode("utf-8"))
+        },
+    }
+
+
+async def _progress_by_run(sc: SessionAndCtx, run_ids: list[UUID]) -> dict[UUID, dict[str, Any]]:
+    if not run_ids:
+        return {}
+    rows = (
+        await sc[0].execute(
+            select(
+                PipelineStageRun.pipeline_run_id,
+                PipelineStageRun.node_key,
+                PipelineStageRun.state,
+                PipelineStageRun.domain_outcome,
+                func.count(PipelineStageRun.id),
+            )
+            .where(PipelineStageRun.pipeline_run_id.in_(run_ids))
+            .group_by(
+                PipelineStageRun.pipeline_run_id,
+                PipelineStageRun.node_key,
+                PipelineStageRun.state,
+                PipelineStageRun.domain_outcome,
+            )
+        )
+    ).all()
+    grouped: dict[UUID, list[tuple[str, str, str | None, int]]] = {}
+    for run_id, node_key, state, domain_outcome, count in rows:
+        grouped.setdefault(run_id, []).append((node_key, state, domain_outcome, count))
+    return {run_id: _stage_progress_projection(grouped.get(run_id, [])) for run_id in run_ids}
+
+
+async def _stage_page(
+    request: Request,
+    sc: SessionAndCtx,
+    *,
+    run: PipelineRun,
+    query: PipelineStageRunListQueryV1,
+) -> tuple[list[dict[str, Any]], str | None]:
+    filter_digest = canonical_digest(
+        {
+            "kind": "pipeline_stage_runs",
+            "pipeline_run_id": str(run.id),
+            "query": query.model_dump(mode="json", exclude={"cursor", "limit"}),
+        }
+    )
+    node_order = PipelineStageRun.node_key.collate("C")
+    shard_order = PipelineStageRun.shard_key.collate("C")
+    statement = select(PipelineStageRun).where(PipelineStageRun.pipeline_run_id == run.id)
+    if query.node_key is not None:
+        statement = statement.where(PipelineStageRun.node_key == query.node_key)
+    if query.state is not None:
+        statement = statement.where(PipelineStageRun.state == query.state.value)
+    if query.domain_outcome is not None:
+        statement = statement.where(PipelineStageRun.domain_outcome == query.domain_outcome)
+    if query.cursor is not None:
+        node_key, shard_key = decode_pipeline_stage_cursor(
+            query.cursor,
+            filter_digest=filter_digest,
+            signing_key=_cursor_key(request),
+        )
+        statement = statement.where(
+            or_(
+                node_order > node_key,
+                and_(node_order == node_key, shard_order > shard_key),
+            )
+        )
+    rows = list(
+        (
+            await sc[0].execute(statement.order_by(node_order, shard_order).limit(query.limit + 1))
+        ).scalars()
+    )
+    has_more = len(rows) > query.limit
+    rows = rows[: query.limit]
+    next_cursor = None
+    if has_more and rows:
+        next_cursor = encode_pipeline_stage_cursor(
+            node_key=rows[-1].node_key,
+            shard_key=rows[-1].shard_key,
+            filter_digest=filter_digest,
+            signing_key=_cursor_key(request),
+        )
+    topology = _graph_topology(run.graph_spec_json)
+    return [
+        _stage_summary_projection(item, topology=topology, run_state=run.state) for item in rows
+    ], next_cursor
+
+
+def _artifact_access_scope(run: PipelineRun, sc: SessionAndCtx) -> tuple[str, ...]:
+    values = ["sanitized_audit", "team_runtime"]
+    if artifact_read_allowed(
+        "authoring_restricted",
+        run_created_by_user_id=getattr(run, "created_by_user_id", None),
+        requesting_user_id=sc[1].user_id,
+        requesting_role=sc[1].role,
+        platform_admin=is_admin(sc[1]),
+    ):
+        values.append("authoring_restricted")
+    return tuple(sorted(values))
+
+
+async def _artifact_page(
+    request: Request,
+    sc: SessionAndCtx,
+    *,
+    run: PipelineRun,
+    query: PipelineArtifactListQueryV1,
+) -> tuple[list[dict[str, Any]], str | None]:
+    access_scope = _artifact_access_scope(run, sc)
+    filter_digest = canonical_digest(
+        {
+            "access_scope": access_scope,
+            "kind": "pipeline_artifacts",
+            "pipeline_run_id": str(run.id),
+        }
+    )
+    statement = select(Artifact).where(
+        Artifact.pipeline_run_id == run.id,
+        or_(Artifact.access_class.is_(None), Artifact.access_class.in_(access_scope)),
+    )
+    if query.cursor is not None:
+        created_at, artifact_id = decode_pipeline_cursor(
+            query.cursor,
+            filter_digest=filter_digest,
+            signing_key=_cursor_key(request),
+        )
+        statement = statement.where(
+            or_(
+                Artifact.created_at > created_at,
+                and_(Artifact.created_at == created_at, Artifact.id > artifact_id),
+            )
+        )
+    rows = list(
+        (
+            await sc[0].execute(
+                statement.order_by(Artifact.created_at, Artifact.id).limit(query.limit + 1)
+            )
+        ).scalars()
+    )
+    rows = [item for item in rows if _artifact_read_allowed_for_context(item, run=run, sc=sc)]
+    has_more = len(rows) > query.limit
+    rows = rows[: query.limit]
+    next_cursor = None
+    if has_more and rows:
+        next_cursor = encode_pipeline_cursor(
+            created_at=rows[-1].created_at,
+            item_id=rows[-1].id,
+            filter_digest=filter_digest,
+            signing_key=_cursor_key(request),
+        )
+    return [_artifact_projection(item) for item in rows], next_cursor
+
+
 @router.get("/pipeline-runs", response_model=PipelineRunListResponseV1)
 async def list_pipeline_runs(
     request: Request,
@@ -449,20 +658,9 @@ async def list_pipeline_runs(
             filter_digest=filter_digest,
             signing_key=_cursor_key(request),
         )
-    stages_by_run: dict[UUID, list[PipelineStageRun]] = {item.id: [] for item in rows}
     ledgers_by_run: dict[UUID, PipelineBudgetLedger] = {}
+    progress_by_run = await _progress_by_run(sc, [item.id for item in rows])
     if rows:
-        stage_rows = list(
-            (
-                await sc[0].execute(
-                    select(PipelineStageRun).where(
-                        PipelineStageRun.pipeline_run_id.in_([item.id for item in rows])
-                    )
-                )
-            ).scalars()
-        )
-        for stage in stage_rows:
-            stages_by_run.setdefault(stage.pipeline_run_id, []).append(stage)
         ledger_rows = list(
             (
                 await sc[0].execute(
@@ -477,7 +675,7 @@ async def list_pipeline_runs(
         "items": [
             _run_list_projection(
                 item,
-                stages_by_run.get(item.id, []),
+                progress_by_run[item.id],
                 ledgers_by_run.get(item.id),
             )
             for item in rows
@@ -487,47 +685,93 @@ async def list_pipeline_runs(
 
 
 @router.get("/pipeline-runs/{run_id}", response_model=PipelineRunDetailV1)
-async def get_pipeline_run(sc: SessionAndCtx, run_id: UUID) -> dict[str, Any]:
+async def get_pipeline_run(request: Request, sc: SessionAndCtx, run_id: UUID) -> dict[str, Any]:
     run = await _run_for_team(sc, run_id)
-    stages = list(
-        (
-            await sc[0].execute(
-                select(PipelineStageRun)
-                .where(PipelineStageRun.pipeline_run_id == run.id)
-                .order_by(PipelineStageRun.node_key, PipelineStageRun.shard_key)
-            )
-        ).scalars()
+    progress = (await _progress_by_run(sc, [run.id]))[run.id]
+    stages, stages_next_cursor = await _stage_page(
+        request,
+        sc,
+        run=run,
+        query=PipelineStageRunListQueryV1(limit=200),
     )
-    artifacts = list(
-        (
-            await sc[0].execute(
-                select(Artifact)
-                .where(Artifact.pipeline_run_id == run.id)
-                .order_by(Artifact.created_at, Artifact.id)
-            )
-        ).scalars()
+    artifacts, artifacts_next_cursor = await _artifact_page(
+        request,
+        sc,
+        run=run,
+        query=PipelineArtifactListQueryV1(limit=100),
     )
     ledger = await sc[0].get(PipelineBudgetLedger, run.id)
     body = run_projection(run)
-    topology = _graph_topology(run.graph_spec_json)
-    stage_projections = [
-        _stage_summary_projection(item, topology=topology, run_state=run.state) for item in stages
-    ]
-    body["stages"] = sorted(
-        stage_projections,
-        key=lambda item: (
-            item["topological_level"],
-            item["node_key"].encode("utf-8"),
-            item["shard_key"].encode("utf-8"),
-        ),
-    )
-    body["artifacts"] = [
-        _artifact_projection(item)
-        for item in artifacts
-        if _artifact_read_allowed_for_context(item, run=run, sc=sc)
-    ]
+    body["progress"] = progress
+    body["topology"] = _graph_topology_projection(run.graph_spec_json)
+    body["stages"] = stages
+    body["stages_next_cursor"] = stages_next_cursor
+    body["artifacts"] = artifacts
+    body["artifacts_next_cursor"] = artifacts_next_cursor
     body["budget"] = _budget_projection(ledger, run)
     return body
+
+
+@router.get(
+    "/pipeline-runs/{run_id}/stages",
+    response_model=PipelineStageRunListResponseV1,
+)
+async def list_pipeline_stage_runs(
+    request: Request,
+    sc: SessionAndCtx,
+    run_id: UUID,
+    node_key: Annotated[str | None, Query()] = None,
+    state: Annotated[str | None, Query()] = None,
+    domain_outcome: Annotated[str | None, Query()] = None,
+    cursor: Annotated[str | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 200,
+) -> dict[str, Any]:
+    run = await _run_for_team(sc, run_id)
+    try:
+        query = PipelineStageRunListQueryV1.model_validate(
+            {
+                "node_key": node_key,
+                "state": state,
+                "domain_outcome": domain_outcome,
+                "cursor": cursor,
+                "limit": limit,
+            }
+        )
+        items, next_cursor = await _stage_page(request, sc, run=run, query=query)
+    except PipelineApiError as exc:
+        raise _error(exc) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"reason_code": "invalid_query", "message": "Invalid StageRun list query"},
+        ) from exc
+    progress = (await _progress_by_run(sc, [run.id]))[run.id]
+    return {"items": items, "next_cursor": next_cursor, "progress": progress}
+
+
+@router.get(
+    "/pipeline-runs/{run_id}/artifacts",
+    response_model=PipelineArtifactListResponseV1,
+)
+async def list_pipeline_artifacts(
+    request: Request,
+    sc: SessionAndCtx,
+    run_id: UUID,
+    cursor: Annotated[str | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+) -> dict[str, Any]:
+    run = await _run_for_team(sc, run_id)
+    try:
+        query = PipelineArtifactListQueryV1.model_validate({"cursor": cursor, "limit": limit})
+        items, next_cursor = await _artifact_page(request, sc, run=run, query=query)
+    except PipelineApiError as exc:
+        raise _error(exc) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"reason_code": "invalid_query", "message": "Invalid Artifact list query"},
+        ) from exc
+    return {"items": items, "next_cursor": next_cursor}
 
 
 @router.post("/pipeline-runs/{run_id}/cancel")
@@ -1365,6 +1609,33 @@ def _graph_topology(graph: dict[str, Any]) -> dict[str, tuple[int, list[str]]]:
     return {key: (resolve(key), needs) for key, needs in needs_by_key.items()}
 
 
+def _graph_topology_projection(graph: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the complete bounded graph shape independently of StageRun paging."""
+
+    topology = _graph_topology(graph)
+    raw_nodes = graph.get("nodes") if isinstance(graph, dict) else None
+    kinds: dict[str, str] = {}
+    if isinstance(raw_nodes, list):
+        for raw in raw_nodes:
+            if (
+                isinstance(raw, dict)
+                and isinstance(raw.get("node_key"), str)
+                and raw.get("node_kind") in {"container", "gate"}
+            ):
+                kinds[raw["node_key"]] = cast(str, raw["node_kind"])
+    return [
+        {
+            "node_key": key,
+            "node_kind": kinds.get(key, "container"),
+            "topological_level": level,
+            "upstream_node_keys": upstream,
+        }
+        for key, (level, upstream) in sorted(
+            topology.items(), key=lambda item: (item[1][0], item[0].encode("utf-8"))
+        )
+    ]
+
+
 def _resource_projection(item: PipelineStageRun) -> tuple[str | None, str]:
     if item.node_kind == "gate":
         return None, "controller"
@@ -1570,14 +1841,9 @@ def _budget_projection(
 
 def _run_list_projection(
     run: PipelineRun,
-    stages: list[PipelineStageRun],
+    progress: dict[str, Any],
     ledger: PipelineBudgetLedger | None,
 ) -> dict[str, Any]:
-    terminal = {"succeeded", "failed", "cancelled", "skipped"}
-    outcomes: dict[str, int] = {}
-    for stage in stages:
-        if stage.state == "succeeded" and stage.domain_outcome is not None:
-            outcomes[stage.domain_outcome] = outcomes.get(stage.domain_outcome, 0) + 1
     return {
         "id": str(run.id),
         "display_name": run.display_name,
@@ -1588,9 +1854,9 @@ def _run_list_projection(
         },
         "state": run.state,
         "result": run.result,
-        "completed_stage_runs": sum(stage.state in terminal for stage in stages),
-        "total_stage_runs": len(stages),
-        "domain_outcomes": dict(sorted(outcomes.items(), key=lambda pair: pair[0].encode())),
+        "completed_stage_runs": progress["completed_stage_runs"],
+        "total_stage_runs": progress["total_stage_runs"],
+        "domain_outcomes": progress["domain_outcomes"],
         "budget": _budget_projection(ledger, run) if ledger else None,
         "created_at": run.created_at.isoformat(),
         "finished_at": run.finished_at.isoformat() if run.finished_at else None,

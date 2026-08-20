@@ -54,7 +54,7 @@ function fixture(eventSize = 200): {
     id: "artifact-1", name: "rollout", artifact_type: "behavior_rollout_bundle.v1",
     content_sha256: digest("b"), manifest_sha256: digest("c"), stored_size_bytes: 1020,
     file_count: files.length, safety_state: "verified_internal", visibility: "team",
-    share_status: "pending_scan", download_path: "/download", detail_path: "/detail",
+    share_status: "pending_scan", access_class: "team_runtime", download_path: "/download", detail_path: "/detail",
     pipeline_run_id: "run-1", pipeline_stage_run_id: "stage-1",
     execution_attempt_id: "attempt-1", producer_kind: "container",
     created_at: "2026-08-12T00:00:00Z", lineage_artifact_ids: ["input-1"],

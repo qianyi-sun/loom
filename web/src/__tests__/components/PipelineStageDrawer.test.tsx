@@ -28,7 +28,7 @@ const detail = {
     id: "artifact-1", name: "result.json", artifact_type: "result",
     content_sha256: "sha256:artifact", manifest_sha256: null,
     stored_size_bytes: 12, file_count: 1, safety_state: "pending",
-    visibility: "team", share_status: "pending_scan", download_path: "/download/1",
+    visibility: "team", share_status: "pending_scan", access_class: "team_runtime" as const, download_path: "/download/1",
     pipeline_run_id: "run-1", pipeline_stage_run_id: "stage-1",
     execution_attempt_id: "attempt-1", producer_kind: "pipeline",
     detail_path: "/pipelines/run-1/stages/stage-1/artifacts/artifact-1",

@@ -210,6 +210,46 @@ def decode_pipeline_cursor(
         raise PipelineApiError(422, "invalid_cursor", "Pipeline cursor is invalid") from exc
 
 
+def encode_pipeline_stage_cursor(
+    *, node_key: str, shard_key: str, filter_digest: str, signing_key: bytes
+) -> str:
+    import base64
+
+    payload = json.dumps(
+        {"f": filter_digest, "n": node_key, "s": shard_key, "v": 1},
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    signature = hmac.new(signing_key, payload, hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(payload + signature).decode().rstrip("=")
+
+
+def decode_pipeline_stage_cursor(
+    value: str, *, filter_digest: str, signing_key: bytes
+) -> tuple[str, str]:
+    import base64
+
+    try:
+        raw = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+        payload, signature = raw[:-32], raw[-32:]
+        if not hmac.compare_digest(
+            signature, hmac.new(signing_key, payload, hashlib.sha256).digest()
+        ):
+            raise ValueError("signature")
+        item = json.loads(payload)
+        if item != {"f": item.get("f"), "n": item.get("n"), "s": item.get("s"), "v": 1}:
+            raise ValueError("shape")
+        if item["f"] != filter_digest:
+            raise ValueError("filter")
+        node_key = item["n"]
+        shard_key = item["s"]
+        if not isinstance(node_key, str) or not isinstance(shard_key, str):
+            raise ValueError("keys")
+        return node_key, shard_key
+    except Exception as exc:
+        raise PipelineApiError(422, "invalid_cursor", "Pipeline cursor is invalid") from exc
+
+
 async def claim_idempotency(
     session: AsyncSession,
     *,

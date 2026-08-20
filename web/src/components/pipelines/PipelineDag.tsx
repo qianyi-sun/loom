@@ -1,6 +1,6 @@
 import { useMemo, useRef } from "react";
 
-import type { PipelineStageRunSummary } from "../../api/client";
+import type { PipelineNodeTopology, PipelineRunDetail, PipelineStageRunSummary } from "../../api/client";
 import { bytewiseCompare, PIPELINE_STAGE_STATE } from "../../lib/pipelinePresentation";
 
 type StageState = PipelineStageRunSummary["state"];
@@ -17,24 +17,16 @@ const STATES: StageState[] = ["blocked", "ready", "queued", "claimed", "running"
 const OUTLINE_PRECEDENCE: StageState[][] = [["failed"], ["cancelled"], ["running", "claimed"], ["retry_wait"], ["ready", "queued"], ["blocked"], ["succeeded"], ["skipped"]];
 const OUTLINES: Record<StageState, string> = { failed: "border-red-600", cancelled: "border-slate-500", running: "border-indigo-600", claimed: "border-indigo-600", retry_wait: "border-amber-600", ready: "border-amber-500", queued: "border-amber-500", blocked: "border-slate-300", succeeded: "border-emerald-600", skipped: "border-slate-300" };
 
-function groupPipelineDag(stages: PipelineStageRunSummary[]): DagNode[] {
-  const nodes = new Map<string, DagNode>();
-  for (const stage of stages) {
-    const current = nodes.get(stage.node_key);
-    if (current) {
-      if (current.kind !== stage.node_kind || current.level !== stage.topological_level || JSON.stringify(current.upstream) !== JSON.stringify(stage.upstream_node_keys)) throw new Error(`pipeline topology contract error for ${stage.node_key}`);
-      current.counts[stage.state] += 1; current.total += 1;
-    } else {
-      const counts = Object.fromEntries(STATES.map((state) => [state, 0])) as Record<StageState, number>;
-      counts[stage.state] = 1;
-      nodes.set(stage.node_key, { key: stage.node_key, kind: stage.node_kind, level: stage.topological_level, upstream: stage.upstream_node_keys, counts, total: 1 });
-    }
-  }
-  return [...nodes.values()].sort((a, b) => a.level - b.level || bytewiseCompare(a.key, b.key));
+function groupPipelineDag(topology: PipelineNodeTopology[], progress: PipelineRunDetail["progress"]): DagNode[] {
+  return topology.map((node) => {
+    const aggregate = progress.nodes[node.node_key];
+    const counts = Object.fromEntries(STATES.map((state) => [state, aggregate?.states[state] ?? 0])) as Record<StageState, number>;
+    return { key: node.node_key, kind: node.node_kind, level: node.topological_level, upstream: node.upstream_node_keys, counts, total: aggregate?.total_stage_runs ?? 0 };
+  }).sort((a, b) => a.level - b.level || bytewiseCompare(a.key, b.key));
 }
 
-export default function PipelineDag({ stages, selectedNodeKey, onSelectNode }: { stages: PipelineStageRunSummary[]; selectedNodeKey: string | null; onSelectNode: (key: string | null) => void }): JSX.Element {
-  const nodes = useMemo(() => groupPipelineDag(stages), [stages]);
+export default function PipelineDag({ topology, progress, selectedNodeKey, onSelectNode }: { topology: PipelineNodeTopology[]; progress: PipelineRunDetail["progress"]; selectedNodeKey: string | null; onSelectNode: (key: string | null) => void }): JSX.Element {
+  const nodes = useMemo(() => groupPipelineDag(topology, progress), [progress, topology]);
   const refs = useRef(new Map<string, HTMLButtonElement>());
   const levels = useMemo(() => {
     const grouped = new Map<number, DagNode[]>();

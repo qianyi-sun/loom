@@ -177,26 +177,29 @@ def test_stage1_two_phase_live_commands_use_exact_hidden_routes(
         httpx.Response(201, json={"state": "capacity_pending"}),
     )
 
-    assert main(
-        [
-            "pipeline",
-            "stage1-smoke",
-            "capacity-preflight",
-            "--candidate",
-            candidate_path,
-            "--authorization",
-            authorization_path,
-            "--confirm-candidate-sha",
-            candidate.candidate_sha256,
-            "--idempotency-key",
-            "stage1-capacity-1",
-            "--signature-key-id",
-            "pipeline-stage1-operator-v1",
-            "--signature",
-            f"@{signature}",
-            "--json",
-        ]
-    ) == 0
+    assert (
+        main(
+            [
+                "pipeline",
+                "stage1-smoke",
+                "capacity-preflight",
+                "--candidate",
+                candidate_path,
+                "--authorization",
+                authorization_path,
+                "--confirm-candidate-sha",
+                candidate.candidate_sha256,
+                "--idempotency-key",
+                "stage1-capacity-1",
+                "--signature-key-id",
+                "pipeline-stage1-operator-v1",
+                "--signature",
+                f"@{signature}",
+                "--json",
+            ]
+        )
+        == 0
+    )
 
     request = server.requests[-1]
     assert request.url.path == "/api/v1/internal/pipeline-stage1-smoke/capacity-preflight"
@@ -336,6 +339,71 @@ def test_materialize_expands_defaults_and_rejects_extra_parameters(
     )
     assert main(bad) == 1
     assert len(server.requests) == 1
+
+
+def test_stage_pages_preserve_server_cursor_and_filters(
+    server: MockServer, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = f"/api/v1/pipeline-runs/{RUN_ID}/stages"
+    server.add(
+        "GET",
+        path,
+        httpx.Response(200, json={"items": [], "next_cursor": "next", "progress": {}}),
+    )
+    assert (
+        main(
+            [
+                "pipeline",
+                "stages",
+                RUN_ID,
+                "--node-key",
+                "generate_card_00",
+                "--state",
+                "succeeded",
+                "--domain-outcome",
+                "accepted",
+                "--cursor",
+                "opaque",
+                "--limit",
+                "500",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["next_cursor"] == "next"
+    assert dict(server.requests[-1].url.params) == {
+        "limit": "500",
+        "node_key": "generate_card_00",
+        "state": "succeeded",
+        "domain_outcome": "accepted",
+        "cursor": "opaque",
+    }
+
+
+def test_artifact_pages_use_run_scoped_authorized_route(
+    server: MockServer, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = f"/api/v1/pipeline-runs/{RUN_ID}/artifacts"
+    server.add("GET", path, httpx.Response(200, json={"items": [], "next_cursor": None}))
+    assert (
+        main(
+            [
+                "pipeline",
+                "artifacts",
+                RUN_ID,
+                "--cursor",
+                "opaque",
+                "--limit",
+                "200",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out) == {"items": [], "next_cursor": None}
+    assert server.requests[-1].url.path == path
+    assert dict(server.requests[-1].url.params) == {"limit": "200", "cursor": "opaque"}
 
 
 def test_watch_uses_last_sequence_and_suppresses_duplicates(
