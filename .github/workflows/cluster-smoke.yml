@@ -64,6 +64,13 @@ run-name: >-
 #   - push to dev when cluster CLI / templates change
 
 on:
+  workflow_call:
+    inputs:
+      admission_call:
+        description: Run as one lane of the native pull-request admission workflow.
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
   push:
     branches: [dev]
@@ -116,7 +123,8 @@ jobs:
         shell: bash
         env:
           FILTERED_EVENT: >-
-            ${{ github.event_name == 'pull_request' &&
+            ${{ inputs.admission_call != true &&
+                github.event_name == 'pull_request' &&
                 (github.event.pull_request.draft ||
                  github.event.action == 'converted_to_draft' ||
                  (contains(fromJSON('["labeled","unlabeled"]'), github.event.action) &&

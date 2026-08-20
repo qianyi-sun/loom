@@ -99,6 +99,13 @@ GATE_CONTRACTS = {
     ),
 }
 
+ADMISSION_LANES = {
+    "repository-validation": ".github/workflows/ci.yml",
+    "image-validation": ".github/workflows/images.yml",
+    "cluster-validation": ".github/workflows/cluster-smoke.yml",
+    "staging-validation": ".github/workflows/staging-smoke.yml",
+}
+
 SOURCE_PLAN_CONTRACTS = {
     ".github/workflows/ci.yml": ("workflow-plan", "plan"),
     ".github/workflows/images.yml": ("plan", "required"),
@@ -324,6 +331,104 @@ def test_source_workflows_share_authoritative_generation_marker() -> None:
     }
     for workflow in workflows.values():
         assert set(_workflow_on(workflow)["pull_request"]["types"]) == expected_pr_types
+
+
+def test_native_admission_aggregates_reusable_validation_workflows() -> None:
+    workflow = _workflow(".github/workflows/admission.yml")
+    on_config = _workflow_on(workflow)
+
+    assert set(on_config) == {"pull_request"}
+    assert set(on_config["pull_request"]["types"]) == {
+        "opened",
+        "synchronize",
+        "reopened",
+        "ready_for_review",
+        "converted_to_draft",
+        "labeled",
+        "unlabeled",
+        "edited",
+    }
+    assert workflow["permissions"] == {"contents": "read"}
+    assert workflow["concurrency"] == {
+        "group": "admission-${{ github.event.pull_request.number }}",
+        "cancel-in-progress": True,
+    }
+
+    jobs = workflow["jobs"]
+    assert set(jobs) == {*ADMISSION_LANES, "admission"}
+    for job_id, source_path in ADMISSION_LANES.items():
+        lane = jobs[job_id]
+        assert lane["uses"] == f"./{source_path}"
+        assert lane["with"] == {"admission_call": True}
+        assert lane["if"] == "${{ !github.event.pull_request.draft }}"
+
+        source = _workflow(source_path)
+        workflow_call = _workflow_on(source)["workflow_call"]
+        assert workflow_call == {
+            "inputs": {
+                "admission_call": {
+                    "description": (
+                        "Run as one lane of the native pull-request admission workflow."
+                    ),
+                    "required": False,
+                    "type": "boolean",
+                    "default": False,
+                },
+            },
+        }
+
+    aggregate = jobs["admission"]
+    assert aggregate["name"] == "admission"
+    assert aggregate["if"] == "${{ always() && !github.event.pull_request.draft }}"
+    assert set(aggregate["needs"]) == set(ADMISSION_LANES)
+    assert aggregate["runs-on"] == "ubuntu-latest"
+    assert aggregate["timeout-minutes"] == 5
+    assert "github.token" not in json.dumps(aggregate)
+    assert "secrets." not in json.dumps(aggregate)
+
+
+@pytest.mark.parametrize(
+    ("results", "expected_returncode"),
+    [
+        (("success", "success", "success", "success"), 0),
+        (("failure", "success", "success", "success"), 1),
+        (("success", "cancelled", "success", "success"), 1),
+        (("success", "success", "skipped", "success"), 1),
+    ],
+)
+def test_native_admission_fails_closed_on_lane_results(
+    results: tuple[str, str, str, str],
+    expected_returncode: int,
+) -> None:
+    aggregate = _workflow(".github/workflows/admission.yml")["jobs"]["admission"]
+    script = aggregate["steps"][0]["run"]
+    result = subprocess.run(
+        ["bash"],
+        input=script,
+        text=True,
+        capture_output=True,
+        env={
+            **os.environ,
+            "REPOSITORY_RESULT": results[0],
+            "IMAGE_RESULT": results[1],
+            "CLUSTER_RESULT": results[2],
+            "STAGING_RESULT": results[3],
+        },
+        check=False,
+    )
+
+    assert result.returncode == expected_returncode, result.stderr
+
+
+def test_admission_calls_bypass_metadata_filtering_inside_source_workflows() -> None:
+    for workflow_path, (plan_job_id, _plan_step_id) in SOURCE_PLAN_CONTRACTS.items():
+        event_step = _workflow(workflow_path)["jobs"][plan_job_id]["steps"][0]
+        filter_expression = event_step["env"]["FILTERED_EVENT"]
+
+        assert "inputs.admission_call != true" in filter_expression
+        assert filter_expression.index("inputs.admission_call != true") < filter_expression.index(
+            "github.event_name == 'pull_request'"
+        )
 
 
 def test_source_workflows_detect_publisher_from_base_or_trusted_promotion() -> None:
