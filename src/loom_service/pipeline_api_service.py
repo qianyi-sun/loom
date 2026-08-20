@@ -192,6 +192,8 @@ def decode_pipeline_cursor(
 
     try:
         raw = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+        if base64.urlsafe_b64encode(raw).decode().rstrip("=") != value:
+            raise ValueError("encoding")
         payload, signature = raw[:-32], raw[-32:]
         if not hmac.compare_digest(
             signature, hmac.new(signing_key, payload, hashlib.sha256).digest()
@@ -231,6 +233,8 @@ def decode_pipeline_stage_cursor(
 
     try:
         raw = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+        if base64.urlsafe_b64encode(raw).decode().rstrip("=") != value:
+            raise ValueError("encoding")
         payload, signature = raw[:-32], raw[-32:]
         if not hmac.compare_digest(
             signature, hmac.new(signing_key, payload, hashlib.sha256).digest()

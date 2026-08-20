@@ -328,24 +328,26 @@ def test_witness_loader_rejects_a_file_whose_security_identity_changes_during_re
     witness.chmod(0o600)
     original_read = os.read
     changed = False
+    transient_link = tmp_path / "witness-transient-link.json"
 
     def read_and_change_security_identity(descriptor: int, amount: int) -> bytes:
         nonlocal changed
         if not changed:
             changed = True
-            transient_link = tmp_path / "witness-transient-link.json"
             os.link(witness, transient_link)
-            transient_link.unlink()
         return original_read(descriptor, amount)
 
     monkeypatch.setattr(os, "read", read_and_change_security_identity)
 
-    with pytest.raises(GlobalExecutionFenceError, match="changed during validation"):
-        load_global_execution_witness(
-            witness,
-            manager_public_key_path=key_path,
-            expected_manager_public_key_sha256=hashlib.sha256(raw_key).hexdigest(),
-        )
+    try:
+        with pytest.raises(GlobalExecutionFenceError, match="changed during validation"):
+            load_global_execution_witness(
+                witness,
+                manager_public_key_path=key_path,
+                expected_manager_public_key_sha256=hashlib.sha256(raw_key).hexdigest(),
+            )
+    finally:
+        transient_link.unlink(missing_ok=True)
 
 
 def test_fresh_authenticated_shadow_witness_allows_legacy_scale_up() -> None:

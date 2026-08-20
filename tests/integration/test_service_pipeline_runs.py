@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -13,7 +14,16 @@ from fastapi import FastAPI
 
 from loom.auth import AuthContext
 from loom_service.dependencies import authed_session
+from loom_service.pipeline_api_service import (
+    PipelineApiError,
+    decode_pipeline_cursor,
+    encode_pipeline_cursor,
+)
 from loom_service.routes import pipeline as pipeline_routes
+
+_BASE64URL_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+_FILTER_DIGEST = "sha256:" + "2" * 64
+_SIGNING_KEY = b"cursor-test-signing-key" * 2
 
 
 class _Result:
@@ -80,6 +90,23 @@ def _app(session: _Session, context: AuthContext) -> FastAPI:
     app.dependency_overrides[authed_session] = _session_override
     app.state.pipeline_cursor_signing_key = b"cursor-signing-key" * 2
     return app
+
+
+def _noncanonical_base64url_alias(value: str) -> str:
+    remainder = len(value) % 4
+    if remainder == 0:
+        alias = value + "="
+    else:
+        assert remainder in {2, 3}
+        last_index = _BASE64URL_ALPHABET.index(value[-1])
+        alias = value[:-1] + _BASE64URL_ALPHABET[last_index + 1]
+
+    def decode(token: str) -> bytes:
+        return base64.urlsafe_b64decode(token + "=" * (-len(token) % 4))
+
+    assert alias != value
+    assert decode(alias) == decode(value)
+    return alias
 
 
 def _budget() -> dict[str, object]:
@@ -362,6 +389,24 @@ async def test_list_run_pagination_returns_an_opaque_signed_cursor() -> None:
     assert str(first.id) not in body["next_cursor"]
 
 
+def test_pipeline_cursor_rejects_noncanonical_base64url_alias() -> None:
+    cursor = encode_pipeline_cursor(
+        created_at=datetime(2026, 8, 12, 12, 2, tzinfo=UTC),
+        item_id=UUID("11111111-1111-1111-1111-111111111111"),
+        filter_digest=_FILTER_DIGEST,
+        signing_key=_SIGNING_KEY,
+    )
+
+    with pytest.raises(PipelineApiError) as raised:
+        decode_pipeline_cursor(
+            _noncanonical_base64url_alias(cursor),
+            filter_digest=_FILTER_DIGEST,
+            signing_key=_SIGNING_KEY,
+        )
+
+    assert raised.value.reason_code == "invalid_cursor"
+
+
 def _stage(run_id: UUID, *, shard_key: str, state: str = "succeeded") -> SimpleNamespace:
     return SimpleNamespace(
         id=uuid4(),
@@ -464,7 +509,7 @@ async def test_stage_run_cursor_is_signed_and_filter_bound() -> None:
     ) as client:
         tampered = await client.get(
             f"/api/v1/pipeline-runs/{run.id}/stages",
-            params={"limit": 1, "cursor": cursor[:-1] + ("A" if cursor[-1] != "A" else "B")},
+            params={"limit": 1, "cursor": _noncanonical_base64url_alias(cursor)},
         )
     assert tampered.status_code == 422
     assert tampered.json()["detail"]["reason_code"] == "invalid_cursor"

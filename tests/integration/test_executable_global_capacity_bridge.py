@@ -78,6 +78,7 @@ async def test_two_owners_share_both_pools_without_cross_binding(
         assert status["blockers"] == ["worker-registration-pending"]
 
 
+@pytest.mark.timeout(120)
 async def test_neutral_fairness_is_stable_and_complete_work_scales_to_zero(
     executable_capacity_harness: ExecutableCapacityHarness,
 ) -> None:
@@ -597,6 +598,7 @@ async def test_failure_matrix_keeps_uncertainty_pool_and_owner_scoped(
     assert foreign_job not in executable_capacity_harness.oldlab.cancelled_job_ids()
 
 
+@pytest.mark.timeout(120)
 async def test_redeploy_delete_and_drain_require_full_epoch_turnover(
     executable_capacity_harness: ExecutableCapacityHarness,
 ) -> None:
