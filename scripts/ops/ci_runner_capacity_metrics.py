@@ -19,15 +19,19 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.ops.authoritative_gate_metrics import (  # noqa: E402
-    SOURCE_WORKFLOW_NAMES,
-    GitHubMetricsClient,
+from scripts.ops.github_actions_metrics import (  # noqa: E402
+    GitHubActionsMetricsClient,
     MetricsError,
     parse_timestamp,
 )
 
 OLDLAB_RUNNER_PREFIX = "oldlab5-kvm-"
-WORKFLOW_IDS = {name: workflow_id for workflow_id, name in SOURCE_WORKFLOW_NAMES.items()}
+WORKFLOW_IDS = {
+    "CI": 302898379,
+    "images": 302898384,
+    "cluster-smoke": 302898381,
+    "staging-smoke": 302898388,
+}
 WORKFLOW_SPECS = {
     "CI": ("normal", 300, WORKFLOW_IDS["CI"]),
     "images": ("image", 900, WORKFLOW_IDS["images"]),
@@ -391,7 +395,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("error: at least one --run is required", file=sys.stderr)
         return 2
     try:
-        client = GitHubMetricsClient(
+        client = GitHubActionsMetricsClient(
             token=os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN", ""),
             repository=args.repository,
             api_url=args.api_url,

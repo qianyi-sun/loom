@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 from scripts.ops import ci_runner_capacity_metrics as metrics
-from scripts.ops.authoritative_gate_metrics import MetricsError
+from scripts.ops.github_actions_metrics import MetricsError
 
 
 def _job(
