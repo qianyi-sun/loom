@@ -24,29 +24,30 @@ def active_staging_profile_text() -> str:
     )
     profile = profile.replace("manager_witness_export_bootstrap = true\n", "", 1)
     profile = profile.replace(
+        'retained_inactive_supervisor_pools = ["task-image-builder-oldlab"]\n',
+        "",
+        1,
+    )
+    profile = profile.replace(
         'pool_name = "task-image-builder-oldlab"\nenabled = false',
         'pool_name = "task-image-builder-oldlab"\nenabled = true',
         1,
     )
     profile = profile.replace(
-        'activation_blockers = [\n  "manager_witness_export_bootstrap_pending",\n]',
+        'activation_blockers = [\n  "protected_task_image_builder_cutover_pending",\n]',
         "activation_blockers = []",
         1,
     )
-    for name in (
-        "gb10-staging",
-        "oldlab-staging",
-        "task-image-builder-oldlab-staging",
-    ):
-        prefix, marker, suffix = profile.partition(f'name = "{name}"')
-        if not marker:
-            raise AssertionError(f"missing committed supervisor fixture: {name}")
-        suffix = suffix.replace(
-            "enabled = false\nactive = false",
-            "enabled = true\nactive = true",
-            1,
-        )
-        profile = prefix + marker + suffix
+    name = "task-image-builder-oldlab-staging"
+    prefix, marker, suffix = profile.partition(f'name = "{name}"')
+    if not marker:
+        raise AssertionError(f"missing committed supervisor fixture: {name}")
+    section, next_section, tail = suffix.partition("\n[[external_slurm_autoscaler_supervisors]]")
+    disabled = "enabled = false\nactive = false"
+    if section.count(disabled) != 1:
+        raise AssertionError(f"committed supervisor fixture is not inactive: {name}")
+    section = section.replace(disabled, "enabled = true\nactive = true", 1)
+    profile = prefix + marker + section + next_section + tail
     return profile
 
 

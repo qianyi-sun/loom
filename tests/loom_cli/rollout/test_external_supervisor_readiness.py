@@ -222,6 +222,7 @@ def _candidate(
     control_plane_environment: str | None = None,
     protected_pools: tuple[str, ...] = (),
     manager_witness_export_bootstrap: bool = False,
+    retained_inactive_supervisor_pools: tuple[str, ...] = (),
 ) -> Path:
     root = tmp_path / "candidate"
     profile = root / PROFILE_PATH
@@ -231,12 +232,17 @@ def _candidate(
     profile_header = 'environment = "staging"\n'
     if control_plane_environment is not None:
         profile_header += f'control_plane_environment = "{control_plane_environment}"\n'
-    if protected_pools or manager_witness_export_bootstrap:
+    if protected_pools or manager_witness_export_bootstrap or retained_inactive_supervisor_pools:
         profile_header += "\n[external_slurm_runner_prerequisites]\n"
         if protected_pools:
             profile_header += f"pools = {json.dumps(list(protected_pools))}\n"
         if manager_witness_export_bootstrap:
             profile_header += "manager_witness_export_bootstrap = true\n"
+        if retained_inactive_supervisor_pools:
+            profile_header += (
+                "retained_inactive_supervisor_pools = "
+                f"{json.dumps(list(retained_inactive_supervisor_pools))}\n"
+            )
     profile.write_text(
         profile_header + "\n" + "\n\n".join(supervisors or [_supervisor()]) + "\n",
         encoding="utf-8",
@@ -447,6 +453,23 @@ def test_artifact_retains_disabled_protected_pool_without_validation_command(
     assert ExternalSupervisorArtifact.from_bytes(artifact.to_bytes()) == artifact
 
 
+def test_artifact_retains_explicit_inactive_supervisor_without_bootstrap(
+    tmp_path: Path,
+) -> None:
+    root = _candidate(
+        tmp_path,
+        supervisors=[_supervisor(enabled=False, active=False)],
+        retained_inactive_supervisor_pools=("gb10",),
+    )
+
+    artifact = _build(root)
+
+    assert [item.pool_name for item in artifact.supervisors] == ["gb10"]
+    assert artifact.supervisors[0].enabled is False
+    assert artifact.supervisors[0].active is False
+    assert artifact.validation_argv("loom-rehearsal-abc123", REHEARSAL_KUBECONFIG) == {}
+
+
 def test_manager_witness_bootstrap_does_not_expand_to_unprotected_supervisors(
     tmp_path: Path,
 ) -> None:
@@ -489,7 +512,7 @@ def _committed_staging_candidate(tmp_path: Path) -> Path:
     return candidate
 
 
-def test_committed_bootstrap_gb10_artifact_stays_within_controller_authority(
+def test_committed_active_gb10_artifact_stays_within_controller_authority(
     tmp_path: Path,
 ) -> None:
     candidate = _committed_staging_candidate(tmp_path)
@@ -503,9 +526,11 @@ def test_committed_bootstrap_gb10_artifact_stays_within_controller_authority(
     )
 
     assert [item.pool_name for item in artifact.supervisors] == ["gb10"]
+    assert artifact.supervisors[0].enabled is True
+    assert artifact.supervisors[0].active is True
 
 
-def test_committed_bootstrap_retains_oldlab_builder_for_deactivation(
+def test_committed_active_profile_retains_inactive_oldlab_builder(
     tmp_path: Path,
 ) -> None:
     candidate = _committed_staging_candidate(tmp_path)
@@ -522,6 +547,11 @@ def test_committed_bootstrap_retains_oldlab_builder_for_deactivation(
         "oldlab",
         "task-image-builder-oldlab",
     ]
+    by_pool = {item.pool_name: item for item in artifact.supervisors}
+    assert by_pool["oldlab"].enabled is True
+    assert by_pool["oldlab"].active is True
+    assert by_pool["task-image-builder-oldlab"].enabled is False
+    assert by_pool["task-image-builder-oldlab"].active is False
 
 
 @pytest.mark.parametrize(("enabled", "active"), [(True, False), (False, True)])

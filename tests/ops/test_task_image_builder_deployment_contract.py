@@ -20,7 +20,7 @@ _VARIABLES = {
 }
 
 
-def test_staging_bootstrap_keeps_provisioned_builders_inert() -> None:
+def test_staging_core_activation_keeps_provisioned_builders_inert() -> None:
     profile = load_environment_state_profile(
         Path("deploy/environment-state/staging.toml"),
         variables=_VARIABLES,
@@ -42,7 +42,7 @@ def test_staging_bootstrap_keeps_provisioned_builders_inert() -> None:
         assert "registry_retention_not_provisioned" not in row["activation_blockers"]
     assert builders["x86_64"]["enabled"] is False
     assert builders["x86_64"]["activation_blockers"] == [
-        "manager_witness_export_bootstrap_pending"
+        "protected_task_image_builder_cutover_pending"
     ]
     assert builders["x86_64"]["allowed_nodes"] == ["trt-eai-oldlab-6"]
     assert builders["arm64"]["enabled"] is False
@@ -176,7 +176,7 @@ def test_remote_worker_compose_forwards_builder_lifecycle_settings() -> None:
     )
 
 
-def test_release_manifest_preserves_bootstrap_builder_blocker_evidence() -> None:
+def test_release_manifest_preserves_protected_builder_cutover_blocker() -> None:
     summary = _external_worker_summary(
         environment_state_path=Path("deploy/environment-state/staging.toml"),
         image_tag=_VARIABLES["IMAGE_TAG"],
@@ -192,7 +192,7 @@ def test_release_manifest_preserves_bootstrap_builder_blocker_evidence() -> None
     by_arch = {row["cpu_arch"]: row for row in builders}
     assert by_arch["x86_64"]["enabled"] is False
     assert by_arch["x86_64"]["activation_blockers"] == [
-        "manager_witness_export_bootstrap_pending"
+        "protected_task_image_builder_cutover_pending"
     ]
     assert by_arch["arm64"]["enabled"] is False
     assert all(row["exclusive"] is True for row in builders)

@@ -211,6 +211,23 @@ def test_candidate_contract_rejects_active_non_gb10_supervisor_during_manager_bo
     profile = tmp_path / candidate_sha / "repo/deploy/environment-state/staging.toml"
     profile.parent.mkdir(parents=True)
     payload = Path("deploy/environment-state/staging.toml").read_text(encoding="utf-8")
+    prerequisites = "[external_slurm_runner_prerequisites]\n"
+    assert payload.count(prerequisites) == 1
+    payload = payload.replace(
+        prerequisites,
+        prerequisites + "manager_witness_export_bootstrap = true\n",
+        1,
+    )
+    for name in ("gb10-staging", "oldlab-staging"):
+        prefix, marker, suffix = payload.partition(f'name = "{name}"')
+        assert marker
+        section, next_section, tail = suffix.partition(
+            "\n[[external_slurm_autoscaler_supervisors]]"
+        )
+        active = "enabled = true\nactive = true"
+        assert section.count(active) == 1
+        section = section.replace(active, "enabled = false\nactive = false", 1)
+        payload = prefix + marker + section + next_section + tail
     prefix, marker, suffix = payload.partition(
         'name = "task-image-builder-oldlab-staging"'
     )
