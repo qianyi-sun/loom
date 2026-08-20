@@ -1,0 +1,587 @@
+# Personal-development Rootless BuildKit Sidecar Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use
+> `superpowers:subagent-driven-development` (recommended) or
+> `superpowers:executing-plans` to implement this plan task-by-task. Steps use
+> checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Replace the contradictory single-container RootlessKit contract with
+an authority-free native BuildKit sidecar while keeping the capability-bearing
+client fully restricted.
+
+**Architecture:** Each target-platform Job has a restricted regular client and
+a restartable init-container BuildKit sidecar in separate PID and mount
+namespaces. The client alone owns the contract, presigned capabilities,
+workspace, verification, and upload; the sidecar owns only disposable BuildKit
+state and the shared Unix socket. The KVM gVisor RuntimeClass remains the host
+boundary, and the dynamic build namespace uses PSA baseline enforcement with
+restricted audit and warning.
+
+**Tech Stack:** Python 3.11, pytest, Kubernetes 1.36 native sidecars,
+ValidatingAdmissionPolicy CEL, gVisor/runsc, RootlessKit 3.0.1, BuildKit 0.32.2,
+Bash, jq, Docker/OCI.
+
+**Spec:** `docs/architecture/personal-dev-builder-rootless-sidecar.md`
+
+## Global constraints
+
+- The global executable-new-capacity ceiling remains exactly `0` throughout
+  implementation and release work.
+- No personal task, Slurm job, database/DNS/Secret value, physical capacity,
+  or personal lifecycle mutation is authorized by this plan.
+- The client container remains UID/GID 1000, RuntimeDefault-seccomp,
+  `allowPrivilegeEscalation=false`, read-only-rootfs, and capability-free.
+- The sidecar is non-privileged and gets only `SETUID` and `SETGID` in its
+  capability bounding set; its initial effective set must remain empty.
+- The sidecar receives no contract, Secret, source workspace, output path,
+  service-account token, projected volume, CSI volume, or image-pull Secret.
+- RootlessKit runs BuildKit through `/bin/setpriv --nnp`; BuildKit and every
+  Dockerfile `RUN` descendant must observe `NoNewPrivs=1`.
+- `shareProcessNamespace` is explicitly false and `hostUsers` remains absent.
+- Process-sandbox disabling is allowed only in the authority-free sidecar.
+- No runc fallback or unmeasured RuntimeClass is permitted.
+- Plans and designs stay under `docs/architecture`; do not recreate
+  `docs/superpowers`.
+
+---
+
+### Task 1: Render the exact two-container security and admission contract
+
+**Files:**
+
+- Modify: `tests/unit/test_personal_dev_builder_manifest.py`
+- Modify: `tests/unit/test_personal_dev_control_plane_render.py`
+- Modify: `tests/unit/test_personal_dev_control_plane_status.py`
+- Modify: `src/loom/personal_dev_builder_manifest.py`
+- Modify: `src/loom/personal_dev_control_plane_render.py`
+- Modify: `src/loom/personal_dev_control_plane_status.py`
+
+**Interfaces:**
+
+- Consumes: `PersonalDevBuilderManifestConfig.builder_image` and the existing
+  attempt-bound namespace/Job naming contract.
+- Produces: a Job whose regular container is `builder`, whose restartable init
+  container is `buildkitd`, and whose socket address is
+  `unix:///var/run/loom-buildkit/buildkitd.sock`.
+- Produces: `_dynamic_namespace_valid()` behavior that accepts restricted
+  personal namespaces and only exact baseline/restricted-versioned builder
+  namespaces.
+
+- [ ] **Step 1: Write failing manifest tests for authority separation**
+
+Extend `test_builder_manifest_is_attempt_bound_restricted_and_finite` and add
+`test_buildkit_sidecar_has_only_rootless_startup_authority` with assertions
+equivalent to:
+
+```python
+labels = namespace["metadata"]["labels"]
+assert labels | {
+    "pod-security.kubernetes.io/enforce": "baseline",
+    "pod-security.kubernetes.io/enforce-version": "v1.36",
+    "pod-security.kubernetes.io/audit": "restricted",
+    "pod-security.kubernetes.io/audit-version": "v1.36",
+    "pod-security.kubernetes.io/warn": "restricted",
+    "pod-security.kubernetes.io/warn-version": "v1.36",
+} == labels
+
+spec = job["spec"]["template"]["spec"]
+assert spec["shareProcessNamespace"] is False
+assert spec["automountServiceAccountToken"] is False
+assert len(spec["containers"]) == 1
+assert len(spec["initContainers"]) == 1
+
+client = spec["containers"][0]
+assert client["name"] == "builder"
+assert client["securityContext"]["allowPrivilegeEscalation"] is False
+assert client["securityContext"]["capabilities"] == {"drop": ["ALL"]}
+assert {mount["name"] for mount in client["volumeMounts"]} == {
+    "contract", "attempt-capability", "workspace", "tmp-client", "buildkit-run"
+}
+
+sidecar = spec["initContainers"][0]
+assert sidecar["name"] == "buildkitd"
+assert sidecar["restartPolicy"] == "Always"
+assert sidecar["command"] == ["/usr/local/bin/loom-personal-dev-buildkitd"]
+assert "args" not in sidecar
+assert sidecar["securityContext"] == {
+    "allowPrivilegeEscalation": True,
+    "capabilities": {"drop": ["ALL"], "add": ["SETGID", "SETUID"]},
+    "readOnlyRootFilesystem": True,
+    "runAsNonRoot": True,
+    "seccompProfile": {"type": "Unconfined"},
+}
+assert {mount["name"] for mount in sidecar["volumeMounts"]} == {
+    "buildkit-run", "buildkit-state", "tmp-buildkit"
+}
+assert not ({"contract", "attempt-capability", "workspace"} & {
+    mount["name"] for mount in sidecar["volumeMounts"]
+})
+```
+
+Also assert that both containers use the exact same immutable image, the socket
+mount is read-only in the client and writable in the sidecar, the sidecar
+startup probe calls `/usr/bin/buildctl --addr
+unix:///var/run/loom-buildkit/buildkitd.sock debug workers`, and no environment
+entry contains a Secret reference.
+
+- [ ] **Step 2: Write failing admission and status tests**
+
+In `test_personal_dev_control_plane_render.py`, require the namespace CEL to
+select exact security labels by family:
+
+```python
+assert "startsWith('loom-dev-')" in expression
+assert "pod-security.kubernetes.io/enforce'] == 'restricted'" in expression
+assert "startsWith('loom-build-')" in expression
+assert "pod-security.kubernetes.io/enforce'] == 'baseline'" in expression
+assert "pod-security.kubernetes.io/enforce-version'] == 'v1.36'" in expression
+assert "pod-security.kubernetes.io/audit-version'] == 'v1.36'" in expression
+assert "pod-security.kubernetes.io/warn-version'] == 'v1.36'" in expression
+```
+
+In `test_personal_dev_control_plane_status.py`, change the healthy builder
+namespace fixture to the exact six PSA labels and add mutations for baseline,
+audit/warn, and version drift. Personal namespace fixtures must remain
+restricted and continue passing.
+
+- [ ] **Step 3: Run the focused tests and verify RED**
+
+Run:
+
+```bash
+PYTHONPATH=src:. /home/hongjian/loom/.venv/bin/pytest \
+  tests/unit/test_personal_dev_builder_manifest.py \
+  tests/unit/test_personal_dev_control_plane_render.py \
+  tests/unit/test_personal_dev_control_plane_status.py -q
+```
+
+Expected: failures show the existing restricted builder namespace, absent
+native sidecar, absent explicit PID isolation, unconditional restricted CEL,
+and status rejection of baseline builder namespaces.
+
+- [ ] **Step 4: Implement the minimal manifest contract**
+
+In `personal_dev_builder_manifest.py`:
+
+- add exact `v1.36` PSA labels;
+- set `shareProcessNamespace: False`;
+- keep the regular client security context unchanged;
+- add the restartable `buildkitd` init container with the exact launcher,
+  security context, startup probe, and private mounts described above;
+- add `buildkit-run`, `buildkit-state`, `tmp-client`, and `tmp-buildkit`
+  `emptyDir` volumes with finite `sizeLimit` values;
+- replace the client's `tmp` mount with `tmp-client` and add a read-only socket
+  mount; and
+- give the sidecar an explicit finite resource envelope without increasing the
+  existing per-container 4 CPU / 8 GiB ceiling.
+
+The sidecar command must be:
+
+```python
+["/usr/local/bin/loom-personal-dev-buildkitd"]
+```
+
+- [ ] **Step 5: Implement family-specific admission and status validation**
+
+Change the namespace policy validation to one parenthesized CEL expression:
+
+```text
+(personal-family && enforce == 'restricted') ||
+(builder-family && enforce == 'baseline' && enforce-version == 'v1.36' &&
+ audit == 'restricted' && audit-version == 'v1.36' &&
+ warn == 'restricted' && warn-version == 'v1.36')
+```
+
+Change `_dynamic_namespace_valid()` so the personal branch retains restricted
+enforcement while the builder branch requires all six exact labels. Do not
+make builder labels acceptable to personal namespaces or vice versa.
+
+- [ ] **Step 6: Run focused tests and verify GREEN**
+
+Run the Step 3 command. Expected: all selected tests pass with no warning.
+
+- [ ] **Step 7: Commit Task 1**
+
+```bash
+git add src/loom/personal_dev_builder_manifest.py \
+  src/loom/personal_dev_control_plane_render.py \
+  src/loom/personal_dev_control_plane_status.py \
+  tests/unit/test_personal_dev_builder_manifest.py \
+  tests/unit/test_personal_dev_control_plane_render.py \
+  tests/unit/test_personal_dev_control_plane_status.py
+git commit -m "fix(dev): isolate rootless buildkit authority"
+```
+
+---
+
+### Task 2: Make the trusted client use the sidecar socket
+
+**Files:**
+
+- Modify: `tests/unit/test_personal_dev_sandbox_builder.py`
+- Modify: `src/loom/personal_dev_sandbox_builder.py`
+
+**Interfaces:**
+
+- Consumes: absolute `/usr/bin/buildctl` and address
+  `unix:///var/run/loom-buildkit/buildkitd.sock`.
+- Produces: `_build_images(..., buildctl_path: Path, buildkit_address: str)` and
+  matching `run_personal_dev_sandbox_build()`/CLI parameters.
+- Removes: daemon ownership and `BUILDKITD_FLAGS`/`XDG_RUNTIME_DIR` from the
+  capability-bearing client.
+
+- [ ] **Step 1: Write a failing direct-client command test**
+
+Import `_build_images` in `test_personal_dev_sandbox_builder.py`. Use the real
+contract and real small OCI fixture, but monkeypatch only `subprocess.run` to
+record each command and write the fixture to the `dest=` output. Assert every
+command starts with:
+
+```python
+[
+    "/usr/bin/buildctl",
+    "--addr=unix:///var/run/loom-buildkit/buildkitd.sock",
+    "build",
+]
+```
+
+Assert no command or environment contains `buildctl-daemonless`, `BUILDKITD`,
+`BUILDKITD_FLAGS`, `ROOTLESSKIT`, or `XDG_RUNTIME_DIR`. Add rejection tests for
+a relative buildctl path and any address other than the exact Unix address.
+Add a client-identity test using temporary marker/status files that requires
+UID/GID 1000, `CapEff=0`, `CapBnd=0`, `NoNewPrivs=1`, and seccomp mode 2, and
+rejects each drift independently.
+
+- [ ] **Step 2: Run the client tests and verify RED**
+
+```bash
+PYTHONPATH=src:. /home/hongjian/loom/.venv/bin/pytest \
+  tests/unit/test_personal_dev_sandbox_builder.py -q
+```
+
+Expected: `_build_images` has the old daemonless parameter and command.
+
+- [ ] **Step 3: Implement direct Buildctl invocation**
+
+Add a fail-closed client identity check before either capability file is read.
+The check must require `/proc/gvisor/kernel_is_gvisor`, UID/GID 1000, empty
+effective and bounding capability sets, `NoNewPrivs=1`, and seccomp mode 2.
+Keep its parser independently testable with explicit marker/status inputs.
+
+Rename the parameter and CLI option to `buildctl_path` /
+`--buildctl-path`; add `buildkit_address` / `--buildkit-address`; validate the
+path is absolute and the address equals the exact constant. Invoke:
+
+```python
+[
+    str(buildctl_path),
+    f"--addr={buildkit_address}",
+    "build",
+    # existing frontend, local, platform, label, and OCI output arguments
+]
+```
+
+Retain finite timeout, closed stdin, suppressed child output, real OCI
+verification, size accounting, canonical artifact creation, and upload.
+
+- [ ] **Step 4: Run the client tests and verify GREEN**
+
+Run the Step 2 command. Expected: all selected tests pass.
+
+- [ ] **Step 5: Commit Task 2**
+
+```bash
+git add src/loom/personal_dev_sandbox_builder.py \
+  tests/unit/test_personal_dev_sandbox_builder.py
+git commit -m "fix(dev): connect builder client to isolated daemon"
+```
+
+---
+
+### Task 3: Bind the trusted image's RootlessKit prerequisites
+
+**Files:**
+
+- Modify: `tests/ops/test_personal_dev_control_plane_package_boundary.py`
+- Modify: `deploy/Dockerfile.personal-dev-builder`
+- Create: `deploy/personal-dev-builder/loom-personal-dev-buildkitd`
+- Modify: `config/component-ownership.toml`
+
+**Interfaces:**
+
+- Consumes: immutable `moby/buildkit:rootless` base digest already checked in.
+- Produces: build-time failure unless `/usr/bin/buildctl`, RootlessKit `3.0.1`,
+  RootlessKit SHA-256
+  `79e43c95bb160488b6cb839da16750f7c590fb307b9c2e2d0421dd73fdc557cc`,
+  BusyBox `setpriv`, and the two exact helper file-capability xattrs exist.
+- Produces: `/usr/local/bin/loom-personal-dev-buildkitd`, a checked-in launcher
+  that validates its exact gVisor/security identity before execing RootlessKit.
+
+- [ ] **Step 1: Write failing Dockerfile contract assertions**
+
+Add an ops test that requires the Dockerfile to bind:
+
+```python
+assert "rootlesskit version 3.0.1" in dockerfile
+assert "79e43c95bb160488b6cb839da16750f7c590fb307b9c2e2d0421dd73fdc557cc" in dockerfile
+assert "/bin/setpriv" in dockerfile
+assert "/usr/bin/newuidmap" in dockerfile
+assert "0100000280000000000000000000000000000000" in dockerfile
+assert "/usr/bin/newgidmap" in dockerfile
+assert "0100000240000000000000000000000000000000" in dockerfile
+assert "COPY deploy/personal-dev-builder/loom-personal-dev-buildkitd" in dockerfile
+```
+
+Add launcher assertions that require the gVisor marker, UID/GID 1000,
+`CapEff=0000000000000000`, `CapBnd=00000000000000c0`, `NoNewPrivs=0`,
+`Seccomp=0`, `/bin/setpriv --nnp`, the exact BuildKit socket, native
+snapshotter, and no-process-sandbox flag. Execute the launcher in a shell test
+with fixture commands/status so each drift fails before RootlessKit exec.
+
+- [ ] **Step 2: Run the ops test and verify RED**
+
+```bash
+PYTHONPATH=src:. /home/hongjian/loom/.venv/bin/pytest \
+  tests/ops/test_personal_dev_control_plane_package_boundary.py -q
+```
+
+Expected: the inherited binaries and xattrs are not yet bound.
+
+- [ ] **Step 3: Add immutable build-time checks**
+
+Create the launcher with static commands only:
+
+```sh
+exec /usr/bin/rootlesskit /bin/setpriv --nnp /usr/bin/buildkitd \
+  --addr=unix:///var/run/loom-buildkit/buildkitd.sock \
+  --oci-worker-no-process-sandbox \
+  --oci-worker-snapshotter=native
+```
+
+Before that exec, require the exact gVisor/status values above, create private
+`HOME` and `XDG_RUNTIME_DIR` directories, and print one bounded
+`loom-buildkitd-preflight` marker without environment contents.
+
+Extend the existing root `RUN` instruction without adding packages. Use
+`sha256sum`, exact `rootlesskit --version` output, `test -x /bin/setpriv`, and
+Python `os.getxattr(path, "security.capability").hex()` comparisons for both
+helpers. Copy the launcher as root-owned mode 0555, add it to the component's
+`source_paths`, and keep the final image user exactly `1000:1000`.
+
+- [ ] **Step 4: Run the ops test and build the image**
+
+```bash
+PYTHONPATH=src:. /home/hongjian/loom/.venv/bin/pytest \
+  tests/ops/test_personal_dev_control_plane_package_boundary.py -q
+docker build --file deploy/Dockerfile.personal-dev-builder \
+  --tag loom-personal-dev-builder:rootless-sidecar-test .
+```
+
+Expected: the test and image build pass, and the final image still declares
+UID/GID `1000:1000`.
+
+- [ ] **Step 5: Commit Task 3**
+
+```bash
+git add config/component-ownership.toml \
+  deploy/Dockerfile.personal-dev-builder \
+  deploy/personal-dev-builder/loom-personal-dev-buildkitd \
+  tests/ops/test_personal_dev_control_plane_package_boundary.py
+git commit -m "fix(dev): bind rootless builder prerequisites"
+```
+
+---
+
+### Task 4: Replace operational conformance with the exact sidecar proof
+
+**Files:**
+
+- Modify: `tests/ops/test_personal_dev_control_plane_package_boundary.py`
+- Modify: `docs/runbooks/personal-dev-builder-runtime.md`
+- Modify: `docs/architecture/personal-dev-builder-runtime.md`
+- Modify: `docs/architecture/personal-dev-builder-rootless-sidecar.md`
+
+**Interfaces:**
+
+- Consumes: the exact image digest from the next trusted release and the
+  existing measured RuntimeClass/fleet profile.
+- Produces: a temporary two-container conformance Pod and owner-only evidence
+  for both containers, both target architectures, NNP inheritance, mount
+  separation, and PID isolation.
+
+- [ ] **Step 1: Write failing runbook structure and parser tests**
+
+Require the runbook to contain all of these exact contracts:
+
+```python
+assert '"pod-security.kubernetes.io/enforce": "baseline"' in runbook
+assert '"pod-security.kubernetes.io/audit": "restricted"' in runbook
+assert 'restartPolicy: "Always"' in runbook
+assert 'command: ["/usr/local/bin/loom-personal-dev-buildkitd"]' in runbook
+assert 'capabilities: {drop: ["ALL"], add: ["SETGID", "SETUID"]}' in runbook
+assert 'seccompProfile: {type: "Unconfined"}' in runbook
+assert 'shareProcessNamespace: false' in runbook
+assert '/usr/bin/buildctl' in runbook
+assert '/usr/bin/buildctl-daemonless.sh' not in runbook
+assert 'loom-nnp=1' in runbook
+```
+
+Extend the existing embedded Bash/Python/jq parser test to render the
+conformance Pod and assert the sidecar has no `script`, `workspace`,
+`attempt-capability`, or contract mount while the client has no state/tmp
+sidecar mount.
+
+- [ ] **Step 2: Run the ops tests and verify RED**
+
+Run the Task 3 Step 2 command. Expected: old single-container conformance and
+restricted smoke namespace assertions fail.
+
+- [ ] **Step 3: Update the rollout smoke namespace**
+
+Change only the temporary operator-owned smoke namespace to baseline
+enforcement at `v1.36`, retaining restricted audit and warning at `v1.36`.
+Update `assert_smoke_namespace_owned()` to require the exact labels. The four
+simple node-pinned gVisor probes retain their restricted container contexts.
+
+- [ ] **Step 4: Render and verify the two-container conformance Pod**
+
+Replace the daemonless command with a regular `conformance` client plus native
+`buildkitd` sidecar. The client mounts the ConfigMap, workspace, private tmp,
+and the socket read-only; the sidecar mounts only socket, state, and private
+tmp. Set the sidecar launcher/security context exactly as Task 1. Set the client
+to `allowPrivilegeEscalation=false`, drop all capabilities, read-only rootfs,
+and RuntimeDefault seccomp. Set `shareProcessNamespace=false` explicitly.
+
+The conformance script must:
+
+- require the gVisor marker and UID/GID 1000;
+- require client `CapEff=0`, `CapBnd=0`, `NoNewPrivs=1`, and seccomp mode 2;
+- prove no `/proc/*/cmdline` exposes RootlessKit or BuildKit;
+- call `/usr/bin/buildctl --addr=unix:///var/run/loom-buildkit/buildkitd.sock`;
+- run digest-pinned amd64 and QEMU arm64 Dockerfile steps;
+- make each `RUN` require and print `NoNewPrivs=1`; and
+- retain exact OCI config platform verification.
+
+Capture bounded logs for both `container/conformance` and
+`container/buildkitd`, exact image IDs, init/regular container statuses, and
+the canonical live Pod. Require the launcher's bounded preflight marker to
+record UID/GID 1000, zero effective caps, bounding set
+`00000000000000c0`, NNP 0, and seccomp mode 0 before accepting the build logs.
+
+- [ ] **Step 5: Align architecture documentation**
+
+Remove claims that the one trusted wrapper both holds authority and runs
+daemonless BuildKit. Document PSA baseline as the necessary standard admission
+level, the authority-free sidecar, the exact helper capability mechanism, NNP
+after mapping, separate PID/mount namespaces, and the unchanged KVM gVisor
+host boundary.
+
+- [ ] **Step 6: Run the ops tests and verify GREEN**
+
+Run the Task 3 Step 2 command. Expected: all ops package-boundary tests pass,
+including Bash, Python, and jq parsing.
+
+- [ ] **Step 7: Commit Task 4**
+
+```bash
+git add docs/architecture/personal-dev-builder-runtime.md \
+  docs/architecture/personal-dev-builder-rootless-sidecar.md \
+  docs/runbooks/personal-dev-builder-runtime.md \
+  tests/ops/test_personal_dev_control_plane_package_boundary.py
+git commit -m "docs(dev): prove isolated rootless sidecar"
+```
+
+---
+
+### Task 5: Verify the implementation and prepare the protected release
+
+**Files:**
+
+- Modify only if verification exposes a scoped defect in Tasks 1–4.
+
+**Interfaces:**
+
+- Consumes: all Task 1–4 commits.
+- Produces: fresh test, local image, local rootless two-container, review, and
+  protected-PR evidence. It does not produce a live cluster rollout from an
+  unmerged commit.
+
+- [ ] **Step 1: Run formatting and focused verification**
+
+```bash
+git diff --check origin/dev...HEAD
+PYTHONPATH=src:. /home/hongjian/loom/.venv/bin/pytest \
+  tests/unit/test_personal_dev_builder_manifest.py \
+  tests/unit/test_personal_dev_sandbox_builder.py \
+  tests/unit/test_personal_dev_control_plane_render.py \
+  tests/unit/test_personal_dev_control_plane_status.py \
+  tests/ops/test_personal_dev_control_plane_package_boundary.py -q
+```
+
+- [ ] **Step 2: Run the full ops and unit suites**
+
+```bash
+PYTHONPATH=src:. /home/hongjian/loom/.venv/bin/pytest tests/ops -q
+PYTHONPATH=src:. /home/hongjian/loom/.venv/bin/pytest tests/unit -q
+```
+
+Expected: zero failures. Record exact pass counts from fresh output.
+
+- [ ] **Step 3: Run local two-container rootless conformance**
+
+Build `loom-personal-dev-builder:rootless-sidecar-test`. Start one daemon
+container as UID/GID 1000, non-privileged, cap-drop ALL plus SETUID/SETGID,
+seccomp/AppArmor unconfined, read-only-rootfs, with only private state/tmp and a
+named socket volume. Start a separate no-new-privileges, cap-drop ALL,
+read-only-rootfs client container with the socket volume read-only. Require:
+
+- daemon outer `CapEff=0`, `CapBnd=00000000000000c0`, and `NoNewPrivs=0`;
+- BuildKit worker readiness;
+- client `CapEff=0`, `CapBnd=0`, and `NoNewPrivs=1`;
+- client cannot see `rootlesskit` or `buildkitd` in `/proc`;
+- digest-pinned amd64 and arm64 `RUN` steps both print `loom-nnp=1`; and
+- both OCI configs carry the requested platform.
+
+Use exact named diagnostic containers/volumes, stop them in a trap, and remove
+only those validated names after logs are captured.
+
+- [ ] **Step 4: Perform iterative self-review**
+
+Review the full `origin/dev...HEAD` diff against every spec requirement and
+threat boundary. Check for sidecar Secret/workspace leakage, mutable image
+references, broad capabilities, PSA family confusion, missing finite limits,
+unparsed runbook programs, and claims without executable evidence. Correct any
+finding with a new failing test and rerun Steps 1–3. Repeat until one complete
+review finds no actionable problem.
+
+- [ ] **Step 5: Push and open a PR**
+
+```bash
+git push --set-upstream origin feat/personal-dev-rootless-sidecar
+gh pr create --repo qianyi-sun/loom --base dev \
+  --head feat/personal-dev-rootless-sidecar \
+  --title "fix(dev): isolate rootless BuildKit authority" \
+  --body $'Fixes #1280\n\nReplaces the contradictory single-container RootlessKit contract with an authority-free native BuildKit sidecar. The capability-bearing client remains restricted; the sidecar has only the two ID-mapping capabilities inside KVM gVisor.\n\nVerification evidence and the protected-rollout boundary are recorded in the final review comment.'
+```
+
+The PR body must link issue #1280, state the reproduced two-stage root cause,
+explain why the sidecar is safer than a broadened single container, report
+fresh test/local-conformance evidence, and state that the cluster remains
+rolled back at capacity ceiling zero.
+
+- [ ] **Step 6: Require protected gates and a new trusted release**
+
+Do not merge around a failure. After the exact head passes every required
+check, merge normally, verify the squash patch identity, wait for the protected
+personal-dev image publication, and verify every required job plus the exact
+trusted-release and evidence hashes. Only that merged release can bind a fresh
+issue #1280 runtime window.
+
+- [ ] **Step 7: Repeat the protected runtime rollout**
+
+Use `docs/runbooks/personal-dev-builder-runtime.md` from the exact merged
+commit. Re-establish all stop conditions, keep the ceiling zero, roll OLDLAB
+agents sequentially, and require the new two-container amd64/arm64 conformance.
+On any failure, preserve evidence and execute the exact reverse rollback. Only
+after conformance, namespace cleanup, and all final invariants pass may the
+separate management-shadow and zero-capacity acceptance work resume.
