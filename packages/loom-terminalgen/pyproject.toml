@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "loom-terminalgen"
+version = "0.1.0"
+description = "Loom-owned source package for durable synthetic terminal-task authoring."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+dependencies = [
+  "openai>=1.68.2,<3",
+  "pydantic>=2.11.7,<3",
+  "rich>=14,<16",
+  "typer>=0.16,<1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9"]
+
+[project.scripts]
+terminalgen = "terminalgen.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/terminalgen"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/terminalgen/atomic_weaknesses.top18.json" = "terminalgen/atomic_weaknesses.top18.json"
+"src/terminalgen/catalog.realistic.json" = "terminalgen/catalog.realistic.json"
+"SOURCE_MANIFEST.json" = "terminalgen/SOURCE_MANIFEST.json"
+"SOURCE_PROVENANCE.md" = "terminalgen/SOURCE_PROVENANCE.md"
+"sbom.cdx.json" = "terminalgen/sbom.cdx.json"
+"acceptance/AUG19_ACCEPTANCE.json" = "terminalgen/AUG19_ACCEPTANCE.json"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "N", "RUF"]
+ignore = ["E501", "RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/terminalgen/*.py" = [
+  "B008", "I001", "RUF100", "UP017", "UP033", "UP035", "UP037", "UP042",
+]

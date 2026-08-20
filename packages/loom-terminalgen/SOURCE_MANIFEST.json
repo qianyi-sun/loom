@@ -1,0 +1,23 @@
+{
+  "files": [
+    {"bytes": 92, "path": "__init__.py", "sha256": "9ce4013abdeeccbbd5477edc700d31f407d2eaad5c8c05c739705ef90b0afe01"},
+    {"bytes": 6531, "path": "agent_skills.py", "sha256": "ad5e9dffb12bdf408bd3119ab14ba738ce4d7aaa097d9c2a36471b19a1d7faca"},
+    {"bytes": 4597, "path": "atomic.py", "sha256": "b5c7395c2277913c95fcd542d7136feb0d4a2ec0a20afc8de4750b42a24220a5"},
+    {"bytes": 21663, "path": "atomic_weaknesses.top18.json", "sha256": "1ecb4ea5ba52074a18f0677a2028a5bb5315ab01ac3812fbf70e707bf8b639ef"},
+    {"bytes": 7607, "path": "bundle_packaging.py", "sha256": "f331007d38c9bb57f2cc2adf71526b6796d68a85643891a51a0c4f9fa8756f74"},
+    {"bytes": 21079, "path": "bundle_validation.py", "sha256": "c8b95f656ac53c2a506d8f2a589e7d2dafd59f93832cb08447a0948bca509757"},
+    {"bytes": 6012, "path": "catalog.py", "sha256": "b136f88b7e262d1f02539f07748688e2d461eaea791ed364aa756f37487a14ad"},
+    {"bytes": 46919, "path": "catalog.realistic.json", "sha256": "427f3d404b75255198da6b56633ee831ce335d7a0246f2515d8e0ea6fd9883fb"},
+    {"bytes": 20550, "path": "cli.py", "sha256": "ef7c011734b68b849a50a4ce346e33b2000ff572ba678eca3f7a20615855066f"},
+    {"bytes": 277, "path": "constants.py", "sha256": "83c36bed0661f2f8de88aab7778f393491483f1f6df82d510aa991b87aad2342"},
+    {"bytes": 12596, "path": "models.py", "sha256": "3e959c49c8b23c7bc44c9c7b739b77fa98e69825578adc2a202502ead82b2634"},
+    {"bytes": 12595, "path": "openai_client.py", "sha256": "28a8c443693f4f0f7ceb82bac564a07d1d12f0459468b58bbf3db3eb9c099222"},
+    {"bytes": 12705, "path": "opencode_synthesizer.py", "sha256": "2bdeda5faf84de25ed9d62600bce530062bd396c329486cf83cdf2761f927f05"},
+    {"bytes": 37626, "path": "pipeline.py", "sha256": "1c93d2f321bffb29fdf7f40a5783745d0072afe133f08cd542f1f2530c10adc9"},
+    {"bytes": 1357, "path": "planner.py", "sha256": "260ea3354aaba927f65736c2d21c5d2fab283d43f3c8fd38a53ec3fded1874b2"},
+    {"bytes": 28435, "path": "prompts.py", "sha256": "e641ab0673fe33884fa3e1d70c4a08ec0c6cd1e7e8c524deddfc2aa073932866"},
+    {"bytes": 14715, "path": "terminal_bench_export.py", "sha256": "19ab9530d6928f29e4a47c97846a0c0b6cb41af584e3785fe10a9e06e338487b"}
+  ],
+  "schema_version": "loom.terminalgen-source-manifest.v1",
+  "source_snapshot_sha256": "009b9ba9418ed1f6037a776adfbeb02a059c9628c39b407402711775d0846753"
+}

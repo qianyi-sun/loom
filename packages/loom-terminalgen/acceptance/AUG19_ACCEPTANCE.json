@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "acceptance": "pass",
+  "reference_selection_date": "2026-08-19",
+  "reference_selection_sha256": "175a03f27d58202098da8e6d21e920cbed7e2ce10349fc9b61860c3462c02961",
+  "reference_run_manifest_sha256": "b8efd82f1a9b6ba047dd518b4aabcc394397056f2a68b03c3b075f7bd6252896",
+  "criterion": "four canonical source tasks reproduce all 20 selected Aug19 bundles byte-for-byte, including file modes",
+  "execution": {
+    "provider_calls_made": 0,
+    "unrestricted_authoring_processes_started": 0,
+    "recorded_calls_replayed": 21,
+    "recorded_failed_calls_replayed": 1,
+    "prompt_exact_matches": 0,
+    "prompt_whitespace_normalized_matches": 21,
+    "prompt_difference": "The imported delivered source emits one additional empty line before the Authoring Limit heading; task acceptance is byte-exact and does not waive task-file differences."
+  },
+  "sources": [
+    {
+      "source_task": "qemu-alpine-ssh",
+      "catalog": "catalogs/v2/qemu-alpine-ssh.json",
+      "catalog_sha256": "3ad741eebef91ee08b17b17691eaadc027abb6b9c31f306ccef3550f8df5045d",
+      "seed": 9201,
+      "tasks": {
+        "repairqemualpinesshpath": "2f9da9d99a88249b823262dbe0ddd473a8a581e9f69bedddfb133c14cd6b4de4",
+        "repairqemualpinesshpath2": "bc42da01ae9bda310cca8a417470aeef4c0468639cb6bf937cccf2fbacaf97e9",
+        "repairqemusshaccesspath": "ef33df2efbf741c3dcce33b5389ffa46365d45f7f60f7557e12de6a82bf0c12a",
+        "repairqemualpinesshpath3": "65fe04f10c3c113c78e50efa55077d4654687cde1f965430e755754151f7672e",
+        "repairqemualpinesshpath4": "4ba887f2f3f2bae00d16dc0cabf3f778c894b661acde93d3261d8f61248893bb"
+      }
+    },
+    {
+      "source_task": "feal-differential-cryptanalysis",
+      "catalog": "catalogs/v3/feal-differential-cryptanalysis.json",
+      "catalog_sha256": "c63f541c039335dfc0a305854f0e0cce693865a718cbdc61a8d37d282b5f0c29",
+      "seed": 9302,
+      "tasks": {
+        "recoverfealfinalsubkey": "3bb150eb3bc67c51439a162a2052805fe71e6779ddbf51369f9e94d4f9d9caec",
+        "fealfinalrounddifferentialaudit": "fd74d2dea5c90e5d05b7ec79ff199ab5503ef5ae489dbfaa420c32cd71a37ca5",
+        "recoverfealfinalsubkeydifferentially": "668c4cc3d090e6d06c86e997bc220c2b5a770f7a6d9ce0bba739987b7b2bed1a",
+        "fealfinalrounddifferentialrecovery": "2fe6d2d9dbf020f80eafbd0e7d0dc2e9e196b9df9839e7f2d74a867cf5b8c948",
+        "recoverfealfinalsubkey2": "9519ed1c310c0f4492bbe715920edc0f6d56996ed37d6e420329cc0d40e00e2b"
+      }
+    },
+    {
+      "source_task": "financial-document-processor",
+      "catalog": "catalogs/v2/financial-document-processor.json",
+      "catalog_sha256": "7442b14611182aa4fd456dd08f1c8c5415cb5b8d33d6f38eb9ab72a0d8d9e119",
+      "seed": 9203,
+      "tasks": {
+        "normalizemixedfinancialdocuments": "b465944ab9a8bc65c06c8eb395e7aa8e403489a1474796c6772bd5ca70e1210f",
+        "normalizeandreconcileinvoicerecords": "0d6347ac1a658d4e30ceb3ad196a36df46e1951560f18c7c1bb79d55567631e4",
+        "normalizeandreconcilefinancialdocuments": "e01c0588728284d6e625ac070fe011a72eb97655bbcc46860e106b8411eb07f8",
+        "auditableinvoicenormalization": "950e2030979474df123775cfba026fab222a66d819c0ce394cd88225c516c0e0",
+        "normalizeauditableinvoiceregister": "010aed83cf0aee54f6d1a25c058f98e3ff7a75dcba984fde72a042d4f1b74a45"
+      }
+    },
+    {
+      "source_task": "break-filter-js-from-html",
+      "catalog": "catalogs/v2/break-filter-js-from-html.json",
+      "catalog_sha256": "e009d9a4003165dd619f32a3bf59d25e972147631353fd77c2e56f71cccce4b8",
+      "seed": 9204,
+      "tasks": {
+        "breakfilterjsfromhtml": "c043085e300d7324e9f213c2787b3df838c03280d2da103399140fce3ba6bd33",
+        "bypassfrozenhtmlfilterinbrowser": "85c9ea3d0f8b696b2947973e0d9d26adbc1d71b82f39203a35682ca9b8836b3e",
+        "breakfilterjsfromhtml2": "9eef2fc778c89222cab3a28ab53c3f91939fc62b06758531c6e9307443e5ce68",
+        "breakfilterjsfromhtml3": "a587826193f5664c95d86d38df3dfdc6b4f7bab3f3ac418ba0c75dcfb1d7e462",
+        "breakfilterjsfromhtml4": "e90df59f01347ceef96e887385e597732004ce1a8ad6ac701531d04d2204336e"
+      }
+    }
+  ],
+  "summary": {
+    "source_tasks": 4,
+    "generated_tasks": 20,
+    "matching_tasks": 20,
+    "mismatching_tasks": 0
+  }
+}

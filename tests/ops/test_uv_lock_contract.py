@@ -26,6 +26,7 @@ WORKSPACE_MEMBERS = {
     "packages/loom-launcher",
     "packages/loom-benchmarks",
     "packages/loom-benchmark-terminal-bench-2",
+    "packages/loom-terminalgen",
 }
 
 
@@ -56,6 +57,7 @@ def test_uv_metadata_defines_one_non_narrowing_workspace_lock() -> None:
     sources = uv["sources"]
     assert sources["loom-benchmarks"] == {"workspace": True}
     assert sources["loom-benchmark-terminal-bench-2"] == {"workspace": True}
+    assert sources["loom-terminalgen"] == {"workspace": True}
 
     terminal_bench = tomllib.loads(
         (ROOT / "packages/loom-benchmark-terminal-bench-2/pyproject.toml").read_text(

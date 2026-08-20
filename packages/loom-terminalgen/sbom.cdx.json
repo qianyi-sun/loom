@@ -1,0 +1,15 @@
+{
+  "bomFormat": "CycloneDX",
+  "components": [
+    {"name": "openai", "purl": "pkg:pypi/openai@2.45.0", "type": "library", "version": "2.45.0"},
+    {"name": "pydantic", "purl": "pkg:pypi/pydantic@2.13.4", "type": "library", "version": "2.13.4"},
+    {"name": "rich", "purl": "pkg:pypi/rich@15.0.0", "type": "library", "version": "15.0.0"},
+    {"name": "typer", "purl": "pkg:pypi/typer@0.26.8", "type": "library", "version": "0.26.8"}
+  ],
+  "metadata": {
+    "component": {"name": "loom-terminalgen", "type": "library", "version": "0.1.0"}
+  },
+  "serialNumber": "urn:uuid:31e3c6b7-4b44-5b3a-9190-9d7dd2fa1432",
+  "specVersion": "1.5",
+  "version": 1
+}
