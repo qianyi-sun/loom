@@ -7,6 +7,7 @@ the outbound CP request without bringing up an actual CP instance.
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
@@ -185,6 +186,37 @@ async def test_post_trial_forwards(
     assert captured["reqs"][0]["method"] == "POST"
     assert captured["reqs"][0]["url"].endswith("/trials")
     assert captured["reqs"][0]["auth"] == f"Bearer {raw}"
+
+
+async def test_post_trial_forwards_pool_pin_and_idempotency_key(
+    fwd_setup: tuple[FastAPI, str, UUID, dict[str, list[dict[str, str]]]],
+) -> None:
+    app, raw, _team_id, captured = fwd_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://svc",
+    ) as ac:
+        response = await ac.post(
+            "/api/v1/trials",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "task_id": "local/task-1",
+                "config": {"agent_name": "oracle", "agent_model": None},
+                "required_worker_pool": "oldlab",
+                "idempotency_key": "oldlab-release-witness-1",
+            },
+        )
+
+    assert response.status_code == 201
+    assert json.loads(captured["reqs"][0]["body"]) == {
+        "task_id": "local/task-1",
+        "config": {"agent_name": "oracle", "agent_model": None},
+        "provider_connection_id": None,
+        "provider_model_id": None,
+        "required_worker_pool": "oldlab",
+        "idempotency_key": "oldlab-release-witness-1",
+    }
 
 
 async def test_post_trial_no_scope_403(
