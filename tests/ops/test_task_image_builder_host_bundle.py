@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -242,6 +243,16 @@ def test_assembler_surfaces_cleanup_failure_after_attempting_all_cleanup(
         assert _temporary_outputs(tmp_path, output)
     finally:
         monkeypatch.undo()
+        snapshot_paths = {
+            path
+            for path in cleanup_attempts
+            if path.name.startswith("loom-host-bundle-snapshot-")
+        }
+        for snapshot in snapshot_paths:
+            if snapshot.parent != Path(tempfile.gettempdir()):
+                raise AssertionError("fixture snapshot cleanup path is unsafe")
+            if os.path.lexists(snapshot):
+                real_rmtree(snapshot)
         for temporary in _temporary_outputs(tmp_path, output):
             real_rmtree(temporary)
 
