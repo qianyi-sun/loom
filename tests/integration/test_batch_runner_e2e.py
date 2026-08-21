@@ -483,6 +483,7 @@ async def test_runner_selects_claimable_task_for_arm64_required_pool_coverage(
             select(Trial).where(Trial.idempotency_key == coverage_key),
         ).scalar_one()
         assert coverage_trial.requires_caps == {
+            "backend": "docker",
             "os": "linux",
             "cpu_arch": "arm64",
             "gpu_vendor": "none",
