@@ -266,7 +266,7 @@ all-node allocation evidence. OLDLAB remains independently gated on #896
 
 Use each GB10 node's local ext4 root disk for Docker data and worker hot paths.
 Do not put Docker `overlay2`, trajectory/benchmark cache, trial scratch,
-Postgres, MinIO backend data, kind volumes, or Kubernetes PV data on
+Postgres, MinIO backend data, local-cluster volumes, or Kubernetes PV data on
 `/shared_work2`. That NFS export is suitable for immutable/read-mostly candidate
 checkout staging or evidence transfer, not high-churn runtime state. Trial
 artifacts return through Loom's artifact/trajectory object-store path.
