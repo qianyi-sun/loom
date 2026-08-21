@@ -530,8 +530,12 @@ The isolated database rehearsal first streams the exact checkpoint dump into
 the pod-scoped emptyDir, verifies its SHA-256 against the attested PostgreSQL
 snapshot identity, and then restores from that regular file with four bounded
 `pg_restore` jobs bound to the isolated `loom_rehearsal` database role.
-Transfer, digest verification, restore and cleanup share one combined 30-minute
-budget; the staged dump is removed before the database proof can pass. This
+The transfer has the same 600-second bound as source dump creation, while
+`pg_restore` retains its independent 1,470-second bound; transfer, digest
+verification, restore and cleanup share one combined 40-minute helper budget.
+A transfer timeout, another transfer failure, and a non-zero restore command
+remain distinct secret-safe blocker codes; raw command output is never stored
+in rehearsal evidence. The staged dump is removed before the database proof can pass. This
 avoids the single-stream restore bottleneck without weakening checkpoint
 identity or keeping rehearsal payloads after verification. Every subsequent
 database identity and migration verification query uses that same explicit

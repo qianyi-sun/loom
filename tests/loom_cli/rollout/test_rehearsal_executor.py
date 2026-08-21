@@ -528,7 +528,7 @@ def test_database_streams_exact_checkpoint_into_restricted_pod() -> None:
     }
     assert len(streams) == 1
     assert streams[0][1] == plan.checkpoint_manifest_path.parent / "postgres" / "loom.dump"
-    assert streams[0][2] == 180
+    assert streams[0][2] == 600
     assert streams[0][0][-3:] == (
         "tee",
         "--",
@@ -562,19 +562,28 @@ def test_database_streams_exact_checkpoint_into_restricted_pod() -> None:
 
 
 @pytest.mark.parametrize(
-    ("transfer_succeeds", "digest_matches", "remove_succeeds", "expected_blocker"),
+    (
+        "transfer_succeeds",
+        "digest_matches",
+        "restore_succeeds",
+        "remove_succeeds",
+        "expected_blocker",
+    ),
     [
-        (False, True, True, "restore-failed"),
-        (False, True, False, "restore-staging-cleanup-failed"),
-        (True, False, True, "restore-staging-verification-failed"),
-        (True, False, False, "restore-staging-cleanup-failed"),
-        (True, True, False, "restore-staging-cleanup-failed"),
+        (False, True, True, True, "restore-transfer-failed"),
+        (False, True, True, False, "restore-staging-cleanup-failed"),
+        (True, False, True, True, "restore-staging-verification-failed"),
+        (True, False, True, False, "restore-staging-cleanup-failed"),
+        (True, True, True, False, "restore-staging-cleanup-failed"),
+        (True, True, False, True, "restore-command-failed"),
+        (True, True, False, False, "restore-staging-cleanup-failed"),
     ],
 )
 def test_database_staged_restore_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
     transfer_succeeds: bool,
     digest_matches: bool,
+    restore_succeeds: bool,
     remove_succeeds: bool,
     expected_blocker: str,
 ) -> None:
@@ -622,6 +631,7 @@ def test_database_staged_restore_fails_closed(
         commands.append(command)
         if "pg_restore" in command:
             restore_called = True
+            return restore_succeeds
         if "rm" in command:
             return remove_succeeds
         return True
@@ -633,6 +643,63 @@ def test_database_staged_restore_fails_closed(
     assert outcome.blockers == {"database": expected_blocker}
     assert restore_called is (transfer_succeeds and digest_matches)
     assert any("rm" in command for command in commands)
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_blocker"),
+    [
+        (
+            subprocess.TimeoutExpired(cmd=("kubectl", "exec"), timeout=600),
+            "restore-transfer-timeout",
+        ),
+        (OSError("bounded transport failure"), "restore-transfer-failed"),
+    ],
+)
+def test_database_staged_restore_classifies_transfer_exceptions(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: BaseException,
+    expected_blocker: str,
+) -> None:
+    plan = _plan()
+    commands: list[tuple[str, ...]] = []
+
+    def fail_stream(_argv, _source, timeout):
+        assert timeout == 600
+        raise failure
+
+    executor = IsolatedRehearsalExecutor(stream_run=fail_stream)
+    monkeypatch.setattr(
+        IsolatedRehearsalExecutor,
+        "_load_images",
+        lambda _self, _plan, _names: True,
+    )
+    monkeypatch.setattr(
+        IsolatedRehearsalExecutor,
+        "_runtime_image_ids",
+        lambda _self, _plan, names: {name: (plan.image_digests[name],) for name in names},
+    )
+    monkeypatch.setattr(
+        "loom_cli.rollout.rehearsal_executor._database_pod_matches",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(IsolatedRehearsalExecutor, "_command", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        IsolatedRehearsalExecutor,
+        "_database_identity",
+        lambda _self, _plan: None,
+    )
+
+    def status(_self, argv, **_kwargs):
+        commands.append(tuple(argv))
+        return True
+
+    monkeypatch.setattr(IsolatedRehearsalExecutor, "_status", status)
+
+    outcome = executor.execute("rehearsal.db-clone", plan)
+
+    assert outcome.blockers == {"database": expected_blocker}
+    assert sum("rm" in command for command in commands) == 1
+    assert not any("pg_restore" in command for command in commands)
 
 
 def test_plan_rejects_non_sha256_database_snapshot_identity() -> None:
