@@ -530,7 +530,7 @@ def test_committed_active_gb10_artifact_stays_within_controller_authority(
     assert artifact.supervisors[0].active is True
 
 
-def test_committed_active_profile_retains_inactive_oldlab_builder(
+def test_committed_active_profile_includes_active_oldlab_builder(
     tmp_path: Path,
 ) -> None:
     candidate = _committed_staging_candidate(tmp_path)
@@ -550,8 +550,8 @@ def test_committed_active_profile_retains_inactive_oldlab_builder(
     by_pool = {item.pool_name: item for item in artifact.supervisors}
     assert by_pool["oldlab"].enabled is True
     assert by_pool["oldlab"].active is True
-    assert by_pool["task-image-builder-oldlab"].enabled is False
-    assert by_pool["task-image-builder-oldlab"].active is False
+    assert by_pool["task-image-builder-oldlab"].enabled is True
+    assert by_pool["task-image-builder-oldlab"].active is True
 
 
 @pytest.mark.parametrize(("enabled", "active"), [(True, False), (False, True)])
