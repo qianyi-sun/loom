@@ -558,6 +558,11 @@ def test_aligned_xz_stream_padding_is_accepted(tmp_path: Path) -> None:
     verified.close()
 
 
+def test_leading_aligned_xz_padding_is_rejected() -> None:
+    with pytest.raises(host_release.HostReleaseError, match="trailing"):
+        host_release._decompress_packages_index(b"\0" * 4 + lzma.compress(b"fixture"))
+
+
 @pytest.mark.parametrize(
     ("suffix", "error"),
     [(b"not-xz", "trailing"), (b"\0", "padding")],

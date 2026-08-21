@@ -716,6 +716,8 @@ def _decompress_packages_index(payload: bytes) -> bytes:
     while remaining:
         padding = len(remaining) - len(remaining.lstrip(b"\0"))
         if padding:
+            if not saw_stream:
+                raise HostReleaseError("Packages index contains trailing bytes")
             if padding % 4:
                 raise HostReleaseError("Packages index XZ padding is not aligned")
             remaining = remaining[padding:]
