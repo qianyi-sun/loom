@@ -33,7 +33,6 @@ def _sidecar_status(**changes: str) -> bytes:
         "CapEff": "0000000000000000",
         "CapBnd": "00000000000000c0",
         "CapAmb": "0000000000000000",
-        "NoNewPrivs": "0",
         "Seccomp": "0",
     }
     fields.update(changes)
@@ -147,6 +146,7 @@ def test_rootless_sidecar_launcher_execs_only_the_fixed_buildkit_command(
             status_file=status,
             uid=1000,
             gid=1000,
+            no_new_privs=0,
             home=state / "home",
             runtime_directory=tmp_path / "runtime",
             execve=execve,
@@ -159,10 +159,8 @@ def test_rootless_sidecar_launcher_execs_only_the_fixed_buildkit_command(
                 "/usr/bin/rootlesskit",
                 "/bin/setpriv",
                 "--nnp",
-                "/usr/bin/buildkitd",
-                "--addr=unix:///var/run/loom-buildkit/buildkitd.sock",
-                "--oci-worker-no-process-sandbox",
-                "--oci-worker-snapshotter=native",
+                "/usr/local/bin/loom-personal-dev-buildkitd",
+                "--buildkit-child",
             ],
             {
                 "HOME": str(state / "home"),
@@ -185,7 +183,6 @@ def test_rootless_sidecar_launcher_execs_only_the_fixed_buildkit_command(
         ("CapEff", "00000000000000c0", 1000, 1000),
         ("CapBnd", "0000000000000000", 1000, 1000),
         ("CapAmb", "00000000000000c0", 1000, 1000),
-        ("NoNewPrivs", "1", 1000, 1000),
         ("Seccomp", "2", 1000, 1000),
         ("Uid", "1000\t1000\t1000\t1000", 1001, 1000),
         ("Gid", "1000\t1000\t1000\t1000", 1000, 1001),
@@ -210,7 +207,105 @@ def test_rootless_sidecar_launcher_rejects_each_identity_drift(
             status_file=status,
             uid=uid,
             gid=gid,
+            no_new_privs=0,
         )
+
+
+def test_rootless_sidecar_launcher_rejects_no_new_privs_drift(
+    tmp_path: Path,
+) -> None:
+    launcher = _sidecar_launcher()
+    marker = tmp_path / "kernel_is_gvisor"
+    marker.write_bytes(b"1\n")
+    status = tmp_path / "status"
+    status.write_bytes(_sidecar_status())
+
+    with pytest.raises(RuntimeError, match="preflight"):
+        launcher["_verify_preflight"](
+            gvisor_marker=marker,
+            status_file=status,
+            uid=1000,
+            gid=1000,
+            no_new_privs=1,
+        )
+
+
+@pytest.mark.parametrize("result", [-1, 2])
+def test_rootless_sidecar_launcher_rejects_invalid_prctl_result(result: int) -> None:
+    launcher = _sidecar_launcher()
+
+    with pytest.raises(RuntimeError, match="preflight"):
+        launcher["_read_no_new_privs"](
+            prctl=lambda option, arg2, arg3, arg4, arg5: result,
+        )
+
+
+def test_rootless_sidecar_launcher_reads_no_new_privs_with_exact_prctl() -> None:
+    launcher = _sidecar_launcher()
+    calls: list[tuple[int, int, int, int, int]] = []
+
+    def prctl(option: int, arg2: int, arg3: int, arg4: int, arg5: int) -> int:
+        calls.append((option, arg2, arg3, arg4, arg5))
+        return 0
+
+    assert launcher["_read_no_new_privs"](prctl=prctl) == 0
+    assert calls == [(39, 0, 0, 0, 0)]
+
+
+def test_rootless_sidecar_buildkit_child_requires_nnp_and_execs_fixed_daemon(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    launcher = _sidecar_launcher()
+    recorded: list[tuple[str, list[str], dict[str, str]]] = []
+
+    def execve(path: str, argv: list[str], environment: dict[str, str]) -> None:
+        recorded.append((path, argv, environment))
+
+    with pytest.raises(RuntimeError, match="returned"):
+        launcher["_main_buildkit_child"](
+            no_new_privs=1,
+            environment={"HOME": "/var/lib/loom-buildkit/home"},
+            execve=execve,
+        )
+
+    assert recorded == [
+        (
+            "/usr/bin/buildkitd",
+            [
+                "/usr/bin/buildkitd",
+                "--addr=unix:///var/run/loom-buildkit/buildkitd.sock",
+                "--oci-worker-no-process-sandbox",
+                "--oci-worker-snapshotter=native",
+            ],
+            {"HOME": "/var/lib/loom-buildkit/home"},
+        )
+    ]
+    assert capsys.readouterr().out == "loom-buildkitd-child-preflight nnp=1\n"
+
+    with pytest.raises(RuntimeError, match="preflight"):
+        launcher["_main_buildkit_child"](
+            no_new_privs=0,
+            environment={},
+            execve=execve,
+        )
+
+
+def test_rootless_sidecar_launcher_dispatches_only_fixed_modes() -> None:
+    launcher = _sidecar_launcher()
+    calls: list[str] = []
+
+    def outer() -> None:
+        calls.append("outer")
+
+    def child() -> None:
+        calls.append("child")
+
+    launcher["_dispatch"]([], outer=outer, child=child)
+    launcher["_dispatch"](["--buildkit-child"], outer=outer, child=child)
+    assert calls == ["outer", "child"]
+
+    with pytest.raises(RuntimeError, match="preflight"):
+        launcher["_dispatch"](["--unknown"], outer=outer, child=child)
 
 
 def test_rootless_sidecar_launcher_requires_gvisor_marker(tmp_path: Path) -> None:
@@ -224,6 +319,7 @@ def test_rootless_sidecar_launcher_requires_gvisor_marker(tmp_path: Path) -> Non
             status_file=status,
             uid=1000,
             gid=1000,
+            no_new_privs=0,
         )
 
 

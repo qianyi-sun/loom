@@ -167,7 +167,6 @@ def _client_status(**changes: str) -> bytes:
         "CapEff": "0000000000000000",
         "CapBnd": "0000000000000000",
         "CapAmb": "0000000000000000",
-        "NoNewPrivs": "1",
         "Seccomp": "2",
     }
     fields.update(changes)
@@ -187,6 +186,7 @@ def test_client_identity_accepts_only_restricted_gvisor_process(
     sandbox_builder._verify_client_identity(
         gvisor_marker=marker,
         status_file=status,
+        no_new_privs=1,
     )
 
 
@@ -200,7 +200,6 @@ def test_client_identity_accepts_only_restricted_gvisor_process(
         ("CapEff", "00000000000000c0"),
         ("CapBnd", "00000000000000c0"),
         ("CapAmb", "00000000000000c0"),
-        ("NoNewPrivs", "0"),
         ("Seccomp", "0"),
     ],
 )
@@ -218,7 +217,41 @@ def test_client_identity_rejects_each_security_drift(
         sandbox_builder._verify_client_identity(
             gvisor_marker=marker,
             status_file=status,
+            no_new_privs=1,
         )
+
+
+def test_client_identity_rejects_no_new_privs_drift(tmp_path: Path) -> None:
+    marker = tmp_path / "kernel_is_gvisor"
+    marker.write_bytes(b"1\n")
+    status = tmp_path / "status"
+    status.write_bytes(_client_status())
+
+    with pytest.raises(PersonalDevSandboxBuildError, match="identity"):
+        sandbox_builder._verify_client_identity(
+            gvisor_marker=marker,
+            status_file=status,
+            no_new_privs=0,
+        )
+
+
+@pytest.mark.parametrize("result", [-1, 2])
+def test_client_identity_rejects_invalid_prctl_result(result: int) -> None:
+    with pytest.raises(PersonalDevSandboxBuildError, match="identity"):
+        sandbox_builder._read_no_new_privs(
+            prctl=lambda option, arg2, arg3, arg4, arg5: result,
+        )
+
+
+def test_client_identity_reads_no_new_privs_with_exact_prctl() -> None:
+    calls: list[tuple[int, int, int, int, int]] = []
+
+    def prctl(option: int, arg2: int, arg3: int, arg4: int, arg5: int) -> int:
+        calls.append((option, arg2, arg3, arg4, arg5))
+        return 1
+
+    assert sandbox_builder._read_no_new_privs(prctl=prctl) == 1
+    assert calls == [(39, 0, 0, 0, 0)]
 
 
 def test_client_identity_requires_gvisor_marker(tmp_path: Path) -> None:
@@ -229,6 +262,7 @@ def test_client_identity_requires_gvisor_marker(tmp_path: Path) -> None:
         sandbox_builder._verify_client_identity(
             gvisor_marker=tmp_path / "missing",
             status_file=status,
+            no_new_privs=1,
         )
 
 
