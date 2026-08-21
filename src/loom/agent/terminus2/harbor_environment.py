@@ -26,8 +26,7 @@ def _import_harbor() -> None:
         import harbor  # noqa: F401
     except ImportError as exc:
         raise ImportError(
-            "terminus-2 requires harbor@527d50d in the worker image. "
-            "See deploy/Dockerfile.worker.",
+            "terminus-2 requires harbor@527d50d in the worker image. See deploy/Dockerfile.worker.",
         ) from exc
 
 
@@ -148,7 +147,7 @@ def make_trial_paths(logs_root: Path) -> TrialPaths:
 async def ensure_sandbox_deps(driver: Driver) -> None:
     install = (
         "if command -v apk >/dev/null 2>&1; then "
-        "apk add --no-cache tmux asciinema 2>/dev/null || true; "
+        "apk add --no-cache bash tmux asciinema 2>/dev/null || true; "
         "elif command -v apt-get >/dev/null 2>&1; then "
         "export DEBIAN_FRONTEND=noninteractive; "
         "apt-get update -qq && apt-get install -y --no-install-recommends "
