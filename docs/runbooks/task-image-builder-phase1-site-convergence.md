@@ -10,15 +10,16 @@ The authoritative design is the [Phase 1 isolation correction](../../archive/doc
 
 ## Current state and stop conditions
 
-Do not run an `apply` action at the time this runbook was published.  These
-already-established blockers have not been rechecked by this procedure:
+Do not run an `apply` action at the time this runbook was published. The four
+live blockers discovered on 2026-08-21 have not been rechecked by this
+procedure:
 
-- Neither OLDLAB nor GB10 has the required dedicated ext4 storage mount at
-  `/var/lib/loom-task-builder` with `prjquota`.
+- The dedicated ext4 storage mount at `/var/lib/loom-task-builder` with
+  `prjquota` is absent on reachable GB10 nodes.
 - The available GB10 principal lacks command-scoped, noninteractive
-  administrative authority.  GB10 `apply` is therefore unavailable; its
-  inventory must also include reachable `trt-gb10-7` before any future
-  maintenance window.
+  administrative authority.
+- `trt-gb10-7` is unreachable.
+- OLDLAB access is unavailable.
 
 The mount is an externally provisioned prerequisite.  It must be a dedicated,
 non-network ext4 mount on a non-root filesystem, mounted with `prjquota`.  Its
@@ -49,9 +50,10 @@ Phase 1 outputs remain immutable at every point:
 ## Inputs, staging, and read-only preflight
 
 Use one reviewed candidate checkout, one signed offline bundle per
-architecture, and owner-controlled receipt/evidence locations.  Replace the
-uppercase placeholders with already-existing paths; do not create a storage
-mount as part of this workflow.
+architecture, and owner-controlled receipt/evidence locations. The candidate,
+receipt, evidence, and bundle-parent paths below must already exist; each
+bundle output path itself must be absent before assembly. Do not create a
+storage mount as part of this workflow.
 
 ```bash
 CANDIDATE_ROOT=/srv/loom/candidates/PHASE1_CANDIDATE
@@ -61,20 +63,41 @@ RECEIPT_ROOT=/srv/loom/receipts/task-image-builder-phase1
 EVIDENCE_ROOT=/srv/loom/evidence/task-image-builder-phase1
 ```
 
-Before a maintenance window, stage the complete signed bundle locally on the
-target host/controller according to local transfer policy.  It includes the
-pinned Ubuntu metadata, packages, keyring, and runtime artifacts; staging is
-not installation or activation.  Verify each bundle before any host change:
+Before a maintenance window, assemble the complete signed bundle into an
+*absent* output path. Assembly is networked because it fetches the pinned
+Ubuntu Snapshot Service closure, but it is inert: it does not install,
+activate, or contact a cluster. It verifies the newly assembled bundle before
+publishing it. Later bundle verification is offline. Assemble both
+architectures before any host change:
+
+```bash
+python3 "$CANDIDATE_ROOT/scripts/ops/task_image_builder_host_bundle.py" assemble \
+  --release "$CANDIDATE_ROOT/deploy/task-image-builder/host-release-v2.json" \
+  --runtime-manifest "$CANDIDATE_ROOT/deploy/task-image-builder/rootless-runtime-v1.json" \
+  --keyring /usr/share/keyrings/ubuntu-archive-keyring.gpg \
+  --architecture x86_64 --output "$OLDLAB_BUNDLE"
+
+python3 "$CANDIDATE_ROOT/scripts/ops/task_image_builder_host_bundle.py" assemble \
+  --release "$CANDIDATE_ROOT/deploy/task-image-builder/host-release-v2.json" \
+  --runtime-manifest "$CANDIDATE_ROOT/deploy/task-image-builder/rootless-runtime-v1.json" \
+  --keyring /usr/share/keyrings/ubuntu-archive-keyring.gpg \
+  --architecture aarch64 --output "$GB10_BUNDLE"
+```
+
+Stage the verified bundles locally on the target host/controller according to
+local transfer policy. They include the pinned Ubuntu metadata, packages,
+keyring, and runtime artifacts; staging is not installation or activation.
+Verify each bundle offline before any host change:
 
 ```bash
 python3 "$CANDIDATE_ROOT/scripts/ops/task_image_builder_host_release.py" verify \
-  --release "$CANDIDATE_ROOT/deploy/task-image-builder/host-release-v1.json" \
+  --release "$CANDIDATE_ROOT/deploy/task-image-builder/host-release-v2.json" \
   --runtime-manifest "$CANDIDATE_ROOT/deploy/task-image-builder/rootless-runtime-v1.json" \
   --bundle "$OLDLAB_BUNDLE" \
   --architecture x86_64
 
 python3 "$CANDIDATE_ROOT/scripts/ops/task_image_builder_host_release.py" verify \
-  --release "$CANDIDATE_ROOT/deploy/task-image-builder/host-release-v1.json" \
+  --release "$CANDIDATE_ROOT/deploy/task-image-builder/host-release-v2.json" \
   --runtime-manifest "$CANDIDATE_ROOT/deploy/task-image-builder/rootless-runtime-v1.json" \
   --bundle "$GB10_BUNDLE" \
   --architecture aarch64
@@ -246,14 +269,14 @@ evidence file exists today:
 python3 "$CANDIDATE_ROOT/scripts/ops/task_image_builder_prerequisite_evidence.py" \
   collect-controller --candidate-root "$CANDIDATE_ROOT" \
   --policy "$CANDIDATE_ROOT/deploy/task-image-builder/prerequisites-v1.toml" \
-  --release "$CANDIDATE_ROOT/deploy/task-image-builder/host-release-v1.json" \
+  --release "$CANDIDATE_ROOT/deploy/task-image-builder/host-release-v2.json" \
   --cluster-id oldlab --slurm-receipt OLDLAB_SLURM_RECEIPT \
   --output "$EVIDENCE_ROOT/oldlab-controller.json"
 
 python3 "$CANDIDATE_ROOT/scripts/ops/task_image_builder_prerequisite_evidence.py" \
   collect-node --candidate-root "$CANDIDATE_ROOT" \
   --policy "$CANDIDATE_ROOT/deploy/task-image-builder/prerequisites-v1.toml" \
-  --release "$CANDIDATE_ROOT/deploy/task-image-builder/host-release-v1.json" \
+  --release "$CANDIDATE_ROOT/deploy/task-image-builder/host-release-v2.json" \
   --cluster-id oldlab --slurm-node trt-eai-oldlab-3 \
   --host-receipt OLDLAB_NODE_HOST_RECEIPT \
   --maintenance-receipt OLDLAB_NODE_MAINTENANCE_RECEIPT \
@@ -268,7 +291,7 @@ envelope, and write a canonical copy to the selected evidence location:
 python3 "$CANDIDATE_ROOT/scripts/ops/task_image_builder_prerequisite_evidence.py" \
   assemble --candidate-root "$CANDIDATE_ROOT" \
   --policy "$CANDIDATE_ROOT/deploy/task-image-builder/prerequisites-v1.toml" \
-  --release "$CANDIDATE_ROOT/deploy/task-image-builder/host-release-v1.json" \
+  --release "$CANDIDATE_ROOT/deploy/task-image-builder/host-release-v2.json" \
   --controller-evidence OLDLAB_CONTROLLER_EVIDENCE \
   --controller-evidence GB10_CONTROLLER_EVIDENCE \
   --node-evidence OLDLAB_NODE_EVIDENCE --node-evidence GB10_NODE_EVIDENCE \

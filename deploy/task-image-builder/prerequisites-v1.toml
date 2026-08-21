@@ -3,6 +3,7 @@ policy_version = "task-image-builder-prerequisites-v1"
 production_certification_allowed = false
 certified_nodes = []
 unconditional_blockers = ["phase2_guard_provider_release_missing"]
+host_release_manifest = "host-release-v2.json"
 
 [identity]
 user = "loom-builder"
