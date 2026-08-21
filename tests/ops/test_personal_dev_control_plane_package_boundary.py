@@ -1108,6 +1108,16 @@ def test_personal_dev_builder_runtime_configmap_rendering_executes(
             f"buildkit_script={shlex.quote(str(buildkit_script))}\n"
             f"evidence_dir={shlex.quote(str(evidence_dir))}\n"
             f"merged_source_sha={merged_source_sha}\n"
+            "kubectl() {\n"
+            "  test \"$*\" = \"--kubeconfig /dev/null --namespace "
+            "loom-runtime-smoke create configmap buildkit-conformance "
+            "--from-file=run.sh=$buildkit_script --dry-run=client -o json\"\n"
+            "  printf '%s\\n' "
+            "'{\"apiVersion\":\"v1\",\"data\":{\"run.sh\":\"#!/bin/sh\\nexit 0\\n\"},"
+            "\"kind\":\"ConfigMap\",\"metadata\":{\"creationTimestamp\":null,"
+            "\"name\":\"buildkit-conformance\",\"namespace\":"
+            "\"loom-runtime-smoke\"}}'\n"
+            "}\n"
             f"{rendering}\n"
         ),
         text=True,
