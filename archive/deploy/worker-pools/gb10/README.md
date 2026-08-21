@@ -220,10 +220,6 @@ the candidate-bound release gate before use.
   `1.0`.
 - The fresh 2026-06-25 recheck observed 15/15 active ARM64 worker rows.
 
-See [`inventory-2026-06-25.txt`](inventory-2026-06-25.txt) and
-[`smoke-evidence-2026-06-25.json`](smoke-evidence-2026-06-25.json) for the
-non-secret historical evidence.
-
 ## External autoscaler supervisor (systemd)
 
 Each environment's env-state profile carries an
@@ -270,7 +266,7 @@ all-node allocation evidence. OLDLAB remains independently gated on #896
 
 Use each GB10 node's local ext4 root disk for Docker data and worker hot paths.
 Do not put Docker `overlay2`, trajectory/benchmark cache, trial scratch,
-Postgres, MinIO backend data, kind volumes, or Kubernetes PV data on
+Postgres, MinIO backend data, local-cluster volumes, or Kubernetes PV data on
 `/shared_work2`. That NFS export is suitable for immutable/read-mostly candidate
 checkout staging or evidence transfer, not high-churn runtime state. Trial
 artifacts return through Loom's artifact/trajectory object-store path.

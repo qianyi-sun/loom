@@ -680,6 +680,11 @@ diagnostic panels work, see [Web platform workflows](#web-platform-workflows).
 
 #### Daytona
 
+The service-mode backend is separately opt-in; see
+[Daytona service-mode worker](architecture/daytona-service-worker.md) for its
+immutable-image, lifecycle, recovery, and unsupported-workload contract. It
+does not turn on automatic overflow from Docker or Slurm pools.
+
 ```bash
 export DAYTONA_API_KEY=...
 loom run --backend daytona --dataset bfcl \

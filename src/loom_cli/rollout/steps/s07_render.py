@@ -27,7 +27,7 @@ from loom_cli.rollout.steps.candidate_source import (
     rollout_cluster_config,
 )
 from loom_cli.rollout.steps.s02_build_images import rollout_all_image_bindings
-from loom_cli.rollout.steps.s03_kind_load_images import registry_image_digests
+from loom_cli.rollout.steps.s04_publish_images import registry_image_digests
 from loom_cli.rollout.steps.subprocess_util import run_captured
 
 

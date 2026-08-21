@@ -19,7 +19,7 @@ spec:
         - name: minio
           image: {{ minio_image }}
           # Single-node dev/local: the image is side-loaded (or already
-          # cached) on the kind/k3d node. `minio_image` is commonly untagged
+          # cached) on a local cluster node. `minio_image` is commonly untagged
           # (→ `:latest`), whose default pull policy is Always — which
           # ErrImagePulls on an offline/air-gapped or cached node. Pin
           # IfNotPresent so a present image is reused. (Distributed staging

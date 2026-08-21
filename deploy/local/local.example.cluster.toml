@@ -11,8 +11,8 @@
 # deployed by the operator rollout. Shared `dev`/`staging`/`production`
 # live under deploy/environments/ and are the only real deploy targets.
 #
-# See docs/runbooks/local-dev-workflow.md for the full walkthrough (kind
-# bootstrap; the default in-cluster k8s_worker path; and the advanced-optional
+# See docs/runbooks/local-dev-workflow.md for the full walkthrough (the default
+# Docker Compose path and the advanced-optional
 # external-Slurm path). The whole stack runs IN the cluster — do not also start
 # the control plane/service as local processes.
 #
@@ -21,11 +21,11 @@
 # yylx.world.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Kubernetes namespace for your local single-node kind/k3s cluster.
+# Kubernetes namespace for an explicitly configured local k3s cluster.
 namespace = "loom-local"
 runtime_environment = "local"
 
-# Localhost routing. A local kind/k3s cluster has no public DNS or TLS;
+# Localhost routing. A local k3s cluster has no public DNS or TLS;
 # reach the API and web through `kubectl port-forward` (see the runbook).
 # Keep this as `localhost` — never a yylx.world host.
 ingress_host = "localhost"
@@ -42,7 +42,7 @@ frontend_api_base_path = "/"
 trajectories_bucket = "loom-local-trajectories"
 artifacts_bucket = "loom-local-artifacts"
 
-# Local single-node cluster: pgbouncer adds a Deployment and slows kind
+# Local single-node cluster: pgbouncer adds a Deployment and slows local
 # boot with no upside at single-developer connection counts. Keep it off.
 [pgbouncer]
 enabled = false
@@ -98,7 +98,7 @@ enabled = true
 # ─── Topology ────────────────────────────────────────────────────────────────
 #
 # Local dev is single-node by construction: single-pod Postgres and MinIO
-# on hostPath storage. Do not raise these — a local kind/k3s node has no HA
+# on hostPath storage. Do not raise these — a local k3s node has no HA
 # capacity, and multi_node=true pulls in CloudNativePG / distributed MinIO /
 # Longhorn that a laptop cluster cannot satisfy.
 [topology]

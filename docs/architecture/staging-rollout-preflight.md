@@ -372,7 +372,7 @@ coverage defect.
 ### Tier 0: admission, under two minutes
 
 Before request publication or backup I/O, verify exact candidate/tree/install
-identity, required tools, Docker/buildx/kind/kubectl, read-only systemd user manager,
+identity, required tools, Docker/buildx/kubectl, read-only systemd user manager,
 credential metadata, SSH topology, GB10 mount/boot/service readiness, capacity
 high-water limits, lifecycle launch/cancel behavior, and backup lease
 eligibility. Browser token owner/mode/ACL/no-follow/read-stability and the GB10
@@ -521,14 +521,10 @@ without misclassifying a non-root firewall warning after the unit has actually
 started and converged. Kubernetes rehearsal manifests likewise match the exact
 declared pod fields plus the fixed API-server termination-message and
 readiness-success defaults; unknown defaulting or desired-state drift still
-fails before restore. After each exact image is loaded, rehearsal resolves the
-Kind/containerd tag back to the attested OCI index, selects the single
-`linux/amd64` manifest, and binds both that manifest digest and its resulting
-config digest plus the exact candidate revision label. Kubernetes may report
-either exact runtime identity or Kind's dated import-index digest. The latter
-is accepted only after resolving the exact containerd content and proving it
-contains the attested parent index under the exact tag annotations. Every
-unresolved or non-derived digest remains invalid.
+fails before restore. Each exact image is published to the configured registry,
+resolved back to the attested OCI index, and bound to the single target-platform
+manifest, config digest, and exact candidate revision label. Every unresolved
+or non-derived digest remains invalid.
 
 The isolated database rehearsal first streams the exact checkpoint dump into
 the pod-scoped emptyDir, verifies its SHA-256 against the attested PostgreSQL
@@ -702,8 +698,8 @@ Ingress regex paths remain absolute Kubernetes paths (the ingress controller
 adds regex anchoring), and the 64-byte rehearsal plan digest is carried in a
 pod annotation rather than an overlong label. Candidate and workload selector
 labels remain bounded and exact.
-The installed browser helper budget covers both the bounded kind image load and
-the 900-second Job completion wait. The outer helper therefore cannot expire
+The installed browser helper budget covers both registry publication and the
+900-second Job completion wait. The outer helper therefore cannot expire
 before the inner wait publishes either success or a normalized terminal
 browser blocker; the acceptance wait itself is not weakened.
 An HTTP rejection from the admission probe is normalized to an allowlisted

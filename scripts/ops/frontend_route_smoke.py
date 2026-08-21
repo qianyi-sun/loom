@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import ssl
 import sys
@@ -880,15 +879,6 @@ def _parse_route(value: str) -> tuple[str, str, str]:
     return environment, route_url.rstrip("/"), expected_api_base.rstrip("/")
 
 
-def _request_ssl_context(*, insecure_for_kind: bool) -> ssl.SSLContext | None:
-    if not insecure_for_kind:
-        return None
-    context = ssl.create_default_context()
-    context.check_hostname = False
-    context.verify_mode = ssl.CERT_NONE
-    return context
-
-
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Verify Loom frontend route metadata and API bases.",
@@ -906,29 +896,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--json", action="store_true")
-    parser.add_argument(
-        "--insecure-for-kind",
-        action="store_true",
-        help="Trust the ephemeral kind ingress certificate (CI=true only).",
-    )
-    args = parser.parse_args(argv)
-    if args.insecure_for_kind and os.environ.get("CI") != "true":
-        parser.error("--insecure-for-kind requires CI=true")
-    return args
+    return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(sys.argv[1:] if argv is None else argv)
-    ssl_context = _request_ssl_context(
-        insecure_for_kind=args.insecure_for_kind,
-    )
     checks = [
         check_route(
             route_url=route_url,
             expected_environment=environment,
             expected_api_base=expected_api_base,
             timeout=args.timeout,
-            ssl_context=ssl_context,
+            ssl_context=None,
         )
         for environment, route_url, expected_api_base in args.route
     ]

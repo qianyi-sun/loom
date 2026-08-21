@@ -165,9 +165,9 @@ authority. Broker-owned step 16 is the only path allowed to exchange the
 singleton admin bearer. It runs a revision-labelled browser image built from
 the exact candidate and writes one sanitized report that binds request,
 attempt, envelope digest, resolved SHA, and the build SHA read from the running
-service. Pull-request kind CI remains credential-free and non-protected; its
+service. Pull-request cluster CI remains credential-free and non-protected; its
 `development` runtime may only prove that the staging-only exchange returns
-`404`. A kind artifact, manual invocation, ambient checkout, or unmerged ref is
+`404`. A local-cluster artifact, manual invocation, ambient checkout, or unmerged ref is
 never candidate evidence.
 The image publishes its non-secret entrypoint read-only and makes only the
 required parent directories traversable, so the broker's numeric service UID

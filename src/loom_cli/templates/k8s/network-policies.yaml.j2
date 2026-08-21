@@ -6,11 +6,9 @@
 # selecting a pod), but the file lists pods top-down by tier:
 # storage → control → compute → public.
 #
-# Important: NetworkPolicy is CNI-enforced. Kind's default CNI does
-# NOT enforce them; the policies still apply cleanly (kubectl accepts)
-# but you need calico / cilium / a real CNI in production for the
-# rules to actually drop traffic. `loom cluster audit` checks
-# presence, not enforcement.
+# Important: NetworkPolicy is CNI-enforced. Use a production CNI such as
+# Calico or Cilium and verify enforcement on the target cluster. `loom cluster
+# audit` checks presence, not packet-level enforcement.
 #
 # DNS allowances target kube-system's kube-dns pod via labels. Most
 # clusters use that label; clusters with a custom CoreDNS deployment

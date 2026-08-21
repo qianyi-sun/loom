@@ -32,7 +32,7 @@ spec:
     metadata:
       labels: { app: loom-llm-gateway-sandbox }
     spec:
-      # Same tolerations as gateway-router: single-node kind clusters
+      # Same tolerations as gateway-router: single-node development clusters
       # still place the pod; multi-node prod puts one per node.
       tolerations:
         - key: node-role.kubernetes.io/control-plane

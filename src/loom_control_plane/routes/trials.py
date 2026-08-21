@@ -102,6 +102,7 @@ async def submit_trial(
     # tenant from the parent batch row.
     batch_id = payload.get("batch_id")
     batch_team_id: UUID | None = None
+    batch_backend = "docker"
     batch_submitter_user_id: UUID | None = None
     batch_usage_user_id: UUID | None = None
     batch_usage_actor: str | None = None
@@ -111,6 +112,7 @@ async def submit_trial(
                 await session.execute(
                     select(
                         Batch.team_id,
+                        Batch.backend,
                         Batch.submitted_by_user_id,
                         Batch.usage_attributed_user_id,
                         Batch.usage_attributed_actor,
@@ -123,6 +125,7 @@ async def submit_trial(
                 detail=f"unknown batch {batch_id}",
             )
         batch_team_id = batch_row.team_id
+        batch_backend = batch_row.backend
         batch_submitter_user_id = batch_row.submitted_by_user_id
         batch_usage_user_id = batch_row.usage_attributed_user_id
         batch_usage_actor = batch_row.usage_attributed_actor
@@ -253,6 +256,7 @@ async def submit_trial(
         )
     requires_caps = derive_requires_caps(task_config)
     requires_caps_json = requires_caps.model_dump(mode="json")
+    requires_caps_json["backend"] = batch_backend
     if trial_config.multi_model is not None and trial_config.multi_model.enabled:
         requires_caps_json["terminus2_model_switch"] = True
     required_worker_pool = _required_worker_pool(payload)

@@ -127,13 +127,6 @@ GITHUB_HOSTED_CONTROL_JOBS = {
 }
 
 
-def test_manual_deploy_spikes_remain_explicitly_github_hosted() -> None:
-    jobs = _workflow(".github/workflows/cluster-deploy-spikes.yml")["jobs"]
-
-    assert jobs["docker-only-spikes"]["runs-on"] == "ubuntu-latest"
-    assert jobs["k8s-spikes"]["runs-on"] == "ubuntu-latest"
-
-
 def test_accelerated_workflows_use_local_uv_manifest_only_on_oldlab() -> None:
     workflow_paths = (
         ".github/workflows/ci.yml",
@@ -2051,44 +2044,6 @@ def test_protected_workflows_isolate_irrelevant_metadata_pending_runs() -> None:
         assert "ci:coverage-summary" in group
         assert "github.event.changes.base != null" in group
         assert "ci:merge-ready" not in group
-
-
-def test_cluster_deploy_spikes_cancel_superseded_pr_runs() -> None:
-    workflow = _workflow(".github/workflows/cluster-deploy-spikes.yml")
-
-    assert workflow["concurrency"]["cancel-in-progress"] == (
-        "${{ github.event_name == 'pull_request' }}"
-    )
-    assert "github.event.pull_request.number || github.ref" in workflow["concurrency"]["group"]
-
-
-def test_pinned_ingress_controller_config_has_trusted_raw_path_guard() -> None:
-    manifest_path = "deploy/k8s/ingress-nginx-kind.yaml"
-    documents = _yaml_documents(manifest_path)
-    controller_config = next(
-        document
-        for document in documents
-        if document.get("kind") == "ConfigMap"
-        and document["metadata"]["name"] == "ingress-nginx-controller"
-    )
-    data = controller_config["data"]
-
-    assert data["allow-snippet-annotations"] == "false"
-    assert data["http-snippet"] == (
-        "map $request_uri $loom_ambiguous_path {\n"
-        "  default 0;\n"
-        "  ~*^[^?]*(?:%2f|%5c|\\x5c|//) 1;\n"
-        '  "~*^/[^/?]*%[0-9a-f]{2}[^/?]*(?:/|[?]|$)" 1;\n'
-        "  ~^/(?:dev|prod)(?:/|\\?|$) 0;\n"
-        "  ~*^/(?:dev|prod)(?:/|\\?|$) 1;\n"
-        "}\n"
-    )
-    assert data["server-snippet"] == (
-        "merge_slashes off;\nif ($loom_ambiguous_path) {\n  return 404;\n}\n"
-    )
-    manifest = (REPO_ROOT / manifest_path).read_text(encoding="utf-8")
-    assert "nginx.ingress.kubernetes.io/server-snippet" not in manifest
-    assert "nginx.ingress.kubernetes.io/configuration-snippet" not in manifest
 
 
 def test_staging_active_rendered_images_are_covered_by_manifest_matrix() -> None:

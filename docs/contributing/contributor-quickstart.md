@@ -290,7 +290,7 @@ the payload case's minimal synthetic passing-workspace fixtures. The immutable
 image is pulled once, then every case runs with further pulls disabled. This
 proves verifier conformance only; it is not proof that a real task or trial
 succeeded. Planner, staging-start, and release consumers use manifest-derived
-inputs. Rollout build, kind-load, and expected-image evidence use one ten-image
+inputs. Rollout build, registry publication, and expected-image evidence use one ten-image
 matrix generated from the fixed candidate worktree's eight
 `rollout_role = "primary"` and two `rollout_role = "auxiliary"` components, then
 persisted by the build step. The two sandbox conformance images are intentionally
@@ -299,7 +299,7 @@ continues to select the Docker tier;
 relevant runtime paths do too. `ci:integration` and `ci:integration-docker`
 add those tiers when paths do not already require them. The selected smoke
 gates cancel superseded PR runs, so a new push to the same PR stops the older
-`cluster-smoke`, `staging-smoke`, or `cluster-deploy-spikes` run instead of
+`cluster-smoke` or `staging-smoke` run instead of
 building a queue of stale checks.
 
 `images-gate` is separate from the fast tier. Relevant image paths select its
@@ -326,7 +326,7 @@ AMD64 and ARM64 members. Same-repository branch workflow code still runs on the 
 path; autonomous-agent hard isolation requires
 fork-only execution or an external trusted workflow/App.
 
-`staging-smoke-gate` proves the credential-free kind deployment smoke only. It
+`staging-smoke-gate` proves the credential-free Compose system smoke only. It
 never enters `ci-aws`, and a missing or skipped real-AWS run is not represented
 as cloud validation. Real AWS evidence belongs to a separately protected,
 trusted post-merge/release workflow rather than the required PR context.

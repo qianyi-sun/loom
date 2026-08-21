@@ -9,9 +9,10 @@ selected runner.
 
 The routing action under `.github/actions/ci-runner-route/` consumes one
 versioned, signed route document and produces a frozen `runs-on` array for each
-requested job key. A missing, invalid, expired, incomplete, or inconsistent
-document selects the hosted fallback. Jobs also verify their actual runner
-identity and architecture before executing.
+requested job key. A missing or late document selects the hosted fallback after
+a bounded wait. An invalid, ambiguous, incomplete, or inconsistent document
+remains a hard failure rather than being accepted as routing authority. Jobs
+also verify their actual runner identity and architecture before executing.
 
 The self-hosted label set is fixed and work-class-specific. Workflows do not
 accept a caller-provided runner label, repository ref, image, or host command.
@@ -53,7 +54,18 @@ need them, so VM destruction is the security boundary between jobs.
 Work classes have explicit slot ceilings and resource shapes. The router may
 prefer self-hosted capacity only when the published generation reports a
 healthy compatible slot. Hosted fallback remains valid when capacity is full,
-the pool is draining, or health cannot be proven.
+the pool is draining, or health cannot be proven. Only a route request observed
+within 30 seconds of its GitHub artifact creation may consume oldlab capacity.
+If the root-owned controller or its publisher remains unavailable, the pinned
+route action freezes the run onto the workflow's exact GitHub-hosted label after
+180 seconds. A controller that recovers later can publish only a hosted route
+for that stale request; terminal fallback requests are skipped without blocking
+newer artifacts. The next fresh workflow can prefer oldlab again automatically.
+
+`LOOM_CI_ROUTE_MODE=oldlab-preferred-v1` is therefore a persistent preference,
+not a transient host-health switch. Do not delete it merely because oldlab is
+temporarily unreachable. Deleting the variable remains an explicit maintenance
+or emergency policy stop; restoring that policy is still an operator decision.
 
 Queue and runner metrics use bounded work-class labels. Dynamic PR, branch,
 actor, and repository-provided strings are not metric labels.

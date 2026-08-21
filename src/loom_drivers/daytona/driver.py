@@ -23,7 +23,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -47,6 +48,7 @@ from loom_drivers.daytona.config import DaytonaConfig
 from loom_drivers.daytona.exec_stream import open_session_stream
 from loom_drivers.daytona.network import to_daytona_network_args
 from loom_drivers.daytona.registry import get_process_registry
+from loom_drivers.daytona.service_controller import DaytonaApiGate
 from loom_drivers.daytona.usage import (
     DEFAULT_PER_SECOND_USD,
     compute_record,
@@ -55,15 +57,20 @@ from loom_drivers.daytona.usage import (
 
 logger = logging.getLogger(__name__)
 
+ReserveCallback = Callable[[], Awaitable[Mapping[str, Any]]]
+StartedCallback = Callable[[UUID, str, datetime], Awaitable[None]]
+DeletedCallback = Callable[[UUID, bool, datetime, str | None], Awaitable[None]]
+
 
 def _default_caps() -> Capabilities:
     return Capabilities(
+        backend="daytona",
         os="linux",
         gpu_vendor="none",
         network_policies=frozenset(["public", "no-network", "allowlist"]),
         dynamic_network_policy=True,
         mounted_fs=True,
-        resource_modes=frozenset(["auto", "limit", "guarantee"]),
+        resource_modes=frozenset(["auto"]),
     )
 
 
@@ -80,18 +87,36 @@ class DaytonaDriver:
     trial_id: UUID | None = None
     team_id: UUID | None = None
     session_factory: Callable[[], Any] | None = None
+    sandbox_name: str | None = None
+    candidate_sha: str | None = None
+    provider_scope: str | None = None
+    attempt_count: int | None = None
+    api_gate: DaytonaApiGate | None = None
+    reserve_callback: ReserveCallback | None = None
+    started_callback: StartedCallback | None = None
+    deleted_callback: DeletedCallback | None = None
     per_second_usd: Decimal = field(default=DEFAULT_PER_SECOND_USD)
     _client: DaytonaClient | None = field(default=None, init=False, repr=False)
     _sandbox: Any | None = field(default=None, init=False, repr=False)
     _started_at: datetime | None = field(default=None, init=False, repr=False)
     _sandbox_id: str | None = field(default=None, init=False, repr=False)
+    _ledger_id: UUID | None = field(default=None, init=False, repr=False)
     _state: Literal["constructed", "running", "stopped"] = field(
-        default="constructed", init=False,
+        default="constructed",
+        init=False,
     )
 
     @property
     def state(self) -> str:
         return self._state
+
+    @asynccontextmanager
+    async def _provider_slot(self) -> AsyncIterator[None]:
+        if self.api_gate is None:
+            yield
+            return
+        async with self.api_gate.slot():
+            yield
 
     async def start(self, *, options: StartOptions | None = None) -> None:
         if self._state != "constructed":
@@ -99,30 +124,113 @@ class DaytonaDriver:
                 f"DaytonaDriver.start() rejected in state {self._state!r}",
             )
         opts = options or StartOptions()
-        if any(
-            value is not None
-            for value in (opts.cpus, opts.memory_mb, opts.storage_mb)
-        ) or opts.gpus:
+        if (
+            any(value is not None for value in (opts.cpus, opts.memory_mb, opts.storage_mb))
+            or opts.gpus
+        ):
             raise DriverError(
                 "DaytonaDriver cannot enforce task resource limits; use a "
                 "compatible backend instead",
             )
+        if (
+            opts.network is not None
+            or opts.volumes
+            or opts.extra_hosts
+            or opts.dns
+            or opts.tmpfs
+            or opts.container_cpus > 0
+            or opts.container_memory_mib > 0
+            or opts.container_pids > 0
+            or opts.cgroup_parent is not None
+            or opts.slurm_allocated_gpus >= 0
+            or opts.slurm_gpu_device_ids
+        ):
+            raise DriverError(
+                "DaytonaDriver cannot honor Docker/Slurm-specific StartOptions; "
+                "route this workload to a compatible backend",
+            )
+        existing_sandbox_id: str | None = None
+        if self.reserve_callback is not None:
+            reservation = await self.reserve_callback()
+            self._ledger_id = UUID(str(reservation["id"]))
+            existing_sandbox_id = (
+                str(reservation["sandbox_id"])
+                if reservation.get("sandbox_id") is not None
+                else None
+            )
         self._client = DaytonaClient(self.config)
         await self._client.open()
         try:
-            from daytona import CreateSandboxFromImageParams
-            params = CreateSandboxFromImageParams(image=self.image)
+            from daytona import CreateSandboxFromImageParams, DaytonaError
+
             assert self._client is not None
             client = self._client
-            self._sandbox = await client.with_retry(
-                lambda: client.sdk.create(params),
-            )
+            lookup_ref = existing_sandbox_id or self.sandbox_name
+            if lookup_ref is not None:
+                try:
+                    async with self._provider_slot():
+                        self._sandbox = await client.sdk.get(lookup_ref)
+                except DaytonaError as exc:
+                    if exc.status_code != 404:
+                        raise
+            if self._sandbox is None:
+                labels = {
+                    key: value
+                    for key, value in {
+                        "loom.trial_id": str(self.trial_id) if self.trial_id else None,
+                        "loom.team_id": str(self.team_id) if self.team_id else None,
+                        "loom.candidate_sha": self.candidate_sha,
+                        "loom.image": self.image,
+                    }.items()
+                    if value is not None
+                }
+                labels.update(dict(opts.labels))
+                params = CreateSandboxFromImageParams(
+                    image=self.image,
+                    name=self.sandbox_name,
+                    labels=labels or None,
+                    env_vars=dict(opts.environment) or None,
+                    # Loom owns deadline, TTL and cleanup reconciliation. A
+                    # provider idle heuristic must never kill a background job.
+                    auto_stop_interval=0 if self.reserve_callback is not None else None,
+                    auto_pause_interval=0 if self.reserve_callback is not None else None,
+                    auto_delete_interval=-1 if self.reserve_callback is not None else None,
+                )
+                try:
+                    async with self._provider_slot():
+                        self._sandbox = await client.with_retry(
+                            lambda: client.sdk.create(params),
+                        )
+                except DaytonaError as create_error:
+                    # A timed-out create response may still have committed on
+                    # the provider. The deterministic name is the idempotency
+                    # key: re-read it before allowing the trial to fail.
+                    if self.sandbox_name is None:
+                        raise
+                    for recovery_attempt in range(3):
+                        try:
+                            async with self._provider_slot():
+                                self._sandbox = await client.sdk.get(self.sandbox_name)
+                            break
+                        except DaytonaError as lookup_error:
+                            if lookup_error.status_code != 404:
+                                raise
+                            if recovery_attempt < 2:
+                                await asyncio.sleep(0.5 * (recovery_attempt + 1))
+                    if self._sandbox is None:
+                        raise create_error
             sandbox = self._sandbox
             assert sandbox is not None  # narrows for mypy
             get_process_registry().register(self._client.sdk, sandbox)
             self._state = "running"
             self._started_at = datetime.now(tz=UTC)
             self._sandbox_id = sandbox.id
+            if self.started_callback is not None and self._ledger_id is not None:
+                await self.started_callback(
+                    self._ledger_id,
+                    self._sandbox_id,
+                    self._started_at,
+                )
             if not isinstance(self.network_policy_baseline, Public):
                 await self.set_network_policy(self.network_policy_baseline)
         except BaseException:
@@ -144,6 +252,7 @@ class DaytonaDriver:
             and self.trial_id is not None
             and self.team_id is not None
             and self.session_factory is not None
+            and self.deleted_callback is None
         ):
             try:
                 stopped_at = datetime.now(tz=UTC)
@@ -161,24 +270,29 @@ class DaytonaDriver:
                     await s.commit()
             except Exception:
                 logger.warning(
-                    "DaytonaDriver: usage persistence failed", exc_info=True,
+                    "DaytonaDriver: usage persistence failed",
+                    exc_info=True,
                 )
         if self._sandbox is not None and self._client is not None and delete:
             sandbox = self._sandbox
             delete_succeeded = False
             try:
-                await asyncio.wait_for(
-                    self._client.sdk.delete(
-                        sandbox, timeout=self.config.delete_timeout_sec,
-                    ),
-                    timeout=self.config.delete_timeout_sec + 5.0,
-                )
+                async with self._provider_slot():
+                    await asyncio.wait_for(
+                        self._client.sdk.delete(
+                            sandbox,
+                            timeout=self.config.delete_timeout_sec,
+                        ),
+                        timeout=self.config.delete_timeout_sec + 5.0,
+                    )
                 delete_succeeded = True
-            except Exception:
+            except Exception as exc:
+                delete_error = f"{type(exc).__name__}: {exc}"
                 logger.warning(
                     "DaytonaDriver: delete failed for sandbox %s; "
                     "leaving in registry for atexit/SIGINT retry",
-                    sandbox.id, exc_info=True,
+                    sandbox.id,
+                    exc_info=True,
                 )
             # Only unregister on success — otherwise atexit/SIGINT
             # cleanup paths get a second chance to delete the sandbox
@@ -186,6 +300,19 @@ class DaytonaDriver:
             # (default 30 min).
             if delete_succeeded:
                 get_process_registry().unregister(sandbox)
+            if self.deleted_callback is not None and self._ledger_id is not None:
+                try:
+                    await self.deleted_callback(
+                        self._ledger_id,
+                        delete_succeeded,
+                        datetime.now(tz=UTC),
+                        None if delete_succeeded else delete_error,
+                    )
+                except Exception:
+                    logger.warning(
+                        "DaytonaDriver: durable delete report failed",
+                        exc_info=True,
+                    )
         self._sandbox = None
         if self._client is not None:
             await self._client.close()
@@ -241,7 +368,11 @@ class DaytonaDriver:
     ) -> ExecHandle:
         sb = self._require_running()
         return await open_session_stream(
-            sandbox=sb, argv=argv, env_vars=env_vars, cwd=cwd, user=user,
+            sandbox=sb,
+            argv=argv,
+            env_vars=env_vars,
+            cwd=cwd,
+            user=user,
         )
 
     async def upload(self, src: Path, dst: PurePosixPath) -> None:
@@ -264,11 +395,13 @@ class DaytonaDriver:
         resolved: dict[str, tuple[str, ...]] = {}
         if isinstance(policy, Allowlist) and policy.domains:
             resolved = await self._resolve_domains_in_sandbox(
-                sb, policy.domains,
+                sb,
+                policy.domains,
             )
         try:
             args = to_daytona_network_args(
-                policy, resolved_domain_ips=resolved,
+                policy,
+                resolved_domain_ips=resolved,
             )
         except ValueError as exc:
             raise DriverError(str(exc)) from exc
@@ -279,7 +412,9 @@ class DaytonaDriver:
         self.network_policy_baseline = policy
 
     async def _resolve_domains_in_sandbox(
-        self, sb: Any, domains: tuple[str, ...],
+        self,
+        sb: Any,
+        domains: tuple[str, ...],
     ) -> dict[str, tuple[str, ...]]:
         out: dict[str, tuple[str, ...]] = {}
         for domain in domains:
@@ -291,17 +426,14 @@ class DaytonaDriver:
             r = await sb.process.exec(cmd, timeout=10)
             if int(r.exit_code) != 0:
                 continue
-            ips = tuple(
-                line.strip()
-                for line in (r.result or "").splitlines()
-                if line.strip()
-            )
+            ips = tuple(line.strip() for line in (r.result or "").splitlines() if line.strip())
             if ips:
                 out[domain] = ips
         return out
 
     async def run_healthcheck(
-        self, hc: HealthcheckSpec | None = None,
+        self,
+        hc: HealthcheckSpec | None = None,
     ) -> None:
         self._require_running()
         if hc is None:

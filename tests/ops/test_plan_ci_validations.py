@@ -193,17 +193,6 @@ def test_cluster_template_change_selects_cluster_and_staging() -> None:
     assert plan.images is False
 
 
-def test_retired_kind_ingress_change_does_not_select_live_smokes() -> None:
-    plan = plan_validations(
-        changed_paths=["deploy/k8s/ingress-nginx-kind.yaml"],
-        labels=set(),
-        event_name="pull_request",
-    )
-
-    assert plan.cluster_smoke is False
-    assert plan.staging_smoke is False
-
-
 @pytest.mark.parametrize(
     "path",
     [
@@ -408,7 +397,7 @@ def test_nearby_rollout_module_does_not_gain_protected_staging_authority() -> No
     "path",
     [
         "deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world/instruction.md",
-        "docs/architecture/cluster-deploy-spikes/01-sandbox-bridge.sh",
+        "unowned-runtime/new-input-two.bin",
         "unowned-runtime/new-input.bin",
     ],
 )

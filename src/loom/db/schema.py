@@ -3225,6 +3225,82 @@ class Batch(Base):
         )
 
 
+class DaytonaSandbox(Base):
+    """Durable identity and cleanup authority for remote Daytona sandboxes."""
+
+    __tablename__ = "daytona_sandboxes"
+    __table_args__ = (
+        CheckConstraint("attempt_count > 0", name="daytona_sandboxes_attempt_check"),
+        CheckConstraint(
+            "candidate_sha ~ '^[0-9a-f]{40}$'",
+            name="daytona_sandboxes_candidate_check",
+        ),
+        CheckConstraint(
+            "provider_scope ~ '^[0-9a-f]{64}$'",
+            name="daytona_sandboxes_provider_scope_check",
+        ),
+        CheckConstraint(
+            "artifact_ref ~ '^[^[:space:]@]+@sha256:[0-9a-f]{64}$'",
+            name="daytona_sandboxes_artifact_check",
+        ),
+        CheckConstraint(
+            "state IN ('reserved','running','delete_pending','deleted')",
+            name="daytona_sandboxes_state_check",
+        ),
+        CheckConstraint(
+            "(state = 'deleted' AND deleted_at IS NOT NULL) "
+            "OR (state <> 'deleted' AND deleted_at IS NULL)",
+            name="daytona_sandboxes_terminal_check",
+        ),
+        UniqueConstraint("trial_id", "attempt_count", name="daytona_sandboxes_trial_attempt_uidx"),
+        UniqueConstraint("sandbox_name", name="daytona_sandboxes_name_uidx"),
+        UniqueConstraint("sandbox_id", name="daytona_sandboxes_id_uidx"),
+        Index(
+            "daytona_sandboxes_cleanup_idx",
+            "state",
+            "deadline_at",
+            "cleanup_lease_expires_at",
+            postgresql_where=text("state <> 'deleted'"),
+        ),
+        Index("daytona_sandboxes_team_created_idx", "team_id", "created_at", "id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    trial_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("trials.id"), nullable=False
+    )
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    team_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("teams.id"), nullable=False
+    )
+    worker_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("workers.id"), nullable=False
+    )
+    candidate_sha: Mapped[str] = mapped_column(Text, nullable=False)
+    provider_scope: Mapped[str] = mapped_column(Text, nullable=False)
+    artifact_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    sandbox_name: Mapped[str] = mapped_column(Text, nullable=False)
+    sandbox_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    state: Mapped[str] = mapped_column(Text, nullable=False)
+    deadline_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    usage_reported_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    cleanup_lease_worker_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("workers.id", ondelete="SET NULL")
+    )
+    cleanup_lease_expires_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class Trial(Base):
     __tablename__ = "trials"
     __table_args__ = (

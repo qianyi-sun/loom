@@ -12,7 +12,7 @@
 #     need the host's clean egress — the CNI pod net MITMs outbound HTTPS);
 #  3. applies the LE ClusterIssuer + Certificate (deploy/staging-k3s/tls-acme.yaml).
 #
-# Safe to re-run. Does NOT touch the kind cluster (rollback anchor).
+# Safe to re-run. Does not mutate application workloads or stateful data.
 set -euo pipefail
 here="$(cd "$(dirname "$0")/../.." && pwd)"        # repo root
 KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"; export KUBECONFIG
@@ -76,7 +76,7 @@ kubectl apply -f "${here}/deploy/staging-k3s/tls-acme.yaml"
 
 # 4. GB10 fleet connectivity: socat forwards from the ports the nodes tunnel to
 #    (bb8-1 :18081/:18082/:19000/:19100) onto the k3s router hostPorts.
-log "installing GB10 fleet forward units (kind->k3s connectivity bridge)"
+log "installing GB10 fleet forward units (k3s connectivity bridge)"
 install -m 0755 "${here}/deploy/staging-k3s/loom-k3s-fleet-fwd.sh" \
   /usr/local/sbin/loom-k3s-fleet-fwd.sh
 install -m 0644 "${here}/deploy/staging-k3s/loom-k3s-fleet-fwd@.service" \

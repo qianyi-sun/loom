@@ -2,7 +2,7 @@
 
 Sibling to `orphan_cleanup.py` (which handles trajectory JSONLs). Docker
 containers spawned via the Docker socket outlive their spawner: if a
-worker crashes, its host reboots, or the kind cluster drops, the sandbox
+worker crashes, its host reboots, or cluster connectivity drops, the sandbox
 containers keep running until someone reaps them. Observed 2026-07-07:
 GB10-2 and GB10-15 each had 10 sleep-infinity trial-cache containers
 still up 3 days after the worker died.

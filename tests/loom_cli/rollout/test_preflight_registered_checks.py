@@ -412,7 +412,7 @@ def test_registered_kubernetes_client_binds_kubeconfig_and_safe_evidence(
 
     def run(argv: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
         calls.append(argv)
-        stdout = "kind-loom-staging\n" if "current-context" in argv else ""
+        stdout = "loom-staging\n" if "current-context" in argv else ""
         return subprocess.CompletedProcess(argv, 0, stdout, "")
 
     metadata_digest = "7" * 64
@@ -433,7 +433,7 @@ def test_registered_kubernetes_client_binds_kubeconfig_and_safe_evidence(
 
     kubernetes = next(item for item in executions if item.check_id == "kubernetes.client")
     assert kubernetes.passed
-    assert kubernetes.evidence["current-context"] == "kind-loom-staging"
+    assert kubernetes.evidence["current-context"] == "loom-staging"
     assert kubernetes.evidence["namespace"] == "loom-staging"
     assert kubernetes.evidence["kubeconfig-metadata-digest"] == metadata_digest
     assert len(calls) == 2
@@ -1812,8 +1812,8 @@ def test_registered_migration_plan_binds_exact_candidate_graph_and_policy() -> N
     )
 
     assert result.passed
-    assert result.evidence["head"] == "0105"
-    assert result.evidence["revision-count"] == 106
+    assert result.evidence["head"] == "0106"
+    assert result.evidence["revision-count"] == 107
     assert result.evidence["linear"] is True
     assert result.evidence["policy-digest"] == policy_digest
 
@@ -2016,6 +2016,7 @@ def test_registered_gb10_candidate_source_binds_exact_shared_checkout(
             _passing_dependency("candidate.identity"),
             _passing_dependency("gb10.ssh-topology"),
             _passing_dependency("gb10.shared-mount"),
+            _passing_dependency("gb10.host-readiness"),
             check,
         )
     )
@@ -2029,6 +2030,11 @@ def test_registered_gb10_candidate_source_binds_exact_shared_checkout(
     assert result.evidence["candidate-tree"] == "2" * 40
     assert result.evidence["host-count"] == 1
     assert check.spec.timeout_seconds == 510
+    assert check.spec.dependencies == (
+        "candidate.identity",
+        "gb10.shared-mount",
+        "gb10.host-readiness",
+    )
     assert len(observed) == 1
     assert set(observed[0]["unit_sha256"]) == {
         "deploy/worker-pools/gb10/loom-gb10-node-agent.service",
