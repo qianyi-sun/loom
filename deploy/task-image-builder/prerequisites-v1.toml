@@ -60,8 +60,15 @@ required_kernel_primitives = [
 
 [storage]
 root = "/var/lib/loom-task-builder/jobs"
+mountpoint = "/var/lib/loom-task-builder"
 allowed_filesystems = ["ext4", "xfs"]
 required_quota_kinds = ["project"]
+project_id = 300993
+site_filesystem = "ext4"
+required_mount_options = ["prjquota"]
+automatic_block_device_changes = false
+reject_root_filesystem = true
+reject_network_filesystem = true
 cache_enabled = false
 cleanup_required = true
 
@@ -116,6 +123,9 @@ legacy_reservation_node = "trt-eai-oldlab-6"
 legacy_reservation_partition = "all"
 slurm_config = "/etc/slurm/slurm.conf"
 cgroup_config = "/etc/slurm/cgroup.conf"
+cgroup_transition = "shared_symlink_to_node_local"
+cgroup_observed_path = "/shared_work/cgroup.conf"
+cgroup_observed_sha256 = "a4a31fa25902b407f1c2d865d5667128725aad5bbaa47c1e2b701c226fff8a2f"
 slurm_config_owner = "trt"
 slurm_config_group = "sharedwork"
 slurm_config_mode = "0664"
@@ -156,6 +166,9 @@ legacy_reservation_node = "trt-gb10-2"
 legacy_reservation_partition = "gb10"
 slurm_config = "/etc/slurm/slurm.conf"
 cgroup_config = "/etc/slurm/cgroup.conf"
+cgroup_transition = "node_local"
+cgroup_observed_path = "/etc/slurm/cgroup.conf"
+cgroup_observed_sha256 = "333f28cf5d91fd40515551b239ce4e421b92244d047e5c25b260bca1af2ac10b"
 slurm_config_owner = "root"
 slurm_config_group = "root"
 slurm_config_mode = "0644"

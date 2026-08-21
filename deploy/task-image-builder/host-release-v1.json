@@ -1,0 +1,84 @@
+{
+  "schema": "loom.task-image-builder-host-release/v1",
+  "release": "host-release-v1",
+  "runtime_manifest": "rootless-runtime-v1.json",
+  "ubuntu": {
+    "os_id": "ubuntu",
+    "version_id": "24.04",
+    "suite": "noble-updates",
+    "component": "main",
+    "signer_fingerprint": "F6ECB3762474EDA9D21B7022871920D1991BC93C",
+    "keyring_name": "ubuntu-archive-keyring.gpg",
+    "keyring_sha256": "80a36b0a6de2f69f49d2df75ef473ccde121e9e190b9ea01d20a4f63778d5c31"
+  },
+  "architecture_map": {
+    "x86_64": "amd64",
+    "aarch64": "arm64"
+  },
+  "repositories": {
+    "amd64": {
+      "base_url": "https://archive.ubuntu.com/ubuntu",
+      "inrelease_path": "dists/noble-updates/InRelease",
+      "packages_path": "dists/noble-updates/main/binary-amd64/Packages.xz"
+    },
+    "arm64": {
+      "base_url": "https://ports.ubuntu.com/ubuntu-ports",
+      "inrelease_path": "dists/noble-updates/InRelease",
+      "packages_path": "dists/noble-updates/main/binary-arm64/Packages.xz"
+    }
+  },
+  "packages": {
+    "amd64": {
+      "libsubid4": {
+        "package": "libsubid4",
+        "version": "1:4.13+dfsg1-4ubuntu3.2",
+        "architecture": "amd64",
+        "filename": "pool/main/s/shadow/libsubid4_4.13+dfsg1-4ubuntu3.2_amd64.deb",
+        "size": 23442,
+        "sha256": "ba97fd28c53560a8d2a2261e8f75a7ab4112535b12f9fe1d50970c30051da0da"
+      },
+      "uidmap": {
+        "package": "uidmap",
+        "version": "1:4.13+dfsg1-4ubuntu3.2",
+        "architecture": "amd64",
+        "filename": "pool/main/s/shadow/uidmap_4.13+dfsg1-4ubuntu3.2_amd64.deb",
+        "size": 26006,
+        "sha256": "a80cb7f72dd18c73cbb0b07b7fbe855504f26bfafae072a9b3d125c89d499b9e"
+      },
+      "quota": {
+        "package": "quota",
+        "version": "4.06-1build6",
+        "architecture": "amd64",
+        "filename": "pool/main/q/quota/quota_4.06-1build6_amd64.deb",
+        "size": 211338,
+        "sha256": "55cc08283cd16b26ce305c01252d92989ee561ea47d2d781958ea6a27d5a7e25"
+      }
+    },
+    "arm64": {
+      "libsubid4": {
+        "package": "libsubid4",
+        "version": "1:4.13+dfsg1-4ubuntu3.2",
+        "architecture": "arm64",
+        "filename": "pool/main/s/shadow/libsubid4_4.13+dfsg1-4ubuntu3.2_arm64.deb",
+        "size": 23534,
+        "sha256": "00916edc15862421e803bec7e69d548c6ce281badf5d449498085a3b3710639f"
+      },
+      "uidmap": {
+        "package": "uidmap",
+        "version": "1:4.13+dfsg1-4ubuntu3.2",
+        "architecture": "arm64",
+        "filename": "pool/main/s/shadow/uidmap_4.13+dfsg1-4ubuntu3.2_arm64.deb",
+        "size": 26650,
+        "sha256": "052b1852a9ab03d931398a9d0060ef7c312f1b48bc4f4ee4533649bb958b634a"
+      },
+      "quota": {
+        "package": "quota",
+        "version": "4.06-1build6",
+        "architecture": "arm64",
+        "filename": "pool/main/q/quota/quota_4.06-1build6_arm64.deb",
+        "size": 216482,
+        "sha256": "2ff4f684f177690caac079d636fa3effdce44e3aa4f6f81f1e24e9ec3e9263b8"
+      }
+    }
+  }
+}

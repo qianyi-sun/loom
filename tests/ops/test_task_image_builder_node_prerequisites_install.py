@@ -260,6 +260,7 @@ def _run(
     *,
     slurm_node: str = "node-1",
     binding_mode: str = "exact",
+    host_checks_fail: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     owner = pwd.getpwuid(os.getuid()).pw_name
     group = grp.getgrgid(os.getgid()).gr_name
@@ -278,12 +279,16 @@ def _run(
         "LOOM_HOST_ARCH": "x86_64",
         "LOOM_SKIP_HOST_CHECKS": "1",
         "LOOM_SLURM_BINDING_MODE": binding_mode,
+        "LOOM_TEST_HOST_CHECKS_FAIL": "1" if host_checks_fail else "0",
     }
     return subprocess.run(
         [
             shutil.which("bash") or "bash",
             "-c",
-            'source "$1"; "loom_node_$2" oldlab "$3" "$4"',
+            'source "$1"; '
+            'if [[ "$LOOM_TEST_HOST_CHECKS_FAIL" == "1" ]]; then '
+            'loom_node_host_checks() { loom_node_error "injected host prerequisite failure"; }; '
+            'fi; "loom_node_$2" oldlab "$3" "$4"',
             "node-installer-test",
             str(INSTALLER),
             action,
@@ -335,6 +340,26 @@ def test_invalid_artifact_fails_before_identity_or_release_mutation(tmp_path: Pa
     assert "artifact digest" in result.stderr
     assert "loom-builder" not in fixture.passwd_file.read_text(encoding="utf-8")
     assert "loom-task-builder" not in fixture.group_file.read_text(encoding="utf-8")
+    assert not fixture.install_base.exists()
+
+
+def test_host_prerequisite_failure_precedes_every_mutation(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    before = {
+        path: path.read_bytes()
+        for path in (
+            fixture.passwd_file,
+            fixture.group_file,
+            fixture.subuid_file,
+            fixture.subgid_file,
+        )
+    }
+
+    result = _run(fixture, "apply", host_checks_fail=True)
+
+    assert result.returncode == 1
+    assert "host prerequisite failure" in result.stderr
+    assert {path: path.read_bytes() for path in before} == before
     assert not fixture.install_base.exists()
 
 
@@ -440,6 +465,7 @@ def test_apply_installs_exact_release_and_is_idempotent(tmp_path: Path) -> None:
     }
     assert not any("qemu" in path.name or "cni" in path.name for path in release.iterdir())
     assert (fixture.install_base / "current").resolve() == release.parent.resolve()
+    assert release.parent.stat().st_mode & 0o777 == 0o755
     assert fixture.subuid_file.read_text(encoding="utf-8") == "loom-builder:3000000:65536\n"
     assert fixture.subgid_file.read_text(encoding="utf-8") == "loom-builder:3000000:65536\n"
     before = {
@@ -495,6 +521,20 @@ def test_installed_release_drift_is_not_silently_repaired(tmp_path: Path) -> Non
     assert repeated.returncode == 1
     assert "installed release drift" in repeated.stderr
     assert binary.read_bytes() == b"drift\n"
+
+
+def test_dangling_release_marker_fails_before_identity_mutation(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    releases = fixture.install_base / "releases"
+    releases.mkdir(parents=True)
+    (releases / "rootless-runtime-v1").symlink_to("missing-release")
+
+    result = _run(fixture, "apply")
+
+    assert result.returncode == 1
+    assert "installed release drift" in result.stderr
+    assert "loom-builder" not in fixture.passwd_file.read_text(encoding="utf-8")
+    assert "loom-task-builder" not in fixture.group_file.read_text(encoding="utf-8")
 
 
 def test_wrong_cluster_architecture_is_rejected(tmp_path: Path) -> None:
