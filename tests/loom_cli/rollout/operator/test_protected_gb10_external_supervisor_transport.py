@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -11,6 +13,10 @@ import loom_cli.rollout.operator.protected_gb10_external_supervisor_transport as
 from loom_cli.rollout.external_supervisor_predecessor import (
     ExternalSupervisorPredecessorAuthority,
     load_predecessor_manifest,
+)
+from loom_cli.rollout.external_supervisor_readiness import (
+    ExternalSupervisorArtifact,
+    build_external_supervisor_artifact,
 )
 from loom_cli.rollout.operator.protected_external_supervisor_transport import (
     ExternalSupervisorLiveObservation,
@@ -21,6 +27,45 @@ from loom_cli.rollout.operator.protected_external_supervisor_transport import (
 from tests.loom_cli.rollout.operator.test_protected_external_supervisor_transition import (
     _artifact,
 )
+from tests.loom_cli.rollout.rehearsal_fixtures import active_staging_profile_text
+
+
+def _controller_artifact(tmp_path: Path) -> ExternalSupervisorArtifact:
+    candidate = tmp_path / "candidate"
+    profile = candidate / "deploy/environment-state/staging.toml"
+    worker_script = candidate / "scripts/ops/worker_pool_autoscaler_external_once.py"
+    builder_script = candidate / "scripts/ops/task_image_builder_autoscaler_external_once.py"
+    profile.parent.mkdir(parents=True)
+    worker_script.parent.mkdir(parents=True)
+    repository = Path(__file__).resolve().parents[4]
+    profile.write_text(active_staging_profile_text(), encoding="utf-8")
+    shutil.copyfile(
+        repository / "scripts/ops/worker_pool_autoscaler_external_once.py",
+        worker_script,
+    )
+    shutil.copyfile(
+        repository / "scripts/ops/task_image_builder_autoscaler_external_once.py",
+        builder_script,
+    )
+    profile.chmod(0o600)
+    worker_script.chmod(0o700)
+    builder_script.chmod(0o700)
+    with patch(
+        "loom_cli.environment_state.staging_gb10_external_activation_blockers",
+        return_value=(),
+    ):
+        artifact = build_external_supervisor_artifact(
+            candidate,
+            candidate_sha="a" * 40,
+            candidate_tree="b" * 40,
+            image_tag="staging-aaaaaaa",
+            execution_host="gx10-01c7",
+        )
+    assert [item.pool_name for item in artifact.supervisors] == [
+        "gb10",
+        "task-image-builder-gb10",
+    ]
+    return artifact
 
 
 def _authority() -> ExternalSupervisorPredecessorAuthority:
@@ -33,13 +78,16 @@ def _authority() -> ExternalSupervisorPredecessorAuthority:
 
 
 def _observation(tmp_path: Path) -> tuple[object, ExternalSupervisorLiveObservation]:
-    artifact = _artifact(tmp_path, execution_host="gx10-01c7")
-    supervisor = artifact.supervisors[0]
+    artifact = _controller_artifact(tmp_path)
     unit_dir = remote.GB10_CONTROLLER_UNIT_DIR
     observation = ExternalSupervisorLiveObservation(
         unit_payloads={
-            supervisor.service_name: supervisor.service_unit.encode(),
-            supervisor.timer_name: supervisor.timer_unit.encode(),
+            unit_name: unit.encode()
+            for supervisor in artifact.supervisors
+            for unit_name, unit in (
+                (supervisor.service_name, supervisor.service_unit),
+                (supervisor.timer_name, supervisor.timer_unit),
+            )
         },
         timer_statuses={
             supervisor.timer_name: TimerRuntimeStatus(
@@ -49,6 +97,7 @@ def _observation(tmp_path: Path) -> tuple[object, ExternalSupervisorLiveObservat
                 fragment_path=str(unit_dir / supervisor.timer_name),
                 need_daemon_reload="no",
             )
+            for supervisor in artifact.supervisors
         },
         service_statuses={
             supervisor.service_name: ServiceRuntimeStatus(
@@ -58,6 +107,7 @@ def _observation(tmp_path: Path) -> tuple[object, ExternalSupervisorLiveObservat
                 fragment_path=str(unit_dir / supervisor.service_name),
                 need_daemon_reload="no",
             )
+            for supervisor in artifact.supervisors
         },
         predecessor_authority=_authority(),
     )
@@ -188,6 +238,38 @@ def test_remote_transport_rejects_non_controller_artifact_before_ssh(tmp_path: P
         transport.observe(artifact)
 
     assert run.calls == []
+
+
+@pytest.mark.parametrize(
+    "pools",
+    [
+        ("gb10",),
+        ("gb10", "task-image-builder-gb10", "task-image-builder-gb10"),
+        ("gb10", "oldlab"),
+    ],
+    ids=["missing-builder", "extra-builder", "foreign-pool"],
+)
+def test_controller_authority_rejects_non_exact_pool_sets(
+    tmp_path: Path,
+    pools: tuple[str, ...],
+) -> None:
+    artifact = _controller_artifact(tmp_path)
+    supervisors = tuple(
+        SimpleNamespace(execution_host="gx10-01c7", pool_name=pool_name)
+        for pool_name in pools
+    )
+    invalid = SimpleNamespace(
+        candidate_sha=artifact.candidate_sha,
+        candidate_tree=artifact.candidate_tree,
+        supervisors=supervisors,
+    )
+
+    with pytest.raises(ValueError, match="exceeds fixed authority"):
+        remote._validate_controller_artifact(
+            invalid,
+            candidate_sha=artifact.candidate_sha,
+            candidate_tree=artifact.candidate_tree,
+        )
 
 
 def test_candidate_helper_dispatches_existing_local_transport_without_reimplementation(
