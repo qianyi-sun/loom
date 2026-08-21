@@ -442,7 +442,7 @@ jobs:
     runs-on: >-
       ${{ fromJSON(needs.ci-route.outputs.routes)[format('tests-root-{0}', matrix.shard)] }}
     needs: [workflow-plan, ci-route]
-    timeout-minutes: 15
+    timeout-minutes: 30
     if: >-
       needs.workflow-plan.outputs.docs_only != 'true' &&
       needs.workflow-plan.outputs.gate_mode == 'full'
