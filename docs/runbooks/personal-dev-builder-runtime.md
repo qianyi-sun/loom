@@ -1267,9 +1267,12 @@ not substitute a tag. Its rootless BuildKit contains
 `uname -m` and inherited no-new-privileges; the verifier then reads each OCI
 config and requires the requested platform metadata. The restricted client and
 native sidecar use separate PID and mount namespaces. A bounded operator gate
-keeps the client alive while BuildKit's own `NoNewPrivs=1` status is captured,
-then releases both builds. Neither container receives a service-account token,
-and the sidecar receives no script, workspace, contract, or capability mount.
+keeps the client alive while the launcher's `PR_GET_NO_NEW_PRIVS` proofs for
+the outer sidecar and irreversible BuildKit child transition are captured,
+then releases both builds. This gVisor release does not expose `NoNewPrivs` in
+`/proc/*/status`, so every no-new-privileges check uses `prctl(2)` directly.
+Neither container receives a service-account token, and the sidecar receives
+no script, workspace, contract, or capability mount.
 
 ```bash
 builder_image='<reviewed-personal-dev-builder-image@sha256:64-lowercase-hex>'
@@ -1287,6 +1290,16 @@ test "$(id -g)" = 1000
 status_value() {
   sed -n "s/^$1:[[:space:]]*//p" /proc/self/status | tr '\t' ' '
 }
+no_new_privs_value() {
+  python3 - <<'PY'
+import ctypes
+
+value = int(ctypes.CDLL(None, use_errno=True).prctl(39, 0, 0, 0, 0))
+if value not in (0, 1):
+    raise SystemExit("PR_GET_NO_NEW_PRIVS failed")
+print(value)
+PY
+}
 test "$(status_value Uid)" = "1000 1000 1000 1000"
 test "$(status_value Gid)" = "1000 1000 1000 1000"
 test "$(status_value CapInh)" = 0000000000000000
@@ -1294,7 +1307,7 @@ test "$(status_value CapPrm)" = 0000000000000000
 test "$(status_value CapEff)" = 0000000000000000
 test "$(status_value CapBnd)" = 0000000000000000
 test "$(status_value CapAmb)" = 0000000000000000
-test "$(status_value NoNewPrivs)" = 1
+test "$(no_new_privs_value)" = 1
 test "$(status_value Seccomp)" = 2
 test -x /usr/bin/buildctl
 test -x /usr/bin/buildkit-qemu-aarch64
@@ -1330,7 +1343,7 @@ build_one() {
   chmod 0700 "$directory"
   cat > "$directory/Dockerfile" <<EOF
 FROM ${BASE_IMAGE}
-RUN actual="\$(uname -m)"; nnp="\$(sed -n 's/^NoNewPrivs:[[:space:]]*//p' /proc/self/status)"; printf 'loom-uname=%s loom-nnp=%s\\n' "\$actual" "\$nnp"; test "\$actual" = "${expected_uname}"; test "\$nnp" = 1
+RUN actual="\$(uname -m)"; nnp="\$(python3 -c 'import ctypes; value=int(ctypes.CDLL(None, use_errno=True).prctl(39,0,0,0,0)); assert value in (0,1); print(value)')"; printf 'loom-uname=%s loom-nnp=%s\\n' "\$actual" "\$nnp"; test "\$actual" = "${expected_uname}"; test "\$nnp" = 1
 EOF
   /usr/bin/buildctl \
       --addr=unix:///var/run/loom-buildkit/buildkitd.sock \
@@ -1493,33 +1506,14 @@ kubectl --kubeconfig "$kubeconfig" create \
   -f "$evidence_dir/buildkit-conformance.pod.json"
 kubectl --kubeconfig "$kubeconfig" --namespace "$smoke_namespace" \
   wait --for=condition=Ready --timeout=10m pod/buildkit-conformance
+sidecar_preflight_log="$evidence_dir/buildkit-conformance.sidecar-preflight.log"
 kubectl --kubeconfig "$kubeconfig" --namespace "$smoke_namespace" \
-  exec -i pod/buildkit-conformance -c buildkitd -- python3 - \
-  > "$evidence_dir/buildkit-conformance.buildkit-nnp.txt" <<'PY'
-from pathlib import Path
-
-matches = []
-for cmdline in Path("/proc").glob("[0-9]*/cmdline"):
-    try:
-        payload = cmdline.read_bytes()
-    except (FileNotFoundError, PermissionError, ProcessLookupError):
-        continue
-    arguments = [value for value in payload.split(b"\0") if value]
-    if arguments and arguments[0] == b"/usr/bin/buildkitd":
-        matches.append(cmdline.parent)
-if len(matches) != 1:
-    raise SystemExit("exact BuildKit process is unavailable")
-status = {}
-for line in (matches[0] / "status").read_text(encoding="ascii").splitlines():
-    name, separator, value = line.partition(":")
-    if separator:
-        status[name] = value.strip()
-if status.get("NoNewPrivs") != "1":
-    raise SystemExit("BuildKit no_new_privs is not set")
-print("loom-buildkit-nnp=1")
-PY
-test "$(< "$evidence_dir/buildkit-conformance.buildkit-nnp.txt")" = \
-  loom-buildkit-nnp=1
+  logs --limit-bytes=1048576 pod/buildkit-conformance -c buildkitd \
+  > "$sidecar_preflight_log"
+grep -F 'loom-buildkitd-preflight uid=1000 gid=1000 capinh=0000000000000000 capprm=0000000000000000 capeff=0000000000000000 capbnd=00000000000000c0 capamb=0000000000000000 nnp=0 seccomp=0' \
+  "$sidecar_preflight_log" >/dev/null
+grep -F 'loom-buildkitd-child-preflight nnp=1' \
+  "$sidecar_preflight_log" >/dev/null
 kubectl --kubeconfig "$kubeconfig" --namespace "$smoke_namespace" \
   exec pod/buildkit-conformance -c conformance -- \
   /bin/sh -ceu -- \
@@ -1607,6 +1601,8 @@ grep -F '"architecture": "amd64", "platform": "linux/amd64"' \
 grep -F '"architecture": "arm64", "platform": "linux/arm64"' \
   "$evidence_dir/buildkit-conformance.client.log" >/dev/null
 grep -F 'loom-buildkitd-preflight uid=1000 gid=1000 capinh=0000000000000000 capprm=0000000000000000 capeff=0000000000000000 capbnd=00000000000000c0 capamb=0000000000000000 nnp=0 seccomp=0' \
+  "$evidence_dir/buildkit-conformance.sidecar.log" >/dev/null
+grep -F 'loom-buildkitd-child-preflight nnp=1' \
   "$evidence_dir/buildkit-conformance.sidecar.log" >/dev/null
 assert_global_stop_conditions
 ```

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import hashlib
 import http.client
 import io
@@ -15,7 +16,7 @@ import stat
 import subprocess
 import tarfile
 import urllib.request
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -45,6 +46,7 @@ _BUILDCTL_PATH = Path("/usr/bin/buildctl")
 _BUILDKIT_ADDRESS = "unix:///var/run/loom-buildkit/buildkitd.sock"
 _CLIENT_GVISOR_MARKER = Path("/proc/gvisor/kernel_is_gvisor")
 _CLIENT_STATUS_FILE = Path("/proc/self/status")
+_PR_GET_NO_NEW_PRIVS = 39
 
 
 class PersonalDevSandboxBuildError(RuntimeError):
@@ -217,10 +219,29 @@ def _read_identity_file(path: Path) -> bytes:
         ) from exc
 
 
+def _read_no_new_privs(
+    *,
+    prctl: Callable[[int, int, int, int, int], int] | None = None,
+) -> int:
+    try:
+        operation = ctypes.CDLL(None, use_errno=True).prctl if prctl is None else prctl
+        value = int(operation(_PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0))
+    except (AttributeError, OSError, TypeError, ValueError) as exc:
+        raise PersonalDevSandboxBuildError(
+            "builder client runtime identity is invalid"
+        ) from exc
+    if value not in {0, 1}:
+        raise PersonalDevSandboxBuildError(
+            "builder client runtime identity is invalid"
+        )
+    return value
+
+
 def _verify_client_identity(
     *,
     gvisor_marker: Path = _CLIENT_GVISOR_MARKER,
     status_file: Path = _CLIENT_STATUS_FILE,
+    no_new_privs: int | None = None,
 ) -> None:
     _read_identity_file(gvisor_marker)
     try:
@@ -237,7 +258,6 @@ def _verify_client_identity(
         "CapEff",
         "CapBnd",
         "CapAmb",
-        "NoNewPrivs",
         "Seccomp",
     }
     observed: dict[str, str] = {}
@@ -250,6 +270,9 @@ def _verify_client_identity(
                 "builder client runtime identity is invalid"
             )
         observed[name] = value.strip()
+    actual_no_new_privs = (
+        _read_no_new_privs() if no_new_privs is None else no_new_privs
+    )
     if (
         set(observed) != required
         or observed["Uid"].split() != ["1000"] * 4
@@ -259,7 +282,7 @@ def _verify_client_identity(
         or observed["CapEff"] != "0000000000000000"
         or observed["CapBnd"] != "0000000000000000"
         or observed["CapAmb"] != "0000000000000000"
-        or observed["NoNewPrivs"] != "1"
+        or actual_no_new_privs != 1
         or observed["Seccomp"] != "2"
     ):
         raise PersonalDevSandboxBuildError(

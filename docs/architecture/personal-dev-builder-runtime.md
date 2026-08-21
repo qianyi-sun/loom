@@ -235,9 +235,10 @@ Then run one digest-pinned, node-bound smoke Pod on each agent and require
 and the exact RuntimeClass binding. On the first node, additionally run
 the exact restricted-client/native-sidecar contract. The proof captures both
 container identities and image IDs, requires the sidecar preflight with only
-the two ID-mapping capabilities, observes `NoNewPrivs=1` on BuildKit itself,
-proves the client cannot see RootlessKit or BuildKit through `/proc`, and runs
-both `linux/amd64` and `linux/arm64` Dockerfile steps with `NoNewPrivs=1`,
+the two ID-mapping capabilities, requires a `PR_GET_NO_NEW_PRIVS=1` marker from
+the fixed child wrapper immediately before BuildKit exec, proves the client
+cannot see RootlessKit or BuildKit through `/proc`, and runs both `linux/amd64`
+and `linux/arm64` Dockerfile steps with `PR_GET_NO_NEW_PRIVS=1`,
 including arm64 through the image's trusted QEMU helper. This ordering avoids
 referring to a RuntimeClass before it exists while keeping the class absent
 until all nodes are actively verified. Baseline would reject the conformance
