@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import runpy
 import shlex
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -171,6 +173,45 @@ def test_rootless_sidecar_launcher_execs_only_the_fixed_buildkit_command(
             },
         )
     ]
+
+
+def test_rootless_sidecar_launcher_clears_setgid_inherited_by_created_directory(
+    tmp_path: Path,
+) -> None:
+    launcher = _sidecar_launcher()
+    state = tmp_path / "state"
+    state.mkdir()
+    state.chmod(0o2770)
+    home = state / "home"
+
+    launcher["_ensure_private_directory"](
+        home,
+        uid=os.getuid(),
+        gid=os.getgid(),
+    )
+
+    metadata = home.lstat()
+    assert stat.S_ISDIR(metadata.st_mode)
+    assert stat.S_IMODE(metadata.st_mode) == 0o700
+    assert metadata.st_uid == os.getuid()
+    assert metadata.st_gid == os.getgid()
+
+
+def test_rootless_sidecar_launcher_rejects_preexisting_setgid_directory(
+    tmp_path: Path,
+) -> None:
+    launcher = _sidecar_launcher()
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    home.chmod(0o2700)
+
+    with pytest.raises(RuntimeError, match="preflight"):
+        launcher["_ensure_private_directory"](
+            home,
+            uid=os.getuid(),
+            gid=os.getgid(),
+        )
+    assert stat.S_IMODE(home.lstat().st_mode) == 0o2700
 
 
 @pytest.mark.parametrize(
