@@ -330,6 +330,66 @@ class ProtectedApplyJournal:
             finally:
                 os.close(lock_fd)
 
+    def has_advanced_epoch_terminal(self, plan: FinalGatePlan) -> bool:
+        """Return whether this exact plan durably advanced its mutation epoch.
+
+        The protected apply check is journaled twice: once per component and
+        once by the outer final-gate DAG.  A process can terminate after the
+        component terminal is durable but before the outer check is
+        published.  Recovery may trust that narrow window only when the
+        service-owned plan, epoch intent, and epoch terminal all bind to the
+        same request, attempt, plan digest, and expected next epoch.
+        """
+        if plan.request_id != self.request_id or plan.attempt_number != self.attempt_number:
+            raise ProtectedApplyJournalError("protected apply recovery identity is invalid")
+        try:
+            _require_directory(self.root, uid=self.service_uid)
+        except FileNotFoundError:
+            return False
+
+        matches: list[tuple[int, Path]] = []
+        for ordinal in (0, 1):
+            component_root = self.root / f"{ordinal:02d}-mutation-epoch-claim"
+            try:
+                _require_directory(component_root, uid=self.service_uid)
+            except FileNotFoundError:
+                continue
+            matches.append((ordinal, component_root))
+        if not matches:
+            return False
+        if len(matches) != 1:
+            raise ProtectedApplyJournalError("protected epoch journal identity is ambiguous")
+
+        ordinal, component_root = matches[0]
+        try:
+            intent = ComponentIntent.from_dict(self._read(component_root / "intent.json"))
+        except FileNotFoundError:
+            return False
+        except ValueError as exc:
+            raise ProtectedApplyJournalError("protected epoch intent is invalid") from exc
+        if (
+            intent.request_id != plan.request_id
+            or intent.attempt_number != plan.attempt_number
+            or intent.plan_digest != plan.plan_digest
+            or intent.component_id != "mutation-epoch-claim"
+            or intent.ordinal != ordinal
+        ):
+            raise ProtectedApplyJournalError("protected epoch intent identity drifted")
+
+        try:
+            terminal = ComponentTerminal.from_dict(self._read(component_root / "terminal.json"))
+        except FileNotFoundError:
+            return False
+        except ValueError as exc:
+            raise ProtectedApplyJournalError("protected epoch terminal is invalid") from exc
+        if (
+            terminal.intent_digest != intent.intent_digest
+            or terminal.component_id != intent.component_id
+            or terminal.observed_epoch != plan.starting_mutation_epoch + 1
+        ):
+            raise ProtectedApplyJournalError("protected epoch terminal identity drifted")
+        return True
+
     def _execute_one(
         self,
         plan: FinalGatePlan,

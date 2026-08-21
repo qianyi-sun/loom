@@ -931,3 +931,75 @@ def test_final_admission_resumes_only_from_exact_prior_or_current_apply(
 
     assert result is resumed_admission
     assert published == [(attempt_number, resumed_admission)]
+
+
+def test_final_admission_recovers_component_journal_without_outer_apply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attestation = SimpleNamespace(
+        attestation_digest="3" * 64,
+        registry_digest="4" * 64,
+        coverage_digest="5" * 64,
+        bindings=SimpleNamespace(staging_mutation_epoch=7),
+    )
+    prior_admission = SimpleNamespace(attestation=attestation)
+    resumed_admission = SimpleNamespace(attestation=attestation, resumed=True)
+    published: list[tuple[int, object]] = []
+
+    class AdmissionStore:
+        def __init__(self, _root, *, request_id, attempt_number, service_uid):
+            assert request_id == REQUEST_ID
+            assert service_uid == os.geteuid()
+            self.attempt_number = attempt_number
+
+        def read(self, found_attestation):
+            assert self.attempt_number == 1
+            assert found_attestation is attestation
+            return prior_admission
+
+        def publish(self, admission):
+            published.append((self.attempt_number, admission))
+
+    class GateStore:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def read_all(self):
+            return {}
+
+    class DeepPreflight:
+        def admit_final(self, *_args, **_kwargs):
+            pytest.fail("component-journal recovery repeated pre-apply admission")
+
+        def admit_post_apply_resume(self, candidate, **kwargs):
+            assert candidate.resolved_sha == "a" * 40
+            assert kwargs["prior_admission"] is prior_admission
+            return resumed_admission
+
+    def find_recovery(_root, **kwargs):
+        assert kwargs["through_attempt"] == 1
+        assert kwargs["starting_mutation_epoch"] == 7
+        return 1
+
+    monkeypatch.setattr(worker_module, "FinalAdmissionStore", AdmissionStore)
+    monkeypatch.setattr(worker_module, "FinalGateExecutionStore", GateStore)
+    monkeypatch.setattr(worker_module, "find_advanced_epoch_attempt", find_recovery)
+    envelope = replace(
+        valid_envelope(),
+        attempt_number=2,
+        attempt_operator="devansh",
+        attempt_uid=2003,
+        resume=True,
+    )
+
+    result = worker_module._admit_final_attempt(
+        envelope,
+        deep_preflight=DeepPreflight(),
+        attestation_store=SimpleNamespace(read=lambda _digest: attestation),
+        state_root=tmp_path,
+        service_uid=os.geteuid(),
+    )
+
+    assert result is resumed_admission
+    assert published == [(2, resumed_admission)]

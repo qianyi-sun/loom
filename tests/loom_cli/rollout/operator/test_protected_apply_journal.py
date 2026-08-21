@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from loom_cli.rollout.operator.final_gate_plan import FinalGatePlanStore
 from loom_cli.rollout.operator.protected_apply_journal import (
     ComponentFailure,
     ComponentObservation,
@@ -14,6 +15,9 @@ from loom_cli.rollout.operator.protected_apply_journal import (
     ProtectedApplyJournal,
     ProtectedApplyJournalError,
     read_component_failure,
+)
+from loom_cli.rollout.operator.protected_apply_recovery import (
+    find_advanced_epoch_attempt,
 )
 from loom_cli.rollout.operator.protected_gb10_transport import GB10FleetApplyError
 from tests.loom_cli.rollout.operator.test_final_gate_plan import _plan
@@ -104,6 +108,48 @@ def test_protected_apply_journal_recovers_intent_after_apply_without_repeating(
     terminal = journal.execute(_plan(tmp_path), (component,))["manifest-apply"]
     assert backend.apply_calls == ["manifest-apply"]
     assert terminal.applied is False
+
+
+def test_protected_apply_recovery_requires_exact_plan_epoch_intent_and_terminal(
+    tmp_path: Path,
+) -> None:
+    journal = _journal(tmp_path)
+    plan = _plan(tmp_path)
+    FinalGatePlanStore(
+        tmp_path / "state",
+        request_id="req-alpha",
+        attempt_number=1,
+        service_uid=os.geteuid(),
+    ).publish(plan)
+    backend = _Backend()
+    epoch = backend.component("mutation-epoch-claim", 0)
+
+    assert not journal.has_advanced_epoch_terminal(plan)
+    journal.execute(plan, (epoch,))
+
+    assert journal.has_advanced_epoch_terminal(plan)
+    assert (
+        find_advanced_epoch_attempt(
+            tmp_path / "state",
+            request_id="req-alpha",
+            through_attempt=1,
+            candidate_sha=plan.candidate_sha,
+            attestation_digest=plan.attestation_digest,
+            starting_mutation_epoch=plan.starting_mutation_epoch,
+            service_uid=os.geteuid(),
+        )
+        == 1
+    )
+    with pytest.raises(ValueError, match="plan binding drifted"):
+        find_advanced_epoch_attempt(
+            tmp_path / "state",
+            request_id="req-alpha",
+            through_attempt=1,
+            candidate_sha="f" * 40,
+            attestation_digest=plan.attestation_digest,
+            starting_mutation_epoch=plan.starting_mutation_epoch,
+            service_uid=os.geteuid(),
+        )
 
 
 def test_protected_apply_journal_refuses_partial_or_drifted_live_state(tmp_path: Path) -> None:
