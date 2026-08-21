@@ -7,6 +7,7 @@ import lzma
 import os
 import stat
 import tarfile
+import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -544,7 +545,10 @@ def test_v1_topology_cannot_authenticate_quota_from_updates(tmp_path: Path) -> N
 
 def test_valid_concatenated_xz_streams_are_accepted(tmp_path: Path) -> None:
     verified = _verify(_bundle_fixture(tmp_path, concatenate_base_index=True))
-    verified.close()
+    try:
+        assert verified.architecture == "x86_64"
+    finally:
+        verified.close()
 
 
 def test_aligned_xz_stream_padding_is_accepted(tmp_path: Path) -> None:
@@ -555,7 +559,58 @@ def test_aligned_xz_stream_padding_is_accepted(tmp_path: Path) -> None:
             base_index_padding=4,
         )
     )
-    verified.close()
+    try:
+        assert verified.architecture == "x86_64"
+    finally:
+        verified.close()
+
+
+def test_snapshot_construction_cleanup_failure_is_visible(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _bundle_fixture(tmp_path)
+    real_mkdir = Path.mkdir
+    real_rmtree = host_release.shutil.rmtree
+    snapshot_paths: set[Path] = set()
+
+    def fail_snapshot_directory_create(
+        path: Path,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        if path.parent.name.startswith("loom-host-bundle-snapshot-"):
+            raise OSError("injected snapshot construction failure")
+        real_mkdir(path, *args, **kwargs)
+
+    def fail_snapshot_cleanup(path: str | Path, *args: object, **kwargs: object) -> None:
+        target = Path(path)
+        if target.name.startswith("loom-host-bundle-snapshot-"):
+            snapshot_paths.add(target)
+            if kwargs.get("ignore_errors") is True:
+                return
+            raise OSError("injected snapshot cleanup failure")
+        real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(host_release.Path, "mkdir", fail_snapshot_directory_create)
+    monkeypatch.setattr(host_release.shutil, "rmtree", fail_snapshot_cleanup)
+    try:
+        with pytest.raises(host_release.HostReleaseError, match="snapshot cleanup failed") as exc:
+            _verify(fixture)
+
+        assert isinstance(exc.value.__cause__, OSError)
+        assert str(exc.value.__cause__) == "injected snapshot cleanup failure"
+        assert isinstance(exc.value.__cause__.__context__, OSError)
+        assert str(exc.value.__cause__.__context__) == "injected snapshot construction failure"
+        assert snapshot_paths
+        assert all(path.name.startswith("loom-host-bundle-snapshot-") for path in snapshot_paths)
+    finally:
+        monkeypatch.undo()
+        for snapshot in snapshot_paths:
+            if snapshot.parent != Path(tempfile.gettempdir()):
+                raise AssertionError("fixture snapshot cleanup path is unsafe")
+            if os.path.lexists(snapshot):
+                real_rmtree(snapshot)
 
 
 def test_leading_aligned_xz_padding_is_rejected() -> None:
@@ -622,39 +677,43 @@ def test_exact_signed_static_bundle_is_accepted(tmp_path: Path) -> None:
     fixture = _bundle_fixture(tmp_path)
 
     verified = _verify(fixture)
-
-    assert verified.architecture == "x86_64"
-    assert len(verified.bundle_digest) == 64
-    assert [path.name for path in verified.package_paths] == [
-        "libsubid4_4.13+dfsg1-4ubuntu3.2_amd64.deb",
-        "uidmap_4.13+dfsg1-4ubuntu3.2_amd64.deb",
-        "quota_4.06-1build6_amd64.deb",
-    ]
-    assert [path.name for path in verified.runtime_paths] == [
-        "buildkit-v0.32.2.linux-amd64.tar.gz",
-        "rootlesskit-x86_64.tar.gz",
-        "slirp4netns-x86_64",
-        "fuse-overlayfs-x86_64",
-    ]
+    try:
+        assert verified.architecture == "x86_64"
+        assert len(verified.bundle_digest) == 64
+        assert [path.name for path in verified.package_paths] == [
+            "libsubid4_4.13+dfsg1-4ubuntu3.2_amd64.deb",
+            "uidmap_4.13+dfsg1-4ubuntu3.2_amd64.deb",
+            "quota_4.06-1build6_amd64.deb",
+        ]
+        assert [path.name for path in verified.runtime_paths] == [
+            "buildkit-v0.32.2.linux-amd64.tar.gz",
+            "rootlesskit-x86_64.tar.gz",
+            "slirp4netns-x86_64",
+            "fuse-overlayfs-x86_64",
+        ]
+    finally:
+        verified.close()
 
 
 def test_exact_aarch64_bundle_is_accepted(tmp_path: Path) -> None:
     fixture = _bundle_fixture(tmp_path, "aarch64")
 
     verified = _verify(fixture)
-
-    assert verified.architecture == "aarch64"
-    assert [path.name for path in verified.package_paths] == [
-        "libsubid4_4.13+dfsg1-4ubuntu3.2_arm64.deb",
-        "uidmap_4.13+dfsg1-4ubuntu3.2_arm64.deb",
-        "quota_4.06-1build6_arm64.deb",
-    ]
-    assert [path.name for path in verified.runtime_paths] == [
-        "buildkit-v0.32.2.linux-arm64.tar.gz",
-        "rootlesskit-aarch64.tar.gz",
-        "slirp4netns-aarch64",
-        "fuse-overlayfs-aarch64",
-    ]
+    try:
+        assert verified.architecture == "aarch64"
+        assert [path.name for path in verified.package_paths] == [
+            "libsubid4_4.13+dfsg1-4ubuntu3.2_arm64.deb",
+            "uidmap_4.13+dfsg1-4ubuntu3.2_arm64.deb",
+            "quota_4.06-1build6_arm64.deb",
+        ]
+        assert [path.name for path in verified.runtime_paths] == [
+            "buildkit-v0.32.2.linux-arm64.tar.gz",
+            "rootlesskit-aarch64.tar.gz",
+            "slirp4netns-aarch64",
+            "fuse-overlayfs-aarch64",
+        ]
+    finally:
+        verified.close()
 
 
 def test_release_reader_handles_short_regular_file_reads(
@@ -711,8 +770,46 @@ def test_unrelated_package_field_continuation_is_accepted(tmp_path: Path) -> Non
     _add_package_description_continuation(fixture)
 
     verified = _verify(fixture)
+    try:
+        assert verified.architecture == "x86_64"
+    finally:
+        verified.close()
 
-    assert verified.architecture == "x86_64"
+
+def test_verification_failure_surfaces_snapshot_cleanup_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _bundle_fixture(tmp_path)
+    inrelease_path = fixture.bundle / "apt/noble.InRelease"
+    inrelease_path.write_bytes(inrelease_path.read_bytes() + b"changed\n")
+    real_rmtree = host_release.shutil.rmtree
+    snapshot_paths: set[Path] = set()
+
+    def fail_snapshot_cleanup(path: str | Path, *args: object, **kwargs: object) -> None:
+        target = Path(path)
+        if target.name.startswith("loom-host-bundle-snapshot-"):
+            snapshot_paths.add(target)
+            if kwargs.get("ignore_errors") is True:
+                return
+            raise OSError("injected snapshot cleanup failure")
+        real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(host_release.shutil, "rmtree", fail_snapshot_cleanup)
+    try:
+        with pytest.raises(host_release.HostReleaseError, match="snapshot cleanup failed") as exc:
+            _verify(fixture)
+
+        assert isinstance(exc.value.__cause__, OSError)
+        assert isinstance(exc.value.__cause__.__context__, host_release.HostReleaseError)
+        assert snapshot_paths
+    finally:
+        monkeypatch.undo()
+        for snapshot in snapshot_paths:
+            if snapshot.parent != Path(tempfile.gettempdir()):
+                raise AssertionError("fixture snapshot cleanup path is unsafe")
+            if os.path.lexists(snapshot):
+                real_rmtree(snapshot)
 
 
 def test_signed_index_from_a_different_suite_is_rejected(tmp_path: Path) -> None:
