@@ -2395,7 +2395,7 @@ def test_committed_development_profile_ships_fail_closed_supervisors() -> None:
     )
 
 
-def test_committed_staging_profile_activates_core_and_oldlab_builder_supervisors() -> None:
+def test_committed_staging_profile_activates_core_and_native_builder_supervisors() -> None:
     profile = load_environment_state_profile(
         Path("deploy/environment-state/staging.toml"),
         variables={
@@ -2454,8 +2454,8 @@ def test_committed_staging_profile_activates_core_and_oldlab_builder_supervisors
     gb10_builder = by_name["task-image-builder-gb10-staging"]
     assert gb10_builder["pool_name"] == "task-image-builder-gb10"
     assert "15454" in gb10_builder["args"]
-    assert gb10_builder["enabled"] is False
-    assert gb10_builder["active"] is False
+    assert gb10_builder["enabled"] is True
+    assert gb10_builder["active"] is True
     _assert_manager_trust_arguments(gb10_builder, pool_name="gb10")
 
 

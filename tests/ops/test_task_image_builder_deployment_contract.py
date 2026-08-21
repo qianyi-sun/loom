@@ -20,7 +20,7 @@ _VARIABLES = {
 }
 
 
-def test_staging_activates_only_the_provisioned_oldlab_builder() -> None:
+def test_staging_activates_both_provisioned_native_builders() -> None:
     profile = load_environment_state_profile(
         Path("deploy/environment-state/staging.toml"),
         variables=_VARIABLES,
@@ -43,13 +43,9 @@ def test_staging_activates_only_the_provisioned_oldlab_builder() -> None:
     assert builders["x86_64"]["enabled"] is True
     assert builders["x86_64"]["activation_blockers"] == []
     assert builders["x86_64"]["allowed_nodes"] == ["trt-eai-oldlab-6"]
-    assert builders["arm64"]["enabled"] is False
+    assert builders["arm64"]["enabled"] is True
     assert builders["arm64"]["allowed_nodes"] == ["trt-gb10-2"]
-    assert set(builders["arm64"]["activation_blockers"]) == {
-        "slurm_builder_qos_not_provisioned",
-        "slurm_builder_reservation_not_provisioned",
-        "exclusive_gb10_nodes_not_provisioned",
-    }
+    assert builders["arm64"]["activation_blockers"] == []
 
     trial_pools = {
         row["pool_name"]: row
@@ -99,8 +95,8 @@ def test_staging_builder_supervisors_match_native_activation() -> None:
         )
     assert supervisors["task-image-builder-oldlab"]["enabled"] is True
     assert supervisors["task-image-builder-oldlab"]["active"] is True
-    assert supervisors["task-image-builder-gb10"]["enabled"] is False
-    assert supervisors["task-image-builder-gb10"]["active"] is False
+    assert supervisors["task-image-builder-gb10"]["enabled"] is True
+    assert supervisors["task-image-builder-gb10"]["active"] is True
 
 
 def test_enabled_builder_policy_requires_complete_slurm_authority() -> None:
@@ -174,7 +170,7 @@ def test_remote_worker_compose_forwards_builder_lifecycle_settings() -> None:
     )
 
 
-def test_release_manifest_preserves_partial_builder_activation() -> None:
+def test_release_manifest_preserves_dual_arch_builder_activation() -> None:
     summary = _external_worker_summary(
         environment_state_path=Path("deploy/environment-state/staging.toml"),
         image_tag=_VARIABLES["IMAGE_TAG"],
@@ -190,5 +186,6 @@ def test_release_manifest_preserves_partial_builder_activation() -> None:
     by_arch = {row["cpu_arch"]: row for row in builders}
     assert by_arch["x86_64"]["enabled"] is True
     assert by_arch["x86_64"]["activation_blockers"] == []
-    assert by_arch["arm64"]["enabled"] is False
+    assert by_arch["arm64"]["enabled"] is True
+    assert by_arch["arm64"]["activation_blockers"] == []
     assert all(row["exclusive"] is True for row in builders)

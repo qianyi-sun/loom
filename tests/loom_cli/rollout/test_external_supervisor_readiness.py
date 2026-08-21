@@ -525,9 +525,15 @@ def test_committed_active_gb10_artifact_stays_within_controller_authority(
         execution_host="gx10-01c7",
     )
 
-    assert [item.pool_name for item in artifact.supervisors] == ["gb10"]
-    assert artifact.supervisors[0].enabled is True
-    assert artifact.supervisors[0].active is True
+    assert [item.pool_name for item in artifact.supervisors] == [
+        "gb10",
+        "task-image-builder-gb10",
+    ]
+    by_pool = {item.pool_name: item for item in artifact.supervisors}
+    assert by_pool["gb10"].enabled is True
+    assert by_pool["gb10"].active is True
+    assert by_pool["task-image-builder-gb10"].enabled is True
+    assert by_pool["task-image-builder-gb10"].active is True
 
 
 def test_committed_active_profile_includes_active_oldlab_builder(
