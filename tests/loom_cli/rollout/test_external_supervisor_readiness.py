@@ -123,12 +123,20 @@ def _args(
     return args
 
 
-def _task_image_builder_args(*, port: int = 15453) -> list[str]:
-    return [
+def _task_image_builder_args(
+    *,
+    port: int = 15453,
+    pool_name: str = "task-image-builder-oldlab",
+) -> list[str]:
+    cluster_name, controller_host = {
+        "task-image-builder-gb10": ("trt-gb10", "gx10-01c7"),
+        "task-image-builder-oldlab": ("trt-oldlab", "TRT-EAI-OLDLAB-1"),
+    }[pool_name]
+    args = [
         "--environment",
         "staging",
         "--pool-name",
-        "task-image-builder-oldlab",
+        pool_name,
         "--profile",
         f"{_WORKING_DIRECTORY}/{PROFILE_PATH}",
         "--image-tag",
@@ -138,9 +146,9 @@ def _task_image_builder_args(*, port: int = 15453) -> list[str]:
         "--git-sha",
         _SHA,
         "--expected-slurm-cluster-name",
-        "trt-oldlab",
+        cluster_name,
         "--expected-slurm-controller-host",
-        "TRT-EAI-OLDLAB-1",
+        controller_host,
         "--namespace",
         "loom-staging",
         "--kubeconfig",
@@ -170,6 +178,9 @@ def _task_image_builder_args(*, port: int = 15453) -> list[str]:
         "--expected-manager-public-key-sha256",
         "a" * 64,
     ]
+    if pool_name == "task-image-builder-gb10":
+        args.extend(["--db-secret-name", "loom-external-slurm-autoscaler-db"])
+    return args
 
 
 def _toml_string(value: str) -> str:
@@ -195,6 +206,8 @@ def _supervisor(
         execution_host = {
             "gb10": "gx10-01c7",
             "oldlab": "TRT-EAI-OLDLAB-1",
+            "task-image-builder-gb10": "gx10-01c7",
+            "task-image-builder-oldlab": "TRT-EAI-OLDLAB-1",
         }[pool_name]
     rendered_args = ", ".join(
         _toml_string(item) for item in (args or _args(port=port, pool_name=pool_name))
@@ -525,9 +538,15 @@ def test_committed_active_gb10_artifact_stays_within_controller_authority(
         execution_host="gx10-01c7",
     )
 
-    assert [item.pool_name for item in artifact.supervisors] == ["gb10"]
-    assert artifact.supervisors[0].enabled is True
-    assert artifact.supervisors[0].active is True
+    assert [item.pool_name for item in artifact.supervisors] == [
+        "gb10",
+        "task-image-builder-gb10",
+    ]
+    by_pool = {item.pool_name: item for item in artifact.supervisors}
+    assert by_pool["gb10"].enabled is True
+    assert by_pool["gb10"].active is True
+    assert by_pool["task-image-builder-gb10"].enabled is True
+    assert by_pool["task-image-builder-gb10"].active is True
 
 
 def test_committed_active_profile_includes_active_oldlab_builder(
@@ -654,21 +673,35 @@ def test_validation_ports_are_unique_and_disjoint_from_live_ports(tmp_path: Path
 def test_rehearsal_validation_routes_remote_policy_without_local_slurm_probe(
     tmp_path: Path,
 ) -> None:
-    artifact = _build(
-        _candidate(
-            tmp_path,
-            supervisors=[
-                _supervisor(),
-                _supervisor(
-                    name="oldlab-staging",
-                    service_name="loom-autoscaler-oldlab-staging.service",
-                    timer_name="loom-autoscaler-oldlab-staging.timer",
-                    pool_name="oldlab",
-                    port=15448,
+    root = _candidate(
+        tmp_path,
+        supervisors=[
+            _supervisor(),
+            _supervisor(
+                name="oldlab-staging",
+                service_name="loom-autoscaler-oldlab-staging.service",
+                timer_name="loom-autoscaler-oldlab-staging.timer",
+                pool_name="oldlab",
+                port=15448,
+            ),
+            _supervisor(
+                name="task-image-builder-gb10-staging",
+                service_name="loom-task-image-builder-gb10-staging.service",
+                timer_name="loom-task-image-builder-gb10-staging.timer",
+                pool_name="task-image-builder-gb10",
+                port=15454,
+                args=_task_image_builder_args(
+                    port=15454,
+                    pool_name="task-image-builder-gb10",
                 ),
-            ],
-        )
+                script_path=_TASK_IMAGE_BUILDER_SCRIPT_PATH,
+            ),
+        ],
     )
+    builder_script = root / _TASK_IMAGE_BUILDER_SCRIPT
+    builder_script.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    builder_script.chmod(0o755)
+    artifact = _build(root)
 
     commands = artifact.validation_argv(
         "loom-rehearsal-abc123",
@@ -676,6 +709,7 @@ def test_rehearsal_validation_routes_remote_policy_without_local_slurm_probe(
     )
     gb10 = commands["gb10-staging"]
     oldlab = commands["oldlab-staging"]
+    gb10_builder = commands["task-image-builder-gb10-staging"]
 
     assert gb10[:3] == (
         _PYTHON_PATH,
@@ -689,6 +723,23 @@ def test_rehearsal_validation_routes_remote_policy_without_local_slurm_probe(
     assert gb10[gb10.index("--db-secret-name") + 1] == "loom-secrets"
     assert "loom-external-slurm-autoscaler-db" not in gb10
     assert _SCRIPT_PATH not in gb10
+
+    assert gb10_builder[:3] == (
+        _PYTHON_PATH,
+        "-m",
+        "loom_cli.rollout.rehearsal_external_supervisor_policy_probe",
+    )
+    assert gb10_builder[-1] == "--validate-only"
+    assert gb10_builder[gb10_builder.index("--pool-name") + 1] == (
+        "task-image-builder-gb10"
+    )
+    assert gb10_builder[gb10_builder.index("--expected-slurm-cluster-name") + 1] == (
+        "trt-gb10"
+    )
+    assert gb10_builder[
+        gb10_builder.index("--expected-slurm-controller-host") + 1
+    ] == "gx10-01c7"
+    assert _TASK_IMAGE_BUILDER_SCRIPT_PATH not in gb10_builder
 
     assert oldlab[:2] == (_PYTHON_PATH, _SCRIPT_PATH)
     assert oldlab[-1] == "--validate-only"

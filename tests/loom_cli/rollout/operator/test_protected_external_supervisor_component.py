@@ -119,6 +119,39 @@ def _build_active_artifact(*args, **kwargs) -> ExternalSupervisorArtifact:
         return build_external_supervisor_artifact(*args, **kwargs)
 
 
+def _with_disabled_gb10_supervisors(profile_text: str) -> str:
+    builder_policy = 'pool_name = "task-image-builder-gb10"\nenabled = true'
+    if profile_text.count(builder_policy) != 1:
+        raise AssertionError("GB10 builder policy fixture is not active")
+    profile_text = profile_text.replace(
+        builder_policy,
+        'pool_name = "task-image-builder-gb10"\nenabled = false',
+        1,
+    )
+    prerequisite_pools = 'pools = ["gb10", "oldlab"]\n'
+    if profile_text.count(prerequisite_pools) != 1:
+        raise AssertionError("external supervisor prerequisite fixture is not canonical")
+    profile_text = profile_text.replace(
+        prerequisite_pools,
+        prerequisite_pools
+        + 'retained_inactive_supervisor_pools = ["task-image-builder-gb10"]\n',
+        1,
+    )
+    for name in ("gb10-staging", "task-image-builder-gb10-staging"):
+        prefix, marker, suffix = profile_text.partition(f'name = "{name}"')
+        if not marker:
+            raise AssertionError(f"missing GB10 supervisor fixture: {name}")
+        section, next_marker, tail = suffix.partition(
+            "\n[[external_slurm_autoscaler_supervisors]]"
+        )
+        active = "enabled = true\nactive = true"
+        disabled = "enabled = false\nactive = false"
+        if section.count(active) != 1 or section.count(disabled) != 0:
+            raise AssertionError(f"GB10 supervisor fixture is not active: {name}")
+        profile_text = prefix + marker + section.replace(active, disabled, 1) + next_marker + tail
+    return profile_text
+
+
 def _bound_artifact(tmp_path: Path):
     plan, candidate_root, artifacts = _bound_multi_artifacts(tmp_path)
     return plan, candidate_root, artifacts["gx10-01c7"]
@@ -129,13 +162,13 @@ def _bound_single_artifact(tmp_path: Path):
     candidate_root = tmp_path / "candidate"
     profile_target = candidate_root / "deploy/environment-state/staging.toml"
     script_target = candidate_root / SCRIPT_PATH
+    builder_script_target = candidate_root / TASK_IMAGE_BUILDER_SCRIPT_PATH
     profile_target.parent.mkdir(parents=True, exist_ok=True)
     script_target.parent.mkdir(parents=True, exist_ok=True)
     repository = Path(__file__).resolve().parents[4]
     profile_text = active_staging_profile_text()
-    # These component mechanics tests retain one supervisor so their exact
-    # operation-order assertions stay focused.  The transition suite exercises
-    # the additive legacy-GB10 -> GB10+OLDLAB protected transition.
+    # This fixture deliberately binds only the GB10 controller so the final
+    # plan validator rejects the missing OLDLAB controller binding.
     prefix, marker, oldlab_section = profile_text.partition(
         'name = "oldlab-staging"',
     )
@@ -176,8 +209,13 @@ def _bound_single_artifact(tmp_path: Path):
         repository / SCRIPT_PATH,
         script_target,
     )
+    shutil.copyfile(
+        repository / TASK_IMAGE_BUILDER_SCRIPT_PATH,
+        builder_script_target,
+    )
     profile_target.chmod(0o600)
     script_target.chmod(0o700)
+    builder_script_target.chmod(0o700)
     artifact = _build_active_artifact(
         candidate_root,
         candidate_sha=plan.candidate_sha,
@@ -1229,16 +1267,21 @@ def test_fixed_transport_runs_closed_convergence_sequence(tmp_path: Path) -> Non
 
     after = transport.observe(artifact)
     assert classify_external_supervisor_live_state(artifact, after) == "exact"
-    supervisor = artifact.supervisors[0]
     assert control.calls == [
         "daemon-reload",
-        f"service:{supervisor.service_name}:{float(supervisor.service_timeout_sec) + 15.0}",
-        f"enable:{supervisor.timer_name}",
-        f"timer:{supervisor.timer_name}",
+        "service:loom-autoscaler-gb10-staging.service:195.0",
+        "service:loom-task-image-builder-gb10-staging.service:195.0",
+        "enable:loom-autoscaler-gb10-staging.timer",
+        "enable:loom-task-image-builder-gb10-staging.timer",
+        "timer:loom-autoscaler-gb10-staging.timer",
+        "timer:loom-task-image-builder-gb10-staging.timer",
     ]
     assert [record.phase for record in store.compensations] == [
         "intent",
+        "intent",
         "activated",
+        "activated",
+        "canonical",
         "canonical",
     ]
     assert store.compensation_blockers() == {}
@@ -1280,11 +1323,7 @@ def test_fixed_transport_converges_active_canonical_to_disabled_target(
     plan, candidate_root, active_artifact = _bound_artifact(tmp_path)
     profile = candidate_root / "deploy/environment-state/staging.toml"
     profile.write_text(
-        profile.read_text(encoding="utf-8").replace(
-            "enabled = true\nactive = true",
-            "enabled = false\nactive = false",
-            1,
-        ),
+        _with_disabled_gb10_supervisors(profile.read_text(encoding="utf-8")),
         encoding="utf-8",
     )
     disabled_artifact = _build_active_artifact(
@@ -1295,10 +1334,8 @@ def test_fixed_transport_converges_active_canonical_to_disabled_target(
         environment=plan.environment,
         execution_host="gx10-01c7",
     )
-    assert len(disabled_artifact.supervisors) == 1
-    disabled = disabled_artifact.supervisors[0]
-    assert not disabled.enabled
-    assert not disabled.active
+    assert len(disabled_artifact.supervisors) == 2
+    assert all(not item.enabled and not item.active for item in disabled_artifact.supervisors)
 
     store = _Store()
     control = _Control(active_artifact, store)
@@ -1323,15 +1360,21 @@ def test_fixed_transport_converges_active_canonical_to_disabled_target(
 
     after = transport.observe(disabled_artifact)
     assert classify_external_supervisor_live_state(disabled_artifact, after) == "exact"
-    assert control.calls[-5:] == [
+    assert control.calls[-9:] == [
         "daemon-reload",
-        f"stop:{disabled.timer_name}",
-        f"disable:{disabled.timer_name}",
-        f"stop-service:{disabled.service_name}",
-        f"reset-failed:{disabled.service_name}",
+        "stop:loom-autoscaler-gb10-staging.timer",
+        "disable:loom-autoscaler-gb10-staging.timer",
+        "stop-service:loom-autoscaler-gb10-staging.service",
+        "reset-failed:loom-autoscaler-gb10-staging.service",
+        "stop:loom-task-image-builder-gb10-staging.timer",
+        "disable:loom-task-image-builder-gb10-staging.timer",
+        "stop-service:loom-task-image-builder-gb10-staging.service",
+        "reset-failed:loom-task-image-builder-gb10-staging.service",
     ]
     assert [record.reason for record in store.compensations if record.phase == "activated"] == [
         "timer-active",
+        "timer-active",
+        "timer-disabled",
         "timer-disabled",
     ]
     assert store.compensation_blockers() == {}
@@ -1343,11 +1386,7 @@ def test_fixed_transport_clears_cached_failure_for_disabled_candidate(
     plan, candidate_root, active_artifact = _bound_artifact(tmp_path)
     profile = candidate_root / "deploy/environment-state/staging.toml"
     profile.write_text(
-        profile.read_text(encoding="utf-8").replace(
-            "enabled = true\nactive = true",
-            "enabled = false\nactive = false",
-            1,
-        ),
+        _with_disabled_gb10_supervisors(profile.read_text(encoding="utf-8")),
         encoding="utf-8",
     )
     disabled_artifact = _build_active_artifact(
@@ -1358,9 +1397,8 @@ def test_fixed_transport_clears_cached_failure_for_disabled_candidate(
         environment=plan.environment,
         execution_host="gx10-01c7",
     )
-    disabled = disabled_artifact.supervisors[0]
-    assert not disabled.enabled
-    assert not disabled.active
+    assert len(disabled_artifact.supervisors) == 2
+    assert all(not item.enabled and not item.active for item in disabled_artifact.supervisors)
 
     store = _Store()
     control = _Control(active_artifact, store)
@@ -1383,10 +1421,14 @@ def test_fixed_transport_clears_cached_failure_for_disabled_candidate(
     assert classify_external_supervisor_live_state(disabled_artifact, after) == "exact"
     assert control.calls == [
         "daemon-reload",
-        f"stop:{disabled.timer_name}",
-        f"disable:{disabled.timer_name}",
-        f"stop-service:{disabled.service_name}",
-        f"reset-failed:{disabled.service_name}",
+        "stop:loom-autoscaler-gb10-staging.timer",
+        "disable:loom-autoscaler-gb10-staging.timer",
+        "stop-service:loom-autoscaler-gb10-staging.service",
+        "reset-failed:loom-autoscaler-gb10-staging.service",
+        "stop:loom-task-image-builder-gb10-staging.timer",
+        "disable:loom-task-image-builder-gb10-staging.timer",
+        "stop-service:loom-task-image-builder-gb10-staging.service",
+        "reset-failed:loom-task-image-builder-gb10-staging.service",
     ]
     assert store.compensation_blockers() == {}
 
@@ -1457,8 +1499,6 @@ def test_timer_start_failure_is_journaled_stopped_disabled_and_verified(
     control = _Control(artifact, store)
     control.fail_timer_start = True
     transport = FixedExternalSupervisorTransport(store=store, control=control)
-    supervisor = artifact.supervisors[0]
-
     with pytest.raises(RuntimeError, match="safely compensated"):
         transport.apply(
             artifact,
@@ -1470,17 +1510,27 @@ def test_timer_start_failure_is_journaled_stopped_disabled_and_verified(
 
     assert control.calls == [
         "daemon-reload",
-        f"service:{supervisor.service_name}:{float(supervisor.service_timeout_sec) + 15.0}",
-        f"enable:{supervisor.timer_name}",
-        f"timer:{supervisor.timer_name}",
-        f"stop:{supervisor.timer_name}",
-        f"disable:{supervisor.timer_name}",
+        "service:loom-autoscaler-gb10-staging.service:195.0",
+        "service:loom-task-image-builder-gb10-staging.service:195.0",
+        "enable:loom-autoscaler-gb10-staging.timer",
+        "enable:loom-task-image-builder-gb10-staging.timer",
+        "timer:loom-autoscaler-gb10-staging.timer",
+        "stop:loom-autoscaler-gb10-staging.timer",
+        "disable:loom-autoscaler-gb10-staging.timer",
+        "stop:loom-task-image-builder-gb10-staging.timer",
+        "disable:loom-task-image-builder-gb10-staging.timer",
         "daemon-reload",
     ]
-    assert control.timer_status(supervisor.timer_name) == _timer_status(
-        supervisor.timer_name, "not-found", "disabled", "inactive"
-    )
-    assert [record.phase for record in store.compensations] == ["intent", "verified"]
+    for supervisor in artifact.supervisors:
+        assert control.timer_status(supervisor.timer_name) == _timer_status(
+            supervisor.timer_name, "not-found", "disabled", "inactive"
+        )
+    assert [record.phase for record in store.compensations] == [
+        "intent",
+        "intent",
+        "verified",
+        "verified",
+    ]
     assert store.compensation_blockers() == {}
     assert (
         classify_external_supervisor_live_state(
@@ -1510,7 +1560,12 @@ def test_failed_timer_compensation_is_journaled_and_blocks_convergence(
             transition_digest="c" * 64,
         )
 
-    assert [record.phase for record in store.compensations] == ["intent", "failed"]
+    assert [record.phase for record in store.compensations] == [
+        "intent",
+        "intent",
+        "failed",
+        "failed",
+    ]
     assert store.compensation_blockers()
     assert (
         classify_external_supervisor_live_state(
@@ -1548,8 +1603,10 @@ def test_crash_intent_is_reconciled_through_fixed_identity_bound_transport(
     transport.reconcile_compensations()
 
     assert control.calls == [
-        f"stop:{supervisor.timer_name}",
-        f"disable:{supervisor.timer_name}",
+        "stop:loom-autoscaler-gb10-staging.timer",
+        "disable:loom-autoscaler-gb10-staging.timer",
+        "stop:loom-task-image-builder-gb10-staging.timer",
+        "disable:loom-task-image-builder-gb10-staging.timer",
         "daemon-reload",
     ]
     assert [record.phase for record in store.compensations] == ["intent", "verified"]

@@ -117,12 +117,13 @@ def _validate_controller_artifact(
     candidate_tree: str,
 ) -> None:
     execution_hosts = {item.execution_host for item in artifact.supervisors}
+    pool_names = {item.pool_name for item in artifact.supervisors}
     if (
         artifact.candidate_sha != candidate_sha
         or artifact.candidate_tree != candidate_tree
-        or len(artifact.supervisors) != 1
+        or len(artifact.supervisors) != 2
         or execution_hosts != {GB10_CONTROLLER_EXECUTION_HOST}
-        or artifact.supervisors[0].pool_name != "gb10"
+        or pool_names != {"gb10", "task-image-builder-gb10"}
     ):
         raise ValueError("GB10 controller artifact exceeds fixed authority")
 

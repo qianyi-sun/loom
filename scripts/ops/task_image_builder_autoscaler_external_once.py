@@ -13,7 +13,7 @@ import stat
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -22,7 +22,10 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
-import worker_pool_autoscaler_external_once as transport  # noqa: E402
+if TYPE_CHECKING:
+    from scripts.ops import worker_pool_autoscaler_external_once as transport
+else:
+    import worker_pool_autoscaler_external_once as transport  # noqa: E402
 
 from loom.db.schema import Token  # noqa: E402
 from loom.worker_token import DEFAULT_WORKER_TOKEN_ENV_KEY, read_env_file_value  # noqa: E402

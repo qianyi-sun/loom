@@ -1667,8 +1667,7 @@ class IsolatedRehearsalExecutor:
                     STAGING_GB10_CONTROLLER_EXECUTION_HOST
                 )
                 if (
-                    len(gb10_supervisors) != 1
-                    or tuple(
+                    tuple(
                         item
                         for item in controller_artifact.supervisors
                         if item.enabled and item.active

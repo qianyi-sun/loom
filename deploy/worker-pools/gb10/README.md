@@ -26,10 +26,9 @@ builder allocation per architecture; the allocation can process several images
 and exits after 120 idle seconds. Trial workers remain non-exclusive and
 pull-only.
 
-The x86_64 OLDLAB builder and its supervisor are active on the dedicated
-`trt-eai-oldlab-6` reservation. The ARM64 GB10 builder remains disabled until
-the GB10 Slurm administrator applies the committed builder QoS/reservation
-converger for `trt-gb10-2`. Activation requires a least-privilege token carrying
+The x86_64 OLDLAB builder and ARM64 GB10 builder are active on the dedicated
+`trt-eai-oldlab-6` and `trt-gb10-2` reservations. Activation requires a
+least-privilege token carrying
 `task-image:build`, a dedicated builder env file, an owner-only Docker
 `config.json` mounted only into the builder container, the declared Slurm
 account/QoS/exclusive reservation, native exclusive capacity, and a
@@ -159,14 +158,23 @@ Environment-state renders and owns:
 ```text
 loom-autoscaler-gb10-staging.service
 loom-autoscaler-gb10-staging.timer
+loom-task-image-builder-gb10-staging.service
+loom-task-image-builder-gb10-staging.timer
 ```
 
-The timer runs
+The trial-pool timer runs
 `scripts/ops/worker_pool_autoscaler_external_once.py --environment staging
 --pool-name gb10`, using local database tunnel port `15451`. Drift checks
 require the declared service/timer, exact candidate paths, environment and
 pool arguments, enabled/active state, Slurm cluster identity, and current
 worker-token parity.
+
+The task-image-builder timer independently runs
+`scripts/ops/task_image_builder_autoscaler_external_once.py --environment
+staging --pool-name task-image-builder-gb10`, using local database tunnel port
+`15454`. Its reconciliation submits at most one concurrency-one allocation on
+the dedicated `trt-gb10-2` reservation and scales back to zero after the
+configured idle interval.
 
 Read-only inspection:
 

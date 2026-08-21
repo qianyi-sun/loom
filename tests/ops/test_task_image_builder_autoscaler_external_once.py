@@ -161,12 +161,18 @@ def test_validate_only_refuses_missing_manager_witness(
         asyncio.run(module._main_async(_args(module, tmp_path, "--validate-only")))
 
 
-def test_committed_disabled_policy_cannot_reconcile(
+def test_committed_gb10_policy_maps_to_enabled_native_pool(
     module: Any,
     tmp_path: Path,
 ) -> None:
-    with pytest.raises(module.TaskImageBuilderPolicyError, match="disabled"):
-        module._load_enabled_builder_config(_args(module, tmp_path))
+    config = module._load_enabled_builder_config(_args(module, tmp_path))
+
+    assert config.pool_name == "task-image-builder-gb10"
+    assert config.cpu_arch == "arm64"
+    assert config.allowed_nodes == ("trt-gb10-2",)
+    assert config.exclusive is True
+    assert config.slurm_qos == "loom-task-image-builder"
+    assert config.slurm_reservation == "loom-task-image-builder"
 
 
 def test_enabled_policy_maps_to_exclusive_runtime_config(
