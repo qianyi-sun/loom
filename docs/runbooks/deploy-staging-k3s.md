@@ -33,7 +33,7 @@ host proxies on `18080/18443`. Each proxy connection enters the fixed
 `32080/32443` NodePort path, letting kube-proxy select any ready ingress
 endpoint without a host reference to kube-proxy's generated chains. A cutover
 unit verifies the Kubernetes routes and both end-to-end proxy paths, installs
-destination-scoped public DNAT, and removes obsolete kind-to-k3s rules. The
+destination-scoped public DNAT, and removes obsolete predecessor route rules. The
 bootstrap waits up to 60 seconds for this reconciliation before continuing. It
 also configures
 cert-manager for the host's working ACME egress path, applies the issuer and

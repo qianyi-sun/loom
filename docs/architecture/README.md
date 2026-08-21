@@ -96,8 +96,6 @@ than mixed with current behavior.
   cluster configuration, and secret projection from `loom-schema.toml`.
 - **[CI runner acceleration](ci-runner-acceleration.md)** — current
   hosted/self-hosted runner selection and isolation requirements.
-- **[Executable cluster checks](cluster-deploy-spikes/README.md)** — CI-run
-  proofs for bridge networking, host preflight, JWT rotation, and TLS.
 
 ## Local model serving
 

@@ -1284,6 +1284,36 @@ used_by     = ["worker"]
 python_type = "Path"
 default     = "/var/lib/loom/trajectories"
 
+[service_config.sandbox_backend]
+used_by     = ["worker"]
+python_type = "WorkerSandboxBackend"
+default     = "docker"
+description = "Service-mode sandbox backend. Docker preserves the existing local-worker path; Daytona opts into the remote service-controller path."
+
+[service_config.daytona_sandbox_ttl_sec]
+used_by     = ["worker"]
+python_type = "int"
+default     = 86400
+description = "Maximum Loom-owned wall-clock lifetime for a Daytona sandbox. Provider auto-stop and auto-delete stay disabled."
+
+[service_config.daytona_api_max_concurrent]
+used_by     = ["worker"]
+python_type = "int"
+default     = 4
+description = "Per-controller bound on concurrent Daytona create, lookup, and delete API operations."
+
+[service_config.daytona_api_min_interval_sec]
+used_by     = ["worker"]
+python_type = "float"
+default     = 0.25
+description = "Minimum interval between Daytona lifecycle API operations from one controller, providing provider rate-limit backpressure."
+
+[service_config.daytona_cleanup_interval_sec]
+used_by     = ["worker"]
+python_type = "float"
+default     = 30.0
+description = "Interval for durable Daytona sandbox cleanup reconciliation."
+
 [service_config.docker_socket]
 used_by     = ["worker"]
 python_type = "Path"
@@ -1604,7 +1634,7 @@ description = "Image tag applied to every loom-* image."
 [render_config.container_registry]
 python_type = "str"
 default     = ""
-description = "Optional registry prefix for every locally built loom-* image in the rendered manifest, without a trailing slash. Empty keeps unprefixed images for kind load-images. Multi-node clusters set a registry host and configure every node's container runtime to pull it."
+description = "Optional registry prefix for every locally built loom-* image in the rendered manifest, without a trailing slash. Protected rollouts require it and publish the exact candidate images before apply. Empty is supported only for unprotected local rendering."
 
 [render_config.container_registry_push]
 python_type = "str"
@@ -1738,7 +1768,7 @@ fields      = { max_concurrent = 16, cpu_request = "500m", cpu_limit = "8", memo
 [render_config.worker_subprocess_gateway_url]
 python_type = "str"
 default     = "http://host.docker.internal:30443/openai/v1"
-description = "Sandbox-facing OpenAI-compatible gateway URL injected into k8s workers as LOOM_WORKER_SUBPROCESS_GATEWAY_URL. The default targets the rendered gateway-router hostPort; kind-on-host deployments with another host service on 30443 should override this, for example to http://host.docker.internal:30444/openai/v1 with a durable host port-forward."
+description = "Sandbox-facing OpenAI-compatible gateway URL injected into k8s workers as LOOM_WORKER_SUBPROCESS_GATEWAY_URL. The default targets the rendered gateway-router hostPort; deployments with another host service on 30443 should override this, for example to http://host.docker.internal:30444/openai/v1 with a durable host port-forward."
 
 [render_config.replicas]
 python_type = "table"
@@ -1749,7 +1779,7 @@ fields      = { service = 2, control_plane = 2, gateway = 2, web = 0, worker = 3
 [render_config.k8s_worker]
 python_type = "table"
 # enabled=false is the safe default for profiles that share host Docker
-# capacity with Slurm. The project-local example enables it for a laptop kind
+# capacity with Slurm. The project-local example enables it for a laptop
 # cluster. Shared development, staging, and production keep it disabled and
 # rely on Slurm-managed pools for trial execution. Setting this to false omits
 # the loom-worker Deployment YAML entirely from the
@@ -1774,7 +1804,7 @@ python_type = "table"
 # HorizontalPodAutoscaler. Profiles that expect variable trial-batch load
 # flip `enabled = true` and tune `min_replicas` / `max_replicas` /
 # `cpu_target_pct`. Requires a metrics-server or equivalent CPU-metric
-# provider in the cluster; kind + development don't have one by
+# provider in the cluster; local development does not have one by
 # default, so leave this off for local dev.
 fields      = { enabled = false, min_replicas = 2, max_replicas = 8, cpu_target_pct = 60 }
 

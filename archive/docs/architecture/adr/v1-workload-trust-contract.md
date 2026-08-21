@@ -51,7 +51,7 @@ An explicit environment that conflicts with that namespace fails before a
 rollout lease, apply, or release manifest can be accepted; explicit
 environments remain valid for non-protected/custom namespaces.
 Manual rollout validates protected cluster and namespace identity before
-evidence or Kind work. A disagreement reports a deterministic
+evidence or local-cluster work. A disagreement reports a deterministic
 protected-target mismatch without echoing the supplied values.
 The release manifest records the structural four-field contract, and the
 release gate requires the manifest and the live `loom-service` environment to

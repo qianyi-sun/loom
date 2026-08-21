@@ -324,7 +324,7 @@ autoscaler policy shape as OLDLAB: `actuator=slurm`, `pool_name=gb10`,
 `actuator_config.partition=gb10`, `actuator_config.cpu_arch=arm64`, and one
 allowed node per `trt-gb10-N` host. GB10's Docker data-root plus worker scratch
 must stay on each node's local ext4 disk. Do not use `/shared_work` for GB10
-Docker overlay2, worker scratch, Postgres, MinIO backend data, or kind/k8s
+Docker overlay2, worker scratch, Postgres, MinIO backend data, or Kubernetes
 volumes; `/shared_work` is NFSv4 and is suitable only for read-mostly cache
 staging, a shared Loom checkout, env files, or evidence transfer.
 

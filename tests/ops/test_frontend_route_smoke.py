@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import ssl
 import subprocess
 from dataclasses import asdict
 from pathlib import Path
@@ -12,9 +11,7 @@ import pytest
 from scripts.ops.frontend_route_smoke import (
     HttpResponse,
     RouteCheck,
-    _parse_args,
     _parse_route,
-    _request_ssl_context,
     _to_http_response,
     check_route,
     extract_asset_urls,
@@ -27,38 +24,6 @@ ROUTE_ARGS = [
     "--route",
     "staging=https://yylx.world/dev=https://yylx.world/dev/api",
 ]
-
-
-def test_insecure_for_kind_flag_is_rejected_outside_ci(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    monkeypatch.delenv("CI", raising=False)
-
-    with pytest.raises(SystemExit, match="2"):
-        _parse_args([*ROUTE_ARGS, "--insecure-for-kind"])
-
-    assert "--insecure-for-kind requires CI=true" in capsys.readouterr().err
-
-
-def test_insecure_for_kind_context_is_process_scoped(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("CI", "true")
-    args = _parse_args([*ROUTE_ARGS, "--insecure-for-kind"])
-    verified_before = ssl.create_default_context()
-
-    context = _request_ssl_context(insecure_for_kind=args.insecure_for_kind)
-
-    assert context is not None
-    assert context.check_hostname is False
-    assert context.verify_mode == ssl.CERT_NONE
-    assert _request_ssl_context(insecure_for_kind=False) is None
-    verified_after = ssl.create_default_context()
-    assert verified_before.check_hostname is True
-    assert verified_before.verify_mode == ssl.CERT_REQUIRED
-    assert verified_after.check_hostname is True
-    assert verified_after.verify_mode == ssl.CERT_REQUIRED
 
 
 def _run_runtime_config(

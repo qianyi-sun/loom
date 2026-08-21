@@ -261,7 +261,7 @@ def successful_command(argv: list[str]) -> subprocess.CompletedProcess[str]:
     elif argv[-3:] == ["rev-parse", "--verify", "HEAD^{tree}"]:
         stdout = f"{CANDIDATE_TREE}\n"
     elif argv[-2:] == ["config", "current-context"]:
-        stdout = "kind-loom-staging\n"
+        stdout = "loom-staging\n"
     elif argv and argv[0] == "/usr/sbin/sysctl":
         stdout = "1024\n"
     elif argv[:1] == ["ssh"] and argv[-1] != "true":
@@ -350,7 +350,7 @@ def test_collect_preflight_uses_shared_kubernetes_client_predicate(
     def probe(run, **_kwargs):
         calls.append(run)
         return KubernetesClientReadiness(
-            current_context="kind-loom-staging",
+            current_context="loom-staging",
             namespace="loom-staging",
             context_ready=False,
             namespace_ready=True,

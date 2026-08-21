@@ -35,7 +35,7 @@ capacity workflow.
 - **[Global fleet pool-executor dry run](global-fleet-pool-executor-dry-run.md)**
   — non-executable reservation, permit, inventory, journaling, fencing, and
   protected-release rehearsal for physical pool controllers.
-- **[Local development](local-dev-workflow.md)** — local kind deployment and
+- **[Local development](local-dev-workflow.md)** — local Docker Compose stack and
   pre-push checks.
 
 Create a separate runbook only for a repeatable procedure with distinct safety,

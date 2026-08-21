@@ -512,7 +512,6 @@ def test_golden_mirror_covers_ci_dockerhub_inputs() -> None:
     expected = {
         "busybox:latest",
         "edoburu/pgbouncer:latest",
-        "kindest/node:v1.31.0",
         "moby/buildkit:buildx-stable-1",
         "postgres:16-alpine",
         "tonistiigi/binfmt:latest",

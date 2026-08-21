@@ -3,7 +3,7 @@
 # local connection to the dedicated ingress NodePort Service, so kube-proxy
 # selects any ready ingress endpoint without Loom referring to disposable
 # KUBE-* chains. After both replacement paths exist, remove obsolete rules left
-# by the kind-to-k3s migration and the emergency HA repair.
+# by the staging entry migration and the emergency HA repair.
 #
 # Idempotent; re-applied with the k3s lifecycle by
 # loom-staging-k3s-cutover.service. Installed by

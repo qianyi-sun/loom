@@ -13,6 +13,7 @@ from loom.models.types import (
     NetworkPolicyKind,
     RequiredCPUArch,
     ResourceMode,
+    SandboxBackend,
 )
 
 
@@ -21,6 +22,7 @@ class Capabilities(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    backend: SandboxBackend = "docker"
     os: OS
     cpu_arch: CPUArch = "x86_64"
     gpu_vendor: GPUVendor
@@ -48,6 +50,7 @@ class RequiredCapabilities(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    backend: SandboxBackend = "docker"
     os: OS
     cpu_arch: RequiredCPUArch = "x86_64"
     gpu_vendor: GPUVendor
@@ -57,7 +60,8 @@ class RequiredCapabilities(BaseModel):
     def satisfied_by(self, caps: Capabilities) -> bool:
         """True iff `caps` offers everything this requires."""
         return (
-            self.os == caps.os
+            self.backend == caps.backend
+            and self.os == caps.os
             and (self.cpu_arch == "any" or self.cpu_arch == caps.cpu_arch)
             and self.gpu_vendor == caps.gpu_vendor
             and self.network_policies <= caps.network_policies

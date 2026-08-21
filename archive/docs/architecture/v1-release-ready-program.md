@@ -250,7 +250,7 @@ not a hard ceiling for a same-repository writer because branch workflow code
 runs under the PR-controlled definition. A fork-only autonomous-agent boundary or an external trusted
 workflow/App is still required for that stronger guarantee.
 The required `staging-smoke-gate` is likewise credential-free and depends only
-on the kind smoke. Real AWS validation belongs to a separately protected,
+on the credential-free cluster smoke. Real AWS validation belongs to a separately protected,
 trusted post-merge/release lane and a skipped cloud run cannot count as cloud
 evidence.
 

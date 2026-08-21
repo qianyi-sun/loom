@@ -64,6 +64,7 @@ def _default_caps() -> Capabilities:
     # Advertising the policy would cause the scheduler to dispatch
     # allowlist-requiring trials here and only fail at worker time.
     return Capabilities(
+        backend="modal",
         os="linux",
         gpu_vendor="nvidia",
         network_policies=frozenset(["public", "no-network"]),

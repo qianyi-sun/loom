@@ -51,11 +51,9 @@ run-name: >-
                     contains(github.event.pull_request.labels.*.name, 'ci:coverage-summary') && '1' || '0'),
              github.event.pull_request.number || 'none') }}
 
-# Runs the manifest-owned Compose system contract for selected PRs. The former
-# kind deployment rehearsal no longer models live staging, which runs on the
-# five-node OLDLAB k3s cluster. Candidate deployment and live k3s readiness are
-# separately authorized protected acceptance; this required PR context does not
-# claim live-staging evidence.
+# Runs the manifest-owned Compose system contract for selected PRs. Candidate
+# deployment and live k3s readiness are separately authorized protected
+# acceptance; this required PR context does not claim live-staging evidence.
 #
 # Trigger model:
 #   - workflow_dispatch (manual)

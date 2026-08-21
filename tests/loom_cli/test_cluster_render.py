@@ -1578,7 +1578,7 @@ def test_render_omits_worker_deployment_when_disabled() -> None:
 
 
 def test_render_includes_worker_when_enabled_via_profile() -> None:
-    """development.cluster.toml opts back in for local kind clusters.
+    """development.cluster.toml opts back in for local cluster workers.
 
     Dynamic-storage profiles render loom-worker as a StatefulSet with
     per-pod PVCs from volumeClaimTemplates so RWO Longhorn volumes on
@@ -1869,10 +1869,7 @@ def test_cluster_audit_exempts_sandbox_hostport() -> None:
 
 
 def test_container_registry_default_leaves_images_unprefixed() -> None:
-    """The default (empty container_registry) must render the historical
-    unprefixed `loom-worker:tag` shape that kind's load-images path
-    depends on. Changing the default would silently break every kind
-    smoke test that relies on `kind load docker-image loom-worker:0.7`."""
+    """The default supports unprefixed images for unprotected local rendering."""
     docs = _load_docs(render_manifests(_DEFAULT_CFG))
     workloads = [d for d in docs if d.get("kind") in ("Deployment", "StatefulSet")]
     loom_images = [

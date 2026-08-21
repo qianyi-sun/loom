@@ -83,6 +83,7 @@ WITH next AS (
        )
      )
      AND t.requires_caps->>'gpu_vendor' = ANY(:worker_gpu_vendors)
+     AND COALESCE(t.requires_caps->>'backend', 'docker') = ANY(:worker_backends)
      AND (t.requires_caps->'network_policies') <@ (:worker_network_policies)::jsonb
      AND (
        t.family_key IS NULL
@@ -205,6 +206,7 @@ async def claim_one(
     worker_cpu_arches: list[str],
     worker_gpu_vendors: list[str],
     worker_network_policies: list[str],
+    worker_backends: list[str] | None = None,
     enforce_shared_slot: bool = False,
 ) -> RowMapping | None:
     """Claim the next eligible trial. Returns the claimed trial row (RowMapping)
@@ -216,6 +218,7 @@ async def claim_one(
         "worker_cpu_arches": worker_cpu_arches,
         "worker_gpu_vendors": worker_gpu_vendors,
         "worker_network_policies": json.dumps(worker_network_policies),
+        "worker_backends": worker_backends or ["docker"],
         "enforce_shared_slot": enforce_shared_slot,
     }
     result = await session.execute(_CLAIM_SQL, params)
@@ -304,6 +307,7 @@ WITH candidates AS (
        )
      )
      AND t.requires_caps->>'gpu_vendor' = ANY(:worker_gpu_vendors)
+     AND COALESCE(t.requires_caps->>'backend', 'docker') = ANY(:worker_backends)
      AND (t.requires_caps->'network_policies') <@ (:worker_network_policies)::jsonb
      AND (
        COALESCE((t.requires_caps->>'terminus2_model_switch')::boolean, false) IS NOT TRUE
@@ -840,6 +844,7 @@ async def claim_work(
     worker_cpu_arches: list[str],
     worker_gpu_vendors: list[str],
     worker_network_policies: list[str],
+    worker_backends: list[str] | None = None,
 ) -> tuple[RowMapping, str | None] | None:
     """Atomically select one Trial or ExecutionAttempt from the shared queue."""
 
@@ -874,6 +879,7 @@ async def claim_work(
         "worker_cpu_arches": worker_cpu_arches,
         "worker_gpu_vendors": worker_gpu_vendors,
         "worker_network_policies": json.dumps(worker_network_policies),
+        "worker_backends": worker_backends or ["docker"],
         "claim_id": uuid4(),
         "lease_token_digest": sha256(raw_lease_token.encode()).hexdigest(),
     }

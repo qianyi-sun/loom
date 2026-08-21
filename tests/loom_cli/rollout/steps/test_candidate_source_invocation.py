@@ -35,7 +35,6 @@ from loom_cli.rollout.steps.candidate_source import (
     candidate_relative_path,
     rollout_cluster_config,
 )
-from loom_cli.rollout.steps.s03_kind_load_images import KindLoadImagesStep
 from loom_cli.rollout.steps.s04_gb10_prep import (
     _LEGACY_NODE_AGENT_TIMER_DROPIN,
     GB10Host,
@@ -558,7 +557,7 @@ def test_materialize_candidate_blob_is_commit_bound_and_fails_closed(
         text=True,
     ).stdout.strip()
     ctx = replace(ctx, resolved_sha=first_head)
-    target = evidence.step_dir(3, "kind-cluster").artifact_path("candidate.yaml")
+    target = evidence.step_dir(3, "cluster-target").artifact_path("candidate.yaml")
 
     first_blob = candidate_source.materialize_candidate_blob(
         ctx,
@@ -699,7 +698,7 @@ def test_materialize_candidate_blob_ignores_replace_refs_and_git_env_injection(
     monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
     monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.repositoryformatversion")
     monkeypatch.setenv("GIT_CONFIG_VALUE_0", "999")
-    target = evidence.step_dir(3, "kind-cluster").artifact_path("candidate.yaml")
+    target = evidence.step_dir(3, "cluster-target").artifact_path("candidate.yaml")
 
     blob = candidate_source.materialize_candidate_blob(
         replace(ctx, resolved_sha=first_head),
@@ -880,49 +879,6 @@ def test_render_runs_loom_cli_from_candidate_worktree(
 
     assert result.exit_code == 0
     _assert_candidate_invocation(seen, worktree=worktree)
-
-
-def test_kind_load_images_resolves_loom_cli_without_global_executable(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    ctx = make_ctx(tmp_path)
-    ev = EvidenceDirectory(tmp_path, "test-rid")
-    ev.ensure()
-    worktree = _prepare_candidate_worktree(ev)
-    step_dir = ev.step_dir(3, "kind-load-images")
-    calls: list[dict[str, Any]] = []
-
-    def fake_run(argv, **kwargs):
-        calls.append(
-            {
-                "argv": list(argv),
-                "cwd": kwargs.get("cwd"),
-                "env": kwargs.get("env"),
-            }
-        )
-        return SubprocessResult(
-            argv=list(argv),
-            returncode=0,
-            stdout="all images present\n",
-            stderr="",
-        )
-
-    monkeypatch.setattr(
-        "loom_cli.rollout.steps.s03_kind_load_images.run_captured",
-        fake_run,
-    )
-
-    result = KindLoadImagesStep().run(ctx, step_dir)
-
-    assert result.exit_code == 0
-    assert calls, "expected step to invoke check-only subcommand"
-    _assert_candidate_invocation(calls[0], worktree=worktree)
-    assert _candidate_args(calls[0]["argv"])[:3] == [
-        "cluster",
-        "load-images",
-        "--cluster-name",
-    ]
 
 
 def test_migrate_render_migration_resolves_loom_cli_without_global_executable(

@@ -1,10 +1,8 @@
 #!/usr/bin/env node
 
 import { Buffer } from "node:buffer";
-import { lookup } from "node:dns/promises";
 import { constants as fsConstants } from "node:fs";
 import * as fs from "node:fs/promises";
-import { isIP } from "node:net";
 import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
@@ -131,7 +129,6 @@ export function parseArgs(argv) {
     rehearsalIsolationId: "",
     emitSanitizedReport: false,
     timeoutMs: DEFAULT_TIMEOUT_MS,
-    insecureForKind: false,
     viewport: { ...DEFAULT_VIEWPORT },
     help: false,
   };
@@ -154,17 +151,6 @@ export function parseArgs(argv) {
     const argument = argv[index];
     if (argument === "--help") {
       options.help = true;
-      continue;
-    }
-    if (argument === "--insecure-for-kind") {
-      if (seen.has(argument)) {
-        throw new SafeSmokeError(
-          "invalid_arguments",
-          "arguments may not be repeated",
-        );
-      }
-      seen.add(argument);
-      options.insecureForKind = true;
       continue;
     }
     if (argument === "--emit-sanitized-report") {
@@ -325,18 +311,6 @@ export function parseArgs(argv) {
       "admin token source must be file:/absolute/path or -",
     );
   }
-  if (
-    options.insecureForKind &&
-    !(
-      process.env.CI === "true" &&
-      process.env.GITHUB_ACTIONS === "true"
-    )
-  ) {
-    throw new SafeSmokeError(
-      "invalid_tls_mode",
-      "--insecure-for-kind requires GitHub Actions",
-    );
-  }
   return options;
 }
 
@@ -450,50 +424,6 @@ export async function loadAdminToken(
     );
   } finally {
     await handle?.close().catch(() => {});
-  }
-}
-
-function loopbackAddress(address) {
-  if (isIP(address) === 4) {
-    return address.startsWith("127.");
-  }
-  if (isIP(address) !== 6) return false;
-  const normalized = address.toLowerCase();
-  return normalized === "::1" || normalized.startsWith("::ffff:127.");
-}
-
-export async function assertInsecureKindBoundary(
-  options,
-  { env = process.env, dnsLookup = lookup } = {},
-) {
-  if (!options.insecureForKind) return;
-  if (!(env.CI === "true" && env.GITHUB_ACTIONS === "true")) {
-    throw new SafeSmokeError(
-      "invalid_tls_mode",
-      "--insecure-for-kind requires GitHub Actions",
-    );
-  }
-  let records;
-  try {
-    records = await dnsLookup(new URL(options.route).hostname, {
-      all: true,
-      verbatim: true,
-    });
-  } catch {
-    throw new SafeSmokeError(
-      "invalid_tls_target",
-      "canonical staging route could not be resolved safely",
-    );
-  }
-  if (
-    !Array.isArray(records) ||
-    records.length === 0 ||
-    records.some((record) => !loopbackAddress(record?.address ?? ""))
-  ) {
-    throw new SafeSmokeError(
-      "invalid_tls_target",
-      "--insecure-for-kind requires a loopback-resolved staging route",
-    );
   }
 }
 
@@ -1128,12 +1058,10 @@ export async function executeSmoke(
     env = process.env,
     fsModule = fs,
     stdin = process.stdin,
-    dnsLookup = lookup,
     playwrightModule,
     nowFn = () => Date.now(),
   } = {},
 ) {
-  await assertInsecureKindBoundary(options, { env, dnsLookup });
   const token = await loadAdminToken(options.adminTokenSource, {
     fsModule,
     stdin,
@@ -1164,7 +1092,6 @@ export async function executeSmoke(
     browserVersion = safeBrowserVersion(browser.version());
     context = await browser.newContext({
       viewport: { ...options.viewport },
-      ignoreHTTPSErrors: options.insecureForKind,
       recordVideo: undefined,
     });
 
@@ -1383,7 +1310,7 @@ const USAGE =
   "--rollout-request-id <req-16hex> --rollout-attempt-number <n> " +
   "--request-envelope-sha256 <64-hex> " +
   "OR --rehearsal-plan-sha256 <64-hex> --rehearsal-isolation-id <24-hex> " +
-  "[--emit-sanitized-report] [--timeout-ms <milliseconds>] [--insecure-for-kind]";
+  "[--emit-sanitized-report] [--timeout-ms <milliseconds>]";
 
 async function main() {
   let options;

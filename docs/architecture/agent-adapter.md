@@ -180,7 +180,7 @@ different network namespaces:
   service DNS. Kubernetes render injects it from
   `worker_subprocess_gateway_url`, which defaults to
   `http://host.docker.internal:30443/openai/v1` for the gateway-router
-  hostPort path. Operators can override it for kind-on-host topologies
+  hostPort path. Operators can override it for host-integrated topologies
   where a different host bridge port is required. Before invoking a
   subprocess adapter, the worker normalizes this URL by
   `endpoint_dialect`: OpenAI-compatible adapters keep `/openai/v1`,

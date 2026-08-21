@@ -1004,7 +1004,7 @@ def build_parser(p: argparse.ArgumentParser) -> None:
         "--cluster-name",
         default=None,
         action=_ExplicitStoreAction,
-        help="Name of the target kind cluster (as in `kind get clusters`).",
+        help="Exact kubeconfig context for the protected k3s target.",
     )
     p.add_argument(
         "--namespace",

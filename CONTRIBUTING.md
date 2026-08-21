@@ -81,11 +81,8 @@ Before declaring work shipped:
 - All affected Markdown docs were scanned and updated for code,
   workflow, deployment, runtime, dependency, or contract changes
 - **Architecture changes that depend on Docker / k8s / CNI / kernel
-  primitive behavior**: add or update a corresponding spike under
-  `docs/architecture/<topic>-spikes/` so CI can empirically verify
-  the mechanism. See
-  [`docs/architecture/cluster-deploy-spikes/README.md`](docs/architecture/cluster-deploy-spikes/README.md)
-  for the pattern and "when to add a spike" guidance
+  primitive behavior**: add or update focused automated coverage under the
+  owning test lane so CI empirically verifies the mechanism
 - Post-ship self-audit pass (re-read each touched file once more for
   regressions, edge cases, type drift) - separate commit if anything
   surfaces
@@ -162,7 +159,7 @@ secrets.
   Autonomous agents need a fork-only
   execution boundary or an external trusted workflow/App before this can be
   treated as a hard token ceiling.
-- `staging-smoke-gate` is a credential-free kind validation lane. It does not
+- `staging-smoke-gate` is a credential-free cluster validation lane. It does not
   request the `ci-aws` environment and does not treat a skipped real-AWS check
   as successful cloud evidence. Real AWS validation is a separate trusted,
   post-merge/release activity and cannot satisfy this protected PR context.
