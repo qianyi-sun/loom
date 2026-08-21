@@ -686,6 +686,26 @@ def test_incomplete_or_unreviewed_runtime_manifest_is_rejected(
         _verify(fixture)
 
 
+def test_verifier_rejects_explicit_runtime_manifest_with_unbound_basename(
+    tmp_path: Path,
+) -> None:
+    fixture = _bundle_fixture(tmp_path)
+    substitute = tmp_path / "substitute-runtime.json"
+    substitute.write_bytes(fixture.runtime_path.read_bytes())
+    substitute.chmod(0o644)
+    release = host_release.load_host_release(fixture.release_path)
+
+    with pytest.raises(host_release.HostReleaseError, match="runtime manifest path"):
+        host_release.verify_host_bundle(
+            fixture.bundle,
+            release,
+            fixture.architecture,
+            FixtureRunner(fixture),
+            runtime_manifest_path=substitute,
+            required_snapshot_owner=os.geteuid(),
+        )
+
+
 def test_unrelated_package_field_continuation_is_accepted(tmp_path: Path) -> None:
     fixture = _bundle_fixture(tmp_path)
     _add_package_description_continuation(fixture)

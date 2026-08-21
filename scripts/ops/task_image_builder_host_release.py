@@ -867,6 +867,8 @@ def verify_host_bundle(
     if debian_architecture is None:
         raise HostReleaseError("native architecture is not in the host release")
     runtime_path = runtime_manifest_path or release.source_path.parent / release.runtime_manifest
+    if runtime_path.name != release.runtime_manifest:
+        raise HostReleaseError("runtime manifest path does not match the release")
     runtime = _load_json(runtime_path, "runtime manifest")
     if runtime.get("schema") != "loom.task-image-builder-rootless-runtime/v1":
         raise HostReleaseError("runtime manifest schema is invalid")

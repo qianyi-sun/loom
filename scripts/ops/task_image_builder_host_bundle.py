@@ -365,13 +365,19 @@ def assemble_host_bundle(
     except OSError as exc:
         raise BundleAssemblyError("bundle assembly failed") from exc
     finally:
+        cleanup_errors: list[BaseException] = []
         if verified is not None:
             try:
                 verified.close()
-            except host_release.HostReleaseError:
-                pass
+            except host_release.HostReleaseError as exc:
+                cleanup_errors.append(exc)
         if temporary is not None and not published and os.path.lexists(temporary):
-            shutil.rmtree(temporary, ignore_errors=True)
+            try:
+                shutil.rmtree(temporary)
+            except OSError as exc:
+                cleanup_errors.append(exc)
+        if cleanup_errors:
+            raise BundleAssemblyError("bundle assembly cleanup failed") from cleanup_errors[0]
 
 
 def _parser() -> argparse.ArgumentParser:

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 from scripts.ops import task_image_builder_host_converge as host
+from tests.ops.test_task_image_builder_host_release import FixtureRunner, _bundle_fixture
 
 DESIRED_CGROUP = (
     b"CgroupPlugin=autodetect\n"
@@ -329,8 +330,9 @@ def test_host_convergence_rejects_release_path_outside_policy_binding(
     tmp_path: Path,
 ) -> None:
     fixture = _fixture(tmp_path)
-    unbound_release = tmp_path / "unbound-release.json"
-    unbound_release.write_bytes(fixture.release.read_bytes())
+    unbound_release = tmp_path / "unbound" / fixture.release.name
+    unbound_release.parent.mkdir()
+    unbound_release.write_text('{"unbound": true}\n', encoding="utf-8")
     paths = replace(fixture.paths, release=unbound_release)
 
     with pytest.raises(host.HostConvergenceError, match="release path"):
@@ -346,6 +348,34 @@ def test_host_convergence_rejects_release_path_outside_policy_binding(
             effective_uid=os.geteuid(),
             required_owner=os.geteuid(),
         )
+
+
+def test_host_bundle_convergence_rejects_substitute_runtime_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _fixture(tmp_path)
+    policy, _ = host._load_policy(fixture.paths.policy, "test", "node-1")
+    source = _bundle_fixture(tmp_path / "authority")
+    policy = replace(policy, host_release_manifest=source.release_path.name)
+    substitute = tmp_path / "substitute-runtime.json"
+    substitute.write_bytes(source.runtime_path.read_bytes())
+    substitute.chmod(0o644)
+    paths = replace(
+        fixture.paths,
+        policy=source.release_path.parent / "prerequisites-v1.toml",
+        release=source.release_path,
+        runtime_manifest=substitute,
+    )
+    runner = FixtureRunner(source)
+    monkeypatch.setattr(
+        host.SystemHostBackend,
+        "_run",
+        staticmethod(lambda args: runner.run(args)),
+    )
+
+    with pytest.raises(host.HostConvergenceError, match="offline host bundle verification"):
+        host.SystemHostBackend(paths)._verify_bundle(policy, source.bundle)
 
 
 def test_plan_and_check_are_read_only(tmp_path: Path) -> None:

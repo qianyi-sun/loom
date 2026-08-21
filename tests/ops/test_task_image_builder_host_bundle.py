@@ -209,6 +209,43 @@ def test_assembler_fsync_failure_cleans_only_its_temporary_tree(
     assert not _temporary_outputs(tmp_path, output)
 
 
+def test_assembler_surfaces_cleanup_failure_after_attempting_all_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = release_fixture(tmp_path)
+    fixture.install_runner(monkeypatch)
+    output = tmp_path / "published-bundle"
+    real_rmtree = bundle.shutil.rmtree
+    cleanup_attempts: list[Path] = []
+
+    def fail_cleanup(path: str | Path, *args: object, **kwargs: object) -> None:
+        del args, kwargs
+        target = Path(path)
+        cleanup_attempts.append(target)
+        if target.name.startswith("loom-host-bundle-snapshot-") or target.name.startswith(
+            f".{output.name}.loom-tmp-"
+        ):
+            raise OSError("injected cleanup failure")
+        real_rmtree(path)
+
+    monkeypatch.setattr(bundle.shutil, "rmtree", fail_cleanup)
+    try:
+        with pytest.raises(bundle.BundleAssemblyError, match="bundle assembly cleanup failed") as exc:
+            fixture.assemble(output)
+
+        assert isinstance(exc.value.__cause__, bundle.host_release.HostReleaseError)
+        assert isinstance(exc.value.__cause__.__cause__, OSError)
+        assert isinstance(exc.value.__context__, bundle.BundleAssemblyError)
+        assert sum(path.name.startswith("loom-host-bundle-snapshot-") for path in cleanup_attempts) >= 2
+        assert any(path.name.startswith(f".{output.name}.loom-tmp-") for path in cleanup_attempts)
+        assert _temporary_outputs(tmp_path, output)
+    finally:
+        monkeypatch.undo()
+        for temporary in _temporary_outputs(tmp_path, output):
+            real_rmtree(temporary)
+
+
 def test_assembler_directory_fsync_failure_prevents_publication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

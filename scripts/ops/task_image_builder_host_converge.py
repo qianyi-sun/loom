@@ -681,10 +681,38 @@ def _validate_facts(policy: HostPolicy, facts: HostFacts) -> None:
         raise HostConvergenceError("forbidden host socket is accessible")
 
 
-def _digests(paths: HostReleasePaths, policy_payload: bytes, policy: HostPolicy) -> dict[str, object]:
+def _authority_release_path(paths: HostReleasePaths, policy: HostPolicy) -> Path:
+    return paths.policy.parent / policy.host_release_manifest
+
+
+def _bound_release_payload(
+    paths: HostReleasePaths,
+    policy: HostPolicy,
+) -> tuple[Path, bytes]:
+    authority_release = _authority_release_path(paths, policy)
+    authority_payload = _read_regular(authority_release, "policy host release")
+    if paths.release != authority_release and _read_regular(
+        paths.release,
+        "host release",
+    ) != authority_payload:
+        raise HostConvergenceError("host release path does not match the policy binding")
+    return authority_release, authority_payload
+
+
+def _digests(
+    paths: HostReleasePaths,
+    policy_payload: bytes,
+    policy: HostPolicy,
+    authority_payload: bytes | None = None,
+) -> dict[str, object]:
+    if authority_payload is None:
+        authority_payload = _read_regular(
+            _authority_release_path(paths, policy),
+            "policy host release",
+        )
     components: dict[str, object] = {
         "policy": _sha(policy_payload),
-        "release": _sha(_read_regular(paths.release, "host release")),
+        "release": _sha(authority_payload),
         "runtime": _sha(_read_regular(paths.runtime_manifest, "runtime manifest")),
     }
     try:
@@ -695,7 +723,7 @@ def _digests(paths: HostReleasePaths, policy_payload: bytes, policy: HostPolicy)
     return {
         "candidate_digest": _sha(_canonical(components)),
         "policy_digest": _sha(policy_payload),
-        "release_digest": _sha(_read_regular(paths.release, "host release")),
+        "release_digest": _sha(authority_payload),
         "cluster_digest": _sha(_canonical(policy.raw_cluster)),
         **binding.as_dict(),
     }
@@ -1102,8 +1130,7 @@ def _converge_host_once(
     if action not in {"plan", "check", "apply", "rollback"}:
         raise HostConvergenceError("host convergence action is invalid")
     policy, policy_payload = _load_policy(paths.policy, cluster_id, slurm_node)
-    if paths.release.name != policy.host_release_manifest:
-        raise HostConvergenceError("host release path does not match the policy binding")
+    _, authority_payload = _bound_release_payload(paths, policy)
     selected_operation = operation_id or str(uuid.uuid4())
     try:
         parsed_operation = uuid.UUID(selected_operation)
@@ -1113,7 +1140,7 @@ def _converge_host_once(
         raise HostConvergenceError("operation ID is invalid")
     receipt_path = receipt_dir / f"{selected_operation}.json"
     owner = os.geteuid() if effective_uid is None else effective_uid
-    digests = _digests(paths, policy_payload, policy)
+    digests = _digests(paths, policy_payload, policy, authority_payload)
 
     if action == "rollback":
         if owner != required_owner:
@@ -1387,7 +1414,7 @@ class SystemHostBackend:
             if self._verified.architecture != policy.architecture:
                 raise HostConvergenceError("verified bundle architecture changed")
             return self._verified.bundle_digest
-        release = host_release.load_host_release(self.paths.release)
+        release = host_release.load_host_release(_authority_release_path(self.paths, policy))
 
         class Adapter:
             def run(
