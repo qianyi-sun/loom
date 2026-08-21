@@ -39,12 +39,14 @@ from loom.db.schema import (
     Team,
     TeamMembership,
     Trial,
+    TrialResourceUsage,
     User,
     Worker,
 )
 from loom.models.batch import Combination
 from loom.models.types import ModelSpec
 from loom.request_params import sanitize_request_extras
+from loom.resource_usage_store import resource_usage_response
 from loom.security.redaction import redact_mapping, redact_text
 from loom_llm_gateway.rate_card import (
     COST_META_CONFIDENCE_KEY,
@@ -289,10 +291,7 @@ def _reject_invalid_workspace_staging_policy_name(
         _reject_submission(
             reason="invalid_input",
             status_code=400,
-            detail=(
-                "trial_config.workspace_staging_policy_name must be "
-                "'tb21' or 'none'"
-            ),
+            detail=("trial_config.workspace_staging_policy_name must be 'tb21' or 'none'"),
         )
 
 
@@ -973,11 +972,7 @@ async def _create_batch_record(
         if payload.combinations:
             for i, combo in enumerate(payload.combinations):
                 conn_id, _model_id = _effective_provider_fields(payload, combo)
-                conn_row = (
-                    provider_connections_by_id.get(conn_id)
-                    if conn_id is not None
-                    else None
-                )
+                conn_row = provider_connections_by_id.get(conn_id) if conn_id is not None else None
                 err = validate_multi_model_for_batch(
                     trial_config=trial_config,
                     agent_name=combo.agent_name,
@@ -2228,6 +2223,40 @@ async def get_batch(
     )
 
 
+@router.get("/batches/{batch_id}/resource-usage")
+async def get_batch_resource_usage(
+    sc: SessionAndCtx,
+    batch_id: UUID,
+) -> dict[str, Any]:
+    s, ctx = sc
+    require_scope(ctx, "read:own")
+    batch = (await s.execute(select(Batch).where(Batch.id == batch_id))).scalar_one_or_none()
+    if batch is None:
+        raise HTTPException(status_code=404, detail="batch not found")
+    require_team_or_admin(ctx, batch.team_id)
+    rows = list(
+        (
+            await s.execute(
+                select(TrialResourceUsage)
+                .join(Trial, Trial.id == TrialResourceUsage.trial_id)
+                .where(Trial.batch_id == batch_id)
+                .order_by(
+                    TrialResourceUsage.trial_id.asc(),
+                    TrialResourceUsage.attempt_count.asc(),
+                    TrialResourceUsage.container_role.asc(),
+                    TrialResourceUsage.role_name.asc(),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    response = resource_usage_response(rows)
+    response["batch_id"] = str(batch_id)
+    response["trials_with_telemetry"] = len({row.trial_id for row in rows})
+    return response
+
+
 @router.get("/batches/{batch_id}/debug")
 async def get_batch_debug(
     request: Request,
@@ -2479,9 +2508,7 @@ async def rerun_failed_batch(
     for target in targets:
         task_id = str(target["task_id"])
         combination_idx = int(target["combination_idx"])
-        if combination_idx < 0 or (
-            combinations and combination_idx >= len(combinations)
-        ):
+        if combination_idx < 0 or (combinations and combination_idx >= len(combinations)):
             _reject_submission(
                 reason="invalid_input",
                 status_code=400,
@@ -2494,8 +2521,7 @@ async def rerun_failed_batch(
                     reason="invalid_input",
                     status_code=400,
                     detail=(
-                        f"combinations[{combination_idx}].agent_name must be a "
-                        "non-empty string"
+                        f"combinations[{combination_idx}].agent_name must be a non-empty string"
                     ),
                 )
         else:

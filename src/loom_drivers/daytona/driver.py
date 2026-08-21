@@ -32,7 +32,12 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 from uuid import UUID
 
-from loom.driver.base import MAX_EXEC_STREAM_BYTES, ExecHandle, StartOptions
+from loom.driver.base import (
+    MAX_EXEC_STREAM_BYTES,
+    DriverResourceSnapshot,
+    ExecHandle,
+    StartOptions,
+)
 from loom.errors import (
     DriverAlreadyStartedError,
     DriverError,
@@ -242,6 +247,12 @@ class DaytonaDriver:
         await self._teardown(delete=delete)
         if self._state == "running":
             self._state = "stopped"
+
+    async def resource_snapshot(self) -> DriverResourceSnapshot | None:
+        # Daytona's current API exposes billed lifetime but not per-sandbox
+        # CPU/RSS/PID/I/O counters. The accounting wrapper persists a typed
+        # unavailable record instead of manufacturing zeros.
+        return None
 
     async def _teardown(self, *, delete: bool) -> None:
         if (

@@ -49,6 +49,7 @@ from loom.agent.oracle import OracleAgent
 from loom.agent.terminus2.runtime import LoomTerminus2Runtime
 from loom.driver.docker import DockerDriver
 from loom.errors import AgentError, classify_failure_message
+from loom.models.resource_usage import TrialResourceUsageReport
 from loom.models.result import FailureReason
 from loom.models.task import TaskConfig
 from loom.models.trial import RetryPolicy, RetryReason, TrialConfig
@@ -105,6 +106,8 @@ from loom_worker.materializers import (
 )
 from loom_worker.orphan_cleanup import cleanup_orphan_trajectories
 from loom_worker.orphan_containers import cleanup_orphan_sandbox_containers
+from loom_worker.resource_accounting import ResourceAccountingDriver, execution_key
+from loom_worker.resource_usage_outbox import ResourceUsageOutbox
 from loom_worker.runner_pool import RunnerPool
 from loom_worker.sandbox_network import SandboxNetworkAllocator
 from loom_worker.sandbox_singleton import (
@@ -680,6 +683,10 @@ async def run_worker(
             ),
         )
         worker_id = UUID(info["worker_id"])
+        resource_usage_outbox = ResourceUsageOutbox(
+            settings.trajectory_cache_dir / "resource-usage-outbox",
+        )
+        await resource_usage_outbox.replay(cp_client.report_resource_usage)
         if production_runtime is not None:
             production_runtime.bind_worker(worker_id)
             pipeline_run = production_runtime.run_claim
@@ -785,6 +792,7 @@ async def run_worker(
                     sandbox_allocator=sandbox_allocator,
                     sandbox_singleton=sandbox_singleton,
                     daytona_runtime=daytona_runtime,
+                    resource_usage_outbox=resource_usage_outbox,
                 )
                 if daytona_runtime is None and image_eviction.due():
                     await asyncio.to_thread(_run_trial_cache_eviction, settings)
@@ -999,6 +1007,7 @@ async def _claim_available_trials(
     sandbox_singleton: SandboxSingletonManager | None = None,
     read_setup_health: Callable[[], Any] | None = None,
     daytona_runtime: _DaytonaWorkerRuntime | None = None,
+    resource_usage_outbox: ResourceUsageOutbox | None = None,
 ) -> int:
     from loom_worker.setup_admission import (
         policy_from_settings,
@@ -1048,6 +1057,7 @@ async def _claim_available_trials(
             sandbox_allocator=sandbox_allocator,
             sandbox_singleton=sandbox_singleton,
             daytona_runtime=daytona_runtime,
+            resource_usage_outbox=resource_usage_outbox,
         )
         claimed += 1
     return claimed
@@ -1068,6 +1078,7 @@ async def _claim_available_work(
     sandbox_singleton: SandboxSingletonManager | None = None,
     read_setup_health: Callable[[], Any] | None = None,
     daytona_runtime: _DaytonaWorkerRuntime | None = None,
+    resource_usage_outbox: ResourceUsageOutbox | None = None,
 ) -> int:
     """Claim from the shared queue when the Pipeline assembly is injected.
 
@@ -1091,6 +1102,7 @@ async def _claim_available_work(
             sandbox_singleton=sandbox_singleton,
             read_setup_health=read_setup_health,
             daytona_runtime=daytona_runtime,
+            resource_usage_outbox=resource_usage_outbox,
         )
 
     from loom_worker.setup_admission import (
@@ -1148,6 +1160,7 @@ async def _claim_available_work(
                 sandbox_allocator=sandbox_allocator,
                 sandbox_singleton=sandbox_singleton,
                 daytona_runtime=daytona_runtime,
+                resource_usage_outbox=resource_usage_outbox,
             )
         elif parsed.work_kind == "execution_attempt":
             if not isinstance(payload, ExecutionAttemptClaimV1):
@@ -1330,10 +1343,14 @@ async def _spawn_trial(
     sandbox_allocator: SandboxNetworkAllocator | None = None,
     sandbox_singleton: SandboxSingletonManager | None = None,
     daytona_runtime: _DaytonaWorkerRuntime | None = None,
+    resource_usage_outbox: ResourceUsageOutbox | None = None,
 ) -> None:
     trial_id = UUID(str(payload["trial_id"]))
     team_id = UUID(str(payload["team_id"]))
     attempt_count = int(payload.get("attempt_count") or 1)
+    usage_outbox = resource_usage_outbox or ResourceUsageOutbox(
+        settings.trajectory_cache_dir / "resource-usage-outbox",
+    )
 
     async def _setup_run_and_cleanup() -> None:
         task_dir: Path | None = None
@@ -1621,27 +1638,65 @@ async def _spawn_trial(
                 error=error,
             )
 
-        def _driver_factory() -> DockerDriver | DaytonaDriver:
+        async def _resource_usage_sink(
+            report: TrialResourceUsageReport,
+            final: bool,
+        ) -> None:
+            if final:
+                await usage_outbox.stage_and_deliver(
+                    report,
+                    cp_client.report_resource_usage,
+                )
+            else:
+                await usage_outbox.stage(report)
+
+        driver_sequence = 0
+
+        def _driver_factory() -> ResourceAccountingDriver:
+            nonlocal driver_sequence
+            ordinal = driver_sequence
+            driver_sequence += 1
+            inner: DockerDriver | DaytonaDriver
             if daytona_runtime is None:
-                return DockerDriver(
+                inner = DockerDriver(
                     image=task_image,
                     workspace=task_config.environment.workdir,
                     docker_api_timeout_sec=settings.docker_api_timeout_sec,
                 )
-            return DaytonaDriver(
-                image=task_image,
-                config=daytona_runtime.config,
-                workspace=task_config.environment.workdir,
+            else:
+                inner = DaytonaDriver(
+                    image=task_image,
+                    config=daytona_runtime.config,
+                    workspace=task_config.environment.workdir,
+                    trial_id=trial_id,
+                    team_id=team_id,
+                    sandbox_name=sandbox_name,
+                    candidate_sha=settings.candidate_sha,
+                    provider_scope=daytona_runtime.provider_scope,
+                    attempt_count=attempt_count,
+                    api_gate=daytona_runtime.gate,
+                    reserve_callback=_reserve_daytona,
+                    started_callback=_daytona_started,
+                    deleted_callback=_daytona_deleted,
+                )
+            role = "agent" if ordinal == 0 else "verifier"
+            return ResourceAccountingDriver(
+                inner,
                 trial_id=trial_id,
-                team_id=team_id,
-                sandbox_name=sandbox_name,
-                candidate_sha=settings.candidate_sha,
-                provider_scope=daytona_runtime.provider_scope,
                 attempt_count=attempt_count,
-                api_gate=daytona_runtime.gate,
-                reserve_callback=_reserve_daytona,
-                started_callback=_daytona_started,
-                deleted_callback=_daytona_deleted,
+                worker_id=worker_id,
+                execution_key=execution_key(
+                    trial_id,
+                    attempt_count,
+                    worker_id,
+                    role,
+                    ordinal,
+                ),
+                container_role=role,
+                role_name="primary" if role == "agent" else f"isolated-{ordinal}",
+                architecture=("x86_64" if daytona_runtime is not None else _host_cpu_arch()),
+                candidate_sha=(getattr(settings, "candidate_sha", "") or None),
+                sink=_resource_usage_sink,
             )
 
         def _docker_sidecar_runtime() -> DockerTaskSidecarRuntime:
@@ -1664,6 +1719,10 @@ async def _spawn_trial(
                     else None
                 ),
                 pull_only=True,
+                attempt_count=attempt_count,
+                worker_id=worker_id,
+                candidate_sha=(getattr(settings, "candidate_sha", "") or None),
+                usage_sink=_resource_usage_sink,
                 setup_slot_provider=lambda: _daemon_build_slot(
                     cp_client,
                     settings,

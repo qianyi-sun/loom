@@ -112,7 +112,14 @@ def test_upgrade_adds_authority_journal_and_nullable_execution_links(
         "data_lifecycle_gc_items",
         "data_lifecycle_gc_authorities",
     }
-    assert linked == {"batches", "trials", "llm_calls", "trial_events", "artifacts"}
+    assert linked == {
+        "batches",
+        "trials",
+        "llm_calls",
+        "trial_events",
+        "trial_resource_usage",
+        "artifacts",
+    }
     assert mutation_tables == {
         "staging_mutation_epochs",
         "staging_mutation_epoch_events",
@@ -717,6 +724,7 @@ def test_sql_inventory_is_read_only_and_binds_unclassified_counts(
         "batches": 0,
         "llm_calls": 0,
         "trial_events": 0,
+        "trial_resource_usage": 0,
         "trials": 0,
     }
     assert plan.mutation_epoch == snapshot.mutation_epoch

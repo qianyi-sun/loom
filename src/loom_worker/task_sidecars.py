@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import logging
 import re
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
@@ -24,13 +25,21 @@ from docker.errors import APIError, ImageNotFound, NotFound
 from loom.driver.build_containment import forbid_build_when_contained
 from loom.driver.task_image import _registry_tag_for
 from loom.models.healthcheck import HealthcheckSpec
+from loom.models.resource_usage import ResourceLimits
 from loom.models.task import TaskConfig, TaskSidecarConfig
+from loom_worker.resource_accounting import (
+    DockerContainerResourceMonitor,
+    UsageSink,
+    execution_key,
+)
 from loom_worker.task_image import (
     TaskImageBuildError,
     _enforce_build_context_limits,
     _resolve_build_context_path,
     _resolve_dockerfile_path,
 )
+
+logger = logging.getLogger(__name__)
 
 _NAME_RE = re.compile(r"[^A-Za-z0-9_.-]")
 SetupSlotProvider = Callable[[], contextlib.AbstractAsyncContextManager[Any]]
@@ -119,6 +128,10 @@ class DockerTaskSidecarRuntime:
         registry_repo: str | None = None,
         registry_images: Mapping[str, str] | None = None,
         pull_only: bool = False,
+        attempt_count: int | None = None,
+        worker_id: UUID | None = None,
+        candidate_sha: str | None = None,
+        usage_sink: UsageSink | None = None,
     ) -> None:
         self.task_config = task_config
         self.task_dir = task_dir
@@ -138,8 +151,13 @@ class DockerTaskSidecarRuntime:
         self.registry_repo = registry_repo
         self.registry_images = dict(registry_images) if registry_images is not None else None
         self.pull_only = pull_only
+        self.attempt_count = attempt_count
+        self.worker_id = worker_id
+        self.candidate_sha = candidate_sha
+        self.usage_sink = usage_sink
         self._client: Any | None = None
         self._containers: list[Any] = []
+        self._usage_monitors: list[DockerContainerResourceMonitor] = []
         self._network: Any | None = None
         self._network_name: str | None = None
 
@@ -168,6 +186,42 @@ class DockerTaskSidecarRuntime:
                     network_name,
                 )
                 self._containers.append(container)
+                if (
+                    self.attempt_count is not None
+                    and self.worker_id is not None
+                    and self.usage_sink is not None
+                ):
+                    monitor = DockerContainerResourceMonitor(
+                        container,
+                        trial_id=self.trial_id,
+                        attempt_count=self.attempt_count,
+                        worker_id=self.worker_id,
+                        execution_key=execution_key(
+                            self.trial_id,
+                            self.attempt_count,
+                            self.worker_id,
+                            "sidecar",
+                            sidecar.name,
+                        ),
+                        role_name=sidecar.name,
+                        architecture=self.cpu_arch,
+                        candidate_sha=self.candidate_sha,
+                        limits=ResourceLimits(
+                            cpu_cores=(self.container_cpus or None),
+                            memory_bytes=(
+                                self.container_memory_mib * 1024 * 1024
+                                if self.container_memory_mib > 0
+                                else None
+                            ),
+                            pids=(self.container_pids or None),
+                        ),
+                        sink=self.usage_sink,
+                    )
+                    try:
+                        await monitor.start()
+                    except Exception:
+                        logger.warning("sidecar_resource_monitor_start_failed", exc_info=True)
+                    self._usage_monitors.append(monitor)
                 if sidecar.healthcheck is not None:
                     await self._wait_for_healthy(container, sidecar.healthcheck)
             return network_name
@@ -176,6 +230,10 @@ class DockerTaskSidecarRuntime:
             raise
 
     async def stop(self) -> None:
+        for monitor in reversed(self._usage_monitors):
+            with contextlib.suppress(Exception):
+                await monitor.stop()
+        self._usage_monitors.clear()
         for container in reversed(self._containers):
             with contextlib.suppress(Exception):
                 await asyncio.to_thread(container.remove, force=True)

@@ -259,7 +259,9 @@ async def delivery_setup(
                     config=common_batch["trial_config"],
                     requires_caps={},
                     submitted_at=now + timedelta(seconds=submitted_offset),
-                    started_at=now + timedelta(seconds=submitted_offset) if state == "succeeded" else None,
+                    started_at=now + timedelta(seconds=submitted_offset)
+                    if state == "succeeded"
+                    else None,
                     finished_at=now + timedelta(seconds=submitted_offset + 1),
                     sample_idx=0,
                     combination_idx=0,
@@ -427,6 +429,7 @@ async def test_delivery_export_creates_5003_style_bundle_and_records_artifact(
         names = sorted(tar.getnames())
         assert "manifest.json" in names
         assert "summary.json" in names
+        assert "ledger/resource_usage.jsonl" in names
         assert "ledger/trials.jsonl" in names
         assert "ledger/trials.csv" in names
         assert "checksums/SHA256SUMS" in names
@@ -480,9 +483,10 @@ async def test_delivery_export_creates_5003_style_bundle_and_records_artifact(
             assert artifact.content_hash == f"sha256:{body['sha256']}"
             assert artifact.artifact_metadata["delivery_export"]["status"] == "ready"
             assert artifact.artifact_metadata["delivery_export"]["task_count"] == 4
-            assert artifact.artifact_metadata["delivery_export"]["manifest"][
-                "archive_sha256"
-            ] == body["sha256"]
+            assert (
+                artifact.artifact_metadata["delivery_export"]["manifest"]["archive_sha256"]
+                == body["sha256"]
+            )
             assert artifact.provenance["source_batch_ids"] == [
                 str(main_batch_id),
                 str(supplemental_batch_id),
@@ -492,11 +496,13 @@ async def test_delivery_export_creates_5003_style_bundle_and_records_artifact(
             assert authority is not None
             assert authority.data_class == "artifact"
             assert authority.owner_id == str(artifact.id)
-            registered_objects = list(s.scalars(
-                select(DataLifecycleObject)
-                .where(DataLifecycleObject.authority_id == authority.id)
-                .order_by(DataLifecycleObject.object_key)
-            ))
+            registered_objects = list(
+                s.scalars(
+                    select(DataLifecycleObject)
+                    .where(DataLifecycleObject.authority_id == authority.id)
+                    .order_by(DataLifecycleObject.object_key)
+                )
+            )
             assert len(registered_objects) == 2
             by_key = {row.object_key: row for row in registered_objects}
             archive_object = by_key[archive_key]
@@ -506,9 +512,7 @@ async def test_delivery_export_creates_5003_style_bundle_and_records_artifact(
             checksum_bytes = fake_s3.objects[(body["storage"]["bucket"], checksum_key)]  # type: ignore[attr-defined]
             checksum_object = by_key[checksum_key]
             assert checksum_object.size_bytes == len(checksum_bytes)
-            assert checksum_object.content_sha256 == hashlib.sha256(
-                checksum_bytes
-            ).hexdigest()
+            assert checksum_object.content_sha256 == hashlib.sha256(checksum_bytes).hexdigest()
             batch = s.get(Batch, main_batch_id)
             assert batch is not None
             assert batch.lifecycle_authority_id is not None
@@ -532,7 +536,7 @@ async def test_raw_harbor_tb2_delivery_export_streams_sample_compatible_bundle(
 
     task_bundle_key = f"{task_ids[0]}/task.toml"
     fake_s3.objects[("task-bundles", task_bundle_key)] = (  # type: ignore[attr-defined]
-        f"id = \"{task_ids[0]}\"\n"
+        f'id = "{task_ids[0]}"\n'
     ).encode()
     fake_s3.objects[("task-bundles", f"{task_ids[0]}/instruction.md")] = (  # type: ignore[attr-defined]
         b"solve the task\n"
@@ -575,8 +579,7 @@ async def test_raw_harbor_tb2_delivery_export_streams_sample_compatible_bundle(
                             "_loom_raw_provider_log": {
                                 "schema_version": "1",
                                 "ref": (
-                                    "llm_calls/"
-                                    f"raw-{index}/provider_extras/_loom_raw_provider_log"
+                                    f"llm_calls/raw-{index}/provider_extras/_loom_raw_provider_log"
                                 ),
                                 "request": {
                                     "body": {
@@ -620,10 +623,7 @@ async def test_raw_harbor_tb2_delivery_export_streams_sample_compatible_bundle(
                     provider_extras={
                         "_loom_raw_provider_log": {
                             "schema_version": "1",
-                            "ref": (
-                                "llm_calls/raw-1b/provider_extras/"
-                                "_loom_raw_provider_log"
-                            ),
+                            "ref": ("llm_calls/raw-1b/provider_extras/_loom_raw_provider_log"),
                             "request": {
                                 "body": {
                                     "messages": [
@@ -705,6 +705,7 @@ async def test_raw_harbor_tb2_delivery_export_streams_sample_compatible_bundle(
         assert f"task_bundles/{first_task}/instruction.md" in names
         assert f"agent_runs/{first_task}/{first_trial}/execution_result.json" in names
         assert f"agent_runs/{first_task}/{first_trial}/metrics.json" in names
+        assert f"agent_runs/{first_task}/{first_trial}/resource_usage.json" in names
         assert f"agent_runs/{first_task}/{first_trial}/artifact_manifest.json" in names
         assert f"agent_runs/{first_task}/{first_trial}/verifier_output.json" in names
         assert f"agent_runs/{first_task}/{first_trial}/provider_logs_manifest.json" in names
@@ -718,6 +719,13 @@ async def test_raw_harbor_tb2_delivery_export_streams_sample_compatible_bundle(
             "agent_runs": "agent_runs/<task_id>/<trial_id>/...",
             "derived": "derived/sft_messages.jsonl",
         }
+        resource_usage = json.load(
+            tar.extractfile(  # type: ignore[arg-type]
+                f"agent_runs/{first_task}/{first_trial}/resource_usage.json"
+            )
+        )
+        assert resource_usage["items"] == []
+        assert resource_usage["aggregate"]["telemetry_status"] == "unavailable"
         provider_manifest = json.load(
             tar.extractfile("provider_logs/manifest.json")  # type: ignore[arg-type]
         )
@@ -755,9 +763,7 @@ async def test_raw_harbor_tb2_delivery_export_streams_sample_compatible_bundle(
             },
         ]
         history_sft_row = next(
-            json.loads(line)
-            for line in sft_lines
-            if len(json.loads(line)["messages"]) == 4
+            json.loads(line) for line in sft_lines if len(json.loads(line)["messages"]) == 4
         )
         history_assistant = history_sft_row["messages"][1]
         assert history_assistant["role"] == "assistant"
@@ -773,14 +779,12 @@ async def test_raw_harbor_tb2_delivery_export_streams_sample_compatible_bundle(
                 f"agent_runs/{first_task}/{first_trial}/artifact_manifest.json"
             )
         )
-        assert {
-            artifact["kind"]: artifact["path"]
-            for artifact in artifact_manifest["artifacts"]
-        }["trajectory"] == "trajectory.json"
-        assert {
-            artifact["kind"]: artifact["path"]
-            for artifact in artifact_manifest["artifacts"]
-        }["agent_native_trajectory"] == "loom_trajectory.jsonl"
+        assert {artifact["kind"]: artifact["path"] for artifact in artifact_manifest["artifacts"]}[
+            "trajectory"
+        ] == "trajectory.json"
+        assert {artifact["kind"]: artifact["path"] for artifact in artifact_manifest["artifacts"]}[
+            "agent_native_trajectory"
+        ] == "loom_trajectory.jsonl"
         trajectory = json.load(
             tar.extractfile(  # type: ignore[arg-type]
                 f"agent_runs/{first_task}/{first_trial}/trajectory.json"
@@ -792,9 +796,7 @@ async def test_raw_harbor_tb2_delivery_export_streams_sample_compatible_bundle(
         assert trajectory["steps"][0]["source"] == "user"
         assert trajectory["steps"][1]["source"] == "agent"
         assert trajectory["steps"][1]["message"] == "Analysis: fresh shell\nPlan: inspect files"
-        assert trajectory["steps"][1]["observation"] == {
-            "results": [{"content": "total 1\n"}]
-        }
+        assert trajectory["steps"][1]["observation"] == {"results": [{"content": "total 1\n"}]}
         assert trajectory["steps"][1]["tool_calls"] == [
             {
                 "tool_call_id": "call-1-1",
@@ -1145,9 +1147,7 @@ async def test_delivery_export_rejects_non_terminal_batch_family(
     sync_engine = create_engine(postgres_url)
     try:
         with sync_engine.begin() as conn:
-            conn.execute(
-                update(Batch).where(Batch.id == main_batch_id).values(state="running")
-            )
+            conn.execute(update(Batch).where(Batch.id == main_batch_id).values(state="running"))
     finally:
         sync_engine.dispose()
 
@@ -1345,9 +1345,7 @@ def _seed_tb2_v2_trial(
                 "agent_model": {"provider": "yibu", "name": "glm-5.1-thinking"},
             },
             trajectory_index={
-                "trajectory_uri": (
-                    f"s3://{settings.trajectories_bucket}/{prefix}/events.jsonl"
-                ),
+                "trajectory_uri": (f"s3://{settings.trajectories_bucket}/{prefix}/events.jsonl"),
                 "atif_uri": f"s3://{settings.trajectories_bucket}/{prefix}/atif.json",
                 "artifacts": [
                     {
@@ -1362,9 +1360,7 @@ def _seed_tb2_v2_trial(
                         "bucket": settings.artifacts_bucket,
                         "key": verifier_log_key,
                         "size": len(verifier_log),
-                        "content_hash": (
-                            f"sha256:{hashlib.sha256(verifier_log).hexdigest()}"
-                        ),
+                        "content_hash": (f"sha256:{hashlib.sha256(verifier_log).hexdigest()}"),
                         "share_status": "shared",
                         "blocked_reason": None,
                     },
@@ -1373,9 +1369,7 @@ def _seed_tb2_v2_trial(
                         "bucket": settings.artifacts_bucket,
                         "key": verifier_meta_key,
                         "size": len(verifier_meta),
-                        "content_hash": (
-                            f"sha256:{hashlib.sha256(verifier_meta).hexdigest()}"
-                        ),
+                        "content_hash": (f"sha256:{hashlib.sha256(verifier_meta).hexdigest()}"),
                         "share_status": "shared",
                         "blocked_reason": None,
                     },
@@ -1384,9 +1378,7 @@ def _seed_tb2_v2_trial(
                         "bucket": settings.artifacts_bucket,
                         "key": verifier_output_key,
                         "size": len(verifier_output),
-                        "content_hash": (
-                            f"sha256:{hashlib.sha256(verifier_output).hexdigest()}"
-                        ),
+                        "content_hash": (f"sha256:{hashlib.sha256(verifier_output).hexdigest()}"),
                         "share_status": "shared",
                         "blocked_reason": None,
                     },
@@ -1416,9 +1408,7 @@ async def test_raw_harbor_tb2_v2_export_rejects_legacy_runtime_stream(
         with sync_engine.begin() as conn:
             for trial_id in selected_trials.values():
                 prefix = f"{delivery_setup['team_id']}/{trial_id}"
-                fake_s3.objects[
-                    (settings.trajectories_bucket, f"{prefix}/events.jsonl")
-                ] = (
+                fake_s3.objects[(settings.trajectories_bucket, f"{prefix}/events.jsonl")] = (
                     json.dumps(
                         {
                             "seq": 1,
@@ -1429,9 +1419,7 @@ async def test_raw_harbor_tb2_v2_export_rejects_legacy_runtime_stream(
                             "parser_name": "json",
                             "prompt_hash": "abc",
                             "template_hashes": {},
-                            "harbor_compat_sha": (
-                                "527d50deb63a5d279e8c20593c18a2cbc7f61f9e"
-                            ),
+                            "harbor_compat_sha": ("527d50deb63a5d279e8c20593c18a2cbc7f61f9e"),
                             "benchmark_provenance": None,
                             "loom_runtime_revision": "1.0",
                         }
@@ -1499,12 +1487,8 @@ async def test_raw_harbor_tb2_v2_export_from_typed_events(
     app.state.settings.public_base_url = "https://yylx.world/dev"
 
     task_bundle_key = f"{task_ids[0]}/task.toml"
-    fake_s3.objects[("task-bundles", task_bundle_key)] = (
-        f'id = "{task_ids[0]}"\n'
-    ).encode()
-    fake_s3.objects[("task-bundles", f"{task_ids[0]}/instruction.md")] = (
-        b"solve the task\n"
-    )
+    fake_s3.objects[("task-bundles", task_bundle_key)] = (f'id = "{task_ids[0]}"\n').encode()
+    fake_s3.objects[("task-bundles", f"{task_ids[0]}/instruction.md")] = b"solve the task\n"
 
     sync_engine = create_engine(postgres_url)
     native_by_trial: dict[UUID, bytes] = {}
@@ -1600,13 +1584,8 @@ async def test_raw_harbor_tb2_v2_export_from_typed_events(
         assert "derived/sft_messages.jsonl" not in names
         assert f"agent_runs/{first_task}/{first_trial}/model_input_trajectory.json" in names
         assert f"agent_runs/{first_task}/{first_trial}/terminal_transcript.jsonl" in names
-        assert (
-            f"agent_runs/{first_task}/{first_trial}/native/harbor_trajectory.json"
-            in names
-        )
-        assert (
-            f"agent_runs/{first_task}/{first_trial}/verifier/output.json" in names
-        )
+        assert f"agent_runs/{first_task}/{first_trial}/native/harbor_trajectory.json" in names
+        assert f"agent_runs/{first_task}/{first_trial}/verifier/output.json" in names
         trajectory = json.load(
             tar.extractfile(f"agent_runs/{first_task}/{first_trial}/trajectory.json")  # type: ignore[arg-type]
         )
@@ -1708,18 +1687,14 @@ async def test_raw_harbor_tb2_v1_packs_verifier_audit_artifacts(
                         "trajectory_uri": (
                             f"s3://{settings.trajectories_bucket}/{prefix}/events.jsonl"
                         ),
-                        "atif_uri": (
-                            f"s3://{settings.trajectories_bucket}/{prefix}/atif.json"
-                        ),
+                        "atif_uri": (f"s3://{settings.trajectories_bucket}/{prefix}/atif.json"),
                         "artifacts": [
                             {
                                 "step_name": "main",
                                 "bucket": settings.artifacts_bucket,
                                 "key": log_key,
                                 "size": len(log_body),
-                                "content_hash": (
-                                    f"sha256:{hashlib.sha256(log_body).hexdigest()}"
-                                ),
+                                "content_hash": (f"sha256:{hashlib.sha256(log_body).hexdigest()}"),
                                 "share_status": "shared",
                                 "blocked_reason": None,
                             },
@@ -1728,9 +1703,7 @@ async def test_raw_harbor_tb2_v1_packs_verifier_audit_artifacts(
                                 "bucket": settings.artifacts_bucket,
                                 "key": meta_key,
                                 "size": len(meta_body),
-                                "content_hash": (
-                                    f"sha256:{hashlib.sha256(meta_body).hexdigest()}"
-                                ),
+                                "content_hash": (f"sha256:{hashlib.sha256(meta_body).hexdigest()}"),
                                 "share_status": "shared",
                                 "blocked_reason": None,
                             },
@@ -1763,11 +1736,7 @@ async def test_raw_harbor_tb2_v1_packs_verifier_audit_artifacts(
                             "schema_version": "1",
                             "ref": "llm_calls/raw-1/provider_extras/_loom_raw_provider_log",
                             "request": {
-                                "body": {
-                                    "messages": [
-                                        {"role": "user", "content": "prompt 1"}
-                                    ]
-                                }
+                                "body": {"messages": [{"role": "user", "content": "prompt 1"}]}
                             },
                             "response": {
                                 "body": {
@@ -1811,9 +1780,7 @@ async def test_raw_harbor_tb2_v1_packs_verifier_audit_artifacts(
 
     with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as tar:
         log_member = f"agent_runs/{first_task}/{first_trial}/verifier/script.log"
-        meta_member = (
-            f"agent_runs/{first_task}/{first_trial}/verifier/script.log.meta.json"
-        )
+        meta_member = f"agent_runs/{first_task}/{first_trial}/verifier/script.log.meta.json"
         output_member = f"agent_runs/{first_task}/{first_trial}/verifier/output.json"
         assert log_member in set(tar.getnames())
         assert meta_member in set(tar.getnames())
@@ -1826,18 +1793,14 @@ async def test_raw_harbor_tb2_v1_packs_verifier_audit_artifacts(
             )
         )
         verifier_entries = [
-            row
-            for row in manifest["artifacts"]
-            if row.get("kind") == "verifier_artifact"
+            row for row in manifest["artifacts"] if row.get("kind") == "verifier_artifact"
         ]
         assert {row["path"] for row in verifier_entries} == {
             "verifier/script.log",
             "verifier/script.log.meta.json",
             "verifier/output.json",
         }
-        log_entry = next(
-            row for row in verifier_entries if row["path"] == "verifier/script.log"
-        )
+        log_entry = next(row for row in verifier_entries if row["path"] == "verifier/script.log")
         assert log_entry["truncated"] is False
         assert log_entry["share_status"] == "shared"
         assert log_entry["size_bytes"] == len(log_body)
