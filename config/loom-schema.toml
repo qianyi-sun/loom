@@ -1284,6 +1284,36 @@ used_by     = ["worker"]
 python_type = "Path"
 default     = "/var/lib/loom/trajectories"
 
+[service_config.sandbox_backend]
+used_by     = ["worker"]
+python_type = "WorkerSandboxBackend"
+default     = "docker"
+description = "Service-mode sandbox backend. Docker preserves the existing local-worker path; Daytona opts into the remote service-controller path."
+
+[service_config.daytona_sandbox_ttl_sec]
+used_by     = ["worker"]
+python_type = "int"
+default     = 86400
+description = "Maximum Loom-owned wall-clock lifetime for a Daytona sandbox. Provider auto-stop and auto-delete stay disabled."
+
+[service_config.daytona_api_max_concurrent]
+used_by     = ["worker"]
+python_type = "int"
+default     = 4
+description = "Per-controller bound on concurrent Daytona create, lookup, and delete API operations."
+
+[service_config.daytona_api_min_interval_sec]
+used_by     = ["worker"]
+python_type = "float"
+default     = 0.25
+description = "Minimum interval between Daytona lifecycle API operations from one controller, providing provider rate-limit backpressure."
+
+[service_config.daytona_cleanup_interval_sec]
+used_by     = ["worker"]
+python_type = "float"
+default     = 30.0
+description = "Interval for durable Daytona sandbox cleanup reconciliation."
+
 [service_config.docker_socket]
 used_by     = ["worker"]
 python_type = "Path"

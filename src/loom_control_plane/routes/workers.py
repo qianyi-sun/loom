@@ -63,6 +63,7 @@ async def _model_switch_plan_payload(session: Any, trial_id: UUID) -> dict[str, 
         return None
     return plan_snapshot_from_row(row).model_dump(mode="json")
 
+
 _WORKER_HEARTBEAT_STATUSES = {"active", "idle-exit", "shutting-down"}
 
 
@@ -224,6 +225,7 @@ async def claim_trial(
     worker_os = sorted({c["os"] for c in caps})
     worker_cpu_arches = sorted({c.get("cpu_arch", "x86_64") for c in caps})
     worker_gpu = sorted({c["gpu_vendor"] for c in caps})
+    worker_backends = sorted({c.get("backend", "docker") for c in caps})
     worker_network = sorted({p for c in caps for p in c["network_policies"]})
 
     import time as _time
@@ -237,6 +239,7 @@ async def claim_trial(
             worker_cpu_arches=worker_cpu_arches,
             worker_gpu_vendors=worker_gpu,
             worker_network_policies=worker_network,
+            worker_backends=worker_backends,
             enforce_shared_slot=True,
         )
         task_image_materialization = None
@@ -320,6 +323,7 @@ async def claim_any_work(
         worker_os = sorted({item["os"] for item in caps})
         worker_cpu_arches = sorted({item.get("cpu_arch", "x86_64") for item in caps})
         worker_gpu = sorted({item["gpu_vendor"] for item in caps})
+        worker_backends = sorted({item.get("backend", "docker") for item in caps})
         worker_network = sorted({policy for item in caps for policy in item["network_policies"]})
         try:
             claimed = await claim_work(
@@ -333,6 +337,7 @@ async def claim_any_work(
                 worker_cpu_arches=worker_cpu_arches,
                 worker_gpu_vendors=worker_gpu,
                 worker_network_policies=worker_network,
+                worker_backends=worker_backends,
             )
         except WorkClaimConflictError as exc:
             await session.rollback()

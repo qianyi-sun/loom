@@ -32,7 +32,7 @@ from typing import cast
 from pydantic import Field, HttpUrl, PostgresDsn, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from loom.models.types import LogLevel
+from loom.models.types import LogLevel, WorkerSandboxBackend
 """
 
 _SERVICE_META = {
@@ -64,7 +64,7 @@ def _format_default(entry: ServiceConfigEntry, service: str, py: str) -> str:
 def _literal(value: Any, py: str) -> str:
     if py == "Path":
         return f"Path({json.dumps(str(value))})"
-    if py in ("str", "LogLevel", "HttpUrl", "PostgresDsn"):
+    if py in ("str", "LogLevel", "WorkerSandboxBackend", "HttpUrl", "PostgresDsn"):
         return json.dumps(str(value))
     if py == "bool":
         return "True" if value else "False"
@@ -136,10 +136,14 @@ def _field_line(entry: ServiceConfigEntry, service: str) -> str:
 
 def render_service_settings(schema: Schema, service: str) -> str:
     cls_name, prefix = _SERVICE_META[service]
-    body_lines = [_field_line(e, service) for e in schema.service_config_for(service)]
+    entries = list(schema.service_config_for(service))
+    body_lines = [_field_line(e, service) for e in entries]
     body = "\n".join(body_lines) if body_lines else "    pass"
+    header = _HEADER
+    if not any(entry.python_type == "WorkerSandboxBackend" for entry in entries):
+        header = header.replace(", WorkerSandboxBackend", "")
     return (
-        _HEADER
+        header
         + "\n\n"
         + f"class {cls_name}(BaseSettings):\n"
         + "    model_config = SettingsConfigDict(\n"

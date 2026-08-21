@@ -53,6 +53,7 @@ async def _claim_trial(
     worker_id,  # type: ignore[no-untyped-def]
     capability_digest: str,
     token_hash: bytes,
+    worker_backends: list[str] | None = None,
 ):
     common = {
         "worker_id": worker_id,
@@ -60,6 +61,7 @@ async def _claim_trial(
         "worker_cpu_arches": ["x86_64"],
         "worker_gpu_vendors": ["none"],
         "worker_network_policies": ["public"],
+        "worker_backends": worker_backends,
     }
     if not unified:
         return await claim_one(session, **common)
@@ -72,6 +74,117 @@ async def _claim_trial(
         **common,
     )
     return result[0] if result is not None else None
+
+
+@pytest.mark.parametrize("unified", [False, True], ids=["legacy", "unified"])
+async def test_claim_requires_exact_sandbox_backend(
+    postgres_url: str,
+    unified: bool,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    team_id = uuid4()
+    worker_id = uuid4()
+    trial_id = uuid4()
+    task_id = f"daytona-backend-claim/{uuid4()}"
+    capability_digest = "sha256:" + "d" * 64
+    token_hash = b"daytona-backend-worker-token"
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session, session.begin():
+            await session.execute(insert(Team).values(id=team_id, name=f"backend-{team_id}"))
+            await session.execute(insert(TeamQuota).values(team_id=team_id))
+            await session.execute(
+                insert(Task).values(
+                    id=task_id,
+                    checksum="e" * 64,
+                    config={
+                        "schema_version": "1",
+                        "task": {"id": task_id, "name": task_id},
+                        "environment": {
+                            "os": "linux",
+                            "docker_image": "registry.example/task@sha256:" + "f" * 64,
+                        },
+                        "agent": {"name": "oracle"},
+                        "verifier": {"name": "pytest"},
+                    },
+                )
+            )
+            await session.execute(
+                insert(Worker).values(
+                    id=worker_id,
+                    hostname=f"daytona-worker-{worker_id}",
+                    version="test",
+                    capabilities=[
+                        {
+                            "backend": "daytona",
+                            "os": "linux",
+                            "cpu_arch": "x86_64",
+                            "gpu_vendor": "none",
+                            "network_policies": ["public"],
+                        }
+                    ],
+                    supported_work_kinds=["trial"],
+                    capability_snapshot_digest=capability_digest,
+                    capability_snapshot_json={
+                        "schema_version": "loom.worker-capabilities.v1",
+                        "cpu_arch": "x86_64",
+                        "container_runtime_features": [],
+                    },
+                    auth_token_hash=token_hash,
+                    max_concurrent=1,
+                    registered_at=now,
+                    last_seen_at=now,
+                    status="active",
+                )
+            )
+            await session.execute(
+                insert(Trial).values(
+                    id=trial_id,
+                    team_id=team_id,
+                    task_id=task_id,
+                    config={},
+                    requires_caps={
+                        "backend": "daytona",
+                        "os": "linux",
+                        "cpu_arch": "x86_64",
+                        "gpu_vendor": "none",
+                        "network_policies": ["public"],
+                    },
+                    state="queued",
+                )
+            )
+
+        async with sessions() as session:
+            wrong = await _claim_trial(
+                session,
+                unified=unified,
+                worker_id=worker_id,
+                capability_digest=capability_digest,
+                token_hash=token_hash,
+                worker_backends=["docker"],
+            )
+            assert wrong is None
+
+        async with sessions() as session:
+            claimed = await _claim_trial(
+                session,
+                unified=unified,
+                worker_id=worker_id,
+                capability_digest=capability_digest,
+                token_hash=token_hash,
+                worker_backends=["daytona"],
+            )
+            assert claimed is not None and claimed["id"] == trial_id
+            await session.commit()
+    finally:
+        async with sessions() as session, session.begin():
+            await session.execute(delete(Trial).where(Trial.id == trial_id))
+            await session.execute(delete(Worker).where(Worker.id == worker_id))
+            await session.execute(delete(Task).where(Task.id == task_id))
+            await session.execute(delete(TeamQuota).where(TeamQuota.team_id == team_id))
+            await session.execute(delete(Team).where(Team.id == team_id))
+        await engine.dispose()
 
 
 @pytest.mark.parametrize("unified", [False, True], ids=["legacy", "unified"])

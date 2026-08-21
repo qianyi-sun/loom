@@ -47,6 +47,25 @@ def test_required_caps_subset_mismatch_os():
     assert req.satisfied_by(worker) is False
 
 
+def test_required_caps_rejects_different_sandbox_backend():
+    worker = Capabilities(
+        backend="daytona",
+        os="linux",
+        gpu_vendor="none",
+        network_policies=frozenset(["public"]),
+        dynamic_network_policy=True,
+        mounted_fs=True,
+        resource_modes=frozenset(["auto"]),
+    )
+    req = RequiredCapabilities(
+        backend="docker",
+        os="linux",
+        gpu_vendor="none",
+        network_policies=frozenset(["public"]),
+    )
+    assert req.satisfied_by(worker) is False
+
+
 def test_required_caps_subset_mismatch_network():
     worker = Capabilities(
         os="linux", gpu_vendor="none",

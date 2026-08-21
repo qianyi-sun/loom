@@ -9,7 +9,7 @@ from typing import cast
 from pydantic import Field, HttpUrl, PostgresDsn, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from loom.models.types import LogLevel
+from loom.models.types import LogLevel, WorkerSandboxBackend
 
 
 class WorkerSettings(BaseSettings):
@@ -31,6 +31,10 @@ class WorkerSettings(BaseSettings):
     container_memory_mib: int = 0
     container_pids: int = 0
     control_plane_url: HttpUrl = cast(HttpUrl, "http://loom-control-plane:8080")
+    daytona_api_max_concurrent: int = 4
+    daytona_api_min_interval_sec: float = 0.25
+    daytona_cleanup_interval_sec: float = 30.0
+    daytona_sandbox_ttl_sec: int = 86400
     docker_api_timeout_sec: int = 1800
     docker_socket: Path = Path("/var/run/docker.sock")
     drain_timeout_sec: int = 600
@@ -60,6 +64,7 @@ class WorkerSettings(BaseSettings):
     pool_name: str = "default"
     pre_start_heartbeat_interval_sec: float = 60.0
     require_cgroup_parent: bool = False
+    sandbox_backend: WorkerSandboxBackend = "docker"
     sandbox_identity: str = ""
     sandbox_isolation: bool = False
     sandbox_singleton_image: str = "loom-llm-gateway-sandbox:dev"
