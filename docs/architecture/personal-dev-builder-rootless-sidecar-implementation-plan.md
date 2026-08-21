@@ -51,8 +51,9 @@ Bash, jq, Docker/OCI.
 - Builder ConfigMaps, Secrets, LimitRanges, and ResourceQuotas are
   admission-bound to immutable, attempt-named, finite shapes; their deletion
   remains shape-independent.
-- RootlessKit runs BuildKit through `/bin/setpriv --nnp`; BuildKit and every
-  Dockerfile `RUN` descendant must observe `NoNewPrivs=1`.
+- RootlessKit runs BuildKit through `/bin/setpriv --nnp`; the fixed child
+  wrapper and every Dockerfile `RUN` descendant must observe
+  `prctl(PR_GET_NO_NEW_PRIVS)=1`.
 - `shareProcessNamespace` is explicitly false and `hostUsers` remains absent.
 - Process-sandbox disabling is allowed only in the authority-free sidecar.
 - No runc fallback or unmeasured RuntimeClass is permitted.
@@ -264,9 +265,10 @@ command starts with:
 Assert no command or environment contains `buildctl-daemonless`, `BUILDKITD`,
 `BUILDKITD_FLAGS`, `ROOTLESSKIT`, or `XDG_RUNTIME_DIR`. Add rejection tests for
 a relative buildctl path and any address other than the exact Unix address.
-Add a client-identity test using temporary marker/status files that requires
-UID/GID 1000, `CapInh=0`, `CapPrm=0`, `CapEff=0`, `CapBnd=0`, `CapAmb=0`,
-`NoNewPrivs=1`, and seccomp mode 2, and rejects each drift independently.
+Add a client-identity test using temporary marker/status files and an injected
+`prctl` result that requires UID/GID 1000, `CapInh=0`, `CapPrm=0`, `CapEff=0`,
+`CapBnd=0`, `CapAmb=0`, `PR_GET_NO_NEW_PRIVS=1`, and seccomp mode 2, and
+rejects each drift independently.
 
 - [ ] **Step 2: Run the client tests and verify RED**
 
@@ -282,8 +284,8 @@ Expected: `_build_images` has the old daemonless parameter and command.
 Add a fail-closed client identity check before either capability file is read.
 The check must require `/proc/gvisor/kernel_is_gvisor`, UID/GID 1000, empty
 inheritable, permitted, effective, bounding, and ambient capability sets,
-`NoNewPrivs=1`, and seccomp mode 2. Keep its parser independently testable with
-explicit marker/status inputs.
+`prctl(PR_GET_NO_NEW_PRIVS)=1`, and seccomp mode 2. Keep its proc parser and
+`prctl` observation independently testable with explicit inputs.
 
 Rename the parameter and CLI option to `buildctl_path` /
 `--buildctl-path`; add `buildkit_address` / `--buildkit-address`; validate the
@@ -359,10 +361,11 @@ assert "COPY deploy/personal-dev-builder/loom-personal-dev-buildkitd" in dockerf
 Add launcher assertions that require the gVisor marker, UID/GID 1000,
 `CapInh=0000000000000000`, `CapPrm=0000000000000000`,
 `CapEff=0000000000000000`, `CapBnd=00000000000000c0`,
-`CapAmb=0000000000000000`, `NoNewPrivs=0`, `Seccomp=0`, `/bin/setpriv --nnp`,
-the exact BuildKit socket, native snapshotter, and no-process-sandbox flag.
-Execute the launcher in a shell test with fixture commands/status so each drift
-fails before RootlessKit exec.
+`CapAmb=0000000000000000`, `PR_GET_NO_NEW_PRIVS=0`, `Seccomp=0`,
+`/bin/setpriv --nnp`, the exact BuildKit socket, native snapshotter, and
+no-process-sandbox flag. Execute the launcher with fixture commands, proc
+status, and injected `prctl` results so each drift fails before RootlessKit
+exec.
 
 - [ ] **Step 2: Run the ops test and verify RED**
 
@@ -482,11 +485,11 @@ The conformance script must:
 
 - require the gVisor marker and UID/GID 1000;
 - require client `CapInh=0`, `CapPrm=0`, `CapEff=0`, `CapBnd=0`, `CapAmb=0`,
-  `NoNewPrivs=1`, and seccomp mode 2;
+  `PR_GET_NO_NEW_PRIVS=1`, and seccomp mode 2;
 - prove no `/proc/*/cmdline` exposes RootlessKit or BuildKit;
 - call `/usr/bin/buildctl --addr=unix:///var/run/loom-buildkit/buildkitd.sock`;
 - run digest-pinned amd64 and QEMU arm64 Dockerfile steps;
-- make each `RUN` require and print `NoNewPrivs=1`; and
+- make each `RUN` require and print `PR_GET_NO_NEW_PRIVS=1`; and
 - retain exact OCI config platform verification.
 
 Capture bounded logs for both `container/conformance` and
@@ -712,10 +715,10 @@ named socket volume. Start a separate no-new-privileges, cap-drop ALL,
 read-only-rootfs client container with the socket volume read-only. Require:
 
 - daemon outer `CapInh=0`, `CapPrm=0`, `CapEff=0`,
-  `CapBnd=00000000000000c0`, `CapAmb=0`, and `NoNewPrivs=0`;
+  `CapBnd=00000000000000c0`, `CapAmb=0`, and `PR_GET_NO_NEW_PRIVS=0`;
 - BuildKit worker readiness;
 - client `CapInh=0`, `CapPrm=0`, `CapEff=0`, `CapBnd=0`, `CapAmb=0`, and
-  `NoNewPrivs=1`;
+  `PR_GET_NO_NEW_PRIVS=1`;
 - client cannot see `rootlesskit` or `buildkitd` in `/proc`;
 - digest-pinned amd64 and arm64 `RUN` steps both print `loom-nnp=1`; and
 - both OCI configs carry the requested platform.

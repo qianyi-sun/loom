@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import ctypes
 import os
 import stat
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -13,16 +15,23 @@ _STATUS_FILE = Path("/proc/self/status")
 _HOME = Path("/var/lib/loom-buildkit/home")
 _RUNTIME_DIRECTORY = Path("/tmp/loom-rootlesskit")
 _ROOTLESSKIT = "/usr/bin/rootlesskit"
-_ROOTLESSKIT_ARGV = [
-    _ROOTLESSKIT,
-    "/bin/setpriv",
-    "--nnp",
-    "/usr/bin/buildkitd",
+_LAUNCHER = "/usr/local/bin/loom-personal-dev-buildkitd"
+_BUILDKITD = "/usr/bin/buildkitd"
+_BUILDKITD_ARGV = [
+    _BUILDKITD,
     "--addr=unix:///var/run/loom-buildkit/buildkitd.sock",
     "--oci-worker-no-process-sandbox",
     "--oci-worker-snapshotter=native",
 ]
+_ROOTLESSKIT_ARGV = [
+    _ROOTLESSKIT,
+    "/bin/setpriv",
+    "--nnp",
+    _LAUNCHER,
+    "--buildkit-child",
+]
 _PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+_PR_GET_NO_NEW_PRIVS = 39
 
 
 def _preflight_error() -> RuntimeError:
@@ -49,12 +58,27 @@ def _read_identity_file(path: Path) -> bytes:
         raise _preflight_error() from exc
 
 
+def _read_no_new_privs(
+    *,
+    prctl: Callable[[int, int, int, int, int], int] | None = None,
+) -> int:
+    try:
+        operation = ctypes.CDLL(None, use_errno=True).prctl if prctl is None else prctl
+        value = int(operation(_PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0))
+    except (AttributeError, OSError, TypeError, ValueError) as exc:
+        raise _preflight_error() from exc
+    if value not in {0, 1}:
+        raise _preflight_error()
+    return value
+
+
 def _verify_preflight(
     *,
     gvisor_marker: Path = _GVISOR_MARKER,
     status_file: Path = _STATUS_FILE,
     uid: int | None = None,
     gid: int | None = None,
+    no_new_privs: int | None = None,
 ) -> dict[str, str]:
     _read_identity_file(gvisor_marker)
     try:
@@ -69,7 +93,6 @@ def _verify_preflight(
         "CapEff",
         "CapBnd",
         "CapAmb",
-        "NoNewPrivs",
         "Seccomp",
     }
     observed: dict[str, str] = {}
@@ -82,6 +105,9 @@ def _verify_preflight(
         observed[name] = value.strip()
     actual_uid = os.getuid() if uid is None else uid
     actual_gid = os.getgid() if gid is None else gid
+    actual_no_new_privs = (
+        _read_no_new_privs() if no_new_privs is None else no_new_privs
+    )
     if (
         set(observed) != required
         or actual_uid != 1000
@@ -93,10 +119,11 @@ def _verify_preflight(
         or observed["CapEff"] != "0000000000000000"
         or observed["CapBnd"] != "00000000000000c0"
         or observed["CapAmb"] != "0000000000000000"
-        or observed["NoNewPrivs"] != "0"
+        or actual_no_new_privs != 0
         or observed["Seccomp"] != "0"
     ):
         raise _preflight_error()
+    observed["NoNewPrivs"] = str(actual_no_new_privs)
     return observed
 
 
@@ -124,6 +151,7 @@ def _main(
     status_file: Path = _STATUS_FILE,
     uid: int | None = None,
     gid: int | None = None,
+    no_new_privs: int | None = None,
     home: Path = _HOME,
     runtime_directory: Path = _RUNTIME_DIRECTORY,
     execve: Callable[[str, list[str], dict[str, str]], object] | None = None,
@@ -135,6 +163,7 @@ def _main(
         status_file=status_file,
         uid=actual_uid,
         gid=actual_gid,
+        no_new_privs=no_new_privs,
     )
     _ensure_private_directory(home, uid=actual_uid, gid=actual_gid)
     _ensure_private_directory(runtime_directory, uid=actual_uid, gid=actual_gid)
@@ -159,5 +188,37 @@ def _main(
     raise RuntimeError("loom-buildkitd exec unexpectedly returned")
 
 
+def _main_buildkit_child(
+    *,
+    no_new_privs: int | None = None,
+    environment: dict[str, str] | None = None,
+    execve: Callable[[str, list[str], dict[str, str]], object] | None = None,
+) -> None:
+    actual_no_new_privs = (
+        _read_no_new_privs() if no_new_privs is None else no_new_privs
+    )
+    if actual_no_new_privs != 1:
+        raise _preflight_error()
+    print("loom-buildkitd-child-preflight nnp=1", flush=True)
+    child_environment = dict(os.environ) if environment is None else environment
+    executor = os.execve if execve is None else execve
+    executor(_BUILDKITD, list(_BUILDKITD_ARGV), child_environment)
+    raise RuntimeError("loom-buildkitd exec unexpectedly returned")
+
+
+def _dispatch(
+    arguments: list[str],
+    *,
+    outer: Callable[[], None] = _main,
+    child: Callable[[], None] = _main_buildkit_child,
+) -> None:
+    if arguments == []:
+        outer()
+    elif arguments == ["--buildkit-child"]:
+        child()
+    else:
+        raise _preflight_error()
+
+
 if __name__ == "__main__":
-    _main()
+    _dispatch(sys.argv[1:])

@@ -39,6 +39,15 @@ The previous Pod contract made both required operations impossible:
    the two exact file-capability helpers could not install the subordinate-ID
    maps even after namespace creation was allowed.
 
+The first protected rollout of this design exposed a separate observation
+defect before RootlessKit started. gVisor `release-20260810.0` implements
+`PR_SET_NO_NEW_PRIVS` and `PR_GET_NO_NEW_PRIVS`, but does not render the Linux
+`NoNewPrivs:` line in `/proc/*/status`. The launcher and conformance therefore
+query `prctl(PR_GET_NO_NEW_PRIVS)` directly. The outer launcher requires `0`, a
+fixed child wrapper after `/bin/setpriv --nnp` requires `1` immediately before
+execing BuildKit, and the client and Dockerfile descendants independently
+require `1`. Capability and seccomp observations remain bound to proc fields.
+
 RootlessKit `3.1.0` does not change this mechanism, so a version-only update is
 not a correction. A local digest-pinned `RUN` build passes with the exact image
 when seccomp is unconfined and only `SETUID` plus `SETGID` are restored to the
@@ -177,10 +186,13 @@ native sidecar on Kubernetes 1.36. It:
   gVisor sandbox;
 - starts an immutable Loom sidecar launcher that fails unless the gVisor
   marker, UID/GID 1000, zero inheritable, permitted, effective, and ambient
-  capability sets, exact `SETUID|SETGID` bounding set, `NoNewPrivs=0`, and
-  seccomp mode 0 are present, then execs `/usr/bin/rootlesskit` with command
-  `/bin/setpriv --nnp /usr/bin/buildkitd`; BuildKit and every descendant
-  therefore have `no_new_privs=1` after the subordinate-ID maps exist;
+  capability sets, exact `SETUID|SETGID` bounding set,
+  `PR_GET_NO_NEW_PRIVS=0`, and seccomp mode 0 are present, then execs
+  `/usr/bin/rootlesskit` with a fixed `/bin/setpriv --nnp` child wrapper. That
+  wrapper requires
+  `PR_GET_NO_NEW_PRIVS=1` immediately before execing `/usr/bin/buildkitd`;
+  BuildKit and every descendant therefore have `no_new_privs=1` after the
+  subordinate-ID maps exist;
 - uses the native snapshotter and `--oci-worker-no-process-sandbox`;
 - mounts only private BuildKit state, private temporary storage, and the shared
   socket directory; and
@@ -209,9 +221,9 @@ for arm64 in the pinned multi-platform base.
 1. The client reads the immutable build contract and presigned capabilities.
 2. Before reading either capability, it fails unless its own gVisor marker,
    UID/GID 1000, empty inheritable, permitted, effective, bounding, and ambient
-   capability sets, `NoNewPrivs=1`, and RuntimeDefault seccomp mode are
-   present. It then downloads and verifies the source archive into its private
-   workspace.
+   capability sets, `PR_GET_NO_NEW_PRIVS=1`, and RuntimeDefault seccomp mode
+   are present. It then downloads and verifies the source archive into its
+   private workspace.
 3. `buildctl` sends the selected source context to BuildKit over the Unix
    socket. The source directory is not mounted into the sidecar.
 4. BuildKit executes the untrusted Dockerfile in its rootless subordinate-ID
@@ -292,10 +304,11 @@ Protected operational conformance must additionally prove:
 
 - the initial sidecar process is UID/GID 1000 with `CapInh=0`, `CapPrm=0`,
   `CapEff=0`, `CapBnd=SETUID|SETGID`, `CapAmb=0`, and seccomp disabled inside
-  gVisor;
-- BuildKit and Dockerfile `RUN` observe `NoNewPrivs=1`;
+  gVisor, with `PR_GET_NO_NEW_PRIVS=0`;
+- the fixed BuildKit child wrapper and Dockerfile `RUN` observe
+  `PR_GET_NO_NEW_PRIVS=1`;
 - the client observes zero inheritable, permitted, effective, bounding, and
-  ambient capabilities, `NoNewPrivs=1`, and RuntimeDefault seccomp;
+  ambient capabilities, `PR_GET_NO_NEW_PRIVS=1`, and RuntimeDefault seccomp;
 - the client cannot observe RootlessKit or BuildKit processes in its `/proc`;
 - the sidecar has none of the contract/capability/workspace mounts;
 - digest-pinned amd64 and QEMU arm64 `RUN` steps report the expected machines
