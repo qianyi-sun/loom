@@ -279,9 +279,7 @@ def _mutate_runtime_class(runtime: dict[str, Any], mutation: str) -> None:
     elif mutation == "runtime-selector-key-extra":
         runtime["scheduling"]["nodeSelector"]["loom.dev/extra"] = "true"
     elif mutation == "runtime-profile-half":
-        runtime["scheduling"]["nodeSelector"][
-            "loom.dev/personal-dev-runtime-profile-a"
-        ] = "a" * 32
+        runtime["scheduling"]["nodeSelector"]["loom.dev/personal-dev-runtime-profile-a"] = "a" * 32
     elif mutation == "runtime-os":
         runtime["scheduling"]["nodeSelector"]["kubernetes.io/os"] = "windows"
     elif mutation == "runtime-architecture":
@@ -461,9 +459,7 @@ def _acceptance_inputs(
             "scanner_binary_sha256": release.scanner.binary_sha256,
             "scanner_cache_identity_sha256": release.scanner.cache_identity_sha256,
             "scanner_database_sha256": release.scanner.database_sha256,
-            "scanner_database_metadata_sha256": (
-                release.scanner.database_metadata_sha256
-            ),
+            "scanner_database_metadata_sha256": (release.scanner.database_metadata_sha256),
             "scanner_finding_policy_sha256": "3" * 64,
             "scanner_java_database_sha256": release.scanner.java_database_sha256,
             "scanner_java_database_metadata_sha256": (
@@ -493,7 +489,7 @@ def _acceptance_inputs(
         "source": {"commit": release.source_sha, "tree": release.source_tree},
         "storage": {
             "backup_restore_evidence_sha256": "b" * 64,
-            "schema_head": "0106",
+            "schema_head": "0107",
         },
         "window": {
             "expires_at": "2099-12-31T23:00:00Z",
@@ -763,9 +759,7 @@ def test_status_accepts_api_server_default_empty_admission_selectors(
 ) -> None:
     expected, runner = _healthy_fixture(tmp_path)
     policies = [
-        item
-        for item in _items(runner, _CLUSTER)
-        if item["kind"] == "ValidatingAdmissionPolicy"
+        item for item in _items(runner, _CLUSTER) if item["kind"] == "ValidatingAdmissionPolicy"
     ]
     assert len(policies) == 3
     for policy in policies:
@@ -833,9 +827,7 @@ def test_acceptance_status_rejects_live_authority_or_exposure_widening(
         "admission-policy-object-selector",
     }:
         policy = next(
-            item
-            for item in _items(runner, _CLUSTER)
-            if item["kind"] == "ValidatingAdmissionPolicy"
+            item for item in _items(runner, _CLUSTER) if item["kind"] == "ValidatingAdmissionPolicy"
         )
         selector = (
             "namespaceSelector"
@@ -1368,26 +1360,22 @@ def test_status_blocks_release_bound_scanner_cache_workload_drift(
     )
     pod = deployment["spec"]["template"]["spec"]
     init = next(
-        item
-        for item in pod["initContainers"]
-        if item["name"] == "personal-dev-scanner-cache-init"
+        item for item in pod["initContainers"] if item["name"] == "personal-dev-scanner-cache-init"
     )
     service = next(item for item in pod["containers"] if item["name"] == "management")
 
     if drift == "init-image":
-        init["image"] = (
-            "ghcr.io/qianyi-sun/loom-personal-dev-scanner-cache@sha256:" + "9" * 64
-        )
+        init["image"] = "ghcr.io/qianyi-sun/loom-personal-dev-scanner-cache@sha256:" + "9" * 64
     elif drift == "init-argument":
         init["args"][-1] = "9" * 64
     elif drift == "init-root-mount":
-        next(
-            mount for mount in init["volumeMounts"] if mount["name"] == "scanner-cache"
-        )["mountPath"] = "/tmp/scanner-cache"
+        next(mount for mount in init["volumeMounts"] if mount["name"] == "scanner-cache")[
+            "mountPath"
+        ] = "/tmp/scanner-cache"
     elif drift == "generation-subpath":
-        next(
-            mount for mount in service["volumeMounts"] if mount["name"] == "scanner-cache"
-        )["subPath"] = "generations/" + "9" * 64
+        next(mount for mount in service["volumeMounts"] if mount["name"] == "scanner-cache")[
+            "subPath"
+        ] = "generations/" + "9" * 64
     elif drift == "cache-path":
         next(
             entry
@@ -1395,18 +1383,16 @@ def test_status_blocks_release_bound_scanner_cache_workload_drift(
             if entry["name"] == "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_CACHE_DIR"
         )["value"] = "/var/lib/loom-personal-dev-scanner"
     elif drift == "fanal-limit":
-        next(volume for volume in pod["volumes"] if volume["name"] == "scanner-fanal")[
-            "emptyDir"
-        ]["sizeLimit"] = "8Gi"
+        next(volume for volume in pod["volumes"] if volume["name"] == "scanner-fanal")["emptyDir"][
+            "sizeLimit"
+        ] = "8Gi"
     elif drift == "node-architecture":
         pod["nodeSelector"]["kubernetes.io/arch"] = "arm64"
     else:  # pragma: no cover - parameter table is exhaustive
         raise AssertionError(drift)
 
     result = (
-        _observe(expected, runner)
-        if plan is None
-        else _observe_acceptance(expected, plan, runner)
+        _observe(expected, runner) if plan is None else _observe_acceptance(expected, plan, runner)
     )
 
     assert result.ready is False

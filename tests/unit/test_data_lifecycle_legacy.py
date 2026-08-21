@@ -81,6 +81,9 @@ def test_apply_locks_every_classification_source_before_epoch_and_row_read(
     calls: list[str] = []
 
     class Result:
+        def scalar_one(self) -> bool:
+            return True
+
         def scalar_one_or_none(self) -> int:
             return 4
 
@@ -134,11 +137,13 @@ def test_apply_locks_every_classification_source_before_epoch_and_row_read(
     )
 
     assert state.epoch == 5
-    assert calls[0] == (
+    lock_index = next(index for index, call in enumerate(calls) if call.startswith("LOCK TABLE"))
+    assert calls[lock_index] == (
         "LOCK TABLE artifacts,batch_family_state,batches,llm_calls,task_sets,"
-        "trial_events,trials IN SHARE ROW EXCLUSIVE MODE"
+        "trial_events,trial_resource_usage,trials IN SHARE ROW EXCLUSIVE MODE"
     )
-    assert "SELECT epoch FROM staging_mutation_epochs" in calls[1]
+    assert all("to_regclass" in call for call in calls[:lock_index])
+    assert "SELECT epoch FROM staging_mutation_epochs" in calls[lock_index + 1]
 
 
 def _pinned_benchmark() -> LegacyRow:

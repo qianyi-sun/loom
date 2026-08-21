@@ -6462,7 +6462,9 @@ class ModelSwitchPlan(Base):
 
     __tablename__ = "model_switch_plans"
     id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), primary_key=True, default=uuid4,
+        PgUUID(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
     )
     trial_id: Mapped[UUID] = mapped_column(
         PgUUID(as_uuid=True),
@@ -6472,7 +6474,9 @@ class ModelSwitchPlan(Base):
     )
     combination_idx: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     mix_mode: Mapped[str] = mapped_column(
-        String, nullable=False, default="student_teacher_student",
+        String,
+        nullable=False,
+        default="student_teacher_student",
     )
     k1: Mapped[int | None] = mapped_column(Integer, nullable=True)
     k2: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -6481,10 +6485,12 @@ class ModelSwitchPlan(Base):
     seed: Mapped[str] = mapped_column(Text, nullable=False)
     prng_version: Mapped[str] = mapped_column(Text, nullable=False)
     student_model_snapshot: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False,
+        JSONB,
+        nullable=False,
     )
     teacher_model_snapshot: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False,
+        JSONB,
+        nullable=False,
     )
     provider_connection_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
@@ -6492,10 +6498,14 @@ class ModelSwitchPlan(Base):
         nullable=True,
     )
     pricing_snapshot: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, default=dict,
+        JSONB,
+        nullable=False,
+        default=dict,
     )
     capability_snapshot: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, default=dict,
+        JSONB,
+        nullable=False,
+        default=dict,
     )
     inherited_from_plan_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
@@ -6503,7 +6513,9 @@ class ModelSwitchPlan(Base):
         nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False, server_default=func.now(),
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
 
 
@@ -6515,7 +6527,9 @@ class TerminusAgentExecution(Base):
         UniqueConstraint("trial_id", "step_id", name="terminus_agent_executions_trial_step_uidx"),
     )
     id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), primary_key=True, default=uuid4,
+        PgUUID(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
     )
     trial_id: Mapped[UUID] = mapped_column(
         PgUUID(as_uuid=True),
@@ -6529,7 +6543,9 @@ class TerminusAgentExecution(Base):
         nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False, server_default=func.now(),
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
 
 
@@ -6539,7 +6555,8 @@ class TerminusAgentRunAttempt(Base):
     __tablename__ = "terminus_agent_run_attempts"
     __table_args__ = (
         UniqueConstraint(
-            "execution_id", "attempt_number",
+            "execution_id",
+            "attempt_number",
             name="terminus_agent_run_attempts_exec_num_uidx",
         ),
         CheckConstraint(
@@ -6548,7 +6565,9 @@ class TerminusAgentRunAttempt(Base):
         ),
     )
     id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), primary_key=True, default=uuid4,
+        PgUUID(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
     )
     execution_id: Mapped[UUID] = mapped_column(
         PgUUID(as_uuid=True),
@@ -6563,7 +6582,9 @@ class TerminusAgentRunAttempt(Base):
     )
     state: Mapped[str] = mapped_column(Text, nullable=False, default="running")
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False, server_default=func.now(),
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
 
 
@@ -6573,11 +6594,15 @@ class EpisodeCheckpoint(Base):
     __tablename__ = "episode_checkpoints"
     __table_args__ = (
         UniqueConstraint(
-            "execution_id", "version", name="episode_checkpoints_exec_version_uidx",
+            "execution_id",
+            "version",
+            name="episode_checkpoints_exec_version_uidx",
         ),
     )
     id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), primary_key=True, default=uuid4,
+        PgUUID(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
     )
     execution_id: Mapped[UUID] = mapped_column(
         PgUUID(as_uuid=True),
@@ -6597,7 +6622,9 @@ class EpisodeCheckpoint(Base):
     last_seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     checksum: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False, server_default=func.now(),
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
 
 
@@ -6606,10 +6633,14 @@ class LlmCallIntent(Base):
 
     __tablename__ = "llm_call_intents"
     client_call_id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), unique=True, nullable=False,
+        PgUUID(as_uuid=True),
+        unique=True,
+        nullable=False,
     )
     id: Mapped[UUID] = mapped_column(
-        PgUUID(as_uuid=True), primary_key=True, default=uuid4,
+        PgUUID(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
     )
     trial_id: Mapped[UUID] = mapped_column(
         PgUUID(as_uuid=True),
@@ -6633,7 +6664,9 @@ class LlmCallIntent(Base):
     role: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="registered")
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False, server_default=func.now(),
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
 
 
@@ -6700,7 +6733,8 @@ class LlmCall(Base):
         index=True,
     )
     client_call_id: Mapped[UUID | None] = mapped_column(
-        PgUUID(as_uuid=True), nullable=True,
+        PgUUID(as_uuid=True),
+        nullable=True,
     )
     agent_execution_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
@@ -6801,6 +6835,77 @@ class TrialEvent(Base):
         ForeignKey("data_lifecycle_authorities.id", ondelete="RESTRICT"),
         nullable=True,
         index=True,
+    )
+
+
+class TrialResourceUsage(Base):
+    """Durable resource counters for one trial-attempt execution container."""
+
+    __tablename__ = "trial_resource_usage"
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    trial_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("trials.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    worker_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("workers.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    lifecycle_authority_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("data_lifecycle_authorities.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    execution_key: Mapped[str] = mapped_column(Text, nullable=False)
+    runtime_id_hash: Mapped[str | None] = mapped_column(Text)
+    container_role: Mapped[str] = mapped_column(Text, nullable=False)
+    role_name: Mapped[str] = mapped_column(Text, nullable=False)
+    backend: Mapped[str] = mapped_column(Text, nullable=False)
+    architecture: Mapped[str | None] = mapped_column(Text)
+    candidate_sha: Mapped[str | None] = mapped_column(Text)
+    image_digest: Mapped[str | None] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    observation_seq: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    container_started_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    first_observed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    last_observed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    finalized_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    terminal_reason: Mapped[str | None] = mapped_column(Text)
+    completeness: Mapped[str] = mapped_column(Text, nullable=False)
+    diagnostic_code: Mapped[str | None] = mapped_column(Text)
+    cpu_limit_cores: Mapped[float | None] = mapped_column(Float)
+    memory_limit_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    pids_limit: Mapped[int | None] = mapped_column(Integer)
+    resource_profile: Mapped[str | None] = mapped_column(Text)
+    cpu_usage_usec: Mapped[int | None] = mapped_column(BigInteger)
+    cpu_user_usec: Mapped[int | None] = mapped_column(BigInteger)
+    cpu_system_usec: Mapped[int | None] = mapped_column(BigInteger)
+    cpu_throttled_usec: Mapped[int | None] = mapped_column(BigInteger)
+    cpu_periods: Mapped[int | None] = mapped_column(BigInteger)
+    cpu_throttled_periods: Mapped[int | None] = mapped_column(BigInteger)
+    memory_current_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    memory_peak_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    memory_events_low: Mapped[int | None] = mapped_column(BigInteger)
+    memory_events_high: Mapped[int | None] = mapped_column(BigInteger)
+    memory_events_max: Mapped[int | None] = mapped_column(BigInteger)
+    memory_events_oom: Mapped[int | None] = mapped_column(BigInteger)
+    memory_events_oom_kill: Mapped[int | None] = mapped_column(BigInteger)
+    pids_current: Mapped[int | None] = mapped_column(BigInteger)
+    pids_peak: Mapped[int | None] = mapped_column(BigInteger)
+    io_read_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    io_write_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    io_read_ops: Mapped[int | None] = mapped_column(BigInteger)
+    io_write_ops: Mapped[int | None] = mapped_column(BigInteger)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
     )
 
 

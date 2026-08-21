@@ -1,6 +1,6 @@
 """Driver Protocol — what every sandbox backend implements (spec §2.2).
 
-The Protocol is intentionally minimal: 7 async methods + 2 declared attributes.
+The Protocol is intentionally minimal: 9 async methods + 2 declared attributes.
 New backends target ≤300 LOC; FakeDriver and DockerDriver are reference impls.
 
 Constants:
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Protocol, runtime_checkable
 
@@ -87,6 +88,40 @@ class StartOptions:
     slurm_gpu_device_ids: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class DriverResourceSnapshot:
+    """Backend-neutral instantaneous/cumulative resource observation.
+
+    ``None`` means the backend did not report the field. It never means zero.
+    Runtime identities are hashed before crossing the worker boundary.
+    """
+
+    observed_at: datetime
+    source: str
+    runtime_id: str | None = None
+    image_digest: str | None = None
+    container_started_at: datetime | None = None
+    cpu_usage_usec: int | None = None
+    cpu_user_usec: int | None = None
+    cpu_system_usec: int | None = None
+    cpu_throttled_usec: int | None = None
+    cpu_periods: int | None = None
+    cpu_throttled_periods: int | None = None
+    memory_current_bytes: int | None = None
+    memory_peak_bytes: int | None = None
+    memory_events_low: int | None = None
+    memory_events_high: int | None = None
+    memory_events_max: int | None = None
+    memory_events_oom: int | None = None
+    memory_events_oom_kill: int | None = None
+    pids_current: int | None = None
+    pids_peak: int | None = None
+    io_read_bytes: int | None = None
+    io_write_bytes: int | None = None
+    io_read_ops: int | None = None
+    io_write_ops: int | None = None
+
+
 @dataclass
 class ExecHandle:
     """Long-running process handle returned by Driver.exec_streaming.
@@ -137,6 +172,8 @@ class Driver(Protocol):
     async def start(self, *, options: StartOptions | None = None) -> None: ...
 
     async def stop(self, *, delete: bool = True) -> None: ...
+
+    async def resource_snapshot(self) -> DriverResourceSnapshot | None: ...
 
     async def exec(
         self,

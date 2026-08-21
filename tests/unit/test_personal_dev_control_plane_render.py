@@ -152,9 +152,7 @@ def _acceptance_render(tmp_path: Path):
             "scanner_binary_sha256": release.scanner.binary_sha256,
             "scanner_cache_identity_sha256": release.scanner.cache_identity_sha256,
             "scanner_database_sha256": release.scanner.database_sha256,
-            "scanner_database_metadata_sha256": (
-                release.scanner.database_metadata_sha256
-            ),
+            "scanner_database_metadata_sha256": (release.scanner.database_metadata_sha256),
             "scanner_finding_policy_sha256": "3" * 64,
             "scanner_java_database_sha256": release.scanner.java_database_sha256,
             "scanner_java_database_metadata_sha256": (
@@ -184,7 +182,7 @@ def _acceptance_render(tmp_path: Path):
         "source": {"commit": release.source_sha, "tree": release.source_tree},
         "storage": {
             "backup_restore_evidence_sha256": "b" * 64,
-            "schema_head": "0106",
+            "schema_head": "0107",
         },
         "window": {
             "expires_at": "2026-08-17T23:00:00Z",
@@ -451,8 +449,7 @@ def test_management_prepares_and_mounts_only_the_release_bound_scanner_generatio
         management = next(
             item
             for item in documents
-            if _identity(item)
-            == ("Deployment", "loom-dev", "loom-personal-dev-management")
+            if _identity(item) == ("Deployment", "loom-dev", "loom-personal-dev-management")
         )
         pod = management["spec"]["template"]["spec"]
         generation_subpath = f"generations/{release.scanner.cache_identity_sha256}"
@@ -512,29 +509,26 @@ def test_management_prepares_and_mounts_only_the_release_bound_scanner_generatio
         service = next(
             container for container in pod["containers"] if container["name"] == "management"
         )
-        service_env = {
-            item["name"]: item["value"] for item in service["env"] if "value" in item
-        }
+        service_env = {item["name"]: item["value"] for item in service["env"] if "value" in item}
         scanner_identity = (
             f"trivy-bin-sha256:{release.scanner.binary_sha256}:"
             f"db-sha256:{release.scanner.database_sha256}:"
             f"java-db-sha256:{release.scanner.java_database_sha256}"
         )
-        assert service_env["LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_CACHE_DIR"] == (
-            generation_path
+        assert service_env["LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_CACHE_DIR"] == (generation_path)
+        assert (
+            service_env["LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_CACHE_IDENTITY_SHA256"]
+            == release.scanner.cache_identity_sha256
         )
-        assert service_env[
-            "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_CACHE_IDENTITY_SHA256"
-        ] == release.scanner.cache_identity_sha256
-        assert service_env[
-            "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_DATABASE_METADATA_SHA256"
-        ] == release.scanner.database_metadata_sha256
-        assert service_env[
-            "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_JAVA_DATABASE_METADATA_SHA256"
-        ] == release.scanner.java_database_metadata_sha256
-        assert service_env["LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_IDENTITY"] == (
-            scanner_identity
+        assert (
+            service_env["LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_DATABASE_METADATA_SHA256"]
+            == release.scanner.database_metadata_sha256
         )
+        assert (
+            service_env["LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_JAVA_DATABASE_METADATA_SHA256"]
+            == release.scanner.java_database_metadata_sha256
+        )
+        assert service_env["LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_IDENTITY"] == (scanner_identity)
         assert service_env["LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_POLICY_SHA256"] == (
             "" if plan is None else plan.builder.scanner_finding_policy_sha256
         )
@@ -569,9 +563,10 @@ def test_management_prepares_and_mounts_only_the_release_bound_scanner_generatio
                 },
             )
         ]
-        assert next(
-            volume for volume in pod["volumes"] if volume["name"] == "scanner-fanal"
-        ) == {"name": "scanner-fanal", "emptyDir": {"sizeLimit": "4Gi"}}
+        assert next(volume for volume in pod["volumes"] if volume["name"] == "scanner-fanal") == {
+            "name": "scanner-fanal",
+            "emptyDir": {"sizeLimit": "4Gi"},
+        }
 
 
 def test_acceptance_render_rejects_shadow_manifest_binding_drift(tmp_path: Path) -> None:

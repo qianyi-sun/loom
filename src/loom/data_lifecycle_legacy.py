@@ -22,7 +22,9 @@ from loom.data_lifecycle import STAGING_EPHEMERAL_TTL, DataClass, OwnerKind
 from loom.data_lifecycle_gc import GcScope
 
 _AUTHORITY_NAMESPACE = UUID("24f4f0db-ec29-40ad-b65d-c5d6fb45b23a")
-_ROW_TABLES = frozenset({"batches", "trials", "llm_calls", "trial_events", "artifacts"})
+_ROW_TABLES = frozenset(
+    {"batches", "trials", "llm_calls", "trial_events", "trial_resource_usage", "artifacts"}
+)
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 

@@ -20,13 +20,19 @@ import tarfile
 import threading
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, cast
 
 import docker
 from docker.errors import APIError, ImageNotFound, NotFound
 
-from loom.driver.base import MAX_EXEC_STREAM_BYTES, ExecHandle, StartOptions
+from loom.driver.base import (
+    MAX_EXEC_STREAM_BYTES,
+    DriverResourceSnapshot,
+    ExecHandle,
+    StartOptions,
+)
 from loom.driver.network_policy import compute_iptables_rules, render_iptables_commands
 from loom.errors import (
     DriverAlreadyStartedError,
@@ -43,6 +49,12 @@ logger = logging.getLogger(__name__)
 
 _KEEPALIVE_CMD = ["sh", "-c", "exec sleep infinity"]
 _GUARD_OWNED_SLICE_RE = re.compile(r"^loom-job-[1-9][0-9]*[.]slice$")
+_CGROUP_V2_READ_SCRIPT = """
+for f in cpu.stat memory.current memory.peak memory.events pids.current pids.peak io.stat; do
+  printf '@@%s\\n' "$f"
+  cat "/sys/fs/cgroup/$f" 2>/dev/null || true
+done
+""".strip()
 
 
 def _default_caps() -> Capabilities:
@@ -81,6 +93,204 @@ def _validated_cgroup_parent(value: str) -> str:
     if any(part in {".", ".."} for part in value.split("/")):
         raise DriverError("Docker cgroup parent contains traversal")
     return path.as_posix()
+
+
+def _nonnegative_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _nanoseconds_to_microseconds(value: object) -> int | None:
+    parsed = _nonnegative_int(value)
+    return parsed // 1_000 if parsed is not None else None
+
+
+def _parse_docker_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _blkio_total(stats: dict[str, Any], key: str, operation: str) -> int | None:
+    rows = stats.get("blkio_stats", {}).get(key)
+    if not isinstance(rows, list):
+        return None
+    values: list[int] = []
+    for row in rows:
+        if not isinstance(row, dict) or str(row.get("op", "")).lower() != operation:
+            continue
+        value = _nonnegative_int(row.get("value"))
+        if value is not None:
+            values.append(value)
+    return sum(values) if values else None
+
+
+def _dict_value(value: object) -> dict[str, Any]:
+    return cast(dict[str, Any], value) if isinstance(value, dict) else {}
+
+
+def read_container_cgroup_v2_files(container: Any) -> dict[str, str]:
+    """Read the container's own namespaced cgroup-v2 files, if exposed."""
+
+    try:
+        result = container.exec_run(["sh", "-c", _CGROUP_V2_READ_SCRIPT])
+    except Exception:
+        return {}
+    exit_code = getattr(result, "exit_code", None)
+    output = getattr(result, "output", None)
+    if exit_code is None and isinstance(result, tuple) and len(result) == 2:
+        exit_code, output = result
+    if exit_code != 0 or not isinstance(output, (bytes, bytearray)):
+        return {}
+    sections: dict[str, list[str]] = {}
+    current: str | None = None
+    for line in bytes(output).decode("utf-8", errors="replace").splitlines():
+        if line.startswith("@@"):
+            current = line[2:]
+            sections.setdefault(current, [])
+        elif current is not None:
+            sections[current].append(line)
+    return {name: "\n".join(lines).strip() for name, lines in sections.items() if lines}
+
+
+def _cgroup_scalar(files: dict[str, str], name: str) -> int | None:
+    value = files.get(name)
+    if value is None or value == "max":
+        return None
+    return _nonnegative_int(value)
+
+
+def _cgroup_map(files: dict[str, str], name: str) -> dict[str, int]:
+    values: dict[str, int] = {}
+    for line in files.get(name, "").splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        parsed = _nonnegative_int(parts[1])
+        if parsed is not None:
+            values[parts[0]] = parsed
+    return values
+
+
+def _cgroup_io(files: dict[str, str]) -> dict[str, int]:
+    totals = {"rbytes": 0, "wbytes": 0, "rios": 0, "wios": 0}
+    observed: set[str] = set()
+    for line in files.get("io.stat", "").splitlines():
+        for item in line.split()[1:]:
+            key, separator, raw = item.partition("=")
+            if not separator or key not in totals:
+                continue
+            parsed = _nonnegative_int(raw)
+            if parsed is not None:
+                totals[key] += parsed
+                observed.add(key)
+    return {key: value for key, value in totals.items() if key in observed}
+
+
+def _reported(primary: int | None, fallback: int | None) -> int | None:
+    return primary if primary is not None else fallback
+
+
+def snapshot_from_docker_stats(
+    stats: dict[str, Any],
+    *,
+    attrs: dict[str, Any],
+    observed_at: datetime,
+    cgroup_files: dict[str, str] | None = None,
+) -> DriverResourceSnapshot:
+    """Normalize Docker's cgroup-v1/v2 compatible stats response."""
+
+    cpu = _dict_value(stats.get("cpu_stats"))
+    usage = _dict_value(cpu.get("cpu_usage"))
+    throttle = _dict_value(cpu.get("throttling_data"))
+    memory = _dict_value(stats.get("memory_stats"))
+    pids = _dict_value(stats.get("pids_stats"))
+    state = _dict_value(attrs.get("State"))
+    image = attrs.get("Image")
+    image_digest = str(image) if isinstance(image, str) and image else None
+    runtime_id = attrs.get("Id")
+    if not isinstance(runtime_id, str) or not runtime_id:
+        runtime_id = None
+    cgroup = cgroup_files or {}
+    cpu_cgroup = _cgroup_map(cgroup, "cpu.stat")
+    memory_events = _cgroup_map(cgroup, "memory.events")
+    io_cgroup = _cgroup_io(cgroup)
+    oom_killed = state.get("OOMKilled") is True
+    return DriverResourceSnapshot(
+        observed_at=observed_at,
+        source="docker_stats",
+        runtime_id=runtime_id,
+        image_digest=image_digest,
+        container_started_at=_parse_docker_timestamp(state.get("StartedAt")),
+        cpu_usage_usec=_reported(
+            cpu_cgroup.get("usage_usec"),
+            _nanoseconds_to_microseconds(usage.get("total_usage")),
+        ),
+        cpu_user_usec=_reported(
+            cpu_cgroup.get("user_usec"),
+            _nanoseconds_to_microseconds(usage.get("usage_in_usermode")),
+        ),
+        cpu_system_usec=_reported(
+            cpu_cgroup.get("system_usec"),
+            _nanoseconds_to_microseconds(usage.get("usage_in_kernelmode")),
+        ),
+        cpu_throttled_usec=_reported(
+            cpu_cgroup.get("throttled_usec"),
+            _nanoseconds_to_microseconds(throttle.get("throttled_time")),
+        ),
+        cpu_periods=_reported(
+            cpu_cgroup.get("nr_periods"),
+            _nonnegative_int(throttle.get("periods")),
+        ),
+        cpu_throttled_periods=_reported(
+            cpu_cgroup.get("nr_throttled"),
+            _nonnegative_int(throttle.get("throttled_periods")),
+        ),
+        memory_current_bytes=_reported(
+            _cgroup_scalar(cgroup, "memory.current"),
+            _nonnegative_int(memory.get("usage")),
+        ),
+        memory_peak_bytes=_reported(
+            _cgroup_scalar(cgroup, "memory.peak"),
+            _nonnegative_int(memory.get("max_usage")),
+        ),
+        memory_events_low=memory_events.get("low"),
+        memory_events_high=memory_events.get("high"),
+        memory_events_max=memory_events.get("max"),
+        memory_events_oom=(
+            max(memory_events.get("oom", 0), 1) if oom_killed else memory_events.get("oom")
+        ),
+        memory_events_oom_kill=(
+            max(memory_events.get("oom_kill", 0), 1)
+            if oom_killed
+            else memory_events.get("oom_kill")
+        ),
+        pids_current=_reported(
+            _cgroup_scalar(cgroup, "pids.current"),
+            _nonnegative_int(pids.get("current")),
+        ),
+        pids_peak=_cgroup_scalar(cgroup, "pids.peak"),
+        io_read_bytes=io_cgroup.get("rbytes")
+        if "rbytes" in io_cgroup
+        else _blkio_total(stats, "io_service_bytes_recursive", "read"),
+        io_write_bytes=io_cgroup.get("wbytes")
+        if "wbytes" in io_cgroup
+        else _blkio_total(stats, "io_service_bytes_recursive", "write"),
+        io_read_ops=io_cgroup.get("rios")
+        if "rios" in io_cgroup
+        else _blkio_total(stats, "io_serviced_recursive", "read"),
+        io_write_ops=io_cgroup.get("wios")
+        if "wios" in io_cgroup
+        else _blkio_total(stats, "io_serviced_recursive", "write"),
+    )
 
 
 @dataclass
@@ -271,6 +481,24 @@ class DockerDriver:
         await self._teardown(delete=delete)
         if self._state == "running":
             self._state = "stopped"
+
+    async def resource_snapshot(self) -> DriverResourceSnapshot | None:
+        """Read one bounded Docker stats observation before container removal."""
+
+        container = self._container
+        if container is None or self._state != "running":
+            return None
+        stats = await asyncio.to_thread(container.stats, stream=False, one_shot=True)
+        cgroup_files = await asyncio.to_thread(read_container_cgroup_v2_files, container)
+        with contextlib.suppress(Exception):
+            await asyncio.to_thread(container.reload)
+        attrs = container.attrs if isinstance(container.attrs, dict) else {}
+        return snapshot_from_docker_stats(
+            stats if isinstance(stats, dict) else {},
+            attrs=attrs,
+            observed_at=datetime.now(UTC),
+            cgroup_files=cgroup_files,
+        )
 
     async def _teardown(self, *, delete: bool) -> None:
         """Shared docker-resource cleanup used by stop() and start()'s failure

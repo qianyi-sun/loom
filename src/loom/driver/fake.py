@@ -21,7 +21,12 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
-from loom.driver.base import MAX_EXEC_STREAM_BYTES, ExecHandle, StartOptions
+from loom.driver.base import (
+    MAX_EXEC_STREAM_BYTES,
+    DriverResourceSnapshot,
+    ExecHandle,
+    StartOptions,
+)
 from loom.errors import (
     DriverAlreadyStartedError,
     DriverNotStartedError,
@@ -77,6 +82,7 @@ class FakeDriver:
 
     # Healthcheck stub: if not None, called by run_healthcheck.
     healthcheck_stub: Callable[[HealthcheckSpec | None], None] | None = None
+    resource_snapshot_stub: Callable[[], DriverResourceSnapshot | None] | None = None
 
     # Internal lifecycle state. Public for test introspection.
     state: Literal["constructed", "running", "stopped"] = "constructed"
@@ -97,6 +103,11 @@ class FakeDriver:
         if self.state == "running":
             self.state = "stopped"
 
+    async def resource_snapshot(self) -> DriverResourceSnapshot | None:
+        if self.resource_snapshot_stub is None:
+            return None
+        return self.resource_snapshot_stub()
+
     def _require_running(self) -> None:
         if self.state != "running":
             raise DriverNotStartedError(
@@ -115,8 +126,11 @@ class FakeDriver:
         self._require_running()
         if self.exec_handler is None:
             return ExecResult(
-                return_code=0, stdout=b"", stderr=b"",
-                truncated=False, duration_sec=0.0,
+                return_code=0,
+                stdout=b"",
+                stderr=b"",
+                truncated=False,
+                duration_sec=0.0,
             )
         return self.exec_handler(cmd, user, cwd, env)
 
@@ -216,9 +230,7 @@ class FakeDriver:
                     self.filesystem[target] = fileobj.read()
                 elif member.islnk():
                     link = PurePosixPath(member.linkname)
-                    link_parts = tuple(
-                        part for part in link.parts if part not in {"", "."}
-                    )
+                    link_parts = tuple(part for part in link.parts if part not in {"", "."})
                     hardlinks.append((target, dst / PurePosixPath(*link_parts)))
             for target, link_target in hardlinks:
                 self.filesystem[target] = self.filesystem[link_target]
@@ -246,8 +258,11 @@ def command_table_handler(
     `truncated=True`).
     """
     fallback = default or ExecResult(
-        return_code=0, stdout=b"", stderr=b"",
-        truncated=False, duration_sec=0.0,
+        return_code=0,
+        stdout=b"",
+        stderr=b"",
+        truncated=False,
+        duration_sec=0.0,
     )
 
     def _handler(
@@ -313,7 +328,8 @@ def scripted_streaming_handler(
             if sleep_before_exit > 0:
                 try:
                     await asyncio.wait_for(
-                        killed.wait(), timeout=sleep_before_exit,
+                        killed.wait(),
+                        timeout=sleep_before_exit,
                     )
                 except TimeoutError:
                     pass
