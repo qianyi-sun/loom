@@ -20,6 +20,7 @@ from uuid import UUID
 
 import httpx
 
+from loom.models.resource_usage import TrialResourceUsageReport
 from loom.pipeline.live_preview import LivePreviewRecordV1, validate_preview_jpeg
 
 
@@ -1135,6 +1136,27 @@ class HttpControlPlaneClient:
             if r.status_code == 409:
                 return False
             r.raise_for_status()
+            return True
+        finally:
+            if owned:
+                await client.aclose()
+
+    async def report_resource_usage(
+        self,
+        report: TrialResourceUsageReport,
+    ) -> bool:
+        """Idempotently persist one staged/final resource usage report."""
+
+        client, owned = self._http()
+        try:
+            response = await client.put(
+                f"/trials/{report.trial_id}/resource-usage",
+                headers=self._headers,
+                json=report.model_dump(mode="json"),
+            )
+            if response.status_code == 409:
+                return False
+            response.raise_for_status()
             return True
         finally:
             if owned:

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+import pytest
 
 from loom.personal_dev_builder_manifest import PersonalDevBuilderManifestConfig
 from loom.personal_dev_builder_runtime import (
@@ -19,13 +22,44 @@ class _Cluster:
     def __init__(self) -> None:
         self.applied: list[str] = []
         self.waited: list[tuple[str, str]] = []
+        self.inspected: list[tuple[str, str]] = []
         self.deleted: list[str] = []
+        self.job_pods: dict[str, dict[str, object]] = {
+            name: {
+                "items": [
+                    {
+                        "metadata": {"labels": {"job-name": name}},
+                        "status": {
+                            "phase": "Succeeded",
+                            "containerStatuses": [
+                                {
+                                    "name": "builder",
+                                    "restartCount": 0,
+                                    "state": {"terminated": {"exitCode": 0}},
+                                }
+                            ],
+                            "initContainerStatuses": [
+                                {"name": "buildkitd", "restartCount": 0}
+                            ],
+                        },
+                    }
+                ]
+            }
+            for name in ("build-amd64", "build-arm64")
+        }
 
     async def apply(self, manifest: str, **_kwargs) -> None:
         self.applied.append(manifest)
 
     async def wait_job(self, namespace: str, name: str) -> None:
         self.waited.append((namespace, name))
+
+    async def wait_job_failure(self, namespace: str, name: str) -> None:
+        await asyncio.Event().wait()
+
+    async def list_job_pods(self, namespace: str, name: str) -> dict[str, object]:
+        self.inspected.append((namespace, name))
+        return self.job_pods[name]
 
     async def delete_namespace(self, namespace: str) -> None:
         self.deleted.append(namespace)
@@ -80,6 +114,10 @@ async def test_kubectl_builder_uses_native_ephemeral_jobs_and_secret_stdin(
 
     assert publication == _publication(registration.candidate)
     assert {name for _namespace, name in cluster.waited} == {"build-amd64", "build-arm64"}
+    assert {name for _namespace, name in cluster.inspected} == {
+        "build-amd64",
+        "build-arm64",
+    }
     secret_documents = [manifest for manifest in cluster.applied if "kind: Secret" in manifest]
     assert len(secret_documents) == 2
     assert any("source?arch=amd64" in manifest for manifest in secret_documents)
@@ -100,6 +138,168 @@ async def test_kubectl_builder_uses_native_ephemeral_jobs_and_secret_stdin(
         f"loom-build-{registration.build_attempt.id.hex}-"
         f"l{registration.build_attempt.lease_epoch:016x}"
     ]
+
+
+@pytest.mark.parametrize(
+    ("status_field", "container_name"),
+    [
+        ("containerStatuses", "builder"),
+        ("initContainerStatuses", "buildkitd"),
+    ],
+)
+async def test_kubectl_builder_rejects_any_container_restart_before_publication(
+    tmp_path: Path,
+    status_field: str,
+    container_name: str,
+) -> None:
+    source = tmp_path / "source.tar"
+    source.write_bytes(b"sealed-source")
+    registration = _registration()
+    registration = replace(
+        registration,
+        candidate=replace(
+            registration.candidate,
+            archive_sha256=hashlib.sha256(b"sealed-source").hexdigest(),
+            archive_size_bytes=len(b"sealed-source"),
+        ),
+    )
+    cluster = _Cluster()
+    pod = cluster.job_pods["build-amd64"]["items"][0]
+    status = pod["status"]
+    entry = next(
+        value for value in status[status_field] if value["name"] == container_name
+    )
+    entry["restartCount"] = 1
+    executor = KubectlPersonalDevBuildExecutor(
+        cluster=cluster,  # type: ignore[arg-type]
+        capabilities=_Capabilities(),  # type: ignore[arg-type]
+        exporter=_Exporter(),  # type: ignore[arg-type]
+        manifest_config=PersonalDevBuilderManifestConfig(
+            builder_image="registry.example/loom-builder@sha256:" + "a" * 64,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="runtime integrity"):
+        await executor.build(registration, source_archive=source)
+
+
+async def test_kubectl_builder_inspects_each_job_as_soon_as_it_completes(
+    tmp_path: Path,
+) -> None:
+    class _CompletionSensitiveCluster(_Cluster):
+        def __init__(self) -> None:
+            super().__init__()
+            self.amd64_inspected = asyncio.Event()
+
+        async def wait_job(self, namespace: str, name: str) -> None:
+            await super().wait_job(namespace, name)
+            if name == "build-arm64":
+                await self.amd64_inspected.wait()
+
+        async def list_job_pods(self, namespace: str, name: str) -> dict[str, object]:
+            observation = await super().list_job_pods(namespace, name)
+            if name == "build-amd64":
+                self.amd64_inspected.set()
+            return observation
+
+    source = tmp_path / "source.tar"
+    source.write_bytes(b"sealed-source")
+    registration = _registration()
+    registration = replace(
+        registration,
+        candidate=replace(
+            registration.candidate,
+            archive_sha256=hashlib.sha256(b"sealed-source").hexdigest(),
+            archive_size_bytes=len(b"sealed-source"),
+        ),
+    )
+    cluster = _CompletionSensitiveCluster()
+    executor = KubectlPersonalDevBuildExecutor(
+        cluster=cluster,  # type: ignore[arg-type]
+        capabilities=_Capabilities(),  # type: ignore[arg-type]
+        exporter=_Exporter(),  # type: ignore[arg-type]
+        manifest_config=PersonalDevBuilderManifestConfig(
+            builder_image="registry.example/loom-builder@sha256:" + "a" * 64,
+        ),
+    )
+
+    publication = await asyncio.wait_for(
+        executor.build(registration, source_archive=source),
+        timeout=0.5,
+    )
+
+    assert publication == _publication(registration.candidate)
+
+
+async def test_kubectl_builder_stops_as_soon_as_a_job_reports_failure(
+    tmp_path: Path,
+) -> None:
+    class _FailedCluster(_Cluster):
+        async def wait_job(self, namespace: str, name: str) -> None:
+            await super().wait_job(namespace, name)
+            await asyncio.Event().wait()
+
+        async def wait_job_failure(self, namespace: str, name: str) -> None:
+            if name == "build-amd64":
+                return
+            await asyncio.Event().wait()
+
+    source = tmp_path / "source.tar"
+    source.write_bytes(b"sealed-source")
+    registration = _registration()
+    registration = replace(
+        registration,
+        candidate=replace(
+            registration.candidate,
+            archive_sha256=hashlib.sha256(b"sealed-source").hexdigest(),
+            archive_size_bytes=len(b"sealed-source"),
+        ),
+    )
+    executor = KubectlPersonalDevBuildExecutor(
+        cluster=_FailedCluster(),  # type: ignore[arg-type]
+        capabilities=_Capabilities(),  # type: ignore[arg-type]
+        exporter=_Exporter(),  # type: ignore[arg-type]
+        manifest_config=PersonalDevBuilderManifestConfig(
+            builder_image="registry.example/loom-builder@sha256:" + "a" * 64,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="reported failure"):
+        await asyncio.wait_for(
+            executor.build(registration, source_archive=source),
+            timeout=0.5,
+        )
+
+
+async def test_kubectl_builder_failure_wins_when_both_job_conditions_are_observed(
+    tmp_path: Path,
+) -> None:
+    class _ContradictoryCluster(_Cluster):
+        async def wait_job_failure(self, namespace: str, name: str) -> None:
+            return
+
+    source = tmp_path / "source.tar"
+    source.write_bytes(b"sealed-source")
+    registration = _registration()
+    registration = replace(
+        registration,
+        candidate=replace(
+            registration.candidate,
+            archive_sha256=hashlib.sha256(b"sealed-source").hexdigest(),
+            archive_size_bytes=len(b"sealed-source"),
+        ),
+    )
+    executor = KubectlPersonalDevBuildExecutor(
+        cluster=_ContradictoryCluster(),  # type: ignore[arg-type]
+        capabilities=_Capabilities(),  # type: ignore[arg-type]
+        exporter=_Exporter(),  # type: ignore[arg-type]
+        manifest_config=PersonalDevBuilderManifestConfig(
+            builder_image="registry.example/loom-builder@sha256:" + "a" * 64,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="reported failure"):
+        await executor.build(registration, source_archive=source)
 
 
 async def test_stale_builder_cleanup_cannot_name_replacement_lease_namespace() -> None:

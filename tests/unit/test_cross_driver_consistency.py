@@ -91,19 +91,22 @@ async def _run_with_driver(drv: Any) -> list[dict[str, Any]]:
     await drv.start()
     events.append({"kind": "start", "image": drv.image})
     r = await drv.exec("echo hello")
-    events.append({
-        "kind": "exec",
-        "rc": r.return_code,
-        "stdout": r.stdout.decode("utf-8", errors="surrogateescape"),
-        "stderr": r.stderr.decode("utf-8", errors="surrogateescape"),
-    })
+    events.append(
+        {
+            "kind": "exec",
+            "rc": r.return_code,
+            "stdout": r.stdout.decode("utf-8", errors="surrogateescape"),
+            "stderr": r.stderr.decode("utf-8", errors="surrogateescape"),
+        }
+    )
     await drv.stop()
     events.append({"kind": "stop"})
     return events
 
 
 async def test_modal_matches_docker_trajectory(
-    fake_modal: ModuleType, monkeypatch: pytest.MonkeyPatch,
+    fake_modal: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("MODAL_TOKEN_ID", "x")
     monkeypatch.setenv("MODAL_TOKEN_SECRET", "y")
@@ -129,13 +132,22 @@ async def test_modal_matches_docker_trajectory(
             self._state = "stopped"
 
         async def exec(  # type: ignore[override]
-            self, cmd: str, *, user: Any = None, cwd: Any = None,
-            env: Any = None, timeout_sec: Any = None,
+            self,
+            cmd: str,
+            *,
+            user: Any = None,
+            cwd: Any = None,
+            env: Any = None,
+            timeout_sec: Any = None,
         ) -> Any:
             from loom.models.exec import ExecResult
+
             return ExecResult(
-                return_code=0, stdout=b"hello\n", stderr=b"",
-                truncated=False, duration_sec=0.001,
+                return_code=0,
+                stdout=b"hello\n",
+                stderr=b"",
+                truncated=False,
+                duration_sec=0.001,
             )
 
     docker_drv = _PatchedDockerDriver(image="python:3.12-slim")
@@ -151,7 +163,8 @@ async def test_modal_matches_docker_trajectory(
 
 
 async def test_modal_matches_daytona_trajectory(
-    fake_modal: ModuleType, monkeypatch: pytest.MonkeyPatch,
+    fake_modal: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("MODAL_TOKEN_ID", "x")
     monkeypatch.setenv("MODAL_TOKEN_SECRET", "y")
@@ -178,13 +191,22 @@ async def test_modal_matches_daytona_trajectory(
             self._state = "stopped"
 
         async def exec(  # type: ignore[override]
-            self, cmd: str, *, user: Any = None, cwd: Any = None,
-            env: Any = None, timeout_sec: Any = None,
+            self,
+            cmd: str,
+            *,
+            user: Any = None,
+            cwd: Any = None,
+            env: Any = None,
+            timeout_sec: Any = None,
         ) -> Any:
             from loom.models.exec import ExecResult
+
             return ExecResult(
-                return_code=0, stdout=b"hello\n", stderr=b"",
-                truncated=False, duration_sec=0.001,
+                return_code=0,
+                stdout=b"hello\n",
+                stderr=b"",
+                truncated=False,
+                duration_sec=0.001,
             )
 
     daytona_drv = _PatchedDaytonaDriver(
@@ -198,8 +220,8 @@ async def test_modal_matches_daytona_trajectory(
     )
 
 
-def test_driver_protocol_surface_unchanged_since_plan_26() -> None:
-    """If ModalDriver had to add a Protocol method, the abstraction broke.
+def test_driver_protocol_surface_is_backfilled_across_drivers() -> None:
+    """Keep every intentional Driver protocol method implemented by all backends.
 
     Inspect Driver protocol members and assert the set matches the
     documented post-Plan-26 surface. If this test fails, revisit the
@@ -209,13 +231,18 @@ def test_driver_protocol_surface_unchanged_since_plan_26() -> None:
     from loom.driver.base import Driver
 
     expected_methods = {
-        "start", "stop", "exec", "exec_streaming",
-        "upload", "download",
-        "set_network_policy", "run_healthcheck",
+        "start",
+        "stop",
+        "exec",
+        "exec_streaming",
+        "upload",
+        "download",
+        "set_network_policy",
+        "run_healthcheck",
+        "resource_snapshot",
     }
     actual_callable = {
-        name for name in dir(Driver)
-        if not name.startswith("_") and callable(getattr(Driver, name))
+        name for name in dir(Driver) if not name.startswith("_") and callable(getattr(Driver, name))
     }
     missing = expected_methods - actual_callable
     assert not missing, f"Driver Protocol lost methods: {missing}"

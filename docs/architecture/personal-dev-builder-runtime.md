@@ -37,12 +37,33 @@ The existing `hostUsers: false` builder field is removed. As of the pinned
 gVisor release, upstream issue `google/gvisor#13303` remains open and runsc does
 not advertise Kubernetes Pod user-namespace support through CRI. Pretending
 otherwise makes every builder Pod fail before start. The replacement is not a
-weaker runc Pod: candidate code remains behind the KVM gVisor syscall boundary,
-the trusted rootless BuildKit wrapper runs as UID/GID 1000, all Linux
-capabilities are dropped, privilege escalation is disabled, the root filesystem
-is read-only, the API token is absent, network policy is default-deny, and
-runsc uses its sandbox network stack with host UDS/FIFO and raw packet writes
+weaker runc Pod: candidate code remains behind the KVM gVisor syscall boundary.
+The Pod separates a capability-free trusted client from an authority-free
+rootless BuildKit native sidecar. The client alone receives the contract,
+presigned capabilities, source workspace, artifact destination, verification,
+and upload logic; it keeps RuntimeDefault seccomp, no-new-privileges, a
+read-only root filesystem, and an empty capability set. The sidecar receives no
+contract, Secret, source, output, or service-account token. It temporarily
+admits only unconfined seccomp plus `SETUID` and `SETGID` in its bounding set so
+RootlessKit can create the user namespace and execute the two pinned
+ID-mapping helpers. `/bin/setpriv --nnp` then starts BuildKit, so BuildKit and
+every Dockerfile `RUN` descendant have no-new-privileges. Separate container
+PID and mount namespaces prevent candidate code from observing the client or
+its authority-bearing files. Network policy remains default-deny, and runsc
+uses its sandbox network stack with host UDS/FIFO and raw packet writes
 disabled.
+
+Kubernetes Baseline PSA rejects explicit seccomp `Unconfined`, so exact
+attempt-bound builder namespaces declare PSA `privileged` enforcement at
+`v1.36` and retain restricted audit/warn. A Loom ValidatingAdmissionPolicy
+then supplies the narrower application-specific contract: it binds each
+management-created Job to the trusted builder digest, measured RuntimeClass,
+non-host namespaces, exact client and sidecar security contexts, separated
+mounts, finite resource quantities, immutable supporting ConfigMap/Secret
+shapes, exact limits and quotas, and direct-public-only egress. Each completed
+Job is inspected immediately and publication is rejected if either container
+restarted. Personal namespaces remain restricted; candidate code cannot create
+or mutate Kubernetes resources.
 
 ## Measured release and profile
 
@@ -212,13 +233,19 @@ After all four nodes pass, server-side diff and apply the exact RuntimeClass.
 Then run one digest-pinned, node-bound smoke Pod on each agent and require
 `/proc/gvisor/kernel_is_gvisor`, nonroot identity, no effective capabilities,
 and the exact RuntimeClass binding. On the first node, additionally run
-rootless BuildKit conformance for both `linux/amd64` and `linux/arm64`,
-including one arm64 `RUN` step through the image's trusted QEMU helper. This
-ordering avoids referring to a RuntimeClass before it exists while keeping the
-class absent until all nodes are actively verified. The smoke namespace and
-Pods are temporary operator-owned resources and are deleted after their
-terminal state and logs are captured. No personal or build namespace is used
-for smoke testing.
+the exact restricted-client/native-sidecar contract. The proof captures both
+container identities and image IDs, requires the sidecar preflight with only
+the two ID-mapping capabilities, observes `NoNewPrivs=1` on BuildKit itself,
+proves the client cannot see RootlessKit or BuildKit through `/proc`, and runs
+both `linux/amd64` and `linux/arm64` Dockerfile steps with `NoNewPrivs=1`,
+including arm64 through the image's trusted QEMU helper. This ordering avoids
+referring to a RuntimeClass before it exists while keeping the class absent
+until all nodes are actively verified. Baseline would reject the conformance
+sidecar's explicit seccomp exception, so the smoke namespace uses privileged
+enforcement with restricted audit/warn. Its exact Pods are temporary
+operator-owned resources and are deleted after both container logs, the
+canonical Pod, and terminal status are captured. No personal or build namespace
+is used for smoke testing.
 
 ## Evidence and readiness
 
@@ -229,6 +256,8 @@ The owner-only evidence directory records, without credentials:
 - each node's preflight, staged, active, restart, Pod continuity, smoke, label,
   and uncordon receipts;
 - RuntimeClass server-side diff and live canonical JSON;
+- the conformance client and sidecar logs, image IDs, mount/PID separation,
+  BuildKit and Dockerfile no-new-privileges evidence, and both OCI platforms;
 - five Ready nodes, no DiskPressure, Longhorn health, and package resource
   inventory;
 - absence of personal/build namespaces and personal workers; and

@@ -10,8 +10,9 @@
 environment = "staging"
 
 # The protected manager now exports authenticated execution witnesses. Core
-# OLDLAB and GB10 supervisors consume those witnesses; task-image builders stay
-# inactive until their separate protected cutover is approved.
+# OLDLAB and GB10 supervisors consume those witnesses. The already-proven
+# exclusive OLDLAB task-image builder is enabled as transitional capacity;
+# the unprovisioned GB10 builder remains inactive.
 [[worker_pool_autoscaler_policies]]
 # GB10 is managed only by the controller-local Slurm supervisor. Per-node
 # worker agents below remain stopped so there is one capacity authority.
@@ -179,7 +180,7 @@ activation_blockers = [
 
 [[task_image_builder_policies]]
 pool_name = "task-image-builder-oldlab"
-enabled = false
+enabled = true
 slurm_cluster_id = "oldlab"
 cpu_arch = "x86_64"
 allowed_nodes = [
@@ -203,9 +204,7 @@ slurm_account = "loom-staging"
 slurm_qos = "loom-task-image-builder"
 slurm_reservation = "loom-task-image-builder"
 job_output_dir = "/shared_work/loom/staging-rollout/job-output"
-activation_blockers = [
-  "protected_task_image_builder_cutover_pending",
-]
+activation_blockers = []
 
 [[gb10_worker_pool_desired_states]]
 pool_name = "gb10"
@@ -273,7 +272,6 @@ required = true
 
 [external_slurm_runner_prerequisites]
 pools = ["gb10", "oldlab"]
-retained_inactive_supervisor_pools = ["task-image-builder-oldlab"]
 expected_repo_ref = "${IMAGE_TAG}"
 require_clean_repo = true
 require_worker_token_parity = true
@@ -445,5 +443,5 @@ args = [
   "--global-execution-manager-kubeconfig", "/var/lib/loom-staging-rollout/kubeconfig",
   "--expected-manager-public-key-sha256", "54b44788af0dc10dc5f0a8277396a35fedf2f143b39e14d5ee35ce09b56b18cd",
 ]
-enabled = false
-active = false
+enabled = true
+active = true

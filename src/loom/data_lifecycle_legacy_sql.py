@@ -44,11 +44,23 @@ _CLASSIFICATION_SOURCE_TABLES = (
     "llm_calls",
     "task_sets",
     "trial_events",
+    "trial_resource_usage",
     "trials",
 )
-_LOCK_CLASSIFICATION_SOURCES_SQL = (
-    "LOCK TABLE " + ",".join(_CLASSIFICATION_SOURCE_TABLES) + " IN SHARE ROW EXCLUSIVE MODE"
-)
+
+
+def _table_exists(connection: Connection, name: str) -> bool:
+    return bool(
+        connection.execute(
+            text("SELECT to_regclass(:name) IS NOT NULL"),
+            {"name": f"public.{name}"},
+        ).scalar_one()
+    )
+
+
+def _lock_classification_sources(connection: Connection) -> None:
+    tables = [name for name in _CLASSIFICATION_SOURCE_TABLES if _table_exists(connection, name)]
+    connection.execute(text("LOCK TABLE " + ",".join(tables) + " IN SHARE ROW EXCLUSIVE MODE"))
 
 
 class LegacyObjectInspector(Protocol):
@@ -141,6 +153,29 @@ def _load_rows(
                 source_values=item,
             )
         )
+    if _table_exists(connection, "trial_resource_usage"):
+        for item in connection.execute(
+            text(
+                "SELECT u.id, u.trial_id, t.team_id, t.submitted_at, u.created_at "
+                "FROM trial_resource_usage u LEFT JOIN trials t ON t.id=u.trial_id "
+                "WHERE u.lifecycle_authority_id IS NULL ORDER BY u.id"
+            )
+        ):
+            if item.team_id is None:
+                blockers.append(f"legacy trial_resource_usage {item.id} has no trial owner")
+                continue
+            rows.append(
+                _row(
+                    table="trial_resource_usage",
+                    row_id=item.id,
+                    team_id=item.team_id,
+                    data_class=DataClass.EVENT,
+                    owner_kind=OwnerKind.TRIAL,
+                    owner_id=str(item.trial_id),
+                    created_at=item.submitted_at,
+                    source_values=item,
+                )
+            )
     for item in connection.execute(
         text(
             "SELECT id, team_id, submitted_at FROM trials "
@@ -816,7 +851,7 @@ class SqlAlchemyLegacyClassifier:
             # from entering after the fresh digest-approved inventory but
             # before all row bindings commit.  The fixed alphabetical order is
             # shared by every classifier invocation and avoids lock inversion.
-            connection.execute(text(_LOCK_CLASSIFICATION_SOURCES_SQL))
+            _lock_classification_sources(connection)
             epoch = connection.execute(
                 text(
                     "SELECT epoch FROM staging_mutation_epochs "

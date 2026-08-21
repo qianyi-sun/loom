@@ -32,7 +32,12 @@ from pathlib import Path, PurePosixPath
 from types import FrameType
 from typing import Any
 
-from loom.driver.base import MAX_EXEC_STREAM_BYTES, ExecHandle, StartOptions
+from loom.driver.base import (
+    MAX_EXEC_STREAM_BYTES,
+    DriverResourceSnapshot,
+    ExecHandle,
+    StartOptions,
+)
 from loom.errors import (
     DriverAlreadyStartedError,
     DriverError,
@@ -181,13 +186,17 @@ class ModalDriver:
 
     _client: ModalClient | None = field(default=None, init=False, repr=False)
     _image_cache: ModalImageCache | None = field(
-        default=None, init=False, repr=False,
+        default=None,
+        init=False,
+        repr=False,
     )
     _sandbox: Any | None = field(default=None, init=False, repr=False)
     _app: Any | None = field(default=None, init=False, repr=False)
     _state: str = field(default="constructed", init=False)
     _applied_policy: NetworkPolicy | None = field(
-        default=None, init=False, repr=False,
+        default=None,
+        init=False,
+        repr=False,
     )
 
     def __post_init__(self) -> None:
@@ -201,10 +210,10 @@ class ModalDriver:
                 f"ModalDriver.start() rejected in state {self._state!r}",
             )
         opts = options or StartOptions()
-        if any(
-            value is not None
-            for value in (opts.cpus, opts.memory_mb, opts.storage_mb)
-        ) or opts.gpus:
+        if (
+            any(value is not None for value in (opts.cpus, opts.memory_mb, opts.storage_mb))
+            or opts.gpus
+        ):
             raise DriverError(
                 "ModalDriver cannot enforce task resource limits through the "
                 "generic StartOptions contract; use a compatible backend instead",
@@ -255,15 +264,22 @@ class ModalDriver:
             self._state = "stopped"
         _LIVE_DRIVERS.discard(self)
 
+    async def resource_snapshot(self) -> DriverResourceSnapshot | None:
+        # Modal does not currently expose a stable per-sandbox cgroup stats
+        # contract through this adapter. Persist typed unavailability upstream.
+        return None
+
     async def _teardown(self) -> None:
         if self._sandbox is not None and self._client is not None:
             try:
                 await self._client.terminate_sandbox(
-                    self._sandbox, wait=True,
+                    self._sandbox,
+                    wait=True,
                 )
             except Exception as exc:
                 logger.warning(
-                    "ModalDriver teardown: terminate raised %s", exc,
+                    "ModalDriver teardown: terminate raised %s",
+                    exc,
                 )
         self._sandbox = None
         self._app = None
@@ -334,8 +350,8 @@ class ModalDriver:
                     # shouldn't swallow the TimeoutError we're about
                     # to re-raise below.
                     logger.warning(
-                        "ModalDriver.exec: proc.terminate() raised "
-                        "after timeout: %s", exc,
+                        "ModalDriver.exec: proc.terminate() raised after timeout: %s",
+                        exc,
                     )
                 raise
         else:
@@ -403,8 +419,7 @@ class ModalDriver:
         r = await self.exec(write_cmd, user=None)
         if r.return_code != 0:
             raise DriverError(
-                f"upload failed rc={r.return_code} "
-                f"stderr={r.stderr[:512]!r}",
+                f"upload failed rc={r.return_code} stderr={r.stderr[:512]!r}",
             )
 
     async def download(self, src: PurePosixPath, dst: Path) -> None:
@@ -413,8 +428,7 @@ class ModalDriver:
         r = await self.exec(f"base64 -w0 {src_q}", user=None)
         if r.return_code != 0:
             raise FileNotFoundError(
-                f"download {src}: rc={r.return_code} "
-                f"stderr={r.stderr[:256]!r}",
+                f"download {src}: rc={r.return_code} stderr={r.stderr[:256]!r}",
             )
         data = base64.b64decode(r.stdout.strip())
         dst.parent.mkdir(parents=True, exist_ok=True)
@@ -457,8 +471,7 @@ class ModalDriver:
                 consecutive_failures += 1
                 if consecutive_failures > hc.retries:
                     raise DriverError(
-                        f"Modal healthcheck failed after {hc.retries} "
-                        f"retries: {hc.command!r}",
+                        f"Modal healthcheck failed after {hc.retries} retries: {hc.command!r}",
                     )
             await asyncio.sleep(hc.interval_sec)
 

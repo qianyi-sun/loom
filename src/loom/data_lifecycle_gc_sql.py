@@ -36,12 +36,24 @@ class BusinessMetadataPurger(Protocol):
 class ExecutionMetadataPurger:
     """Fail-closed deletion order for execution-history tables only."""
 
-    _TABLES = ("trial_events", "llm_calls", "artifacts", "trials", "batches")
+    _TABLES = (
+        "trial_resource_usage",
+        "trial_events",
+        "llm_calls",
+        "artifacts",
+        "trials",
+        "batches",
+    )
 
     def delete_exact(self, connection: Connection, authority_ids: Sequence[UUID]) -> None:
         if not authority_ids:
             return
         for table in self._TABLES:
+            if not connection.execute(
+                text("SELECT to_regclass(:name) IS NOT NULL"),
+                {"name": f"public.{table}"},
+            ).scalar_one():
+                continue
             connection.execute(
                 text(
                     f"DELETE FROM {table} WHERE lifecycle_authority_id IN "

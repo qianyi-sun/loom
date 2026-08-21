@@ -39,7 +39,14 @@ def test_builder_manifest_is_attempt_bound_restricted_and_finite() -> None:
         f"loom-build-{registration.build_attempt.id.hex}-"
         f"l{registration.build_attempt.lease_epoch:016x}"
     )
-    assert namespace["metadata"]["labels"]["pod-security.kubernetes.io/enforce"] == "restricted"
+    assert namespace["metadata"]["labels"] | {
+        "pod-security.kubernetes.io/enforce": "privileged",
+        "pod-security.kubernetes.io/enforce-version": "v1.36",
+        "pod-security.kubernetes.io/audit": "restricted",
+        "pod-security.kubernetes.io/audit-version": "v1.36",
+        "pod-security.kubernetes.io/warn": "restricted",
+        "pod-security.kubernetes.io/warn-version": "v1.36",
+    } == namespace["metadata"]["labels"]
     for document in documents:
         assert document["metadata"]["labels"] | expected_labels == document["metadata"]["labels"]
         assert document["kind"] != "Secret"
@@ -48,11 +55,16 @@ def test_builder_manifest_is_attempt_bound_restricted_and_finite() -> None:
     assert pod["metadata"]["labels"] | expected_labels == pod["metadata"]["labels"]
     spec = pod["spec"]
     assert spec["automountServiceAccountToken"] is False
+    assert spec["enableServiceLinks"] is False
+    assert spec["shareProcessNamespace"] is False
     assert "hostUsers" not in spec
     assert spec["runtimeClassName"] == "loom-personal-dev-builder"
     assert "nodeSelector" not in spec
     assert job["spec"]["activeDeadlineSeconds"] == 3600
+    assert len(spec["containers"]) == 1
+    assert len(spec["initContainers"]) == 1
     container = spec["containers"][0]
+    assert container["name"] == "builder"
     assert container["image"].endswith("@sha256:" + "a" * 64)
     assert container["securityContext"] == {
         "allowPrivilegeEscalation": False,
@@ -64,6 +76,13 @@ def test_builder_manifest_is_attempt_bound_restricted_and_finite() -> None:
         "cpu": "4",
         "ephemeral-storage": "20Gi",
         "memory": "8Gi",
+    }
+    assert {mount["name"] for mount in container["volumeMounts"]} == {
+        "attempt-capability",
+        "buildkit-run",
+        "contract",
+        "tmp-client",
+        "workspace",
     }
     capability = next(
         volume for volume in spec["volumes"] if volume["name"] == "attempt-capability"
@@ -87,6 +106,62 @@ def test_builder_manifest_is_attempt_bound_restricted_and_finite() -> None:
             "namespace": "loom-dev",
         }
     ]
+
+
+def test_buildkit_sidecar_has_only_rootless_startup_authority() -> None:
+    documents = personal_dev_builder_manifest_documents(
+        _registration(),
+        platform="linux/amd64",
+        config=_config(),
+    )
+    job = next(document for document in documents if document["kind"] == "Job")
+    spec = job["spec"]["template"]["spec"]
+    client = spec["containers"][0]
+    sidecar = spec["initContainers"][0]
+
+    assert sidecar["name"] == "buildkitd"
+    assert sidecar["image"] == client["image"]
+    assert sidecar["restartPolicy"] == "Always"
+    assert sidecar["command"] == ["/usr/local/bin/loom-personal-dev-buildkitd"]
+    assert "args" not in sidecar
+    assert sidecar["securityContext"] == {
+        "allowPrivilegeEscalation": True,
+        "capabilities": {"drop": ["ALL"], "add": ["SETGID", "SETUID"]},
+        "readOnlyRootFilesystem": True,
+        "runAsNonRoot": True,
+        "seccompProfile": {"type": "Unconfined"},
+    }
+    assert {mount["name"] for mount in sidecar["volumeMounts"]} == {
+        "buildkit-run",
+        "buildkit-state",
+        "tmp-buildkit",
+    }
+    assert sidecar["startupProbe"] == {
+        "exec": {
+            "command": [
+                "/usr/bin/buildctl",
+                "--addr",
+                "unix:///var/run/loom-buildkit/buildkitd.sock",
+                "debug",
+                "workers",
+            ]
+        },
+        "failureThreshold": 60,
+        "periodSeconds": 2,
+        "timeoutSeconds": 1,
+    }
+    mounts = {
+        container["name"]: {mount["name"]: mount for mount in container["volumeMounts"]}
+        for container in (client, sidecar)
+    }
+    assert mounts["builder"]["buildkit-run"]["readOnly"] is True
+    assert "readOnly" not in mounts["buildkitd"]["buildkit-run"]
+    assert not {
+        "attempt-capability",
+        "contract",
+        "workspace",
+    } & set(mounts["buildkitd"])
+    assert "env" not in sidecar
 
 
 def test_builder_network_policy_denies_internal_authority_and_allows_exact_routes() -> None:
@@ -115,20 +190,61 @@ def test_builder_network_policy_denies_internal_authority_and_allows_exact_route
     )
     public_blocks = [peer["ipBlock"] for rule in egress for peer in rule["to"] if "ipBlock" in peer]
     ipv4 = next(block for block in public_blocks if block["cidr"] == "0.0.0.0/0")
-    assert "10.0.0.0/8" in ipv4["except"]
-    assert "169.254.0.0/16" in ipv4["except"]
-    assert "192.0.2.0/24" in ipv4["except"]
-    assert "198.18.0.0/15" in ipv4["except"]
-    assert "198.51.100.0/24" in ipv4["except"]
-    assert "203.0.113.0/24" in ipv4["except"]
-    ipv6 = next(block for block in public_blocks if block["cidr"] == "::/0")
-    assert "2001:db8::/32" in ipv6["except"]
+    assert ipv4["except"] == [
+        "0.0.0.0/8",
+        "10.0.0.0/8",
+        "100.64.0.0/10",
+        "127.0.0.0/8",
+        "169.254.0.0/16",
+        "172.16.0.0/12",
+        "192.0.0.0/24",
+        "192.0.2.0/24",
+        "192.88.99.0/24",
+        "192.168.0.0/16",
+        "198.18.0.0/15",
+        "198.51.100.0/24",
+        "203.0.113.0/24",
+        "224.0.0.0/4",
+        "240.0.0.0/4",
+    ]
+    ipv6 = next(block for block in public_blocks if block["cidr"] == "2000::/3")
+    assert ipv6["except"] == [
+        "2001::/23",
+        "2001:db8::/32",
+        "2002::/16",
+        "3fff::/20",
+    ]
     assert all(
         port["port"] in {80, 443}
         for rule in egress
         if any("ipBlock" in peer for peer in rule["to"])
         for port in rule["ports"]
     )
+
+
+def test_builder_quota_reserves_the_kubernetes_root_ca_configmap() -> None:
+    registration = _registration()
+    platform_documents = [
+        personal_dev_builder_manifest_documents(
+            registration,
+            platform=platform,
+            config=_config(),
+        )
+        for platform in ("linux/amd64", "linux/arm64")
+    ]
+    contract_names = {
+        document["metadata"]["name"]
+        for documents in platform_documents
+        for document in documents
+        if document["kind"] == "ConfigMap"
+    }
+    quota = next(
+        document
+        for document in platform_documents[0]
+        if document["kind"] == "ResourceQuota"
+    )
+
+    assert int(quota["spec"]["hard"]["configmaps"]) == len(contract_names) + 1
 
 
 def test_builder_contract_is_canonical_and_contains_no_capability() -> None:

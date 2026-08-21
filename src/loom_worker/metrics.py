@@ -68,3 +68,14 @@ PIPELINE_LIVE_PREVIEW_EVENTS_TOTAL = Counter(
     "Bounded Stage 1 preview producer and publisher outcomes",
     labelnames=("result", "reason"),
 )
+
+RESOURCE_ACCOUNTING_EVENTS_TOTAL = Counter(
+    "loom_worker_resource_accounting_events_total",
+    "Per-execution resource accounting collection and delivery outcomes",
+    labelnames=("result", "reason"),
+)
+
+RESOURCE_ACCOUNTING_OUTBOX_BACKLOG = Gauge(
+    "loom_worker_resource_accounting_outbox_backlog",
+    "Durable resource-accounting reports awaiting control-plane acknowledgement",
+)

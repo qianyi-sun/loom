@@ -2395,7 +2395,7 @@ def test_committed_development_profile_ships_fail_closed_supervisors() -> None:
     )
 
 
-def test_committed_staging_profile_activates_only_core_signed_witness_supervisors() -> None:
+def test_committed_staging_profile_activates_core_and_oldlab_builder_supervisors() -> None:
     profile = load_environment_state_profile(
         Path("deploy/environment-state/staging.toml"),
         variables={
@@ -2417,9 +2417,9 @@ def test_committed_staging_profile_activates_only_core_signed_witness_supervisor
     assert "manager_witness_export_bootstrap" not in (
         profile.external_slurm_runner_prerequisites
     )
-    assert profile.external_slurm_runner_prerequisites[
-        "retained_inactive_supervisor_pools"
-    ] == ["task-image-builder-oldlab"]
+    assert "retained_inactive_supervisor_pools" not in (
+        profile.external_slurm_runner_prerequisites
+    )
 
     gb10 = by_name["gb10-staging"]
     assert gb10["pool_name"] == "gb10"
@@ -2447,8 +2447,8 @@ def test_committed_staging_profile_activates_only_core_signed_witness_supervisor
     assert builder["service_name"] == "loom-task-image-builder-oldlab-staging.service"
     assert builder["timer_name"] == "loom-task-image-builder-oldlab-staging.timer"
     assert "15453" in builder["args"]
-    assert builder["enabled"] is False
-    assert builder["active"] is False
+    assert builder["enabled"] is True
+    assert builder["active"] is True
     _assert_manager_trust_arguments(builder, pool_name="oldlab")
 
     gb10_builder = by_name["task-image-builder-gb10-staging"]

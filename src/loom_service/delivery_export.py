@@ -25,7 +25,8 @@ from loom.data_lifecycle_registry import (
     ensure_artifact_lifecycle_authority,
     register_lifecycle_object,
 )
-from loom.db.schema import Artifact, Batch, LlmCall, Task, Trial
+from loom.db.schema import Artifact, Batch, LlmCall, Task, Trial, TrialResourceUsage
+from loom.resource_usage_store import resource_usage_response, row_to_report
 from loom_service.delivery_export_tb2_v2 import (
     build_per_trial_v2_bundle,
     parse_trajectory_events,
@@ -117,8 +118,7 @@ class ArchiveBuildResult:
 
 def _json_bytes(data: Any) -> bytes:
     return (
-        json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-        + "\n"
+        json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n"
     ).encode()
 
 
@@ -251,9 +251,7 @@ def _model_info(batch: Batch) -> tuple[str | None, str | None]:
 
 
 async def _load_batch(session: Any, batch_id: UUID) -> Batch:
-    batch = (
-        await session.execute(select(Batch).where(Batch.id == batch_id))
-    ).scalar_one_or_none()
+    batch = (await session.execute(select(Batch).where(Batch.id == batch_id))).scalar_one_or_none()
     if batch is None:
         raise InvalidDeliveryBatchFamilyError({"message": "batch not found"})
     return cast(Batch, batch)
@@ -408,6 +406,35 @@ async def _llm_calls_for_selected(
     out: dict[UUID, list[LlmCall]] = {trial_id: [] for trial_id in trial_ids}
     for call in rows:
         out.setdefault(call.trial_id, []).append(call)
+    return out
+
+
+async def _resource_usage_for_selected(
+    session: Any,
+    selected: list[SelectedTrial],
+) -> dict[UUID, list[TrialResourceUsage]]:
+    trial_ids = [item.trial.id for item in selected]
+    if not trial_ids:
+        return {}
+    rows = list(
+        (
+            await session.execute(
+                select(TrialResourceUsage)
+                .where(TrialResourceUsage.trial_id.in_(trial_ids))
+                .order_by(
+                    TrialResourceUsage.trial_id.asc(),
+                    TrialResourceUsage.attempt_count.asc(),
+                    TrialResourceUsage.container_role.asc(),
+                    TrialResourceUsage.role_name.asc(),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    out: dict[UUID, list[TrialResourceUsage]] = {trial_id: [] for trial_id in trial_ids}
+    for row in rows:
+        out.setdefault(row.trial_id, []).append(row)
     return out
 
 
@@ -893,8 +920,7 @@ def _add_tar_stream(
 
 def _payload_checksums_bytes(files: dict[str, bytes]) -> bytes:
     lines = [
-        f"{hashlib.sha256(data).hexdigest()}  {name}\n"
-        for name, data in sorted(files.items())
+        f"{hashlib.sha256(data).hexdigest()}  {name}\n" for name, data in sorted(files.items())
     ]
     return "".join(lines).encode()
 
@@ -946,9 +972,7 @@ def _first_or_last_raw_message(
     if not isinstance(body, dict) or not isinstance(body.get("messages"), list):
         return None
     candidates = [
-        item
-        for item in body["messages"]
-        if isinstance(item, dict) and item.get("role") == role
+        item for item in body["messages"] if isinstance(item, dict) and item.get("role") == role
     ]
     if not candidates:
         return None
@@ -1093,9 +1117,7 @@ def _messages_from_raw_log(
         msg = {"role": assistant["role"]}
         if "content" in assistant:
             content = assistant["content"]
-            msg["content"] = (
-                _normalize_tb2_assistant_content(content) if normalize_tb2 else content
-            )
+            msg["content"] = _normalize_tb2_assistant_content(content) if normalize_tb2 else content
         if isinstance(assistant.get("reasoning_content"), str):
             msg["reasoning_content"] = assistant["reasoning_content"]
         messages.append(msg)
@@ -1199,9 +1221,7 @@ def _raw_harbor_trajectory(item: SelectedTrial, calls: list[LlmCall]) -> dict[st
             "source": "agent",
             "model_name": call.model,
             "message": (
-                _tb2_agent_message(action)
-                if action is not None
-                else _message_content_text(content)
+                _tb2_agent_message(action) if action is not None else _message_content_text(content)
             ),
             "observation": _tb2_observation_after_call(
                 calls,
@@ -1367,6 +1387,7 @@ def _build_archive(
     mode: DeliveryExportMode,
     tasks_by_id: dict[str, Task] | None = None,
     llm_calls_by_trial: dict[UUID, list[LlmCall]] | None = None,
+    resource_usage_by_trial: dict[UUID, list[TrialResourceUsage]] | None = None,
     artifacts_bucket: str = "artifacts",
     spool_max_bytes: int = DEFAULT_ARCHIVE_SPOOL_MAX_BYTES,
 ) -> ArchiveBuildResult:
@@ -1387,6 +1408,16 @@ def _build_archive(
             add_bytes(tar, "summary.json", _public_json_bytes(summary))
             add_bytes(tar, "ledger/trials.jsonl", b"".join(_json_bytes(row) for row in rows))
             add_bytes(tar, "ledger/trials.csv", _csv_bytes(rows))
+            usage_rows = resource_usage_by_trial or {}
+            add_bytes(
+                tar,
+                "ledger/resource_usage.jsonl",
+                b"".join(
+                    _json_bytes(row_to_report(row).model_dump(mode="json"))
+                    for item in selected
+                    for row in usage_rows.get(item.trial.id, [])
+                ),
+            )
             for row, item in zip(rows, selected, strict=True):
                 add_ref(tar, str(row["trajectory_file"]), item.trajectory)
                 add_ref(tar, str(row["atif_file"]), item.atif)
@@ -1399,6 +1430,7 @@ def _build_archive(
                     selected=selected,
                     tasks_by_id=tasks_by_id or {},
                     llm_calls_by_trial=llm_calls_by_trial or {},
+                    resource_usage_by_trial=usage_rows,
                     mode=mode,
                     artifacts_bucket=artifacts_bucket,
                 )
@@ -1431,6 +1463,7 @@ def _add_raw_harbor_entries(
     selected: list[SelectedTrial],
     tasks_by_id: dict[str, Task],
     llm_calls_by_trial: dict[UUID, list[LlmCall]],
+    resource_usage_by_trial: dict[UUID, list[TrialResourceUsage]],
     mode: DeliveryExportMode,
     artifacts_bucket: str,
 ) -> None:
@@ -1488,6 +1521,13 @@ def _add_raw_harbor_entries(
             tar,
             _raw_agent_run_path(item, "metrics.json"),
             _public_json_bytes(_raw_metrics(item, calls)),
+        )
+        add_bytes(
+            tar,
+            _raw_agent_run_path(item, "resource_usage.json"),
+            _public_json_bytes(
+                resource_usage_response(resource_usage_by_trial.get(item.trial.id, [])),
+            ),
         )
         add_bytes(
             tar,
@@ -1595,6 +1635,7 @@ def _add_raw_harbor_entries(
             "artifacts": [
                 {"kind": "execution_result", "path": "execution_result.json"},
                 {"kind": "metrics", "path": "metrics.json"},
+                {"kind": "resource_usage", "path": "resource_usage.json"},
                 {"kind": "verifier_output", "path": "verifier_output.json"},
                 *trajectory_artifacts,
                 {"kind": "atif", "path": "atif.json"},
@@ -1745,7 +1786,9 @@ async def latest_delivery_export(
         .all()
     )
     for artifact in artifacts:
-        metadata = artifact.artifact_metadata if isinstance(artifact.artifact_metadata, dict) else {}
+        metadata = (
+            artifact.artifact_metadata if isinstance(artifact.artifact_metadata, dict) else {}
+        )
         delivery = metadata.get("delivery_export")
         if not isinstance(delivery, dict):
             continue
@@ -1811,6 +1854,7 @@ async def create_delivery_export(
     object_validation = _head_delivery_objects(minio_client, selected)
     tasks_by_id: dict[str, Task] = {}
     llm_calls_by_trial: dict[UUID, list[LlmCall]] = {}
+    resource_usage_by_trial = await _resource_usage_for_selected(session, selected)
     extra_object_counts: dict[str, int] = {}
     if _is_raw_harbor_mode(mode):
         tasks_by_id = await _tasks_for_selected(session, selected)
@@ -1844,6 +1888,7 @@ async def create_delivery_export(
         mode=mode,
         tasks_by_id=tasks_by_id,
         llm_calls_by_trial=llm_calls_by_trial,
+        resource_usage_by_trial=resource_usage_by_trial,
         artifacts_bucket=settings.artifacts_bucket,
     )
     sha256 = archive.sha256

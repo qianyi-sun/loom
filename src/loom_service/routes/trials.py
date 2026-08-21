@@ -28,9 +28,10 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import and_, func, or_, select
 
-from loom.db.schema import LlmCall, Task, Team, Trial, User
+from loom.db.schema import LlmCall, Task, Team, Trial, TrialResourceUsage, User
 from loom.model_switch_store import load_model_switch_plan, plan_snapshot_from_row
 from loom.models.types import ModelSpec
+from loom.resource_usage_store import resource_usage_response
 from loom_llm_gateway.rate_card import (
     COST_META_CONFIDENCE_KEY,
     COST_META_SOURCE_KEY,
@@ -104,9 +105,8 @@ def _priced_call_filter() -> Any:
 
 
 def _price_unknown_call_filter() -> Any:
-    return (
-        LlmCall.rate_card_hash.like("facade:rate-card:missing%")
-        | _cost_meta_filter(COST_META_SOURCE_KEY, "unpriced")
+    return LlmCall.rate_card_hash.like("facade:rate-card:missing%") | _cost_meta_filter(
+        COST_META_SOURCE_KEY, "unpriced"
     )
 
 
@@ -638,6 +638,36 @@ async def get_trial(
         )
         base["usage_by_role"] = usage_by_role(llm_calls)
     return base
+
+
+@router.get("/trials/{trial_id}/resource-usage")
+async def get_trial_resource_usage(
+    sc: SessionAndCtx,
+    trial_id: UUID,
+) -> dict[str, Any]:
+    s, ctx = sc
+    require_scope(ctx, "read:own")
+    trial = (await s.execute(select(Trial).where(Trial.id == trial_id))).scalar_one_or_none()
+    if trial is None:
+        raise HTTPException(status_code=404, detail="trial not found")
+    require_team_or_admin(ctx, trial.team_id)
+    rows = list(
+        (
+            await s.execute(
+                select(TrialResourceUsage)
+                .where(TrialResourceUsage.trial_id == trial_id)
+                .order_by(
+                    TrialResourceUsage.attempt_count.asc(),
+                    TrialResourceUsage.container_role.asc(),
+                    TrialResourceUsage.role_name.asc(),
+                    TrialResourceUsage.execution_key.asc(),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return resource_usage_response(rows)
 
 
 @router.get("/trials/{trial_id}/debug")

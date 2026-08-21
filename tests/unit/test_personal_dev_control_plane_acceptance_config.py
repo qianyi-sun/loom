@@ -124,7 +124,7 @@ def _plan_value(
             "images": release.canonical_value()["images"],
         },
         "storage": {
-            "schema_head": "0106",
+            "schema_head": "0107",
             "backup_restore_evidence_sha256": "b" * 64,
         },
         "activation": {
@@ -139,9 +139,7 @@ def _plan_value(
             "scanner_binary_sha256": release.scanner.binary_sha256,
             "scanner_cache_identity_sha256": release.scanner.cache_identity_sha256,
             "scanner_database_sha256": release.scanner.database_sha256,
-            "scanner_database_metadata_sha256": (
-                release.scanner.database_metadata_sha256
-            ),
+            "scanner_database_metadata_sha256": (release.scanner.database_metadata_sha256),
             "scanner_java_database_sha256": release.scanner.java_database_sha256,
             "scanner_java_database_metadata_sha256": (
                 release.scanner.java_database_metadata_sha256
@@ -213,18 +211,14 @@ def test_acceptance_plan_loads_exact_owner_only_canonical_contract(tmp_path: Pat
     plan = load_personal_dev_acceptance_plan(path, digest)
 
     assert plan.schema_version == 1
-    assert str(plan.manager.authority_incarnation) == (
-        "00000000-0000-0000-0000-000000000101"
-    )
+    assert str(plan.manager.authority_incarnation) == ("00000000-0000-0000-0000-000000000101")
     assert plan.manager.execution_state == "shadow"
     assert plan.manager.execution_epoch == 0
     assert plan.manager.executable_new_capacity_ceiling == 0
     assert plan.builder.runtime_handler == "runsc-personal-dev"
     assert plan.builder.runtime_profile_sha256 == profile.builder.runtime_profile_sha256
     assert plan.builder.scanner_binary_sha256 == release.scanner.binary_sha256
-    assert plan.builder.scanner_cache_identity_sha256 == (
-        release.scanner.cache_identity_sha256
-    )
+    assert plan.builder.scanner_cache_identity_sha256 == (release.scanner.cache_identity_sha256)
     assert plan.builder.scanner_database_metadata_sha256 == (
         release.scanner.database_metadata_sha256
     )
@@ -413,9 +407,7 @@ def test_acceptance_plan_rejects_path_replacement_race(
         lambda value: value["release"].update(release_evidence_sha256="f" * 64),
         lambda value: value["release"].update(shadow_manifest_sha256="f" * 64),
         lambda value: value["release"]["images"].update(
-            personal_dev_builder=(
-                "ghcr.io/qianyi-sun/loom-personal-dev-builder@sha256:" + "d" * 64
-            )
+            personal_dev_builder=("ghcr.io/qianyi-sun/loom-personal-dev-builder@sha256:" + "d" * 64)
         ),
         lambda value: value["release"]["images"].update(
             personal_dev_scanner_cache=(
@@ -425,13 +417,9 @@ def test_acceptance_plan_rejects_path_replacement_race(
         lambda value: value["builder"].update(scanner_binary_sha256="2" * 64),
         lambda value: value["builder"].update(scanner_cache_identity_sha256="2" * 64),
         lambda value: value["builder"].update(scanner_database_sha256="2" * 64),
-        lambda value: value["builder"].update(
-            scanner_database_metadata_sha256="2" * 64
-        ),
+        lambda value: value["builder"].update(scanner_database_metadata_sha256="2" * 64),
         lambda value: value["builder"].update(scanner_java_database_sha256="2" * 64),
-        lambda value: value["builder"].update(
-            scanner_java_database_metadata_sha256="2" * 64
-        ),
+        lambda value: value["builder"].update(scanner_java_database_metadata_sha256="2" * 64),
         lambda value: value["storage"].update(schema_head="0097"),
         lambda value: value["builder"].update(runtime_class_name="other-runtime"),
         lambda value: value["builder"].update(runtime_handler="runc"),

@@ -125,9 +125,7 @@ def _acceptance_plan(
             "scanner_binary_sha256": release.scanner.binary_sha256,
             "scanner_cache_identity_sha256": release.scanner.cache_identity_sha256,
             "scanner_database_sha256": release.scanner.database_sha256,
-            "scanner_database_metadata_sha256": (
-                release.scanner.database_metadata_sha256
-            ),
+            "scanner_database_metadata_sha256": (release.scanner.database_metadata_sha256),
             "scanner_finding_policy_sha256": "3" * 64,
             "scanner_java_database_sha256": release.scanner.java_database_sha256,
             "scanner_java_database_metadata_sha256": (
@@ -167,7 +165,7 @@ def _acceptance_plan(
         "source": {"commit": release.source_sha, "tree": release.source_tree},
         "storage": {
             "backup_restore_evidence_sha256": "b" * 64,
-            "schema_head": "0106",
+            "schema_head": "0107",
         },
         "window": {
             "expires_at": "2099-12-31T23:00:00Z",

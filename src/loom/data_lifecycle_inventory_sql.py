@@ -16,7 +16,14 @@ from loom.data_lifecycle_gc import (
     build_gc_plan,
 )
 
-_EXECUTION_TABLES = ("batches", "trials", "llm_calls", "trial_events", "artifacts")
+_EXECUTION_TABLES = (
+    "batches",
+    "trials",
+    "llm_calls",
+    "trial_events",
+    "trial_resource_usage",
+    "artifacts",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +84,14 @@ class SqlAlchemyLifecycleInventory:
             isolation_level="REPEATABLE READ"
         ) as connection:
             with connection.begin():
+                execution_tables = tuple(
+                    table
+                    for table in _EXECUTION_TABLES
+                    if connection.execute(
+                        text("SELECT to_regclass(:name) IS NOT NULL"),
+                        {"name": f"public.{table}"},
+                    ).scalar_one()
+                )
                 epoch = connection.execute(
                     text(
                         "SELECT epoch FROM staging_mutation_epochs "
@@ -117,7 +132,7 @@ class SqlAlchemyLifecycleInventory:
                             ).scalar_one()
                         ),
                     )
-                    for table in _EXECUTION_TABLES
+                    for table in execution_tables
                 )
         return LifecycleInventorySnapshot(
             scope=scope,

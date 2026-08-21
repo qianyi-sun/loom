@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import re
+import runpy
 import shlex
 import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 from tests.unit.test_dev_instance_manifest import _immutable_config
 from tests.unit.test_personal_dev_builder import _registration
 from tests.unit.test_personal_dev_builder_manifest import _config as _builder_config
@@ -22,6 +24,31 @@ def _read(relative: str) -> str:
     return (_ROOT / relative).read_text(encoding="utf-8")
 
 
+def _sidecar_status(**changes: str) -> bytes:
+    fields = {
+        "Uid": "1000\t1000\t1000\t1000",
+        "Gid": "1000\t1000\t1000\t1000",
+        "CapInh": "0000000000000000",
+        "CapPrm": "0000000000000000",
+        "CapEff": "0000000000000000",
+        "CapBnd": "00000000000000c0",
+        "CapAmb": "0000000000000000",
+        "NoNewPrivs": "0",
+        "Seccomp": "0",
+    }
+    fields.update(changes)
+    return "".join(f"{name}:\t{value}\n" for name, value in fields.items()).encode(
+        "ascii"
+    )
+
+
+def _sidecar_launcher() -> dict[str, object]:
+    return runpy.run_path(
+        str(_ROOT / "deploy/personal-dev-builder/loom-personal-dev-buildkitd"),
+        run_name="loom_personal_dev_buildkitd_test",
+    )
+
+
 def test_shadow_package_is_pure_render_only_and_has_no_legacy_extension() -> None:
     source = (_ROOT / "src/loom/personal_dev_control_plane_render.py").read_text(encoding="utf-8")
 
@@ -31,7 +58,7 @@ def test_shadow_package_is_pure_render_only_and_has_no_legacy_extension() -> Non
     assert "def apply" not in source
     assert "def activate" not in source
     assert "loom-dev-shared" not in source
-    assert "0.0.0.0/0" not in source
+    assert '"cidr": "0.0.0.0/0"' not in source
 
 
 def test_dynamic_personal_and_builder_namespaces_bind_read_authority_locally() -> None:
@@ -60,6 +87,144 @@ def test_dynamic_personal_and_builder_namespaces_bind_read_authority_locally() -
                 "namespace": "loom-dev",
             }
         ]
+
+
+def test_personal_dev_builder_image_binds_rootless_sidecar_prerequisites() -> None:
+    dockerfile = _read("deploy/Dockerfile.personal-dev-builder")
+    ownership = _read("config/component-ownership.toml")
+
+    assert "rootlesskit version 3.0.1" in dockerfile
+    assert (
+        "79e43c95bb160488b6cb839da16750f7c590fb307b9c2e2d0421dd73fdc557cc"
+        in dockerfile
+    )
+    assert (
+        "27dfdece833e7ababf64ac5ac37b55b631d614e51e23d2f3505b2881f22c1fce"
+        in dockerfile
+    )
+    assert "ARG TARGETARCH" in dockerfile
+    assert "/usr/bin/buildctl" in dockerfile
+    assert "qemu_path=/usr/bin/buildkit-qemu-aarch64" in dockerfile
+    assert "qemu_path=/usr/bin/buildkit-qemu-x86_64" in dockerfile
+    assert 'test -x "$qemu_path"' in dockerfile
+    assert "/bin/setpriv" in dockerfile
+    assert "/usr/bin/newuidmap" in dockerfile
+    assert "0100000280000000000000000000000000000000" in dockerfile
+    assert "/usr/bin/newgidmap" in dockerfile
+    assert "0100000240000000000000000000000000000000" in dockerfile
+    assert (
+        "COPY --chown=0:0 --chmod=0555 "
+        "deploy/personal-dev-builder/loom-personal-dev-buildkitd" in dockerfile
+    )
+    assert '"deploy/personal-dev-builder/loom-personal-dev-buildkitd"' in ownership
+
+
+def test_rootless_sidecar_launcher_execs_only_the_fixed_buildkit_command(
+    tmp_path: Path,
+) -> None:
+    launcher = _sidecar_launcher()
+    marker = tmp_path / "kernel_is_gvisor"
+    marker.write_bytes(b"1\n")
+    status = tmp_path / "status"
+    status.write_bytes(_sidecar_status())
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    recorded: list[tuple[str, list[str], dict[str, str]]] = []
+
+    def execve(path: str, argv: list[str], environment: dict[str, str]) -> None:
+        recorded.append((path, argv, environment))
+
+    def accept_private_directory(path: Path, *, uid: int, gid: int) -> None:
+        assert path in {state / "home", tmp_path / "runtime"}
+        assert (uid, gid) == (1000, 1000)
+
+    launcher["_main"].__globals__["_ensure_private_directory"] = (
+        accept_private_directory
+    )
+    with pytest.raises(RuntimeError, match="returned"):
+        launcher["_main"](
+            gvisor_marker=marker,
+            status_file=status,
+            uid=1000,
+            gid=1000,
+            home=state / "home",
+            runtime_directory=tmp_path / "runtime",
+            execve=execve,
+        )
+
+    assert recorded == [
+        (
+            "/usr/bin/rootlesskit",
+            [
+                "/usr/bin/rootlesskit",
+                "/bin/setpriv",
+                "--nnp",
+                "/usr/bin/buildkitd",
+                "--addr=unix:///var/run/loom-buildkit/buildkitd.sock",
+                "--oci-worker-no-process-sandbox",
+                "--oci-worker-snapshotter=native",
+            ],
+            {
+                "HOME": str(state / "home"),
+                "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "TMPDIR": "/tmp",
+                "USER": "user",
+                "XDG_RUNTIME_DIR": str(tmp_path / "runtime"),
+            },
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "uid", "gid"),
+    [
+        ("Uid", "1001\t1001\t1001\t1001", 1000, 1000),
+        ("Gid", "1001\t1001\t1001\t1001", 1000, 1000),
+        ("CapInh", "00000000000000c0", 1000, 1000),
+        ("CapPrm", "00000000000000c0", 1000, 1000),
+        ("CapEff", "00000000000000c0", 1000, 1000),
+        ("CapBnd", "0000000000000000", 1000, 1000),
+        ("CapAmb", "00000000000000c0", 1000, 1000),
+        ("NoNewPrivs", "1", 1000, 1000),
+        ("Seccomp", "2", 1000, 1000),
+        ("Uid", "1000\t1000\t1000\t1000", 1001, 1000),
+        ("Gid", "1000\t1000\t1000\t1000", 1000, 1001),
+    ],
+)
+def test_rootless_sidecar_launcher_rejects_each_identity_drift(
+    tmp_path: Path,
+    field: str,
+    value: str,
+    uid: int,
+    gid: int,
+) -> None:
+    launcher = _sidecar_launcher()
+    marker = tmp_path / "kernel_is_gvisor"
+    marker.write_bytes(b"1\n")
+    status = tmp_path / "status"
+    status.write_bytes(_sidecar_status(**{field: value}))
+
+    with pytest.raises(RuntimeError, match="preflight"):
+        launcher["_verify_preflight"](
+            gvisor_marker=marker,
+            status_file=status,
+            uid=uid,
+            gid=gid,
+        )
+
+
+def test_rootless_sidecar_launcher_requires_gvisor_marker(tmp_path: Path) -> None:
+    launcher = _sidecar_launcher()
+    status = tmp_path / "status"
+    status.write_bytes(_sidecar_status())
+
+    with pytest.raises(RuntimeError, match="preflight"):
+        launcher["_verify_preflight"](
+            gvisor_marker=tmp_path / "missing",
+            status_file=status,
+            uid=1000,
+            gid=1000,
+        )
 
 
 def test_dev_fleet_package_never_creates_a_second_shared_namespace() -> None:
@@ -648,7 +813,18 @@ def test_personal_dev_builder_runtime_runbook_is_exact_and_inert() -> None:
     assert runbook.count("loom-personal-dev-runtime-smoke") >= 8
     assert runbook.count(".spec.nodeSelector == {") >= 2
     assert runbook.count(".scheduling.nodeSelector == {") >= 3
+    assert '"pod-security.kubernetes.io/enforce": "privileged"' in runbook
     assert '"pod-security.kubernetes.io/enforce-version": "v1.36"' in runbook
+    assert '"pod-security.kubernetes.io/audit": "restricted"' in runbook
+    assert 'restartPolicy: "Always"' in runbook
+    assert 'command: ["/usr/local/bin/loom-personal-dev-buildkitd"]' in runbook
+    assert 'capabilities: {drop: ["ALL"], add: ["SETGID", "SETUID"]}' in runbook
+    assert 'seccompProfile: {type: "Unconfined"}' in runbook
+    assert "enableServiceLinks: false" in runbook
+    assert "shareProcessNamespace: false" in runbook
+    assert "/usr/bin/buildctl" in runbook
+    assert "/usr/bin/buildctl-daemonless.sh" not in runbook
+    assert "loom-nnp=1" in runbook
     assert 'configMap: {name: "buildkit-conformance", defaultMode: 292}' in runbook
     assert "get secrets -o name" in normalized
     assert "services,secrets" not in normalized
@@ -739,6 +915,90 @@ def test_personal_dev_builder_runtime_embedded_programs_parse() -> None:
     drifted_control_labels["loom.dev/personal-dev-runtime-profile-a"] = "unexpected"
     assert evaluate_nodes(drifted_nodes).returncode != 0
 
+    network_policy_filters = [
+        value
+        for value in jq_filters
+        if 'kind: "List"' in value and 'name: "build-egress"' in value
+    ]
+    assert len(network_policy_filters) == 1
+    smoke_policies = json.loads(
+        subprocess.run(
+            [
+                "jq",
+                "-n",
+                "--arg",
+                "namespace",
+                "loom-runtime-smoke",
+                "--arg",
+                "source",
+                "2" * 40,
+                network_policy_filters[0],
+            ],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout
+    )
+    policies = {item["metadata"]["name"]: item for item in smoke_policies["items"]}
+    assert policies["default-deny"]["spec"] == {
+        "podSelector": {},
+        "policyTypes": ["Ingress", "Egress"],
+    }
+    assert policies["build-egress"]["spec"]["egress"] == [
+        {
+            "to": [
+                {
+                    "namespaceSelector": {
+                        "matchLabels": {"kubernetes.io/metadata.name": "kube-system"}
+                    },
+                    "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}},
+                }
+            ],
+            "ports": [
+                {"protocol": "UDP", "port": 53},
+                {"protocol": "TCP", "port": 53},
+            ],
+        },
+        {
+            "to": [
+                {
+                    "ipBlock": {
+                        "cidr": "0.0.0.0/0",
+                        "except": [
+                            "0.0.0.0/8",
+                            "10.0.0.0/8",
+                            "100.64.0.0/10",
+                            "127.0.0.0/8",
+                            "169.254.0.0/16",
+                            "172.16.0.0/12",
+                            "192.0.0.0/24",
+                            "192.0.2.0/24",
+                            "192.88.99.0/24",
+                            "192.168.0.0/16",
+                            "198.18.0.0/15",
+                            "198.51.100.0/24",
+                            "203.0.113.0/24",
+                            "224.0.0.0/4",
+                            "240.0.0.0/4",
+                        ],
+                    }
+                },
+                {
+                    "ipBlock": {
+                        "cidr": "2000::/3",
+                        "except": [
+                            "2001::/23",
+                            "2001:db8::/32",
+                            "2002::/16",
+                            "3fff::/20",
+                        ],
+                    }
+                },
+            ],
+            "ports": [{"protocol": "TCP", "port": 443}],
+        },
+    ]
+
     smoke_filters = [value for value in jq_filters if "kernel_is_gvisor" in value]
     assert len(smoke_filters) == 1
     rendered = subprocess.run(
@@ -774,6 +1034,111 @@ def test_personal_dev_builder_runtime_embedded_programs_parse() -> None:
         check=False,
     )
     assert shell.returncode == 0, shell.stderr
+
+    buildkit_filters = [
+        value
+        for value in jq_filters
+        if 'restartPolicy: "Always"' in value and 'name: "buildkitd"' in value
+    ]
+    assert len(buildkit_filters) == 1
+    buildkit_pod = json.loads(
+        subprocess.run(
+            [
+                "jq",
+                "-n",
+                "--arg",
+                "namespace",
+                "loom-runtime-smoke",
+                "--arg",
+                "image",
+                "example.invalid/builder@sha256:" + "3" * 64,
+                "--arg",
+                "base",
+                "example.invalid/base@sha256:" + "4" * 64,
+                "--arg",
+                "source",
+                "5" * 40,
+                buildkit_filters[0],
+            ],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout
+    )
+    spec = buildkit_pod["spec"]
+    assert spec["enableServiceLinks"] is False
+    assert spec["shareProcessNamespace"] is False
+    assert len(spec["containers"]) == 1
+    assert len(spec["initContainers"]) == 1
+    client = spec["containers"][0]
+    sidecar = spec["initContainers"][0]
+    assert client["name"] == "conformance"
+    assert sidecar["name"] == "buildkitd"
+    client_mounts = {mount["name"] for mount in client["volumeMounts"]}
+    sidecar_mounts = {mount["name"] for mount in sidecar["volumeMounts"]}
+    assert client_mounts == {"buildkit-run", "script", "tmp-client", "workspace"}
+    assert sidecar_mounts == {"buildkit-run", "buildkit-state", "tmp-buildkit"}
+    assert not {"attempt-capability", "contract", "script", "workspace"} & (
+        sidecar_mounts
+    )
+    assert not {"buildkit-state", "tmp-buildkit"} & client_mounts
+
+
+def test_personal_dev_builder_runtime_configmap_rendering_executes(
+    tmp_path: Path,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-builder-runtime.md")
+    start = runbook.index(
+        'buildkit_configmap="$evidence_dir/buildkit-conformance.configmap.json"'
+    )
+    end_marker = 'chmod 0600 "$buildkit_configmap"'
+    end = runbook.index(end_marker, start) + len(end_marker)
+    rendering = runbook[start:end]
+
+    buildkit_script = tmp_path / "run.sh"
+    buildkit_script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    merged_source_sha = "0123456789abcdef0123456789abcdef01234567"
+    behavior = subprocess.run(
+        ["bash", "-seu", "--"],
+        input=(
+            "kubeconfig=/dev/null\n"
+            "smoke_namespace=loom-runtime-smoke\n"
+            f"buildkit_script={shlex.quote(str(buildkit_script))}\n"
+            f"evidence_dir={shlex.quote(str(evidence_dir))}\n"
+            f"merged_source_sha={merged_source_sha}\n"
+            "kubectl() {\n"
+            "  test \"$*\" = \"--kubeconfig /dev/null --namespace "
+            "loom-runtime-smoke create configmap buildkit-conformance "
+            "--from-file=run.sh=$buildkit_script --dry-run=client -o json\"\n"
+            "  printf '%s\\n' "
+            "'{\"apiVersion\":\"v1\",\"data\":{\"run.sh\":\"#!/bin/sh\\nexit 0\\n\"},"
+            "\"kind\":\"ConfigMap\",\"metadata\":{\"creationTimestamp\":null,"
+            "\"name\":\"buildkit-conformance\",\"namespace\":"
+            "\"loom-runtime-smoke\"}}'\n"
+            "}\n"
+            f"{rendering}\n"
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert behavior.returncode == 0, behavior.stderr
+
+    rendered = json.loads(
+        (evidence_dir / "buildkit-conformance.configmap.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert rendered["metadata"]["namespace"] == "loom-runtime-smoke"
+    assert rendered["metadata"]["labels"] == {
+        "app.kubernetes.io/managed-by": "loom-personal-dev-runtime-smoke"
+    }
+    assert rendered["metadata"]["annotations"] == {
+        "loom.dev/runtime-rollout-source-sha": merged_source_sha
+    }
+    assert rendered["data"] == {"run.sh": "#!/bin/sh\nexit 0\n"}
 
 
 def test_personal_dev_builder_runtime_hostname_identity_uses_dns_case_rules() -> None:
@@ -955,6 +1320,183 @@ def test_personal_dev_builder_runtime_root_staging_directories_are_private(
         check=False,
     )
     assert behavior.returncode == 0, behavior.stderr
+
+
+def test_personal_dev_builder_runtime_staging_cleanup_handles_live_siblings(
+    tmp_path: Path,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-builder-runtime.md")
+    marker = "cleanup_node_staging() {"
+    cleanup_function = runbook[runbook.index(marker) :].split("\n}", 1)[0] + "\n}"
+    source_sha = "a" * 40
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    actual_root_base = tmp_path / "root-stage"
+    actual_root_parent = actual_root_base / source_sha
+    for number in (2, 3):
+        (actual_root_parent / f"trt-eai-oldlab-{number}").mkdir(parents=True)
+
+    behavior = subprocess.run(
+        ["bash", "-seu", "--"],
+        input=(
+            f"{cleanup_function}\n"
+            f"evidence_dir={shlex.quote(str(evidence_dir))}\n"
+            f"merged_source_sha={source_sha}\n"
+            f"actual_root_base={shlex.quote(str(actual_root_base))}\n"
+            "hard_root_base=/root/loom-personal-dev-builder-runtime-rollout\n"
+            "ssh_run_options=()\n"
+            "declare -A ssh_targets=(\n"
+            "  [trt-eai-oldlab-2]=target\n"
+            "  [trt-eai-oldlab-3]=target\n"
+            ")\n"
+            "assert_remote_staging() { :; }\n"
+            "assert_node_staging() { :; }\n"
+            "sudo() {\n"
+            '  test "$1" = -n\n'
+            '  test "$2" = --\n'
+            "  shift 2\n"
+            '  "$@"\n'
+            "}\n"
+            "ssh() {\n"
+            '  test "$1" = target\n'
+            '  command="$2"\n'
+            '  command="${command//$hard_root_base/$actual_root_base}"\n'
+            '  eval "$command"\n'
+            "}\n"
+            "for number in 2 3; do\n"
+            '  node="trt-eai-oldlab-$number"\n'
+            '  remote_stage="$(mktemp -d /tmp/loom-personal-dev-runtime.XXXXXXXX)"\n'
+            '  printf "%s\\n" "$remote_stage" > "$evidence_dir/$node.remote-stage.txt"\n'
+            '  printf "/root/loom-personal-dev-builder-runtime-rollout/%s/%s\\n" '
+            '"$merged_source_sha" "$node" > "$evidence_dir/$node.root-stage.txt"\n'
+            '  cleanup_node_staging "$node"\n'
+            '  test ! -e "$remote_stage"\n'
+            '  test ! -e "$actual_root_base/$merged_source_sha/$node"\n'
+            "  if test \"$number\" = 2; then\n"
+            '    test -d "$actual_root_base/$merged_source_sha/trt-eai-oldlab-3"\n'
+            "  fi\n"
+            "done\n"
+            'test ! -e "$actual_root_base"\n'
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert behavior.returncode == 0, behavior.stderr
+
+
+def test_personal_dev_builder_runtime_captures_logs_before_failed_conformance_stops(
+    tmp_path: Path,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-builder-runtime.md")
+    start = runbook.index("conformance_wait_status=0")
+    end_marker = 'test "$conformance_wait_status" -eq 0'
+    end = runbook.index(end_marker, start) + len(end_marker)
+    failure_path = runbook[start:end]
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+
+    behavior = subprocess.run(
+        ["bash", "-seu", "--"],
+        input=(
+            f"evidence_dir={shlex.quote(str(evidence_dir))}\n"
+            "kubeconfig=/dev/null\n"
+            "smoke_namespace=loom-runtime-smoke\n"
+            "builder_image=example.invalid/builder@sha256:"
+            + "3" * 64
+            + "\n"
+            + "merged_source_sha="
+            + "5" * 40
+            + "\n"
+            + "profile_label_a="
+            + "6" * 32
+            + "\n"
+            + "profile_label_b="
+            + "7" * 32
+            + "\n"
+            + "kubectl() {\n"
+            + '  case " $* " in\n'
+            + '    *" wait "*) return 1 ;;\n'
+            + '    *" get pod/buildkit-conformance "*) '
+            + "printf '%s\\n' '{\"status\":{\"phase\":\"Failed\"}}' ;;\n"
+            + '    *" logs "*" -c conformance "*) printf "client failure\\n" ;;\n'
+            + '    *" logs "*" -c buildkitd "*) printf "sidecar failure\\n" ;;\n'
+            + "    *) return 1 ;;\n"
+            + "  esac\n"
+            + "}\n"
+            + failure_path
+            + "\n"
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert behavior.returncode != 0
+    assert (evidence_dir / "buildkit-conformance.client.log").read_text(
+        encoding="utf-8"
+    ) == "client failure\n"
+    assert (evidence_dir / "buildkit-conformance.sidecar.log").read_text(
+        encoding="utf-8"
+    ) == "sidecar failure\n"
+
+
+def test_personal_dev_builder_runtime_captures_log_before_failed_gvisor_probe_stops(
+    tmp_path: Path,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-builder-runtime.md")
+    loop = runbook.index('for node in "${nodes[@]}"; do', runbook.index("## 6."))
+    start = runbook.index(
+        'kubectl --kubeconfig "$kubeconfig" create -f "$manifest"', loop
+    )
+    end = runbook.index("  assert_smoke_namespace_owned", start)
+    failure_path = runbook[start:end]
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+
+    behavior = subprocess.run(
+        ["bash", "-seu", "--"],
+        input=(
+            f"evidence_dir={shlex.quote(str(evidence_dir))}\n"
+            "kubeconfig=/dev/null\n"
+            "smoke_namespace=loom-runtime-smoke\n"
+            "manifest=/dev/null\n"
+            "pod=gvisor-smoke-2\n"
+            "node=trt-eai-oldlab-2\n"
+            "smoke_image=example.invalid/smoke@sha256:"
+            + "3" * 64
+            + "\n"
+            + "merged_source_sha="
+            + "5" * 40
+            + "\n"
+            + "profile_label_a="
+            + "6" * 32
+            + "\n"
+            + "profile_label_b="
+            + "7" * 32
+            + "\n"
+            + "kubectl() {\n"
+            + '  case " $* " in\n'
+            + '    *" create "*) return 0 ;;\n'
+            + '    *" wait "*) return 1 ;;\n'
+            + '    *" get pod/gvisor-smoke-2 "*) '
+            + "printf '%s\\n' '{\"status\":{\"phase\":\"Failed\"}}' ;;\n"
+            + '    *" logs "*) printf "gvisor failure\\n" ;;\n'
+            + "    *) return 1 ;;\n"
+            + "  esac\n"
+            + "}\n"
+            + failure_path
+            + "\n"
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert behavior.returncode != 0
+    assert (evidence_dir / "gvisor-smoke-2.log").read_text(
+        encoding="utf-8"
+    ) == "gvisor failure\n"
 
 
 def test_personal_dev_builder_runtime_longhorn_health_requires_live_readiness() -> None:

@@ -118,6 +118,14 @@ class PersonalDevBuilderCluster(Protocol):
 
     async def wait_job(self, namespace: str, name: str) -> None: ...
 
+    async def wait_job_failure(self, namespace: str, name: str) -> None: ...
+
+    async def list_job_pods(
+        self,
+        namespace: str,
+        name: str,
+    ) -> Mapping[str, object]: ...
+
     async def delete_namespace(self, namespace: str) -> None: ...
 
 
@@ -278,6 +286,62 @@ def _verify_staged_source(
         raise RuntimeError("personal-dev staged source binding changed")
 
 
+def _verify_builder_job_runtime(
+    observation: Mapping[str, object],
+    *,
+    job_name: str,
+) -> None:
+    try:
+        items = observation["items"]
+        if not isinstance(items, list) or len(items) != 1:
+            raise TypeError
+        pod = items[0]
+        if not isinstance(pod, Mapping):
+            raise TypeError
+        metadata = pod["metadata"]
+        status = pod["status"]
+        if not isinstance(metadata, Mapping) or not isinstance(status, Mapping):
+            raise TypeError
+        labels = metadata["labels"]
+        if not isinstance(labels, Mapping) or labels.get("job-name") != job_name:
+            raise TypeError
+
+        client_statuses = status["containerStatuses"]
+        sidecar_statuses = status["initContainerStatuses"]
+        if (
+            status.get("phase") != "Succeeded"
+            or not isinstance(client_statuses, list)
+            or len(client_statuses) != 1
+            or not isinstance(sidecar_statuses, list)
+            or len(sidecar_statuses) != 1
+        ):
+            raise TypeError
+        client = client_statuses[0]
+        sidecar = sidecar_statuses[0]
+        if not isinstance(client, Mapping) or not isinstance(sidecar, Mapping):
+            raise TypeError
+        terminated = client.get("state")
+        if not isinstance(terminated, Mapping):
+            raise TypeError
+        terminated = terminated.get("terminated")
+        if (
+            client.get("name") != "builder"
+            or type(client.get("restartCount")) is not int
+            or client["restartCount"] != 0
+            or not isinstance(terminated, Mapping)
+            or type(terminated.get("exitCode")) is not int
+            or terminated["exitCode"] != 0
+            or sidecar.get("name") != "buildkitd"
+            or type(sidecar.get("restartCount")) is not int
+            or sidecar["restartCount"] != 0
+        ):
+            raise TypeError
+    except (KeyError, TypeError):
+        raise RuntimeError(
+            "personal-dev builder Job runtime integrity check failed"
+        ) from None
+
+
 @dataclass(slots=True)
 class KubectlPersonalDevBuildExecutor:
     """Run native sandboxes; retain registry/export authority outside them."""
@@ -345,7 +409,40 @@ class KubectlPersonalDevBuildExecutor:
             await self.cluster.apply(yaml.safe_dump(secret, sort_keys=False))
             await self.cluster.apply(yaml.safe_dump(job, sort_keys=False))
             jobs.append(job_name)
-        await asyncio.gather(*(self.cluster.wait_job(namespace, name) for name in jobs))
+        async def wait_and_verify(job_name: str) -> None:
+            completion = asyncio.create_task(
+                self.cluster.wait_job(namespace, job_name)
+            )
+            failure = asyncio.create_task(
+                self.cluster.wait_job_failure(namespace, job_name)
+            )
+            try:
+                done, _pending = await asyncio.wait(
+                    {completion, failure},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if failure in done:
+                    failure.result()
+                    raise RuntimeError(
+                        "personal-dev builder Job reported failure"
+                    )
+                completion.result()
+            finally:
+                for task in (completion, failure):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(completion, failure, return_exceptions=True)
+            observation = await self.cluster.list_job_pods(namespace, job_name)
+            _verify_builder_job_runtime(observation, job_name=job_name)
+
+        wait_tasks = [asyncio.create_task(wait_and_verify(name)) for name in jobs]
+        try:
+            await asyncio.gather(*wait_tasks)
+        finally:
+            for task in wait_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*wait_tasks, return_exceptions=True)
         return await self.exporter.publish(registration)
 
     async def cleanup(self, registration: CandidateRegistration) -> None:

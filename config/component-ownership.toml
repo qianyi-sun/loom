@@ -230,6 +230,7 @@ build_context = "."
 source_paths = [
   ".dockerignore",
   "deploy/Dockerfile.personal-dev-builder",
+  "deploy/personal-dev-builder/loom-personal-dev-buildkitd",
   "src/loom/__init__.py",
   "src/loom/personal_dev_builder_artifact.py",
   "src/loom/personal_dev_candidate.py",

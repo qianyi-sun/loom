@@ -279,9 +279,7 @@ def _mutate_runtime_class(runtime: dict[str, Any], mutation: str) -> None:
     elif mutation == "runtime-selector-key-extra":
         runtime["scheduling"]["nodeSelector"]["loom.dev/extra"] = "true"
     elif mutation == "runtime-profile-half":
-        runtime["scheduling"]["nodeSelector"][
-            "loom.dev/personal-dev-runtime-profile-a"
-        ] = "a" * 32
+        runtime["scheduling"]["nodeSelector"]["loom.dev/personal-dev-runtime-profile-a"] = "a" * 32
     elif mutation == "runtime-os":
         runtime["scheduling"]["nodeSelector"]["kubernetes.io/os"] = "windows"
     elif mutation == "runtime-architecture":
@@ -461,9 +459,7 @@ def _acceptance_inputs(
             "scanner_binary_sha256": release.scanner.binary_sha256,
             "scanner_cache_identity_sha256": release.scanner.cache_identity_sha256,
             "scanner_database_sha256": release.scanner.database_sha256,
-            "scanner_database_metadata_sha256": (
-                release.scanner.database_metadata_sha256
-            ),
+            "scanner_database_metadata_sha256": (release.scanner.database_metadata_sha256),
             "scanner_finding_policy_sha256": "3" * 64,
             "scanner_java_database_sha256": release.scanner.java_database_sha256,
             "scanner_java_database_metadata_sha256": (
@@ -493,7 +489,7 @@ def _acceptance_inputs(
         "source": {"commit": release.source_sha, "tree": release.source_tree},
         "storage": {
             "backup_restore_evidence_sha256": "b" * 64,
-            "schema_head": "0106",
+            "schema_head": "0107",
         },
         "window": {
             "expires_at": "2099-12-31T23:00:00Z",
@@ -763,9 +759,7 @@ def test_status_accepts_api_server_default_empty_admission_selectors(
 ) -> None:
     expected, runner = _healthy_fixture(tmp_path)
     policies = [
-        item
-        for item in _items(runner, _CLUSTER)
-        if item["kind"] == "ValidatingAdmissionPolicy"
+        item for item in _items(runner, _CLUSTER) if item["kind"] == "ValidatingAdmissionPolicy"
     ]
     assert len(policies) == 3
     for policy in policies:
@@ -833,9 +827,7 @@ def test_acceptance_status_rejects_live_authority_or_exposure_widening(
         "admission-policy-object-selector",
     }:
         policy = next(
-            item
-            for item in _items(runner, _CLUSTER)
-            if item["kind"] == "ValidatingAdmissionPolicy"
+            item for item in _items(runner, _CLUSTER) if item["kind"] == "ValidatingAdmissionPolicy"
         )
         selector = (
             "namespaceSelector"
@@ -907,13 +899,44 @@ def test_acceptance_queries_the_runtime_class_bound_by_the_plan(
     assert runtime_command in [command for command, _timeout in runner.calls]
 
 
+def _exact_builder_namespace() -> dict[str, object]:
+    name = f"loom-build-{'a' * 32}-l{'b' * 16}"
+    return {
+        "apiVersion": "v1",
+        "kind": "Namespace",
+        "metadata": {
+            "name": name,
+            "labels": {
+                "app.kubernetes.io/managed-by": (
+                    "loom-personal-dev-builder-controller"
+                ),
+                "app.kubernetes.io/part-of": "loom",
+                "kubernetes.io/metadata.name": name,
+                "loom.dev/candidate": "c" * 12,
+                "loom.dev/subject": "00000000-0000-0000-0000-000000000402",
+                "loom.dev/incarnation": "00000000-0000-0000-0000-000000000403",
+                "loom.dev/operation": "00000000-0000-0000-0000-000000000404",
+                "loom.dev/attempt": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "loom.dev/operation-epoch": "1",
+                "loom.dev/build-attempt-sequence": "0",
+                "loom.dev/build-lease-epoch": "1",
+                "pod-security.kubernetes.io/enforce": "privileged",
+                "pod-security.kubernetes.io/enforce-version": "v1.36",
+                "pod-security.kubernetes.io/audit": "restricted",
+                "pod-security.kubernetes.io/audit-version": "v1.36",
+                "pod-security.kubernetes.io/warn": "restricted",
+                "pod-security.kubernetes.io/warn-version": "v1.36",
+            },
+        },
+    }
+
+
 def test_acceptance_permits_only_exact_owned_dynamic_namespace_families(
     tmp_path: Path,
 ) -> None:
     expected, plan, runner = _acceptance_healthy_fixture(tmp_path)
     namespaces = _items(runner, _NAMESPACES)
     personal_subject = "00000000-0000-0000-0000-000000000401"
-    builder_subject = "00000000-0000-0000-0000-000000000402"
     namespaces.extend(
         [
             {
@@ -929,19 +952,7 @@ def test_acceptance_permits_only_exact_owned_dynamic_namespace_families(
                     },
                 },
             },
-            {
-                "apiVersion": "v1",
-                "kind": "Namespace",
-                "metadata": {
-                    "name": f"loom-build-{'a' * 32}-l{'b' * 16}",
-                    "labels": {
-                        "app.kubernetes.io/managed-by": ("loom-personal-dev-builder-controller"),
-                        "app.kubernetes.io/part-of": "loom",
-                        "loom.dev/subject": builder_subject,
-                        "pod-security.kubernetes.io/enforce": "restricted",
-                    },
-                },
-            },
+            _exact_builder_namespace(),
         ]
     )
     deployments = _items(runner, _DEPLOYMENTS)
@@ -979,6 +990,84 @@ def test_acceptance_permits_only_exact_owned_dynamic_namespace_families(
     assert components["namespaces"].observed == 3
     assert components["namespaces"].ready is True
     assert components["personal-workers"].observed == 0
+
+
+@pytest.mark.parametrize(
+    ("label", "drifted_value"),
+    [
+        ("pod-security.kubernetes.io/enforce", "baseline"),
+        ("pod-security.kubernetes.io/enforce-version", "latest"),
+        ("pod-security.kubernetes.io/audit", "baseline"),
+        ("pod-security.kubernetes.io/audit-version", "latest"),
+        ("pod-security.kubernetes.io/warn", "baseline"),
+        ("pod-security.kubernetes.io/warn-version", "latest"),
+    ],
+)
+def test_acceptance_rejects_builder_namespace_pod_security_drift(
+    tmp_path: Path,
+    label: str,
+    drifted_value: str,
+) -> None:
+    expected, plan, runner = _acceptance_healthy_fixture(tmp_path)
+    namespace = _exact_builder_namespace()
+    namespace["metadata"]["labels"][label] = drifted_value  # type: ignore[index]
+    _items(runner, _NAMESPACES).append(namespace)
+
+    result = _observe_acceptance(expected, plan, runner)
+
+    assert result.ready is False
+    assert "builder_namespace_invalid" in result.blockers
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "annotation",
+        "finalizer",
+        "generated-name",
+        "owner-reference",
+        "extra-label",
+        "attempt-mismatch",
+        "injected-name-mismatch",
+    ],
+)
+def test_acceptance_rejects_builder_namespace_metadata_drift(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    expected, plan, runner = _acceptance_healthy_fixture(tmp_path)
+    namespace = _exact_builder_namespace()
+    metadata = namespace["metadata"]
+    assert isinstance(metadata, dict)
+    labels = metadata["labels"]
+    assert isinstance(labels, dict)
+    if mutation == "annotation":
+        metadata["annotations"] = {"example.invalid/drift": "true"}
+    elif mutation == "finalizer":
+        metadata["finalizers"] = ["example.invalid/drift"]
+    elif mutation == "generated-name":
+        metadata["generateName"] = "loom-build-"
+    elif mutation == "owner-reference":
+        metadata["ownerReferences"] = [
+            {
+                "apiVersion": "v1",
+                "kind": "Namespace",
+                "name": "other",
+                "uid": "00000000-0000-0000-0000-000000000405",
+            }
+        ]
+    elif mutation == "extra-label":
+        labels["example.invalid/drift"] = "true"
+    elif mutation == "attempt-mismatch":
+        labels["loom.dev/attempt"] = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+    else:
+        labels["kubernetes.io/metadata.name"] = "loom-build-mismatch"
+    _items(runner, _NAMESPACES).append(namespace)
+
+    result = _observe_acceptance(expected, plan, runner)
+
+    assert result.ready is False
+    assert "builder_namespace_invalid" in result.blockers
 
 
 @pytest.mark.parametrize(
@@ -1271,26 +1360,22 @@ def test_status_blocks_release_bound_scanner_cache_workload_drift(
     )
     pod = deployment["spec"]["template"]["spec"]
     init = next(
-        item
-        for item in pod["initContainers"]
-        if item["name"] == "personal-dev-scanner-cache-init"
+        item for item in pod["initContainers"] if item["name"] == "personal-dev-scanner-cache-init"
     )
     service = next(item for item in pod["containers"] if item["name"] == "management")
 
     if drift == "init-image":
-        init["image"] = (
-            "ghcr.io/qianyi-sun/loom-personal-dev-scanner-cache@sha256:" + "9" * 64
-        )
+        init["image"] = "ghcr.io/qianyi-sun/loom-personal-dev-scanner-cache@sha256:" + "9" * 64
     elif drift == "init-argument":
         init["args"][-1] = "9" * 64
     elif drift == "init-root-mount":
-        next(
-            mount for mount in init["volumeMounts"] if mount["name"] == "scanner-cache"
-        )["mountPath"] = "/tmp/scanner-cache"
+        next(mount for mount in init["volumeMounts"] if mount["name"] == "scanner-cache")[
+            "mountPath"
+        ] = "/tmp/scanner-cache"
     elif drift == "generation-subpath":
-        next(
-            mount for mount in service["volumeMounts"] if mount["name"] == "scanner-cache"
-        )["subPath"] = "generations/" + "9" * 64
+        next(mount for mount in service["volumeMounts"] if mount["name"] == "scanner-cache")[
+            "subPath"
+        ] = "generations/" + "9" * 64
     elif drift == "cache-path":
         next(
             entry
@@ -1298,18 +1383,16 @@ def test_status_blocks_release_bound_scanner_cache_workload_drift(
             if entry["name"] == "LOOM_SVC_PERSONAL_DEV_BUILDER_SCANNER_CACHE_DIR"
         )["value"] = "/var/lib/loom-personal-dev-scanner"
     elif drift == "fanal-limit":
-        next(volume for volume in pod["volumes"] if volume["name"] == "scanner-fanal")[
-            "emptyDir"
-        ]["sizeLimit"] = "8Gi"
+        next(volume for volume in pod["volumes"] if volume["name"] == "scanner-fanal")["emptyDir"][
+            "sizeLimit"
+        ] = "8Gi"
     elif drift == "node-architecture":
         pod["nodeSelector"]["kubernetes.io/arch"] = "arm64"
     else:  # pragma: no cover - parameter table is exhaustive
         raise AssertionError(drift)
 
     result = (
-        _observe(expected, runner)
-        if plan is None
-        else _observe_acceptance(expected, plan, runner)
+        _observe(expected, runner) if plan is None else _observe_acceptance(expected, plan, runner)
     )
 
     assert result.ready is False
