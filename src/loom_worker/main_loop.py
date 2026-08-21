@@ -32,7 +32,7 @@ import time
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
@@ -80,6 +80,15 @@ from loom.trial.workspace import (
 from loom.verifier.base import Verifier
 from loom.verifier.pytest_verifier import PytestVerifier
 from loom.verifier.script_verifier import ScriptVerifier
+from loom_drivers.daytona.config import DaytonaConfig
+from loom_drivers.daytona.driver import DaytonaDriver
+from loom_drivers.daytona.service_controller import (
+    DaytonaApiGate,
+    provider_scope,
+)
+from loom_drivers.daytona.service_controller import (
+    reconcile_one as reconcile_one_daytona_sandbox,
+)
 from loom_worker.artifact_input_journal import allocatable_capacity
 from loom_worker.config import WorkerSettings
 from loom_worker.control_plane_client import HttpControlPlaneClient, StepTokenClient
@@ -131,6 +140,8 @@ _SLURM_JOB_ID_RE = re.compile(r"^[1-9][0-9]*(?:_[0-9]+)?$")
 # Docker's systemd cgroup driver takes the guard-owned allocation slice as a
 # unit name rather than a filesystem path.
 _WORKER_SLICE_RE = re.compile(r"^loom-job-([1-9][0-9]*)\.slice$")
+_IMMUTABLE_IMAGE_RE = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
+_CANDIDATE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 logger = logging.getLogger(__name__)
 
@@ -257,6 +268,7 @@ def _worker_cgroup_parent(settings: WorkerSettings) -> str | None:
 _DEFAULT_CAPS = [
     {
         "os": "linux",
+        "backend": "docker",
         "cpu_arch": _host_cpu_arch(),
         "gpu_vendor": "none",
         "network_policies": ["public", "no-network", "allowlist"],
@@ -266,6 +278,68 @@ _DEFAULT_CAPS = [
         "terminus2_model_switch": True,
     }
 ]
+
+
+@dataclass(frozen=True)
+class _DaytonaWorkerRuntime:
+    config: DaytonaConfig
+    gate: DaytonaApiGate
+    provider_scope: str
+
+
+def _worker_capabilities(settings: WorkerSettings) -> list[dict[str, Any]]:
+    caps = dict(_DEFAULT_CAPS[0])
+    if getattr(settings, "sandbox_backend", "docker") == "daytona":
+        caps.update(
+            backend="daytona",
+            cpu_arch="x86_64",
+            resource_modes=["auto"],
+            supports_custom_network=False,
+        )
+    return [caps]
+
+
+def _build_daytona_runtime(settings: WorkerSettings) -> _DaytonaWorkerRuntime | None:
+    if settings.sandbox_backend == "docker":
+        return None
+    if settings.sandbox_backend != "daytona":
+        raise RuntimeError(f"unsupported worker sandbox backend {settings.sandbox_backend!r}")
+    if _CANDIDATE_SHA_RE.fullmatch(settings.candidate_sha) is None:
+        raise RuntimeError(
+            "Daytona service-worker startup requires an exact lowercase "
+            "40-character LOOM_WORKER_CANDIDATE_SHA",
+        )
+    incompatible = {
+        "require_cgroup_parent": settings.require_cgroup_parent,
+        "cgroup_parent": bool(settings.cgroup_parent),
+        "sandbox_identity": bool(settings.sandbox_identity),
+        "slurm_job_id": bool(settings.slurm_job_id),
+        "compose_project": bool(settings.compose_project),
+        "sandbox_isolation": settings.sandbox_isolation,
+        "enable_worker_vllm": settings.enable_worker_vllm,
+        "container_cpus": settings.container_cpus > 0,
+        "container_memory_mib": settings.container_memory_mib > 0,
+        "container_pids": settings.container_pids > 0,
+    }
+    active = sorted(name for name, enabled in incompatible.items() if enabled)
+    if active:
+        raise RuntimeError(
+            "Daytona service-worker rejects Docker/Slurm-local settings: " + ", ".join(active),
+        )
+    if settings.daytona_sandbox_ttl_sec <= 0:
+        raise RuntimeError("daytona_sandbox_ttl_sec must be positive")
+    if settings.daytona_cleanup_interval_sec <= 0:
+        raise RuntimeError("daytona_cleanup_interval_sec must be positive")
+    config = DaytonaConfig.from_env()  # credential failure is pre-registration
+    gate = DaytonaApiGate(
+        max_concurrent=settings.daytona_api_max_concurrent,
+        min_interval_sec=settings.daytona_api_min_interval_sec,
+    )
+    return _DaytonaWorkerRuntime(
+        config=config,
+        gate=gate,
+        provider_scope=provider_scope(config),
+    )
 
 
 def _host_memory_bytes() -> int:
@@ -360,13 +434,11 @@ def _pipeline_registration_payload(
         input_cache_ready_bytes=cache.get("input_cache_ready_bytes", 0),
         gpu_devices=devices,
     )
-    legacy_capabilities = [
-        {
-            **_DEFAULT_CAPS[0],
-            "cpu_arch": snapshot.cpu_arch,
-            "gpu_vendor": "nvidia" if snapshot.gpu_devices else "none",
-        }
-    ]
+    legacy_capabilities = _worker_capabilities(settings)
+    legacy_capabilities[0].update(
+        cpu_arch=snapshot.cpu_arch,
+        gpu_vendor="nvidia" if snapshot.gpu_devices else "none",
+    )
     return {
         "capabilities": legacy_capabilities,
         "capability_snapshot": snapshot.model_dump(mode="json"),
@@ -516,6 +588,35 @@ def _log_docker_registry_auth_summary() -> None:
     )
 
 
+async def _reconcile_daytona_cleanup_batch(
+    *,
+    cp_client: HttpControlPlaneClient,
+    worker_id: UUID,
+    runtime: _DaytonaWorkerRuntime,
+    limit: int,
+) -> int:
+    reconciled = 0
+    for _ in range(max(1, limit)):
+        try:
+            found = await reconcile_one_daytona_sandbox(
+                cp_client=cp_client,
+                worker_id=worker_id,
+                config=runtime.config,
+                gate=runtime.gate,
+            )
+        except Exception:
+            logger.warning(
+                "daytona_cleanup_reconcile_failed worker_id=%s",
+                worker_id,
+                exc_info=True,
+            )
+            break
+        if not found:
+            break
+        reconciled += 1
+    return reconciled
+
+
 async def run_worker(
     settings: WorkerSettings,
     *,
@@ -523,14 +624,17 @@ async def run_worker(
 ) -> None:
     state = ShutdownState()
     install_signal_handlers(state)
+    daytona_runtime = _build_daytona_runtime(settings)
 
     # Evaluate the controller-owned containment binding before registration,
     # cleanup, or claims. A non-exclusive worker must never become visible if
     # its allocation cgroup was lost or replaced.
-    _worker_cgroup_parent(settings)
+    if daytona_runtime is None:
+        _worker_cgroup_parent(settings)
     settings.trajectory_cache_dir.mkdir(parents=True, exist_ok=True)
     _configure_blocking_io_executor(settings)
-    _log_docker_registry_auth_summary()
+    if daytona_runtime is None:
+        _log_docker_registry_auth_summary()
 
     async with (
         httpx.AsyncClient(
@@ -582,8 +686,16 @@ async def run_worker(
         capability_snapshot_digest = info.get("capability_snapshot_digest")
         logger.info("worker_registered worker_id=%s", worker_id)
 
-        _run_orphan_cleanup(settings, worker_id)
-        _run_trial_cache_eviction(settings)
+        if daytona_runtime is None:
+            _run_orphan_cleanup(settings, worker_id)
+            _run_trial_cache_eviction(settings)
+        else:
+            await _reconcile_daytona_cleanup_batch(
+                cp_client=cp_client,
+                worker_id=worker_id,
+                runtime=daytona_runtime,
+                limit=settings.daytona_api_max_concurrent,
+            )
 
         sync_http = httpx.Client(
             base_url=str(settings.control_plane_url),
@@ -616,6 +728,9 @@ async def run_worker(
                 after_seconds=settings.idle_exit_after_seconds,
             )
             image_eviction = _PeriodicMaintenanceTracker(interval_seconds=3_600)
+            daytona_cleanup = _PeriodicMaintenanceTracker(
+                interval_seconds=settings.daytona_cleanup_interval_sec,
+            )
             # PR-E: per-worker vLLM registry. Opt-in via settings; the
             # `enabled=False` path still constructs the object so the
             # trial runner gets a deterministic AgentError instead of
@@ -630,8 +745,10 @@ async def run_worker(
             # Allocator is always built (cheap); singleton is started
             # only when isolation is on so default-off workers don't
             # need the singleton image pulled.
-            sandbox_allocator = SandboxNetworkAllocator(
-                worker_index=settings.sandbox_worker_index,
+            sandbox_allocator = (
+                SandboxNetworkAllocator(worker_index=settings.sandbox_worker_index)
+                if daytona_runtime is None
+                else None
             )
             sandbox_singleton: SandboxSingletonManager | None = None
             if settings.sandbox_isolation:
@@ -667,9 +784,17 @@ async def run_worker(
                     vllm_registry=vllm_registry,
                     sandbox_allocator=sandbox_allocator,
                     sandbox_singleton=sandbox_singleton,
+                    daytona_runtime=daytona_runtime,
                 )
-                if image_eviction.due():
+                if daytona_runtime is None and image_eviction.due():
                     await asyncio.to_thread(_run_trial_cache_eviction, settings)
+                if daytona_runtime is not None and daytona_cleanup.due():
+                    await _reconcile_daytona_cleanup_batch(
+                        cp_client=cp_client,
+                        worker_id=worker_id,
+                        runtime=daytona_runtime,
+                        limit=settings.daytona_api_max_concurrent,
+                    )
                 should_idle_exit = idle_exit.observe(
                     claimed=claimed,
                     in_flight=pool.in_flight,
@@ -725,7 +850,7 @@ async def _register_worker_with_retry(
     register_kwargs: dict[str, Any] = {
         "hostname": _worker_hostname(settings.hostname),
         "version": "0.0.1",
-        "capabilities": _DEFAULT_CAPS,
+        "capabilities": _worker_capabilities(settings),
         "max_concurrent": max(1, settings.max_concurrent),
         "pool_name": settings.pool_name,
     }
@@ -873,6 +998,7 @@ async def _claim_available_trials(
     sandbox_allocator: SandboxNetworkAllocator | None = None,
     sandbox_singleton: SandboxSingletonManager | None = None,
     read_setup_health: Callable[[], Any] | None = None,
+    daytona_runtime: _DaytonaWorkerRuntime | None = None,
 ) -> int:
     from loom_worker.setup_admission import (
         policy_from_settings,
@@ -883,8 +1009,12 @@ async def _claim_available_trials(
     setup_health_policy = policy_from_settings(settings)
     read_health_snapshot = read_setup_health or read_node_health_snapshot
     while pool.in_flight < settings.max_concurrent:
-        health = setup_health_policy.evaluate(read_health_snapshot())
-        if not health.ok:
+        health = (
+            setup_health_policy.evaluate(read_health_snapshot())
+            if daytona_runtime is None
+            else None
+        )
+        if health is not None and not health.ok:
             logger.warning(
                 "trial_claim_paused_node_setup_health worker_id=%s reason=%s detail=%s",
                 worker_id,
@@ -895,7 +1025,7 @@ async def _claim_available_trials(
         try:
             trial_payload = await cp_client.claim(
                 worker_id=worker_id,
-                caps=_DEFAULT_CAPS,
+                caps=_worker_capabilities(settings),
             )
         except httpx.HTTPError as exc:
             logger.warning(
@@ -917,6 +1047,7 @@ async def _claim_available_trials(
             vllm_registry=vllm_registry,
             sandbox_allocator=sandbox_allocator,
             sandbox_singleton=sandbox_singleton,
+            daytona_runtime=daytona_runtime,
         )
         claimed += 1
     return claimed
@@ -936,6 +1067,7 @@ async def _claim_available_work(
     sandbox_allocator: SandboxNetworkAllocator | None = None,
     sandbox_singleton: SandboxSingletonManager | None = None,
     read_setup_health: Callable[[], Any] | None = None,
+    daytona_runtime: _DaytonaWorkerRuntime | None = None,
 ) -> int:
     """Claim from the shared queue when the Pipeline assembly is injected.
 
@@ -958,6 +1090,7 @@ async def _claim_available_work(
             sandbox_allocator=sandbox_allocator,
             sandbox_singleton=sandbox_singleton,
             read_setup_health=read_setup_health,
+            daytona_runtime=daytona_runtime,
         )
 
     from loom_worker.setup_admission import (
@@ -969,8 +1102,12 @@ async def _claim_available_work(
     setup_health_policy = policy_from_settings(settings)
     read_health_snapshot = read_setup_health or read_node_health_snapshot
     while pool.in_flight < settings.max_concurrent:
-        health = setup_health_policy.evaluate(read_health_snapshot())
-        if not health.ok:
+        health = (
+            setup_health_policy.evaluate(read_health_snapshot())
+            if daytona_runtime is None
+            else None
+        )
+        if health is not None and not health.ok:
             logger.warning(
                 "work_claim_paused_node_setup_health worker_id=%s reason=%s detail=%s",
                 worker_id,
@@ -1010,6 +1147,7 @@ async def _claim_available_work(
                 vllm_registry=vllm_registry,
                 sandbox_allocator=sandbox_allocator,
                 sandbox_singleton=sandbox_singleton,
+                daytona_runtime=daytona_runtime,
             )
         elif parsed.work_kind == "execution_attempt":
             if not isinstance(payload, ExecutionAttemptClaimV1):
@@ -1118,6 +1256,67 @@ async def _resolve_layered_trial_image(
     )
 
 
+def _resolve_daytona_trial_image(
+    *,
+    task_config: TaskConfig,
+    materialization: TaskImageExecutionGrantV1 | None,
+) -> str:
+    """Return provider-pullable immutable startup identity without Docker."""
+
+    environment = task_config.environment
+    unsupported = []
+    if environment.sidecars:
+        unsupported.append("sidecars")
+    if environment.extra_hosts:
+        unsupported.append("extra_hosts")
+    if environment.dns:
+        unsupported.append("dns")
+    if environment.tmpfs:
+        unsupported.append("tmpfs")
+    if unsupported:
+        raise TaskImageBuildError(
+            "Daytona backend does not support task " + ", ".join(unsupported),
+        )
+    if environment.dockerfile is not None:
+        if materialization is None:
+            raise TaskImageBuildError(
+                "Daytona Dockerfile task requires a candidate-bound task image grant",
+            )
+        image = materialization.registry_images.get("task")
+    else:
+        image = environment.docker_image
+    if image is None or _IMMUTABLE_IMAGE_RE.fullmatch(image) is None:
+        raise TaskImageBuildError(
+            "Daytona startup requires an immutable registry image @sha256 digest; "
+            "mutable image aliases are rejected",
+        )
+    return image
+
+
+def _require_daytona_agent_image_ready(agent_name: str) -> None:
+    if agent_name in {"oracle", "direct-completion", "litellm", "terminus-2"}:
+        return
+    try:
+        from loom_launcher import get_adapter
+    except ImportError:
+        return
+    adapter = get_adapter(agent_name)
+    if adapter is not None and getattr(adapter, "install_script", None):
+        raise TaskImageBuildError(
+            "Daytona backend cannot build a mutable agent layer at runtime; "
+            "publish a complete immutable task image or use the Docker backend",
+        )
+
+
+def _daytona_sandbox_name(
+    *,
+    trial_id: UUID,
+    attempt_count: int,
+    candidate_sha: str,
+) -> str:
+    return f"loom-{trial_id.hex}-{attempt_count}-{candidate_sha[:8]}"
+
+
 async def _spawn_trial(
     *,
     pool: RunnerPool,
@@ -1130,6 +1329,7 @@ async def _spawn_trial(
     vllm_registry: WorkerVLLMRegistry,
     sandbox_allocator: SandboxNetworkAllocator | None = None,
     sandbox_singleton: SandboxSingletonManager | None = None,
+    daytona_runtime: _DaytonaWorkerRuntime | None = None,
 ) -> None:
     trial_id = UUID(str(payload["trial_id"]))
     team_id = UUID(str(payload["team_id"]))
@@ -1148,6 +1348,10 @@ async def _spawn_trial(
         )
         try:
             trial_config = TrialConfig.model_validate(payload.get("config") or {})
+            if daytona_runtime is not None and payload.get("family_state_uri"):
+                raise TaskImageBuildError(
+                    "Daytona backend does not support host-mounted family state",
+                )
             raw_task_image_materialization = payload.get("task_image_materialization")
             task_image_materialization = (
                 TaskImageExecutionGrantV1.model_validate(raw_task_image_materialization)
@@ -1157,11 +1361,11 @@ async def _spawn_trial(
             if task_image_materialization is None:
                 bundle = await cp_client.get_task_bundle(str(payload["task_id"]))
             else:
-                host_arch = _host_cpu_arch()
-                if task_image_materialization.cpu_arch != host_arch:
+                execution_arch = "x86_64" if daytona_runtime is not None else _host_cpu_arch()
+                if task_image_materialization.cpu_arch != execution_arch:
                     raise TaskImageBuildError(
                         "task image materialization architecture mismatch "
-                        f"expected={host_arch} "
+                        f"expected={execution_arch} "
                         f"granted={task_image_materialization.cpu_arch}"
                     )
                 bundle = {
@@ -1229,52 +1433,52 @@ async def _spawn_trial(
                     source_provenance=provenance,
                 )
             validate_task_dir_compatibility(task_dir)
-            # #275: serialize concurrent task-image builds so a burst of
-            # trials cannot fan out unbounded apt-get / dpkg / build
-            # containers on a shared host Docker daemon (e.g. OLDLAB).
-            # `_daemon_build_slot` reuses the same slot pool that
-            # `_resolve_layered_trial_image` uses; when the tag is
-            # already cached, resolve_task_image never enters the slot.
-            task_image = await resolve_task_image(
-                task_config=task_config,
-                task_dir=task_dir,
-                task_checksum=task_checksum,
-                docker_api_timeout_sec=settings.docker_api_timeout_sec,
-                build_slot_provider=lambda: _daemon_build_slot(
-                    cp_client,
-                    settings,
-                    worker_id,
-                ),
-                require_containment=bool(getattr(settings, "require_cgroup_parent", False)),
-                # #1169: contained pools set trial_cache_registry_repo so a
-                # base task image built+pushed by a non-contained builder is
-                # pullable here instead of (refused) rebuilt. getattr mirrors
-                # the require_cgroup_parent line above so partial/fake settings
-                # degrade gracefully (registry disabled).
-                registry_repo=(getattr(settings, "trial_cache_registry_repo", "") or None),
-                registry_image=(
-                    task_image_materialization.registry_images.get("task")
-                    if task_image_materialization is not None
-                    else None
-                ),
-                registry_pull_timeout_sec=getattr(
-                    settings, "trial_cache_registry_pull_timeout_sec", 15.0
-                ),
-                cpu_arch=_host_cpu_arch(),
-                build_if_missing=False,
-            )
-            # #317 Phase 1: if the chosen agent declares an
-            # install_script, layer the agent install onto the task
-            # image and run against the cached layered tag instead.
-            # Build is content-addressed + cluster-shared via the
-            # active_trial_cache_builds slot table.
-            task_image = await _resolve_layered_trial_image(
-                task_image=task_image,
-                agent_name=trial_config.agent_name,
-                settings=settings,
-                cp_client=cp_client,
-                worker_id=worker_id,
-            )
+            if daytona_runtime is not None:
+                task_image = _resolve_daytona_trial_image(
+                    task_config=task_config,
+                    materialization=task_image_materialization,
+                )
+                _require_daytona_agent_image_ready(trial_config.agent_name)
+                if workspace_staging_policy is not None:
+                    raise TaskImageBuildError(
+                        "Daytona backend does not support the separate private-workspace "
+                        "verifier runtime",
+                    )
+            else:
+                # #275: serialize concurrent task-image builds so a burst of
+                # trials cannot fan out unbounded apt-get / dpkg / build
+                # containers on a shared host Docker daemon (e.g. OLDLAB).
+                task_image = await resolve_task_image(
+                    task_config=task_config,
+                    task_dir=task_dir,
+                    task_checksum=task_checksum,
+                    docker_api_timeout_sec=settings.docker_api_timeout_sec,
+                    build_slot_provider=lambda: _daemon_build_slot(
+                        cp_client,
+                        settings,
+                        worker_id,
+                    ),
+                    require_containment=bool(getattr(settings, "require_cgroup_parent", False)),
+                    registry_repo=(getattr(settings, "trial_cache_registry_repo", "") or None),
+                    registry_image=(
+                        task_image_materialization.registry_images.get("task")
+                        if task_image_materialization is not None
+                        else None
+                    ),
+                    registry_pull_timeout_sec=getattr(
+                        settings, "trial_cache_registry_pull_timeout_sec", 15.0
+                    ),
+                    cpu_arch=_host_cpu_arch(),
+                    build_if_missing=False,
+                )
+                # #317 Phase 1: optional Docker-local agent layer.
+                task_image = await _resolve_layered_trial_image(
+                    task_image=task_image,
+                    agent_name=trial_config.agent_name,
+                    settings=settings,
+                    cp_client=cp_client,
+                    worker_id=worker_id,
+                )
         except Exception as exc:
             if task_dir is not None:
                 shutil.rmtree(task_dir, ignore_errors=True)
@@ -1359,6 +1563,114 @@ async def _spawn_trial(
         if family_state_mount is not None:
             family_state_volumes = (family_state_mount.as_volume_tuple(),)
 
+        hard_deadline_sec = resolve_hard_deadline_sec(
+            task_config=task_config,
+            trial_config=trial_config,
+            multiplier=settings.trial_hard_deadline_multiplier,
+            grace_sec=settings.trial_hard_deadline_grace_sec,
+        )
+        sandbox_lifetime_sec = getattr(settings, "daytona_sandbox_ttl_sec", 86_400)
+        if hard_deadline_sec is not None:
+            sandbox_lifetime_sec = min(sandbox_lifetime_sec, int(hard_deadline_sec))
+        sandbox_deadline_at = datetime.now(tz=UTC) + timedelta(
+            seconds=sandbox_lifetime_sec,
+        )
+        sandbox_name = _daytona_sandbox_name(
+            trial_id=trial_id,
+            attempt_count=attempt_count,
+            candidate_sha=getattr(settings, "candidate_sha", "") or ("0" * 40),
+        )
+
+        async def _reserve_daytona() -> Mapping[str, Any]:
+            assert daytona_runtime is not None
+            return await cp_client.reserve_daytona_sandbox(
+                worker_id=worker_id,
+                trial_id=trial_id,
+                team_id=team_id,
+                attempt_count=attempt_count,
+                candidate_sha=settings.candidate_sha,
+                provider_scope=daytona_runtime.provider_scope,
+                artifact_ref=task_image,
+                sandbox_name=sandbox_name,
+                deadline_at=sandbox_deadline_at.isoformat(),
+            )
+
+        async def _daytona_started(
+            ledger_id: UUID,
+            sandbox_id: str,
+            started_at: datetime,
+        ) -> None:
+            await cp_client.mark_daytona_sandbox_started(
+                worker_id=worker_id,
+                ledger_id=ledger_id,
+                sandbox_id=sandbox_id,
+                started_at=started_at.isoformat(),
+            )
+
+        async def _daytona_deleted(
+            ledger_id: UUID,
+            deleted: bool,
+            stopped_at: datetime,
+            error: str | None,
+        ) -> None:
+            await cp_client.report_daytona_deleted(
+                worker_id=worker_id,
+                ledger_id=ledger_id,
+                deleted=deleted,
+                stopped_at=stopped_at.isoformat(),
+                error=error,
+            )
+
+        def _driver_factory() -> DockerDriver | DaytonaDriver:
+            if daytona_runtime is None:
+                return DockerDriver(
+                    image=task_image,
+                    workspace=task_config.environment.workdir,
+                    docker_api_timeout_sec=settings.docker_api_timeout_sec,
+                )
+            return DaytonaDriver(
+                image=task_image,
+                config=daytona_runtime.config,
+                workspace=task_config.environment.workdir,
+                trial_id=trial_id,
+                team_id=team_id,
+                sandbox_name=sandbox_name,
+                candidate_sha=settings.candidate_sha,
+                provider_scope=daytona_runtime.provider_scope,
+                attempt_count=attempt_count,
+                api_gate=daytona_runtime.gate,
+                reserve_callback=_reserve_daytona,
+                started_callback=_daytona_started,
+                deleted_callback=_daytona_deleted,
+            )
+
+        def _docker_sidecar_runtime() -> DockerTaskSidecarRuntime:
+            return DockerTaskSidecarRuntime(
+                task_config=task_config,
+                task_dir=task_dir,
+                task_checksum=task_checksum,
+                trial_id=trial_id,
+                docker_api_timeout_sec=settings.docker_api_timeout_sec,
+                container_cpus=settings.container_cpus,
+                container_memory_mib=settings.container_memory_mib,
+                container_pids=settings.container_pids,
+                container_cgroup_parent=_worker_cgroup_parent(settings),
+                runtime_identity_labels=_runtime_identity_labels(settings),
+                cpu_arch=_host_cpu_arch(),
+                registry_repo=(getattr(settings, "trial_cache_registry_repo", "") or None),
+                registry_images=(
+                    task_image_materialization.registry_images
+                    if task_image_materialization is not None
+                    else None
+                ),
+                pull_only=True,
+                setup_slot_provider=lambda: _daemon_build_slot(
+                    cp_client,
+                    settings,
+                    worker_id,
+                ),
+            )
+
         runner = LocalTrialRunner(
             trial_id=trial_id,
             team_id=team_id,
@@ -1366,11 +1678,7 @@ async def _spawn_trial(
             task_checksum=task_checksum,
             task_dir=task_dir,
             trial_config=trial_config,
-            driver_factory=lambda: DockerDriver(
-                image=task_image,
-                workspace=task_config.environment.workdir,
-                docker_api_timeout_sec=settings.docker_api_timeout_sec,
-            ),
+            driver_factory=_driver_factory,
             agent_factory=_default_agent_factory(
                 team_id,
                 trial_id,
@@ -1433,35 +1741,17 @@ async def _spawn_trial(
             container_cpus=settings.container_cpus,
             container_memory_mib=settings.container_memory_mib,
             container_pids=settings.container_pids,
-            container_cgroup_parent=_worker_cgroup_parent(settings),
-            runtime_identity_labels=_runtime_identity_labels(settings),
-            slurm_allocated_gpus=getattr(settings, "slurm_allocated_gpus", -1),
-            slurm_gpu_device_ids=_slurm_gpu_device_ids(settings),
-            sidecar_runtime_factory=lambda: DockerTaskSidecarRuntime(
-                task_config=task_config,
-                task_dir=task_dir,
-                task_checksum=task_checksum,
-                trial_id=trial_id,
-                docker_api_timeout_sec=settings.docker_api_timeout_sec,
-                container_cpus=settings.container_cpus,
-                container_memory_mib=settings.container_memory_mib,
-                container_pids=settings.container_pids,
-                container_cgroup_parent=_worker_cgroup_parent(settings),
-                runtime_identity_labels=_runtime_identity_labels(settings),
-                cpu_arch=_host_cpu_arch(),
-                registry_repo=(getattr(settings, "trial_cache_registry_repo", "") or None),
-                registry_images=(
-                    task_image_materialization.registry_images
-                    if task_image_materialization is not None
-                    else None
-                ),
-                pull_only=True,
-                setup_slot_provider=lambda: _daemon_build_slot(
-                    cp_client,
-                    settings,
-                    worker_id,
-                ),
+            container_cgroup_parent=(
+                _worker_cgroup_parent(settings) if daytona_runtime is None else None
             ),
+            runtime_identity_labels=_runtime_identity_labels(settings),
+            slurm_allocated_gpus=(
+                getattr(settings, "slurm_allocated_gpus", -1) if daytona_runtime is None else -1
+            ),
+            slurm_gpu_device_ids=(
+                _slurm_gpu_device_ids(settings) if daytona_runtime is None else ()
+            ),
+            sidecar_runtime_factory=(_docker_sidecar_runtime if daytona_runtime is None else None),
         )
 
         # #360 + #378: wrap the runner with the cancellation watchdog so
@@ -1470,12 +1760,6 @@ async def _spawn_trial(
         # (b) trials that hang past a generous multiple of the resolved
         # effective agent timeout get force-cancelled instead of running
         # indefinitely.
-        hard_deadline_sec = resolve_hard_deadline_sec(
-            task_config=task_config,
-            trial_config=trial_config,
-            multiplier=settings.trial_hard_deadline_multiplier,
-            grace_sec=settings.trial_hard_deadline_grace_sec,
-        )
         try:
             await run_with_watchdog(
                 runner.run(),

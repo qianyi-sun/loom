@@ -54,6 +54,26 @@
     "default": "'http://loom-control-plane:8080'",
     "required": false
   },
+  "daytona_api_max_concurrent": {
+    "annotation": "<class 'int'>",
+    "default": "4",
+    "required": false
+  },
+  "daytona_api_min_interval_sec": {
+    "annotation": "<class 'float'>",
+    "default": "0.25",
+    "required": false
+  },
+  "daytona_cleanup_interval_sec": {
+    "annotation": "<class 'float'>",
+    "default": "30.0",
+    "required": false
+  },
+  "daytona_sandbox_ttl_sec": {
+    "annotation": "<class 'int'>",
+    "default": "86400",
+    "required": false
+  },
   "docker_api_timeout_sec": {
     "annotation": "<class 'int'>",
     "default": "1800",
@@ -197,6 +217,11 @@
   "require_cgroup_parent": {
     "annotation": "<class 'bool'>",
     "default": "False",
+    "required": false
+  },
+  "sandbox_backend": {
+    "annotation": "typing.Literal['docker', 'daytona']",
+    "default": "'docker'",
     "required": false
   },
   "sandbox_identity": {

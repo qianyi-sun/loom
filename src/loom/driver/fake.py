@@ -45,6 +45,7 @@ StreamingHandler = Callable[
 
 def _default_caps() -> Capabilities:
     return Capabilities(
+        backend="fake",
         os="linux",
         gpu_vendor="none",
         network_policies=frozenset(["public", "no-network", "allowlist"]),
