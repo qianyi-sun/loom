@@ -52,6 +52,61 @@ class _Runner:
         return CommandResult(stdout="{}", stderr="")
 
 
+async def test_kubectl_lists_only_pods_for_the_exact_job() -> None:
+    runner = _Runner()
+    kubectl = KubectlClient("kubectl", context="dev-fleet", runner=runner)
+
+    observation = await kubectl.list_job_pods("loom-build-attempt", "build-amd64")
+
+    assert observation == {}
+    assert runner.calls == [
+        (
+            [
+                "kubectl",
+                "--context",
+                "dev-fleet",
+                "get",
+                "pods",
+                "--namespace",
+                "loom-build-attempt",
+                "--selector=job-name=build-amd64",
+                "-o",
+                "json",
+            ],
+            None,
+        )
+    ]
+
+
+async def test_kubectl_waits_for_the_exact_job_failed_condition() -> None:
+    runner = _Runner()
+    kubectl = KubectlClient(
+        "kubectl",
+        context="dev-fleet",
+        job_wait_timeout_seconds=360,
+        runner=runner,
+    )
+
+    await kubectl.wait_job_failure("loom-build-attempt", "build-amd64")
+
+    assert runner.calls == [
+        (
+            [
+                "kubectl",
+                "--context",
+                "dev-fleet",
+                "wait",
+                "--namespace",
+                "loom-build-attempt",
+                "--for=condition=failed",
+                "--timeout=360s",
+                "job/build-amd64",
+            ],
+            None,
+        )
+    ]
+
+
 def test_instance_database_url_replaces_only_instance_identity() -> None:
     url = instance_database_url(
         "postgresql+psycopg://admin:old@db.internal:5433/postgres?sslmode=require",

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
 
+from loom import personal_dev_sandbox_builder as sandbox_builder
 from loom.personal_dev_builder_artifact import verify_personal_dev_build_artifact
 from loom.personal_dev_builder_manifest import (
     PersonalDevBuilderManifestConfig,
@@ -12,8 +14,10 @@ from loom.personal_dev_builder_manifest import (
 )
 from loom.personal_dev_candidate import PERSONAL_DEV_COMPONENTS
 from loom.personal_dev_sandbox_builder import (
+    _DOCKERFILES,
     PersonalDevSandboxBuildContract,
     PersonalDevSandboxBuildError,
+    _build_images,
     create_personal_dev_build_artifact,
 )
 from tests.unit.test_personal_dev_builder import _registration
@@ -74,3 +78,172 @@ def test_sandbox_contract_rejects_noncanonical_or_changed_authority() -> None:
     payload = json.dumps(changed, sort_keys=True, separators=(",", ":")).encode("ascii")
     with pytest.raises(PersonalDevSandboxBuildError, match="authority"):
         PersonalDevSandboxBuildContract.parse(payload)
+
+
+def test_build_images_uses_only_the_fixed_sidecar_socket(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = _contract()
+    source = tmp_path / "source"
+    for dockerfile in _DOCKERFILES.values():
+        path = source / dockerfile
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("FROM scratch\n", encoding="utf-8")
+    image_payload, _manifest_digest = _oci_archive(architecture="amd64")
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append((command, kwargs))
+        output_argument = next(
+            argument for argument in command if argument.startswith("--output=type=oci,dest=")
+        )
+        Path(output_argument.removeprefix("--output=type=oci,dest=")).write_bytes(
+            image_payload
+        )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+    images = _build_images(
+        contract,
+        source_directory=source,
+        output_directory=tmp_path / "images",
+        buildctl_path=Path("/usr/bin/buildctl"),
+        buildkit_address="unix:///var/run/loom-buildkit/buildkitd.sock",
+    )
+
+    assert set(images) == set(PERSONAL_DEV_COMPONENTS)
+    assert len(calls) == len(PERSONAL_DEV_COMPONENTS)
+    forbidden = (
+        "buildctl-daemonless",
+        "buildkitd_flags",
+        "rootlesskit",
+        "xdg_runtime_dir",
+    )
+    for command, kwargs in calls:
+        assert command[:3] == [
+            "/usr/bin/buildctl",
+            "--addr=unix:///var/run/loom-buildkit/buildkitd.sock",
+            "build",
+        ]
+        environment = kwargs.get("env", {})
+        assert isinstance(environment, dict)
+        assert "BUILDKITD" not in environment
+        serialized = repr((command, environment)).casefold()
+        assert all(value not in serialized for value in forbidden)
+
+
+@pytest.mark.parametrize(
+    ("buildctl_path", "buildkit_address"),
+    [
+        (Path("buildctl"), "unix:///var/run/loom-buildkit/buildkitd.sock"),
+        (Path("/tmp/buildctl"), "unix:///var/run/loom-buildkit/buildkitd.sock"),
+        (Path("/usr/bin/buildctl"), "unix:///tmp/buildkitd.sock"),
+        (Path("/usr/bin/buildctl"), "tcp://127.0.0.1:1234"),
+    ],
+)
+def test_build_images_rejects_untrusted_client_endpoints(
+    tmp_path: Path,
+    buildctl_path: Path,
+    buildkit_address: str,
+) -> None:
+    with pytest.raises(PersonalDevSandboxBuildError, match="buildctl"):
+        _build_images(
+            _contract(),
+            source_directory=tmp_path / "source",
+            output_directory=tmp_path / "images",
+            buildctl_path=buildctl_path,
+            buildkit_address=buildkit_address,
+        )
+
+
+def _client_status(**changes: str) -> bytes:
+    fields = {
+        "Uid": "1000\t1000\t1000\t1000",
+        "Gid": "1000\t1000\t1000\t1000",
+        "CapInh": "0000000000000000",
+        "CapPrm": "0000000000000000",
+        "CapEff": "0000000000000000",
+        "CapBnd": "0000000000000000",
+        "CapAmb": "0000000000000000",
+        "NoNewPrivs": "1",
+        "Seccomp": "2",
+    }
+    fields.update(changes)
+    return "".join(f"{name}:\t{value}\n" for name, value in fields.items()).encode(
+        "ascii"
+    )
+
+
+def test_client_identity_accepts_only_restricted_gvisor_process(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "kernel_is_gvisor"
+    marker.write_bytes(b"1\n")
+    status = tmp_path / "status"
+    status.write_bytes(_client_status())
+
+    sandbox_builder._verify_client_identity(
+        gvisor_marker=marker,
+        status_file=status,
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("Uid", "1001\t1001\t1001\t1001"),
+        ("Gid", "1001\t1001\t1001\t1001"),
+        ("CapInh", "00000000000000c0"),
+        ("CapPrm", "00000000000000c0"),
+        ("CapEff", "00000000000000c0"),
+        ("CapBnd", "00000000000000c0"),
+        ("CapAmb", "00000000000000c0"),
+        ("NoNewPrivs", "0"),
+        ("Seccomp", "0"),
+    ],
+)
+def test_client_identity_rejects_each_security_drift(
+    tmp_path: Path,
+    field: str,
+    value: str,
+) -> None:
+    marker = tmp_path / "kernel_is_gvisor"
+    marker.write_bytes(b"1\n")
+    status = tmp_path / "status"
+    status.write_bytes(_client_status(**{field: value}))
+
+    with pytest.raises(PersonalDevSandboxBuildError, match="identity"):
+        sandbox_builder._verify_client_identity(
+            gvisor_marker=marker,
+            status_file=status,
+        )
+
+
+def test_client_identity_requires_gvisor_marker(tmp_path: Path) -> None:
+    status = tmp_path / "status"
+    status.write_bytes(_client_status())
+
+    with pytest.raises(PersonalDevSandboxBuildError, match="identity"):
+        sandbox_builder._verify_client_identity(
+            gvisor_marker=tmp_path / "missing",
+            status_file=status,
+        )
+
+
+def test_client_identity_is_checked_before_authority_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def reject_identity() -> None:
+        raise PersonalDevSandboxBuildError("builder client runtime identity is invalid")
+
+    monkeypatch.setattr(sandbox_builder, "_verify_client_identity", reject_identity)
+
+    with pytest.raises(PersonalDevSandboxBuildError, match="identity"):
+        sandbox_builder.run_personal_dev_sandbox_build(
+            contract_file=tmp_path / "missing-contract",
+            capability_directory=tmp_path / "missing-capabilities",
+            workspace=tmp_path / "workspace",
+        )

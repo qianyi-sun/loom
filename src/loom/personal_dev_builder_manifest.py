@@ -22,6 +22,30 @@ _MANAGED_LABELS = {
     "app.kubernetes.io/managed-by": "loom-personal-dev-builder-controller",
     "app.kubernetes.io/part-of": "loom",
 }
+PUBLIC_EGRESS_IPV4_EXCEPTIONS = (
+    "0.0.0.0/8",
+    "10.0.0.0/8",
+    "100.64.0.0/10",
+    "127.0.0.0/8",
+    "169.254.0.0/16",
+    "172.16.0.0/12",
+    "192.0.0.0/24",
+    "192.0.2.0/24",
+    "192.88.99.0/24",
+    "192.168.0.0/16",
+    "198.18.0.0/15",
+    "198.51.100.0/24",
+    "203.0.113.0/24",
+    "224.0.0.0/4",
+    "240.0.0.0/4",
+)
+PUBLIC_EGRESS_IPV6_CIDR = "2000::/3"
+PUBLIC_EGRESS_IPV6_EXCEPTIONS = (
+    "2001::/23",
+    "2001:db8::/32",
+    "2002::/16",
+    "3fff::/20",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,9 +214,12 @@ def personal_dev_builder_manifest_documents(
             "name": namespace,
             "labels": {
                 **_labels(registration),
-                "pod-security.kubernetes.io/enforce": "restricted",
+                "pod-security.kubernetes.io/enforce": "privileged",
+                "pod-security.kubernetes.io/enforce-version": "v1.36",
                 "pod-security.kubernetes.io/audit": "restricted",
+                "pod-security.kubernetes.io/audit-version": "v1.36",
                 "pod-security.kubernetes.io/warn": "restricted",
+                "pod-security.kubernetes.io/warn-version": "v1.36",
             },
         },
     }
@@ -219,7 +246,7 @@ def personal_dev_builder_manifest_documents(
         "metadata": _metadata("builder-quota", namespace, registration),
         "spec": {
             "hard": {
-                "configmaps": "2",
+                "configmaps": "3",
                 "count/jobs.batch": "2",
                 "pods": "2",
                 "secrets": "2",
@@ -294,35 +321,13 @@ def personal_dev_builder_manifest_documents(
                         {
                             "ipBlock": {
                                 "cidr": "0.0.0.0/0",
-                                "except": [
-                                    "0.0.0.0/8",
-                                    "10.0.0.0/8",
-                                    "100.64.0.0/10",
-                                    "127.0.0.0/8",
-                                    "169.254.0.0/16",
-                                    "172.16.0.0/12",
-                                    "192.0.0.0/24",
-                                    "192.0.2.0/24",
-                                    "192.168.0.0/16",
-                                    "198.18.0.0/15",
-                                    "198.51.100.0/24",
-                                    "203.0.113.0/24",
-                                    "224.0.0.0/4",
-                                    "240.0.0.0/4",
-                                ],
+                                "except": list(PUBLIC_EGRESS_IPV4_EXCEPTIONS),
                             }
                         },
                         {
                             "ipBlock": {
-                                "cidr": "::/0",
-                                "except": [
-                                    "::/128",
-                                    "::1/128",
-                                    "2001:db8::/32",
-                                    "fc00::/7",
-                                    "fe80::/10",
-                                    "ff00::/8",
-                                ],
+                                "cidr": PUBLIC_EGRESS_IPV6_CIDR,
+                                "except": list(PUBLIC_EGRESS_IPV6_EXCEPTIONS),
                             }
                         },
                     ],
@@ -365,6 +370,8 @@ def personal_dev_builder_manifest_documents(
                 "spec": {
                     "restartPolicy": "Never",
                     "automountServiceAccountToken": False,
+                    "enableServiceLinks": False,
+                    "shareProcessNamespace": False,
                     "runtimeClassName": config.runtime_class_name,
                     "securityContext": {
                         "runAsNonRoot": True,
@@ -417,7 +424,75 @@ def personal_dev_builder_manifest_documents(
                                     "readOnly": True,
                                 },
                                 {"name": "workspace", "mountPath": "/workspace"},
-                                {"name": "tmp", "mountPath": "/tmp"},
+                                {"name": "tmp-client", "mountPath": "/tmp"},
+                                {
+                                    "name": "buildkit-run",
+                                    "mountPath": "/var/run/loom-buildkit",
+                                    "readOnly": True,
+                                },
+                            ],
+                        }
+                    ],
+                    "initContainers": [
+                        {
+                            "name": "buildkitd",
+                            "image": config.builder_image,
+                            "imagePullPolicy": config.image_pull_policy,
+                            "restartPolicy": "Always",
+                            "command": [
+                                "/usr/local/bin/loom-personal-dev-buildkitd"
+                            ],
+                            "securityContext": {
+                                "allowPrivilegeEscalation": True,
+                                "capabilities": {
+                                    "drop": ["ALL"],
+                                    "add": ["SETGID", "SETUID"],
+                                },
+                                "readOnlyRootFilesystem": True,
+                                "runAsNonRoot": True,
+                                "seccompProfile": {"type": "Unconfined"},
+                            },
+                            "resources": {
+                                "requests": {
+                                    "cpu": config.cpu_request,
+                                    "ephemeral-storage": (
+                                        config.ephemeral_storage_request
+                                    ),
+                                    "memory": config.memory_request,
+                                },
+                                "limits": {
+                                    "cpu": config.cpu_limit,
+                                    "ephemeral-storage": config.ephemeral_storage_limit,
+                                    "memory": config.memory_limit,
+                                },
+                            },
+                            "startupProbe": {
+                                "exec": {
+                                    "command": [
+                                        "/usr/bin/buildctl",
+                                        "--addr",
+                                        (
+                                            "unix:///var/run/loom-buildkit/"
+                                            "buildkitd.sock"
+                                        ),
+                                        "debug",
+                                        "workers",
+                                    ]
+                                },
+                                "failureThreshold": 60,
+                                "periodSeconds": 2,
+                                "timeoutSeconds": 1,
+                            },
+                            "volumeMounts": [
+                                {
+                                    "name": "buildkit-run",
+                                    "mountPath": "/var/run/loom-buildkit",
+                                },
+                                {
+                                    "name": "buildkit-state",
+                                    "mountPath": "/var/lib/loom-buildkit",
+                                },
+                                {"name": "tmp-buildkit", "mountPath": "/tmp"},
                             ],
                         }
                     ],
@@ -437,7 +512,13 @@ def personal_dev_builder_manifest_documents(
                             "name": "workspace",
                             "emptyDir": {"sizeLimit": config.ephemeral_storage_limit},
                         },
-                        {"name": "tmp", "emptyDir": {"sizeLimit": "1Gi"}},
+                        {"name": "tmp-client", "emptyDir": {"sizeLimit": "1Gi"}},
+                        {"name": "buildkit-run", "emptyDir": {"sizeLimit": "64Mi"}},
+                        {
+                            "name": "buildkit-state",
+                            "emptyDir": {"sizeLimit": config.ephemeral_storage_limit},
+                        },
+                        {"name": "tmp-buildkit", "emptyDir": {"sizeLimit": "1Gi"}},
                     ],
                 },
             },
@@ -456,6 +537,9 @@ def personal_dev_builder_manifest_documents(
 
 
 __all__ = [
+    "PUBLIC_EGRESS_IPV4_EXCEPTIONS",
+    "PUBLIC_EGRESS_IPV6_CIDR",
+    "PUBLIC_EGRESS_IPV6_EXCEPTIONS",
     "PersonalDevBuilderManifestConfig",
     "personal_dev_builder_manifest_documents",
 ]

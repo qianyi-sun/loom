@@ -146,6 +146,40 @@ class KubectlClient:
             timeout_seconds=self.job_wait_timeout_seconds + 30,
         )
 
+    async def wait_job_failure(self, namespace: str, name: str) -> None:
+        await self.runner.run(
+            self._argv(
+                "wait",
+                "--namespace",
+                namespace,
+                "--for=condition=failed",
+                f"--timeout={self.job_wait_timeout_seconds}s",
+                f"job/{name}",
+            ),
+            timeout_seconds=self.job_wait_timeout_seconds + 30,
+        )
+
+    async def list_job_pods(self, namespace: str, name: str) -> dict[str, Any]:
+        result = await self.runner.run(
+            self._argv(
+                "get",
+                "pods",
+                "--namespace",
+                namespace,
+                f"--selector=job-name={name}",
+                "-o",
+                "json",
+            ),
+            timeout_seconds=30,
+        )
+        try:
+            value = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            raise DevInstanceRuntimeError("cluster Pod response was invalid") from None
+        if not isinstance(value, dict):
+            raise DevInstanceRuntimeError("cluster Pod response was invalid")
+        return value
+
     async def wait_deployment(self, namespace: str, name: str) -> None:
         await self.runner.run(
             self._argv(
