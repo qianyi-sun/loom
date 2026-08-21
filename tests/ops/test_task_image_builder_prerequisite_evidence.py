@@ -21,9 +21,9 @@ from jsonschema import Draft202012Validator
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts/ops/task_image_builder_prerequisite_evidence.py"
 POLICY = ROOT / "deploy/task-image-builder/prerequisites-v1.toml"
-RELEASE = ROOT / "deploy/task-image-builder/host-release-v1.json"
+RELEASE = ROOT / "deploy/task-image-builder/host-release-v2.json"
 RUNTIME = ROOT / "deploy/task-image-builder/rootless-runtime-v1.json"
-SCHEMA = ROOT / "docs/evidence/task-image-builder-prerequisite-conformance-v1.schema.json"
+SCHEMA = ROOT / "docs/evidence/task-image-builder-prerequisite-conformance-v2.schema.json"
 PHASE2_NAMES = (
     "loom-task-builder-allocation-supervisor",
     "loom-task-builder-node-guard",
@@ -374,7 +374,7 @@ def _maintenance_receipt(
 ) -> dict[str, object]:
     cluster = _cluster(cluster_id)
     resources = _policy()["resource_profile"]
-    reason = f"loom-task-builder-phase1/host-release-v1/{operation_id}"
+    reason = f"loom-task-builder-phase1/host-release-v2/{operation_id}"
     cgroup_contents = (
         "CgroupPlugin=autodetect\n"
         "ConstrainCores=yes\n"
@@ -656,6 +656,7 @@ def _node_observation(
         packages.append(
             {
                 "name": name,
+                "source_suite": package["source_suite"],
                 "version": package["version"],
                 "architecture": package["architecture"],
                 "filename": package["filename"],
@@ -731,7 +732,8 @@ def _node_observation(
             "source": {
                 "os_id": "ubuntu",
                 "version_id": "24.04",
-                "suite": release["ubuntu"]["suite"],
+                "snapshot": release["ubuntu"]["snapshot"],
+                "suites": ["noble", "noble-updates"],
                 "component": "main",
                 "signer_fingerprint": release["ubuntu"]["signer_fingerprint"],
                 "keyring_sha256": release["ubuntu"]["keyring_sha256"],
@@ -1128,6 +1130,24 @@ def test_cli_exposes_separate_read_only_collection_and_assembly_commands() -> No
     assert "assemble" in result.stdout
 
 
+def test_evidence_context_uses_policy_bound_v2_release() -> None:
+    context = EVIDENCE._load_context(ROOT, POLICY, RELEASE)
+
+    assert context.release["schema"] == "loom.task-image-builder-host-release/v2"
+    assert context.release["release"] == "host-release-v2"
+    assert context.policy.raw["host_release_manifest"] == "host-release-v2.json"
+
+
+def test_evidence_context_rejects_explicit_release_bytes_outside_policy_binding(
+    tmp_path: Path,
+) -> None:
+    explicit = tmp_path / "host-release-v2.json"
+    explicit.write_bytes(RELEASE.read_bytes() + b"\n")
+
+    with pytest.raises(EVIDENCE.EvidenceError, match="does not match the candidate"):
+        EVIDENCE._load_context(ROOT, POLICY, explicit)
+
+
 def test_collectors_transport_exact_receipts_and_raw_host_readback_owner_only(
     tmp_path: Path,
 ) -> None:
@@ -1176,13 +1196,13 @@ def test_collectors_transport_exact_receipts_and_raw_host_readback_owner_only(
         required_owner=os.geteuid(),
     )
 
-    assert controller["schema"] == "loom.task-image-builder-controller-evidence/v1"
+    assert controller["schema"] == "loom.task-image-builder-controller-evidence/v2"
     assert controller["cluster"]["controller_identity"] == _controller_observation()
     assert controller["cluster"]["slurm_receipt"]["document"] == json.loads(
         slurm_path.read_text(encoding="utf-8")
     )
     assert controller["cluster"]["slurm_receipt"]["sha256"] == _sha_path(slurm_path)
-    assert node["schema"] == "loom.task-image-builder-node-evidence/v1"
+    assert node["schema"] == "loom.task-image-builder-node-evidence/v2"
     expected_packages = _node_observation(
         cluster_id, node_name, 10, operation_id, "1041"
     )["packages"]
@@ -1190,6 +1210,25 @@ def test_collectors_transport_exact_receipts_and_raw_host_readback_owner_only(
         expected_packages["installed"], key=lambda item: item["name"]
     )
     assert node["node"]["packages"] == expected_packages
+    assert node["node"]["packages"]["source"] == {
+        "os_id": "ubuntu",
+        "version_id": "24.04",
+        "snapshot": "20260820T000000Z",
+        "suites": ["noble", "noble-updates"],
+        "component": "main",
+        "signer_fingerprint": "F6ECB3762474EDA9D21B7022871920D1991BC93C",
+        "keyring_sha256": (
+            "80a36b0a6de2f69f49d2df75ef473ccde121e9e190b9ea01d20a4f63778d5c31"
+        ),
+    }
+    assert {
+        row["name"]: row["source_suite"]
+        for row in node["node"]["packages"]["installed"]
+    } == {
+        "libsubid4": "noble-updates",
+        "quota": "noble",
+        "uidmap": "noble-updates",
+    }
     assert node["node"]["runtime"]["dependency_sha256"] == {}
     assert node["node"]["kernel"]["slurm_cgroup_readback"]["contents"].endswith(
         "ConstrainDevices=yes\n"

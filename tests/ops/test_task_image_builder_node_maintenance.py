@@ -12,7 +12,7 @@ import pytest
 from scripts.ops import task_image_builder_node_maintenance as maintenance
 
 OPERATION_ID = "00000000-0000-4000-8000-000000000021"
-LOOM_REASON = f"loom-task-builder-phase1/host-release-v1/{OPERATION_ID}"
+LOOM_REASON = f"loom-task-builder-phase1/host-release-v2/{OPERATION_ID}"
 
 
 @dataclass
@@ -276,6 +276,7 @@ schema = "loom.task-image-builder-prerequisites/v1"
 production_certification_allowed = false
 certified_nodes = []
 unconditional_blockers = ["phase2_guard_provider_release_missing"]
+host_release_manifest = "host-release-v2.json"
 
 [resource_profile]
 cpus = 8
@@ -295,6 +296,12 @@ slurm_qos = "loom-task-image-builder-rootless-test"
 """.lstrip(),
         encoding="utf-8",
     )
+    release = policy.parent / "host-release-v2.json"
+    shutil.copyfile(
+        maintenance.ROOT / "deploy/task-image-builder/host-release-v2.json",
+        release,
+    )
+    release.chmod(0o644)
     host.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
     host.chmod(0o755)
     bundle = tmp_path / "bundle"
@@ -325,6 +332,45 @@ def _receipt(fixture: Fixture) -> dict[str, object]:
     paths = list(fixture.receipt_root.glob("*.json"))
     assert len(paths) == 1
     return json.loads(paths[0].read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    ["nested/host-release-v2.json", r"nested\host-release-v2.json"],
+)
+def test_maintenance_policy_rejects_release_manifest_path_separators(
+    tmp_path: Path,
+    manifest: str,
+) -> None:
+    fixture = _fixture(tmp_path)
+    policy = fixture.candidate_root / "deploy/task-image-builder/prerequisites-v1.toml"
+    policy.write_text(
+        policy.read_text(encoding="utf-8").replace(
+            'host_release_manifest = "host-release-v2.json"',
+            f"host_release_manifest = '{manifest}'",
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(maintenance.MaintenanceError, match="release manifest"):
+        _maintain(fixture, "plan")
+
+
+def test_maintenance_rejects_v1_release_authority(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    release = fixture.candidate_root / "deploy/task-image-builder/host-release-v2.json"
+    release.write_text(
+        json.dumps(
+            {
+                "schema": "loom.task-image-builder-host-release/v1",
+                "release": "host-release-v1",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(maintenance.MaintenanceError, match="host release"):
+        _maintain(fixture, "plan")
 
 
 def test_apply_records_prestate_drains_then_preflights_and_activates_only_target(
@@ -374,6 +420,18 @@ def test_foreign_drain_is_blocked_without_mutation(tmp_path: Path) -> None:
     assert result["state"] == "blocked"
     assert _receipt(fixture)["pre_state"]["reason"] == "operator-maintenance"
     assert _receipt(fixture)["terminal_state"] == "blocked"
+    assert fixture.runner.drain_reasons == []
+    assert fixture.runner.remote_actions == []
+
+
+def test_v1_maintenance_drain_reason_is_foreign(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    fixture.runner.state = "DRAIN"
+    fixture.runner.reason = f"loom-task-builder-phase1/host-release-v1/{OPERATION_ID}"
+
+    result = _maintain(fixture)
+
+    assert result["state"] == "blocked"
     assert fixture.runner.drain_reasons == []
     assert fixture.runner.remote_actions == []
 

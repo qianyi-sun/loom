@@ -22,7 +22,7 @@ from jsonschema import Draft202012Validator
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts/ops/task_image_builder_prerequisite_conformance.py"
 POLICY = ROOT / "deploy/task-image-builder/prerequisites-v1.toml"
-SCHEMA = ROOT / "docs/evidence/task-image-builder-prerequisite-conformance-v1.schema.json"
+SCHEMA = ROOT / "docs/evidence/task-image-builder-prerequisite-conformance-v2.schema.json"
 
 
 def _load_module() -> ModuleType:
@@ -232,7 +232,7 @@ def _fixture_policy() -> dict[str, Any]:
 
 def _fixture_release() -> dict[str, Any]:
     return json.loads(
-        (ROOT / "deploy/task-image-builder/host-release-v1.json").read_text(encoding="utf-8")
+        (ROOT / "deploy/task-image-builder/host-release-v2.json").read_text(encoding="utf-8")
     )
 
 
@@ -263,7 +263,7 @@ def _fixture_cluster(cluster_id: str) -> dict[str, Any]:
 def _candidate_digest() -> str:
     components = {
         "policy": _path_digest(POLICY),
-        "release": _path_digest(ROOT / "deploy/task-image-builder/host-release-v1.json"),
+        "release": _path_digest(ROOT / "deploy/task-image-builder/host-release-v2.json"),
         "runtime": _path_digest(ROOT / "deploy/task-image-builder/rootless-runtime-v1.json"),
         **_authority_binding().as_dict(),
     }
@@ -283,7 +283,7 @@ def _host_candidate_digest() -> str:
     return _fingerprint(
         {
             "policy": _path_digest(POLICY),
-            "release": _path_digest(ROOT / "deploy/task-image-builder/host-release-v1.json"),
+            "release": _path_digest(ROOT / "deploy/task-image-builder/host-release-v2.json"),
             "runtime": _path_digest(ROOT / "deploy/task-image-builder/rootless-runtime-v1.json"),
             **_authority_binding().as_dict(),
         }
@@ -498,7 +498,7 @@ def _host_receipt(cluster_id: str, node_name: str, operation_id: str) -> dict[st
         "slurm_node": node_name,
         "candidate_digest": _host_candidate_digest(),
         "policy_digest": _path_digest(POLICY),
-        "release_digest": _path_digest(ROOT / "deploy/task-image-builder/host-release-v1.json"),
+        "release_digest": _path_digest(ROOT / "deploy/task-image-builder/host-release-v2.json"),
         "cluster_digest": _fingerprint(cluster),
         **_authority_binding().as_dict(),
         "bundle_digest": "2" * 64,
@@ -531,7 +531,7 @@ def _host_receipt(cluster_id: str, node_name: str, operation_id: str) -> dict[st
         "slurm_node": node_name,
         "candidate_digest": _host_candidate_digest(),
         "policy_digest": _path_digest(POLICY),
-        "release_digest": _path_digest(ROOT / "deploy/task-image-builder/host-release-v1.json"),
+        "release_digest": _path_digest(ROOT / "deploy/task-image-builder/host-release-v2.json"),
         "cluster_digest": _fingerprint(cluster),
         **_authority_binding().as_dict(),
         "production_certification_allowed": False,
@@ -573,7 +573,7 @@ def _maintenance_receipt(
     job_id: str,
 ) -> dict[str, Any]:
     cluster = _fixture_cluster(cluster_id)
-    reason = f"loom-task-builder-phase1/host-release-v1/{operation_id}"
+    reason = f"loom-task-builder-phase1/host-release-v2/{operation_id}"
     cgroup_contents = (
         "CgroupPlugin=autodetect\n"
         "ConstrainCores=yes\n"
@@ -830,8 +830,8 @@ def _metadata(observed_at: str) -> dict[str, Any]:
         "policy_version": policy["policy_version"],
         "policy_sha256": _fingerprint(policy),
         "policy_file_sha256": _path_digest(POLICY),
-        "release_name": "host-release-v1",
-        "release_sha256": _path_digest(ROOT / "deploy/task-image-builder/host-release-v1.json"),
+        "release_name": "host-release-v2",
+        "release_sha256": _path_digest(ROOT / "deploy/task-image-builder/host-release-v2.json"),
         "runtime_manifest_sha256": _path_digest(
             ROOT / "deploy/task-image-builder/rootless-runtime-v1.json"
         ),
@@ -976,6 +976,7 @@ def _node_evidence(
     installed_packages = [
         {
             "name": name,
+            "source_suite": package["source_suite"],
             "version": package["version"],
             "architecture": package["architecture"],
             "filename": package["filename"],
@@ -1049,7 +1050,8 @@ def _node_evidence(
             "source": {
                 "os_id": "ubuntu",
                 "version_id": "24.04",
-                "suite": "noble-updates",
+                "snapshot": "20260820T000000Z",
+                "suites": ["noble", "noble-updates"],
                 "component": "main",
                 "signer_fingerprint": "F6ECB3762474EDA9D21B7022871920D1991BC93C",
                 "keyring_sha256": (
@@ -1293,15 +1295,15 @@ def _complete_evidence() -> dict[str, Any]:
         clusters.append(controller)
         ordinal += 1
     return {
-        "schema": "loom.task-image-builder-prerequisite-conformance/v1",
-        "schema_version": 1,
+        "schema": "loom.task-image-builder-prerequisite-conformance/v2",
+        "schema_version": 2,
         "collected_at": observed_at,
         "candidate_sha256": _candidate_digest(),
         "policy_version": policy["policy_version"],
         "policy_sha256": _fingerprint(policy),
         "policy_file_sha256": _path_digest(POLICY),
-        "release_name": "host-release-v1",
-        "release_sha256": _path_digest(ROOT / "deploy/task-image-builder/host-release-v1.json"),
+        "release_name": "host-release-v2",
+        "release_sha256": _path_digest(ROOT / "deploy/task-image-builder/host-release-v2.json"),
         "runtime_manifest_sha256": _path_digest(
             ROOT / "deploy/task-image-builder/rootless-runtime-v1.json"
         ),
@@ -1755,6 +1757,42 @@ def test_schema_and_complete_phase_one_evidence_are_valid_but_not_certifiable() 
 
 
 @pytest.mark.parametrize(
+    "mutation",
+    [
+        "v1-schema",
+        "v1-release",
+        "swapped-suites",
+        "wrong-snapshot",
+        "missing-source-suite",
+        "package-source-mismatch",
+    ],
+)
+def test_v2_evidence_rejects_release_source_drift(mutation: str) -> None:
+    evidence = _evidence()
+    node = evidence["clusters"][0]["nodes"][0]
+    if mutation == "v1-schema":
+        evidence["schema"] = "loom.task-image-builder-prerequisite-conformance/v1"
+        evidence["schema_version"] = 1
+    elif mutation == "v1-release":
+        evidence["release_name"] = "host-release-v1"
+    elif mutation == "swapped-suites":
+        node["packages"]["source"]["suites"] = ["noble-updates", "noble"]
+    elif mutation == "wrong-snapshot":
+        node["packages"]["source"]["snapshot"] = "20260819T000000Z"
+    elif mutation == "missing-source-suite":
+        del node["packages"]["installed"][0]["source_suite"]
+    elif mutation == "package-source-mismatch":
+        quota = next(
+            item for item in node["packages"]["installed"] if item["name"] == "quota"
+        )
+        quota["source_suite"] = "noble-updates"
+    else:
+        raise AssertionError(f"unknown mutation: {mutation}")
+
+    assert _failures(evidence)
+
+
+@pytest.mark.parametrize(
     ("old", "new"),
     [
         (
@@ -1798,11 +1836,55 @@ def test_policy_loader_rejects_mutated_phase_one_authority(
     policy_path.write_text(source.replace(old, new, 1), encoding="utf-8")
     for source_path in (
         ROOT / "deploy/task-image-builder/rootless-runtime-v1.json",
-        ROOT / "deploy/task-image-builder/host-release-v1.json",
+        ROOT / "deploy/task-image-builder/host-release-v2.json",
     ):
         (tmp_path / source_path.name).write_bytes(source_path.read_bytes())
 
     with pytest.raises(CONFORMANCE.ConformanceError, match="policy"):
+        CONFORMANCE.load_policy(policy_path)
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    ["nested/host-release-v2.json", r"nested\host-release-v2.json"],
+)
+def test_policy_loader_rejects_release_manifest_path_separators(
+    tmp_path: Path,
+    manifest: str,
+) -> None:
+    policy_path = tmp_path / POLICY.name
+    policy_path.write_text(
+        POLICY.read_text(encoding="utf-8").replace(
+            'host_release_manifest = "host-release-v2.json"',
+            f"host_release_manifest = '{manifest}'",
+        ),
+        encoding="utf-8",
+    )
+    for source_path in (
+        ROOT / "deploy/task-image-builder/rootless-runtime-v1.json",
+        ROOT / "deploy/task-image-builder/host-release-v2.json",
+    ):
+        (tmp_path / source_path.name).write_bytes(source_path.read_bytes())
+
+    with pytest.raises(CONFORMANCE.ConformanceError, match="release manifest"):
+        CONFORMANCE.load_policy(policy_path)
+
+
+def test_policy_loader_rejects_v1_host_release_contract(tmp_path: Path) -> None:
+    policy_path = tmp_path / POLICY.name
+    policy_path.write_bytes(POLICY.read_bytes())
+    (tmp_path / "rootless-runtime-v1.json").write_bytes(
+        (ROOT / "deploy/task-image-builder/rootless-runtime-v1.json").read_bytes()
+    )
+    release = _fixture_release()
+    release["schema"] = "loom.task-image-builder-host-release/v1"
+    release["release"] = "host-release-v1"
+    (tmp_path / "host-release-v2.json").write_text(
+        json.dumps(release),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CONFORMANCE.ConformanceError, match="host release"):
         CONFORMANCE.load_policy(policy_path)
 
 
@@ -2325,7 +2407,7 @@ def test_cli_verify_converts_parser_recursion_to_a_generic_error(tmp_path: Path)
     ("target_name", "expected"),
     [
         ("rootless-runtime-v1.json", "rootless runtime manifest is invalid"),
-        ("host-release-v1.json", "host release is invalid"),
+        ("host-release-v2.json", "host release is invalid"),
     ],
 )
 def test_cli_plan_converts_policy_json_recursion_to_a_generic_error(
@@ -2337,7 +2419,7 @@ def test_cli_plan_converts_policy_json_recursion_to_a_generic_error(
     policy_path.write_bytes(POLICY.read_bytes())
     for source in (
         ROOT / "deploy/task-image-builder/rootless-runtime-v1.json",
-        ROOT / "deploy/task-image-builder/host-release-v1.json",
+        ROOT / "deploy/task-image-builder/host-release-v2.json",
     ):
         destination = tmp_path / source.name
         if source.name == target_name:

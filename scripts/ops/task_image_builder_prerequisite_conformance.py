@@ -31,12 +31,13 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.ops import task_image_builder_authority as authority  # noqa: E402
+from scripts.ops import task_image_builder_host_release as host_release  # noqa: E402
 
 DEFAULT_POLICY = REPO_ROOT / "deploy/task-image-builder/prerequisites-v1.toml"
 DEFAULT_SCHEMA = (
-    REPO_ROOT / "docs/evidence/task-image-builder-prerequisite-conformance-v1.schema.json"
+    REPO_ROOT / "docs/evidence/task-image-builder-prerequisite-conformance-v2.schema.json"
 )
-EVIDENCE_SCHEMA = "loom.task-image-builder-prerequisite-conformance/v1"
+EVIDENCE_SCHEMA = "loom.task-image-builder-prerequisite-conformance/v2"
 INERT_BLOCKER = "phase2_guard_provider_release_missing"
 ZERO_HASH = "0" * 64
 EXPECTED_IDENTITY = {
@@ -350,15 +351,23 @@ def load_policy(path: Path) -> PrerequisitePolicy:
         "loom.task-image-builder-rootless-runtime/v1"
     ):
         raise ConformanceError("rootless runtime manifest is invalid")
-    release_path = path.parent / "host-release-v1.json"
+    release_manifest = raw_value.get("host_release_manifest")
+    if (
+        not isinstance(release_manifest, str)
+        or not release_manifest
+        or "/" in release_manifest
+        or "\\" in release_manifest
+        or Path(release_manifest).name != release_manifest
+    ):
+        raise ConformanceError("host release manifest path is invalid")
+    release_path = path.parent / release_manifest
     release_payload = _read_regular(release_path)
     release_value = _policy_json(release_payload, "host release is invalid")
-    if (
-        not isinstance(release_value, dict)
-        or release_value.get("schema") != "loom.task-image-builder-host-release/v1"
-        or release_value.get("release") != "host-release-v1"
-        or release_value.get("runtime_manifest") != manifest_name
-    ):
+    try:
+        parsed_release = host_release.load_host_release(release_path)
+    except host_release.HostReleaseError as exc:
+        raise ConformanceError("host release is invalid") from exc
+    if not isinstance(release_value, dict) or parsed_release.runtime_manifest != manifest_name:
         raise ConformanceError("host release is invalid")
     digest = hashlib.sha256(_canonical_bytes(raw_value)).hexdigest()
     try:
@@ -436,6 +445,10 @@ def _valid_operation_id(value: object) -> bool:
     except ValueError:
         return False
     return parsed.version == 4 and str(parsed) == value
+
+
+def _owned_reason(release_name: str, operation_id: object) -> str:
+    return f"loom-task-builder-phase1/{release_name}/{operation_id}"
 
 
 def _file_digest(relative: str) -> str:
@@ -827,20 +840,22 @@ def _package_failures(
     node_name: str,
 ) -> list[str]:
     ubuntu = policy.release["ubuntu"]
+    debian_architecture = policy.release["architecture_map"][cluster["architecture"]]
     expected_source = {
         "os_id": ubuntu["os_id"],
         "version_id": ubuntu["version_id"],
-        "suite": ubuntu["suite"],
+        "snapshot": ubuntu["snapshot"],
+        "suites": list(policy.release["repositories"][debian_architecture]["indexes"]),
         "component": ubuntu["component"],
         "signer_fingerprint": ubuntu["signer_fingerprint"],
         "keyring_sha256": ubuntu["keyring_sha256"],
     }
     if value.get("source") != expected_source:
         return [f"{node_name}: package/source signature evidence is invalid"]
-    debian_architecture = policy.release["architecture_map"][cluster["architecture"]]
     expected_installed = [
         {
             "name": name,
+            "source_suite": package["source_suite"],
             "version": package["version"],
             "architecture": package["architecture"],
             "filename": package["filename"],
@@ -1643,7 +1658,7 @@ def _maintenance_receipt_failures(
         return failures
     pre_state = document.get("pre_state")
     operation_id = document.get("operation_id")
-    owned_reason = f"loom-task-builder-phase1/host-release-v1/{operation_id}"
+    owned_reason = _owned_reason(str(policy.release["release"]), operation_id)
     if not isinstance(pre_state, dict) or set(pre_state) != {
         "state",
         "reason",

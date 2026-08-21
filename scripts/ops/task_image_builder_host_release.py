@@ -25,7 +25,14 @@ MAX_BINARY_BYTES = 512 * 1024 * 1024
 SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 FINGERPRINT_RE = re.compile(r"^[A-F0-9]{40}$")
 ARCHITECTURE_MAP = {"x86_64": "amd64", "aarch64": "arm64"}
+EXPECTED_SNAPSHOT = "20260820T000000Z"
+EXPECTED_SUITES = ("noble", "noble-updates")
 PACKAGE_ORDER = ("libsubid4", "uidmap", "quota")
+EXPECTED_PACKAGE_SUITES = {
+    "libsubid4": "noble-updates",
+    "uidmap": "noble-updates",
+    "quota": "noble",
+}
 EXPECTED_SETUID_PATHS = {"./usr/bin/newgidmap", "./usr/bin/newuidmap"}
 EXPECTED_RUNTIME_RELEASE = "rootless-runtime-v1"
 EXPECTED_RUNTIME_BINARIES = {
@@ -82,6 +89,7 @@ class SubprocessCommandRunner:
 @dataclass(frozen=True)
 class PackageArtifact:
     package: str
+    source_suite: str
     version: str
     architecture: str
     filename: str
@@ -90,10 +98,20 @@ class PackageArtifact:
 
 
 @dataclass(frozen=True)
+class RepositoryIndex:
+    suite: str
+    inrelease_path: str
+    inrelease_size: int
+    inrelease_sha256: str
+    packages_path: str
+    packages_size: int
+    packages_sha256: str
+
+
+@dataclass(frozen=True)
 class RepositoryMetadata:
     base_url: str
-    inrelease_path: str
-    packages_path: str
+    indexes: Mapping[str, RepositoryIndex]
 
 
 @dataclass(frozen=True)
@@ -104,7 +122,7 @@ class HostRelease:
     signer_fingerprint: str
     keyring_name: str
     keyring_sha256: str
-    suite: str
+    snapshot: str
     architecture_map: Mapping[str, str]
     repositories: Mapping[str, RepositoryMetadata]
     packages: Mapping[str, Mapping[str, PackageArtifact]]
@@ -148,6 +166,16 @@ def _string(value: object, label: str) -> str:
 def _exact_keys(value: Mapping[str, object], expected: set[str], label: str) -> None:
     if set(value) != expected:
         raise HostReleaseError(f"{label} fields are invalid")
+
+
+def _bounded_size(value: object, maximum: int, label: str) -> int:
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or not 0 < value <= maximum
+    ):
+        raise HostReleaseError(f"{label} is invalid")
+    return value
 
 
 def _safe_relative(value: object, label: str) -> str:
@@ -229,9 +257,11 @@ def load_host_release(path: Path) -> HostRelease:
         },
         "host release",
     )
-    if raw["schema"] != "loom.task-image-builder-host-release/v1":
+    if raw["schema"] != "loom.task-image-builder-host-release/v2":
         raise HostReleaseError("host release schema is invalid")
     release_name = _string(raw["release"], "release")
+    if release_name != "host-release-v2":
+        raise HostReleaseError("host release name is invalid")
     runtime_manifest = _safe_relative(raw["runtime_manifest"], "runtime manifest")
 
     ubuntu = _object(raw["ubuntu"], "ubuntu")
@@ -240,7 +270,7 @@ def load_host_release(path: Path) -> HostRelease:
         {
             "os_id",
             "version_id",
-            "suite",
+            "snapshot",
             "component",
             "signer_fingerprint",
             "keyring_name",
@@ -261,7 +291,9 @@ def load_host_release(path: Path) -> HostRelease:
     keyring_sha256 = _string(ubuntu["keyring_sha256"], "keyring digest")
     if SHA256_RE.fullmatch(keyring_sha256) is None:
         raise HostReleaseError("keyring digest is invalid")
-    suite = _string(ubuntu["suite"], "Ubuntu suite")
+    snapshot = _string(ubuntu["snapshot"], "Ubuntu snapshot")
+    if snapshot != EXPECTED_SNAPSHOT:
+        raise HostReleaseError("Ubuntu snapshot is invalid")
 
     architecture_map_raw = _object(raw["architecture_map"], "architecture map")
     if not architecture_map_raw:
@@ -285,17 +317,64 @@ def load_host_release(path: Path) -> HostRelease:
         repository = _object(repositories_raw[architecture], f"{architecture} repository")
         _exact_keys(
             repository,
-            {"base_url", "inrelease_path", "packages_path"},
+            {"base_url", "indexes"},
             f"{architecture} repository",
         )
         base_url = _string(repository["base_url"], "repository base URL")
-        if not base_url.startswith("https://") or "@" in base_url:
+        expected_base_url = f"https://snapshot.ubuntu.com/ubuntu/{snapshot}"
+        if base_url != expected_base_url:
             raise HostReleaseError("repository base URL is invalid")
-        repositories[architecture] = RepositoryMetadata(
-            base_url,
-            _safe_relative(repository["inrelease_path"], "InRelease path"),
-            _safe_relative(repository["packages_path"], "Packages path"),
-        )
+        indexes_raw = _object(repository["indexes"], f"{architecture} indexes")
+        if tuple(indexes_raw) != EXPECTED_SUITES:
+            raise HostReleaseError("repository suite set is invalid")
+        indexes: dict[str, RepositoryIndex] = {}
+        for suite in EXPECTED_SUITES:
+            index = _object(indexes_raw[suite], f"{architecture} {suite} index")
+            _exact_keys(
+                index,
+                {
+                    "inrelease_path",
+                    "inrelease_size",
+                    "inrelease_sha256",
+                    "packages_path",
+                    "packages_size",
+                    "packages_sha256",
+                },
+                f"{architecture} {suite} index",
+            )
+            inrelease_path = _safe_relative(index["inrelease_path"], "InRelease path")
+            packages_path = _safe_relative(index["packages_path"], "Packages path")
+            if inrelease_path != f"dists/{suite}/InRelease" or packages_path != (
+                f"dists/{suite}/main/binary-{architecture}/Packages.xz"
+            ):
+                raise HostReleaseError("repository index path is invalid")
+            inrelease_size = _bounded_size(
+                index["inrelease_size"],
+                MAX_METADATA_BYTES,
+                "repository index size",
+            )
+            packages_size = _bounded_size(
+                index["packages_size"],
+                MAX_METADATA_BYTES,
+                "repository index size",
+            )
+            inrelease_sha256 = _string(index["inrelease_sha256"], "InRelease digest")
+            packages_sha256 = _string(index["packages_sha256"], "Packages digest")
+            if any(
+                SHA256_RE.fullmatch(digest) is None
+                for digest in (inrelease_sha256, packages_sha256)
+            ):
+                raise HostReleaseError("repository index digest is invalid")
+            indexes[suite] = RepositoryIndex(
+                suite=suite,
+                inrelease_path=inrelease_path,
+                inrelease_size=inrelease_size,
+                inrelease_sha256=inrelease_sha256,
+                packages_path=packages_path,
+                packages_size=packages_size,
+                packages_sha256=packages_sha256,
+            )
+        repositories[architecture] = RepositoryMetadata(base_url, indexes)
 
         architecture_packages = _object(packages_raw[architecture], f"{architecture} packages")
         if set(architecture_packages) != set(PACKAGE_ORDER):
@@ -305,7 +384,15 @@ def load_host_release(path: Path) -> HostRelease:
             item = _object(architecture_packages[package], f"{architecture} {package}")
             _exact_keys(
                 item,
-                {"package", "version", "architecture", "filename", "size", "sha256"},
+                {
+                    "package",
+                    "source_suite",
+                    "version",
+                    "architecture",
+                    "filename",
+                    "size",
+                    "sha256",
+                },
                 f"{architecture} {package}",
             )
             if item["package"] != package or item["architecture"] != architecture:
@@ -318,12 +405,15 @@ def load_host_release(path: Path) -> HostRelease:
                 raise HostReleaseError("package digest is invalid")
             parsed_packages[package] = PackageArtifact(
                 package,
+                _string(item["source_suite"], "package source suite"),
                 _string(item["version"], "package version"),
                 architecture,
                 _safe_relative(item["filename"], "package filename"),
                 size,
                 digest,
             )
+            if parsed_packages[package].source_suite != EXPECTED_PACKAGE_SUITES[package]:
+                raise HostReleaseError("package source suite is invalid")
         packages[architecture] = parsed_packages
 
     return HostRelease(
@@ -333,7 +423,7 @@ def load_host_release(path: Path) -> HostRelease:
         signer_fingerprint=signer,
         keyring_name=keyring_name,
         keyring_sha256=keyring_sha256,
-        suite=suite,
+        snapshot=snapshot,
         architecture_map=architecture_map,
         repositories=repositories,
         packages=packages,
@@ -365,10 +455,14 @@ def _expected_bundle_paths(
         f"packages/{PurePosixPath(item.filename).name}"
         for item in release.packages[debian_architecture].values()
     }
+    apt_paths = {
+        f"apt/{suite}.{kind}"
+        for suite in release.repositories[debian_architecture].indexes
+        for kind in ("InRelease", "Packages.xz")
+    }
     return {
         release.keyring_name,
-        "apt/InRelease",
-        "apt/Packages.xz",
+        *apt_paths,
         *package_paths,
         *runtime_paths,
     }
@@ -462,7 +556,7 @@ def _snapshot_bundle(
             directory_descriptor = source_root if directory_name == "." else source_directories[directory_name]
             limit = (
                 MAX_METADATA_BYTES
-                if relative in {"apt/InRelease", "apt/Packages.xz"} or directory_name == "."
+                if directory_name in {".", "apt"}
                 else MAX_ARTIFACT_BYTES
             )
             descriptor = os.open(
@@ -612,16 +706,49 @@ def _release_index_digest(
     return rows[0]
 
 
+def _decompress_packages_index(payload: bytes) -> bytes:
+    if not payload:
+        raise HostReleaseError("Packages index is empty")
+    xz_magic = b"\xfd7zXZ\x00"
+    remaining = payload
+    expanded = bytearray()
+    saw_stream = False
+    while remaining:
+        padding = len(remaining) - len(remaining.lstrip(b"\0"))
+        if padding:
+            if not saw_stream:
+                raise HostReleaseError("Packages index contains trailing bytes")
+            if padding % 4:
+                raise HostReleaseError("Packages index XZ padding is not aligned")
+            remaining = remaining[padding:]
+            if not remaining:
+                break
+        if not remaining.startswith(xz_magic):
+            raise HostReleaseError("Packages index contains trailing bytes")
+        saw_stream = True
+        decompressor = lzma.LZMADecompressor(format=lzma.FORMAT_XZ)
+        try:
+            stream = decompressor.decompress(
+                remaining,
+                max_length=MAX_METADATA_BYTES - len(expanded) + 1,
+            )
+        except lzma.LZMAError as exc:
+            raise HostReleaseError("Packages index is invalid") from exc
+        expanded.extend(stream)
+        if len(expanded) > MAX_METADATA_BYTES:
+            raise HostReleaseError("Packages index expands beyond its limit")
+        if not decompressor.eof:
+            raise HostReleaseError("Packages index is incomplete")
+        if len(decompressor.unused_data) >= len(remaining):
+            raise HostReleaseError("Packages index stream made no progress")
+        remaining = decompressor.unused_data
+    if not saw_stream:
+        raise HostReleaseError("Packages index is empty")
+    return bytes(expanded)
+
+
 def _package_stanzas(payload: bytes) -> dict[str, dict[str, str]]:
-    try:
-        decompressor = lzma.LZMADecompressor()
-        expanded = decompressor.decompress(payload, max_length=MAX_METADATA_BYTES + 1)
-    except (lzma.LZMAError, UnicodeDecodeError) as exc:
-        raise HostReleaseError("Packages index is invalid") from exc
-    if len(expanded) > MAX_METADATA_BYTES:
-        raise HostReleaseError("Packages index expands beyond its limit")
-    if not decompressor.eof or decompressor.unused_data:
-        raise HostReleaseError("Packages index is incomplete or concatenated")
+    expanded = _decompress_packages_index(payload)
     try:
         text = expanded.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -740,6 +867,8 @@ def verify_host_bundle(
     if debian_architecture is None:
         raise HostReleaseError("native architecture is not in the host release")
     runtime_path = runtime_manifest_path or release.source_path.parent / release.runtime_manifest
+    if runtime_path.name != release.runtime_manifest:
+        raise HostReleaseError("runtime manifest path does not match the release")
     runtime = _load_json(runtime_path, "runtime manifest")
     if runtime.get("schema") != "loom.task-image-builder-rootless-runtime/v1":
         raise HostReleaseError("runtime manifest schema is invalid")
@@ -760,32 +889,52 @@ def verify_host_bundle(
         keyring = _read_regular(keyring_path, MAX_METADATA_BYTES, "Ubuntu archive keyring")
         if _sha256(keyring) != release.keyring_sha256:
             raise HostReleaseError("Ubuntu archive keyring digest is invalid")
-        inrelease_path = snapshot_root / "apt/InRelease"
-        inrelease = _read_regular(inrelease_path, MAX_METADATA_BYTES, "InRelease")
-        _verify_signature(keyring_path, inrelease_path, release.signer_fingerprint, runner)
-
         repository = release.repositories[debian_architecture]
-        prefix = f"dists/{release.suite}/"
-        if not repository.packages_path.startswith(prefix):
-            raise HostReleaseError("Packages path is outside the signed suite")
-        signed_packages_path = repository.packages_path.removeprefix(prefix)
-        expected_digest, expected_size = _release_index_digest(
-            inrelease,
-            signed_packages_path,
-            release.suite,
-        )
-        packages_path = snapshot_root / "apt/Packages.xz"
-        packages_payload = _read_regular(packages_path, MAX_METADATA_BYTES, "Packages index")
-        if len(packages_payload) != expected_size or _sha256(packages_payload) != expected_digest:
-            raise HostReleaseError("Packages index does not match InRelease")
-        package_index = _package_stanzas(packages_payload)
+        package_indexes: dict[str, dict[str, dict[str, str]]] = {}
+        for suite, index in repository.indexes.items():
+            inrelease_path = snapshot_root / "apt" / f"{suite}.InRelease"
+            inrelease = _read_regular(inrelease_path, MAX_METADATA_BYTES, "InRelease")
+            packages_path = snapshot_root / "apt" / f"{suite}.Packages.xz"
+            packages_payload = _read_regular(
+                packages_path,
+                MAX_METADATA_BYTES,
+                "Packages index",
+            )
+            if (
+                len(inrelease) != index.inrelease_size
+                or _sha256(inrelease) != index.inrelease_sha256
+                or len(packages_payload) != index.packages_size
+                or _sha256(packages_payload) != index.packages_sha256
+            ):
+                raise HostReleaseError("repository pinned metadata is invalid")
+            _verify_signature(
+                keyring_path,
+                inrelease_path,
+                release.signer_fingerprint,
+                runner,
+            )
+            prefix = f"dists/{suite}/"
+            if not index.packages_path.startswith(prefix):
+                raise HostReleaseError("Packages path is outside the signed suite")
+            signed_packages_path = index.packages_path.removeprefix(prefix)
+            expected_digest, expected_size = _release_index_digest(
+                inrelease,
+                signed_packages_path,
+                suite,
+            )
+            if (
+                len(packages_payload) != expected_size
+                or _sha256(packages_payload) != expected_digest
+            ):
+                raise HostReleaseError("Packages index does not match signed metadata")
+            package_indexes[suite] = _package_stanzas(packages_payload)
 
         package_paths: list[Path] = []
         for package in PACKAGE_ORDER:
             artifact = release.packages[debian_architecture][package]
-            fields = package_index.get(package)
+            fields = package_indexes[artifact.source_suite].get(package)
             if fields is None:
-                raise HostReleaseError("package is absent from the signed index")
+                raise HostReleaseError("package signed metadata is absent")
             expected_fields = {
                 "Package": artifact.package,
                 "Version": artifact.version,

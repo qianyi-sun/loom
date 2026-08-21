@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 from scripts.ops import task_image_builder_host_converge as host
+from tests.ops.test_task_image_builder_host_release import FixtureRunner, _bundle_fixture
 
 DESIRED_CGROUP = (
     b"CgroupPlugin=autodetect\n"
@@ -176,9 +177,14 @@ def _fixture(tmp_path: Path, transition: str = "shared_symlink_to_node_local") -
     storage.mkdir()
     bundle = tmp_path / "bundle"
     bundle.mkdir()
-    release = tmp_path / "host-release-v1.json"
+    release = tmp_path / "host-release-v2.json"
     release.write_text(
-        json.dumps({"schema": "loom.task-image-builder-host-release/v1", "release": "host-release-v1"}),
+        json.dumps(
+            {
+                "schema": "loom.task-image-builder-host-release/v2",
+                "release": "host-release-v2",
+            }
+        ),
         encoding="utf-8",
     )
     runtime = tmp_path / "rootless-runtime-v1.json"
@@ -199,6 +205,7 @@ policy_version = "task-image-builder-prerequisites-v1"
 production_certification_allowed = false
 certified_nodes = []
 unconditional_blockers = ["phase2_guard_provider_release_missing"]
+host_release_manifest = "host-release-v2.json"
 
 [identity]
 user = "loom-builder"
@@ -298,6 +305,77 @@ def _receipt(fixture: Fixture) -> dict[str, object]:
     receipts = list(fixture.receipt_dir.glob("*.json"))
     assert len(receipts) == 1
     return json.loads(receipts[0].read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    ["nested/host-release-v2.json", r"nested\host-release-v2.json"],
+)
+def test_host_policy_rejects_release_manifest_path_separators(
+    tmp_path: Path,
+    manifest: str,
+) -> None:
+    fixture = _fixture(tmp_path)
+    policy = fixture.policy.read_text(encoding="utf-8").replace(
+        'host_release_manifest = "host-release-v2.json"',
+        f"host_release_manifest = '{manifest}'",
+    )
+    fixture.policy.write_text(policy, encoding="utf-8")
+
+    with pytest.raises(host.HostConvergenceError, match="release manifest"):
+        _run(fixture, "plan")
+
+
+def test_host_convergence_rejects_release_path_outside_policy_binding(
+    tmp_path: Path,
+) -> None:
+    fixture = _fixture(tmp_path)
+    unbound_release = tmp_path / "unbound" / fixture.release.name
+    unbound_release.parent.mkdir()
+    unbound_release.write_text('{"unbound": true}\n', encoding="utf-8")
+    paths = replace(fixture.paths, release=unbound_release)
+
+    with pytest.raises(host.HostConvergenceError, match="release path"):
+        host.converge_host(
+            "plan",
+            "test",
+            "node-1",
+            fixture.bundle,
+            fixture.receipt_dir,
+            fixture.backend,
+            paths,
+            operation_id="00000000-0000-4000-8000-000000000011",
+            effective_uid=os.geteuid(),
+            required_owner=os.geteuid(),
+        )
+
+
+def test_host_bundle_convergence_rejects_substitute_runtime_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _fixture(tmp_path)
+    policy, _ = host._load_policy(fixture.paths.policy, "test", "node-1")
+    source = _bundle_fixture(tmp_path / "authority")
+    policy = replace(policy, host_release_manifest=source.release_path.name)
+    substitute = tmp_path / "substitute-runtime.json"
+    substitute.write_bytes(source.runtime_path.read_bytes())
+    substitute.chmod(0o644)
+    paths = replace(
+        fixture.paths,
+        policy=source.release_path.parent / "prerequisites-v1.toml",
+        release=source.release_path,
+        runtime_manifest=substitute,
+    )
+    runner = FixtureRunner(source)
+    monkeypatch.setattr(
+        host.SystemHostBackend,
+        "_run",
+        staticmethod(lambda args: runner.run(args)),
+    )
+
+    with pytest.raises(host.HostConvergenceError, match="offline host bundle verification"):
+        host.SystemHostBackend(paths)._verify_bundle(policy, source.bundle)
 
 
 def test_plan_and_check_are_read_only(tmp_path: Path) -> None:

@@ -27,6 +27,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.ops import task_image_builder_authority as authority  # noqa: E402
+from scripts.ops import task_image_builder_host_release as host_release  # noqa: E402
 
 ZERO_HASH = "0" * 64
 INERT_BLOCKER = "phase2_guard_provider_release_missing"
@@ -154,6 +155,7 @@ class SubprocessCommandRunner:
 @dataclass(frozen=True)
 class NodePolicy:
     cluster_id: str
+    release_name: str
     controller: str
     builder_nodes: tuple[str, ...]
     trial_partition: str
@@ -181,6 +183,10 @@ def _inert() -> dict[str, object]:
         "certified_nodes": [],
         "blockers": [INERT_BLOCKER],
     }
+
+
+def _owned_reason(release_name: str, operation_id: str) -> str:
+    return f"loom-task-builder-phase1/{release_name}/{operation_id}"
 
 
 def _read_regular(path: Path, label: str) -> bytes:
@@ -296,6 +302,20 @@ def _load_policy(
         or raw.get("unconditional_blockers") != [INERT_BLOCKER]
     ):
         raise MaintenanceError("candidate prerequisite policy is not inert")
+    release_manifest = raw.get("host_release_manifest")
+    if (
+        not isinstance(release_manifest, str)
+        or not release_manifest
+        or "/" in release_manifest
+        or "\\" in release_manifest
+        or Path(release_manifest).name != release_manifest
+    ):
+        raise MaintenanceError("candidate host release manifest path is invalid")
+    release_path = candidate_root / "deploy/task-image-builder" / release_manifest
+    try:
+        release = host_release.load_host_release(release_path)
+    except host_release.HostReleaseError as exc:
+        raise MaintenanceError("candidate host release is invalid") from exc
     resources = raw.get("resource_profile")
     if not isinstance(resources, dict):
         raise MaintenanceError("candidate resource profile is invalid")
@@ -315,6 +335,7 @@ def _load_policy(
     return (
         NodePolicy(
             cluster_id=cluster_id,
+            release_name=release.release,
             controller=_string(cluster.get("controller"), "candidate controller"),
             builder_nodes=tuple(nodes),
             trial_partition=_string(cluster.get("trial_partition"), "candidate trial partition"),
@@ -1033,7 +1054,7 @@ def maintain_node(
         raise MaintenanceError("operation ID is invalid") from exc
     if parsed.version != 4 or str(parsed) != selected_operation:
         raise MaintenanceError("operation ID is invalid")
-    loom_reason = f"loom-task-builder-phase1/host-release-v1/{selected_operation}"
+    loom_reason = _owned_reason(policy.release_name, selected_operation)
     if ssh_config is not None and (not ssh_config.is_absolute() or ssh_config.is_symlink()):
         raise MaintenanceError("SSH config is unsafe")
     if cluster_id == "gb10" and ssh_config is None:

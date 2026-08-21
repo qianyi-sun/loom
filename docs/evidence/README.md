@@ -9,14 +9,16 @@ prerequisite conformance, and shared sandbox capacity evidence. The current
 benchmark reward contract is documented under
 [`../score-alignment/`](../score-alignment/README.md).
 
-Task-image builder prerequisite conformance v1 records the dedicated
+Task-image builder [prerequisite conformance v2 schema](task-image-builder-prerequisite-conformance-v2.schema.json)
+records the dedicated
 controller Unix identity, the current immutable legacy builder contract, and
 the verified binding from each Slurm node alias to its local physical host. Its
 controller and node fragments also carry the canonical Slurm, host-convergence,
-and maintenance receipts; signed package provenance; installed runtime and
-dependency digests; Slurm/cgroup readback; dedicated mount and project-quota
-readback; allocation-scoped smoke containment; terminal accounting; reservation
-lifecycle; and cleanup facts.
+and maintenance receipts; signed, snapshot-bound package provenance including
+the ordered Ubuntu suite set and each installed package's source suite;
+installed runtime and dependency digests; Slurm/cgroup readback; dedicated
+mount and project-quota readback; allocation-scoped smoke containment; terminal
+accounting; reservation lifecycle; and cleanup facts.
 
 Use `scripts/ops/task_image_builder_prerequisite_evidence.py` to
 `collect-controller` or `collect-node` on the corresponding local authority,

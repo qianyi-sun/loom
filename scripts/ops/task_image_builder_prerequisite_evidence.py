@@ -37,9 +37,9 @@ MAX_INPUT_BYTES = 4 * 1024 * 1024
 MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 ZERO_HASH = "0" * 64
 INERT_BLOCKER = "phase2_guard_provider_release_missing"
-CONTROLLER_SCHEMA = "loom.task-image-builder-controller-evidence/v1"
-NODE_SCHEMA = "loom.task-image-builder-node-evidence/v1"
-ASSEMBLED_SCHEMA = "loom.task-image-builder-prerequisite-conformance/v1"
+CONTROLLER_SCHEMA = "loom.task-image-builder-controller-evidence/v2"
+NODE_SCHEMA = "loom.task-image-builder-node-evidence/v2"
+ASSEMBLED_SCHEMA = "loom.task-image-builder-prerequisite-conformance/v2"
 BUILDER_FEATURE = "loom_rootless_buildkit"
 PHASE2_NAMES = (
     "loom-task-builder-allocation-supervisor",
@@ -269,6 +269,10 @@ def _inert(value: Mapping[str, Any], label: str) -> None:
         raise EvidenceError(f"{label} breached the Phase 1 inert boundary")
 
 
+def _owned_reason(release_name: str, operation_id: str) -> str:
+    return f"loom-task-builder-phase1/{release_name}/{operation_id}"
+
+
 def _candidate_file(candidate_root: Path, relative: str) -> Path:
     path = candidate_root / relative
     if not path.is_file() or path.is_symlink():
@@ -295,24 +299,30 @@ def _load_context(candidate_root: Path, policy_path: Path, release_path: Path) -
     candidate_policy = _candidate_file(
         candidate_root, "deploy/task-image-builder/prerequisites-v1.toml"
     )
-    candidate_release = _candidate_file(
-        candidate_root, "deploy/task-image-builder/host-release-v1.json"
-    )
     policy_payload = _same_input(policy_path, candidate_policy, "prerequisite policy")
-    release_payload = _same_input(release_path, candidate_release, "host release")
     try:
         policy = conformance.load_policy(policy_path)
     except conformance.ConformanceError as exc:
         raise EvidenceError(str(exc)) from exc
+    release_manifest = policy.raw.get("host_release_manifest")
+    if not isinstance(release_manifest, str):
+        raise EvidenceError("policy host release binding is invalid")
+    candidate_release = _candidate_file(
+        candidate_root,
+        "deploy/task-image-builder/" + release_manifest,
+    )
+    release_payload = _same_input(release_path, candidate_release, "host release")
+    if _sha(release_payload) != policy.release_digest:
+        raise EvidenceError("explicit host release does not match the policy binding")
     release = _json_object(release_payload, "host release")
     if (
-        release.get("schema") != "loom.task-image-builder-host-release/v1"
-        or release.get("release") != "host-release-v1"
+        release.get("schema") != "loom.task-image-builder-host-release/v2"
+        or release.get("release") != "host-release-v2"
         or not isinstance(release.get("runtime_manifest"), str)
         or Path(str(release["runtime_manifest"])).name != release["runtime_manifest"]
     ):
         raise EvidenceError("host release contract is invalid")
-    runtime_path = release_path.parent / str(release["runtime_manifest"])
+    runtime_path = policy_path.parent / str(release["runtime_manifest"])
     candidate_runtime = _candidate_file(
         candidate_root,
         "deploy/task-image-builder/" + str(release["runtime_manifest"]),
@@ -910,7 +920,7 @@ def _validate_maintenance_receipt(
     }:
         raise EvidenceError(f"{node_name}: maintenance pre-state is invalid")
     operation_id = str(document["operation_id"])
-    owned_reason = f"loom-task-builder-phase1/host-release-v1/{operation_id}"
+    owned_reason = _owned_reason(str(context.release["release"]), operation_id)
     state = str(pre_state.get("state"))
     if "DRAIN" in state and pre_state.get("reason") != owned_reason:
         raise EvidenceError(f"{node_name}: foreign drain ownership is forbidden")
@@ -1409,21 +1419,23 @@ def _validate_packages(
     ubuntu = context.release.get("ubuntu")
     if not isinstance(ubuntu, dict):
         raise EvidenceError("host release Ubuntu source is invalid")
+    debian_architecture = context.release["architecture_map"][cluster["architecture"]]
     expected_source = {
         "os_id": ubuntu["os_id"],
         "version_id": ubuntu["version_id"],
-        "suite": ubuntu["suite"],
+        "snapshot": ubuntu["snapshot"],
+        "suites": list(context.release["repositories"][debian_architecture]["indexes"]),
         "component": ubuntu["component"],
         "signer_fingerprint": ubuntu["signer_fingerprint"],
         "keyring_sha256": ubuntu["keyring_sha256"],
     }
     if value.get("source") != expected_source:
         raise EvidenceError(f"{node_name}: package/source signature evidence is invalid")
-    debian_architecture = context.release["architecture_map"][cluster["architecture"]]
     release_packages = context.release["packages"][debian_architecture]
     expected_installed = [
         {
             "name": name,
+            "source_suite": package["source_suite"],
             "version": package["version"],
             "architecture": package["architecture"],
             "filename": package["filename"],
@@ -2205,7 +2217,7 @@ def assemble(
         clusters.append(cluster)
     result = {
         "schema": ASSEMBLED_SCHEMA,
-        "schema_version": 1,
+        "schema_version": 2,
         "collected_at": _utc_text(timestamp),
         "candidate_sha256": context.candidate_sha256,
         "policy_version": context.policy.raw["policy_version"],
@@ -2673,6 +2685,7 @@ def _package_observation(
         installed.append(
             {
                 "name": name,
+                "source_suite": package["source_suite"],
                 "version": package["version"],
                 "architecture": package["architecture"],
                 "filename": package["filename"],
@@ -2684,7 +2697,8 @@ def _package_observation(
         "source": {
             "os_id": ubuntu["os_id"],
             "version_id": ubuntu["version_id"],
-            "suite": ubuntu["suite"],
+            "snapshot": ubuntu["snapshot"],
+            "suites": list(context.release["repositories"][debian_arch]["indexes"]),
             "component": ubuntu["component"],
             "signer_fingerprint": ubuntu["signer_fingerprint"],
             "keyring_sha256": ubuntu["keyring_sha256"],
