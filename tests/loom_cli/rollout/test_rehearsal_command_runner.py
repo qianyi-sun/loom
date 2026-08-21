@@ -168,6 +168,30 @@ def test_runner_accepts_normalized_failure_without_stderr(tmp_path: Path) -> Non
     assert observed_timeout == 2400
 
 
+def test_runner_allows_database_transfer_and_restore_budget(tmp_path: Path) -> None:
+    observed_timeout = 0
+
+    def run(argv, environment, timeout):
+        nonlocal observed_timeout
+        del environment
+        observed_timeout = timeout
+        payload = {
+            "blockers": {},
+            "check_id": "rehearsal.db-clone",
+            "cleanup_verified": False,
+            "details": {"status": "restored"},
+            "passed": True,
+            "plan_digest": plan.plan_digest,
+            "schema_version": 1,
+        }
+        return subprocess.CompletedProcess(argv, 0, json.dumps(payload), "")
+
+    authority, plan = _authority(tmp_path, run)
+
+    assert authority("rehearsal.db-clone", plan).passed
+    assert observed_timeout == 2400
+
+
 @pytest.mark.parametrize(
     "mutation",
     [

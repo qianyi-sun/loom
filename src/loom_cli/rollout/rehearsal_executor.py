@@ -109,7 +109,11 @@ _KUBERNETES_UID_RE = re.compile(
 )
 _RESOURCE_VERSION_RE = re.compile(r"[1-9][0-9]{0,31}\Z")
 _REHEARSAL_DUMP_PATH = "/var/lib/postgresql/data/loom-rehearsal.dump"
-_REHEARSAL_DUMP_TRANSFER_TIMEOUT = 180
+# Creating the source dump already has a 600-second bound.  Give the
+# checkpoint-preserving kubectl stream the same budget: a shorter fixed limit
+# can reject a valid archive solely because the API-server transport slowed
+# down, even though the later restore still has ample bounded time.
+_REHEARSAL_DUMP_TRANSFER_TIMEOUT = 600
 _REHEARSAL_DUMP_DIGEST_TIMEOUT = 120
 _REHEARSAL_DUMP_RESTORE_TIMEOUT = 1470
 _EXTERNAL_SUPERVISOR_VALIDATION_TIMEOUT_SECONDS = 180
@@ -1215,14 +1219,18 @@ class IsolatedRehearsalExecutor:
                 dump_path,
                 _REHEARSAL_DUMP_TRANSFER_TIMEOUT,
             )
+        except subprocess.TimeoutExpired:
+            if not self._remove_staged_dump(plan):
+                return _blocked("database", "restore-staging-cleanup-failed")
+            return _blocked("database", "restore-transfer-timeout")
         except (OSError, RuntimeError, subprocess.SubprocessError):
             if not self._remove_staged_dump(plan):
                 return _blocked("database", "restore-staging-cleanup-failed")
-            return _blocked("database", "restore-failed")
+            return _blocked("database", "restore-transfer-failed")
         if transferred.returncode != 0:
             if not self._remove_staged_dump(plan):
                 return _blocked("database", "restore-staging-cleanup-failed")
-            return _blocked("database", "restore-failed")
+            return _blocked("database", "restore-transfer-failed")
         staged_digest = self._text_command(
             (
                 "kubectl",
@@ -1277,7 +1285,7 @@ class IsolatedRehearsalExecutor:
         if not removed:
             return _blocked("database", "restore-staging-cleanup-failed")
         if not restored:
-            return _blocked("database", "restore-failed")
+            return _blocked("database", "restore-command-failed")
         identity = self._database_identity(plan)
         if (
             identity is None
