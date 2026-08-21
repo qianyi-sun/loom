@@ -21,7 +21,9 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _MAX_STDOUT_BYTES = 64 * 1024
 _TIMEOUTS = {
     "rehearsal.namespace": 300,
-    "rehearsal.db-clone": 1800,
+    # 600s checkpoint transfer + 1470s pg_restore + bounded pod/digest/cleanup
+    # overhead.  The outer helper must not expire before its inner operations.
+    "rehearsal.db-clone": 2400,
     "rehearsal.systemd-launch": 120,
     "rehearsal.migration": 900,
     "rehearsal.release": 900,
