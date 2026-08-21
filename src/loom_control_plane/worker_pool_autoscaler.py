@@ -2623,11 +2623,14 @@ async def reconcile_worker_pool_autoscaler_once(
         except GlobalExecutionFenceError:
             continue
         verified_policy_ids.add(row.id)
-    if not external_only and policies and len(verified_policy_ids) == len(policies):
+    if policies and len(verified_policy_ids) == len(policies):
         await assign_neutral_queued_trials(
             session,
             environment=scoped_environment,
             now=now,
+            assignment_pool_names=frozenset(
+                row.pool_name for row in policies if row.id in verified_policy_ids
+            ),
         )
     active_activations = {
         activation.policy_id: activation

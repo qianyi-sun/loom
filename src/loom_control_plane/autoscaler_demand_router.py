@@ -116,8 +116,13 @@ async def assign_neutral_queued_trials(
     *,
     environment: str,
     now: datetime | None = None,
+    assignment_pool_names: frozenset[str] | None = None,
 ) -> DemandRoutingSummary:
-    """Assign every unpinned neutral queued trial to exactly one pool."""
+    """Assign unpinned neutral demand, optionally limited to witnessed pools.
+
+    Foreign choices still reserve their planned slot in memory so one scoped
+    pass preserves deterministic global balancing across the whole queue.
+    """
     now = now or datetime.now(UTC)
     policies = (
         (
@@ -193,13 +198,15 @@ async def assign_neutral_queued_trials(
         if selected_pool is None:
             unroutable_count += 1
             continue
-        trial.autoscaler_pool_name = selected_pool
-        trial.autoscaler_pool_assigned_at = now
         selected_state = states[selected_pool]
         states[selected_pool] = replace(
             selected_state,
             assigned_queued_slots=selected_state.assigned_queued_slots + 1,
         )
+        if assignment_pool_names is not None and selected_pool not in assignment_pool_names:
+            continue
+        trial.autoscaler_pool_name = selected_pool
+        trial.autoscaler_pool_assigned_at = now
         assigned_count += 1
 
     await session.flush()
