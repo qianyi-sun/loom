@@ -130,6 +130,84 @@ async def test_router_assigns_each_neutral_trial_to_one_enabled_pool(
         await engine.dispose()
 
 
+async def test_pool_scoped_router_preserves_global_balancing_for_neutral_batch(
+    postgres_url: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 8, 21, 18, 0, tzinfo=UTC)
+    team_id = uuid4()
+    try:
+        async with factory() as session:
+            await session.execute(insert(Team).values(id=team_id, name="scoped-routing-team"))
+            await session.execute(
+                insert(Task).values(id="scoped-routing-task", checksum="0" * 64, config={})
+            )
+            for pool_name, cpu_arch in (("gb10", "arm64"), ("oldlab", "x86_64")):
+                await session.execute(
+                    insert(WorkerPoolAutoscalerPolicy).values(
+                        environment="staging",
+                        pool_name=pool_name,
+                        actuator="slurm",
+                        enabled=True,
+                        min_slots=0,
+                        max_slots=10,
+                        scale_up_threshold_slots=1,
+                        scale_down_idle_seconds=60,
+                        scale_up_cooldown_seconds=0,
+                        scale_down_cooldown_seconds=0,
+                        drain_timeout_seconds=60,
+                        actuator_config={
+                            "backend": "docker",
+                            "cpu_arch": cpu_arch,
+                            "external_runner": True,
+                        },
+                    ),
+                )
+            for index in range(4):
+                await session.execute(
+                    insert(Trial).values(
+                        id=uuid4(),
+                        team_id=team_id,
+                        task_id="scoped-routing-task",
+                        config={},
+                        requires_caps={"backend": "docker", "cpu_arch": "any"},
+                        state="queued",
+                        idempotency_key=f"neutral-{index + 1}",
+                        submitted_at=now + timedelta(seconds=index),
+                    ),
+                )
+            await session.commit()
+
+        async with factory() as session:
+            summary = await assign_neutral_queued_trials(
+                session,
+                environment="staging",
+                now=now,
+                assignment_pool_names=frozenset({"gb10"}),
+            )
+            await session.commit()
+
+        async with factory() as session:
+            rows = (
+                await session.execute(
+                    select(Trial.idempotency_key, Trial.autoscaler_pool_name).order_by(
+                        Trial.submitted_at,
+                    )
+                )
+            ).all()
+
+        assert summary.assigned_count == 2
+        assert rows == [
+            ("neutral-1", "gb10"),
+            ("neutral-2", None),
+            ("neutral-3", "gb10"),
+            ("neutral-4", None),
+        ]
+    finally:
+        await engine.dispose()
+
+
 @pytest.mark.parametrize("_iteration", range(5))
 async def test_router_lock_does_not_hide_concrete_trial_from_claim(
     postgres_url: str,
