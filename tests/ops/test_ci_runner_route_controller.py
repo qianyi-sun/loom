@@ -479,5 +479,12 @@ def test_pool_timer_runs_the_route_controller_with_systemd_credential() -> None:
     assert "--token-file ${CREDENTIALS_DIRECTORY}/github-token" in service
     assert "LoadCredential=route-publisher-hmac:" in service
     assert "--publisher-secret-file ${CREDENTIALS_DIRECTORY}/route-publisher-hmac" in service
-    assert "--candidate-sha ${LOOM_CI_RUNNER_CANDIDATE_SHA}" in service
+    route_command = next(
+        line
+        for line in service.splitlines()
+        if line.startswith("ExecStart=/usr/local/libexec/loom-ci-runner-route-controller ")
+    )
+    assert "--candidate-sha ${LOOM_CI_RUNNER_ROUTE_CANDIDATE_SHA}" in route_command
+    assert "LOOM_CI_RUNNER_POOL_CANDIDATE_SHA" not in route_command
+    assert "--candidate-sha ${LOOM_CI_RUNNER_CANDIDATE_SHA}" not in service
     assert "Environment=GITHUB_TOKEN" not in service
