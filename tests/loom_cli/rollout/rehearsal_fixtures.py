@@ -44,9 +44,11 @@ def active_staging_profile_text() -> str:
         raise AssertionError(f"missing committed supervisor fixture: {name}")
     section, next_section, tail = suffix.partition("\n[[external_slurm_autoscaler_supervisors]]")
     disabled = "enabled = false\nactive = false"
-    if section.count(disabled) != 1:
-        raise AssertionError(f"committed supervisor fixture is not inactive: {name}")
-    section = section.replace(disabled, "enabled = true\nactive = true", 1)
+    active = "enabled = true\nactive = true"
+    if section.count(disabled) == 1 and section.count(active) == 0:
+        section = section.replace(disabled, active, 1)
+    elif section.count(disabled) != 0 or section.count(active) != 1:
+        raise AssertionError(f"committed supervisor fixture is not canonical: {name}")
     profile = prefix + marker + section + next_section + tail
     return profile
 
