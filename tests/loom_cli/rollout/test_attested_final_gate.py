@@ -166,6 +166,36 @@ def test_attested_final_gate_applies_once_then_verifies_shared_checks() -> None:
     ]
 
 
+def test_attested_final_gate_replays_component_journal_after_outer_apply_crash() -> None:
+    calls: list[tuple[str, CheckOperation]] = []
+    authority = AttestedFinalGateAuthority(
+        attestation=_attestation(),
+        actions=_actions(calls),
+        candidate_sha=CANDIDATE,
+        mutation_epoch=7,
+        now=NOW,
+        post_apply_resume=True,
+        protected_apply_recovery=True,
+    )
+
+    report = authority.execute(now=NOW)
+
+    assert report.passed
+    assert calls[0] == ("final.protected-apply", CheckOperation.APPLY)
+
+
+def test_attested_final_gate_rejects_ambiguous_recovery_authority() -> None:
+    with pytest.raises(ValueError, match="expired or drifted"):
+        AttestedFinalGateAuthority(
+            attestation=_attestation(),
+            actions=_actions([]),
+            candidate_sha=CANDIDATE,
+            mutation_epoch=7,
+            now=NOW,
+            protected_apply_recovery=True,
+        )
+
+
 def test_attested_final_gate_refuses_expired_or_incomplete_proof() -> None:
     with pytest.raises(ValueError, match="expired or drifted"):
         AttestedFinalGateAuthority(
