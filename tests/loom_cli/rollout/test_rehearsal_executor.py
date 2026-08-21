@@ -1044,7 +1044,7 @@ def test_release_loads_exact_images_and_verifies_all_scoped_resources() -> None:
         if payload == _external_supervisor_profile()
     )
     assert max(secret_readback_indexes) < policy_seed_index < validation_index < release_apply_index
-    assert len(validation_calls) == 3
+    assert len(validation_calls) == 4
     assert policy_seed_argv[policy_seed_argv.index("--container") + 1] == "migration"
     assert (
         f"LOOM_DB_URL=postgresql+psycopg://loom_rehearsal@127.0.0.1:5432/{plan.resources.database}"
@@ -1116,35 +1116,50 @@ def test_external_supervisor_validation_routes_gb10_controller_proof_remotely() 
     assert blocker is None
     assert digest is not None and len(digest) == 64
     assert len(controller_artifacts) == 1
-    assert [item.name for item in controller_artifacts[0].supervisors] == ["gb10-staging"]
+    assert [item.name for item in controller_artifacts[0].supervisors] == [
+        "gb10-staging",
+        "task-image-builder-gb10-staging",
+    ]
     validation_commands = [
         command[command.index("--") + 1 :]
         for command, _payload in calls
         if command[:4] == ("systemd-run", "--user", "--wait", "--collect")
     ]
-    assert len(validation_commands) == 3
-    assert any(
-        command[:2] == (artifact.supervisors[1].python_path, artifact.supervisors[1].script_path)
-        and command[command.index("--pool-name") + 1] == "oldlab"
+    assert len(validation_commands) == 4
+    by_pool = {
+        command[command.index("--pool-name") + 1]: command
         for command in validation_commands
+    }
+    assert set(by_pool) == {
+        "gb10",
+        "oldlab",
+        "task-image-builder-gb10",
+        "task-image-builder-oldlab",
+    }
+    supervisors = {item.pool_name: item for item in artifact.supervisors}
+    assert by_pool["oldlab"][:2] == (
+        supervisors["oldlab"].python_path,
+        supervisors["oldlab"].script_path,
     )
-    assert any(
-        command[:3]
-        == (
-            artifact.supervisors[0].python_path,
+    assert by_pool["task-image-builder-oldlab"][:2] == (
+        supervisors["task-image-builder-oldlab"].python_path,
+        supervisors["task-image-builder-oldlab"].script_path,
+    )
+    for pool_name in ("gb10", "task-image-builder-gb10"):
+        assert by_pool[pool_name][:3] == (
+            supervisors[pool_name].python_path,
             "-m",
             "loom_cli.rollout.rehearsal_external_supervisor_policy_probe",
         )
-        and command[command.index("--pool-name") + 1] == "gb10"
-        for command in validation_commands
-    )
     assert all(
-        not (
-            command[:2]
-            == (artifact.supervisors[0].python_path, artifact.supervisors[0].script_path)
-            and command[command.index("--pool-name") + 1] == "gb10"
+        command[:3]
+        == (
+            supervisors[pool_name].python_path,
+            "-m",
+            "loom_cli.rollout.rehearsal_external_supervisor_policy_probe",
         )
-        for command in validation_commands
+        for pool_name, command in by_pool.items()
+        if pool_name in {"gb10", "task-image-builder-gb10"}
     )
 
 
@@ -2177,6 +2192,7 @@ def test_cleanup_retires_only_exact_external_supervisor_validation_units() -> No
     assert set(service_names) == {
         "loom-autoscaler-gb10-staging.service",
         "loom-autoscaler-oldlab-staging.service",
+        "loom-task-image-builder-gb10-staging.service",
         "loom-task-image-builder-oldlab-staging.service",
     }
     validation_active = dict.fromkeys(validation_units, True)

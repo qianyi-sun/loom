@@ -660,7 +660,10 @@ class ExternalSupervisorIdentity:
         command: tuple[str, ...]
         if execution_host == local_host:
             command = (self.python_path, self.script_path)
-        elif execution_host == gb10_host and self.pool_name == "gb10":
+        elif execution_host == gb10_host and self.pool_name in {
+            "gb10",
+            "task-image-builder-gb10",
+        }:
             command = (self.python_path, "-m", REHEARSAL_POLICY_VALIDATION_MODULE)
         else:  # pragma: no cover - construction rejects unsupported authorities
             raise ValueError("external supervisor rehearsal execution host is unsupported")

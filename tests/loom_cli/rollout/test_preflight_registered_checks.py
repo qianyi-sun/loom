@@ -1892,6 +1892,8 @@ def test_registered_systemd_render_uses_exact_static_unit_verifier(tmp_path: Pat
         "loom-autoscaler-gb10-staging.timer",
         "loom-autoscaler-oldlab-staging.service",
         "loom-autoscaler-oldlab-staging.timer",
+        "loom-task-image-builder-gb10-staging.service",
+        "loom-task-image-builder-gb10-staging.timer",
         "loom-task-image-builder-oldlab-staging.service",
         "loom-task-image-builder-oldlab-staging.timer",
     }
@@ -1906,12 +1908,14 @@ def test_registered_systemd_render_uses_exact_static_unit_verifier(tmp_path: Pat
     assert set(result.evidence["supervisor-controller-unit-digests"]) == {
         "gx10-01c7/loom-autoscaler-gb10-staging.service",
         "gx10-01c7/loom-autoscaler-gb10-staging.timer",
+        "gx10-01c7/loom-task-image-builder-gb10-staging.service",
+        "gx10-01c7/loom-task-image-builder-gb10-staging.timer",
         "TRT-EAI-OLDLAB-1/loom-autoscaler-oldlab-staging.service",
         "TRT-EAI-OLDLAB-1/loom-autoscaler-oldlab-staging.timer",
         "TRT-EAI-OLDLAB-1/loom-task-image-builder-oldlab-staging.service",
         "TRT-EAI-OLDLAB-1/loom-task-image-builder-oldlab-staging.timer",
     }
-    assert result.evidence["unit-count"] == 9
+    assert result.evidence["unit-count"] == 11
     assert set(result.evidence["supervisor-script-digests"]) == {
         SCRIPT_PATH,
         TASK_IMAGE_BUILDER_SCRIPT_PATH,
