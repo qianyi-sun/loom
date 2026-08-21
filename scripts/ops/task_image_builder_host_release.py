@@ -128,6 +128,21 @@ class HostRelease:
     packages: Mapping[str, Mapping[str, PackageArtifact]]
 
 
+def _remove_snapshot(snapshot_root: Path) -> None:
+    try:
+        metadata = snapshot_root.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise HostReleaseError("bundle snapshot cannot be inspected for cleanup") from exc
+    if not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o700:
+        raise HostReleaseError("bundle snapshot metadata is unsafe for cleanup")
+    try:
+        shutil.rmtree(snapshot_root)
+    except OSError as exc:
+        raise HostReleaseError("bundle snapshot cleanup failed") from exc
+
+
 @dataclass
 class VerifiedHostBundle:
     architecture: str
@@ -137,18 +152,7 @@ class VerifiedHostBundle:
     runtime_paths: tuple[Path, ...]
 
     def close(self) -> None:
-        try:
-            metadata = self.snapshot_root.lstat()
-        except FileNotFoundError:
-            return
-        except OSError as exc:
-            raise HostReleaseError("bundle snapshot cannot be inspected for cleanup") from exc
-        if not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o700:
-            raise HostReleaseError("bundle snapshot metadata is unsafe for cleanup")
-        try:
-            shutil.rmtree(self.snapshot_root)
-        except OSError as exc:
-            raise HostReleaseError("bundle snapshot cleanup failed") from exc
+        _remove_snapshot(self.snapshot_root)
 
 
 def _object(value: object, label: str) -> dict[str, object]:
@@ -631,11 +635,11 @@ def _snapshot_bundle(
         return snapshot_root
     except HostReleaseError:
         if snapshot_root is not None:
-            shutil.rmtree(snapshot_root, ignore_errors=True)
+            _remove_snapshot(snapshot_root)
         raise
     except OSError as exc:
         if snapshot_root is not None:
-            shutil.rmtree(snapshot_root, ignore_errors=True)
+            _remove_snapshot(snapshot_root)
         raise HostReleaseError("bundle cannot be snapshotted safely") from exc
     finally:
         for descriptor, _, _ in source_files.values():
@@ -1010,7 +1014,7 @@ def verify_host_bundle(
             runtime_paths=tuple(runtime_paths),
         )
     except BaseException:
-        shutil.rmtree(snapshot_root, ignore_errors=True)
+        _remove_snapshot(snapshot_root)
         raise
 
 
