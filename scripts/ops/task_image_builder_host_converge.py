@@ -63,7 +63,7 @@ class HostReleasePaths:
 
 DEFAULT_PATHS = HostReleasePaths(
     policy=ROOT / "deploy/task-image-builder/prerequisites-v1.toml",
-    release=ROOT / "deploy/task-image-builder/host-release-v1.json",
+    release=ROOT / "deploy/task-image-builder/host-release-v2.json",
     runtime_manifest=ROOT / "deploy/task-image-builder/rootless-runtime-v1.json",
     node_installer=(
         ROOT / "deploy/slurm/install-loom-task-image-builder-node-prerequisites.sh"
@@ -75,6 +75,7 @@ DEFAULT_PATHS = HostReleasePaths(
 @dataclass(frozen=True)
 class HostPolicy:
     cluster_id: str
+    host_release_manifest: str
     architecture: str
     slurm_node: str
     builder_nodes: tuple[str, ...]
@@ -274,6 +275,15 @@ def _load_policy(path: Path, cluster_id: str, slurm_node: str) -> tuple[HostPoli
         raise HostConvergenceError("prerequisite policy is not inert")
     if raw.get("unconditional_blockers") != [INERT_BLOCKER]:
         raise HostConvergenceError("prerequisite blocker is invalid")
+    release_manifest = raw.get("host_release_manifest")
+    if (
+        not isinstance(release_manifest, str)
+        or not release_manifest
+        or "/" in release_manifest
+        or "\\" in release_manifest
+        or Path(release_manifest).name != release_manifest
+    ):
+        raise HostConvergenceError("host release manifest path is invalid")
     clusters = [
         item
         for item in raw.get("clusters", [])
@@ -312,6 +322,7 @@ def _load_policy(path: Path, cluster_id: str, slurm_node: str) -> tuple[HostPoli
     return (
         HostPolicy(
             cluster_id=cluster_id,
+            host_release_manifest=release_manifest,
             architecture=str(cluster.get("architecture")),
             slurm_node=slurm_node,
             builder_nodes=nodes,
@@ -1091,6 +1102,8 @@ def _converge_host_once(
     if action not in {"plan", "check", "apply", "rollback"}:
         raise HostConvergenceError("host convergence action is invalid")
     policy, policy_payload = _load_policy(paths.policy, cluster_id, slurm_node)
+    if paths.release.name != policy.host_release_manifest:
+        raise HostConvergenceError("host release path does not match the policy binding")
     selected_operation = operation_id or str(uuid.uuid4())
     try:
         parsed_operation = uuid.UUID(selected_operation)

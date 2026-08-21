@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://loom.example/schemas/task-image-builder-prerequisite-conformance-v1.schema.json",
-  "title": "Task-image builder Phase 1 prerequisite conformance evidence",
+  "$id": "https://loom.example/schemas/task-image-builder-prerequisite-conformance-v2.schema.json",
+  "title": "Task-image builder Phase 1 prerequisite conformance evidence v2",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -25,10 +25,10 @@
   ],
   "properties": {
     "schema": {
-      "const": "loom.task-image-builder-prerequisite-conformance/v1"
+      "const": "loom.task-image-builder-prerequisite-conformance/v2"
     },
     "schema_version": {
-      "const": 1
+      "const": 2
     },
     "collected_at": {
       "type": "string",
@@ -47,7 +47,7 @@
       "$ref": "#/$defs/sha256"
     },
     "release_name": {
-      "const": "host-release-v1"
+      "const": "host-release-v2"
     },
     "release_sha256": {
       "$ref": "#/$defs/sha256"
@@ -320,7 +320,8 @@
       "required": [
         "os_id",
         "version_id",
-        "suite",
+        "snapshot",
+        "suites",
         "component",
         "signer_fingerprint",
         "keyring_sha256"
@@ -332,8 +333,18 @@
         "version_id": {
           "const": "24.04"
         },
-        "suite": {
-          "const": "noble-updates"
+        "snapshot": {
+          "const": "20260820T000000Z"
+        },
+        "suites": {
+          "type": "array",
+          "prefixItems": [
+            {"const": "noble"},
+            {"const": "noble-updates"}
+          ],
+          "items": false,
+          "minItems": 2,
+          "maxItems": 2
         },
         "component": {
           "const": "main"
@@ -352,6 +363,7 @@
       "additionalProperties": false,
       "required": [
         "name",
+        "source_suite",
         "version",
         "architecture",
         "filename",
@@ -361,6 +373,9 @@
       "properties": {
         "name": {
           "enum": ["libsubid4", "quota", "uidmap"]
+        },
+        "source_suite": {
+          "enum": ["noble", "noble-updates"]
         },
         "version": {
           "type": "string",
@@ -382,7 +397,17 @@
         "artifact_sha256": {
           "$ref": "#/$defs/sha256"
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"name": {"const": "quota"}}},
+          "then": {"properties": {"source_suite": {"const": "noble"}}}
+        },
+        {
+          "if": {"properties": {"name": {"enum": ["libsubid4", "uidmap"]}}},
+          "then": {"properties": {"source_suite": {"const": "noble-updates"}}}
+        }
+      ]
     },
     "uidMapHelper": {
       "type": "object",
@@ -1456,7 +1481,7 @@
           "$ref": "#/$defs/sha256"
         },
         "release_name": {
-          "const": "host-release-v1"
+          "const": "host-release-v2"
         },
         "release_sha256": {
           "$ref": "#/$defs/sha256"
@@ -1564,7 +1589,7 @@
           "$ref": "#/$defs/sha256"
         },
         "release_name": {
-          "const": "host-release-v1"
+          "const": "host-release-v2"
         },
         "release_sha256": {
           "$ref": "#/$defs/sha256"

@@ -31,6 +31,8 @@ def test_phase_one_policy_is_dynamic_bounded_and_cannot_certify_production() -> 
 
     assert policy["schema"] == "loom.task-image-builder-prerequisites/v1"
     assert policy["policy_version"] == "task-image-builder-prerequisites-v1"
+    assert policy["host_release_manifest"] == "host-release-v2.json"
+    assert not (ROOT / "deploy/task-image-builder/host-release-v1.json").exists()
     assert policy["production_certification_allowed"] is False
     assert policy["certified_nodes"] == []
     assert policy["unconditional_blockers"] == [
