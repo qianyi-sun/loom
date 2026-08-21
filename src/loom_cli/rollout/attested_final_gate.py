@@ -57,6 +57,7 @@ class AttestedFinalGateAuthority:
         mutation_epoch: int,
         now: datetime,
         post_apply_resume: bool = False,
+        protected_apply_recovery: bool = False,
         max_concurrency: int = 4,
     ) -> None:
         if now.tzinfo is None or now.utcoffset() is None:
@@ -66,6 +67,8 @@ class AttestedFinalGateAuthority:
             or attestation.bindings.candidate_sha != candidate_sha
             or attestation.bindings.staging_mutation_epoch != mutation_epoch
             or type(post_apply_resume) is not bool
+            or type(protected_apply_recovery) is not bool
+            or (protected_apply_recovery and not post_apply_resume)
             or (now >= attestation.expires_at and not post_apply_resume)
         ):
             raise ValueError("final gate attestation is expired or drifted")
@@ -87,6 +90,7 @@ class AttestedFinalGateAuthority:
         coverage.require_exact_tier(checks, tier=4)
         self._attestation = attestation
         self._post_apply_resume = post_apply_resume
+        self._protected_apply_recovery = protected_apply_recovery
         self._checks = checks
         self._checks_by_id = {check.spec.check_id: check for check in checks}
         self._dag = PreflightDag(
@@ -173,10 +177,13 @@ class AttestedFinalGateAuthority:
         ):
             raise ValueError("final gate attestation expired before execution")
         prior = dict(prior_executions or {})
-        if self._post_apply_resume != (
-            durable_prior_executions == frozenset({"final.protected-apply"})
-        ):
+        has_durable_apply = durable_prior_executions == frozenset({"final.protected-apply"})
+        if self._post_apply_resume != (has_durable_apply or self._protected_apply_recovery):
             raise ValueError("post-apply final gate authority is incomplete")
+        if self._protected_apply_recovery and (
+            durable_prior_executions or "final.protected-apply" in prior
+        ):
+            raise ValueError("protected apply recovery evidence is ambiguous")
         if durable_prior_executions:
             if (
                 durable_prior_executions != frozenset({"final.protected-apply"})

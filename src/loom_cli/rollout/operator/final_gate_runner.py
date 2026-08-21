@@ -15,6 +15,7 @@ from loom_cli.rollout.preflight_contract import CheckExecution, PreflightAttesta
 
 from .final_gate_store import FinalGateExecutionStore
 from .model import DriverEnvelope
+from .protected_apply_recovery import find_advanced_epoch_attempt
 
 FinalGateActionsFactory = Callable[
     [DriverEnvelope, PreflightAttestation, int, FinalAttestationAdmission],
@@ -92,9 +93,24 @@ class FinalGateRunner:
                         continue
                     newest.setdefault(check_id, execution)
         protected_apply_recorded = "final.protected-apply" in newest
-        if mutation_epoch == starting_epoch + 1 and not protected_apply_recorded:
+        protected_apply_recovery = False
+        if envelope.resume and not protected_apply_recorded:
+            protected_apply_recovery = (
+                find_advanced_epoch_attempt(
+                    self.state_root,
+                    request_id=envelope.request_id,
+                    through_attempt=envelope.attempt_number - 1,
+                    candidate_sha=envelope.resolved_sha,
+                    attestation_digest=envelope.preflight_attestation_sha256,
+                    starting_mutation_epoch=starting_epoch,
+                    service_uid=self.service_uid,
+                )
+                is not None
+            )
+        protected_apply_completed = protected_apply_recorded or protected_apply_recovery
+        if mutation_epoch == starting_epoch + 1 and not protected_apply_completed:
             raise ValueError("final gate mutation epoch drifted before apply")
-        if admission.post_apply_resume != protected_apply_recorded:
+        if admission.post_apply_resume != protected_apply_completed:
             raise ValueError("final gate post-apply admission is incomplete")
         execution_time = self.now()
         authority = AttestedFinalGateAuthority(
@@ -104,6 +120,7 @@ class FinalGateRunner:
             mutation_epoch=starting_epoch,
             now=execution_time,
             post_apply_resume=admission.post_apply_resume,
+            protected_apply_recovery=protected_apply_recovery,
             max_concurrency=self.max_concurrency,
         )
         durable: frozenset[str] = frozenset()
@@ -117,9 +134,9 @@ class FinalGateRunner:
             prior = newest
         protected_apply_passed = "final.protected-apply" in prior
         if mutation_epoch == starting_epoch + 1:
-            if not protected_apply_passed:
+            if not (protected_apply_passed or protected_apply_recovery):
                 raise ValueError("final gate mutation epoch drifted before apply")
-        elif protected_apply_passed:
+        elif protected_apply_passed or protected_apply_recovery:
             raise ValueError("final gate protected apply epoch did not advance")
         for execution in prior.values():
             journal.publish(execution)

@@ -50,6 +50,7 @@ from .model import (
     RolloutRequest,
 )
 from .policy import sanitized_child_environment
+from .protected_apply_recovery import find_advanced_epoch_attempt
 from .redaction import redact_rollout_text
 from .store import RequestStore
 from .systemd import SystemdUserManager
@@ -300,6 +301,23 @@ def _admit_final_attempt(
             service_uid=service_uid,
         ).read(attestation)
         break
+    if prior_admission is None and envelope.resume:
+        recovery_attempt = find_advanced_epoch_attempt(
+            state_root,
+            request_id=envelope.request_id,
+            through_attempt=envelope.attempt_number - 1,
+            candidate_sha=envelope.resolved_sha,
+            attestation_digest=envelope.preflight_attestation_sha256,
+            starting_mutation_epoch=attestation.bindings.staging_mutation_epoch,
+            service_uid=service_uid,
+        )
+        if recovery_attempt is not None:
+            prior_admission = FinalAdmissionStore(
+                state_root,
+                request_id=envelope.request_id,
+                attempt_number=recovery_attempt,
+                service_uid=service_uid,
+            ).read(attestation)
     if prior_admission is None:
         admission = deep_preflight.admit_final(
             candidate,
