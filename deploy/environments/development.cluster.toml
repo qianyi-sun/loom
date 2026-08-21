@@ -24,7 +24,7 @@ enabled = false
 
 # Shared dev is a lightweight, low-resource env (just enough for post-merge
 # integration), so its backends are single-node-shaped BY CHOICE — not because
-# it is a single-node kind cluster. PgBouncer is disabled because one development Postgres has no
+# it is a single-node development cluster. PgBouncer is disabled because one development Postgres has no
 # realistic connection-count pressure and the extra Deployment isn't worth it.
 # Staging/production use the schema default (enabled=true).
 [pgbouncer]

@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import ssl
 import sys
@@ -324,18 +323,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Skip ingress-owned HSTS; allowed only for explicit loopback probes.",
     )
-    parser.add_argument(
-        "--insecure-for-kind",
-        action="store_true",
-        help="Trust the ephemeral kind ingress certificate (CI=true only).",
-    )
     args = parser.parse_args(argv)
     if not args.route and not args.probe:
         parser.error("at least one --route or --probe is required")
     if args.web_origin_only and args.route:
         parser.error("--web-origin-only accepts explicit --probe values only")
-    if args.insecure_for_kind and os.environ.get("CI") != "true":
-        parser.error("--insecure-for-kind requires CI=true")
     for probe in args.probe:
         try:
             _parse_url(probe.url, allow_loopback_http=args.web_origin_only)
@@ -357,16 +349,11 @@ def main(argv: list[str] | None = None) -> int:
     labels = [probe.label for probe in probes]
     if len(labels) != len(set(labels)):
         raise SystemExit("probe labels must be unique")
-    ssl_context: ssl.SSLContext | None = None
-    if args.insecure_for_kind:
-        ssl_context = ssl.create_default_context()
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
     results = run_probes(
         probes,
         timeout=args.timeout,
         require_hsts=not args.web_origin_only,
-        ssl_context=ssl_context,
+        ssl_context=None,
     )
     report = {
         "status": "pass" if all(result.status == "pass" for result in results) else "fail",

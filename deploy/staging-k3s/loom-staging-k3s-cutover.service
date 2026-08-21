@@ -1,5 +1,5 @@
 [Unit]
-Description=Route public :443/:80 to the k3s ingress (kind->k3s entry cutover)
+Description=Route public :443/:80 to the k3s ingress
 Requires=loom-staging-public-proxy@18080-32080.service loom-staging-public-proxy@18443-32443.service
 After=docker.service k3s.service network-online.target loom-staging-public-proxy@18080-32080.service loom-staging-public-proxy@18443-32443.service
 Wants=docker.service k3s.service network-online.target

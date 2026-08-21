@@ -30,6 +30,11 @@ NetworkPolicyKind = Literal["public", "no-network", "allowlist"]
 # Logging level (spec §7.2).
 LogLevel = Literal["debug", "info", "warn", "error", "fatal"]
 
+# Service-mode worker execution backend. Docker remains the default so an
+# existing worker deployment keeps its byte-for-byte scheduling behavior.
+WorkerSandboxBackend = Literal["docker", "daytona"]
+SandboxBackend = Literal["docker", "daytona", "modal", "fake"]
+
 
 ModelSource = Literal["api", "local-server", "hf"]
 HFExecution = Literal["local-vllm", "inference-api"]
@@ -84,8 +89,7 @@ class ModelSpec(BaseModel):
         if self.source == "local-server":
             if not self.local_server:
                 raise ValueError(
-                    "ModelSpec.source='local-server' requires "
-                    "local_server to be set",
+                    "ModelSpec.source='local-server' requires local_server to be set",
                 )
             return f"local/{self.local_server}/{self.name}"
         if self.source == "hf":

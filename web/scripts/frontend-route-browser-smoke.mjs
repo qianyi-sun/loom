@@ -21,7 +21,6 @@ function parseArgs(argv) {
     routes: [],
     timeoutMs: 30_000,
     tracePath: "",
-    insecureForKind: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
@@ -31,12 +30,10 @@ function parseArgs(argv) {
       options.timeoutMs = Number(argv[++index]);
     } else if (argument === "--trace") {
       options.tracePath = argv[++index] ?? "";
-    } else if (argument === "--insecure-for-kind") {
-      options.insecureForKind = true;
     } else if (argument === "--help") {
       console.log(
         "Usage: frontend-route-browser-smoke --route https://host/prefix " +
-          "[--trace path] [--timeout-ms milliseconds] [--insecure-for-kind]",
+          "[--trace path] [--timeout-ms milliseconds]",
       );
       process.exit(0);
     } else {
@@ -52,9 +49,6 @@ function parseArgs(argv) {
     options.timeoutMs > 120_000
   ) {
     throw new Error("--timeout-ms must be an integer from 1000 to 120000");
-  }
-  if (options.insecureForKind && process.env.CI !== "true") {
-    throw new Error("--insecure-for-kind requires CI=true");
   }
   return options;
 }
@@ -733,9 +727,7 @@ async function run(options) {
   let context;
   const observations = [];
   try {
-    context = await browser.newContext({
-      ignoreHTTPSErrors: options.insecureForKind,
-    });
+    context = await browser.newContext();
     if (options.tracePath) {
       await context.tracing.start({
         screenshots: true,

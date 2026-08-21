@@ -204,7 +204,6 @@ def _service(
     tmp_path: Path,
     *,
     store: _Store | None = None,
-    registry: bool = False,
     oci_index: bool = False,
 ) -> tuple[InstalledLifecycleCapacityService, _Commands]:
     config = replace(
@@ -222,30 +221,25 @@ def _service(
             runtime_environment="staging",
             namespace="loom-staging",
             image_tag=_TAG,
-            container_registry="192.168.50.13:5000" if registry else "",
-            container_registry_push="localhost:5000" if registry else "",
+            container_registry="192.168.50.13:5000",
+            container_registry_push="localhost:5000",
             lifecycle_legacy_buckets=("legacy-artifacts", "legacy-trajectories"),
         )
     )
-    registry_digests = (
-        {
-            name: (
-                (_IMAGE_ID if oci_index else _MANIFEST_DIGEST)
-                if name == "loom-control-plane"
-                else "sha256:" + f"{index + 2:064x}"
-            )
-            for index, (name, _path) in enumerate(ALL_BUILD_IMAGES)
-        }
-        if registry
-        else {}
-    )
-    if registry:
-        rendered = pin_rendered_manifest_images(
-            rendered,
-            image_tag=_TAG,
-            container_registry="192.168.50.13:5000",
-            registry_digests=registry_digests,
+    registry_digests = {
+        name: (
+            (_IMAGE_ID if oci_index else _MANIFEST_DIGEST)
+            if name == "loom-control-plane"
+            else "sha256:" + f"{index + 2:064x}"
         )
+        for index, (name, _path) in enumerate(ALL_BUILD_IMAGES)
+    }
+    rendered = pin_rendered_manifest_images(
+        rendered,
+        image_tag=_TAG,
+        container_registry="192.168.50.13:5000",
+        registry_digests=registry_digests,
+    )
     loaded = SimpleNamespace(
         publication=SimpleNamespace(
             candidate_sha=_SHA,
@@ -279,13 +273,13 @@ def _service(
             "legacy-trajectories",
         ),
         expected_filesystem_paths=("/var/lib/loom-minio-capacity/0",),
-        container_registry="192.168.50.13:5000" if registry else "",
-        container_registry_push="localhost:5000" if registry else "",
+        container_registry="192.168.50.13:5000",
+        container_registry_push="localhost:5000",
     )
     return service, commands
 
 
-def test_inventory_claim_and_execute_publish_exact_evidence(tmp_path: Path) -> None:
+def test_inventory_claim_and_execute_publish_exact_registry_evidence(tmp_path: Path) -> None:
     service, commands = _service(tmp_path)
     plan = service.inventory()
 
@@ -298,14 +292,8 @@ def test_inventory_claim_and_execute_publish_exact_evidence(tmp_path: Path) -> N
     assert evidence["job_uid"] == _UID
     assert (service.evidence_root / f"{plan.plan_digest}.claim.json").is_file()
     assert (service.evidence_root / f"{plan.plan_digest}.result.json").is_file()
-    assert commands.calls[0] == (
-        "kind",
-        "load",
-        "docker-image",
-        "--name",
-        "loom-staging",
-        f"loom-control-plane:{_TAG}",
-    )
+    assert commands.calls[0][:3] == ("docker", "manifest", "inspect")
+    assert "--verbose" in commands.calls[0]
 
 
 def test_prepare_rejects_active_rollout_or_digest_drift_without_claim(tmp_path: Path) -> None:
@@ -317,8 +305,8 @@ def test_prepare_rejects_active_rollout_or_digest_drift_without_claim(tmp_path: 
     assert not service.evidence_root.exists()
 
 
-def test_registry_capacity_uses_preflight_digest_without_kind_or_republish(tmp_path: Path) -> None:
-    service, commands = _service(tmp_path, registry=True)
+def test_registry_capacity_uses_preflight_digest_without_republish(tmp_path: Path) -> None:
+    service, commands = _service(tmp_path)
     plan = service.inventory()
     service.prepare_apply(approved_plan_digest=plan.plan_digest)
 
@@ -328,7 +316,6 @@ def test_registry_capacity_uses_preflight_digest_without_kind_or_republish(tmp_p
         command[:2] in {("docker", "tag"), ("docker", "push")} for command in commands.calls
     )
     assert f"192.168.50.13:5000/loom-control-plane@{_MANIFEST_DIGEST}" in plan.job_manifest
-    assert not any(command and command[0] == "kind" for command in commands.calls)
 
     inactive, _commands = _service(tmp_path / "other")
     with pytest.raises(InstalledLifecycleCapacityError, match="digest drifted"):
@@ -337,7 +324,7 @@ def test_registry_capacity_uses_preflight_digest_without_kind_or_republish(tmp_p
 
 
 def test_registry_capacity_accepts_exact_docker_provenance_index(tmp_path: Path) -> None:
-    service, commands = _service(tmp_path, registry=True, oci_index=True)
+    service, commands = _service(tmp_path, oci_index=True)
     plan = service.inventory()
     service.prepare_apply(approved_plan_digest=plan.plan_digest)
 
@@ -367,7 +354,7 @@ def test_claim_is_single_use_and_failed_execution_preserves_claim(tmp_path: Path
         stdout="",
         stderr="sensitive details are not surfaced",
     )
-    with pytest.raises(InstalledLifecycleCapacityError, match="image load failed"):
+    with pytest.raises(InstalledLifecycleCapacityError, match="publication identity drifted"):
         service.execute_claimed(plan)
     assert (service.evidence_root / f"{plan.plan_digest}.claim.json").is_file()
     assert not (service.evidence_root / f"{plan.plan_digest}.result.json").exists()

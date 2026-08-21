@@ -138,7 +138,7 @@ untrusted_workload_isolation = false
 Invalid profile, manifest, or live environment values fail before transform,
 source, verifier, or subprocess content is fetched or run. The protected
 namespace is authoritative target evidence, and manual rollout validates the
-cluster and namespace identity before evidence collection or disposable Kind
+cluster and namespace identity before evidence collection or disposable local
 work. `--skip-preflight` does not bypass the contract. See
 [User-Brought TaskSets](../architecture/user-brought-tasksets.md) and
 [Sandbox Isolation](../architecture/sandbox-isolation.md).

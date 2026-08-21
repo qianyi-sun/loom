@@ -451,8 +451,6 @@ def test_database_streams_exact_checkpoint_into_restricted_pod() -> None:
             tag = argv[-1]
             name = tag.split(":", 1)[0]
             return subprocess.CompletedProcess(argv, 0, plan.image_digests[name] + "\n", "")
-        if argv[:3] == ("kind", "load", "docker-image"):
-            return subprocess.CompletedProcess(argv, 0, "loaded\n", "")
         if payload is not None:
             pod = json.loads(payload)
             for container in pod["spec"]["containers"]:
@@ -487,7 +485,7 @@ def test_database_streams_exact_checkpoint_into_restricted_pod() -> None:
                     "conditions": [{"type": "Ready", "status": "True"}],
                     "containerStatuses": [
                         {
-                            "imageID": "docker.io/library/import-2026-07-20@" + postgres_import,
+                            "imageID": "sha256:" + postgres_config.removeprefix("sha256:"),
                             "name": "postgres",
                             "ready": True,
                         },
@@ -649,8 +647,6 @@ def test_database_rejects_unclassified_server_default_drift() -> None:
         if tuple(argv[:3]) == ("docker", "image", "inspect"):
             name = argv[-1].split(":", 1)[0]
             return subprocess.CompletedProcess(argv, 0, plan.image_digests[name] + "\n", "")
-        if tuple(argv[:3]) == ("kind", "load", "docker-image"):
-            return subprocess.CompletedProcess(argv, 0, "loaded\n", "")
         if payload is not None:
             pod = json.loads(payload)
             for container in pod["spec"]["containers"]:
@@ -680,127 +676,7 @@ def test_plan_rejects_missing_exact_image_before_executor() -> None:
         )
 
 
-def test_runtime_image_binding_resolves_exact_index_platform_config() -> None:
-    plan = _plan()
-    name = "loom-control-plane"
-    expected = plan.image_digests[name]
-    reference = f"docker.io/library/{name}:{plan.image_tag}"
-    manifest_digest = "sha256:" + "c" * 64
-    config_digest = "sha256:" + "d" * 64
-    import_digest = "sha256:" + "f" * 64
-
-    def run(argv, _payload, _timeout):
-        command = tuple(argv)
-        if "images" in command and "list" in command:
-            value = (
-                "REF TYPE DIGEST SIZE PLATFORMS LABELS\n"
-                f"{reference} application/vnd.oci.image.index.v1+json "
-                f"{expected} 1MiB linux/amd64 managed\n"
-            )
-        elif "content" in command and command[-1] == expected:
-            value = json.dumps(
-                {
-                    "schemaVersion": 2,
-                    "mediaType": "application/vnd.oci.image.index.v1+json",
-                    "manifests": [
-                        {
-                            "digest": manifest_digest,
-                            "mediaType": "application/vnd.oci.image.manifest.v1+json",
-                            "platform": {"architecture": "amd64", "os": "linux"},
-                        },
-                        {
-                            "digest": "sha256:" + "e" * 64,
-                            "mediaType": "application/vnd.oci.image.manifest.v1+json",
-                            "platform": {"architecture": "unknown", "os": "unknown"},
-                        },
-                    ],
-                }
-            )
-        elif "content" in command and command[-1] == manifest_digest:
-            value = json.dumps(
-                {
-                    "schemaVersion": 2,
-                    "mediaType": "application/vnd.oci.image.manifest.v1+json",
-                    "config": {
-                        "digest": config_digest,
-                        "mediaType": "application/vnd.oci.image.config.v1+json",
-                    },
-                }
-            )
-        elif "content" in command and command[-1] == import_digest:
-            value = json.dumps(
-                {
-                    "schemaVersion": 2,
-                    "mediaType": "application/vnd.oci.image.index.v1+json",
-                    "manifests": [
-                        {
-                            "digest": expected,
-                            "mediaType": "application/vnd.oci.image.index.v1+json",
-                            "annotations": {
-                                "io.containerd.image.name": reference,
-                                "org.opencontainers.image.ref.name": plan.image_tag,
-                            },
-                        }
-                    ],
-                }
-            )
-        elif "crictl" in command:
-            value = json.dumps(
-                {
-                    "status": {
-                        "id": config_digest,
-                        "repoTags": [reference],
-                        "repoDigests": [f"docker.io/library/import-2026-07-20@{import_digest}"],
-                    },
-                    "info": {
-                        "imageSpec": {
-                            "architecture": "amd64",
-                            "os": "linux",
-                            "config": {
-                                "Labels": {"org.opencontainers.image.revision": plan.candidate_sha}
-                            },
-                        }
-                    },
-                }
-            )
-        else:
-            raise AssertionError(command)
-        return subprocess.CompletedProcess(argv, 0, value, "")
-
-    resolved = IsolatedRehearsalExecutor(run=run)._runtime_image_ids(plan, (name,))
-
-    assert resolved == {name: (config_digest, manifest_digest, import_digest)}
-
-    def repo_digest_drift(argv, payload, timeout):
-        result = run(argv, payload, timeout)
-        if "content" not in tuple(argv) or argv[-1] != import_digest:
-            return result
-        value = json.loads(result.stdout)
-        value["manifests"][0]["annotations"]["org.opencontainers.image.ref.name"] = "drift"
-        return subprocess.CompletedProcess(argv, 0, json.dumps(value), "")
-
-    assert (
-        IsolatedRehearsalExecutor(run=repo_digest_drift)._runtime_image_ids(plan, (name,)) is None
-    )
-
-
-def test_runtime_image_binding_rejects_kind_tag_drift() -> None:
-    plan = _plan()
-    name = "loom-control-plane"
-    reference = f"docker.io/library/{name}:{plan.image_tag}"
-
-    def run(argv, _payload, _timeout):
-        value = (
-            "REF TYPE DIGEST SIZE PLATFORMS LABELS\n"
-            f"{reference} application/vnd.oci.image.index.v1+json "
-            f"sha256:{'0' * 64} 1MiB linux/amd64 managed\n"
-        )
-        return subprocess.CompletedProcess(argv, 0, value, "")
-
-    assert IsolatedRehearsalExecutor(run=run)._runtime_image_ids(plan, (name,)) is None
-
-
-def test_registry_rehearsal_uses_preflight_published_digest_without_kind() -> None:
+def test_registry_rehearsal_uses_preflight_published_digest_without_republish() -> None:
     manifest_digests = {
         name: f"sha256:{hashlib.sha256((name + '-manifest').encode()).hexdigest()}"
         for name in _plan().image_digests
@@ -832,7 +708,6 @@ def test_registry_rehearsal_uses_preflight_published_digest_without_kind() -> No
     executor = IsolatedRehearsalExecutor(run=run)
     assert executor._load_images(plan, (name,)) is True
     assert executor._runtime_image_ids(plan, (name,)) == {name: (expected, manifest_digest)}
-    assert not any(command and command[0] == "kind" for command in calls)
     assert not any(command[:2] in {("docker", "tag"), ("docker", "push")} for command in calls)
     manifest = _database_pod_manifest(plan)
     containers = manifest["spec"]["containers"]
@@ -842,7 +717,7 @@ def test_registry_rehearsal_uses_preflight_published_digest_without_kind() -> No
     assert all(container["imagePullPolicy"] == "IfNotPresent" for container in containers)
 
 
-def test_registry_rehearsal_accepts_provenance_index_without_kind() -> None:
+def test_registry_rehearsal_accepts_provenance_index() -> None:
     plan = replace(
         _plan(),
         container_registry="192.168.50.13:5000",
@@ -900,156 +775,6 @@ def test_registry_rehearsal_accepts_provenance_index_without_kind() -> None:
     executor = IsolatedRehearsalExecutor(run=run)
     assert executor._load_images(plan, (name,)) is True
     assert executor._runtime_image_ids(plan, (name,)) == {name: (expected, expected)}
-    assert not any(command and command[0] == "kind" for command in calls)
-
-
-def _runtime_binding_run(
-    *,
-    plan,
-    name,
-    expected,
-    reference,
-    manifest_digest,
-    config_digest,
-    import_index,
-    repo_digests,
-):
-    def run(argv, _payload, _timeout):
-        command = tuple(argv)
-        if "images" in command and "list" in command:
-            value = (
-                "REF TYPE DIGEST SIZE PLATFORMS LABELS\n"
-                f"{reference} application/vnd.oci.image.index.v1+json "
-                f"{expected} 1MiB linux/amd64 managed\n"
-            )
-        elif "content" in command and command[-1] == expected:
-            value = json.dumps(
-                {
-                    "schemaVersion": 2,
-                    "mediaType": "application/vnd.oci.image.index.v1+json",
-                    "manifests": [
-                        {
-                            "digest": manifest_digest,
-                            "mediaType": "application/vnd.oci.image.manifest.v1+json",
-                            "platform": {"architecture": "amd64", "os": "linux"},
-                        }
-                    ],
-                }
-            )
-        elif "content" in command and command[-1] == manifest_digest:
-            value = json.dumps(
-                {
-                    "schemaVersion": 2,
-                    "mediaType": "application/vnd.oci.image.manifest.v1+json",
-                    "config": {
-                        "digest": config_digest,
-                        "mediaType": "application/vnd.oci.image.config.v1+json",
-                    },
-                }
-            )
-        elif "content" in command and command[-1] in import_index:
-            value = json.dumps(
-                {
-                    "schemaVersion": 2,
-                    "mediaType": "application/vnd.oci.image.index.v1+json",
-                    "manifests": [
-                        {
-                            "digest": expected,
-                            "mediaType": "application/vnd.oci.image.index.v1+json",
-                            "annotations": {
-                                "io.containerd.image.name": reference,
-                                "org.opencontainers.image.ref.name": plan.image_tag,
-                            },
-                        }
-                    ],
-                }
-            )
-        elif "crictl" in command:
-            value = json.dumps(
-                {
-                    "status": {
-                        "id": config_digest,
-                        "repoTags": [reference],
-                        "repoDigests": list(repo_digests),
-                    },
-                    "info": {
-                        "imageSpec": {
-                            "architecture": "amd64",
-                            "os": "linux",
-                            "config": {
-                                "Labels": {"org.opencontainers.image.revision": plan.candidate_sha}
-                            },
-                        }
-                    },
-                }
-            )
-        else:
-            raise AssertionError(command)
-        return subprocess.CompletedProcess(argv, 0, value, "")
-
-    return run
-
-
-def test_runtime_image_binding_tolerates_multiday_import_aliases() -> None:
-    # A rehearsal image re-imported on more than one calendar day carries one
-    # ``import-YYYY-MM-DD`` repoDigest per import, all pinning the SAME content
-    # digest. The resolver must accept those duplicate aliases. Regression for
-    # the #838 pre-launch backup that failed with runtime-image-binding-failed
-    # once the postgres rehearsal image was imported on a second day.
-    plan = _plan()
-    name = "loom-control-plane"
-    expected = plan.image_digests[name]
-    reference = f"docker.io/library/{name}:{plan.image_tag}"
-    manifest_digest = "sha256:" + "c" * 64
-    config_digest = "sha256:" + "d" * 64
-    import_digest = "sha256:" + "f" * 64
-
-    run = _runtime_binding_run(
-        plan=plan,
-        name=name,
-        expected=expected,
-        reference=reference,
-        manifest_digest=manifest_digest,
-        config_digest=config_digest,
-        import_index={import_digest},
-        repo_digests=(
-            f"docker.io/library/import-2026-07-20@{import_digest}",
-            f"docker.io/library/import-2026-07-21@{import_digest}",
-        ),
-    )
-
-    resolved = IsolatedRehearsalExecutor(run=run)._runtime_image_ids(plan, (name,))
-
-    assert resolved == {name: (config_digest, manifest_digest, import_digest)}
-
-
-def test_runtime_image_binding_rejects_divergent_import_digests() -> None:
-    # Two repoDigests pinning DIFFERENT content digests keep the runtime image
-    # identity ambiguous and must still be rejected.
-    plan = _plan()
-    name = "loom-control-plane"
-    expected = plan.image_digests[name]
-    reference = f"docker.io/library/{name}:{plan.image_tag}"
-    manifest_digest = "sha256:" + "c" * 64
-    config_digest = "sha256:" + "d" * 64
-    import_digest_a = "sha256:" + "f" * 64
-    import_digest_b = "sha256:" + "a" * 64
-
-    run = _runtime_binding_run(
-        plan=plan,
-        name=name,
-        expected=expected,
-        reference=reference,
-        manifest_digest=manifest_digest,
-        config_digest=config_digest,
-        import_index={import_digest_a, import_digest_b},
-        repo_digests=(
-            f"docker.io/library/import-2026-07-20@{import_digest_a}",
-            f"docker.io/library/import-2026-07-21@{import_digest_b}",
-        ),
-    )
-
-    assert IsolatedRehearsalExecutor(run=run)._runtime_image_ids(plan, (name,)) is None
 
 
 def test_migration_runs_exact_candidate_against_restored_database() -> None:
@@ -1139,8 +864,6 @@ def test_release_loads_exact_images_and_verifies_all_scoped_resources() -> None:
         if command[:3] == ("docker", "image", "inspect"):
             name = command[-1].split(":", 1)[0]
             return subprocess.CompletedProcess(argv, 0, plan.image_digests[name] + "\n", "")
-        if command[:3] == ("kind", "load", "docker-image"):
-            return subprocess.CompletedProcess(argv, 0, "loaded\n", "")
         if command[:3] == ("systemctl", "--user", "show"):
             assert command[-2:] == ("--property=LoadState", "--value")
             return subprocess.CompletedProcess(argv, 0, "not-found\n", "")
@@ -1226,13 +949,6 @@ def test_release_loads_exact_images_and_verifies_all_scoped_resources() -> None:
     assert {item.execution_host for item in supervisor_artifact.supervisors} == {
         "TRT-EAI-OLDLAB-1",
         "gx10-01c7",
-    }
-    kind_load = next(command for command, _payload in calls if command[:2] == ("kind", "load"))
-    assert kind_load[-2:] == ("--name", plan.cluster_name)
-    assert set(kind_load[3:-2]) == {
-        "loom-llm-gateway:" + plan.image_tag,
-        "loom-service:" + plan.image_tag,
-        "loom-web:" + plan.image_tag,
     }
     secret_apply = next(payload for _command, payload in calls if payload == secrets.payload)
     assert secret_apply == secrets.payload
@@ -1532,8 +1248,6 @@ def test_release_rejects_external_supervisor_artifact_drift_after_secret_readbac
         if command[:3] == ("docker", "image", "inspect"):
             name = command[-1].split(":", 1)[0]
             return subprocess.CompletedProcess(argv, 0, plan.image_digests[name] + "\n", "")
-        if command[:3] == ("kind", "load", "docker-image"):
-            return subprocess.CompletedProcess(argv, 0, "loaded\n", "")
         if payload == secrets.payload:
             return subprocess.CompletedProcess(argv, 0, "applied\n", "")
         if (
@@ -1578,8 +1292,6 @@ def test_release_external_supervisor_failure_is_secret_free_and_blocks_manifest(
         if command[:3] == ("docker", "image", "inspect"):
             name = command[-1].split(":", 1)[0]
             return subprocess.CompletedProcess(argv, 0, plan.image_digests[name] + "\n", "")
-        if command[:3] == ("kind", "load", "docker-image"):
-            return subprocess.CompletedProcess(argv, 0, "loaded\n", "")
         if command[:3] == ("systemctl", "--user", "show"):
             return subprocess.CompletedProcess(argv, 0, "not-found\n", "")
         if command[:4] == ("systemd-run", "--user", "--wait", "--collect"):
@@ -1662,7 +1374,7 @@ def test_release_refuses_local_image_drift_before_kubernetes_mutation() -> None:
         calls.append(command)
         if command[:3] == ("docker", "image", "inspect"):
             return subprocess.CompletedProcess(argv, 0, "sha256:" + "0" * 64 + "\n", "")
-        raise AssertionError("drifted images must fail before kind or Kubernetes")
+        raise AssertionError("drifted images must fail before Kubernetes mutation")
 
     outcome = IsolatedRehearsalExecutor(
         run=run,
@@ -2800,7 +2512,7 @@ def test_browser_executes_exact_isolated_job_and_validates_report() -> None:
         calls.append((tuple(argv), payload, timeout))
         if argv[:3] == ("docker", "image", "inspect"):
             return subprocess.CompletedProcess(argv, 0, artifact.browser_image_digest + "\n", "")
-        if argv[:3] == ("kind", "load", "docker-image") or "apply" in argv or "wait" in argv:
+        if "apply" in argv or "wait" in argv:
             return subprocess.CompletedProcess(argv, 0, "", "")
         if "logs" in argv:
             return subprocess.CompletedProcess(argv, 0, json.dumps(report), "")

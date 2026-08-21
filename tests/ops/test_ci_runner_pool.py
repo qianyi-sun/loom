@@ -512,7 +512,6 @@ def test_golden_mirror_covers_ci_dockerhub_inputs() -> None:
     expected = {
         "busybox:latest",
         "edoburu/pgbouncer:latest",
-        "kindest/node:v1.31.0",
         "moby/buildkit:buildx-stable-1",
         "postgres:16-alpine",
         "tonistiigi/binfmt:latest",
@@ -868,7 +867,7 @@ def test_status_is_secret_safe_and_reports_online_capacity(
     assert "opaque-jit" not in json.dumps(report)
 
 
-def test_systemd_unit_uses_credential_and_candidate_sources() -> None:
+def test_systemd_unit_uses_independent_candidate_sources() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     service = (
         repo_root / "deploy/ci-runners/loom-ci-runner-pool.service"
@@ -878,7 +877,14 @@ def test_systemd_unit_uses_credential_and_candidate_sources() -> None:
     assert "${CREDENTIALS_DIRECTORY}/github-token" in service
     assert "LoadCredential=route-publisher-hmac:" in service
     assert "${CREDENTIALS_DIRECTORY}/route-publisher-hmac" in service
-    assert "${LOOM_CI_RUNNER_CANDIDATE_SHA}" in service
+    pool_command = next(
+        line
+        for line in service.splitlines()
+        if line.startswith("ExecStart=/usr/local/libexec/loom-ci-runner-pool ")
+    )
+    assert "--candidate-sha ${LOOM_CI_RUNNER_POOL_CANDIDATE_SHA}" in pool_command
+    assert "LOOM_CI_RUNNER_ROUTE_CANDIDATE_SHA" not in pool_command
+    assert "--candidate-sha ${LOOM_CI_RUNNER_CANDIDATE_SHA}" not in service
     assert "Environment=GITHUB_TOKEN" not in service
     assert "ProtectSystem=strict" in service
 

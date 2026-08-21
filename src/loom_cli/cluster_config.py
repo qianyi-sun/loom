@@ -153,11 +153,11 @@ if TYPE_CHECKING:
         image_tag: str = "0.7"
         # Optional container registry prefix applied to every locally-built
         # `loom-*` image reference in the rendered manifest. Empty (default)
-        # keeps the historical shape — kind's in-cluster load-images path
-        # depends on unprefixed names. For multi-node k3s / production, set
+        # keeps unprefixed names for unprotected local rendering. For
+        # protected multi-node k3s / production, set
         # to the registry host+port (no trailing slash) and point each
         # node's `/etc/rancher/k3s/registries.yaml` at the same endpoint so
-        # containerd can pull without side-channel image imports.
+        # containerd can pull the published candidate images.
         container_registry: str = ""
         # Operator-local publication endpoint for container_registry. This is
         # explicit because a k3s mirror may pull through a LAN address while

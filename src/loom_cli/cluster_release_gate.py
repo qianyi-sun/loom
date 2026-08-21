@@ -301,8 +301,6 @@ def _image_identity_matches(
 def _runtime_identity_kind(live_image_id: str | None) -> str:
     if not live_image_id:
         return "missing"
-    if re.search(r"(?:^|/)import-\d{4}-\d{2}-\d{2}@", live_image_id):
-        return "kind-import"
     return "runtime"
 
 
@@ -518,7 +516,7 @@ def _image_identity_checks(
                                 "preflighted rollout path deletes only "
                                 "classified sandbox-deadline pods and "
                                 "retries readiness once; if it still fails, "
-                                "inspect kind/containerd/kubelet on the node"
+                                "inspect containerd/kubelet on the node"
                             ),
                         )
                     )
@@ -645,28 +643,6 @@ def _image_identity_checks(
                                     str(expected_repo_digest) if expected_repo_digest else None
                                 ),
                                 "runtime_identity_mismatch": False,
-                            },
-                        )
-                    )
-                    break
-                if runtime_identity_kind == "kind-import":
-                    # The pod reached this branch only after its Pod spec image
-                    # matched the Deployment template. In kind/containerd,
-                    # status.containerStatuses[].image may report another tag
-                    # attached to the imported image, so keep that drift in
-                    # evidence without treating it as an old ReplicaSet.
-                    checks.append(
-                        ReleaseGateCheck(
-                            name=f"image-identity:{deployment_name}/{container_name}",
-                            outcome="pass",
-                            detail="Ready pod uses kind-imported runtime identity for release template image",
-                            evidence={
-                                **evidence,
-                                "identity_strategy": "kind-import-template-image",
-                                "expected_digest": _sha_from_ref(
-                                    str(expected_repo_digest) if expected_repo_digest else None
-                                ),
-                                "runtime_identity_mismatch": True,
                             },
                         )
                     )

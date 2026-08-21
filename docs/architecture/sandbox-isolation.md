@@ -75,8 +75,7 @@ enforce DNS names.
 `loom cluster render` emits NetworkPolicy objects for Loom components and
 `loom cluster audit` rejects a required component that has no selecting
 policy. The audit proves coverage, not packet-level correctness. NetworkPolicy
-is enforced by the cluster CNI; kind's default CNI accepts these resources but
-does not enforce them.
+is enforced by the cluster CNI and must be verified on every shared target.
 
 Only the web application and `/api/v1` service are public through Ingress. The
 Control Plane, LLM Gateway, Postgres, object storage, xDS, and egress proxy stay

@@ -13,7 +13,7 @@ def test_kubernetes_client_probe_collects_context_and_namespace() -> None:
 
     def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
         calls.append(tuple(argv))
-        stdout = "kind-loom-staging\n" if argv[-2:] == ["config", "current-context"] else ""
+        stdout = "loom-staging\n" if argv[-2:] == ["config", "current-context"] else ""
         return subprocess.CompletedProcess(argv, 0, stdout, "")
 
     readiness = probe_kubernetes_client(
@@ -24,7 +24,7 @@ def test_kubernetes_client_probe_collects_context_and_namespace() -> None:
     )
 
     assert readiness.ready
-    assert readiness.current_context == "kind-loom-staging"
+    assert readiness.current_context == "loom-staging"
     assert readiness.namespace == "loom-staging"
     assert len(readiness.evidence_digest) == 64
     assert calls == [

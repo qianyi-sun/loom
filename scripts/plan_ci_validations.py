@@ -306,9 +306,6 @@ def plan_validations(
         "deploy/environments/",
         "deploy/staging-k3s/",
     )
-    retired_kind_exact = {
-        "deploy/k8s/ingress-nginx-kind.yaml",
-    }
     staging_exact = {
         ".github/workflows/staging-smoke.yml",
         ".github/workflows/release-promotion-gate.yml",
@@ -384,11 +381,7 @@ def plan_validations(
         if image_match:
             select("images", f"path:{path}")
             matched_owner = True
-        if path in retired_kind_exact:
-            # Retained only as a rollback/development artifact. Live staging
-            # runs on k3s, so this path must not consume either live smoke lane.
-            matched_owner = True
-        elif _matches(path, exact=cluster_exact, prefixes=cluster_prefixes):
+        if _matches(path, exact=cluster_exact, prefixes=cluster_prefixes):
             select("cluster_smoke", f"path:{path}")
             matched_owner = True
         if _matches(path, exact=staging_exact, prefixes=staging_prefixes):

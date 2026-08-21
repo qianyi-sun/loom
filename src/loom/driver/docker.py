@@ -47,6 +47,7 @@ _GUARD_OWNED_SLICE_RE = re.compile(r"^loom-job-[1-9][0-9]*[.]slice$")
 
 def _default_caps() -> Capabilities:
     return Capabilities(
+        backend="docker",
         os="linux",
         gpu_vendor="none",
         network_policies=frozenset(["public", "no-network", "allowlist"]),

@@ -312,7 +312,7 @@ class InstalledLifecycleCapacityService:
         self.expected_drive_count = expected_drive_count
         self.expected_filesystem_paths = expected_filesystem_paths
         try:
-            self.registry_publication = validate_container_registry_prefixes(
+            registry_publication = validate_container_registry_prefixes(
                 container_registry,
                 container_registry_push,
             )
@@ -320,6 +320,11 @@ class InstalledLifecycleCapacityService:
             raise InstalledLifecycleCapacityError(
                 "lifecycle capacity registry authority is invalid"
             ) from exc
+        if registry_publication is None:
+            raise InstalledLifecycleCapacityError(
+                "lifecycle capacity registry authority is required"
+            )
+        self.registry_publication = registry_publication
         self.evidence_root = config.state_root / "lifecycle-capacity-jobs"
 
     def inventory(self) -> LifecycleCapacityJobPlan:
@@ -347,14 +352,8 @@ class InstalledLifecycleCapacityService:
             expected_filesystem_paths=self.expected_filesystem_paths,
             capacity_source=self.capacity_source,
             expected_drive_count=self.expected_drive_count,
-            container_registry=(
-                self.registry_publication[0] if self.registry_publication is not None else ""
-            ),
-            registry_digest=(
-                loaded.images.registry_digests["loom-control-plane"]
-                if self.registry_publication is not None
-                else ""
-            ),
+            container_registry=self.registry_publication[0],
+            registry_digest=loaded.images.registry_digests["loom-control-plane"],
         )
 
     def prepare_apply(self, *, approved_plan_digest: str) -> LifecycleCapacityJobPlan:
@@ -390,29 +389,21 @@ class InstalledLifecycleCapacityService:
         if self.inventory() != plan:
             raise InstalledLifecycleCapacityError("capacity plan drifted before image load")
         image = f"loom-control-plane:{plan.image_tag}"
-        if self.registry_publication is None:
-            _safe_command(
-                self.commands.simple(
-                    ("kind", "load", "docker-image", "--name", self.config.cluster_name, image)
-                ),
-                "exact capacity image load",
+        pull, push = self.registry_publication
+        target = f"{push}/{image}"
+        observed_digest = _inspect_registry_manifest(
+            lambda argv, _cwd: self.commands.simple(argv),
+            target,
+            expected_image_id=plan.control_plane_image_id,
+        )
+        if (
+            observed_digest != plan.control_plane_registry_digest
+            or f"{pull}/loom-control-plane@{plan.control_plane_registry_digest}"
+            not in plan.job_manifest
+        ):
+            raise InstalledLifecycleCapacityError(
+                "exact capacity image publication identity drifted"
             )
-        else:
-            pull, push = self.registry_publication
-            target = f"{push}/{image}"
-            observed_digest = _inspect_registry_manifest(
-                lambda argv, _cwd: self.commands.simple(argv),
-                target,
-                expected_image_id=plan.control_plane_image_id,
-            )
-            if (
-                observed_digest != plan.control_plane_registry_digest
-                or f"{pull}/loom-control-plane@{plan.control_plane_registry_digest}"
-                not in plan.job_manifest
-            ):
-                raise InstalledLifecycleCapacityError(
-                    "exact capacity image publication identity drifted"
-                )
         if self.inventory() != plan:
             raise InstalledLifecycleCapacityError("capacity plan drifted during image load")
         apply_record = _object(

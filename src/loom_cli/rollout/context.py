@@ -30,7 +30,7 @@ class RolloutContext:
         image_tag: Target release image tag (e.g. ``staging-abc123``).
         target_ref: Git ref the operator asked to roll out (e.g. ``origin/dev``).
         resolved_sha: Full 40-char git sha the ref resolved to at launch.
-        cluster_name: Name of the target k8s cluster (kind cluster name).
+        cluster_name: Exact kubeconfig context for the protected k3s target.
         namespace: Kubernetes namespace for the release.
         environment: Protected environment name (e.g. ``staging``).
             Used by the backup verification and release-gate steps to bind

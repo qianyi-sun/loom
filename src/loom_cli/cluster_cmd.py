@@ -2587,7 +2587,7 @@ def _audit(args: argparse.Namespace) -> int:
     """`loom cluster audit` — render manifests and check the
     public/internal boundary (#77). Renders without touching the
     cluster, so it's safe to run anywhere as a static check (CI
-    pre-merge, kind smoke, operator dry-run)."""
+    pre-merge, Compose smoke, operator dry-run)."""
     from loom_cli.cluster_boundary import audit_boundary, format_violations
 
     try:
@@ -2890,7 +2890,7 @@ def _check_default_storage_class(
             detail="no StorageClass resources registered",
             remediation=(
                 "Install a CSI driver appropriate for your cluster "
-                "(e.g. local-path-provisioner for kind:\n"
+                "(e.g. local-path-provisioner:\n"
                 "  kubectl apply -f "
                 "https://raw.githubusercontent.com/rancher/"
                 "local-path-provisioner/master/deploy/local-path-storage.yaml"
@@ -3169,128 +3169,6 @@ def _check_configured_static_host_path_storage(
     )
 
 
-def _is_kind_context(context: str | None) -> bool:
-    return bool(context and context.startswith("kind-"))
-
-
-def _read_kind_node_mounts(context: str | None) -> list[dict[str, Any]] | None:
-    if not _is_kind_context(context):
-        return None
-    assert context is not None
-    cluster_name = context.removeprefix("kind-")
-    node_name = f"{cluster_name}-control-plane"
-    import subprocess
-
-    proc = subprocess.run(
-        ["docker", "inspect", "--format", "{{json .Mounts}}", node_name],
-        capture_output=True,
-        check=False,
-        text=True,
-    )
-    if proc.returncode != 0:
-        return None
-    try:
-        mounts = json.loads(proc.stdout.strip())
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(mounts, list):
-        return None
-    return [mount for mount in mounts if isinstance(mount, dict)]
-
-
-def _normalise_mount_path(value: object) -> str:
-    return str(value or "").rstrip("/") or "/"
-
-
-def _kind_bind_mount_covers_static_root(
-    mount: dict[str, Any],
-    *,
-    root: str,
-) -> bool:
-    if str(mount.get("Type") or mount.get("type") or "").lower() != "bind":
-        return False
-    source = _normalise_mount_path(mount.get("Source") or mount.get("source"))
-    destination = _normalise_mount_path(
-        mount.get("Destination") or mount.get("destination"),
-    )
-    if not source or source == "/":
-        return False
-    if destination == "/data":
-        return root == "/data" or root.startswith("/data/")
-    return destination == root or root.startswith(f"{destination}/")
-
-
-def _check_kind_static_host_path_mount(
-    *,
-    context: str | None,
-    cluster_config: ClusterConfig | None,
-    environment: str,
-    kind_node_mounts: list[dict[str, Any]] | None,
-) -> PreflightCheck | None:
-    if not _is_kind_context(context) or cluster_config is None:
-        return None
-    try:
-        root = _normalise_static_host_path_root(cluster_config)
-    except ValueError as exc:
-        return PreflightCheck(
-            name="kind-host-storage-mount",
-            outcome="fail",
-            detail=(
-                f"protected kind environment {environment!r} has invalid "
-                f"persistent storage config: {exc}"
-            ),
-        )
-    if root is None:
-        return None
-    if kind_node_mounts is None:
-        return PreflightCheck(
-            name="kind-host-storage-mount",
-            outcome="fail",
-            detail=(
-                f"protected kind environment {environment!r} uses "
-                f"static-host-path root {root}, but the kind node Docker "
-                "mounts could not be inspected"
-            ),
-            remediation=(
-                "Run preflight from a host with Docker access, or rebuild the "
-                "kind cluster with an extraMount that binds host /data or "
-                f"{root} into the control-plane node."
-            ),
-        )
-    if any(
-        _kind_bind_mount_covers_static_root(mount, root=root)
-        for mount in kind_node_mounts
-        if isinstance(mount, dict)
-    ):
-        return PreflightCheck(
-            name="kind-host-storage-mount",
-            outcome="pass",
-            detail=(
-                f"protected kind environment {environment!r} has a host bind "
-                f"mount covering static-host-path root {root}"
-            ),
-        )
-    destinations = [
-        _normalise_mount_path(mount.get("Destination") or mount.get("destination"))
-        for mount in kind_node_mounts
-        if isinstance(mount, dict)
-    ]
-    return PreflightCheck(
-        name="kind-host-storage-mount",
-        outcome="fail",
-        detail=(
-            f"protected kind environment {environment!r} uses static-host-path "
-            f"root {root}, but the kind node has no Docker bind mount to /data "
-            f"or {root}; mounted destinations={destinations or 'none'}"
-        ),
-        remediation=(
-            "Rebuild the kind cluster with extraMounts mapping host /data "
-            f"or {root} into the control-plane node, then restore from a "
-            "verified backup before trusting static hostPath PV durability."
-        ),
-    )
-
-
 def _check_protected_storage_boundary(
     core_v1: Any,
     storage_v1: Any,
@@ -3521,7 +3399,6 @@ def collect_preflight(
     backup_limits: BackupTraversalLimits | None = None,
     cluster_config: ClusterConfig | None = None,
     workload_contract_profile: object = None,
-    kind_node_mounts: list[dict[str, Any]] | None = None,
 ) -> PreflightReport:
     """Pure-collection function — every API client passed in so tests
     can inject fakes. If `namespace-exists` fails, the namespace-
@@ -3552,14 +3429,6 @@ def collect_preflight(
                 cluster_config=cluster_config,
             )
         )
-        kind_mount_check = _check_kind_static_host_path_mount(
-            context=context,
-            cluster_config=cluster_config,
-            environment=env_name,
-            kind_node_mounts=kind_node_mounts,
-        )
-        if kind_mount_check is not None:
-            checks.append(kind_mount_check)
         checks.append(
             _check_backup_manifest(
                 backup_manifest,
@@ -3751,7 +3620,6 @@ def _preflight(args: argparse.Namespace) -> int:
         return 2
     try:
         effective_context = _effective_kube_context(args.context)
-        kind_node_mounts = _read_kind_node_mounts(effective_context)
         report = collect_preflight(
             core_v1,
             net_v1,
@@ -3766,7 +3634,6 @@ def _preflight(args: argparse.Namespace) -> int:
             backup_limits=_backup_traversal_limits_from_args(args),
             cluster_config=cluster_config,
             workload_contract_profile=workload_contract_profile,
-            kind_node_mounts=kind_node_mounts,
         )
     except Exception as exc:
         sys.stderr.write(
@@ -4754,7 +4621,6 @@ def _up_impl(
     if not args.skip_preflight:
         try:
             effective_context = _effective_kube_context(args.context)
-            kind_node_mounts = _read_kind_node_mounts(effective_context)
             report = collect_preflight(
                 core_v1,
                 net_v1,
@@ -4769,7 +4635,6 @@ def _up_impl(
                 backup_limits=_backup_traversal_limits_from_args(args),
                 cluster_config=config,
                 workload_contract_profile=workload_contract_profile,
-                kind_node_mounts=kind_node_mounts,
             )
             _append_target_schema_doctor_check(
                 report,
@@ -5280,65 +5145,6 @@ def _render_migration(args: argparse.Namespace) -> int:
     sys.stdout.write(manifest)
     if not manifest.endswith("\n"):
         sys.stdout.write("\n")
-    return 0
-
-
-def _load_images(args: argparse.Namespace) -> int:
-    """Handler for `loom cluster load-images` (#96)."""
-    from loom_cli.cluster_load_images import (
-        load_images_into_kind,
-        resolve_images,
-    )
-
-    manifest_paths = [Path(p) for p in args.from_manifest]
-    try:
-        images = resolve_images(
-            explicit=args.image,
-            manifest_paths=manifest_paths,
-        )
-    except FileNotFoundError as exc:
-        sys.stderr.write(f"error: {exc}\n")
-        return 2
-
-    if not images:
-        sys.stderr.write(
-            "error: no images to process. Pass --image TAG (repeatable) "
-            "and/or --from-manifest PATH.\n"
-        )
-        return 2
-
-    result = load_images_into_kind(
-        cluster_name=args.cluster_name,
-        images=images,
-        check_only=args.check_only,
-    )
-
-    if args.check_only:
-        if result.missing:
-            sys.stderr.write(
-                "error: kind cluster is missing images that a rollout would require:\n"
-            )
-            for image in result.missing:
-                sys.stderr.write(f"  - {image}\n")
-            fix_cmd = f"  loom cluster load-images --cluster-name {args.cluster_name} " + " ".join(
-                f"--image {img}" for img in result.missing
-            )
-            sys.stderr.write(f"\nTo fix, load them into the kind node cache:\n{fix_cmd}\n")
-            return 1
-        sys.stdout.write(
-            f"all {len(images)} image(s) present in kind cluster '{args.cluster_name}'\n"
-        )
-        return 0
-
-    for image in result.loaded:
-        sys.stdout.write(f"loaded: {image}\n")
-    if result.failed:
-        sys.stderr.write("error: kind load failed for:\n")
-        for image in result.failed:
-            err_line = result.stderr.get(image, "").strip().splitlines()
-            summary = err_line[-1] if err_line else "(no stderr)"
-            sys.stderr.write(f"  - {image}: {summary}\n")
-        return 1
     return 0
 
 
@@ -5932,7 +5738,7 @@ def dispatch(argv: list[str]) -> int:
         "--recover-sandbox-deadlines",
         action="store_true",
         help=(
-            "When readiness stalls on classified kind/containerd pod "
+            "When readiness stalls on classified containerd pod "
             "sandbox deadline failures, delete only those classified pods "
             "and retry readiness once. Preflight still runs first unless "
             "--skip-preflight is explicitly supplied."
@@ -6461,54 +6267,6 @@ def dispatch(argv: list[str]) -> int:
     )
     p_evidence.set_defaults(handler=_bootstrap_evidence_paths)
 
-    p_load_images = sub.add_parser(
-        "load-images",
-        help=(
-            "Load local Docker images into a kind cluster's node runtime "
-            "so kubectl apply can resolve them."
-        ),
-    )
-    p_load_images.add_argument(
-        "--cluster-name",
-        required=True,
-        help=(
-            "Name of the kind cluster (as in `kind get clusters`). Used "
-            "as --name to `kind load` and as the control-plane container "
-            "prefix for `--check-only`."
-        ),
-    )
-    p_load_images.add_argument(
-        "--image",
-        action="append",
-        default=[],
-        help=(
-            "Local image tag to load (repeatable). Format: 'name:tag'. "
-            "Combine with --from-manifest to also parse tags out of "
-            "rendered Kubernetes manifests."
-        ),
-    )
-    p_load_images.add_argument(
-        "--from-manifest",
-        action="append",
-        default=[],
-        help=(
-            "Path to a rendered Kubernetes YAML manifest. Local image "
-            "tags found under pod spec container/initContainer image "
-            "fields are added to the load set. Registry-qualified "
-            "images are skipped."
-        ),
-    )
-    p_load_images.add_argument(
-        "--check-only",
-        action="store_true",
-        help=(
-            "Do not load; instead query the kind node's containerd via "
-            "`docker exec ... crictl images` and exit non-zero if any "
-            "of the requested tags are missing. Suitable for preflight."
-        ),
-    )
-    p_load_images.set_defaults(handler=_load_images)
-
     p_render_migration = sub.add_parser(
         "render-migration",
         help=(
@@ -6569,7 +6327,7 @@ def dispatch(argv: list[str]) -> int:
         help=(
             "One-command staging rollout driver with state-machine "
             "resume. Orchestrates 16 steps: resolve-target → "
-            "worktree → build → kind-cluster → kind-load → backup → audit "
+            "worktree → build → cluster-target → publish-images → backup → audit "
             "→ render → preflight → migrate → cluster-up → env-state "
             "→ gb10-prep → production-defaults → release-gate → smoke, "
             "plus a summary."

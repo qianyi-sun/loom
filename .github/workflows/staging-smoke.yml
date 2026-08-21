@@ -51,11 +51,9 @@ run-name: >-
                     contains(github.event.pull_request.labels.*.name, 'ci:coverage-summary') && '1' || '0'),
              github.event.pull_request.number || 'none') }}
 
-# Runs the manifest-owned Compose system contract for selected PRs. The former
-# kind deployment rehearsal no longer models live staging, which runs on the
-# five-node OLDLAB k3s cluster. Candidate deployment and live k3s readiness are
-# separately authorized protected acceptance; this required PR context does not
-# claim live-staging evidence.
+# Runs the manifest-owned Compose system contract for selected PRs. Candidate
+# deployment and live k3s readiness are separately authorized protected
+# acceptance; this required PR context does not claim live-staging evidence.
 #
 # Trigger model:
 #   - workflow_dispatch (manual)
@@ -196,7 +194,7 @@ jobs:
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           repository: qianyi-sun/loom
-          ref: 9a0df38f5cc4f9cf747efac3c4e37e9657e8eb34
+          ref: 66b83fc57a3141197a997c9f6d4ce6e2a98ee3de
           sparse-checkout: .github/actions/ci-runner-route
           path: .loom-ci-route-action
           persist-credentials: false

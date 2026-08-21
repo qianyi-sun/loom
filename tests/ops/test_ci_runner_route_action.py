@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 from loom_control_plane import ci_runner_lease_broker as leases
+from loom_control_plane import ci_runner_route_controller as controller
 
 HEAD_SHA = "a" * 40
 
@@ -189,6 +190,69 @@ def test_poll_accepts_only_the_exact_digest_check(
 
     assert list(routes) == request_value["job_keys"]
     assert poll_output.read_text(encoding="utf-8").startswith("routes={")
+
+
+def test_poll_timeout_freezes_exact_hosted_routes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    action = _module()
+    environment = _environment(tmp_path, mode="oldlab-preferred-v1")
+    request_value = action.prepare(environment, tmp_path / "request-output")
+    monkeypatch.setattr(action, "POLL_TIMEOUT_SECONDS", 0)
+    monkeypatch.setattr(
+        action,
+        "_get_json",
+        lambda *_args: pytest.fail("a zero-length deadline must not query GitHub"),
+    )
+    poll_output = tmp_path / "poll-output"
+
+    routes = action.poll(
+        {
+            "GITHUB_TOKEN": "opaque-token",
+            "ROUTE_REQUEST_PATH": environment["ROUTE_REQUEST_PATH"],
+        },
+        poll_output,
+    )
+
+    assert list(routes) == request_value["job_keys"]
+    assert set(map(tuple, routes.values())) == {("ubuntu-latest",)}
+    assert poll_output.read_text(encoding="utf-8").startswith("routes={")
+
+
+def test_poll_never_hides_an_ambiguous_trusted_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    action = _module()
+    environment = _environment(tmp_path, mode="oldlab-preferred-v1")
+    request_value = action.prepare(environment, tmp_path / "request-output")
+    request = leases.RouteRequest.from_mapping(request_value)
+    external_id = (
+        f"{action.CHECK_PREFIX}:{request.workflow_id}:{request.workflow_run_id}:"
+        f"{request.run_attempt}:{action._canonical_sha(request_value)}"
+    )
+    check = {"external_id": external_id}
+    monkeypatch.setattr(action, "_get_json", lambda *_args: {"check_runs": [check, check]})
+
+    with pytest.raises(action.RouteActionError, match="identity is ambiguous"):
+        action.poll(
+            {
+                "GITHUB_TOKEN": "opaque-token",
+                "ROUTE_REQUEST_PATH": environment["ROUTE_REQUEST_PATH"],
+            },
+            tmp_path / "poll-output",
+        )
+
+    assert not (tmp_path / "poll-output").exists()
+
+
+def test_hosted_deadline_exceeds_the_oldlab_publish_window() -> None:
+    action = _module()
+    controller_window = (
+        controller.OLDLAB_REQUEST_MAX_AGE_SECONDS
+        + controller.PUBLISHER_POLL_SECONDS * controller.PUBLISHER_POLL_ATTEMPTS
+    )
+
+    assert controller_window < action.POLL_TIMEOUT_SECONDS < 5 * 60
 
 
 def test_composite_action_pins_artifact_upload_and_exposes_only_routes() -> None:

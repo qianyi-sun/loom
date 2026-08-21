@@ -1,5 +1,5 @@
 name: Resolve oldlab-first CI routes
-description: Upload one bounded route request and validate the trusted controller response.
+description: Upload one bounded route request, validate the trusted response, or freeze onto hosted capacity after the deadline.
 
 inputs:
   route-mode:
