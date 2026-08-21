@@ -1,6 +1,8 @@
 # Task-image builder Phase 1 isolation correction
 
-**Status:** Approved design; implementation and live convergence pending
+**Status:** Approved design; Phase 1 prerequisite implementation and inert
+operator runbook published; live convergence pending externally provisioned
+storage and GB10 administrative authority
 
 **Date:** 2026-08-19
 
@@ -28,6 +30,11 @@ Phase 1 remains inert throughout:
 - no rootless builder policy or supervisor is enabled;
 - no builder node feature is advertised; and
 - task `4139e767` is not rerun.
+
+The operational sequence and its current stop conditions are published in the
+[Phase 1 site-convergence runbook](../../../docs/runbooks/task-image-builder-phase1-site-convergence.md).
+The runbook documents check/plan-first evidence collection only; publication
+does not constitute a live controller/node check or authorization to apply.
 
 ## Why PR #1457 must not be applied
 
@@ -227,6 +234,29 @@ staged, signatures and digests validate, UID/GID and subordinate ranges are
 conflict-free, an exact configuration backup can be created, and the storage
 plan has been selected from observed disk and filesystem inventory.
 
+Bundle verification produces an owner-private snapshot from descriptor-pinned
+regular inputs after rejecting symlinks, special files, writable inputs, and
+source changes. Host apply consumes only that verified snapshot and removes it
+on every terminal path; it never reopens caller-controlled bundle paths after
+verification.
+
+The Phase 1 smoke owns only the controls Slurm can prove at this boundary: the
+cardinality of `cpuset.cpus.effective`, exact `memory.max`, exact
+`memory.swap.max`, and an attached cgroup-device BPF program. Exact CPU
+bandwidth (`cpu.max`) and PID (`pids.max`) enforcement belong to the Phase 2
+node guard and are not claimed by Phase 1 evidence.
+
+The project-quota jobs root is exactly `/var/lib/loom-task-builder/jobs`, owned
+by UID 993/GID 980, mode `0700`, project ID `300993` with inheritance, and empty
+after smoke cleanup. Evidence re-reads that metadata, `lsattr`, and `repquota`;
+it does not substitute an earlier host receipt for the fresh observation.
+
+All producers, collectors, and verification inputs are bound through
+`authority-components-v1.json`, which names every authority-bearing component
+and its digest. Kernel and storage claims retain bounded raw syscall,
+command, file, mount, quota, metadata, and cleanup observations so semantic
+verification never trusts policy-derived booleans alone.
+
 The converger never automatically repartitions a disk, resizes a filesystem,
 enables quota on an unrelated root filesystem, or creates a loopback
 filesystem. If no suitable existing or explicitly provisioned filesystem is
@@ -303,6 +333,13 @@ no builder provider, node guard, activation, or rerun.
 PR B follows the same protected PR and squash-merge process. Repository changes
 are made only in a worktree, and `docs/superpowers/**` is excluded.
 
+The delivered [inert operator runbook](../../../docs/runbooks/task-image-builder-phase1-site-convergence.md)
+binds this repository boundary to the future authorized sequence: verified
+artifact staging, controller identity/readback, additive Slurm convergence,
+OLDLAB-first one-node maintenance, rollback receipt inspection, complete
+two-cluster evidence assembly, and the still-closed Phase 2 boundary.  It does
+not record a fresh live check or authorize an apply.
+
 ### Operational rollout
 
 After both PRs merge:
@@ -351,7 +388,14 @@ PR B and operational acceptance must prove, per node and then per cluster:
   exact account/QoS/partition request, while the equivalent `loom-rollout`
   request is rejected;
 - a credential-free smoke allocation verifies Slurm admission and cgroup
-  placement without executing BuildKit or untrusted build input;
+  placement, cpuset cardinality, memory/swap limits, and device containment
+  without executing BuildKit or untrusted build input;
+- CPU-bandwidth and PID-limit enforcement remain explicitly blocked on the
+  Phase 2 node guard rather than being inferred from Phase 1 Slurm state;
+- the authority-component manifest and bounded raw kernel/storage observations
+  match the candidate, receipts, and derived evidence;
+- the jobs root is UID 993/GID 980 mode `0700`, project-inheriting as 300993,
+  and freshly observed empty after the receipt-bound cleanup command;
 - no surviving build process, mount, credential, or writable cache after the
   contained smoke allocation; and
 - ordinary trials remain schedulable after node restoration.

@@ -1985,6 +1985,14 @@ def test_python_test_shards_are_complete_and_non_overlapping() -> None:
     assert "${{ matrix.shard }}" in integration_upload["with"]["name"]
 
 
+def test_root_test_shard_timeout_has_bounded_growth_headroom() -> None:
+    workflow = _workflow(".github/workflows/ci.yml")
+
+    timeout_minutes = workflow["jobs"]["tests-root"]["timeout-minutes"]
+
+    assert 25 <= timeout_minutes <= 45
+
+
 def test_ci_supports_merge_queue_merge_group_event() -> None:
     workflow = _workflow(".github/workflows/ci.yml")
     on_config = _workflow_on(workflow)

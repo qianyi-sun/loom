@@ -9,6 +9,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 POLICY_PATH = ROOT / "deploy/task-image-builder/prerequisites-v1.toml"
 RUNTIME_PATH = ROOT / "deploy/task-image-builder/rootless-runtime-v1.json"
+HOST_RELEASE_PATH = ROOT / "deploy/task-image-builder/host-release-v1.json"
 SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 
 
@@ -19,6 +20,10 @@ def _policy() -> dict[str, Any]:
 
 def _runtime() -> dict[str, Any]:
     return json.loads(RUNTIME_PATH.read_text(encoding="utf-8"))
+
+
+def _host_release() -> dict[str, Any]:
+    return json.loads(HOST_RELEASE_PATH.read_text(encoding="utf-8"))
 
 
 def test_phase_one_policy_is_dynamic_bounded_and_cannot_certify_production() -> None:
@@ -219,3 +224,117 @@ def test_runtime_manifest_pins_only_native_rootless_binaries() -> None:
             assert SHA256_RE.fullmatch(digest)
             assert "qemu" not in name
             assert "cni" not in name
+
+
+def test_host_release_pins_signed_packages_and_site_preconditions() -> None:
+    release = _host_release()
+    policy = _policy()
+
+    assert release["schema"] == "loom.task-image-builder-host-release/v1"
+    assert release["release"] == "host-release-v1"
+    assert release["runtime_manifest"] == "rootless-runtime-v1.json"
+    assert release["ubuntu"] == {
+        "os_id": "ubuntu",
+        "version_id": "24.04",
+        "suite": "noble-updates",
+        "component": "main",
+        "signer_fingerprint": "F6ECB3762474EDA9D21B7022871920D1991BC93C",
+        "keyring_name": "ubuntu-archive-keyring.gpg",
+        "keyring_sha256": (
+            "80a36b0a6de2f69f49d2df75ef473ccde121e9e190b9ea01d20a4f63778d5c31"
+        ),
+    }
+    assert release["repositories"] == {
+        "amd64": {
+            "base_url": "https://archive.ubuntu.com/ubuntu",
+            "inrelease_path": "dists/noble-updates/InRelease",
+            "packages_path": "dists/noble-updates/main/binary-amd64/Packages.xz",
+        },
+        "arm64": {
+            "base_url": "https://ports.ubuntu.com/ubuntu-ports",
+            "inrelease_path": "dists/noble-updates/InRelease",
+            "packages_path": "dists/noble-updates/main/binary-arm64/Packages.xz",
+        },
+    }
+    assert release["architecture_map"] == {"x86_64": "amd64", "aarch64": "arm64"}
+
+    expected_packages = {
+        "amd64": {
+            "libsubid4": (
+                "1:4.13+dfsg1-4ubuntu3.2",
+                "pool/main/s/shadow/libsubid4_4.13+dfsg1-4ubuntu3.2_amd64.deb",
+                23_442,
+                "ba97fd28c53560a8d2a2261e8f75a7ab4112535b12f9fe1d50970c30051da0da",
+            ),
+            "uidmap": (
+                "1:4.13+dfsg1-4ubuntu3.2",
+                "pool/main/s/shadow/uidmap_4.13+dfsg1-4ubuntu3.2_amd64.deb",
+                26_006,
+                "a80cb7f72dd18c73cbb0b07b7fbe855504f26bfafae072a9b3d125c89d499b9e",
+            ),
+            "quota": (
+                "4.06-1build6",
+                "pool/main/q/quota/quota_4.06-1build6_amd64.deb",
+                211_338,
+                "55cc08283cd16b26ce305c01252d92989ee561ea47d2d781958ea6a27d5a7e25",
+            ),
+        },
+        "arm64": {
+            "libsubid4": (
+                "1:4.13+dfsg1-4ubuntu3.2",
+                "pool/main/s/shadow/libsubid4_4.13+dfsg1-4ubuntu3.2_arm64.deb",
+                23_534,
+                "00916edc15862421e803bec7e69d548c6ce281badf5d449498085a3b3710639f",
+            ),
+            "uidmap": (
+                "1:4.13+dfsg1-4ubuntu3.2",
+                "pool/main/s/shadow/uidmap_4.13+dfsg1-4ubuntu3.2_arm64.deb",
+                26_650,
+                "052b1852a9ab03d931398a9d0060ef7c312f1b48bc4f4ee4533649bb958b634a",
+            ),
+            "quota": (
+                "4.06-1build6",
+                "pool/main/q/quota/quota_4.06-1build6_arm64.deb",
+                216_482,
+                "2ff4f684f177690caac079d636fa3effdce44e3aa4f6f81f1e24e9ec3e9263b8",
+            ),
+        },
+    }
+    for architecture, packages in expected_packages.items():
+        assert set(release["packages"][architecture]) == set(packages)
+        for package, (version, filename, size, digest) in packages.items():
+            assert release["packages"][architecture][package] == {
+                "package": package,
+                "version": version,
+                "architecture": architecture,
+                "filename": filename,
+                "size": size,
+                "sha256": digest,
+            }
+            assert SHA256_RE.fullmatch(digest)
+
+    storage = policy["storage"]
+    assert storage["mountpoint"] == "/var/lib/loom-task-builder"
+    assert storage["root"] == "/var/lib/loom-task-builder/jobs"
+    assert storage["project_id"] == 300_993
+    assert storage["site_filesystem"] == "ext4"
+    assert storage["required_mount_options"] == ["prjquota"]
+    assert storage["automatic_block_device_changes"] is False
+    assert storage["reject_root_filesystem"] is True
+    assert storage["reject_network_filesystem"] is True
+
+    clusters = {item["id"]: item for item in policy["clusters"]}
+    assert clusters["oldlab"]["cgroup_transition"] == "shared_symlink_to_node_local"
+    assert clusters["oldlab"]["cgroup_observed_path"] == "/shared_work/cgroup.conf"
+    assert clusters["oldlab"]["cgroup_observed_sha256"] == (
+        "a4a31fa25902b407f1c2d865d5667128725aad5bbaa47c1e2b701c226fff8a2f"
+    )
+    assert clusters["gb10"]["cgroup_transition"] == "node_local"
+    assert clusters["gb10"]["cgroup_observed_path"] == "/etc/slurm/cgroup.conf"
+    assert clusters["gb10"]["cgroup_observed_sha256"] == (
+        "333f28cf5d91fd40515551b239ce4e421b92244d047e5c25b260bca1af2ac10b"
+    )
+
+    serialized = json.dumps({"release": release, "storage": storage}, sort_keys=True).lower()
+    for forbidden in ("docker.sock", '"reservation"', '"exclusive"', '"nodelist"'):
+        assert forbidden not in serialized
