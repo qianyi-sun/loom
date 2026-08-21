@@ -635,11 +635,11 @@ def _snapshot_bundle(
         return snapshot_root
     except HostReleaseError:
         if snapshot_root is not None:
-            shutil.rmtree(snapshot_root, ignore_errors=True)
+            _remove_snapshot(snapshot_root)
         raise
     except OSError as exc:
         if snapshot_root is not None:
-            shutil.rmtree(snapshot_root, ignore_errors=True)
+            _remove_snapshot(snapshot_root)
         raise HostReleaseError("bundle cannot be snapshotted safely") from exc
     finally:
         for descriptor, _, _ in source_files.values():

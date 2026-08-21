@@ -545,7 +545,10 @@ def test_v1_topology_cannot_authenticate_quota_from_updates(tmp_path: Path) -> N
 
 def test_valid_concatenated_xz_streams_are_accepted(tmp_path: Path) -> None:
     verified = _verify(_bundle_fixture(tmp_path, concatenate_base_index=True))
-    verified.close()
+    try:
+        assert verified.architecture == "x86_64"
+    finally:
+        verified.close()
 
 
 def test_aligned_xz_stream_padding_is_accepted(tmp_path: Path) -> None:
@@ -556,7 +559,58 @@ def test_aligned_xz_stream_padding_is_accepted(tmp_path: Path) -> None:
             base_index_padding=4,
         )
     )
-    verified.close()
+    try:
+        assert verified.architecture == "x86_64"
+    finally:
+        verified.close()
+
+
+def test_snapshot_construction_cleanup_failure_is_visible(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _bundle_fixture(tmp_path)
+    real_mkdir = Path.mkdir
+    real_rmtree = host_release.shutil.rmtree
+    snapshot_paths: set[Path] = set()
+
+    def fail_snapshot_directory_create(
+        path: Path,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        if path.parent.name.startswith("loom-host-bundle-snapshot-"):
+            raise OSError("injected snapshot construction failure")
+        real_mkdir(path, *args, **kwargs)
+
+    def fail_snapshot_cleanup(path: str | Path, *args: object, **kwargs: object) -> None:
+        target = Path(path)
+        if target.name.startswith("loom-host-bundle-snapshot-"):
+            snapshot_paths.add(target)
+            if kwargs.get("ignore_errors") is True:
+                return
+            raise OSError("injected snapshot cleanup failure")
+        real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(host_release.Path, "mkdir", fail_snapshot_directory_create)
+    monkeypatch.setattr(host_release.shutil, "rmtree", fail_snapshot_cleanup)
+    try:
+        with pytest.raises(host_release.HostReleaseError, match="snapshot cleanup failed") as exc:
+            _verify(fixture)
+
+        assert isinstance(exc.value.__cause__, OSError)
+        assert str(exc.value.__cause__) == "injected snapshot cleanup failure"
+        assert isinstance(exc.value.__cause__.__context__, OSError)
+        assert str(exc.value.__cause__.__context__) == "injected snapshot construction failure"
+        assert snapshot_paths
+        assert all(path.name.startswith("loom-host-bundle-snapshot-") for path in snapshot_paths)
+    finally:
+        monkeypatch.undo()
+        for snapshot in snapshot_paths:
+            if snapshot.parent != Path(tempfile.gettempdir()):
+                raise AssertionError("fixture snapshot cleanup path is unsafe")
+            if os.path.lexists(snapshot):
+                real_rmtree(snapshot)
 
 
 def test_leading_aligned_xz_padding_is_rejected() -> None:
