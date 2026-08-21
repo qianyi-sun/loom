@@ -757,8 +757,15 @@ request/attempt directory. The journal is private, no-follow, single-link and
 no-replace. A worker restart may reuse only a passed, unexpired execution with
 the exact input fingerprint, implementation digest, stage and operation. This
 means a published successful `final.protected-apply` is never repeated after a
-worker crash; an incomplete or failed execution cannot be treated as resume
-authority.
+worker crash. An incomplete or failed outer execution is not resume authority
+by itself. The one recoverable crash window is an exact service-owned final
+plan whose component journal contains the matching mutation-epoch intent and
+terminal at `starting_epoch + 1`. A resumed attempt must bind that plan to the
+same request candidate and attestation, pass post-apply admission against the
+advanced live epoch, and rerun the protected action through a new component
+journal. Each component is then reclassified: exact effects receive terminal
+evidence without repeating mutation, while any partial, ambiguous, or drifted
+state still fails closed.
 
 An attested worker may not use the 18-step compatibility driver. The production
 worker composition always injects the six-check `FinalGateRunner`;

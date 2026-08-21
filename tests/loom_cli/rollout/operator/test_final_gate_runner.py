@@ -73,7 +73,7 @@ def _admission(attestation: PreflightAttestation) -> FinalAttestationAdmission:
     return FinalAttestationAdmission(attestation, (tier0,), _baseline_executions())
 
 
-def _actions(calls, attestation_digest: str):
+def _actions(calls, attestation_digest: str, *, observed_epoch: int = 7):
     def action(check_id: str):
         def execute(operation: CheckOperation) -> FinalGateResult:
             calls.append((check_id, operation))
@@ -82,7 +82,7 @@ def _actions(calls, attestation_digest: str):
                 operation=operation,
                 candidate_sha="a" * 40,
                 attestation_digest=attestation_digest,
-                observed_epoch=7,
+                observed_epoch=observed_epoch,
                 evidence_digest="9" * 64,
                 protected_mutation=(
                     check_id in PROTECTED_MUTATION_CHECK_IDS and operation is CheckOperation.APPLY
@@ -106,7 +106,9 @@ def _runner(tmp_path: Path, calls, *, epoch: int = 7) -> FinalGateRunner:
     return FinalGateRunner(
         attestation_store=store,
         actions_factory=lambda _envelope, _attestation, _epoch, _admission: _actions(
-            calls, attestation.attestation_digest
+            calls,
+            attestation.attestation_digest,
+            observed_epoch=epoch,
         ),
         read_mutation_epoch=lambda: epoch,
         now=lambda: NOW,
@@ -157,6 +159,44 @@ def test_final_gate_runner_refuses_epoch_drift_before_actions(tmp_path: Path) ->
         runner(_envelope(), _admission(_valid_attestation()))
 
     assert calls == []
+
+
+def test_final_gate_runner_recovers_missing_outer_apply_from_component_journal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, CheckOperation]] = []
+    runner = _runner(tmp_path, calls, epoch=8)
+    attempt = tmp_path / "state/requests/req-alpha/attempts/2"
+    attempt.mkdir(parents=True, mode=0o700)
+    os.chmod(attempt, 0o700)
+    envelope = replace(
+        _envelope(),
+        attempt_number=2,
+        attempt_operator="devansh",
+        attempt_uid=2003,
+        resume=True,
+    )
+    observed: list[dict[str, object]] = []
+
+    def find_recovery(_root, **kwargs):
+        observed.append(kwargs)
+        return 1
+
+    monkeypatch.setattr(
+        "loom_cli.rollout.operator.final_gate_runner.find_advanced_epoch_attempt",
+        find_recovery,
+    )
+
+    assert (
+        runner(
+            envelope,
+            replace(_admission(_valid_attestation()), post_apply_resume=True),
+        )
+        == 0
+    )
+    assert observed[0]["through_attempt"] == 1
+    assert calls[0] == ("final.protected-apply", CheckOperation.APPLY)
 
 
 def test_final_gate_runner_resumes_after_apply_without_repeating_mutation(
