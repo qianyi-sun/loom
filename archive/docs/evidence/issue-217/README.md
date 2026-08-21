@@ -15,8 +15,6 @@ build → trial → `verifier_shim.sh` → `VerifierResult`).
 
 Additional archived batches:
 
-- [`g3-public-beta/`](g3-public-beta/) — four public-beta task runs with paired
-  ATIF and trajectory artifacts.
 - [`g6-provider-matrix/`](g6-provider-matrix/) — three provider-matrix runs
   with paired ATIF and trajectory artifacts.
 

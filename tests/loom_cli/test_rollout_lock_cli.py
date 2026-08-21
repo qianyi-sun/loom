@@ -329,7 +329,6 @@ def _patch_cluster_up_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda *_args, **_kwargs: type("Report", (), {"any_fail": False})(),
     )
     monkeypatch.setattr("loom_cli.cluster_cmd._effective_kube_context", lambda _context: None)
-    monkeypatch.setattr("loom_cli.cluster_cmd._read_kind_node_mounts", lambda _context: {})
     monkeypatch.setattr(
         "loom_cli.cluster_cmd._append_target_schema_doctor_check",
         lambda *_args, **_kwargs: None,

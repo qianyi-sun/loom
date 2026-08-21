@@ -43,8 +43,8 @@ class TestDefaultStepSequence:
             "resolve-target",
             "worktree",
             "build-images",
-            "kind-cluster",
-            "kind-load-images",
+            "cluster-target",
+            "publish-images",
             "gb10-prep",
             "backup",
             "audit",
@@ -62,16 +62,16 @@ class TestDefaultStepSequence:
         got = {s.name for s in default_step_sequence()}
         assert got == expected, f"unexpected step names: {got ^ expected}"
 
-    def test_missing_kind_cluster_recovery_runs_before_image_load(self) -> None:
+    def test_cluster_target_verification_runs_before_image_publication(self) -> None:
         names = [s.name for s in default_step_sequence()]
 
-        assert names.index("kind-cluster") < names.index("kind-load-images")
-        assert names.index("kind-load-images") < names.index("migrate")
+        assert names.index("cluster-target") < names.index("publish-images")
+        assert names.index("publish-images") < names.index("migrate")
 
     def test_cluster_up_runs_after_migration_before_desired_state_apply(self) -> None:
         """GB10 node-agent must not apply a stale release target.
 
-        Missing-kind recovery has no standing Control Plane after migration, so
+        A newly prepared target has no standing Control Plane after migration, so
         cluster-up must recreate platform services before env-state uses the CP
         API. GB10 prep can start the host-local node-agent, so desired state
         must still be updated before prep starts.

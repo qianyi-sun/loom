@@ -110,7 +110,7 @@ def test_apply_manifests_patches_existing_statefulset_without_immutable_pvc_defa
     result = apply_manifests(
         _rendered_manifest(),
         "loom-staging",
-        context="kind-loom-staging",
+        context="loom-staging",
         apps_v1=_FakeApps({"loom-minio": _live_minio_statefulset()}),
     )
 

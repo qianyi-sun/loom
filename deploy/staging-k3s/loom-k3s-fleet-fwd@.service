@@ -1,5 +1,5 @@
 [Unit]
-Description=GB10 fleet kind->k3s forward %i (bb8-1 hostport -> k3s router)
+Description=GB10 fleet k3s forward %i (bb8-1 hostport -> k3s router)
 After=network.target
 
 [Service]

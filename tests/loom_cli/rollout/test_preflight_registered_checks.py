@@ -412,7 +412,7 @@ def test_registered_kubernetes_client_binds_kubeconfig_and_safe_evidence(
 
     def run(argv: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
         calls.append(argv)
-        stdout = "kind-loom-staging\n" if "current-context" in argv else ""
+        stdout = "loom-staging\n" if "current-context" in argv else ""
         return subprocess.CompletedProcess(argv, 0, stdout, "")
 
     metadata_digest = "7" * 64
@@ -433,7 +433,7 @@ def test_registered_kubernetes_client_binds_kubeconfig_and_safe_evidence(
 
     kubernetes = next(item for item in executions if item.check_id == "kubernetes.client")
     assert kubernetes.passed
-    assert kubernetes.evidence["current-context"] == "kind-loom-staging"
+    assert kubernetes.evidence["current-context"] == "loom-staging"
     assert kubernetes.evidence["namespace"] == "loom-staging"
     assert kubernetes.evidence["kubeconfig-metadata-digest"] == metadata_digest
     assert len(calls) == 2

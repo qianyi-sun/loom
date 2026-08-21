@@ -32,7 +32,7 @@ spec:
     metadata:
       labels: { app: loom-gateway-router }
     spec:
-      # Tolerate the control-plane taint so single-node kind clusters
+      # Tolerate the control-plane taint so single-node development clusters
       # still place a router pod. On multi-node prod clusters this
       # places one per node, which is exactly what we want — sandbox
       # traffic stays on the local node.

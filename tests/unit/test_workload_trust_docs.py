@@ -49,7 +49,7 @@ def test_current_workload_trust_docs_preserve_the_fail_closed_boundary() -> None
     assert "protected namespace is authoritative target evidence" in normalized_operator
     assert (
         "manual rollout validates the cluster and namespace identity before evidence "
-        "collection or disposable kind work"
+        "collection or disposable local work"
     ) in normalized_operator
 
 

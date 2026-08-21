@@ -18,7 +18,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEPLOY_DIR = _REPO_ROOT / "deploy"
 
 # Rollout-critical service images. These are the ones the staging driver
-# builds + kind-loads before every rollout. Sandbox images (agent, gateway)
+# builds and publishes before every rollout. Sandbox images (agent, gateway)
 # are built out-of-band and get the same treatment for consistency, but the
 # blast radius of a sandbox build failing during a rollout is lower.
 _ROLLOUT_CRITICAL_DOCKERFILES = (

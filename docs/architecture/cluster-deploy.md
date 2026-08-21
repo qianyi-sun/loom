@@ -96,7 +96,6 @@ loom cluster render-migration
 loom cluster release-manifest
 loom cluster minio-storage-preflight
 loom cluster release-gate
-loom cluster load-images
 loom cluster rollout ...
 ```
 

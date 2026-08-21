@@ -4,7 +4,7 @@
 
 # Object-store bucket for trial artifacts. Rendered into control-plane, worker, and loom-service env. Set per environment when deployments share an object-store endpoint.
 artifacts_bucket = "artifacts"
-# Optional registry prefix for every locally built loom-* image in the rendered manifest, without a trailing slash. Empty keeps unprefixed images for kind load-images. Multi-node clusters set a registry host and configure every node's container runtime to pull it.
+# Optional registry prefix for every locally built loom-* image in the rendered manifest, without a trailing slash. Protected rollouts require it and publish the exact candidate images before apply. Empty is supported only for unprotected local rendering.
 container_registry = ""
 # Operator-local publication prefix for container_registry (no scheme or trailing slash). It must be set together with container_registry. This may differ from the pull prefix when k3s registry mirrors expose the same registry through a node-local endpoint, for example localhost:5000 -> 192.168.50.13:5000.
 container_registry_push = ""
@@ -52,7 +52,7 @@ runtime_environment = "production"
 trajectories_bucket = "trajectories"
 # Registry repository for the shared trial-image cache. Empty uses only per-worker caches. A configured repository lets workers pull layered images built elsewhere; workers need mounted pull and push credentials. A failed shared pull falls back to a local build.
 trial_cache_registry_repo = ""
-# Sandbox-facing OpenAI-compatible gateway URL injected into k8s workers as LOOM_WORKER_SUBPROCESS_GATEWAY_URL. The default targets the rendered gateway-router hostPort; kind-on-host deployments with another host service on 30443 should override this, for example to http://host.docker.internal:30444/openai/v1 with a durable host port-forward.
+# Sandbox-facing OpenAI-compatible gateway URL injected into k8s workers as LOOM_WORKER_SUBPROCESS_GATEWAY_URL. The default targets the rendered gateway-router hostPort; deployments with another host service on 30443 should override this, for example to http://host.docker.internal:30444/openai/v1 with a durable host port-forward.
 worker_subprocess_gateway_url = "http://host.docker.internal:30443/openai/v1"
 worker_trajectory_storage_gi = 100
 

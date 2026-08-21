@@ -81,11 +81,8 @@ Before declaring work shipped:
 - All affected Markdown docs were scanned and updated for code,
   workflow, deployment, runtime, dependency, or contract changes
 - **Architecture changes that depend on Docker / k8s / CNI / kernel
-  primitive behavior**: add or update a corresponding spike under
-  `docs/architecture/<topic>-spikes/` so CI can empirically verify
-  the mechanism. See
-  [`docs/architecture/cluster-deploy-spikes/README.md`](docs/architecture/cluster-deploy-spikes/README.md)
-  for the pattern and "when to add a spike" guidance
+  primitive behavior**: add or update focused automated coverage under the
+  owning test lane so CI empirically verifies the mechanism
 - Post-ship self-audit pass (re-read each touched file once more for
   regressions, edge cases, type drift) - separate commit if anything
   surfaces

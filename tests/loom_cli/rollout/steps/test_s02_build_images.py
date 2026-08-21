@@ -88,7 +88,7 @@ def _write_matrix(
     auxiliary=AUXILIARY_PLAN,
     manifest_sha256: str = "e" * 64,
 ) -> Path:
-    step_dir = StepDir(number=4, name="kind-load-images", path=tmp_path / "04-kind")
+    step_dir = StepDir(number=4, name="publish-images", path=tmp_path / "04-publish")
     matrix_path = tmp_path / "02-build-images" / "image-matrix.json"
     matrix_path.parent.mkdir(parents=True, exist_ok=True)
     envelope = s02_build_images._matrix_envelope(
@@ -283,7 +283,7 @@ def test_persisted_v2_matrix_returns_only_primary_images(
 ) -> None:
     ctx = SimpleNamespace(resolved_sha="a" * 40)
     step_path = _write_matrix(tmp_path, ctx=ctx)
-    step_dir = StepDir(number=4, name="kind-load-images", path=step_path)
+    step_dir = StepDir(number=4, name="publish-images", path=step_path)
     monkeypatch.setattr(
         s02_build_images,
         "_rollout_matrix_from_candidate",
@@ -318,7 +318,7 @@ def test_persisted_v2_matrix_must_match_candidate_manifest(
 ) -> None:
     ctx = SimpleNamespace(resolved_sha="a" * 40)
     step_path = _write_matrix(tmp_path, ctx=ctx)
-    step_dir = StepDir(number=4, name="kind-load-images", path=step_path)
+    step_dir = StepDir(number=4, name="publish-images", path=step_path)
     monkeypatch.setattr(
         s02_build_images,
         "_rollout_matrix_from_candidate",
@@ -334,7 +334,7 @@ def test_persisted_matrix_rejects_boolean_schema_version(
 ) -> None:
     ctx = SimpleNamespace(resolved_sha="a" * 40)
     step_path = _write_matrix(tmp_path, ctx=ctx, schema_version=True)
-    step_dir = StepDir(number=4, name="kind-load-images", path=step_path)
+    step_dir = StepDir(number=4, name="publish-images", path=step_path)
 
     with pytest.raises(RuntimeError, match="invalid candidate binding"):
         rollout_images(ctx, step_dir)  # type: ignore[arg-type]

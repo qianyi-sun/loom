@@ -220,10 +220,6 @@ the candidate-bound release gate before use.
   `1.0`.
 - The fresh 2026-06-25 recheck observed 15/15 active ARM64 worker rows.
 
-See [`inventory-2026-06-25.txt`](inventory-2026-06-25.txt) and
-[`smoke-evidence-2026-06-25.json`](smoke-evidence-2026-06-25.json) for the
-non-secret historical evidence.
-
 ## External autoscaler supervisor (systemd)
 
 Each environment's env-state profile carries an

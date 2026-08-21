@@ -72,7 +72,7 @@ For public repository operation:
   state or call the exact logout endpoint; every other unsafe method fails
   closed before route handling. The exchange does not update the target's normal
   login timestamp and also returns and audits the immutable service build SHA.
-  It is not a production or normal user login mechanism. Ephemeral kind CI
+  It is not a production or normal user login mechanism. The Compose CI smoke
   renders the service as `development` and proves this endpoint remains `404`;
   only a candidate-bound brokered protected-staging rollout may exercise the
   positive exchange.

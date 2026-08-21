@@ -533,7 +533,7 @@ def test_collect_status_managed_pod_crashloop_blocks_ready() -> None:
 
 
 def test_collect_status_classifies_pod_sandbox_deadline_events() -> None:
-    """#206 regression: kind/containerd sandbox deadline stalls are
+    """#206 regression: containerd sandbox deadline stalls are
     node-runtime failures, not application CrashLoop/image/config failures.
 
     The staging failure had both target pods stuck creating their pod

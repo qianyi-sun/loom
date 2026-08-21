@@ -1002,159 +1002,6 @@ def test_release_gate_fails_when_ready_pod_image_id_does_not_match_manifest() ->
     assert check.evidence["runtime_identity_mismatch"] is True
 
 
-def test_release_gate_accepts_kind_import_runtime_identity_when_template_matches() -> None:
-    external_workers = _external_workers_manifest_section()
-    manifest = _manifest(
-        expected_digest="sha256:" + "1" * 64,
-        external_workers=external_workers,
-    )
-    apps = _FakeAppsV1(
-        {
-            "loom-service": _deployment(
-                name="loom-service",
-                image="loom-service:staging-abc123",
-            ),
-        }
-    )
-    core = _FakeCoreV1(
-        [
-            _ready_pod(
-                name="loom-service-kind",
-                app="loom-service",
-                image="loom-service:staging-abc123",
-                image_id="docker.io/library/import-2026-07-02@sha256:" + "9" * 64,
-            ),
-        ]
-    )
-
-    report = collect_release_gate_report(
-        manifest=manifest,
-        apps_v1=apps,
-        core_v1=core,
-        namespace="loom",
-        rendered_manifest_sha256="rendered-sha",
-        cluster_config_sha256="config-sha",
-        live_alembic_heads=["0050"],
-        **_gb10_release_gate_inputs(external_workers),
-    )
-
-    assert report.all_pass
-    check = next(
-        check for check in report.checks if check.name == "image-identity:loom-service/app"
-    )
-    assert check.outcome == "pass"
-    assert (
-        check.detail == "Ready pod uses kind-imported runtime identity for release template image"
-    )
-    assert check.evidence["identity_strategy"] == "kind-import-template-image"
-    assert check.evidence["runtime_identity_kind"] == "kind-import"
-    assert check.evidence["runtime_identity_mismatch"] is True
-
-
-def test_release_gate_rejects_stale_status_image_on_kind_import_pod() -> None:
-    """#339 regression — kind-import must not mask an old ReplicaSet pod.
-
-    Deployment template image says `staging-abc123` (the release target),
-    but the only Ready pod still has the old image in its pod spec. The pod's
-    runtime image ID has the kind-import shape, so the gate must reject it
-    before treating a kind-import runtime identity as acceptable.
-    """
-    manifest = _manifest(expected_digest="sha256:" + "1" * 64)
-    apps = _FakeAppsV1(
-        {
-            "loom-service": _deployment(
-                name="loom-service",
-                image="loom-service:staging-abc123",
-            ),
-        }
-    )
-    core = _FakeCoreV1(
-        [
-            _ready_pod(
-                name="loom-service-kind",
-                app="loom-service",
-                image="loom-service:staging-old",
-                status_image="loom-service:staging-old",
-                image_id="docker.io/library/import-2026-07-02@sha256:" + "9" * 64,
-            ),
-        ]
-    )
-
-    report = collect_release_gate_report(
-        manifest=manifest,
-        apps_v1=apps,
-        core_v1=core,
-        namespace="loom",
-        rendered_manifest_sha256="rendered-sha",
-        cluster_config_sha256="config-sha",
-        live_alembic_heads=["0050"],
-    )
-
-    assert not report.all_pass
-    check = next(
-        check for check in report.checks if check.name == "image-identity:loom-service/app"
-    )
-    assert check.outcome == "fail"
-    assert check.detail == "no target-generation Ready pods found for managed Deployment"
-    assert check.remediation is not None
-    assert "wait" in check.remediation.lower()
-
-
-def test_release_gate_accepts_kind_import_status_image_alias_on_target_pod() -> None:
-    """kind/containerd can report another tag for the target pod's image.
-
-    The release gate should reject old ReplicaSet pods by checking the pod spec
-    against the Deployment template. Once the Ready pod's spec is the release
-    template image, a kind-import runtime identity plus a different
-    status.containerStatuses[].image tag can be a containerd display alias.
-    """
-    external_workers = _external_workers_manifest_section()
-    manifest = _manifest(
-        expected_digest="sha256:" + "1" * 64,
-        external_workers=external_workers,
-    )
-    apps = _FakeAppsV1(
-        {
-            "loom-service": _deployment(
-                name="loom-service",
-                image="loom-service:staging-abc123",
-            ),
-        }
-    )
-    core = _FakeCoreV1(
-        [
-            _ready_pod(
-                name="loom-service-kind",
-                app="loom-service",
-                image="loom-service:staging-abc123",
-                status_image="docker.io/library/loom-service:staging-old",
-                image_id="docker.io/library/import-2026-07-02@sha256:" + "9" * 64,
-            ),
-        ]
-    )
-
-    report = collect_release_gate_report(
-        manifest=manifest,
-        apps_v1=apps,
-        core_v1=core,
-        namespace="loom",
-        rendered_manifest_sha256="rendered-sha",
-        cluster_config_sha256="config-sha",
-        live_alembic_heads=["0050"],
-        **_gb10_release_gate_inputs(external_workers),
-    )
-
-    assert report.all_pass
-    check = next(
-        check for check in report.checks if check.name == "image-identity:loom-service/app"
-    )
-    assert check.outcome == "pass"
-    assert check.evidence["identity_strategy"] == "kind-import-template-image"
-    assert check.evidence["status_image_stale"] is True
-    assert check.evidence["status_image_matches_template"] is False
-    assert check.evidence["live_image"] == "docker.io/library/loom-service:staging-old"
-
-
 def test_release_gate_does_not_mark_default_docker_prefix_status_image_stale() -> None:
     external_workers = _external_workers_manifest_section()
     manifest = _manifest(
@@ -1172,11 +1019,11 @@ def test_release_gate_does_not_mark_default_docker_prefix_status_image_stale() -
     core = _FakeCoreV1(
         [
             _ready_pod(
-                name="loom-service-kind",
+                name="loom-service-target",
                 app="loom-service",
                 image="loom-service:staging-abc123",
                 status_image="docker.io/library/loom-service:staging-abc123",
-                image_id="docker.io/library/import-2026-07-02@sha256:" + "9" * 64,
+                image_id="containerd://sha256:" + "1" * 64,
             ),
         ]
     )
@@ -1345,7 +1192,7 @@ def test_release_gate_fails_when_target_generation_pod_lacks_runtime_image_id() 
     assert check.evidence["runtime_identity_kind"] == "missing"
 
 
-def test_release_gate_rejects_stale_kind_import_pod_from_old_template() -> None:
+def test_release_gate_rejects_stale_pod_from_old_template() -> None:
     manifest = _manifest(expected_digest="sha256:" + "1" * 64)
     apps = _FakeAppsV1(
         {
@@ -1361,7 +1208,7 @@ def test_release_gate_rejects_stale_kind_import_pod_from_old_template() -> None:
                 name="loom-service-old",
                 app="loom-service",
                 image="loom-service:staging-old",
-                image_id="docker.io/library/import-2026-07-02@sha256:" + "9" * 64,
+                image_id="containerd://sha256:" + "9" * 64,
             ),
         ]
     )
