@@ -13,5 +13,4 @@ instead.
   canary execution checklist.
 - [`remote-worker-pool.md`](remote-worker-pool.md) — predecessor of the
   current remote worker-pool procedure.
-- [`staging-dev-tip-cutover.md`](staging-dev-tip-cutover.md) — completed
   staging cutover procedure.

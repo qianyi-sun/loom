@@ -159,7 +159,7 @@ secrets.
   Autonomous agents need a fork-only
   execution boundary or an external trusted workflow/App before this can be
   treated as a hard token ceiling.
-- `staging-smoke-gate` is a credential-free kind validation lane. It does not
+- `staging-smoke-gate` is a credential-free cluster validation lane. It does not
   request the `ci-aws` environment and does not treat a skipped real-AWS check
   as successful cloud evidence. Real AWS validation is a separate trusted,
   post-merge/release activity and cannot satisfy this protected PR context.

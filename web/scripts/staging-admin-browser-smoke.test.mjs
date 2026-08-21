@@ -8,7 +8,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   SafeSmokeError,
-  assertInsecureKindBoundary,
   canonicalStagingRoute,
   createAuthenticatedPageMonitor,
   executeSmoke,
@@ -78,7 +77,7 @@ describe("staging admin browser smoke arguments", () => {
   it("accepts the exact staging route and secret-source contract", () => {
     process.env.CI = "true";
     process.env.GITHUB_ACTIONS = "true";
-    const options = parseArgs([...validArgs(), "--insecure-for-kind"]);
+    const options = parseArgs(validArgs());
 
     expect(options).toMatchObject({
       route: "https://yylx.world/staging",
@@ -89,7 +88,6 @@ describe("staging admin browser smoke arguments", () => {
       rolloutRequestId: ROLLOUT_REQUEST_ID,
       rolloutAttemptNumber: 1,
       requestEnvelopeSha256: ENVELOPE_SHA256,
-      insecureForKind: true,
     });
   });
 
@@ -222,72 +220,6 @@ describe("admin token source isolation", () => {
     } finally {
       await fs.rm(directory, { recursive: true, force: true });
     }
-  });
-});
-
-describe("kind TLS boundary", () => {
-  it("requires GitHub Actions and loopback-only DNS before bypassing TLS", async () => {
-    const options = {
-      route: "https://yylx.world/staging",
-      insecureForKind: true,
-    };
-    await expect(
-      assertInsecureKindBoundary(options, {
-        env: { CI: "true" },
-        dnsLookup: async () => [{ address: "127.0.0.1", family: 4 }],
-      }),
-    ).rejects.toMatchObject({ code: "invalid_tls_mode" });
-    await expect(
-      assertInsecureKindBoundary(options, {
-        env: { CI: "true", GITHUB_ACTIONS: "true" },
-        dnsLookup: async () => [{ address: "203.0.113.10", family: 4 }],
-      }),
-    ).rejects.toMatchObject({ code: "invalid_tls_target" });
-    await expect(
-      assertInsecureKindBoundary(options, {
-        env: { CI: "true", GITHUB_ACTIONS: "true" },
-        dnsLookup: async () => [
-          { address: "127.0.0.1", family: 4 },
-          { address: "::1", family: 6 },
-        ],
-      }),
-    ).resolves.toBeUndefined();
-  });
-
-  it("does not resolve DNS when strict TLS remains enabled", async () => {
-    let called = false;
-    await assertInsecureKindBoundary(
-      { route: "https://yylx.world/staging", insecureForKind: false },
-      {
-        env: {},
-        dnsLookup: async () => {
-          called = true;
-          return [];
-        },
-      },
-    );
-    expect(called).toBe(false);
-  });
-
-  it("rejects unsafe DNS before reading the singleton token", async () => {
-    process.env.CI = "true";
-    process.env.GITHUB_ACTIONS = "true";
-    const options = parseArgs([...validArgs(), "--insecure-for-kind"]);
-    let secretRead = false;
-
-    await expect(
-      executeSmoke(options, {
-        env: { CI: "true", GITHUB_ACTIONS: "true" },
-        dnsLookup: async () => [{ address: "203.0.113.10", family: 4 }],
-        fsModule: {
-          lstat: async () => {
-            secretRead = true;
-            throw new Error("must not read");
-          },
-        },
-      }),
-    ).rejects.toMatchObject({ code: "invalid_tls_target" });
-    expect(secretRead).toBe(false);
   });
 });
 

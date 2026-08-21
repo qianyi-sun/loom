@@ -460,7 +460,7 @@ def test_collect_status_visible_kube_system_crashloop_blocks_ready() -> None:
     core = _FakeCoreV1(secrets={"loom-secrets"})
     core.pods_by_namespace["kube-system"] = [
         _Spec(
-            metadata=_Spec(name="kube-controller-manager-kind-control-plane"),
+            metadata=_Spec(name="kube-controller-manager-staging-control-plane"),
             status=_Spec(
                 conditions=[
                     _Spec(type="Ready", status="False"),

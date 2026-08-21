@@ -1941,17 +1941,11 @@ class IsolatedRehearsalExecutor:
         return False
 
     def _load_images(self, plan: RehearsalPlan, names: Sequence[str]) -> bool:
-        tags = tuple(f"{name}:{plan.image_tag}" for name in names)
-        if not tags or not self._local_images_match(plan, names):
+        if not names or not self._local_images_match(plan, names):
             return False
-        if plan.container_registry:
-            return all(self._registry_runtime_image_ids(plan, name) is not None for name in names)
-        if not self._status(
-            ("kind", "load", "docker-image", *tags, "--name", plan.cluster_name),
-            timeout=900,
-        ):
+        if not plan.container_registry and self.runtime_image_resolver is None:
             return False
-        return self._local_images_match(plan, names)
+        return self._runtime_image_ids(plan, names) is not None
 
     def _publish_registry_image(self, plan: RehearsalPlan, name: str) -> bool:
         source = f"{name}:{plan.image_tag}"
@@ -2008,13 +2002,11 @@ class IsolatedRehearsalExecutor:
             ):
                 return None
             return {name: tuple(values[name]) for name in names}
+        if not plan.container_registry:
+            return None
         result: dict[str, tuple[str, ...]] = {}
         for name in names:
-            image_ids = (
-                self._registry_runtime_image_ids(plan, name)
-                if plan.container_registry
-                else self._kind_runtime_image_ids(plan, name)
-            )
+            image_ids = self._registry_runtime_image_ids(plan, name)
             if image_ids is None:
                 return None
             result[name] = image_ids
@@ -2043,186 +2035,6 @@ class IsolatedRehearsalExecutor:
         if expected_manifest is None or observed_manifest != expected_manifest:
             return None
         return expected, expected_manifest
-
-    def _kind_runtime_image_ids(
-        self,
-        plan: RehearsalPlan,
-        name: str,
-    ) -> tuple[str, ...] | None:
-        expected = plan.image_digests.get(name)
-        if expected is None:
-            return None
-        node = f"{plan.cluster_name}-control-plane"
-        reference = f"docker.io/library/{name}:{plan.image_tag}"
-        listing = self._text_command(
-            (
-                "docker",
-                "exec",
-                node,
-                "ctr",
-                "-n",
-                "k8s.io",
-                "images",
-                "list",
-                f"name=={reference}",
-            ),
-            timeout=30,
-            max_bytes=4096,
-        )
-        lines = listing.splitlines() if listing is not None else []
-        fields = lines[1].split(maxsplit=5) if len(lines) == 2 else []
-        if len(fields) < 5 or fields[0] != reference or fields[2] != expected:
-            return None
-        descriptor = self._containerd_content(node, expected)
-        if descriptor is None:
-            return None
-        media_type = descriptor.get("mediaType")
-        manifest = descriptor
-        manifest_digest = expected
-        if media_type == "application/vnd.oci.image.index.v1+json":
-            manifests = descriptor.get("manifests")
-            matches = (
-                [
-                    item
-                    for item in manifests
-                    if isinstance(item, dict)
-                    and item.get("mediaType") == "application/vnd.oci.image.manifest.v1+json"
-                    and item.get("platform") == {"architecture": "amd64", "os": "linux"}
-                ]
-                if isinstance(manifests, list)
-                else []
-            )
-            if len(matches) != 1:
-                return None
-            selected_digest = matches[0].get("digest")
-            if (
-                not isinstance(selected_digest, str)
-                or re.fullmatch(r"sha256:[0-9a-f]{64}", selected_digest) is None
-            ):
-                return None
-            manifest_digest = selected_digest
-            resolved_manifest = self._containerd_content(node, manifest_digest)
-            if resolved_manifest is None:
-                return None
-            manifest = resolved_manifest
-        if manifest.get("mediaType") != "application/vnd.oci.image.manifest.v1+json":
-            return None
-        config = manifest.get("config")
-        config_digest = config.get("digest") if isinstance(config, dict) else None
-        if (
-            not isinstance(config_digest, str)
-            or re.fullmatch(r"sha256:[0-9a-f]{64}", config_digest) is None
-        ):
-            return None
-        inspected = self._text_command(
-            ("docker", "exec", node, "crictl", "inspecti", reference),
-            timeout=30,
-            max_bytes=_MAX_OUTPUT_BYTES,
-        )
-        try:
-            payload = json.loads(inspected) if inspected is not None else None
-        except json.JSONDecodeError:
-            return None
-        if not isinstance(payload, dict):
-            return None
-        status = payload.get("status")
-        info = payload.get("info")
-        image_spec = info.get("imageSpec") if isinstance(info, dict) else None
-        image_config = image_spec.get("config") if isinstance(image_spec, dict) else None
-        labels = image_config.get("Labels") if isinstance(image_config, dict) else None
-        repo_digests = status.get("repoDigests") if isinstance(status, dict) else None
-        imported_digests = (
-            self._validated_import_digests(
-                node,
-                repo_digests,
-                expected=expected,
-                expected_media_type=media_type,
-                reference=reference,
-                image_tag=plan.image_tag,
-            )
-            if isinstance(repo_digests, list)
-            else None
-        )
-        if not (
-            isinstance(status, dict)
-            and status.get("id") == config_digest
-            and isinstance(status.get("repoTags"), list)
-            and reference in status["repoTags"]
-            and imported_digests is not None
-            and isinstance(image_spec, dict)
-            and image_spec.get("architecture") == "amd64"
-            and image_spec.get("os") == "linux"
-            and isinstance(labels, dict)
-            and labels.get("org.opencontainers.image.revision") == plan.candidate_sha
-        ):
-            return None
-        return tuple(dict.fromkeys((config_digest, manifest_digest, *imported_digests)))
-
-    def _validated_import_digests(
-        self,
-        node: str,
-        repo_digests: Sequence[object],
-        *,
-        expected: str,
-        expected_media_type: object,
-        reference: str,
-        image_tag: str,
-    ) -> tuple[str, ...] | None:
-        validated: list[str] = []
-        for repo_digest in repo_digests:
-            if not isinstance(repo_digest, str) or repo_digest.count("@") != 1:
-                return None
-            repository, digest = repo_digest.rsplit("@", 1)
-            if (
-                re.fullmatch(r"docker\.io/library/import-[0-9]{4}-[0-9]{2}-[0-9]{2}", repository)
-                is None
-                or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
-            ):
-                return None
-            imported = self._containerd_content(node, digest)
-            descriptors = imported.get("manifests") if imported is not None else None
-            matches = (
-                [
-                    item
-                    for item in descriptors
-                    if isinstance(item, dict)
-                    and item.get("digest") == expected
-                    and item.get("mediaType") == expected_media_type
-                    and item.get("annotations")
-                    == {
-                        "io.containerd.image.name": reference,
-                        "org.opencontainers.image.ref.name": image_tag,
-                    }
-                ]
-                if imported is not None
-                and imported.get("mediaType") == "application/vnd.oci.image.index.v1+json"
-                and isinstance(descriptors, list)
-                else []
-            )
-            if len(matches) != 1:
-                return None
-            validated.append(digest)
-        # A rehearsal image re-imported on more than one calendar day carries one
-        # ``import-YYYY-MM-DD`` repoDigest per import, each pinning the SAME content
-        # digest. Tolerate those duplicate aliases, but still require a single
-        # unambiguous content identity so a genuinely divergent import is rejected.
-        if len(set(validated)) > 1:
-            return None
-        return tuple(dict.fromkeys(validated))
-
-    def _containerd_content(self, node: str, digest: str) -> dict[str, object] | None:
-        if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
-            return None
-        value = self._text_command(
-            ("docker", "exec", node, "ctr", "-n", "k8s.io", "content", "get", digest),
-            timeout=30,
-            max_bytes=_MAX_OUTPUT_BYTES,
-        )
-        try:
-            payload = json.loads(value) if value is not None else None
-        except json.JSONDecodeError:
-            return None
-        return payload if isinstance(payload, dict) else None
 
     def _secret_plan_digest(self, plan: RehearsalPlan, name: str) -> str | None:
         value = self._text_command(
