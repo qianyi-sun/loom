@@ -9,7 +9,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 POLICY_PATH = ROOT / "deploy/task-image-builder/prerequisites-v1.toml"
 RUNTIME_PATH = ROOT / "deploy/task-image-builder/rootless-runtime-v1.json"
-HOST_RELEASE_PATH = ROOT / "deploy/task-image-builder/host-release-v1.json"
+HOST_RELEASE_PATH = ROOT / "deploy/task-image-builder/host-release-v2.json"
 SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 
 
@@ -230,13 +230,13 @@ def test_host_release_pins_signed_packages_and_site_preconditions() -> None:
     release = _host_release()
     policy = _policy()
 
-    assert release["schema"] == "loom.task-image-builder-host-release/v1"
-    assert release["release"] == "host-release-v1"
+    assert release["schema"] == "loom.task-image-builder-host-release/v2"
+    assert release["release"] == "host-release-v2"
     assert release["runtime_manifest"] == "rootless-runtime-v1.json"
     assert release["ubuntu"] == {
         "os_id": "ubuntu",
         "version_id": "24.04",
-        "suite": "noble-updates",
+        "snapshot": "20260820T000000Z",
         "component": "main",
         "signer_fingerprint": "F6ECB3762474EDA9D21B7022871920D1991BC93C",
         "keyring_name": "ubuntu-archive-keyring.gpg",
@@ -246,14 +246,66 @@ def test_host_release_pins_signed_packages_and_site_preconditions() -> None:
     }
     assert release["repositories"] == {
         "amd64": {
-            "base_url": "https://archive.ubuntu.com/ubuntu",
-            "inrelease_path": "dists/noble-updates/InRelease",
-            "packages_path": "dists/noble-updates/main/binary-amd64/Packages.xz",
+            "base_url": "https://snapshot.ubuntu.com/ubuntu/20260820T000000Z",
+            "indexes": {
+                "noble": {
+                    "inrelease_path": "dists/noble/InRelease",
+                    "inrelease_size": 255_850,
+                    "inrelease_sha256": (
+                        "cdb2f31d809f589719a53c6ad15f255b27569c4059542ada282aaa21b8e164b0"
+                    ),
+                    "packages_path": "dists/noble/main/binary-amd64/Packages.xz",
+                    "packages_size": 1_401_160,
+                    "packages_sha256": (
+                        "2a6a199e1031a5c279cb346646d594993f35b1c03dd4a82aaa0323980dd92451"
+                    ),
+                },
+                "noble-updates": {
+                    "inrelease_path": "dists/noble-updates/InRelease",
+                    "inrelease_size": 126_125,
+                    "inrelease_sha256": (
+                        "79d2a1c90ce4f14c98867053190c64a9018ac993702fe5146081873f3da526bf"
+                    ),
+                    "packages_path": (
+                        "dists/noble-updates/main/binary-amd64/Packages.xz"
+                    ),
+                    "packages_size": 1_215_608,
+                    "packages_sha256": (
+                        "f43e6d13c95ac3db303163064a024de9718e61191b26f89584288d83842e8419"
+                    ),
+                },
+            },
         },
         "arm64": {
-            "base_url": "https://ports.ubuntu.com/ubuntu-ports",
-            "inrelease_path": "dists/noble-updates/InRelease",
-            "packages_path": "dists/noble-updates/main/binary-arm64/Packages.xz",
+            "base_url": "https://snapshot.ubuntu.com/ubuntu/20260820T000000Z",
+            "indexes": {
+                "noble": {
+                    "inrelease_path": "dists/noble/InRelease",
+                    "inrelease_size": 255_850,
+                    "inrelease_sha256": (
+                        "cdb2f31d809f589719a53c6ad15f255b27569c4059542ada282aaa21b8e164b0"
+                    ),
+                    "packages_path": "dists/noble/main/binary-arm64/Packages.xz",
+                    "packages_size": 1_376_632,
+                    "packages_sha256": (
+                        "4a1901e6124fb0a111f5dffc8f5c14474f449e2ecfa71f2eaf0b29917edb53f9"
+                    ),
+                },
+                "noble-updates": {
+                    "inrelease_path": "dists/noble-updates/InRelease",
+                    "inrelease_size": 126_125,
+                    "inrelease_sha256": (
+                        "79d2a1c90ce4f14c98867053190c64a9018ac993702fe5146081873f3da526bf"
+                    ),
+                    "packages_path": (
+                        "dists/noble-updates/main/binary-arm64/Packages.xz"
+                    ),
+                    "packages_size": 1_262_792,
+                    "packages_sha256": (
+                        "573cec116d4f4effc0b2cacbff28fd542182debd30d94ec40be996286690fba5"
+                    ),
+                },
+            },
         },
     }
     assert release["architecture_map"] == {"x86_64": "amd64", "aarch64": "arm64"}
@@ -261,18 +313,21 @@ def test_host_release_pins_signed_packages_and_site_preconditions() -> None:
     expected_packages = {
         "amd64": {
             "libsubid4": (
+                "noble-updates",
                 "1:4.13+dfsg1-4ubuntu3.2",
                 "pool/main/s/shadow/libsubid4_4.13+dfsg1-4ubuntu3.2_amd64.deb",
                 23_442,
                 "ba97fd28c53560a8d2a2261e8f75a7ab4112535b12f9fe1d50970c30051da0da",
             ),
             "uidmap": (
+                "noble-updates",
                 "1:4.13+dfsg1-4ubuntu3.2",
                 "pool/main/s/shadow/uidmap_4.13+dfsg1-4ubuntu3.2_amd64.deb",
                 26_006,
                 "a80cb7f72dd18c73cbb0b07b7fbe855504f26bfafae072a9b3d125c89d499b9e",
             ),
             "quota": (
+                "noble",
                 "4.06-1build6",
                 "pool/main/q/quota/quota_4.06-1build6_amd64.deb",
                 211_338,
@@ -281,18 +336,21 @@ def test_host_release_pins_signed_packages_and_site_preconditions() -> None:
         },
         "arm64": {
             "libsubid4": (
+                "noble-updates",
                 "1:4.13+dfsg1-4ubuntu3.2",
                 "pool/main/s/shadow/libsubid4_4.13+dfsg1-4ubuntu3.2_arm64.deb",
                 23_534,
                 "00916edc15862421e803bec7e69d548c6ce281badf5d449498085a3b3710639f",
             ),
             "uidmap": (
+                "noble-updates",
                 "1:4.13+dfsg1-4ubuntu3.2",
                 "pool/main/s/shadow/uidmap_4.13+dfsg1-4ubuntu3.2_arm64.deb",
                 26_650,
                 "052b1852a9ab03d931398a9d0060ef7c312f1b48bc4f4ee4533649bb958b634a",
             ),
             "quota": (
+                "noble",
                 "4.06-1build6",
                 "pool/main/q/quota/quota_4.06-1build6_arm64.deb",
                 216_482,
@@ -302,9 +360,10 @@ def test_host_release_pins_signed_packages_and_site_preconditions() -> None:
     }
     for architecture, packages in expected_packages.items():
         assert set(release["packages"][architecture]) == set(packages)
-        for package, (version, filename, size, digest) in packages.items():
+        for package, (source_suite, version, filename, size, digest) in packages.items():
             assert release["packages"][architecture][package] == {
                 "package": package,
+                "source_suite": source_suite,
                 "version": version,
                 "architecture": architecture,
                 "filename": filename,

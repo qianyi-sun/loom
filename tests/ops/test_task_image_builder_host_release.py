@@ -7,7 +7,7 @@ import lzma
 import os
 import stat
 import tarfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -36,6 +36,7 @@ class BundleFixture:
     bundle: Path
     release_path: Path
     runtime_path: Path
+    release: dict[str, object]
     package_payloads: dict[str, bytes]
     architecture: str
     debian_architecture: str
@@ -43,6 +44,14 @@ class BundleFixture:
     signature_valid: bool = True
     dynamic_runtime: bool = False
     unexpected_setuid: bool = False
+
+    def write_release(self) -> None:
+        _write(self.release_path, json.dumps(self.release).encode())
+
+    def append_signed_index_bytes(self, suite: str, suffix: bytes) -> None:
+        path = self.bundle / "apt" / f"{suite}.Packages.xz"
+        path.write_bytes(path.read_bytes() + suffix)
+        _rewrite_index_pins_and_inrelease(self, suite)
 
 
 class FixtureRunner:
@@ -112,7 +121,66 @@ def _write(path: Path, payload: bytes, mode: int = 0o644) -> None:
     path.chmod(mode)
 
 
-def _bundle_fixture(tmp_path: Path, architecture: str = "x86_64") -> BundleFixture:
+def _xz_streams(payload: bytes, *, concatenate: bool = False, padding: int = 0) -> bytes:
+    if not concatenate:
+        return lzma.compress(payload)
+    midpoint = len(payload) // 2
+    return lzma.compress(payload[:midpoint]) + (b"\0" * padding) + lzma.compress(
+        payload[midpoint:]
+    )
+
+
+def _inrelease(suite: str, packages_xz: bytes, debian_architecture: str) -> bytes:
+    return (
+        "-----BEGIN PGP SIGNED MESSAGE-----\n"
+        "Hash: SHA512\n\n"
+        f"Suite: {suite}\n"
+        "SHA256:\n"
+        f" {_sha256(packages_xz)} {len(packages_xz)} "
+        f"main/binary-{debian_architecture}/Packages.xz\n"
+        "-----BEGIN PGP SIGNATURE-----\nfixture\n-----END PGP SIGNATURE-----\n"
+    ).encode()
+
+
+def _release_indexes(fixture: BundleFixture) -> dict[str, dict[str, object]]:
+    repositories = fixture.release["repositories"]
+    assert isinstance(repositories, dict)
+    repository = repositories[fixture.debian_architecture]
+    assert isinstance(repository, dict)
+    indexes = repository["indexes"]
+    assert isinstance(indexes, dict)
+    return indexes
+
+
+def _rewrite_inrelease_pin(fixture: BundleFixture, suite: str) -> None:
+    inrelease = (fixture.bundle / "apt" / f"{suite}.InRelease").read_bytes()
+    index = _release_indexes(fixture)[suite]
+    assert isinstance(index, dict)
+    index["inrelease_size"] = len(inrelease)
+    index["inrelease_sha256"] = _sha256(inrelease)
+    fixture.write_release()
+
+
+def _rewrite_index_pins_and_inrelease(fixture: BundleFixture, suite: str) -> None:
+    packages = (fixture.bundle / "apt" / f"{suite}.Packages.xz").read_bytes()
+    inrelease_path = fixture.bundle / "apt" / f"{suite}.InRelease"
+    _write(inrelease_path, _inrelease(suite, packages, fixture.debian_architecture))
+    index = _release_indexes(fixture)[suite]
+    assert isinstance(index, dict)
+    index["packages_size"] = len(packages)
+    index["packages_sha256"] = _sha256(packages)
+    index["inrelease_size"] = inrelease_path.stat().st_size
+    index["inrelease_sha256"] = _sha256(inrelease_path.read_bytes())
+    fixture.write_release()
+
+
+def _bundle_fixture(
+    tmp_path: Path,
+    architecture: str = "x86_64",
+    *,
+    concatenate_base_index: bool = False,
+    base_index_padding: int = 0,
+) -> BundleFixture:
     debian_architecture, runtime_platform = {
         "x86_64": ("amd64", "linux-amd64"),
         "aarch64": ("arm64", "linux-arm64"),
@@ -137,12 +205,13 @@ def _bundle_fixture(tmp_path: Path, architecture: str = "x86_64") -> BundleFixtu
         ),
         "quota": ("4.06-1build6", f"quota_4.06-1build6_{debian_architecture}.deb"),
     }
-    package_stanzas: list[str] = []
+    package_stanzas: dict[str, list[str]] = {"noble": [], "noble-updates": []}
     release_packages: dict[str, dict[str, object]] = {}
     for package, (version, filename) in package_rows.items():
         payload = package_payloads[filename]
         archive_path = f"pool/main/fixture/{filename}"
-        package_stanzas.append(
+        source_suite = "noble" if package == "quota" else "noble-updates"
+        package_stanzas[source_suite].append(
             "\n".join(
                 [
                     f"Package: {package}",
@@ -156,6 +225,7 @@ def _bundle_fixture(tmp_path: Path, architecture: str = "x86_64") -> BundleFixtu
         )
         release_packages[package] = {
             "package": package,
+            "source_suite": source_suite,
             "version": version,
             "architecture": debian_architecture,
             "filename": archive_path,
@@ -164,18 +234,27 @@ def _bundle_fixture(tmp_path: Path, architecture: str = "x86_64") -> BundleFixtu
         }
         _write(bundle / "packages" / filename, payload)
 
-    packages_xz = lzma.compress(("\n\n".join(package_stanzas) + "\n").encode())
-    _write(bundle / "apt" / "Packages.xz", packages_xz)
-    inrelease = (
-        "-----BEGIN PGP SIGNED MESSAGE-----\n"
-        "Hash: SHA512\n\n"
-        "Suite: noble-updates\n"
-        "SHA256:\n"
-        f" {_sha256(packages_xz)} {len(packages_xz)} "
-        f"main/binary-{debian_architecture}/Packages.xz\n"
-        "-----BEGIN PGP SIGNATURE-----\nfixture\n-----END PGP SIGNATURE-----\n"
-    ).encode()
-    _write(bundle / "apt" / "InRelease", inrelease)
+    repository_indexes: dict[str, dict[str, object]] = {}
+    for suite in ("noble", "noble-updates"):
+        packages_xz = _xz_streams(
+            ("\n\n".join(package_stanzas[suite]) + "\n").encode(),
+            concatenate=suite == "noble" and concatenate_base_index,
+            padding=base_index_padding if suite == "noble" else 0,
+        )
+        packages_bundle_path = bundle / "apt" / f"{suite}.Packages.xz"
+        inrelease_bundle_path = bundle / "apt" / f"{suite}.InRelease"
+        _write(packages_bundle_path, packages_xz)
+        _write(inrelease_bundle_path, _inrelease(suite, packages_xz, debian_architecture))
+        repository_indexes[suite] = {
+            "inrelease_path": f"dists/{suite}/InRelease",
+            "inrelease_size": inrelease_bundle_path.stat().st_size,
+            "inrelease_sha256": _sha256(inrelease_bundle_path.read_bytes()),
+            "packages_path": (
+                f"dists/{suite}/main/binary-{debian_architecture}/Packages.xz"
+            ),
+            "packages_size": len(packages_xz),
+            "packages_sha256": _sha256(packages_xz),
+        }
     _write(bundle / "ubuntu-archive-keyring.gpg", keyring)
 
     buildkit_files = {
@@ -224,13 +303,13 @@ def _bundle_fixture(tmp_path: Path, architecture: str = "x86_64") -> BundleFixtu
     runtime_path.chmod(0o644)
 
     release = {
-        "schema": "loom.task-image-builder-host-release/v1",
-        "release": "host-release-v1",
+        "schema": "loom.task-image-builder-host-release/v2",
+        "release": "host-release-v2",
         "runtime_manifest": runtime_path.name,
         "ubuntu": {
             "os_id": "ubuntu",
             "version_id": "24.04",
-            "suite": "noble-updates",
+            "snapshot": "20260820T000000Z",
             "component": "main",
             "signer_fingerprint": SIGNER,
             "keyring_name": "ubuntu-archive-keyring.gpg",
@@ -239,11 +318,10 @@ def _bundle_fixture(tmp_path: Path, architecture: str = "x86_64") -> BundleFixtu
         "architecture_map": {architecture: debian_architecture},
         "repositories": {
             debian_architecture: {
-                "base_url": "https://example.invalid/ubuntu",
-                "inrelease_path": "dists/noble-updates/InRelease",
-                "packages_path": (
-                    f"dists/noble-updates/main/binary-{debian_architecture}/Packages.xz"
+                "base_url": (
+                    "https://snapshot.ubuntu.com/ubuntu/20260820T000000Z"
                 ),
+                "indexes": repository_indexes,
             }
         },
         "packages": {debian_architecture: release_packages},
@@ -257,6 +335,7 @@ def _bundle_fixture(tmp_path: Path, architecture: str = "x86_64") -> BundleFixtu
         bundle,
         release_path,
         runtime_path,
+        release,
         package_payloads,
         architecture,
         debian_architecture,
@@ -275,6 +354,145 @@ def _verify(fixture: BundleFixture) -> host_release.VerifiedHostBundle:
     )
 
 
+def _v2_release_document() -> dict[str, object]:
+    indexes = {
+        "noble": {
+            "inrelease_path": "dists/noble/InRelease",
+            "inrelease_size": 101,
+            "inrelease_sha256": "1" * 64,
+            "packages_path": "dists/noble/main/binary-amd64/Packages.xz",
+            "packages_size": 202,
+            "packages_sha256": "2" * 64,
+        },
+        "noble-updates": {
+            "inrelease_path": "dists/noble-updates/InRelease",
+            "inrelease_size": 303,
+            "inrelease_sha256": "3" * 64,
+            "packages_path": "dists/noble-updates/main/binary-amd64/Packages.xz",
+            "packages_size": 404,
+            "packages_sha256": "4" * 64,
+        },
+    }
+    packages: dict[str, dict[str, object]] = {}
+    for package, source_suite, version, digest in (
+        ("libsubid4", "noble-updates", "1:4.13+dfsg1-4ubuntu3.2", "a" * 64),
+        ("uidmap", "noble-updates", "1:4.13+dfsg1-4ubuntu3.2", "b" * 64),
+        ("quota", "noble", "4.06-1build6", "c" * 64),
+    ):
+        filename = f"pool/main/fixture/{package}_{version}_amd64.deb"
+        packages[package] = {
+            "package": package,
+            "source_suite": source_suite,
+            "version": version,
+            "architecture": "amd64",
+            "filename": filename,
+            "size": 100,
+            "sha256": digest,
+        }
+    return {
+        "schema": "loom.task-image-builder-host-release/v2",
+        "release": "host-release-v2",
+        "runtime_manifest": "rootless-runtime-v1.json",
+        "ubuntu": {
+            "os_id": "ubuntu",
+            "version_id": "24.04",
+            "snapshot": "20260820T000000Z",
+            "component": "main",
+            "signer_fingerprint": SIGNER,
+            "keyring_name": "ubuntu-archive-keyring.gpg",
+            "keyring_sha256": "5" * 64,
+        },
+        "architecture_map": {"x86_64": "amd64"},
+        "repositories": {
+            "amd64": {
+                "base_url": (
+                    "https://snapshot.ubuntu.com/ubuntu/20260820T000000Z"
+                ),
+                "indexes": indexes,
+            }
+        },
+        "packages": {"amd64": packages},
+    }
+
+
+def test_v2_release_binds_snapshot_suites_and_package_sources(tmp_path: Path) -> None:
+    release_path = tmp_path / "host-release-v2.json"
+    _write(release_path, json.dumps(_v2_release_document()).encode())
+
+    release = host_release.load_host_release(release_path)
+
+    assert release.release == "host-release-v2"
+    assert release.snapshot == "20260820T000000Z"
+    assert set(release.repositories["amd64"].indexes) == {
+        "noble",
+        "noble-updates",
+    }
+    assert {
+        package: artifact.source_suite
+        for package, artifact in release.packages["amd64"].items()
+    } == {
+        "libsubid4": "noble-updates",
+        "quota": "noble",
+        "uidmap": "noble-updates",
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "unknown-suite",
+        "mutable-base-url",
+        "wrong-snapshot",
+        "missing-metadata-pin",
+        "source-suite-drift",
+        "duplicate-index-path",
+    ],
+)
+def test_v2_release_rejects_unbound_repository_authority(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    release = _v2_release_document()
+    ubuntu = release["ubuntu"]
+    repositories = release["repositories"]
+    packages = release["packages"]
+    assert isinstance(ubuntu, dict)
+    assert isinstance(repositories, dict)
+    assert isinstance(packages, dict)
+    repository = repositories["amd64"]
+    architecture_packages = packages["amd64"]
+    assert isinstance(repository, dict)
+    assert isinstance(architecture_packages, dict)
+    indexes = repository["indexes"]
+    assert isinstance(indexes, dict)
+    noble = indexes["noble"]
+    updates = indexes["noble-updates"]
+    assert isinstance(noble, dict)
+    assert isinstance(updates, dict)
+
+    if mutation == "unknown-suite":
+        indexes["noble-security"] = indexes.pop("noble-updates")
+    elif mutation == "mutable-base-url":
+        repository["base_url"] = "https://archive.ubuntu.com/ubuntu"
+    elif mutation == "wrong-snapshot":
+        ubuntu["snapshot"] = "20260819T000000Z"
+    elif mutation == "missing-metadata-pin":
+        del noble["packages_sha256"]
+    elif mutation == "source-suite-drift":
+        quota = architecture_packages["quota"]
+        assert isinstance(quota, dict)
+        quota["source_suite"] = "noble-updates"
+    elif mutation == "duplicate-index-path":
+        updates["packages_path"] = noble["packages_path"]
+    else:
+        raise AssertionError(f"unknown mutation: {mutation}")
+
+    release_path = tmp_path / "host-release-v2.json"
+    _write(release_path, json.dumps(release).encode())
+    with pytest.raises(host_release.HostReleaseError):
+        host_release.load_host_release(release_path)
+
+
 def _mutate_runtime_manifest(fixture: BundleFixture, mutation: str) -> None:
     runtime = json.loads(fixture.runtime_path.read_text(encoding="utf-8"))
     if mutation == "release":
@@ -287,7 +505,7 @@ def _mutate_runtime_manifest(fixture: BundleFixture, mutation: str) -> None:
 
 
 def _add_package_description_continuation(fixture: BundleFixture) -> None:
-    packages_path = fixture.bundle / "apt/Packages.xz"
+    packages_path = fixture.bundle / "apt/noble-updates.Packages.xz"
     packages = lzma.decompress(packages_path.read_bytes()).decode("utf-8")
     packages = packages.replace(
         f"Architecture: {fixture.debian_architecture}\n",
@@ -297,17 +515,102 @@ def _add_package_description_continuation(fixture: BundleFixture) -> None:
     )
     packages_payload = lzma.compress(packages.encode("utf-8"))
     packages_path.write_bytes(packages_payload)
+    _rewrite_index_pins_and_inrelease(fixture, "noble-updates")
 
-    inrelease_path = fixture.bundle / "apt/InRelease"
-    rows = inrelease_path.read_text(encoding="utf-8").splitlines()
-    for index, row in enumerate(rows):
-        packages_relative = f"main/binary-{fixture.debian_architecture}/Packages.xz"
-        if row.endswith(packages_relative):
-            rows[index] = (
-                f" {_sha256(packages_payload)} {len(packages_payload)} "
-                f"{packages_relative}"
-            )
-    inrelease_path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+def test_v1_topology_cannot_authenticate_quota_from_updates(tmp_path: Path) -> None:
+    fixture = _bundle_fixture(tmp_path)
+    release = host_release.load_host_release(fixture.release_path)
+    architecture_packages = dict(release.packages[fixture.debian_architecture])
+    architecture_packages["quota"] = replace(
+        architecture_packages["quota"],
+        source_suite="noble-updates",
+    )
+    release = replace(
+        release,
+        packages={fixture.debian_architecture: architecture_packages},
+    )
+
+    with pytest.raises(host_release.HostReleaseError, match="signed metadata"):
+        host_release.verify_host_bundle(
+            fixture.bundle,
+            release,
+            fixture.architecture,
+            FixtureRunner(fixture),
+            runtime_manifest_path=fixture.runtime_path,
+            required_snapshot_owner=os.geteuid(),
+        )
+
+
+def test_valid_concatenated_xz_streams_are_accepted(tmp_path: Path) -> None:
+    verified = _verify(_bundle_fixture(tmp_path, concatenate_base_index=True))
+    verified.close()
+
+
+def test_aligned_xz_stream_padding_is_accepted(tmp_path: Path) -> None:
+    verified = _verify(
+        _bundle_fixture(
+            tmp_path,
+            concatenate_base_index=True,
+            base_index_padding=4,
+        )
+    )
+    verified.close()
+
+
+@pytest.mark.parametrize(
+    ("suffix", "error"),
+    [(b"not-xz", "trailing"), (b"\0", "padding")],
+)
+def test_invalid_xz_trailing_bytes_are_rejected(
+    tmp_path: Path,
+    suffix: bytes,
+    error: str,
+) -> None:
+    fixture = _bundle_fixture(tmp_path)
+    fixture.append_signed_index_bytes("noble", suffix)
+
+    with pytest.raises(host_release.HostReleaseError, match=error):
+        _verify(fixture)
+
+
+@pytest.mark.parametrize(
+    ("payload", "error"),
+    [
+        (b"", "empty"),
+        (lzma.compress(b"fixture")[:-1], "incomplete"),
+    ],
+)
+def test_empty_or_truncated_xz_index_is_rejected(payload: bytes, error: str) -> None:
+    with pytest.raises(host_release.HostReleaseError, match=error):
+        host_release._decompress_packages_index(payload)
+
+
+def test_xz_aggregate_expansion_over_64_mib_is_rejected() -> None:
+    payload = _xz_streams(
+        b"x" * (host_release.MAX_METADATA_BYTES + 1),
+        concatenate=True,
+    )
+
+    with pytest.raises(host_release.HostReleaseError, match="expands beyond"):
+        host_release._decompress_packages_index(payload)
+
+
+def test_extra_apt_file_is_rejected(tmp_path: Path) -> None:
+    fixture = _bundle_fixture(tmp_path)
+    _write(fixture.bundle / "apt/extra", b"not part of release\n")
+
+    with pytest.raises(host_release.HostReleaseError, match="bundle layout"):
+        _verify(fixture)
+
+
+def test_changed_pinned_index_bytes_are_rejected(tmp_path: Path) -> None:
+    fixture = _bundle_fixture(tmp_path)
+    inrelease_path = fixture.bundle / "apt/noble.InRelease"
+    inrelease_path.write_bytes(inrelease_path.read_bytes() + b"changed\n")
+
+    with pytest.raises(host_release.HostReleaseError, match="pinned metadata"):
+        _verify(fixture)
 
 
 def test_exact_signed_static_bundle_is_accepted(tmp_path: Path) -> None:
@@ -363,7 +666,7 @@ def test_release_reader_handles_short_regular_file_reads(
 
     release = host_release.load_host_release(fixture.release_path)
 
-    assert release.release == "host-release-v1"
+    assert release.release == "host-release-v2"
 
 
 @pytest.mark.parametrize("mutation", ["release", "binary"])
@@ -389,12 +692,13 @@ def test_unrelated_package_field_continuation_is_accepted(tmp_path: Path) -> Non
 
 def test_signed_index_from_a_different_suite_is_rejected(tmp_path: Path) -> None:
     fixture = _bundle_fixture(tmp_path)
-    inrelease_path = fixture.bundle / "apt/InRelease"
+    inrelease_path = fixture.bundle / "apt/noble-updates.InRelease"
     inrelease = inrelease_path.read_text(encoding="utf-8").replace(
         "Suite: noble-updates",
         "Suite: noble-security",
     )
     inrelease_path.write_text(inrelease, encoding="utf-8")
+    _rewrite_inrelease_pin(fixture, "noble-updates")
 
     with pytest.raises(host_release.HostReleaseError, match="suite"):
         _verify(fixture)
