@@ -78,6 +78,25 @@ safe rollout validates the pinned runner release and checksums, QEMU/KVM,
 Docker, disk and memory headroom, guest boot, JIT registration, one disposable
 job, teardown, and hosted fallback.
 
+The systemd service requires two independent exact commit identities in
+`candidate.env`. `LOOM_CI_RUNNER_POOL_CANDIDATE_SHA` is the commit bound into
+the current golden QEMU image and advances only with a matching image build and
+preflight. `LOOM_CI_RUNNER_ROUTE_CANDIDATE_SHA` is the merged commit used to
+validate workflow blobs and execute the trusted route publisher; it may advance
+without rebuilding unchanged runner capacity. Both values are mandatory. The
+service has no implicit shared-candidate fallback, so a missing or malformed
+identity fails closed instead of silently coupling the two release lifecycles.
+Write the file as:
+
+```text
+LOOM_CI_RUNNER_POOL_CANDIDATE_SHA=<full golden-image commit SHA>
+LOOM_CI_RUNNER_ROUTE_CANDIDATE_SHA=<full merged route-controller commit SHA>
+```
+
+Install the route-controller modules, wrapper, and service unit from that exact
+route commit. The legacy `LOOM_CI_RUNNER_CANDIDATE_SHA` may coexist only while
+an old unit is retained for rollback; the split unit does not read it.
+
 Draining stops new self-hosted selection, waits for busy jobs, removes idle JIT
 registrations and guests, and leaves workflows using hosted runners. Do not
 delete a busy GitHub runner or VM to accelerate drain unless the job itself is
