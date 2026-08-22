@@ -50,6 +50,7 @@ def test_0108_adds_durable_grant_attempt_and_publication_ledgers(
         }
         assert {
             "task_image_build_grants_native_check",
+            "task_image_build_grants_settle_check",
             "task_image_build_grants_state_check",
             "task_image_build_grants_state_fields_check",
         } <= grant_checks
@@ -205,14 +206,14 @@ def test_0108_adds_durable_grant_attempt_and_publication_ledgers(
                             id, environment, provider, slurm_cluster_id, cpu_arch,
                             state, submitting_identity, slurm_account,
                             slurm_partition, slurm_qos, request_spec,
-                            request_sha256, slurm_comment, ambiguity_settle_until,
+                            request_sha256, slurm_comment, ambiguity_settle_seconds,
                             journal_sequence
                         ) VALUES (
                             :id, 'staging', 'slurm-rootless-v1', 'gb10', 'arm64',
                             'issued', 'loom-builder', 'loom-task-builder',
                             'loom-task-builder', 'loom-task-image-builder-rootless-gb10',
                             CAST(:request_spec AS jsonb), :request_sha256, :comment,
-                            now(), 0
+                            30, 0
                         )
                     """),
                     {
@@ -226,6 +227,7 @@ def test_0108_adds_durable_grant_attempt_and_publication_ledgers(
                 text("""
                     UPDATE task_image_build_grants
                        SET state='bound', invocation_started_at=now(),
+                           ambiguity_settle_until=now(),
                            slurm_job_id=:job_id, bound_at=now()
                      WHERE id=:id
                 """),
@@ -237,6 +239,7 @@ def test_0108_adds_durable_grant_attempt_and_publication_ledgers(
                     text("""
                         UPDATE task_image_build_grants
                            SET state='bound', invocation_started_at=now(),
+                               ambiguity_settle_until=now(),
                                slurm_job_id=:job_id, bound_at=now()
                          WHERE id=:id
                     """),

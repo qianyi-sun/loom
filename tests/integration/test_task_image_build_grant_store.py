@@ -57,11 +57,18 @@ def _grant(grant_id: UUID | None = None):
     return issue_slurm_build_grant(_policy(), grant_id=grant_id or uuid4())
 
 
-def _inventory(grant, *, job_id: str, state: str, held: bool):
+def _inventory(
+    grant,
+    *,
+    job_id: str,
+    state: str,
+    held: bool,
+    observed_at: datetime = _NOW,
+):
     return SlurmBuildInventoryV1(
         controller_authoritative=True,
         accounting_authoritative=True,
-        observed_at=_NOW,
+        observed_at=observed_at,
         jobs=(
             SlurmBuildJobObservationV1(
                 job_id=job_id,
@@ -137,6 +144,28 @@ async def test_submission_invocation_is_journaled_exactly_once_before_external_c
         ]
 
 
+async def test_ambiguity_settle_window_starts_with_the_submission_invocation(
+    grant_session: async_sessionmaker[AsyncSession],
+) -> None:
+    grant = _grant()
+    invocation_started_at = _NOW + timedelta(minutes=5)
+    async with grant_session() as session:
+        await issue_task_image_build_grant(
+            session,
+            environment="staging",
+            grant=grant,
+            ambiguity_settle_seconds=30,
+            now=_NOW,
+        )
+        begun = await begin_task_image_build_submission(
+            session,
+            grant_id=grant.grant_id,
+            now=invocation_started_at,
+        )
+
+        assert begun.ambiguity_settle_until == invocation_started_at + timedelta(seconds=30)
+
+
 async def test_exact_held_job_binds_durably_before_release(
     grant_session: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -208,7 +237,7 @@ async def test_reconciliation_revokes_terminal_or_zero_and_journals_cancellation
             inventory=SlurmBuildInventoryV1(
                 controller_authoritative=True,
                 accounting_authoritative=True,
-                observed_at=_NOW,
+                observed_at=_NOW + timedelta(seconds=2),
                 jobs=(),
             ),
             now=_NOW + timedelta(seconds=2),
@@ -274,3 +303,96 @@ async def test_reconciliation_revokes_terminal_or_zero_and_journals_cancellation
         )
         assert len(cancellation_events) == 1
         assert cancellation_events[0].payload == {"job_ids": ["33333"]}
+
+
+async def test_revoked_grant_cancels_a_late_live_job_without_becoming_bindable(
+    grant_session: async_sessionmaker[AsyncSession],
+) -> None:
+    grant = _grant()
+    async with grant_session() as session:
+        await issue_task_image_build_grant(
+            session,
+            environment="staging",
+            grant=grant,
+            ambiguity_settle_seconds=1,
+            now=_NOW,
+        )
+        await begin_task_image_build_submission(session, grant_id=grant.grant_id, now=_NOW)
+        revoked = await reconcile_task_image_build_submission(
+            session,
+            grant_id=grant.grant_id,
+            inventory=SlurmBuildInventoryV1(
+                controller_authoritative=True,
+                accounting_authoritative=True,
+                observed_at=_NOW + timedelta(seconds=2),
+                jobs=(),
+            ),
+            now=_NOW + timedelta(seconds=2),
+        )
+        assert revoked.action == "revoke"
+
+        stale_cleanup = await reconcile_task_image_build_submission(
+            session,
+            grant_id=grant.grant_id,
+            inventory=SlurmBuildInventoryV1(
+                controller_authoritative=True,
+                accounting_authoritative=True,
+                observed_at=_NOW,
+                jobs=(),
+            ),
+            now=_NOW + timedelta(seconds=2),
+        )
+        assert stale_cleanup.action == "wait"
+        assert stale_cleanup.reason == "inventory_snapshot_precedes_revocation"
+
+        late_inventory = _inventory(
+            grant,
+            job_id="44444",
+            state="pending",
+            held=True,
+            observed_at=_NOW + timedelta(seconds=3),
+        )
+        cancel_first = await reconcile_task_image_build_submission(
+            session,
+            grant_id=grant.grant_id,
+            inventory=late_inventory,
+            now=_NOW + timedelta(seconds=3),
+        )
+        cancel_repeat = await reconcile_task_image_build_submission(
+            session,
+            grant_id=grant.grant_id,
+            inventory=late_inventory,
+            now=_NOW + timedelta(seconds=3),
+        )
+        terminal = await reconcile_task_image_build_submission(
+            session,
+            grant_id=grant.grant_id,
+            inventory=_inventory(
+                grant,
+                job_id="44444",
+                state="terminal",
+                held=False,
+                observed_at=_NOW + timedelta(seconds=4),
+            ),
+            now=_NOW + timedelta(seconds=4),
+        )
+        await session.commit()
+
+        assert cancel_first == cancel_repeat
+        assert cancel_first.action == "cancel_then_reconcile"
+        assert cancel_first.cancel_job_ids == ("44444",)
+        assert terminal.action == "revoke"
+        row = await session.get(TaskImageBuildGrant, grant.grant_id)
+        assert row is not None
+        assert (row.state, row.slurm_job_id, row.released_at) == ("revoked", None, None)
+        events = list(
+            (
+                await session.scalars(
+                    select(TaskImageBuildGrantEvent)
+                    .where(TaskImageBuildGrantEvent.grant_id == grant.grant_id)
+                    .order_by(TaskImageBuildGrantEvent.sequence)
+                )
+            ).all()
+        )
+        assert [event.event_type for event in events].count("revoked") == 1
+        assert [event.event_type for event in events].count("cancellation_requested") == 1

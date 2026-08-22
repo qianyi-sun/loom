@@ -45,6 +45,7 @@ def classify_task_image_build_inventory(
     grant: SlurmBuildGrantV1,
     inventory: SlurmBuildInventoryV1,
     *,
+    invocation_started_at: datetime,
     ambiguity_settle_until: datetime,
     now: datetime,
 ) -> TaskImageBuildInventoryDecision:
@@ -59,11 +60,21 @@ def classify_task_image_build_inventory(
             action="wait",
             reason="inventory_state_unknown",
         )
+    if inventory.observed_at > now:
+        return TaskImageBuildInventoryDecision(
+            action="wait",
+            reason="inventory_snapshot_is_in_the_future",
+        )
+    if inventory.observed_at < invocation_started_at:
+        return TaskImageBuildInventoryDecision(
+            action="wait",
+            reason="inventory_snapshot_precedes_submission",
+        )
     if not inventory.jobs:
-        if now < ambiguity_settle_until:
+        if inventory.observed_at < ambiguity_settle_until:
             return TaskImageBuildInventoryDecision(
                 action="wait",
-                reason="ambiguity_settle_window_open",
+                reason="inventory_snapshot_precedes_settle_deadline",
             )
         return TaskImageBuildInventoryDecision(
             action="revoke",
@@ -104,6 +115,50 @@ def classify_task_image_build_inventory(
     return TaskImageBuildInventoryDecision(
         action="wait",
         reason="inventory_state_unknown",
+    )
+
+
+def _classify_revoked_grant_inventory(
+    inventory: SlurmBuildInventoryV1,
+    *,
+    revoked_at: datetime,
+    now: datetime,
+) -> TaskImageBuildInventoryDecision:
+    if not inventory.controller_authoritative or not inventory.accounting_authoritative:
+        return TaskImageBuildInventoryDecision(
+            action="wait",
+            reason="inventory_incomplete",
+        )
+    if any(job.state == "unknown" for job in inventory.jobs):
+        return TaskImageBuildInventoryDecision(
+            action="wait",
+            reason="inventory_state_unknown",
+        )
+    if inventory.observed_at > now:
+        return TaskImageBuildInventoryDecision(
+            action="wait",
+            reason="inventory_snapshot_is_in_the_future",
+        )
+    if inventory.observed_at < revoked_at:
+        return TaskImageBuildInventoryDecision(
+            action="wait",
+            reason="inventory_snapshot_precedes_revocation",
+        )
+    live_job_ids = tuple(
+        sorted(
+            (job.job_id for job in inventory.jobs if job.state in {"pending", "running"}),
+            key=int,
+        )
+    )
+    if live_job_ids:
+        return TaskImageBuildInventoryDecision(
+            action="cancel_then_reconcile",
+            reason="revoked_grant_live_submission",
+            cancel_job_ids=live_job_ids,
+        )
+    return TaskImageBuildInventoryDecision(
+        action="revoke",
+        reason="revoked_grant_has_no_live_submission",
     )
 
 
@@ -180,7 +235,8 @@ async def issue_task_image_build_grant(
         request_spec=request.model_dump(mode="json"),
         request_sha256=grant.request_sha256,
         slurm_comment=grant.comment,
-        ambiguity_settle_until=now + timedelta(seconds=ambiguity_settle_seconds),
+        ambiguity_settle_seconds=ambiguity_settle_seconds,
+        ambiguity_settle_until=None,
         journal_sequence=0,
         created_at=now,
         updated_at=now,
@@ -211,6 +267,7 @@ async def begin_task_image_build_submission(
         )
     row.state = "submitting"
     row.invocation_started_at = now
+    row.ambiguity_settle_until = now + timedelta(seconds=row.ambiguity_settle_seconds)
     row.updated_at = now
     _append_event(
         session,
@@ -250,16 +307,33 @@ async def reconcile_task_image_build_submission(
 ) -> TaskImageBuildInventoryDecision:
     """Journal the safe consequence of authoritative submission inventory."""
     row = await _locked_grant(session, grant_id=grant_id)
-    if row.state != "submitting":
+    if row.state not in {"submitting", "revoked"}:
         raise TaskImageBuildGrantConflictError(
             f"task-image build grant {grant_id} is not awaiting reconciliation"
         )
-    decision = classify_task_image_build_inventory(
-        _stored_grant(row),
-        inventory,
-        ambiguity_settle_until=row.ambiguity_settle_until,
-        now=now,
-    )
+    was_revoked = row.state == "revoked"
+    if was_revoked:
+        if row.revoked_at is None:
+            raise TaskImageBuildGrantConflictError(
+                f"task-image build grant {grant_id} lacks revocation timing evidence"
+            )
+        decision = _classify_revoked_grant_inventory(
+            inventory,
+            revoked_at=row.revoked_at,
+            now=now,
+        )
+    elif row.invocation_started_at is None or row.ambiguity_settle_until is None:
+        raise TaskImageBuildGrantConflictError(
+            f"task-image build grant {grant_id} lacks submission timing evidence"
+        )
+    else:
+        decision = classify_task_image_build_inventory(
+            _stored_grant(row),
+            inventory,
+            invocation_started_at=row.invocation_started_at,
+            ambiguity_settle_until=row.ambiguity_settle_until,
+            now=now,
+        )
     if decision.action == "bind":
         if decision.bind_job_id is None:
             raise RuntimeError("bind decision lacks a Slurm job ID")
@@ -274,7 +348,7 @@ async def reconcile_task_image_build_submission(
             payload={"job_id": decision.bind_job_id},
             now=now,
         )
-    elif decision.action == "revoke":
+    elif decision.action == "revoke" and not was_revoked:
         row.state = "revoked"
         row.revoke_reason = decision.reason
         row.revoked_at = now

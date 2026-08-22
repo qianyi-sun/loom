@@ -2045,23 +2045,32 @@ class TaskImageBuildGrant(Base):
             name="task_image_build_grants_journal_check",
         ),
         CheckConstraint(
+            "ambiguity_settle_seconds > 0",
+            name="task_image_build_grants_settle_check",
+        ),
+        CheckConstraint(
             "(state = 'issued' AND invocation_started_at IS NULL "
-            "AND slurm_job_id IS NULL AND bound_at IS NULL "
+            "AND slurm_job_id IS NULL AND ambiguity_settle_until IS NULL "
+            "AND bound_at IS NULL "
             "AND released_at IS NULL AND revoked_at IS NULL "
             "AND revoke_reason IS NULL) OR "
             "(state = 'submitting' AND invocation_started_at IS NOT NULL "
-            "AND slurm_job_id IS NULL AND bound_at IS NULL "
+            "AND slurm_job_id IS NULL AND ambiguity_settle_until IS NOT NULL "
+            "AND bound_at IS NULL "
             "AND released_at IS NULL AND revoked_at IS NULL "
             "AND revoke_reason IS NULL) OR "
             "(state = 'bound' AND invocation_started_at IS NOT NULL "
-            "AND slurm_job_id IS NOT NULL AND bound_at IS NOT NULL "
+            "AND slurm_job_id IS NOT NULL AND ambiguity_settle_until IS NOT NULL "
+            "AND bound_at IS NOT NULL "
             "AND released_at IS NULL AND revoked_at IS NULL "
             "AND revoke_reason IS NULL) OR "
             "(state = 'released' AND invocation_started_at IS NOT NULL "
-            "AND slurm_job_id IS NOT NULL AND bound_at IS NOT NULL "
+            "AND slurm_job_id IS NOT NULL AND ambiguity_settle_until IS NOT NULL "
+            "AND bound_at IS NOT NULL "
             "AND released_at IS NOT NULL AND revoked_at IS NULL "
             "AND revoke_reason IS NULL) OR "
-            "(state = 'revoked' AND released_at IS NULL "
+            "(state = 'revoked' AND ambiguity_settle_until IS NOT NULL "
+            "AND released_at IS NULL "
             "AND revoked_at IS NOT NULL AND revoke_reason IS NOT NULL)",
             name="task_image_build_grants_state_fields_check",
         ),
@@ -2104,8 +2113,9 @@ class TaskImageBuildGrant(Base):
     request_spec: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     request_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     slurm_comment: Mapped[str] = mapped_column(Text, nullable=False)
-    ambiguity_settle_until: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False
+    ambiguity_settle_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    ambiguity_settle_until: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
     )
     invocation_started_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True), nullable=True

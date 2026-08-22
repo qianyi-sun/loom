@@ -29,7 +29,8 @@ def upgrade() -> None:
           request_spec JSONB NOT NULL,
           request_sha256 VARCHAR(64) NOT NULL,
           slurm_comment TEXT NOT NULL,
-          ambiguity_settle_until TIMESTAMPTZ NOT NULL,
+          ambiguity_settle_seconds INTEGER NOT NULL,
+          ambiguity_settle_until TIMESTAMPTZ,
           invocation_started_at TIMESTAMPTZ,
           slurm_job_id TEXT,
           revoke_reason TEXT,
@@ -73,28 +74,35 @@ def upgrade() -> None:
             CHECK (slurm_job_id IS NULL OR slurm_job_id ~ '^[0-9]+$'),
           CONSTRAINT task_image_build_grants_journal_check
             CHECK (journal_sequence >= 0),
+          CONSTRAINT task_image_build_grants_settle_check
+            CHECK (ambiguity_settle_seconds > 0),
           CONSTRAINT task_image_build_grants_state_fields_check CHECK (
             (state = 'issued'
               AND invocation_started_at IS NULL AND slurm_job_id IS NULL
+              AND ambiguity_settle_until IS NULL
               AND bound_at IS NULL AND released_at IS NULL
               AND revoked_at IS NULL AND revoke_reason IS NULL)
             OR
             (state = 'submitting'
               AND invocation_started_at IS NOT NULL AND slurm_job_id IS NULL
+              AND ambiguity_settle_until IS NOT NULL
               AND bound_at IS NULL AND released_at IS NULL
               AND revoked_at IS NULL AND revoke_reason IS NULL)
             OR
             (state = 'bound'
               AND invocation_started_at IS NOT NULL AND slurm_job_id IS NOT NULL
+              AND ambiguity_settle_until IS NOT NULL
               AND bound_at IS NOT NULL AND released_at IS NULL
               AND revoked_at IS NULL AND revoke_reason IS NULL)
             OR
             (state = 'released'
               AND invocation_started_at IS NOT NULL AND slurm_job_id IS NOT NULL
+              AND ambiguity_settle_until IS NOT NULL
               AND bound_at IS NOT NULL AND released_at IS NOT NULL
               AND revoked_at IS NULL AND revoke_reason IS NULL)
             OR
             (state = 'revoked'
+              AND ambiguity_settle_until IS NOT NULL
               AND released_at IS NULL AND revoked_at IS NOT NULL
               AND revoke_reason IS NOT NULL)
           )

@@ -78,11 +78,12 @@ def _inventory(
     *jobs: SlurmBuildJobObservationV1,
     controller_authoritative: bool = True,
     accounting_authoritative: bool = True,
+    observed_at: datetime = _NOW,
 ) -> SlurmBuildInventoryV1:
     return SlurmBuildInventoryV1(
         controller_authoritative=controller_authoritative,
         accounting_authoritative=accounting_authoritative,
-        observed_at=_NOW,
+        observed_at=observed_at,
         jobs=jobs,
     )
 
@@ -99,6 +100,7 @@ def test_incomplete_or_unknown_inventory_waits_without_binding(inventory) -> Non
     decision = classify_task_image_build_inventory(
         _grant(),
         inventory,
+        invocation_started_at=_NOW - timedelta(seconds=2),
         ambiguity_settle_until=_NOW - timedelta(seconds=1),
         now=_NOW,
     )
@@ -112,12 +114,14 @@ def test_authoritative_zero_waits_until_settle_then_revokes() -> None:
     before = classify_task_image_build_inventory(
         _grant(),
         _inventory(),
+        invocation_started_at=_NOW - timedelta(seconds=2),
         ambiguity_settle_until=_NOW + timedelta(seconds=1),
         now=_NOW,
     )
     after = classify_task_image_build_inventory(
         _grant(),
         _inventory(),
+        invocation_started_at=_NOW - timedelta(seconds=2),
         ambiguity_settle_until=_NOW - timedelta(seconds=1),
         now=_NOW,
     )
@@ -127,10 +131,24 @@ def test_authoritative_zero_waits_until_settle_then_revokes() -> None:
     assert after.reason == "authoritative_inventory_empty"
 
 
+def test_zero_inventory_uses_snapshot_time_not_later_handler_time() -> None:
+    decision = classify_task_image_build_inventory(
+        _grant(),
+        _inventory(observed_at=_NOW + timedelta(seconds=29)),
+        invocation_started_at=_NOW,
+        ambiguity_settle_until=_NOW + timedelta(seconds=30),
+        now=_NOW + timedelta(seconds=60),
+    )
+
+    assert decision.action == "wait"
+    assert decision.reason == "inventory_snapshot_precedes_settle_deadline"
+
+
 def test_one_exact_pending_held_job_is_the_only_bindable_inventory() -> None:
     decision = classify_task_image_build_inventory(
         _grant(),
         _inventory(_job("12345")),
+        invocation_started_at=_NOW - timedelta(seconds=2),
         ambiguity_settle_until=_NOW - timedelta(seconds=1),
         now=_NOW,
     )
@@ -169,6 +187,7 @@ def test_live_nonheld_mismatched_mixed_or_multiple_inventory_requires_cancellati
     decision = classify_task_image_build_inventory(
         _grant(),
         inventory,
+        invocation_started_at=_NOW - timedelta(seconds=2),
         ambiguity_settle_until=_NOW - timedelta(seconds=1),
         now=_NOW,
     )
@@ -182,6 +201,7 @@ def test_terminal_inventory_revokes_without_cancelling_or_binding() -> None:
     decision = classify_task_image_build_inventory(
         _grant(),
         _inventory(_job("12345", state="terminal", held=False)),
+        invocation_started_at=_NOW - timedelta(seconds=2),
         ambiguity_settle_until=_NOW - timedelta(seconds=1),
         now=_NOW,
     )
