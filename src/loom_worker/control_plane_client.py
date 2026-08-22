@@ -1635,6 +1635,7 @@ class HttpControlPlaneClient:
         *,
         materialization_id: UUID,
         builder_id: str,
+        attempt_count: int,
         lease_epoch: int,
         component: str,
         registry_image: str,
@@ -1644,6 +1645,7 @@ class HttpControlPlaneClient:
             operation="publication",
             payload={
                 "builder_id": builder_id,
+                "attempt_count": attempt_count,
                 "lease_epoch": lease_epoch,
                 "component": component,
                 "registry_image": registry_image,

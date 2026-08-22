@@ -1,0 +1,57 @@
+schema = "loom.task-image-rootless-provider-policies/v1"
+
+[[policies]]
+schema = "loom.task-image-build-environment-policy/v1"
+enabled = false
+activation_blockers = [
+  "allocation_executor_not_accepted",
+  "node_guard_not_accepted",
+  "publication_acceptance_not_complete",
+  "renewable_registry_credential_broker_not_accepted",
+]
+slurm_cluster_id = "oldlab"
+cpu_arch = "x86_64"
+submitting_identity = "loom-builder"
+partition = "loom-task-builder"
+account = "loom-task-builder"
+qos = "loom-task-image-builder-rootless-oldlab"
+feature_constraint = "loom_rootless_buildkit"
+supervisor_path = "/usr/local/libexec/loom-task-builder-supervisor"
+sbatch_path = "/usr/bin/sbatch"
+
+[policies.resources]
+cpus = 8
+memory_mib = 32768
+pids = 4096
+scratch_bytes = 107374182400
+scratch_inodes = 1000000
+wall_time = "02:00:00"
+swap_bytes = 0
+
+[[policies]]
+schema = "loom.task-image-build-environment-policy/v1"
+enabled = false
+activation_blockers = [
+  "allocation_executor_not_accepted",
+  "node_guard_not_accepted",
+  "publication_acceptance_not_complete",
+  "renewable_registry_credential_broker_not_accepted",
+]
+slurm_cluster_id = "gb10"
+cpu_arch = "arm64"
+submitting_identity = "loom-builder"
+partition = "loom-task-builder"
+account = "loom-task-builder"
+qos = "loom-task-image-builder-rootless-gb10"
+feature_constraint = "loom_rootless_buildkit"
+supervisor_path = "/usr/local/libexec/loom-task-builder-supervisor"
+sbatch_path = "/usr/bin/sbatch"
+
+[policies.resources]
+cpus = 8
+memory_mib = 32768
+pids = 4096
+scratch_bytes = 107374182400
+scratch_inodes = 1000000
+wall_time = "02:00:00"
+swap_bytes = 0

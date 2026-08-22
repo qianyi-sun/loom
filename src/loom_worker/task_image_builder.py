@@ -83,6 +83,7 @@ class TaskImageBuilderControlPlane(Protocol):
         *,
         materialization_id: UUID,
         builder_id: str,
+        attempt_count: int,
         lease_epoch: int,
         component: str,
         registry_image: str,
@@ -336,6 +337,7 @@ async def process_task_image_claim(
             return await control_plane.record_task_image_publication(
                 materialization_id=claim.id,
                 builder_id=builder_id,
+                attempt_count=claim.attempt_count,
                 lease_epoch=claim.lease_epoch,
                 component=component,
                 registry_image=registry_image,
