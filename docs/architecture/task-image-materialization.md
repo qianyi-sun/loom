@@ -37,6 +37,13 @@ the returned immutable manifest digests, and marks the row ready. Builders use
 lease epochs and heartbeats so a
 stale process cannot publish readiness after its lease has been reclaimed.
 
+The exclusive host-daemon pool is the active Phase 1 implementation and remains
+the rollback path. The Phase 2 allocation-scoped rootless provider is a separate
+contract: it renders a native-architecture Slurm job held for durable grant
+binding, without a reservation, node pin, `--exclusive`, host runtime socket,
+credential, or broad environment export. Its checked-in policy is inert input;
+no route, timer, supervisor, or autoscaler constructs the provider from it.
+
 Ordinary Loom workers never wait for or perform a task-authored Dockerfile
 build. After the scheduler observes readiness, the trial claim carries the
 frozen task snapshot and exact per-component registry digests. The execution
@@ -64,10 +71,15 @@ new immutable materialization identity rather than resetting bounded attempts.
 
 Registry publication cannot be atomic across multiple component manifests.
 When a component is pushed, Loom records the immutable digest immediately in an
-append-only publication history before readiness can be committed. Automatic
-retries reuse current verified component publications. Stale builders may add
-cleanup evidence but cannot publish readiness, so lease loss and later retries
-cannot turn earlier manifests into untracked registry leaks.
+append-only `task_image_publication_evidence` row bound to the exact
+materialization attempt, lease epoch, component, registry image, and builder
+before readiness can be committed. The materialization row's JSON publication
+history is a compatibility projection, not the audit authority. An exact replay
+within one attempt is idempotent, while an identical OCI digest from a later
+lease remains distinct evidence. Automatic retries reuse current verified
+component publications. Stale builders may add cleanup evidence but cannot
+publish readiness, so lease loss and later retries cannot turn earlier
+manifests into untracked registry leaks.
 
 The builder autoscaler scales from zero using queued build demand. It dispatches
 only exclusive Slurm jobs and never converts the existing non-exclusive GB10
@@ -105,6 +117,12 @@ registry plus a laptop Docker builder sidecar so native-arch Dockerfile
 materializations can become `ready` without Slurm. That sidecar is not the
 production exclusive-builder design. Until it is present and has published a
 digest, Dockerfile-backed local batches stay queued.
+
+The rootless provider remains disabled until the allocation executor, node
+guard, renewable registry-credential broker, and publication acceptance path
+have each passed their activation evidence. Removing those blockers is a later
+release step that must wire the provider deliberately; loading the Phase 2
+policy in this increment cannot submit or release a Slurm job.
 
 ## Verification
 
