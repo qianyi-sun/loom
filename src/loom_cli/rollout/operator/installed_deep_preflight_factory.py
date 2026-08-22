@@ -353,56 +353,50 @@ def _external_supervisor_predecessor_source(
         )
         if canonical is not None:
             runtime_ready = canonical.unit_dir == str(unit_dir)
-            if execution_host == STAGING_ROLLOUT_EXECUTION_HOST:
-                canonical_unit_names = set(canonical.unit_sha256)
-                canonical_units = {name: units.get(name) for name in canonical_unit_names}
-                canonical_timers = {
-                    name: status for name, status in timers.items() if name in canonical_unit_names
-                }
-                canonical_services = {
-                    name: status
-                    for name, status in services.items()
-                    if name in canonical_unit_names
-                }
-                runtime_ready = runtime_ready and canonical_external_supervisor_runtime_ready(
-                    canonical,
-                    unit_payloads=canonical_units,
-                    timer_statuses=canonical_timers,
-                    service_statuses=canonical_services,
-                )
-                for name in sorted(set(units) - canonical_unit_names):
-                    payload = units[name]
-                    if name.endswith(".timer"):
-                        timer_status = timers.get(name)
-                        runtime_ready = runtime_ready and (
-                            payload is None
-                            and timer_status is not None
-                            and timer_status.load_state == "not-found"
-                            and timer_status.unit_file_state in {"", "disabled", "not-found"}
-                            and timer_status.active_state == "inactive"
-                            and timer_status.fragment_path == ""
-                            and timer_status.need_daemon_reload == "no"
-                        )
-                    elif name.endswith(".service"):
-                        service_status = services.get(name)
-                        runtime_ready = runtime_ready and (
-                            payload is None
-                            and service_status is not None
-                            and service_status.load_state == "not-found"
-                            and service_status.result == ""
-                            and service_status.exec_main_status is None
-                            and service_status.fragment_path == ""
-                            and service_status.need_daemon_reload == "no"
-                        )
-                    else:
-                        runtime_ready = False
-            else:
-                runtime_ready = runtime_ready and canonical_external_supervisor_runtime_ready(
-                    canonical,
-                    unit_payloads=units,
-                    timer_statuses=timers,
-                    service_statuses=services,
-                )
+            # Controller observations cover the complete candidate unit set,
+            # while the predecessor identity may legitimately predate newly
+            # introduced supervisors. Validate the canonical subset exactly
+            # and require every candidate-only unit to be fully absent.
+            canonical_unit_names = set(canonical.unit_sha256)
+            canonical_units = {name: units.get(name) for name in canonical_unit_names}
+            canonical_timers = {
+                name: status for name, status in timers.items() if name in canonical_unit_names
+            }
+            canonical_services = {
+                name: status for name, status in services.items() if name in canonical_unit_names
+            }
+            runtime_ready = runtime_ready and canonical_external_supervisor_runtime_ready(
+                canonical,
+                unit_payloads=canonical_units,
+                timer_statuses=canonical_timers,
+                service_statuses=canonical_services,
+            )
+            for name in sorted(set(units) - canonical_unit_names):
+                payload = units[name]
+                if name.endswith(".timer"):
+                    timer_status = timers.get(name)
+                    runtime_ready = runtime_ready and (
+                        payload is None
+                        and timer_status is not None
+                        and timer_status.load_state == "not-found"
+                        and timer_status.unit_file_state in {"", "disabled", "not-found"}
+                        and timer_status.active_state == "inactive"
+                        and timer_status.fragment_path == ""
+                        and timer_status.need_daemon_reload == "no"
+                    )
+                elif name.endswith(".service"):
+                    service_status = services.get(name)
+                    runtime_ready = runtime_ready and (
+                        payload is None
+                        and service_status is not None
+                        and service_status.load_state == "not-found"
+                        and service_status.result == ""
+                        and service_status.exec_main_status is None
+                        and service_status.fragment_path == ""
+                        and service_status.need_daemon_reload == "no"
+                    )
+                else:
+                    runtime_ready = False
             pointer_digest = ExternalSupervisorCanonicalPointer.build(canonical).pointer_digest
         else:
             live_unit_sha256 = {

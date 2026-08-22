@@ -605,13 +605,23 @@ class _ReadyCanonicalExternalSupervisorControl:
         self,
         canonical: ExternalSupervisorCanonicalIdentity,
         *,
-        loaded_candidate_only_service: str | None = None,
+        loaded_candidate_only_unit: str | None = None,
+        unit_dir: Path = PROTECTED_USER_UNIT_DIR,
     ) -> None:
         self.canonical = canonical
-        self.loaded_candidate_only_service = loaded_candidate_only_service
+        self.loaded_candidate_only_unit = loaded_candidate_only_unit
+        self.unit_dir = unit_dir
 
     def timer_status(self, name: str) -> TimerRuntimeStatus:
         if name not in self.canonical.unit_sha256:
+            if name == self.loaded_candidate_only_unit:
+                return TimerRuntimeStatus(
+                    load_state="loaded",
+                    unit_file_state="disabled",
+                    active_state="inactive",
+                    fragment_path=str(self.unit_dir / name),
+                    need_daemon_reload="no",
+                )
             return TimerRuntimeStatus(
                 load_state="not-found",
                 unit_file_state="not-found",
@@ -629,18 +639,18 @@ class _ReadyCanonicalExternalSupervisorControl:
             load_state="loaded",
             unit_file_state="enabled" if active else "disabled",
             active_state="active" if active else "inactive",
-            fragment_path=str(PROTECTED_USER_UNIT_DIR / name),
+            fragment_path=str(self.unit_dir / name),
             need_daemon_reload="no",
         )
 
     def service_status(self, name: str) -> ServiceRuntimeStatus:
         if name not in self.canonical.unit_sha256:
-            if name == self.loaded_candidate_only_service:
+            if name == self.loaded_candidate_only_unit:
                 return ServiceRuntimeStatus(
                     load_state="loaded",
                     result="success",
                     exec_main_status=0,
-                    fragment_path=str(PROTECTED_USER_UNIT_DIR / name),
+                    fragment_path=str(self.unit_dir / name),
                     need_daemon_reload="no",
                 )
             return ServiceRuntimeStatus(
@@ -654,7 +664,7 @@ class _ReadyCanonicalExternalSupervisorControl:
             load_state="loaded",
             result="success",
             exec_main_status=0,
-            fragment_path=str(PROTECTED_USER_UNIT_DIR / name),
+            fragment_path=str(self.unit_dir / name),
             need_daemon_reload="no",
         )
 
@@ -680,6 +690,28 @@ class _CanonicalExternalSupervisorStore:
 def _ready_oldlab_canonical_identity() -> ExternalSupervisorCanonicalIdentity:
     provisional = ExternalSupervisorCanonicalIdentity.from_manifest(
         load_predecessor_manifest(execution_host="TRT-EAI-OLDLAB-1")
+    )
+    payload = provisional.payload()
+    payload["record_kind"] = "activation"
+    payload["transition_group_id"] = "f" * 32
+    payload["runtime_evidence_digest"] = transport_module._expected_identity_runtime_digest(
+        provisional
+    )
+    record = {
+        **payload,
+        "evidence_digest": hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+    }
+    return ExternalSupervisorCanonicalIdentity.from_bytes(
+        json.dumps(record, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    )
+
+
+def _ready_gb10_canonical_identity() -> ExternalSupervisorCanonicalIdentity:
+    provisional = ExternalSupervisorCanonicalIdentity.from_manifest(
+        load_predecessor_manifest(execution_host="gx10-01c7"),
+        unit_dir=GB10_CANONICAL_UNIT_DIR,
     )
     payload = provisional.payload()
     payload["record_kind"] = "activation"
@@ -824,7 +856,7 @@ def _installed_oldlab_canonical_snapshot(
     store = _CanonicalExternalSupervisorStore(canonical)
     control = _ReadyCanonicalExternalSupervisorControl(
         canonical,
-        loaded_candidate_only_service=loaded_candidate_only_service,
+        loaded_candidate_only_unit=loaded_candidate_only_service,
     )
     monkeypatch.setattr(
         installed_deep_preflight_factory,
@@ -853,6 +885,56 @@ def _installed_oldlab_canonical_snapshot(
         control=control,
     ).observe(artifact)
     return snapshot, final_observation, canonical
+
+
+def _installed_gb10_canonical_snapshot(
+    candidate_root: Path,
+    *,
+    loaded_candidate_only_unit: str | None = None,
+) -> tuple[
+    ExternalSupervisorPredecessorSnapshot,
+    transport_module.ExternalSupervisorLiveObservation,
+    ExternalSupervisorCanonicalIdentity,
+]:
+    context = _installed_predecessor_context(
+        candidate_root,
+        backup_schema_revision="0088",
+        database_schema_revision="0088",
+    )
+    artifact = build_external_supervisor_artifact(
+        candidate_root,
+        candidate_sha=str(context.bindings["candidate.sha"]),
+        candidate_tree=str(context.bindings["candidate.tree"]),
+        image_tag=f"staging-{str(context.bindings['candidate.sha'])[:7]}",
+        environment="staging",
+        execution_host="gx10-01c7",
+    )
+    canonical = _ready_gb10_canonical_identity()
+    store = _CanonicalExternalSupervisorStore(canonical)
+    control = _ReadyCanonicalExternalSupervisorControl(
+        canonical,
+        loaded_candidate_only_unit=loaded_candidate_only_unit,
+        unit_dir=Path(GB10_CANONICAL_UNIT_DIR),
+    )
+    final_observation = transport_module.FixedExternalSupervisorTransport(
+        store=store,
+        control=control,
+        unit_dir=Path(GB10_CANONICAL_UNIT_DIR),
+    ).observe(artifact)
+    source = installed_deep_preflight_factory._external_supervisor_predecessor_source(
+        candidate_root=candidate_root,
+        git_run=_git_run,
+        service_uid=501,
+        pool_identity_source=lambda: _pool_identity(
+            "0088",
+            legacy_count=0,
+            target_count=1,
+        ),
+        execution_host="gx10-01c7",
+        unit_dir=Path(GB10_CANONICAL_UNIT_DIR),
+        observation_source=lambda _context: final_observation,
+    )
+    return source(context), final_observation, canonical
 
 
 def test_installed_external_supervisor_predecessor_source_binds_merged_provenance(
@@ -1034,6 +1116,53 @@ def test_installed_oldlab_canonical_predecessor_rejects_loaded_candidate_only_un
         "loom-task-image-builder-oldlab-staging.service"
     ]
     assert extra_service.load_state == "loaded"
+    assert snapshot.live_evidence_digest == final_observation.evidence_digest
+    assert snapshot.runtime_ready is False
+
+
+def test_installed_gb10_canonical_predecessor_accepts_absent_candidate_only_units(
+    secure_candidate_root: Path,
+) -> None:
+    snapshot, final_observation, canonical = _installed_gb10_canonical_snapshot(
+        secure_candidate_root,
+    )
+
+    assert set(canonical.unit_sha256) == {
+        "loom-autoscaler-gb10-staging.service",
+        "loom-autoscaler-gb10-staging.timer",
+    }
+    assert set(final_observation.unit_payloads) == {
+        "loom-autoscaler-gb10-staging.service",
+        "loom-autoscaler-gb10-staging.timer",
+        "loom-task-image-builder-gb10-staging.service",
+        "loom-task-image-builder-gb10-staging.timer",
+    }
+    assert snapshot.live_evidence_digest == final_observation.evidence_digest
+    assert snapshot.runtime_ready is True
+
+
+@pytest.mark.parametrize(
+    "candidate_only_unit",
+    (
+        "loom-task-image-builder-gb10-staging.service",
+        "loom-task-image-builder-gb10-staging.timer",
+    ),
+)
+def test_installed_gb10_canonical_predecessor_rejects_loaded_candidate_only_unit(
+    secure_candidate_root: Path,
+    candidate_only_unit: str,
+) -> None:
+    snapshot, final_observation, _canonical = _installed_gb10_canonical_snapshot(
+        secure_candidate_root,
+        loaded_candidate_only_unit=candidate_only_unit,
+    )
+
+    statuses = (
+        final_observation.service_statuses
+        if candidate_only_unit.endswith(".service")
+        else final_observation.timer_statuses
+    )
+    assert statuses[candidate_only_unit].load_state == "loaded"
     assert snapshot.live_evidence_digest == final_observation.evidence_digest
     assert snapshot.runtime_ready is False
 
