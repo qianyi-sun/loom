@@ -30,6 +30,7 @@ from loom_control_plane.task_image_materializations import (
 router = APIRouter(prefix="/api/v1/internal/task-image-materializations")
 BuilderID = Annotated[str, Field(min_length=1, max_length=128)]
 LeaseEpoch = Annotated[int, Field(gt=0)]
+AttemptCount = Annotated[int, Field(gt=0)]
 
 
 class _StrictModel(BaseModel):
@@ -58,6 +59,7 @@ class FailRequest(LeaseRequest):
 
 
 class PublicationRequest(LeaseRequest):
+    attempt_count: AttemptCount | None = None
     component: Annotated[str, Field(min_length=1, max_length=256)]
     registry_image: Annotated[str, Field(min_length=1, max_length=2048)]
 
@@ -270,6 +272,7 @@ async def publication_route(
             session,
             materialization_id=materialization_id,
             builder_id=payload.builder_id,
+            attempt_count=payload.attempt_count,
             lease_epoch=payload.lease_epoch,
             component=payload.component,
             registry_image=payload.registry_image,

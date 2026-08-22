@@ -14,6 +14,8 @@ from sqlalchemy.orm import sessionmaker
 from loom.db.schema import (
     Task,
     TaskImageMaterialization,
+    TaskImageMaterializationAttempt,
+    TaskImagePublicationEvidence,
     Team,
     Token,
     Trial,
@@ -32,6 +34,19 @@ def materialization_namespace(postgres_url: str) -> Iterator[str]:
         engine = create_engine(postgres_url)
         with sessionmaker(engine)() as session:
             session.execute(delete(Trial).where(Trial.task_id.startswith(namespace)))
+            materialization_ids = select(TaskImageMaterialization.id).where(
+                TaskImageMaterialization.task_id.startswith(namespace)
+            )
+            session.execute(
+                delete(TaskImagePublicationEvidence).where(
+                    TaskImagePublicationEvidence.materialization_id.in_(materialization_ids)
+                )
+            )
+            session.execute(
+                delete(TaskImageMaterializationAttempt).where(
+                    TaskImageMaterializationAttempt.materialization_id.in_(materialization_ids)
+                )
+            )
             session.execute(
                 delete(TaskImageMaterialization).where(
                     TaskImageMaterialization.task_id.startswith(namespace)
@@ -447,7 +462,11 @@ def test_publication_evidence_is_append_only_across_retries(
         "publication",
         builder_id="builder-a",
         lease_epoch=first_claim["lease_epoch"],
-        extra={"component": "task", "registry_image": first_image},
+        extra={
+            "attempt_count": first_claim["attempt_count"],
+            "component": "task",
+            "registry_image": first_image,
+        },
     )
     assert recorded.status_code == 200, recorded.text
     failed = _mutation(
@@ -480,7 +499,6 @@ def test_publication_evidence_is_append_only_across_retries(
 
     second_claim = _claim(client, builder_token, builder_id="builder-b").json()
     assert second_claim["registry_images"] == {"task": first_image}
-    second_image = "registry.example/loom/task@sha256:" + "5" * 64
     recorded_again = _mutation(
         client,
         builder_token,
@@ -488,7 +506,11 @@ def test_publication_evidence_is_append_only_across_retries(
         "publication",
         builder_id="builder-b",
         lease_epoch=second_claim["lease_epoch"],
-        extra={"component": "task", "registry_image": second_image},
+        extra={
+            "attempt_count": second_claim["attempt_count"],
+            "component": "task",
+            "registry_image": first_image,
+        },
     )
     assert recorded_again.status_code == 200, recorded_again.text
     started = _mutation(
@@ -507,13 +529,76 @@ def test_publication_evidence_is_append_only_across_retries(
         "complete",
         builder_id="builder-b",
         lease_epoch=second_claim["lease_epoch"],
-        extra={"registry_images": {"task": second_image}},
+        extra={"registry_images": {"task": first_image}},
     )
     assert completed.status_code == 200, completed.text
-    assert {entry["registry_image"] for entry in completed.json()["registry_image_history"]} == {
-        first_image,
-        second_image,
-    }
+    assert [
+        (entry["attempt_count"], entry["lease_epoch"], entry["registry_image"])
+        for entry in completed.json()["registry_image_history"]
+    ] == [
+        (first_claim["attempt_count"], first_claim["lease_epoch"], first_image),
+        (second_claim["attempt_count"], second_claim["lease_epoch"], first_image),
+    ]
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            evidence = session.scalars(
+                select(TaskImagePublicationEvidence)
+                .where(TaskImagePublicationEvidence.materialization_id == materialization_id)
+                .order_by(TaskImagePublicationEvidence.lease_epoch)
+            ).all()
+        assert [(row.attempt_number, row.lease_epoch) for row in evidence] == [
+            (first_claim["attempt_count"], first_claim["lease_epoch"]),
+            (second_claim["attempt_count"], second_claim["lease_epoch"]),
+        ]
+    finally:
+        engine.dispose()
+
+
+def test_legacy_publication_body_is_accepted_only_for_current_live_lease(
+    client: TestClient,
+    builder_token: str,
+    create_materialization: Callable[..., UUID],
+    postgres_url: str,
+) -> None:
+    materialization_id = create_materialization()
+    first = _claim(client, builder_token, builder_id="builder-legacy").json()
+    registry_image = "registry.example/loom/task@sha256:" + "7" * 64
+    current = _mutation(
+        client,
+        builder_token,
+        str(materialization_id),
+        "publication",
+        builder_id="builder-legacy",
+        lease_epoch=first["lease_epoch"],
+        extra={"component": "task", "registry_image": registry_image},
+    )
+    assert current.status_code == 200, current.text
+
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            session.execute(
+                update(TaskImageMaterialization)
+                .where(TaskImageMaterialization.id == materialization_id)
+                .values(lease_expires_at=datetime.now(UTC) - timedelta(seconds=1))
+            )
+            session.commit()
+    finally:
+        engine.dispose()
+    second = _claim(client, builder_token, builder_id="builder-current").json()
+    assert second["lease_epoch"] > first["lease_epoch"]
+
+    stale = _mutation(
+        client,
+        builder_token,
+        str(materialization_id),
+        "publication",
+        builder_id="builder-legacy",
+        lease_epoch=first["lease_epoch"],
+        extra={"component": "task", "registry_image": registry_image},
+    )
+    assert stale.status_code == 409, stale.text
 
 
 def test_retryable_failure_requeues_and_reclaim_advances_epoch(

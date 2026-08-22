@@ -349,7 +349,7 @@ class _FakeControlPlane:
         self.completed: dict[str, str] | None = None
         self.failed = False
         self.failed_registry_images: dict[str, str] = {}
-        self.recorded_publications: list[tuple[str, str]] = []
+        self.recorded_publications: list[tuple[int, str, str]] = []
 
     async def start_task_image_materialization(self, **_kwargs: Any) -> bool:
         return True
@@ -374,7 +374,11 @@ class _FakeControlPlane:
 
     async def record_task_image_publication(self, **kwargs: Any) -> bool:
         self.recorded_publications.append(
-            (str(kwargs["component"]), str(kwargs["registry_image"]))
+            (
+                int(kwargs["attempt_count"]),
+                str(kwargs["component"]),
+                str(kwargs["registry_image"]),
+            )
         )
         return True
 
@@ -384,9 +388,11 @@ async def test_process_claim_heartbeats_and_completes_fenced_lease(
 ) -> None:
     control_plane = _FakeControlPlane()
 
-    async def materialize(
-        _claim: Any, _settings: Any, **_kwargs: Any
-    ) -> dict[str, str]:
+    async def materialize(_claim: Any, _settings: Any, **kwargs: Any) -> dict[str, str]:
+        assert await kwargs["publication_recorder"](
+            "task",
+            "registry.example/task@sha256:" + "d" * 64,
+        )
         await asyncio.sleep(0.04)
         return {"task": "registry.example/task@sha256:" + "d" * 64}
 
@@ -408,6 +414,9 @@ async def test_process_claim_heartbeats_and_completes_fenced_lease(
         "task": "registry.example/task@sha256:" + "d" * 64,
     }
     assert control_plane.failed is False
+    assert control_plane.recorded_publications == [
+        (1, "task", "registry.example/task@sha256:" + "d" * 64),
+    ]
 
 
 async def test_process_claim_reports_partial_registry_publication(

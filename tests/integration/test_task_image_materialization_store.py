@@ -8,8 +8,20 @@ import pytest
 from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from loom.db.schema import Task, TaskImageMaterialization
+from loom.db.schema import (
+    Task,
+    TaskImageMaterialization,
+    TaskImageMaterializationAttempt,
+    TaskImagePublicationEvidence,
+)
 from loom.task_image_materialization import ensure_task_image_materializations
+from loom_control_plane.task_image_materializations import (
+    TaskImageLeaseConflictError,
+    claim_task_image_materialization,
+    fail_task_image_materialization,
+    record_task_image_publication,
+    retry_task_image_materialization,
+)
 
 
 def _task_values(*, task_id: str, checksum: str) -> dict[str, object]:
@@ -43,6 +55,8 @@ async def materialization_session(
         yield factory
     finally:
         async with factory() as session:
+            await session.execute(delete(TaskImagePublicationEvidence))
+            await session.execute(delete(TaskImageMaterializationAttempt))
             await session.execute(delete(TaskImageMaterialization))
             await session.execute(
                 delete(Task).where(
@@ -80,6 +94,113 @@ async def test_ensure_enqueues_idempotent_architecture_snapshots(
             )
         )
         assert count == 2
+
+
+async def test_publication_evidence_retains_identical_digest_across_attempt_leases(
+    materialization_session: async_sessionmaker[AsyncSession],
+) -> None:
+    task_id = f"materialization/{uuid4()}"
+    checksum = "9" * 64
+    registry_image = "registry.example/loom/task@sha256:" + "a" * 64
+    async with materialization_session() as session:
+        await session.execute(insert(Task).values(**_task_values(task_id=task_id, checksum=checksum)))
+        await session.commit()
+        task = (await session.execute(select(Task).where(Task.id == task_id))).scalar_one()
+        await ensure_task_image_materializations(session, task_row=task)
+        await session.commit()
+
+        first = await claim_task_image_materialization(
+            session,
+            builder_id="builder:first",
+            cpu_arch="arm64",
+        )
+        assert first is not None
+        assert (first.attempt_count, first.lease_epoch) == (1, 1)
+        await record_task_image_publication(
+            session,
+            materialization_id=first.id,
+            builder_id="builder:first",
+            attempt_count=first.attempt_count,
+            lease_epoch=first.lease_epoch,
+            component="task",
+            registry_image=registry_image,
+        )
+        await fail_task_image_materialization(
+            session,
+            materialization_id=first.id,
+            builder_id="builder:first",
+            lease_epoch=first.lease_epoch,
+            retryable=False,
+            failure_reason="fixture_failure",
+            failure_message="force an admin retry",
+            registry_images={"task": registry_image},
+        )
+        await retry_task_image_materialization(session, materialization_id=first.id)
+        await session.commit()
+
+        second = await claim_task_image_materialization(
+            session,
+            builder_id="builder:second",
+            cpu_arch="arm64",
+        )
+        assert second is not None
+        assert second.id == first.id
+        assert (second.attempt_count, second.lease_epoch) == (1, 3)
+        for _ in range(2):
+            await record_task_image_publication(
+                session,
+                materialization_id=second.id,
+                builder_id="builder:second",
+                attempt_count=second.attempt_count,
+                lease_epoch=second.lease_epoch,
+                component="task",
+                registry_image=registry_image,
+            )
+        await session.commit()
+
+        attempts = list(
+            (
+                await session.scalars(
+                    select(TaskImageMaterializationAttempt)
+                    .where(TaskImageMaterializationAttempt.materialization_id == second.id)
+                    .order_by(TaskImageMaterializationAttempt.lease_epoch)
+                )
+            ).all()
+        )
+        evidence = list(
+            (
+                await session.scalars(
+                    select(TaskImagePublicationEvidence)
+                    .where(TaskImagePublicationEvidence.materialization_id == second.id)
+                    .order_by(TaskImagePublicationEvidence.lease_epoch)
+                )
+            ).all()
+        )
+        assert [(row.attempt_number, row.lease_epoch, row.builder_id) for row in attempts] == [
+            (1, 1, "builder:first"),
+            (1, 3, "builder:second"),
+        ]
+        assert [
+            (row.attempt_number, row.lease_epoch, row.builder_id, row.registry_image)
+            for row in evidence
+        ] == [
+            (1, 1, "builder:first", registry_image),
+            (1, 3, "builder:second", registry_image),
+        ]
+        refreshed = await session.get(TaskImageMaterialization, second.id)
+        assert refreshed is not None
+        assert [entry["lease_epoch"] for entry in refreshed.registry_image_history] == [1, 3]
+
+        with pytest.raises(TaskImageLeaseConflictError, match="attempt"):
+            await record_task_image_publication(
+                session,
+                materialization_id=second.id,
+                builder_id="builder:forged",
+                attempt_count=second.attempt_count,
+                lease_epoch=second.lease_epoch,
+                component="task",
+                registry_image=registry_image,
+            )
 
 
 async def test_new_task_checksum_creates_new_immutable_materializations(

@@ -138,6 +138,7 @@ async def test_task_image_mutations_serialize_fence_and_surface_conflict() -> No
         assert await client.record_task_image_publication(
             materialization_id=materialization_id,
             builder_id="builder-a",
+            attempt_count=1,
             lease_epoch=4,
             component="task",
             registry_image="registry.example/task@sha256:" + "c" * 64,
@@ -178,6 +179,7 @@ async def test_task_image_mutations_serialize_fence_and_surface_conflict() -> No
             f"/api/v1/internal/task-image-materializations/{materialization_id}/publication",
             {
                 **common,
+                "attempt_count": 1,
                 "component": "task",
                 "registry_image": "registry.example/task@sha256:" + "c" * 64,
             },

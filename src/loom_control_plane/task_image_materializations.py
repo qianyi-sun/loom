@@ -7,12 +7,15 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import and_, exists, func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
 from loom.db.schema import (
     Task,
     TaskImageMaterialization,
+    TaskImageMaterializationAttempt,
+    TaskImagePublicationEvidence,
     Trial,
     TrialTaskImageMaterialization,
 )
@@ -48,24 +51,39 @@ def _record_registry_image_history(
     row: TaskImageMaterialization,
     *,
     builder_id: str,
+    attempt_count: int,
     lease_epoch: int,
     registry_images: dict[str, str],
     now: datetime,
 ) -> None:
     history = list(row.registry_image_history or [])
     observed = {
-        (str(entry.get("component")), str(entry.get("registry_image")))
+        (
+            entry.get("attempt_count"),
+            entry.get("lease_epoch"),
+            str(entry.get("builder_id")),
+            str(entry.get("component")),
+            str(entry.get("registry_image")),
+        )
         for entry in history
         if isinstance(entry, dict)
     }
     for component, registry_image in registry_images.items():
-        if (component, registry_image) in observed:
+        evidence_key = (
+            attempt_count,
+            lease_epoch,
+            builder_id,
+            component,
+            registry_image,
+        )
+        if evidence_key in observed:
             continue
         history.append(
             {
                 "component": component,
                 "registry_image": registry_image,
                 "builder_id": builder_id,
+                "attempt_count": attempt_count,
                 "lease_epoch": lease_epoch,
                 "recorded_at": now.isoformat(),
             }
@@ -73,11 +91,63 @@ def _record_registry_image_history(
     row.registry_image_history = history
 
 
+async def _record_attempt_publication_evidence(
+    session: AsyncSession,
+    row: TaskImageMaterialization,
+    *,
+    builder_id: str,
+    attempt_count: int,
+    lease_epoch: int,
+    registry_images: dict[str, str],
+    now: datetime,
+) -> None:
+    attempt = await session.scalar(
+        select(TaskImageMaterializationAttempt).where(
+            TaskImageMaterializationAttempt.materialization_id == row.id,
+            TaskImageMaterializationAttempt.attempt_number == attempt_count,
+            TaskImageMaterializationAttempt.lease_epoch == lease_epoch,
+            TaskImageMaterializationAttempt.builder_id == builder_id,
+        )
+    )
+    if attempt is None:
+        raise TaskImageLeaseConflictError("task image publication attempt does not exist")
+    for component, registry_image in registry_images.items():
+        await session.execute(
+            pg_insert(TaskImagePublicationEvidence)
+            .values(
+                materialization_attempt_id=attempt.id,
+                materialization_id=row.id,
+                attempt_number=attempt.attempt_number,
+                lease_epoch=attempt.lease_epoch,
+                builder_id=attempt.builder_id,
+                component=component,
+                registry_image=registry_image,
+                recorded_at=now,
+            )
+            .on_conflict_do_nothing(
+                index_elements=(
+                    TaskImagePublicationEvidence.materialization_attempt_id,
+                    TaskImagePublicationEvidence.component,
+                    TaskImagePublicationEvidence.registry_image,
+                )
+            )
+        )
+    _record_registry_image_history(
+        row,
+        builder_id=builder_id,
+        attempt_count=attempt_count,
+        lease_epoch=lease_epoch,
+        registry_images=registry_images,
+        now=now,
+    )
+
+
 async def record_task_image_publication(
     session: AsyncSession,
     *,
     materialization_id: UUID,
     builder_id: str,
+    attempt_count: int | None,
     lease_epoch: int,
     component: str,
     registry_image: str,
@@ -91,6 +161,18 @@ async def record_task_image_publication(
     )
     if row is None:
         raise TaskImageLeaseConflictError("task image materialization does not exist")
+    if attempt_count is None:
+        if (
+            row.state not in {"claimed", "running"}
+            or row.claimed_by != builder_id
+            or row.lease_epoch != lease_epoch
+            or row.lease_expires_at is None
+            or row.lease_expires_at <= now
+        ):
+            raise TaskImageLeaseConflictError(
+                "legacy task image publication requires the current live lease"
+            )
+        attempt_count = row.attempt_count
     try:
         images = validate_task_image_registry_images(
             {component: registry_image},
@@ -98,9 +180,11 @@ async def record_task_image_publication(
         )
     except ValueError as exc:
         raise TaskImageCompletionError(str(exc)) from exc
-    _record_registry_image_history(
+    await _record_attempt_publication_evidence(
+        session,
         row,
         builder_id=builder_id,
+        attempt_count=attempt_count,
         lease_epoch=lease_epoch,
         registry_images=images,
         now=now,
@@ -207,6 +291,15 @@ async def claim_task_image_materialization(
     row.failure_reason = None
     row.failure_message = None
     row.updated_at = now
+    session.add(
+        TaskImageMaterializationAttempt(
+            materialization_id=row.id,
+            attempt_number=row.attempt_count,
+            lease_epoch=row.lease_epoch,
+            builder_id=builder_id,
+            claimed_at=now,
+        )
+    )
     await session.flush()
     return row
 
@@ -310,9 +403,11 @@ async def complete_task_image_materialization(
         )
     except ValueError as exc:
         raise TaskImageCompletionError(str(exc)) from exc
-    _record_registry_image_history(
+    await _record_attempt_publication_evidence(
+        session,
         row,
         builder_id=builder_id,
+        attempt_count=row.attempt_count,
         lease_epoch=lease_epoch,
         registry_images=registry_images,
         now=now,
@@ -356,9 +451,11 @@ async def fail_task_image_materialization(
         )
     except ValueError as exc:
         raise TaskImageCompletionError(str(exc)) from exc
-    _record_registry_image_history(
+    await _record_attempt_publication_evidence(
+        session,
         row,
         builder_id=builder_id,
+        attempt_count=row.attempt_count,
         lease_epoch=lease_epoch,
         registry_images=registry_images,
         now=now,
