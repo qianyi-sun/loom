@@ -1990,6 +1990,306 @@ class TaskImageMaterialization(Base):
     )
 
 
+class TaskImageBuildGrant(Base):
+    """One recoverable held-job authority with one submission invocation."""
+
+    __tablename__ = "task_image_build_grants"
+    __table_args__ = (
+        CheckConstraint(
+            "environment ~ '^[A-Za-z0-9_.-]+$'",
+            name="task_image_build_grants_environment_check",
+        ),
+        CheckConstraint(
+            "provider = 'slurm-rootless-v1'",
+            name="task_image_build_grants_provider_check",
+        ),
+        CheckConstraint(
+            "slurm_cluster_id IN ('oldlab','gb10')",
+            name="task_image_build_grants_cluster_check",
+        ),
+        CheckConstraint(
+            "cpu_arch IN ('x86_64','arm64')",
+            name="task_image_build_grants_arch_check",
+        ),
+        CheckConstraint(
+            "(slurm_cluster_id = 'oldlab' AND cpu_arch = 'x86_64' "
+            "AND slurm_qos = 'loom-task-image-builder-rootless-oldlab') OR "
+            "(slurm_cluster_id = 'gb10' AND cpu_arch = 'arm64' "
+            "AND slurm_qos = 'loom-task-image-builder-rootless-gb10')",
+            name="task_image_build_grants_native_check",
+        ),
+        CheckConstraint(
+            "state IN ('issued','submitting','bound','released','revoked')",
+            name="task_image_build_grants_state_check",
+        ),
+        CheckConstraint(
+            "submitting_identity = 'loom-builder' "
+            "AND slurm_account = 'loom-task-builder' "
+            "AND slurm_partition = 'loom-task-builder'",
+            name="task_image_build_grants_identity_check",
+        ),
+        CheckConstraint(
+            "request_sha256 ~ '^[0-9a-f]{64}$'",
+            name="task_image_build_grants_request_digest_check",
+        ),
+        CheckConstraint(
+            "slurm_comment = 'loom-task-builder-v1:grant=' || id::text",
+            name="task_image_build_grants_comment_check",
+        ),
+        CheckConstraint(
+            "slurm_job_id IS NULL OR slurm_job_id ~ '^[0-9]+$'",
+            name="task_image_build_grants_job_id_check",
+        ),
+        CheckConstraint(
+            "journal_sequence >= 0",
+            name="task_image_build_grants_journal_check",
+        ),
+        CheckConstraint(
+            "(state = 'issued' AND invocation_started_at IS NULL "
+            "AND slurm_job_id IS NULL AND bound_at IS NULL "
+            "AND released_at IS NULL AND revoked_at IS NULL "
+            "AND revoke_reason IS NULL) OR "
+            "(state = 'submitting' AND invocation_started_at IS NOT NULL "
+            "AND slurm_job_id IS NULL AND bound_at IS NULL "
+            "AND released_at IS NULL AND revoked_at IS NULL "
+            "AND revoke_reason IS NULL) OR "
+            "(state = 'bound' AND invocation_started_at IS NOT NULL "
+            "AND slurm_job_id IS NOT NULL AND bound_at IS NOT NULL "
+            "AND released_at IS NULL AND revoked_at IS NULL "
+            "AND revoke_reason IS NULL) OR "
+            "(state = 'released' AND invocation_started_at IS NOT NULL "
+            "AND slurm_job_id IS NOT NULL AND bound_at IS NOT NULL "
+            "AND released_at IS NOT NULL AND revoked_at IS NULL "
+            "AND revoke_reason IS NULL) OR "
+            "(state = 'revoked' AND released_at IS NULL "
+            "AND revoked_at IS NOT NULL AND revoke_reason IS NOT NULL)",
+            name="task_image_build_grants_state_fields_check",
+        ),
+        Index(
+            "task_image_build_grants_comment_uidx",
+            "slurm_comment",
+            unique=True,
+        ),
+        Index(
+            "task_image_build_grants_job_uidx",
+            "slurm_cluster_id",
+            "slurm_job_id",
+            unique=True,
+            postgresql_where=text("slurm_job_id IS NOT NULL"),
+        ),
+        Index(
+            "task_image_build_grants_reconcile_idx",
+            "environment",
+            "slurm_cluster_id",
+            "state",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    environment: Mapped[str] = mapped_column(Text, nullable=False)
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    slurm_cluster_id: Mapped[str] = mapped_column(Text, nullable=False)
+    cpu_arch: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'issued'"),
+        default="issued",
+    )
+    submitting_identity: Mapped[str] = mapped_column(Text, nullable=False)
+    slurm_account: Mapped[str] = mapped_column(Text, nullable=False)
+    slurm_partition: Mapped[str] = mapped_column(Text, nullable=False)
+    slurm_qos: Mapped[str] = mapped_column(Text, nullable=False)
+    request_spec: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    request_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    slurm_comment: Mapped[str] = mapped_column(Text, nullable=False)
+    ambiguity_settle_until: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False
+    )
+    invocation_started_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    slurm_job_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    revoke_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    journal_sequence: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("0"),
+        default=0,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+    bound_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    released_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+
+
+class TaskImageBuildGrantEvent(Base):
+    """Append-only transition evidence for one build grant."""
+
+    __tablename__ = "task_image_build_grant_events"
+    __table_args__ = (
+        CheckConstraint(
+            "sequence > 0",
+            name="task_image_build_grant_events_sequence_check",
+        ),
+        CheckConstraint(
+            "event_type IN ('issued','submission_started','reconciliation_wait',"
+            "'cancellation_requested','bound','released','revoked')",
+            name="task_image_build_grant_events_type_check",
+        ),
+        UniqueConstraint(
+            "grant_id",
+            "sequence",
+            name="task_image_build_grant_events_sequence_uidx",
+        ),
+        Index(
+            "task_image_build_grant_events_created_idx",
+            "grant_id",
+            "created_at",
+            "sequence",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    grant_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("task_image_build_grants.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+        default=dict,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class TaskImageMaterializationAttempt(Base):
+    """Immutable builder/attempt/lease identity created with every claim."""
+
+    __tablename__ = "task_image_materialization_attempts"
+    __table_args__ = (
+        CheckConstraint(
+            "attempt_number > 0 AND lease_epoch > 0",
+            name="task_image_materialization_attempts_counters_check",
+        ),
+        UniqueConstraint(
+            "materialization_id",
+            "lease_epoch",
+            name="task_image_materialization_attempts_lease_uidx",
+        ),
+        UniqueConstraint(
+            "id",
+            "materialization_id",
+            "attempt_number",
+            "lease_epoch",
+            "builder_id",
+            name="task_image_materialization_attempts_binding_uidx",
+        ),
+        Index(
+            "task_image_materialization_attempts_lookup_idx",
+            "materialization_id",
+            "attempt_number",
+            "lease_epoch",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    materialization_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("task_image_materializations.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    lease_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    builder_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    claimed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class TaskImagePublicationEvidence(Base):
+    """Append-only cleanup evidence for one exact materialization attempt."""
+
+    __tablename__ = "task_image_publication_evidence"
+    __table_args__ = (
+        CheckConstraint(
+            "attempt_number > 0 AND lease_epoch > 0",
+            name="task_image_publication_evidence_counters_check",
+        ),
+        CheckConstraint(
+            "length(component) BETWEEN 1 AND 256",
+            name="task_image_publication_evidence_component_check",
+        ),
+        CheckConstraint(
+            "length(registry_image) BETWEEN 1 AND 2048",
+            name="task_image_publication_evidence_image_check",
+        ),
+        ForeignKeyConstraint(
+            (
+                "materialization_attempt_id",
+                "materialization_id",
+                "attempt_number",
+                "lease_epoch",
+                "builder_id",
+            ),
+            (
+                "task_image_materialization_attempts.id",
+                "task_image_materialization_attempts.materialization_id",
+                "task_image_materialization_attempts.attempt_number",
+                "task_image_materialization_attempts.lease_epoch",
+                "task_image_materialization_attempts.builder_id",
+            ),
+            name="task_image_publication_evidence_attempt_fkey",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "materialization_attempt_id",
+            "component",
+            "registry_image",
+            name="task_image_publication_evidence_replay_uidx",
+        ),
+        Index(
+            "task_image_publication_evidence_materialization_idx",
+            "materialization_id",
+            "attempt_number",
+            "lease_epoch",
+            "recorded_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    materialization_attempt_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), nullable=False
+    )
+    materialization_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    lease_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    builder_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    component: Mapped[str] = mapped_column(Text, nullable=False)
+    registry_image: Mapped[str] = mapped_column(Text, nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class TrialTaskImageMaterialization(Base):
     """Immutable readiness prerequisite attached to one submitted trial."""
 
