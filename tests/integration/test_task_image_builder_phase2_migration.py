@@ -44,6 +44,40 @@ def test_0108_adds_durable_grant_attempt_and_publication_ledgers(
             TaskImageMaterializationAttempt.__tablename__,
             TaskImagePublicationEvidence.__tablename__,
         } <= tables
+        inspector = inspect(engine)
+        grant_checks = {
+            item["name"] for item in inspector.get_check_constraints("task_image_build_grants")
+        }
+        assert {
+            "task_image_build_grants_native_check",
+            "task_image_build_grants_state_check",
+            "task_image_build_grants_state_fields_check",
+        } <= grant_checks
+        grant_indexes = {
+            item["name"]: item for item in inspector.get_indexes("task_image_build_grants")
+        }
+        assert grant_indexes["task_image_build_grants_job_uidx"]["unique"] is True
+        evidence_foreign_keys = {
+            item["name"]: item
+            for item in inspector.get_foreign_keys("task_image_publication_evidence")
+        }
+        attempt_binding = evidence_foreign_keys[
+            "task_image_publication_evidence_attempt_fkey"
+        ]
+        assert attempt_binding["constrained_columns"] == [
+            "materialization_attempt_id",
+            "materialization_id",
+            "attempt_number",
+            "lease_epoch",
+            "builder_id",
+        ]
+        assert attempt_binding["referred_columns"] == [
+            "id",
+            "materialization_id",
+            "attempt_number",
+            "lease_epoch",
+            "builder_id",
+        ]
 
         materialization_id = uuid4()
         attempt_ids = (uuid4(), uuid4())
@@ -131,6 +165,26 @@ def test_0108_adds_durable_grant_attempt_and_publication_ledgers(
                         "attempt_id": attempt_ids[1],
                         "materialization_id": materialization_id,
                         "digest": digest,
+                    },
+                )
+
+        with pytest.raises(IntegrityError):
+            with engine.begin() as connection:
+                connection.execute(
+                    text("""
+                        INSERT INTO task_image_publication_evidence (
+                            materialization_attempt_id, materialization_id,
+                            attempt_number, lease_epoch, builder_id, component,
+                            registry_image, recorded_at
+                        ) VALUES (
+                            :attempt_id, :materialization_id, 1, 3,
+                            'builder:forged', 'task', :digest, now()
+                        )
+                    """),
+                    {
+                        "attempt_id": attempt_ids[1],
+                        "materialization_id": materialization_id,
+                        "digest": "registry.example/loom/fixture@sha256:" + "b" * 64,
                     },
                 )
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ from loom_cli.task_image_rootless_provider_policy import (
 )
 
 _POLICY_PATH = Path("deploy/task-image-builder/rootless-provider-v1.toml")
+_PREREQUISITES_PATH = Path("deploy/task-image-builder/prerequisites-v1.toml")
 
 
 def test_checked_in_policy_loads_exactly_two_disabled_native_providers() -> None:
@@ -46,6 +48,26 @@ def test_checked_in_policy_loads_exactly_two_disabled_native_providers() -> None
         }
 
 
+def test_provider_resources_match_the_rootless_prerequisite_profile() -> None:
+    policies = load_task_image_rootless_provider_policy(_POLICY_PATH)
+    prerequisites = tomllib.loads(_PREREQUISITES_PATH.read_text(encoding="utf-8"))
+    resource_profile = prerequisites["resource_profile"]
+    expected = {
+        field: resource_profile[field]
+        for field in (
+            "cpus",
+            "memory_mib",
+            "pids",
+            "scratch_bytes",
+            "scratch_inodes",
+            "wall_time",
+            "swap_bytes",
+        )
+    }
+
+    assert all(policy.resources.model_dump() == expected for policy in policies)
+
+
 def _write_mutated_policy(tmp_path: Path, old: str, new: str) -> Path:
     policy = _POLICY_PATH.read_text(encoding="utf-8")
     assert old in policy
@@ -58,6 +80,19 @@ def test_enabled_policy_with_an_activation_blocker_is_rejected(tmp_path: Path) -
     path = _write_mutated_policy(tmp_path, "enabled = false", "enabled = true")
 
     with pytest.raises(TaskImageRootlessProviderPolicyError, match="activation blockers"):
+        load_task_image_rootless_provider_policy(path)
+
+
+def test_disabled_policy_without_activation_blockers_is_rejected(tmp_path: Path) -> None:
+    blockers = """activation_blockers = [
+  \"allocation_executor_not_accepted\",
+  \"node_guard_not_accepted\",
+  \"publication_acceptance_not_complete\",
+  \"renewable_registry_credential_broker_not_accepted\",
+]"""
+    path = _write_mutated_policy(tmp_path, blockers, "activation_blockers = []")
+
+    with pytest.raises(TaskImageRootlessProviderPolicyError, match="retain activation blockers"):
         load_task_image_rootless_provider_policy(path)
 
 

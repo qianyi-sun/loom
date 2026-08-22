@@ -2225,7 +2225,7 @@ class TaskImageMaterializationAttempt(Base):
 
 
 class TaskImagePublicationEvidence(Base):
-    """Append-only cleanup evidence for one exact materialization attempt."""
+    """Append-only publication evidence for one exact materialization attempt."""
 
     __tablename__ = "task_image_publication_evidence"
     __table_args__ = (
