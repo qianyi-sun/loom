@@ -83,6 +83,20 @@ class BundlePresenceReport:
             if failure.reason != "checksum_mismatch"
         ]
 
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "s3_tasks": self.s3_tasks,
+            "verified": self.verified,
+            "failed": self.failed,
+            "checksum_mismatches": self.checksum_mismatches,
+            "verification_errors": self.verification_errors,
+            "failures": [failure.to_dict() for failure in self.failures],
+            # Retain the original presence-only fields for JSON consumers
+            # while they move to the stronger verification contract.
+            "missing": self.missing,
+            "missing_sources": self.missing_sources,
+        }
+
 
 async def run_readiness_audit(
     *,
