@@ -1,3 +1,4 @@
+import builtins
 from pathlib import Path
 
 import pytest
@@ -52,8 +53,30 @@ def test_task_checksum_matches_adapter_sha256_of_dir_including_dotfiles(
     assert task_checksum(task_dir) == sha256_of_dir(task_dir)
 
 
-def test_task_image_builder_imports_shared_sha256_of_dir() -> None:
-    """The exclusive builder must not keep a second directory-hash copy."""
-    text = _BUILDER.read_text(encoding="utf-8")
-    assert "from loom_benchmarks.util import sha256_of_dir" in text
-    assert "def sha256_of_dir" not in text
+def test_task_checksum_runtime_does_not_import_benchmark_adapters(
+    task_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Service/TaskSet hashing must work without the optional adapter package."""
+    original_import = builtins.__import__
+
+    def guarded_import(name: str, *args: object, **kwargs: object) -> object:
+        if name == "loom_benchmarks" or name.startswith("loom_benchmarks."):
+            raise AssertionError("runtime checksum imported benchmark adapters")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+    assert len(task_checksum(task_dir)) == 64
+
+
+def test_runtime_and_adapter_consumers_share_one_checksum_function() -> None:
+    """Every ingestion/build/audit path must bind the neutral implementation."""
+    from loom_bundle_checksum import sha256_of_dir as canonical_sha256_of_dir
+    from loom_worker import main_loop, task_image_builder
+    from loom_cli import benchmark_readiness
+
+    assert sha256_of_dir is canonical_sha256_of_dir
+    assert task_image_builder.sha256_of_dir is canonical_sha256_of_dir
+    assert main_loop.sha256_of_dir is canonical_sha256_of_dir
+    assert benchmark_readiness.sha256_of_dir is canonical_sha256_of_dir
