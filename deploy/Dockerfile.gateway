@@ -4,8 +4,10 @@ ENV PIP_RETRIES=10 PIP_DEFAULT_TIMEOUT=60
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src
+COPY packages/loom-bundle-checksum ./packages/loom-bundle-checksum
 COPY migrations ./migrations
-RUN chmod -R a+rX ./src ./migrations && \
+RUN chmod -R a+rX ./src ./migrations ./packages/loom-bundle-checksum && \
+    pip install --no-cache-dir -e ./packages/loom-bundle-checksum && \
     pip install --no-cache-dir -e .
 EXPOSE 9100
 CMD ["python", "-m", "loom_llm_gateway"]

@@ -401,6 +401,11 @@ loom datasets register my-benchmark --hf-org "$LOOM_HF_ORG" \
 loom datasets audit my-benchmark --verify-bundles
 ```
 
+`--verify-bundles` downloads and canonically hashes every file under each
+registered internal bundle prefix. It fails on checksum drift, an empty or
+malformed prefix, a missing `task.toml`, or an object-store read error; checking
+only that `task.toml` exists is not sufficient publication evidence.
+
 For first-party adapter publishes, the `Publish benchmarks to HF Hub` GitHub
 Actions workflow is the preferred protected path. It runs in the
 `huggingface-publish` environment, fails the selected benchmark job when

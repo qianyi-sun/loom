@@ -21,7 +21,7 @@ from typing import Any, Protocol
 from uuid import UUID
 
 import docker
-from loom_benchmarks.util import sha256_of_dir
+from loom_bundle_checksum import sha256_of_dir
 
 from loom.driver.task_image import (
     TaskImageBuildError,

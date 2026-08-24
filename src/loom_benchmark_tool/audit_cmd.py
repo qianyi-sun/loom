@@ -14,7 +14,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from loom_benchmark_terminal_bench_2.upstream import TB21_TASK_COUNT, load_tb21_lock
-from loom_benchmarks.util import sha256_of_dir
+from loom_bundle_checksum import sha256_of_dir
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession

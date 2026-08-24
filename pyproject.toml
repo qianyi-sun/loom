@@ -47,6 +47,7 @@ dependencies = [
   "argon2-cffi>=23.1,<26.0",
   "rfc8785>=0.1.4,<0.2",
   "numpy>=2.0,<3.0",
+  "loom-bundle-checksum>=0.1.0,<0.2",
 ]
 
 [project.optional-dependencies]
@@ -176,12 +177,14 @@ required-environments = [
 [tool.uv.workspace]
 members = [
   "packages/loom-launcher",
+  "packages/loom-bundle-checksum",
   "packages/loom-benchmarks",
   "packages/loom-benchmark-terminal-bench-2",
   "packages/loom-terminalgen",
 ]
 
 [tool.uv.sources]
+loom-bundle-checksum = { workspace = true }
 loom-benchmarks = { workspace = true }
 loom-benchmark-terminal-bench-2 = { workspace = true }
 loom-terminalgen = { workspace = true }
@@ -205,7 +208,8 @@ ignore = ["E501", "RUF001", "RUF002", "RUF003"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-files = ["src/loom", "src/loom_llm_gateway", "src/loom_control_plane", "src/loom_worker", "src/loom_benchmark_tool", "src/loom_service", "src/loom_cli", "src/loom_drivers", "src/loom_egress_xds", "src/loom_family_orchestrator", "src/loom_pipeline_orchestrator", "src/loom_listen", "src/loom_capacity_guard", "src/loom_capacity_agent", "src/loom_capacity_manager", "src/loom_capacity_executor", "src/loom_capacity_pool_controller", "src/loom_capacity_pool_executor"]
+mypy_path = ["packages/loom-bundle-checksum"]
+files = ["packages/loom-bundle-checksum/loom_bundle_checksum", "src/loom", "src/loom_llm_gateway", "src/loom_control_plane", "src/loom_worker", "src/loom_benchmark_tool", "src/loom_service", "src/loom_cli", "src/loom_drivers", "src/loom_egress_xds", "src/loom_family_orchestrator", "src/loom_pipeline_orchestrator", "src/loom_listen", "src/loom_capacity_guard", "src/loom_capacity_agent", "src/loom_capacity_manager", "src/loom_capacity_executor", "src/loom_capacity_pool_controller", "src/loom_capacity_pool_executor"]
 plugins = ["pydantic.mypy"]
 
 # boto3 / botocore don't ship type stubs and the full boto3-stubs[s3] package

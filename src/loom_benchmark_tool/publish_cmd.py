@@ -31,7 +31,7 @@ from typing import Any, Literal, cast
 from huggingface_hub import HfApi
 from loom_benchmarks.fetch import fetch_upstream
 from loom_benchmarks.registry import REGISTRY
-from loom_benchmarks.util import sha256_of_dir
+from loom_bundle_checksum import sha256_of_dir
 
 from loom.license_policy import tags_with_license_execution_policy
 from loom.trajectory.storage import (
@@ -130,7 +130,7 @@ def _bundle_checksum(bundle_dir: Path) -> str:
     path so independent re-builds produce the same digest if the
     bundle contents match byte-for-byte. Same hashing scheme the
     import command writes into `tasks.checksum`."""
-    return cast(str, sha256_of_dir(bundle_dir))
+    return sha256_of_dir(bundle_dir)
 
 
 def _required_artifact_contract_tag(task_config: dict[str, object]) -> str:

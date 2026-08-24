@@ -8,6 +8,7 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 COPY packages ./packages
 RUN chmod -R a+rX ./src ./packages /usr/local/bin/kubectl && \
+    pip install --no-cache-dir -e ./packages/loom-bundle-checksum && \
     pip install --no-cache-dir -e . && \
     pip install --no-cache-dir -e ./packages/loom-launcher
 ARG LOOM_BUILD_SHA=unknown

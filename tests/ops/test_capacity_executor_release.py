@@ -17,6 +17,20 @@ _SOURCE_SHA = "1" * 40
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+def test_offline_release_wheels_and_hash_pins_neutral_checksum_dependency() -> None:
+    """The exported offline requirements must never retain a workspace path."""
+    text = (_REPO_ROOT / "deploy/Dockerfile.capacity-executor").read_text()
+
+    assert "COPY packages/loom-bundle-checksum ./packages/loom-bundle-checksum" in text
+    assert "--no-emit-workspace" in text
+    checksum_wheel_command = (
+        "--wheel-dir /release-inputs/wheelhouse \\\n"
+        "      ./packages/loom-bundle-checksum"
+    )
+    assert checksum_wheel_command in text
+    assert 'f"loom-bundle-checksum=={version} --hash=sha256:{digest}\\n"' in text
+
+
 def _payload(root: Path) -> Path:
     payload = root / "payload"
     (payload / "wheelhouse").mkdir(parents=True)

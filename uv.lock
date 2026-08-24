@@ -34,6 +34,7 @@ members = [
     "loom",
     "loom-benchmark-terminal-bench-2",
     "loom-benchmarks",
+    "loom-bundle-checksum",
     "loom-launcher",
     "loom-terminalgen",
 ]
@@ -1813,6 +1814,7 @@ dependencies = [
     { name = "jinja2" },
     { name = "jsonschema" },
     { name = "litellm" },
+    { name = "loom-bundle-checksum" },
     { name = "numpy" },
     { name = "openai" },
     { name = "pillow" },
@@ -1886,6 +1888,7 @@ requires-dist = [
     { name = "litellm", specifier = ">=1.70,<2.0" },
     { name = "loom-benchmark-terminal-bench-2", marker = "extra == 'rollout'", editable = "packages/loom-benchmark-terminal-bench-2" },
     { name = "loom-benchmarks", marker = "extra == 'rollout'", editable = "packages/loom-benchmarks" },
+    { name = "loom-bundle-checksum", editable = "packages/loom-bundle-checksum" },
     { name = "modal", marker = "extra == 'modal'", specifier = ">=0.66.55,<0.80" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10,<2.0" },
     { name = "numpy", specifier = ">=2.0,<3.0" },
@@ -1953,6 +1956,7 @@ source = { editable = "packages/loom-benchmarks" }
 dependencies = [
     { name = "datasets" },
     { name = "httpx" },
+    { name = "loom-bundle-checksum" },
     { name = "pydantic" },
 ]
 
@@ -1966,11 +1970,17 @@ dev = [
 requires-dist = [
     { name = "datasets", specifier = ">=2.18,<4" },
     { name = "httpx", specifier = ">=0.27,<1" },
+    { name = "loom-bundle-checksum", editable = "packages/loom-bundle-checksum" },
     { name = "pydantic", specifier = ">=2.7,<3" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8,<9" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23,<1" },
 ]
 provides-extras = ["dev"]
+
+[[package]]
+name = "loom-bundle-checksum"
+version = "0.1.0"
+source = { editable = "packages/loom-bundle-checksum" }
 
 [[package]]
 name = "loom-launcher"
