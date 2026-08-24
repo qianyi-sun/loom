@@ -248,17 +248,18 @@ def _json_document(payload: str) -> dict[str, Any]:
 def _list_items(
     result: subprocess.CompletedProcess[str],
     *,
-    expected_kind: str,
+    expected_kind: str | tuple[str, ...],
     expected_api_version: str = "v1",
 ) -> list[dict[str, Any]]:
     if result.returncode != 0:
         raise OSError("kubectl inventory is unavailable")
     document = _json_document(result.stdout)
     items = document.get("items")
+    expected_kinds = (expected_kind,) if isinstance(expected_kind, str) else expected_kind
     if (
         not set(document).issubset({"apiVersion", "kind", "metadata", "items"})
         or document.get("apiVersion") != expected_api_version
-        or document.get("kind") != expected_kind
+        or document.get("kind") not in expected_kinds
         or not isinstance(items, list)
         or len(items) > _MAX_INVENTORY_ITEMS
         or any(not isinstance(item, dict) for item in items)
@@ -1123,7 +1124,10 @@ def _observe_personal_dev_status(
         namespace_result = results[_NAMESPACE_COMMAND]
         if namespace_result is None:
             raise ValueError("namespace inventory response is invalid")
-        namespace_items = _list_items(namespace_result, expected_kind="NamespaceList")
+        namespace_items = _list_items(
+            namespace_result,
+            expected_kind=("NamespaceList", "List"),
+        )
         names: dict[str, dict[str, Any]] = {}
         for item in namespace_items:
             if item.get("apiVersion") != "v1" or item.get("kind") != "Namespace":
