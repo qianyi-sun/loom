@@ -2352,6 +2352,14 @@ def test_committed_environment_state_profiles_cover_gb10_slurm_policy(
         profile.external_slurm_runner_prerequisites["env_template"]
         == "/var/lib/loom-staging-rollout/generated/staging-gb10-worker-staging-bootstrap.env"
     )
+    worker_service_env = profile.external_slurm_runner_prerequisites["worker_service_env"]
+    for pool_name in ("gb10", "oldlab"):
+        assert worker_service_env[pool_name]["LOOM_WORKER_TRAJECTORIES_BUCKET"] == (
+            "loom-staging-trajectories"
+        )
+        assert worker_service_env[pool_name]["LOOM_WORKER_ARTIFACTS_BUCKET"] == (
+            "loom-staging-artifacts"
+        )
 
 
 def test_committed_development_profile_ships_fail_closed_supervisors() -> None:
