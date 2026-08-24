@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import tempfile
 from collections import defaultdict
 from dataclasses import dataclass
+from pathlib import Path
 
-from sqlalchemy import select
+from loom_benchmarks.util import sha256_of_dir
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.benchmark_readiness import (
@@ -31,11 +34,54 @@ def _load_registry_names() -> set[str]:
 
 
 @dataclass(frozen=True)
+class BundleVerificationFailure:
+    task_id: str
+    source: str
+    reason: str
+    expected_checksum: str | None = None
+    actual_checksum: str | None = None
+
+    def to_dict(self) -> dict[str, str | None]:
+        return {
+            "task_id": self.task_id,
+            "source": self.source,
+            "reason": self.reason,
+            "expected_checksum": self.expected_checksum,
+            "actual_checksum": self.actual_checksum,
+        }
+
+
+@dataclass(frozen=True)
 class BundlePresenceReport:
     s3_tasks: int
     verified: int
-    missing: int
-    missing_sources: list[str]
+    failures: tuple[BundleVerificationFailure, ...]
+
+    @property
+    def failed(self) -> int:
+        return len(self.failures)
+
+    @property
+    def checksum_mismatches(self) -> int:
+        return sum(failure.reason == "checksum_mismatch" for failure in self.failures)
+
+    @property
+    def verification_errors(self) -> int:
+        return self.failed - self.checksum_mismatches
+
+    @property
+    def missing(self) -> int:
+        """Backward-compatible count for callers that only understood presence."""
+        return self.verification_errors
+
+    @property
+    def missing_sources(self) -> list[str]:
+        """Backward-compatible sources for non-checksum verification failures."""
+        return [
+            failure.source
+            for failure in self.failures
+            if failure.reason != "checksum_mismatch"
+        ]
 
 
 async def run_readiness_audit(
@@ -121,8 +167,18 @@ async def run_bundle_presence_audit(
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         async with session_factory() as session:
-            task_stmt = select(TaskRow.id, TaskRow.source).where(
-                TaskRow.benchmark_id.is_not(None),
+            task_stmt = select(
+                TaskRow.id,
+                TaskRow.checksum,
+                TaskRow.source,
+                TaskRow.benchmark_id,
+                TaskRow.task_set_id,
+            ).where(
+                or_(
+                    TaskRow.benchmark_id.is_not(None),
+                    TaskRow.task_set_id.is_not(None),
+                ),
+                TaskRow.source.like("s3://%"),
             )
             if benchmark is not None:
                 task_stmt = task_stmt.where(TaskRow.benchmark_id == benchmark)
@@ -130,30 +186,60 @@ async def run_bundle_presence_audit(
     finally:
         await engine.dispose()
 
-    verified = 0
-    missing_sources: list[str] = []
-    s3_tasks = 0
-    for _task_id, source in task_rows:
+    failures: list[BundleVerificationFailure] = []
+    for task_id, checksum, source, _benchmark_id, _task_set_id in task_rows:
         parsed = _parse_s3_source(source)
         if parsed is None:
+            failures.append(
+                BundleVerificationFailure(
+                    task_id=str(task_id),
+                    source=str(source),
+                    reason="invalid_source",
+                    expected_checksum=str(checksum).removeprefix("sha256:"),
+                )
+            )
             continue
-        s3_tasks += 1
         bucket, prefix = parsed
         try:
-            await object_store.get_object(
-                bucket=bucket,
-                key=f"{prefix}task.toml",
-            )
+            with tempfile.TemporaryDirectory(prefix="loom-bundle-audit-") as temp:
+                bundle_dir = Path(temp)
+                downloaded = await object_store.download_prefix(
+                    bucket=bucket,
+                    prefix=prefix,
+                    out_dir=bundle_dir,
+                )
+                if downloaded == 0:
+                    raise ValueError("bundle prefix is empty")
+                if not (bundle_dir / "task.toml").is_file():
+                    raise ValueError("bundle is missing task.toml")
+                actual_checksum = sha256_of_dir(bundle_dir)
         except Exception:
-            missing_sources.append(str(source))
+            failures.append(
+                BundleVerificationFailure(
+                    task_id=str(task_id),
+                    source=str(source),
+                    reason="verification_error",
+                    expected_checksum=str(checksum).removeprefix("sha256:"),
+                    actual_checksum=None,
+                )
+            )
             continue
-        verified += 1
+        expected_checksum = str(checksum).removeprefix("sha256:")
+        if actual_checksum != expected_checksum:
+            failures.append(
+                BundleVerificationFailure(
+                    task_id=str(task_id),
+                    source=str(source),
+                    reason="checksum_mismatch",
+                    expected_checksum=expected_checksum,
+                    actual_checksum=actual_checksum,
+                )
+            )
 
     return BundlePresenceReport(
-        s3_tasks=s3_tasks,
-        verified=verified,
-        missing=len(missing_sources),
-        missing_sources=missing_sources,
+        s3_tasks=len(task_rows),
+        verified=len(task_rows) - len(failures),
+        failures=tuple(failures),
     )
 
 
@@ -161,6 +247,7 @@ __all__ = [
     "BenchmarkAuditSource",
     "BenchmarkReadinessItem",
     "BundlePresenceReport",
+    "BundleVerificationFailure",
     "TaskAuditSource",
     "build_readiness_item",
     "render_readiness_json",
