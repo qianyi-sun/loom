@@ -128,6 +128,38 @@ def test_compose_uses_task_mirror_provenance_not_adapter_origin() -> None:
     assert evidence["catalog"]["runnable_tasks"] == 100
     assert evidence["catalog"]["artifact_contract_classified_tasks"] == 100
     assert evidence["catalog"]["apd5_required_artifact_contract_tasks"] == 1
+
+
+def test_compose_rejects_bundle_checksum_mismatch() -> None:
+    audit = _audit_report()
+    audit["bundle_presence"] = {
+        "s3_tasks": 100,
+        "verified": 99,
+        "failed": 1,
+        "checksum_mismatches": 1,
+        "verification_errors": 0,
+        "failures": [
+            {
+                "task_id": "skilllearnbench/example/example-1",
+                "source": "s3://loom-benchmarks/skilllearnbench/example/example-1/",
+                "reason": "checksum_mismatch",
+                "expected_checksum": "a" * 64,
+                "actual_checksum": "b" * 64,
+            }
+        ],
+        "missing": 0,
+        "missing_sources": [],
+    }
+
+    with pytest.raises(HfBoundaryEvidenceError, match="bundle verification"):
+        compose_boundary_evidence(
+            benchmark_id="skilllearnbench",
+            environment="staging",
+            audit_report=audit,
+            source_summary=_source_summary(),
+            canary_summary=_canary_summary(),
+            worker_boundary=_worker_boundary(),
+        )
     assert evidence["catalog"]["requires_caps"]["cpu_arch"] == "any"
     assert evidence["runtime_sources"]["total_task_sources"] == 100
     assert evidence["runtime_sources"]["internal_s3_sources"] == 100
@@ -714,6 +746,8 @@ hosts = [
 def test_hf_boundary_db_audit_branch_uses_readiness_audit_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from loom_cli.benchmark_readiness import BundlePresenceReport
+
     async def fake_run_readiness_audit(**kwargs: object) -> list[str]:
         assert kwargs == {
             "db_url": "postgresql://loom/test",
@@ -721,15 +755,14 @@ def test_hf_boundary_db_audit_branch_uses_readiness_audit_contract(
         }
         return ["readiness-item"]
 
-    async def fake_run_bundle_presence_audit(**kwargs: object) -> SimpleNamespace:
+    async def fake_run_bundle_presence_audit(**kwargs: object) -> BundlePresenceReport:
         assert set(kwargs) == {"db_url", "benchmark", "object_store"}
         assert kwargs["db_url"] == "postgresql://loom/test"
         assert kwargs["benchmark"] == "skilllearnbench"
-        return SimpleNamespace(
+        return BundlePresenceReport(
             s3_tasks=2,
             verified=2,
-            missing=0,
-            missing_sources=[],
+            failures=(),
         )
 
     def fake_render_readiness_json(items: list[str]) -> str:
@@ -768,10 +801,14 @@ def test_hf_boundary_db_audit_branch_uses_readiness_audit_contract(
     )
 
     assert audit["bundle_presence"] == {
-        "s3_tasks": 2,
-        "verified": 2,
+        "checksum_mismatches": 0,
+        "failed": 0,
+        "failures": [],
         "missing": 0,
         "missing_sources": [],
+        "s3_tasks": 2,
+        "verified": 2,
+        "verification_errors": 0,
     }
 
 
