@@ -202,6 +202,23 @@ def test_guard_accepts_release_fresh_outer_stateful_metadata_and_exact_live_line
     assert result.stderr == ""
 
 
+def test_guard_accepts_null_server_creation_timestamp_on_live_templates(
+    tmp_path: Path,
+) -> None:
+    current, previous, live_inventory = _upgrade_inputs(tmp_path)
+    live = _live_inventory()
+    for item in live["items"]:
+        if item["kind"] == "StatefulSet":
+            item["spec"]["volumeClaimTemplates"][0]["metadata"][
+                "creationTimestamp"
+            ] = None
+    _write_live_inventory(live_inventory, live)
+
+    result = _run_guard(current, live_inventory, previous)
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_guard_accepts_first_install_only_when_live_storage_is_absent(tmp_path: Path) -> None:
     current = tmp_path / "current.yaml"
     live_inventory = tmp_path / "live.json"

@@ -364,6 +364,9 @@ assert_forward_storage_lineage_contract() {
     --namespace loom-dev \
     --ignore-not-found \
     --output=json > "$live_storage_inventory"
+  if test ! -s "$live_storage_inventory"; then
+    jq -cn '{apiVersion:"v1",items:[],kind:"List"}' > "$live_storage_inventory"
+  fi
   test "$(stat -c %s "$live_storage_inventory")" -gt 0
   test "$(stat -c %s "$live_storage_inventory")" -le 4194304
   chmod 0600 "$live_storage_inventory"

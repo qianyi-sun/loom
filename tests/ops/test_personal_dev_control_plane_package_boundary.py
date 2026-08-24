@@ -502,6 +502,118 @@ def test_personal_management_shadow_runbook_has_exact_bounded_rehearsal() -> Non
     assert 'sha256sum "$rollback_status_evidence"' in runbook
 
 
+@pytest.mark.parametrize(
+    ("kubectl_payload", "expected_items"),
+    [
+        pytest.param("", 0, id="all-five-absent"),
+        pytest.param(
+            '{"apiVersion":"v1","items":[{"sentinel":true}],"kind":"List"}',
+            1,
+            id="nonempty-inventory",
+        ),
+    ],
+)
+def test_personal_management_storage_inventory_producer_handles_kubectl_output(
+    tmp_path: Path,
+    kubectl_payload: str,
+    expected_items: int,
+) -> None:
+    runbook = _read("docs/runbooks/personal-dev-management-plane-shadow.md")
+    function_start = runbook.index("assert_forward_storage_lineage_contract() {")
+    function_end = runbook.index("\n}\n\njq -e", function_start) + 2
+    function_source = runbook[function_start:function_end]
+    fake_bin = tmp_path / "bin"
+    evidence_dir = tmp_path / "evidence"
+    fake_bin.mkdir()
+    evidence_dir.mkdir()
+    kubeconfig = tmp_path / "reviewed.kubeconfig"
+    shadow_render = tmp_path / "shadow.yaml"
+    previous_render = tmp_path / "absent-previous.yaml"
+    kubeconfig.write_text("reviewed\n", encoding="utf-8")
+    shadow_render.write_text("reviewed\n", encoding="utf-8")
+    fake_kubectl = fake_bin / "kubectl"
+    fake_kubectl.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        'test "$*" = "$EXPECTED_KUBECTL_ARGS"\n'
+        'printf %s "$KUBECTL_PAYLOAD"\n',
+        encoding="utf-8",
+    )
+    fake_kubectl.chmod(0o755)
+    fake_uv = fake_bin / "uv"
+    fake_uv.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        "live_inventory=\n"
+        'while test "$#" -gt 0; do\n'
+        '  if test "$1" = --live-inventory; then\n'
+        "    shift\n"
+        '    live_inventory="$1"\n'
+        "  fi\n"
+        "  shift\n"
+        "done\n"
+        'test -n "$live_inventory"\n'
+        "jq -e --argjson expected \"$EXPECTED_ITEMS\" "
+        "'.apiVersion == \"v1\" and .kind == \"List\" and "
+        "(.items | length) == $expected' \"$live_inventory\" >/dev/null\n",
+        encoding="utf-8",
+    )
+    fake_uv.chmod(0o755)
+    expected_arguments = " ".join(
+        (
+            "--kubeconfig",
+            str(kubeconfig),
+            "--request-timeout=10s",
+            "get",
+            "statefulset.apps/loom-dev-postgres",
+            "statefulset.apps/loom-dev-minio",
+            "persistentvolumeclaim/data-loom-dev-postgres-0",
+            "persistentvolumeclaim/data-loom-dev-minio-0",
+            "persistentvolumeclaim/loom-personal-dev-scanner-cache",
+            "--namespace",
+            "loom-dev",
+            "--ignore-not-found",
+            "--output=json",
+        )
+    )
+    script = (
+        "set -euo pipefail\n"
+        f"{function_source}\n"
+        'evidence_dir="$1"\n'
+        'kubeconfig="$2"\n'
+        'shadow_render="$3"\n'
+        'previous_shadow_render="$4"\n'
+        "previous_shadow_sha256=" + "0" * 64 + "\n"
+        "assert_forward_storage_lineage_contract\n"
+    )
+    environment = {
+        **os.environ,
+        "EXPECTED_ITEMS": str(expected_items),
+        "EXPECTED_KUBECTL_ARGS": expected_arguments,
+        "KUBECTL_PAYLOAD": kubectl_payload,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+    }
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            script,
+            "runbook-storage-producer",
+            str(evidence_dir),
+            str(kubeconfig),
+            str(shadow_render),
+            str(previous_render),
+        ],
+        check=False,
+        capture_output=True,
+        env=environment,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_personal_management_shadow_runbook_preserves_authority_boundaries() -> None:
     runbook = _read("docs/runbooks/personal-dev-management-plane-shadow.md")
     lowered = runbook.casefold()

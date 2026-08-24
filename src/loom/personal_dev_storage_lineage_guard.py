@@ -229,13 +229,26 @@ def _expected_live_template(template: dict[str, Any]) -> dict[str, Any]:
     return expected
 
 
+def _normalized_live_template(template: object) -> object:
+    normalized = copy.deepcopy(template)
+    if not isinstance(normalized, dict) or not isinstance(normalized.get("metadata"), dict):
+        return normalized
+    metadata = normalized["metadata"]
+    if metadata.get("creationTimestamp") is None:
+        metadata.pop("creationTimestamp", None)
+    return normalized
+
+
 def _live_stateful_matches(item: dict[str, Any], template: dict[str, Any]) -> bool:
     spec = item.get("spec")
     templates = spec.get("volumeClaimTemplates") if isinstance(spec, dict) else None
     return (
         isinstance(templates, list)
         and len(templates) == 1
-        and _canonical(templates[0], subject="live stateful claim template")
+        and _canonical(
+            _normalized_live_template(templates[0]),
+            subject="live stateful claim template",
+        )
         == _canonical(_expected_live_template(template), subject="expected live claim template")
     )
 
