@@ -570,7 +570,7 @@ def test_materializes_external_slurm_env_file_without_secret_evidence(
     assert json.loads(evidence)["records"][0]["worker_token"] == "[REDACTED]"
 
 
-def test_materialization_applies_pool_service_endpoints_without_changing_secrets(
+def test_materialization_applies_pool_runtime_identity_without_changing_secrets(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -590,6 +590,8 @@ def test_materialization_applies_pool_service_endpoints_without_changing_secrets
             "LOOM_WORKER_GATEWAY_URL": "http://192.168.50.103:19100",
             "LOOM_WORKER_SUBPROCESS_GATEWAY_URL": "http://192.168.50.103:19100",
             "LOOM_WORKER_MINIO_ENDPOINT": "http://192.168.50.103:19000",
+            "LOOM_WORKER_TRAJECTORIES_BUCKET": "loom-staging-trajectories",
+            "LOOM_WORKER_ARTIFACTS_BUCKET": "loom-staging-artifacts",
             "LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO": ("192.168.50.103:5443/loom-trial-cache"),
         },
     )
@@ -623,12 +625,73 @@ def test_materialization_applies_pool_service_endpoints_without_changing_secrets
     assert "LOOM_WORKER_GATEWAY_URL=http://192.168.50.103:19100\n" in rendered
     assert "LOOM_WORKER_SUBPROCESS_GATEWAY_URL=http://192.168.50.103:19100\n" in rendered
     assert "LOOM_WORKER_MINIO_ENDPOINT=http://192.168.50.103:19000\n" in rendered
+    assert "LOOM_WORKER_TRAJECTORIES_BUCKET=loom-staging-trajectories\n" in rendered
+    assert "LOOM_WORKER_ARTIFACTS_BUCKET=loom-staging-artifacts\n" in rendered
     assert (
         "LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO=192.168.50.103:5443/loom-trial-cache\n" in rendered
     )
     assert "LOOM_WORKER_TOKEN=current-worker-token\n" in rendered
     assert "LOOM_WORKER_MINIO_ACCESS_KEY=keep-access\n" in rendered
     assert "LOOM_WORKER_MINIO_SECRET_KEY=keep-secret\n" in rendered
+
+
+def test_pool_worker_service_env_requires_complete_storage_identity() -> None:
+    settings = {
+        "worker_service_env": {
+            "gb10": {
+                "LOOM_WORKER_CONTROL_PLANE_URL": "http://192.168.50.103:18081",
+                "LOOM_WORKER_GATEWAY_URL": "http://192.168.50.103:19100",
+                "LOOM_WORKER_MINIO_ENDPOINT": "http://192.168.50.103:19000",
+                "LOOM_WORKER_ARTIFACTS_BUCKET": "loom-staging-artifacts",
+            }
+        }
+    }
+
+    with pytest.raises(
+        ExternalSlurmPrereqMaterializationError,
+        match="invalid keys",
+    ):
+        _pool_worker_service_env(settings, pool_name="gb10")
+
+
+@pytest.mark.parametrize(
+    "bucket",
+    (
+        "Bad/Bucket",
+        "192.168.50.103",
+        "a..b",
+        "a.-b",
+        "a-.b",
+        "xn--bucket",
+        "sthree-bucket",
+        "amzn-s3-demo-bucket",
+        "bucket-s3alias",
+        "bucket--ol-s3",
+        "bucket.mrap",
+        "bucket--x-s3",
+        "bucket--table-s3",
+    ),
+)
+def test_pool_worker_service_env_rejects_noncanonical_storage_identity(
+    bucket: str,
+) -> None:
+    settings = {
+        "worker_service_env": {
+            "gb10": {
+                "LOOM_WORKER_CONTROL_PLANE_URL": "http://192.168.50.103:18081",
+                "LOOM_WORKER_GATEWAY_URL": "http://192.168.50.103:19100",
+                "LOOM_WORKER_MINIO_ENDPOINT": "http://192.168.50.103:19000",
+                "LOOM_WORKER_TRAJECTORIES_BUCKET": bucket,
+                "LOOM_WORKER_ARTIFACTS_BUCKET": "loom-staging-artifacts",
+            }
+        }
+    }
+
+    with pytest.raises(
+        ExternalSlurmPrereqMaterializationError,
+        match="canonical S3 bucket names",
+    ):
+        _pool_worker_service_env(settings, pool_name="gb10")
 
 
 @pytest.mark.parametrize(
@@ -760,6 +823,20 @@ def test_materialization_applies_pool_service_endpoints_without_changing_secrets
                 }
             },
             "private HTTP URLs",
+        ),
+        (
+            {
+                "worker_service_env": {
+                    "gb10": {
+                        "LOOM_WORKER_CONTROL_PLANE_URL": "http://192.168.50.103:18081",
+                        "LOOM_WORKER_GATEWAY_URL": "http://192.168.50.103:19100",
+                        "LOOM_WORKER_MINIO_ENDPOINT": "http://192.168.50.103:19000",
+                        "LOOM_WORKER_TRAJECTORIES_BUCKET": 123,
+                        "LOOM_WORKER_ARTIFACTS_BUCKET": "loom-staging-artifacts",
+                    }
+                }
+            },
+            "canonical S3 bucket names",
         ),
     ),
 )

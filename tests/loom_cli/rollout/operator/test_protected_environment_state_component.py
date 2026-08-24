@@ -312,6 +312,8 @@ LOOM_WORKER_CONTROL_PLANE_URL = "http://192.168.50.103:18081"
 LOOM_WORKER_GATEWAY_URL = "http://192.168.50.103:19100"
 LOOM_WORKER_SUBPROCESS_GATEWAY_URL = "http://192.168.50.103:19100"
 LOOM_WORKER_MINIO_ENDPOINT = "http://192.168.50.103:19000"
+LOOM_WORKER_TRAJECTORIES_BUCKET = "loom-staging-trajectories"
+LOOM_WORKER_ARTIFACTS_BUCKET = "loom-staging-artifacts"
 LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO = "192.168.50.103:5443/loom-trial-cache"
 
 [external_slurm_runner_prerequisites.worker_service_env.oldlab]
@@ -319,6 +321,8 @@ LOOM_WORKER_CONTROL_PLANE_URL = "http://192.168.50.103:18081"
 LOOM_WORKER_GATEWAY_URL = "http://192.168.50.103:19100"
 LOOM_WORKER_SUBPROCESS_GATEWAY_URL = "http://192.168.50.103:19100"
 LOOM_WORKER_MINIO_ENDPOINT = "http://192.168.50.103:19000"
+LOOM_WORKER_TRAJECTORIES_BUCKET = "loom-staging-trajectories"
+LOOM_WORKER_ARTIFACTS_BUCKET = "loom-staging-artifacts"
 LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO = "192.168.50.103:5443/loom-trial-cache"
 """.strip(),
             )
@@ -421,6 +425,8 @@ LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO = "192.168.50.103:5443/loom-trial-cache"
                     "LOOM_WORKER_SUBPROCESS_GATEWAY_URL=http://192.168.50.103:19100\n" in env_text
                 )
                 assert "LOOM_WORKER_MINIO_ENDPOINT=http://192.168.50.103:19000\n" in env_text
+                assert "LOOM_WORKER_TRAJECTORIES_BUCKET=loom-staging-trajectories\n" in env_text
+                assert "LOOM_WORKER_ARTIFACTS_BUCKET=loom-staging-artifacts\n" in env_text
                 assert (
                     "LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO="
                     "192.168.50.103:5443/loom-trial-cache\n" in env_text
@@ -551,6 +557,8 @@ def test_external_runner_policy_authority_rejects_incomplete_or_static_contracts
         "LOOM_WORKER_GATEWAY_URL": "http://192.168.50.103:19100",
         "LOOM_WORKER_SUBPROCESS_GATEWAY_URL": "http://192.168.50.103:19100",
         "LOOM_WORKER_MINIO_ENDPOINT": "http://192.168.50.103:19000",
+        "LOOM_WORKER_TRAJECTORIES_BUCKET": "loom-staging-trajectories",
+        "LOOM_WORKER_ARTIFACTS_BUCKET": "loom-staging-artifacts",
         "LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO": ("192.168.50.103:5443/loom-trial-cache"),
     }
     profile.external_slurm_runner_prerequisites["worker_service_env"] = {

@@ -1366,12 +1366,19 @@ _REQUIRED_EXTERNAL_RUNNER_ENV_KEYS = frozenset(
         "LOOM_WORKER_MINIO_SECRET_KEY",
     }
 )
+_WORKER_STORAGE_BUCKET_ENV_KEYS = frozenset(
+    {
+        "LOOM_WORKER_TRAJECTORIES_BUCKET",
+        "LOOM_WORKER_ARTIFACTS_BUCKET",
+    }
+)
 _WORKER_SERVICE_ENV_KEYS = frozenset(
     {
         "LOOM_WORKER_CONTROL_PLANE_URL",
         "LOOM_WORKER_GATEWAY_URL",
         "LOOM_WORKER_SUBPROCESS_GATEWAY_URL",
         "LOOM_WORKER_MINIO_ENDPOINT",
+        *_WORKER_STORAGE_BUCKET_ENV_KEYS,
         "LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO",
     }
 )
@@ -1379,6 +1386,27 @@ _REQUIRED_WORKER_SERVICE_ENV_KEYS = _WORKER_SERVICE_ENV_KEYS - {
     "LOOM_WORKER_SUBPROCESS_GATEWAY_URL",
     "LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO",
 }
+_S3_BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
+_S3_BUCKET_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
+_S3_BUCKET_IPV4_RE = re.compile(r"^[0-9]{1,3}(?:[.][0-9]{1,3}){3}$")
+_S3_RESERVED_BUCKET_PREFIXES = ("xn--", "sthree-", "amzn-s3-demo-")
+_S3_RESERVED_BUCKET_SUFFIXES = (
+    "-s3alias",
+    "--ol-s3",
+    ".mrap",
+    "--x-s3",
+    "--table-s3",
+)
+
+
+def _is_canonical_s3_bucket_name(value: str) -> bool:
+    return bool(
+        _S3_BUCKET_RE.fullmatch(value)
+        and _S3_BUCKET_IPV4_RE.fullmatch(value) is None
+        and not value.startswith(_S3_RESERVED_BUCKET_PREFIXES)
+        and not value.endswith(_S3_RESERVED_BUCKET_SUFFIXES)
+        and all(_S3_BUCKET_LABEL_RE.fullmatch(label) for label in value.split("."))
+    )
 
 
 def _pool_worker_service_env(
@@ -1402,7 +1430,7 @@ def _pool_worker_service_env(
         )
     keys = set(pool_config)
     unknown = sorted(keys - _WORKER_SERVICE_ENV_KEYS)
-    missing = sorted(_REQUIRED_WORKER_SERVICE_ENV_KEYS - keys)
+    missing = sorted((_REQUIRED_WORKER_SERVICE_ENV_KEYS - _WORKER_STORAGE_BUCKET_ENV_KEYS) - keys)
     if unknown or missing:
         raise ExternalSlurmPrereqMaterializationError(
             f"external runner worker_service_env.{pool_name} has invalid keys",
@@ -1410,10 +1438,25 @@ def _pool_worker_service_env(
     rendered: dict[str, str] = {}
     for key, raw_value in pool_config.items():
         if not isinstance(raw_value, str):
+            if key in _WORKER_STORAGE_BUCKET_ENV_KEYS:
+                raise ExternalSlurmPrereqMaterializationError(
+                    "external runner "
+                    f"worker_service_env.{pool_name} values must be canonical "
+                    "S3 bucket names",
+                )
             raise ExternalSlurmPrereqMaterializationError(
                 f"external runner worker_service_env.{pool_name} values must be URLs",
             )
         value = _secret_safe_value(raw_value.strip())
+        if key in _WORKER_STORAGE_BUCKET_ENV_KEYS:
+            if not _is_canonical_s3_bucket_name(value):
+                raise ExternalSlurmPrereqMaterializationError(
+                    "external runner "
+                    f"worker_service_env.{pool_name} values must be canonical "
+                    "S3 bucket names",
+                )
+            rendered[key] = value
+            continue
         if key == "LOOM_WORKER_TRIAL_CACHE_REGISTRY_REPO":
             parsed_registry = urlsplit(f"//{value}")
             try:
@@ -1463,6 +1506,10 @@ def _pool_worker_service_env(
                 f"external runner worker_service_env.{pool_name} values must be private HTTP URLs",
             )
         rendered[key] = value
+    if not _WORKER_STORAGE_BUCKET_ENV_KEYS.issubset(keys):
+        raise ExternalSlurmPrereqMaterializationError(
+            f"external runner worker_service_env.{pool_name} has invalid keys",
+        )
     return rendered
 
 
