@@ -17,6 +17,10 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from loom_benchmark_tool.db_url import normalize_db_url
+from loom_cli.benchmark_readiness import (
+    BUNDLE_VERIFICATION_KIND,
+    BUNDLE_VERIFICATION_SCHEMA_VERSION,
+)
 from loom_cli.canary_task_filter import task_filter_targets_only_benchmark
 
 _RAW_SECRET_RE = re.compile(r"(?:hf_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16})")
@@ -204,6 +208,13 @@ def compose_boundary_evidence(
         "failed",
         bundle_verification.get("missing"),
     )
+    if (
+        bundle_verification.get("schema_version") != BUNDLE_VERIFICATION_SCHEMA_VERSION
+        or bundle_verification.get("verification_kind") != BUNDLE_VERIFICATION_KIND
+    ):
+        raise HfBoundaryEvidenceError(
+            "audit does not use the required full-bundle verification contract",
+        )
     if (
         isinstance(bundle_tasks, bool)
         or not isinstance(bundle_tasks, int)

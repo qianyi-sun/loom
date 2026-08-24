@@ -26,6 +26,8 @@ from loom.task_image_materialization import canonical_task_checksum
 from loom.trajectory.storage import ObjectStore
 from loom_benchmark_tool.db_url import normalize_db_url
 
+BUNDLE_VERIFICATION_SCHEMA_VERSION = 2
+BUNDLE_VERIFICATION_KIND = "complete_bundle_sha256_of_dir_v1"
 _BUNDLE_AUDIT_CONCURRENCY = 8
 
 
@@ -89,6 +91,8 @@ class BundlePresenceReport:
 
     def to_dict(self) -> dict[str, object]:
         return {
+            "schema_version": BUNDLE_VERIFICATION_SCHEMA_VERSION,
+            "verification_kind": BUNDLE_VERIFICATION_KIND,
             "s3_tasks": self.s3_tasks,
             "verified": self.verified,
             "failed": self.failed,
@@ -304,6 +308,8 @@ async def run_bundle_presence_audit(
 
 
 __all__ = [
+    "BUNDLE_VERIFICATION_KIND",
+    "BUNDLE_VERIFICATION_SCHEMA_VERSION",
     "BenchmarkAuditSource",
     "BenchmarkReadinessItem",
     "BundlePresenceReport",
