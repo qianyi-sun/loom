@@ -287,6 +287,66 @@ def test_audit_verify_bundles_prints_summary_and_fails_on_missing(
     assert "missing=1" in out
 
 
+def test_audit_verify_bundles_fails_on_checksum_mismatch(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from loom_benchmark_tool.audit_cmd import AuditResult
+    from loom_cli.benchmark_readiness import (
+        BundlePresenceReport,
+        BundleVerificationFailure,
+    )
+
+    class FakeObjectStore:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+    async def fake_run_audit(**_kwargs: Any) -> list[AuditResult]:
+        return []
+
+    async def fake_bundle_audit(**_kwargs: Any) -> BundlePresenceReport:
+        return BundlePresenceReport(
+            s3_tasks=2,
+            verified=1,
+            failures=(
+                BundleVerificationFailure(
+                    task_id="fake-bench/mismatch",
+                    source="s3://loom-benchmarks/fake/mismatch/",
+                    reason="checksum_mismatch",
+                    expected_checksum="a" * 64,
+                    actual_checksum="b" * 64,
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(datasets_cmd, "run_readiness_audit", fake_run_audit)
+    monkeypatch.setattr(datasets_cmd, "run_bundle_presence_audit", fake_bundle_audit)
+    monkeypatch.setattr("loom.trajectory.storage.MinioObjectStore", FakeObjectStore)
+
+    rc = datasets_cmd.dispatch(
+        [
+            "audit",
+            "fake-bench",
+            "--db-url",
+            "postgresql://x/y",
+            "--verify-bundles",
+            "--minio-endpoint",
+            "http://target-minio:9000",
+            "--minio-access-key",
+            "target-access",
+            "--minio-secret-key",
+            "target-secret",
+        ]
+    )
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "bundle_verification" in out
+    assert "failed=1" in out
+    assert "checksum_mismatches=1" in out
+    assert "checksum_mismatch fake-bench/mismatch" in out
+
+
 @pytest.mark.asyncio
 async def test_bundle_audit_hashes_complete_bundles_and_includes_tasksets(
     monkeypatch: pytest.MonkeyPatch,
