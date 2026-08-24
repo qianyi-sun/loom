@@ -297,7 +297,7 @@ def _add_audit_args(p: argparse.ArgumentParser) -> None:
         action="store_true",
         help=(
             "Also verify internal s3:// task bundle prefixes in object storage "
-            "by reading each mirrored task.toml."
+            "by downloading each complete bundle and comparing its canonical checksum."
         ),
     )
     p.add_argument(

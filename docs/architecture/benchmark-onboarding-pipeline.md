@@ -46,8 +46,11 @@ loom datasets provision-catalog
   catalog.
 - `register` verifies a published manifest, upserts benchmark/task rows, and
   can mirror bundles into internal object storage.
-- `audit` reports catalog, manifest, bundle, task-config, verifier, adapter,
-  architecture, and readiness blockers.
+- `audit` reports catalog, manifest, task-config, verifier, adapter,
+  architecture, and readiness blockers. `audit --verify-bundles` downloads the
+  complete internal bundle for every benchmark and TaskSet row, recomputes the
+  canonical checksum across all files, and fails closed on drift or unreadable
+  content.
 - `activate` selects a fully audited immutable profile in one transaction.
 - `verify` samples registered tasks and runs the oracle path end to end.
 - `provision-catalog` copies selected runnable benchmark, task, agent, and

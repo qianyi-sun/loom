@@ -1423,6 +1423,7 @@ opening the SPA:
 loom datasets audit --all
 loom datasets audit swe-bench-verified
 loom datasets audit --all --json
+loom datasets audit --all --verify-bundles
 python scripts/benchmark_reward_gate.py readiness \
   --server-url "$LOOM_SERVER_URL" \
   --token env:LOOM_API_TOKEN
@@ -1432,7 +1433,11 @@ The audit reports raw task rows, valid `TaskConfig` rows, source
 schemes, materializer status, readiness state, and blocker reason. A
 legacy published manifest with task rows but empty `config` appears as
 `blocked` with `manifest_legacy_missing_task_config`; republish or
-backfill the benchmark before launching user batches.
+backfill the benchmark before launching user batches. With
+`--verify-bundles`, Loom downloads every complete internal `s3://` bundle,
+including benchmark and TaskSet rows, hashes every file with the canonical
+bundle checksum, and exits nonzero on a mismatch or unreadable bundle. A
+`task.toml`-only presence check is not integrity evidence.
 
 The same readiness model powers the service catalog. In New Batch, a benchmark
 marked `Ready` is selectable. `Needs publish` means no runnable tasks are
@@ -1510,8 +1515,9 @@ HF-published first-party benchmarks in protected environments, use
 `loom datasets register --mirror-to-object-store` so runtime rows point at
 internal object storage while preserving HF repo/revision/checksum provenance.
 Follow either path with `/api/v1/agents` discovery evidence and
-`loom datasets audit --all --verify-bundles`. These
-commands are separate from `scripts/seed_test_data.py`, which is only for
+`loom datasets audit --all --verify-bundles`. The full-bundle check must report
+`failed=0` before release certification. These commands are separate from
+`scripts/seed_test_data.py`, which is only for
 disposable auth/run fixtures. `loom eval batch create` uses the local agent
 catalog when `loom-launcher` is installed, but falls back to the deployed
 server's `/api/v1/agents` catalog for service-mode submissions so an operator
