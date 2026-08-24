@@ -443,3 +443,79 @@ async def test_bundle_audit_hashes_complete_bundles_and_includes_tasksets(
             "task_id": "fake-bench/mismatch",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_bundle_audit_classifies_fail_closed_verification_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from loom.trajectory.storage import FakeObjectStore
+
+    class FakeEngine:
+        async def dispose(self) -> None:
+            return None
+
+    class FakeResult:
+        def all(self) -> list[tuple[str, str, str, str | None, str | None]]:
+            checksum = "a" * 64
+            return [
+                ("bench/invalid-source", checksum, "s3://bucket", "bench", None),
+                ("bench/empty", checksum, "s3://bucket/empty/", "bench", None),
+                ("bench/no-config", checksum, "s3://bucket/no-config/", "bench", None),
+                ("bench/download", checksum, "s3://bucket/download/", "bench", None),
+                ("bench/invalid-checksum", "not-a-sha", "s3://bucket/invalid/", "bench", None),
+            ]
+
+    class FakeSession:
+        async def __aenter__(self) -> FakeSession:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def execute(self, _statement: object) -> FakeResult:
+            return FakeResult()
+
+    class FailingObjectStore(FakeObjectStore):
+        async def download_prefix(
+            self,
+            *,
+            bucket: str,
+            prefix: str,
+            out_dir: Path,
+        ) -> int:
+            if prefix == "download/":
+                raise KeyError("object store unavailable")
+            return await super().download_prefix(
+                bucket=bucket,
+                prefix=prefix,
+                out_dir=out_dir,
+            )
+
+    monkeypatch.setattr(benchmark_readiness, "create_async_engine", lambda _url: FakeEngine())
+    monkeypatch.setattr(
+        benchmark_readiness,
+        "async_sessionmaker",
+        lambda *_args, **_kwargs: lambda: FakeSession(),
+    )
+    store = FailingObjectStore(
+        objects={
+            ("bucket", "no-config/instruction.md"): b"missing config\n",
+            ("bucket", "invalid/task.toml"): b"task\n",
+        }
+    )
+
+    report = await benchmark_readiness.run_bundle_presence_audit(
+        db_url="postgresql://x/y",
+        object_store=store,
+    )
+
+    assert report.verified == 0
+    assert report.failed == 5
+    assert [failure.reason for failure in report.failures] == [
+        "invalid_source",
+        "empty_bundle",
+        "missing_task_toml",
+        "download_error",
+        "invalid_checksum",
+    ]
