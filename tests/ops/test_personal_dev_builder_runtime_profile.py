@@ -81,11 +81,15 @@ def test_checked_in_profile_binds_the_measured_release_and_host() -> None:
 def test_profile_renders_exact_k3s_and_runsc_configuration() -> None:
     profile = load_runtime_profile(_PROFILE_PATH)
 
+    assert profile.pod_annotations == (
+        "dev.gvisor.spec.mount.buildkit-run.*",
+    )
     assert profile.k3s_template == (
         '{{ template "base" . }}\n\n'
         "[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes."
         "'runsc-personal-dev']\n"
         '  runtime_type = "io.containerd.runsc.v1"\n'
+        '  pod_annotations = ["dev.gvisor.spec.mount.buildkit-run.*"]\n'
         "[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes."
         "'runsc-personal-dev'.options]\n"
         '  TypeUrl = "io.containerd.runsc.v1.options"\n'

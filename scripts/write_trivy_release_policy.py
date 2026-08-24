@@ -97,12 +97,6 @@ TRIVY_EXCEPTIONS = (
         ),
     ),
     TrivyException(
-        "CVE-2026-57433",
-        _PERL_PURLS,
-        date(2026, 9, 12),
-        _PERL_EXCEPTION_STATEMENT,
-    ),
-    TrivyException(
         "CVE-2026-6653",
         ("pkg:deb/debian/libxml2",),
         date(2026, 9, 12),
@@ -134,7 +128,7 @@ def _render_ignore_bytes(exceptions: tuple[TrivyException, ...]) -> bytes:
 
 TRIVY_IGNORE_BYTES = _render_ignore_bytes(TRIVY_EXCEPTIONS)
 TRIVY_CONFIG_SHA256 = "bd8896276b5d8d00d8bb3c3d7a51d359b4931ea2811c21cb8ed692766a7eb8cf"
-TRIVY_IGNORE_SHA256 = "b09bd1a38036f5e4274586af64616a306590ec33b1e2ac8a73d67ab88d2e4d5a"
+TRIVY_IGNORE_SHA256 = "11f957c7a63686da04c9f38e39aa2ca1eeef743b36c75810054afc84571ed2f7"
 
 
 class TrivyPolicyError(RuntimeError):

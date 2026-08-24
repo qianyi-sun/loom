@@ -15,7 +15,6 @@ VALIDATOR = REPO_ROOT / "scripts/validate_trivy_release_report.py"
 _PERL_CVES = (
     "CVE-2026-13221",
     "CVE-2026-42496",
-    "CVE-2026-57433",
     "CVE-2026-8376",
 )
 _AGENT_PERL_PACKAGES = (

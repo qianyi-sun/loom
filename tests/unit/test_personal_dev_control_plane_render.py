@@ -243,7 +243,7 @@ def test_shadow_render_is_deterministic_complete_and_digest_bound(tmp_path: Path
     assert rendered.runtime_handler == profile.builder.runtime_handler
     assert rendered.runtime_profile_sha256 == profile.builder.runtime_profile_sha256
     assert hashlib.sha256(rendered.yaml_text.encode("utf-8")).hexdigest() == (
-        "7515f64e3f1b231656c4941cd8abf3861c1cbf37dbc70350eba161249dc070e9"
+        "d29dfdff26d2e4b6c4b15172d31323c46d8861d396fb9e8cc26ed59d4af65d68"
     )
 
     identities = {_identity(document) for document in documents}
@@ -1138,6 +1138,32 @@ def test_builder_admission_binds_privileged_exception_to_exact_job_contract(
     assert "attempt-capability" in contract
     assert "buildkit-state" in contract
     assert "readOnly == true" in contract
+
+
+def test_builder_admission_requires_exact_gvisor_shared_mount_annotations(
+    tmp_path: Path,
+) -> None:
+    _, _, _, documents = _render(tmp_path)
+    policy = next(
+        item
+        for item in documents
+        if item["kind"] == "ValidatingAdmissionPolicy"
+        and item["metadata"]["name"] == "loom-personal-dev-management-resources"
+    )
+    metadata_contract = next(
+        item["expression"]
+        for item in policy["spec"]["validations"]
+        if item["message"]
+        == "builder Job metadata differs from its exact privileged exception"
+    )
+
+    for value in (
+        "spec.template.metadata.annotations.size() == 3",
+        "spec.template.metadata.annotations['dev.gvisor.spec.mount.buildkit-run.share'] == 'pod'",
+        "spec.template.metadata.annotations['dev.gvisor.spec.mount.buildkit-run.type'] == 'tmpfs'",
+        "spec.template.metadata.annotations['dev.gvisor.spec.mount.buildkit-run.options'] == 'rw,rprivate'",
+    ):
+        assert value in metadata_contract
 
 
 def test_builder_admission_limits_each_job_to_one_cleanup_safe_execution(

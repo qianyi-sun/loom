@@ -111,12 +111,12 @@ in `config/ci-upgrade-policy.json`. Workflow routing is implemented in
 
 Image routing remains separate from release authority. The untrusted build and
 trusted publication scans both use pinned Trivy v0.70.0 with `scan-type: image`,
-`vuln-type: os,library`, `timeout: 10m0s`, `severity: CRITICAL`, `exit-code:
+`vuln-type: os,library`, `timeout: 20m0s`, `severity: CRITICAL`, `exit-code:
 '1'`, `ignore-unfixed: 'false'`, `scanners: vuln`, and `cache: 'false'`. Before
 each scan, a repository helper writes the fixed config and reviewed ignore file
 outside the checkout. Maintained images and dependencies are upgraded before
-an exception is considered. The temporary exceptions cover only the four
-unfixed Perl findings (CVE-2026-13221, CVE-2026-42496, CVE-2026-57433, and
+an exception is considered. The temporary exceptions cover only the three
+unfixed CRITICAL Perl findings (CVE-2026-13221, CVE-2026-42496, and
 CVE-2026-8376) on the exact Debian Perl packages required by Debian base
 runtimes, the agent toolchain, and the staging-compatible PostgreSQL 17.4
 rehearsal image, CVE-2026-43185 on the agent compiler's

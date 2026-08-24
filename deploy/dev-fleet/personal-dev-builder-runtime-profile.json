@@ -82,6 +82,9 @@
       "watchdog-action": "panic"
     },
     "handler": "runsc-personal-dev",
+    "pod_annotations": [
+      "dev.gvisor.spec.mount.buildkit-run.*"
+    ],
     "runtime_type": "io.containerd.runsc.v1"
   },
   "runtime_class": {

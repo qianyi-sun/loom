@@ -913,6 +913,7 @@ class PersonalDevBuilderRuntimeInstaller:
             raise PersonalDevBuilderRuntimeInstallError("active_runtime_invalid") from exc
         expected = {
             "runtime_type": self.profile.runtime_type,
+            "pod_annotations": list(self.profile.pod_annotations),
             "options": {
                 "TypeUrl": "io.containerd.runsc.v1.options",
                 "ConfigPath": str(self.profile.runsc_config_path),

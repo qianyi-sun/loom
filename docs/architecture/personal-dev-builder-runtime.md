@@ -81,7 +81,8 @@ file bytes, including the final newline. The profile fixes these inputs:
   parent-directory entry, sizes, archive/install modes, and SHA-256 digests;
 - K3s `v1.36.2+k3s1`, containerd `v2.3.2-k3s2`, Linux amd64, `/dev/kvm`,
   and loaded `kvm` plus `kvm_intel` modules;
-- all installation paths, containerd handler bytes, and runsc flags; and
+- all installation paths, containerd handler bytes, and runsc flags;
+- the handler's one narrow forwarded Pod-annotation prefix; and
 - RuntimeClass identity and the profile-label encoding.
 
 The archive is supplied as an owner-controlled local input. The installer does
@@ -107,6 +108,7 @@ documented v3 extension template rather than copying a generated config:
 
 [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.'runsc-personal-dev']
   runtime_type = "io.containerd.runsc.v1"
+  pod_annotations = ["dev.gvisor.spec.mount.buildkit-run.*"]
 [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.'runsc-personal-dev'.options]
   TypeUrl = "io.containerd.runsc.v1.options"
   ConfigPath = "/etc/containerd/runsc-personal-dev.toml"
@@ -115,6 +117,14 @@ documented v3 extension template rather than copying a generated config:
 The template is installed only when the destination is absent or already
 byte-identical. An unrelated existing template is a stop condition; the
 installer never merges TOML text heuristically.
+
+The handler forwards only `dev.gvisor.spec.mount.buildkit-run.*`. The exact
+builder Job and two-container conformance Pod set that volume's `share=pod`,
+`type=tmpfs`, and `options=rw,rprivate` hints. This makes the socket directory
+one gVisor-internal Pod-shared tmpfs while leaving every other volume in its
+default isolated view. The admission policy requires exactly those three
+annotations. No broad `dev.gvisor.*` forwarding, `force-shared`, host bind,
+host Unix-socket authority, TCP listener, or writable client mount is admitted.
 
 `/etc/containerd/runsc-personal-dev.toml` fixes the absolute runsc binary and
 these runsc flags:
@@ -126,7 +136,7 @@ these runsc flags:
 | `network` | `sandbox` | Candidate traffic stays in netstack |
 | `directfs` | `false` | Keep filesystem access in the less-privileged gofer |
 | `file-access` | `exclusive` | Root filesystem is not externally mutated |
-| `file-access-mounts` | `shared` | Kubernetes projections and emptyDir remain coherent |
+| `file-access-mounts` | `shared` | Allow hinted runtime sharing; the socket hint remains mandatory |
 | `host-uds` | `none` | No host Unix socket bridge |
 | `host-fifo` | `none` | No host FIFO bridge |
 | `net-raw` | `false` | Remove raw-socket authority |
@@ -237,8 +247,10 @@ the exact restricted-client/native-sidecar contract. The proof captures both
 container identities and image IDs, requires the sidecar preflight with only
 the two ID-mapping capabilities, requires a `PR_GET_NO_NEW_PRIVS=1` marker from
 the fixed child wrapper immediately before BuildKit exec, proves the client
-cannot see RootlessKit or BuildKit through `/proc`, and runs both `linux/amd64`
-and `linux/arm64` Dockerfile steps with `PR_GET_NO_NEW_PRIVS=1`,
+cannot see RootlessKit or BuildKit through `/proc`, proves the client reaches
+the sidecar-created Unix socket through the exact pod-shared tmpfs hint, and
+runs both `linux/amd64` and `linux/arm64` Dockerfile steps with
+`PR_GET_NO_NEW_PRIVS=1`,
 including arm64 through the image's trusted QEMU helper. This ordering avoids
 referring to a RuntimeClass before it exists while keeping the class absent
 until all nodes are actively verified. Baseline would reject the conformance
@@ -258,6 +270,7 @@ The owner-only evidence directory records, without credentials:
   and uncordon receipts;
 - RuntimeClass server-side diff and live canonical JSON;
 - the conformance client and sidecar logs, image IDs, mount/PID separation,
+  exact shared-mount annotations and sibling Unix-socket visibility,
   BuildKit and Dockerfile no-new-privileges evidence, and both OCI platforms;
 - five Ready nodes, no DiskPressure, Longhorn health, and package resource
   inventory;
