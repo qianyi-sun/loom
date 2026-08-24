@@ -503,20 +503,25 @@ def test_personal_management_shadow_runbook_has_exact_bounded_rehearsal() -> Non
 
 
 @pytest.mark.parametrize(
-    ("kubectl_payload", "expected_items"),
+    ("kubectl_payload", "kubectl_status", "expected_items", "expected_returncode"),
     [
-        pytest.param("", 0, id="all-five-absent"),
+        pytest.param("", 0, 0, 0, id="all-five-absent"),
         pytest.param(
             '{"apiVersion":"v1","items":[{"sentinel":true}],"kind":"List"}',
+            0,
             1,
+            0,
             id="nonempty-inventory",
         ),
+        pytest.param("", 1, 0, 1, id="kubectl-failure"),
     ],
 )
 def test_personal_management_storage_inventory_producer_handles_kubectl_output(
     tmp_path: Path,
     kubectl_payload: str,
+    kubectl_status: int,
     expected_items: int,
+    expected_returncode: int,
 ) -> None:
     runbook = _read("docs/runbooks/personal-dev-management-plane-shadow.md")
     function_start = runbook.index("assert_forward_storage_lineage_contract() {")
@@ -536,7 +541,8 @@ def test_personal_management_storage_inventory_producer_handles_kubectl_output(
         "#!/bin/sh\n"
         "set -eu\n"
         'test "$*" = "$EXPECTED_KUBECTL_ARGS"\n'
-        'printf %s "$KUBECTL_PAYLOAD"\n',
+        'printf %s "$KUBECTL_PAYLOAD"\n'
+        'exit "$KUBECTL_STATUS"\n',
         encoding="utf-8",
     )
     fake_kubectl.chmod(0o755)
@@ -591,6 +597,7 @@ def test_personal_management_storage_inventory_producer_handles_kubectl_output(
         "EXPECTED_ITEMS": str(expected_items),
         "EXPECTED_KUBECTL_ARGS": expected_arguments,
         "KUBECTL_PAYLOAD": kubectl_payload,
+        "KUBECTL_STATUS": str(kubectl_status),
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
     }
 
@@ -611,7 +618,7 @@ def test_personal_management_storage_inventory_producer_handles_kubectl_output(
         text=True,
     )
 
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == expected_returncode, result.stderr
 
 
 def test_personal_management_shadow_runbook_preserves_authority_boundaries() -> None:
