@@ -28,6 +28,8 @@ def _audit_report() -> dict[str, object]:
             }
         ],
         "bundle_presence": {
+            "schema_version": 2,
+            "verification_kind": "complete_bundle_sha256_of_dir_v1",
             "s3_tasks": 100,
             "verified": 100,
             "missing": 0,
@@ -153,6 +155,8 @@ def test_compose_uses_task_mirror_provenance_not_adapter_origin() -> None:
 def test_compose_rejects_bundle_checksum_mismatch() -> None:
     audit = _audit_report()
     audit["bundle_presence"] = {
+        "schema_version": 2,
+        "verification_kind": "complete_bundle_sha256_of_dir_v1",
         "s3_tasks": 100,
         "verified": 99,
         "failed": 1,
@@ -172,6 +176,24 @@ def test_compose_rejects_bundle_checksum_mismatch() -> None:
     }
 
     with pytest.raises(HfBoundaryEvidenceError, match="bundle verification"):
+        compose_boundary_evidence(
+            benchmark_id="skilllearnbench",
+            environment="staging",
+            audit_report=audit,
+            source_summary=_source_summary(),
+            canary_summary=_canary_summary(),
+            worker_boundary=_worker_boundary(),
+        )
+
+
+def test_compose_rejects_legacy_task_toml_presence_evidence() -> None:
+    audit = _audit_report()
+    bundle_presence = audit["bundle_presence"]
+    assert isinstance(bundle_presence, dict)
+    bundle_presence.pop("schema_version")
+    bundle_presence.pop("verification_kind")
+
+    with pytest.raises(HfBoundaryEvidenceError, match="full-bundle verification contract"):
         compose_boundary_evidence(
             benchmark_id="skilllearnbench",
             environment="staging",
@@ -806,8 +828,10 @@ def test_hf_boundary_db_audit_branch_uses_readiness_audit_contract(
         "failures": [],
         "missing": 0,
         "missing_sources": [],
+        "schema_version": 2,
         "s3_tasks": 2,
         "verified": 2,
+        "verification_kind": "complete_bundle_sha256_of_dir_v1",
         "verification_errors": 0,
     }
 
