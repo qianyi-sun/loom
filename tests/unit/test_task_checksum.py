@@ -73,8 +73,9 @@ def test_task_checksum_runtime_does_not_import_benchmark_adapters(
 def test_runtime_and_adapter_consumers_share_one_checksum_function() -> None:
     """Every ingestion/build/audit path must bind the neutral implementation."""
     from loom_bundle_checksum import sha256_of_dir as canonical_sha256_of_dir
-    from loom_worker import main_loop, task_image_builder
+
     from loom_cli import benchmark_readiness
+    from loom_worker import main_loop, task_image_builder
 
     assert sha256_of_dir is canonical_sha256_of_dir
     assert task_image_builder.sha256_of_dir is canonical_sha256_of_dir

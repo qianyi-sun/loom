@@ -24,6 +24,7 @@ TARGET_ENVIRONMENTS = {
 }
 WORKSPACE_MEMBERS = {
     "packages/loom-launcher",
+    "packages/loom-bundle-checksum",
     "packages/loom-benchmarks",
     "packages/loom-benchmark-terminal-bench-2",
     "packages/loom-terminalgen",
@@ -55,6 +56,7 @@ def test_uv_metadata_defines_one_non_narrowing_workspace_lock() -> None:
     assert pyproject["project"]["requires-python"] == ">=3.11"
 
     sources = uv["sources"]
+    assert sources["loom-bundle-checksum"] == {"workspace": True}
     assert sources["loom-benchmarks"] == {"workspace": True}
     assert sources["loom-benchmark-terminal-bench-2"] == {"workspace": True}
     assert sources["loom-terminalgen"] == {"workspace": True}
@@ -197,6 +199,7 @@ def test_ci_requires_real_locked_installs_on_both_linux_runner_architectures() -
     assert "uv pip check --python .venv/bin/python" in script
     for package in (
         "loom",
+        "loom_bundle_checksum",
         "loom_launcher",
         "loom_benchmarks",
         "loom_benchmark_terminal_bench_2",

@@ -8,7 +8,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
-from loom_benchmarks.util import sha256_of_dir
+from loom_bundle_checksum import sha256_of_dir
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -298,7 +298,12 @@ async def run_bundle_presence_audit(
             for task_id, checksum, source, _benchmark_id, _task_set_id in task_rows
         )
     )
-    failures = tuple(failure for failure in results if failure is not None)
+    failures = tuple(
+        sorted(
+            (failure for failure in results if failure is not None),
+            key=lambda failure: (failure.task_id, failure.source, failure.reason),
+        )
+    )
 
     return BundlePresenceReport(
         s3_tasks=len(task_rows),

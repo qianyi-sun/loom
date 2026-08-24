@@ -3,9 +3,11 @@ ENV PIP_RETRIES=10 PIP_DEFAULT_TIMEOUT=60
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src
+COPY packages/loom-bundle-checksum ./packages/loom-bundle-checksum
 COPY config ./config
 COPY migrations ./migrations
-RUN pip install --no-cache-dir -e .
+RUN pip install --no-cache-dir -e ./packages/loom-bundle-checksum && \
+    pip install --no-cache-dir -e .
 USER 65532:65532
 EXPOSE 8092
 CMD ["python", "-m", "loom_pipeline_orchestrator"]

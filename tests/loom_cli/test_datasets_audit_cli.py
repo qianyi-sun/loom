@@ -514,11 +514,11 @@ async def test_bundle_audit_classifies_fail_closed_verification_errors(
     assert report.verified == 0
     assert report.failed == 5
     assert [failure.reason for failure in report.failures] == [
-        "invalid_source",
-        "empty_bundle",
-        "missing_task_toml",
         "download_error",
+        "empty_bundle",
         "invalid_checksum",
+        "invalid_source",
+        "missing_task_toml",
     ]
 
 

@@ -5,8 +5,10 @@ WORKDIR /app
 
 COPY pyproject.toml README.md ./
 COPY src/loom_capacity_manager ./src/loom_capacity_manager
+COPY packages/loom-bundle-checksum ./packages/loom-bundle-checksum
 COPY capacity_migrations ./capacity_migrations
-RUN chmod -R a+rX ./src ./capacity_migrations && \
+RUN chmod -R a+rX ./src ./packages/loom-bundle-checksum ./capacity_migrations && \
+    pip install --no-cache-dir -e ./packages/loom-bundle-checksum && \
     pip install --no-cache-dir -e .
 
 ARG LOOM_BUILD_SHA=unknown

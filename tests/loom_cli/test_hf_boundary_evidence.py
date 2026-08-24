@@ -32,6 +32,10 @@ def _audit_report() -> dict[str, object]:
             "verification_kind": "complete_bundle_sha256_of_dir_v1",
             "s3_tasks": 100,
             "verified": 100,
+            "failed": 0,
+            "checksum_mismatches": 0,
+            "verification_errors": 0,
+            "failures": [],
             "missing": 0,
             "missing_sources": [],
         },
@@ -194,6 +198,45 @@ def test_compose_rejects_legacy_task_toml_presence_evidence() -> None:
     bundle_presence.pop("verification_kind")
 
     with pytest.raises(HfBoundaryEvidenceError, match="full-bundle verification contract"):
+        compose_boundary_evidence(
+            benchmark_id="skilllearnbench",
+            environment="staging",
+            audit_report=audit,
+            source_summary=_source_summary(),
+            canary_summary=_canary_summary(),
+            worker_boundary=_worker_boundary(),
+        )
+
+
+def test_compose_rejects_version_tagged_legacy_presence_shape() -> None:
+    audit = _audit_report()
+    audit["bundle_presence"] = {
+        "schema_version": 2,
+        "verification_kind": "complete_bundle_sha256_of_dir_v1",
+        "s3_tasks": 100,
+        "verified": 100,
+        "missing": 0,
+        "missing_sources": [],
+    }
+
+    with pytest.raises(HfBoundaryEvidenceError, match="full-bundle verification contract"):
+        compose_boundary_evidence(
+            benchmark_id="skilllearnbench",
+            environment="staging",
+            audit_report=audit,
+            source_summary=_source_summary(),
+            canary_summary=_canary_summary(),
+            worker_boundary=_worker_boundary(),
+        )
+
+
+def test_compose_rejects_internally_inconsistent_bundle_verification() -> None:
+    audit = _audit_report()
+    bundle_presence = audit["bundle_presence"]
+    assert isinstance(bundle_presence, dict)
+    bundle_presence["checksum_mismatches"] = 1
+
+    with pytest.raises(HfBoundaryEvidenceError, match="bundle verification"):
         compose_boundary_evidence(
             benchmark_id="skilllearnbench",
             environment="staging",

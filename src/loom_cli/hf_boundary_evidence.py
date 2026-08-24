@@ -24,6 +24,20 @@ from loom_cli.benchmark_readiness import (
 from loom_cli.canary_task_filter import task_filter_targets_only_benchmark
 
 _RAW_SECRET_RE = re.compile(r"(?:hf_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16})")
+_BUNDLE_VERIFICATION_KEYS = frozenset(
+    {
+        "schema_version",
+        "verification_kind",
+        "s3_tasks",
+        "verified",
+        "failed",
+        "checksum_mismatches",
+        "verification_errors",
+        "failures",
+        "missing",
+        "missing_sources",
+    }
+)
 
 _REMOTE_WORKER_ENV_SCRIPT = r"""
 import json
@@ -202,12 +216,16 @@ def compose_boundary_evidence(
 
     audit_item = _audit_item(audit_report, benchmark_id)
     bundle_verification = _mapping(audit_report.get("bundle_presence"))
+    if set(bundle_verification) != _BUNDLE_VERIFICATION_KEYS:
+        raise HfBoundaryEvidenceError(
+            "audit does not use the required full-bundle verification contract",
+        )
     bundle_tasks = bundle_verification.get("s3_tasks")
     bundle_verified = bundle_verification.get("verified")
-    bundle_failed = bundle_verification.get(
-        "failed",
-        bundle_verification.get("missing"),
-    )
+    bundle_failed = bundle_verification.get("failed")
+    bundle_checksum_mismatches = bundle_verification.get("checksum_mismatches")
+    bundle_verification_errors = bundle_verification.get("verification_errors")
+    bundle_missing = bundle_verification.get("missing")
     if (
         bundle_verification.get("schema_version") != BUNDLE_VERIFICATION_SCHEMA_VERSION
         or bundle_verification.get("verification_kind") != BUNDLE_VERIFICATION_KIND
@@ -222,9 +240,20 @@ def compose_boundary_evidence(
         or not isinstance(bundle_verified, int)
         or isinstance(bundle_failed, bool)
         or not isinstance(bundle_failed, int)
+        or isinstance(bundle_checksum_mismatches, bool)
+        or not isinstance(bundle_checksum_mismatches, int)
+        or isinstance(bundle_verification_errors, bool)
+        or not isinstance(bundle_verification_errors, int)
+        or isinstance(bundle_missing, bool)
+        or not isinstance(bundle_missing, int)
         or bundle_tasks <= 0
         or bundle_verified != bundle_tasks
         or bundle_failed != 0
+        or bundle_checksum_mismatches != 0
+        or bundle_verification_errors != 0
+        or bundle_verification.get("failures") != []
+        or bundle_missing != 0
+        or bundle_verification.get("missing_sources") != []
     ):
         raise HfBoundaryEvidenceError(
             "audit bundle verification is incomplete or contains failures",

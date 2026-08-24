@@ -2,6 +2,44 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
+_EDITABLE_ROOT_IMAGES = (
+    "Dockerfile.capacity-manager",
+    "Dockerfile.control-plane",
+    "Dockerfile.family-orchestrator",
+    "Dockerfile.gateway",
+    "Dockerfile.personal-dev-activation-agent",
+    "Dockerfile.pipeline-orchestrator",
+    "Dockerfile.service",
+    "Dockerfile.worker",
+)
+
+
+def test_editable_root_images_install_neutral_bundle_checksum_first() -> None:
+    """A clean image build must satisfy Loom's local checksum dependency."""
+    for name in _EDITABLE_ROOT_IMAGES:
+        dockerfile = ROOT / "deploy" / name
+        text = dockerfile.read_text()
+        assert (
+            "COPY packages ./packages" in text
+            or "COPY packages/loom-bundle-checksum ./packages/loom-bundle-checksum" in text
+        ), dockerfile
+        checksum_install = "pip install --no-cache-dir -e ./packages/loom-bundle-checksum"
+        assert checksum_install in text, dockerfile
+        install_lines = [
+            line.strip().removeprefix("RUN ")
+            for line in text.splitlines()
+            if "pip install" in line
+        ]
+        checksum_index = next(
+            index for index, line in enumerate(install_lines) if line.startswith(checksum_install)
+        )
+        root_index = next(
+            index
+            for index, line in enumerate(install_lines)
+            if line in {"pip install --no-cache-dir -e .", "pip install --no-cache-dir -e . && \\"}
+        )
+        assert checksum_index < root_index, dockerfile
+
 
 def test_db_facing_images_include_migrations_for_schema_startup() -> None:
     dockerfiles = [

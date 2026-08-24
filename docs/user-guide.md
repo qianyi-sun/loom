@@ -26,8 +26,9 @@ adapter packages from the versions recorded in `uv.lock`.
 > environment" error you get from `pip install` on modern
 > Debian / Ubuntu. Install: <https://docs.astral.sh/uv/getting-started/installation/>.
 > Prefer plain `pip`? Run `python3 -m venv .venv && source
-> .venv/bin/activate` first, then `pip install -e . -e
-> packages/loom-launcher -e packages/loom-benchmarks`. That convenience path
+> .venv/bin/activate` first, then `pip install -e
+> packages/loom-bundle-checksum -e . -e packages/loom-launcher -e
+> packages/loom-benchmarks`. That convenience path
 > bypasses `uv.lock` and is not valid CI, rollout, or release evidence.
 
 ## Choose your quickstart

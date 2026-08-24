@@ -65,5 +65,6 @@ jobs:
           import loom  # noqa: F401
           import loom_benchmark_terminal_bench_2  # noqa: F401
           import loom_benchmarks  # noqa: F401
+          import loom_bundle_checksum  # noqa: F401
           import loom_launcher  # noqa: F401
           PY

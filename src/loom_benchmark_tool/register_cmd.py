@@ -34,7 +34,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from loom_benchmarks.util import sha256_of_dir
+from loom_bundle_checksum import sha256_of_dir
 from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -293,7 +293,7 @@ def _validate_relative_prefix(value: str, *, label: str) -> str:
 
 
 def _bundle_checksum(bundle_dir: Path) -> str:
-    return cast(str, sha256_of_dir(bundle_dir))
+    return sha256_of_dir(bundle_dir)
 
 
 def _copy_hf_snapshot_bundle_for_registration(

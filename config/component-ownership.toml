@@ -136,6 +136,7 @@ source_paths = [
   "README.md",
   "deploy/Dockerfile.control-plane",
   "migrations/**",
+  "packages/loom-bundle-checksum/**",
   "pyproject.toml",
   "src/**",
 ]
@@ -156,6 +157,7 @@ source_paths = [
   "README.md",
   "deploy/Dockerfile.capacity-manager",
   "capacity_migrations/**",
+  "packages/loom-bundle-checksum/**",
   "pyproject.toml",
   "src/loom_capacity_manager/**",
 ]
@@ -181,6 +183,7 @@ source_paths = [
   "deploy/dev-fleet/loom-capacity-pool-executor-prepared.timer",
   "deploy/dev-fleet/loom-capacity-pool-executor-active.service",
   "deploy/dev-fleet/loom-capacity-pool-executor-active.timer",
+  "packages/loom-bundle-checksum/**",
   "pyproject.toml",
   "scripts/ops/capacity_executor_release.py",
   "scripts/ops/global_fleet_pool_executor_once.py",
@@ -291,6 +294,7 @@ source_paths = [
   "README.md",
   "deploy/Dockerfile.family-orchestrator",
   "migrations/**",
+  "packages/loom-bundle-checksum/**",
   "pyproject.toml",
   "src/**",
 ]
@@ -311,6 +315,7 @@ source_paths = [
   "README.md",
   "deploy/Dockerfile.pipeline-orchestrator",
   "migrations/**",
+  "packages/loom-bundle-checksum/**",
   "pyproject.toml",
   "src/loom/pipeline/**",
   "src/loom_pipeline_orchestrator/**",
@@ -376,6 +381,7 @@ source_paths = [
   "README.md",
   "deploy/Dockerfile.gateway",
   "migrations/**",
+  "packages/loom-bundle-checksum/**",
   "pyproject.toml",
   "src/**",
 ]

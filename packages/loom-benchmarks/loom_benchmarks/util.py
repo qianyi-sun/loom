@@ -10,7 +10,6 @@ files.
 from __future__ import annotations
 
 import base64
-import hashlib
 import re
 import textwrap
 from pathlib import Path
@@ -18,6 +17,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+from loom_bundle_checksum import sha256_of_dir as sha256_of_dir
 
 _IDENT_RE = re.compile(r"[^A-Za-z0-9_]")
 
@@ -231,25 +231,3 @@ def toml_string(value: str) -> str:
             out.append(ch)
     out.append('"')
     return "".join(out)
-
-
-def sha256_of_dir(directory: Path) -> str:
-    """Stable hash of (relpath, content) for every file under `directory`.
-
-    The adapter writes this into `ConvertedTask.checksum`, which then
-    populates `tasks.checksum`. Two converted dirs with identical
-    content produce identical hashes; either content or relpath
-    differing flips the digest.
-
-    All bundle files are included, including dotfiles. Some benchmark
-    adapters copy upstream repositories into the task bundle, and files
-    such as `.gitignore` are real bundle content that must stay under
-    checksum coverage."""
-    h = hashlib.sha256()
-    for path in sorted(directory.rglob("*")):
-        if path.is_dir():
-            continue
-        rel = path.relative_to(directory).as_posix().encode("utf-8")
-        h.update(b"\x00" + rel + b"\x00")
-        h.update(path.read_bytes())
-    return h.hexdigest()

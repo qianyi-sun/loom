@@ -39,7 +39,7 @@ from urllib.parse import urlparse
 from uuid import UUID
 
 import httpx
-from loom_benchmarks.util import sha256_of_dir
+from loom_bundle_checksum import sha256_of_dir
 
 from loom.agent.base import AgentRuntime
 from loom.agent.gateway_client import LLMGatewayClient

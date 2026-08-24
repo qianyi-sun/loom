@@ -101,10 +101,15 @@ def test_capacity_manager_image_installs_the_packaged_migration_tree() -> None:
     dockerfile = _CAPACITY_MANAGER_DOCKERFILE.read_text(encoding="utf-8")
 
     copy = "COPY capacity_migrations ./capacity_migrations"
-    install = "pip install --no-cache-dir -e ."
+    root_install = "pip install --no-cache-dir -e ."
+    install_commands = [
+        line.strip().removesuffix(" && \\")
+        for line in dockerfile.splitlines()
+        if line.strip().startswith("pip install ")
+    ]
     assert dockerfile.count(copy) == 1
-    assert dockerfile.count(install) == 1
-    assert dockerfile.index(copy) < dockerfile.index(install)
+    assert install_commands.count(root_install) == 1
+    assert dockerfile.index(copy) < dockerfile.index(root_install)
 
 
 def test_capacity_manager_sources_do_not_import_unpackaged_loom_modules() -> None:

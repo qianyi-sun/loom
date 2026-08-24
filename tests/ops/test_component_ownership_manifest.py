@@ -330,6 +330,31 @@ runtime_policy = "start"
     ] == ["worker"]
 
 
+def test_neutral_bundle_checksum_rebuilds_every_consuming_image() -> None:
+    manifest = component_ownership.load_manifest(
+        REPO_ROOT / "config/component-ownership.toml"
+    )
+
+    owners = {
+        owner.id
+        for owner in manifest.component_owners_for_path(
+            "packages/loom-bundle-checksum/loom_bundle_checksum/__init__.py"
+        )
+    }
+
+    assert owners == {
+        "capacity-executor",
+        "capacity-manager",
+        "control-plane",
+        "family-orchestrator",
+        "llm-gateway",
+        "personal-dev-activation-agent",
+        "pipeline-orchestrator",
+        "service",
+        "worker",
+    }
+
+
 def test_validator_fails_closed_for_unowned_dockerfile(tmp_path: Path) -> None:
     manifest_path = tmp_path / "component-ownership.toml"
     manifest_path.write_text("schema_version = 2\n", encoding="utf-8")
