@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -22,6 +21,10 @@ from loom.data_lifecycle_registry import (
 )
 from loom.db.schema import Artifact, ArtifactLineageEdge, Batch
 from loom.db.schema import Trial as TrialRow
+from loom.trajectory.object_identity import (
+    TrajectoryObjectFilename,
+    resolve_trajectory_object_key,
+)
 
 router = APIRouter()
 
@@ -117,26 +120,28 @@ def _policy_from_share_status(status: str) -> tuple[str, str]:
     return "unknown", "pending"
 
 
-def _storage_from_s3_uri(
+def _trajectory_storage_from_uri(
     uri: Any,
     *,
-    default_bucket: str,
-    default_key: str,
+    trial: TrialRow,
+    expected_bucket: str,
+    filename: TrajectoryObjectFilename,
     media_type: str,
     size_bytes: int = 0,
 ) -> dict[str, Any]:
-    bucket = default_bucket
-    key = default_key
-    if isinstance(uri, str) and uri.startswith("s3://"):
-        parsed = urlparse(uri)
-        if parsed.netloc:
-            bucket = parsed.netloc
-        parsed_key = parsed.path.lstrip("/")
-        if parsed_key:
-            key = parsed_key
+    try:
+        key = resolve_trajectory_object_key(
+            uri=uri,
+            expected_bucket=expected_bucket,
+            team_id=trial.team_id,
+            trial_id=trial.id,
+            filename=filename,
+        )
+    except ValueError as exc:
+        raise TrajectoryLifecycleEvidenceError(str(exc)) from exc
     return {
         "backend": "object_store",
-        "bucket": bucket,
+        "bucket": expected_bucket,
         "key": key,
         "media_type": media_type,
         "size_bytes": max(int(size_bytes), 0),
@@ -268,7 +273,6 @@ def _artifact_descriptors_from_index(
     descriptors: list[dict[str, Any]] = []
     trial_share_status = _share_status(trial.share_status, "pending_scan")
     trial_safety, trial_redaction = _policy_from_share_status(trial_share_status)
-    default_prefix = f"{trial.team_id}/{trial.id}"
 
     if index_payload.get("trajectory_uri"):
         descriptors.append(_artifact_descriptor_base(
@@ -280,10 +284,11 @@ def _artifact_descriptors_from_index(
                 index_payload.get("trajectory_sha256")
                 or index_payload.get("checksum_sha256")
             ),
-            storage=_storage_from_s3_uri(
+            storage=_trajectory_storage_from_uri(
                 index_payload.get("trajectory_uri"),
-                default_bucket=trajectories_bucket,
-                default_key=f"{default_prefix}/events.jsonl",
+                trial=trial,
+                expected_bucket=trajectories_bucket,
+                filename="events.jsonl",
                 media_type="application/x-ndjson",
                 size_bytes=index_payload.get("trajectory_size_bytes", 0),
             ),
@@ -301,10 +306,11 @@ def _artifact_descriptors_from_index(
             artifact_type="atif_projection",
             name="ATIF projection",
             content_hash=_content_hash(index_payload.get("atif_sha256")),
-            storage=_storage_from_s3_uri(
+            storage=_trajectory_storage_from_uri(
                 index_payload.get("atif_uri"),
-                default_bucket=trajectories_bucket,
-                default_key=f"{default_prefix}/atif.json",
+                trial=trial,
+                expected_bucket=trajectories_bucket,
+                filename="atif.json",
                 media_type="application/json",
                 size_bytes=index_payload.get("atif_size_bytes", 0),
             ),
@@ -644,11 +650,28 @@ async def get_trajectory_url(
         )
 
     settings = request.app.state.settings
+    index = row.trajectory_index if isinstance(row.trajectory_index, dict) else {}
+    try:
+        key = resolve_trajectory_object_key(
+            uri=index.get("trajectory_uri"),
+            expected_bucket=settings.trajectories_bucket,
+            team_id=row.team_id,
+            trial_id=trial_id,
+            filename="events.jsonl",
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "trajectory_object_identity_invalid",
+                "message": str(exc),
+            },
+        ) from exc
     url = request.app.state.minio_client.generate_presigned_url(
         "get_object",
         Params={
             "Bucket": settings.trajectories_bucket,
-            "Key": f"{row.team_id}/{trial_id}/events.jsonl",
+            "Key": key,
         },
         ExpiresIn=settings.signed_url_expiry_sec,
     )

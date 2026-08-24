@@ -39,6 +39,33 @@ async def test_writer_writes_local_first(tmp_path: Path, store: FakeObjectStore)
     assert store.objects[("trajectories", "t/abc/events.jsonl")].count(b"\n") == 1
 
 
+async def test_writer_replaces_stale_local_attempt_before_upload(
+    tmp_path: Path,
+    store: FakeObjectStore,
+) -> None:
+    local = tmp_path / "events.jsonl"
+    local.write_bytes(b'{"attempt":"stale"}\n')
+    writer = TrajectoryWriter(
+        local_path=local,
+        store=store,
+        bucket="trajectories",
+        key="t/retry/events.jsonl",
+        flush_event_count=1000,
+        flush_bytes=10_000_000,
+        flush_sec=3600,
+        min_part_bytes=0,
+    )
+
+    async with writer:
+        await writer.append(_event(0))
+
+    remote = store.objects[("trajectories", "t/retry/events.jsonl")]
+    assert local.read_bytes() == remote
+    assert remote.count(b"\n") == 1
+    assert b'"instruction_excerpt":"event 0"' in remote
+    assert b'"attempt":"stale"' not in remote
+
+
 async def test_writer_flush_on_event_count(tmp_path: Path, store: FakeObjectStore):
     local = tmp_path / "events.jsonl"
     writer = TrajectoryWriter(

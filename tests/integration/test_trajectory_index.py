@@ -1,6 +1,7 @@
 import hashlib
 from collections.abc import Iterator
 from datetime import UTC, datetime
+from urllib.parse import unquote, urlparse
 from uuid import UUID, uuid4
 
 import pytest
@@ -31,7 +32,7 @@ from loom_control_plane.config import ControlPlaneSettings
 
 
 @pytest.fixture
-def traj_seed(postgres_url: str) -> Iterator[tuple[UUID, UUID, str]]:
+def traj_seed(postgres_url: str) -> Iterator[tuple[UUID, UUID, UUID, str]]:
     engine = create_engine(postgres_url)
     session_factory = sessionmaker(engine)
     team_id = uuid4()
@@ -58,7 +59,7 @@ def traj_seed(postgres_url: str) -> Iterator[tuple[UUID, UUID, str]]:
         ))
         s.commit()
     try:
-        yield trial_id, worker_id, raw
+        yield trial_id, team_id, worker_id, raw
     finally:
         with session_factory() as s:
             s.execute(delete(Trial))
@@ -84,7 +85,7 @@ def traj_seed(postgres_url: str) -> Iterator[tuple[UUID, UUID, str]]:
 @pytest.fixture
 def app(
     monkeypatch: pytest.MonkeyPatch, postgres_url: str,
-    traj_seed: tuple[UUID, UUID, str],
+    traj_seed: tuple[UUID, UUID, UUID, str],
 ):
     for k, v in {
         "LOOM_CP_DB_URL": postgres_url,
@@ -98,14 +99,16 @@ def app(
 
 
 def test_index_patch(app, traj_seed):  # type: ignore[no-untyped-def]
-    trial_id, worker_id, raw = traj_seed
+    trial_id, team_id, worker_id, raw = traj_seed
     with TestClient(app) as client:
         r = client.patch(
             f"/trials/{trial_id}/trajectory_index",
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "worker_id": str(worker_id),
-                "trajectory_uri": f"s3://trajectories/x/{trial_id}/events.jsonl",
+                "trajectory_uri": (
+                    f"s3://trajectories/{team_id}/{trial_id}/events.jsonl"
+                ),
                 "trajectory_size_bytes": 1024,
                 "trajectory_sha256": "a" * 64,
                 "bytes_uploaded": 1024,
@@ -121,14 +124,16 @@ def test_index_patch_rejects_unclassified_object_evidence(
     traj_seed,
     postgres_url: str,
 ):  # type: ignore[no-untyped-def]
-    trial_id, worker_id, raw = traj_seed
+    trial_id, team_id, worker_id, raw = traj_seed
     with TestClient(app) as client:
         r = client.patch(
             f"/trials/{trial_id}/trajectory_index",
             headers={"Authorization": f"Bearer {raw}"},
             json={
                 "worker_id": str(worker_id),
-                "trajectory_uri": f"s3://trajectories/x/{trial_id}/events.jsonl",
+                "trajectory_uri": (
+                    f"s3://trajectories/{team_id}/{trial_id}/events.jsonl"
+                ),
                 "trajectory_size_bytes": 1024,
             },
         )
@@ -154,7 +159,7 @@ def test_index_patch_populates_typed_artifacts_and_lineage(
     traj_seed,
     postgres_url: str,
 ) -> None:
-    trial_id, worker_id, raw = traj_seed
+    trial_id, _team_id, worker_id, raw = traj_seed
     engine = create_engine(postgres_url)
     parent_artifact_id = uuid4()
     batch_id = uuid4()
@@ -297,7 +302,7 @@ def test_index_patch_populates_typed_artifacts_and_lineage(
 
 def test_index_patch_fenced(app, traj_seed):  # type: ignore[no-untyped-def]
     """A different worker_id → 409 (claim lost)."""
-    trial_id, _worker_id, raw = traj_seed
+    trial_id, _team_id, _worker_id, raw = traj_seed
     with TestClient(app) as client:
         r = client.patch(
             f"/trials/{trial_id}/trajectory_index",
@@ -308,3 +313,112 @@ def test_index_patch_fenced(app, traj_seed):  # type: ignore[no-untyped-def]
             },
         )
         assert r.status_code == 409
+
+
+def test_retry_registration_creates_distinct_lifecycle_objects(
+    app,
+    traj_seed,
+    postgres_url: str,
+) -> None:  # type: ignore[no-untyped-def]
+    trial_id, team_id, worker_id, raw = traj_seed
+    with TestClient(app) as client:
+        for attempt in (1, 2):
+            prefix = f"{team_id}/{trial_id}/attempts/{attempt}"
+            response = client.patch(
+                f"/trials/{trial_id}/trajectory_index",
+                headers={"Authorization": f"Bearer {raw}"},
+                json={
+                    "worker_id": str(worker_id),
+                    "trajectory_uri": (
+                        f"s3://trajectories/{prefix}/events.jsonl"
+                    ),
+                    "trajectory_size_bytes": 100 + attempt,
+                    "trajectory_sha256": str(attempt) * 64,
+                },
+            )
+            assert response.status_code == 200, response.text
+
+    engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(engine)() as session:
+            artifacts = list(session.scalars(
+                select(Artifact).where(
+                    Artifact.trial_id == trial_id,
+                    Artifact.artifact_type == "trajectory",
+                )
+            ))
+            objects = list(session.scalars(
+                select(DataLifecycleObject).where(
+                    DataLifecycleObject.authority_id.in_([
+                        artifact.lifecycle_authority_id for artifact in artifacts
+                    ])
+                )
+            ))
+        expected_keys = {
+            f"{team_id}/{trial_id}/attempts/1/events.jsonl",
+            f"{team_id}/{trial_id}/attempts/2/events.jsonl",
+        }
+        assert {artifact.storage["key"] for artifact in artifacts} == expected_keys
+        assert {obj.object_key for obj in objects} == expected_keys
+    finally:
+        engine.dispose()
+
+
+def test_control_plane_download_uses_validated_attempt_uri(
+    app,
+    traj_seed,
+    postgres_url: str,
+) -> None:  # type: ignore[no-untyped-def]
+    trial_id, team_id, _worker_id, raw = traj_seed
+    key = f"{team_id}/{trial_id}/attempts/4/events.jsonl"
+    engine = create_engine(postgres_url)
+    with engine.begin() as connection:
+        connection.execute(
+            update(Trial)
+            .where(Trial.id == trial_id)
+            .values(trajectory_index={
+                "trajectory_uri": f"s3://trajectories/{key}",
+            })
+        )
+    engine.dispose()
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/trials/{trial_id}/trajectory",
+            headers={"Authorization": f"Bearer {raw}"},
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 302, response.text
+    assert unquote(urlparse(response.headers["location"]).path).endswith(
+        f"/trajectories/{key}"
+    )
+
+
+def test_control_plane_download_rejects_cross_bucket_uri(
+    app,
+    traj_seed,
+    postgres_url: str,
+) -> None:  # type: ignore[no-untyped-def]
+    trial_id, team_id, _worker_id, raw = traj_seed
+    engine = create_engine(postgres_url)
+    with engine.begin() as connection:
+        connection.execute(
+            update(Trial)
+            .where(Trial.id == trial_id)
+            .values(trajectory_index={
+                "trajectory_uri": (
+                    f"s3://foreign/{team_id}/{trial_id}/attempts/4/events.jsonl"
+                ),
+            })
+        )
+    engine.dispose()
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/trials/{trial_id}/trajectory",
+            headers={"Authorization": f"Bearer {raw}"},
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 409

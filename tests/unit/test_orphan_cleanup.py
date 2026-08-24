@@ -183,3 +183,61 @@ def test_returns_empty_when_dir_missing(tmp_path: Path) -> None:
         state_and_owner_lookup=lambda _t: ("succeeded", None),
     )
     assert deleted == []
+
+
+def test_deletes_every_attempt_file_for_terminal_trial(tmp_path: Path) -> None:
+    trial_id = uuid4()
+    first = tmp_path / f"{trial_id}.attempt-1.events.jsonl"
+    second = tmp_path / f"{trial_id}.attempt-2.events.jsonl"
+    first.write_text("first")
+    second.write_text("second")
+
+    cleanup_orphan_trajectories(
+        cache_dir=tmp_path,
+        owned_worker_id=uuid4(),
+        state_and_owner_lookup=lambda _tid: ("succeeded", None),
+    )
+
+    assert not first.exists()
+    assert not second.exists()
+
+
+def test_preserves_fresh_non_terminal_attempt_file_and_checks_owner(
+    tmp_path: Path,
+) -> None:
+    trial_id = uuid4()
+    attempt = tmp_path / f"{trial_id}.attempt-2.events.jsonl"
+    attempt.write_text("current")
+    looked_up: list[UUID] = []
+
+    cleanup_orphan_trajectories(
+        cache_dir=tmp_path,
+        owned_worker_id=uuid4(),
+        state_and_owner_lookup=lambda tid: (
+            looked_up.append(tid) or "running",
+            None,
+        ),
+    )
+
+    assert looked_up == [trial_id]
+    assert attempt.exists()
+
+
+def test_deletes_stale_non_terminal_attempt_file(tmp_path: Path) -> None:
+    import os
+
+    trial_id = uuid4()
+    attempt = tmp_path / f"{trial_id}.attempt-4.events.jsonl"
+    attempt.write_text("stale")
+    mtime = 1_000_000.0
+    os.utime(attempt, (mtime, mtime))
+
+    cleanup_orphan_trajectories(
+        cache_dir=tmp_path,
+        owned_worker_id=uuid4(),
+        state_and_owner_lookup=lambda _tid: ("queued", None),
+        now_sec=mtime + 100,
+        non_terminal_fallback_sec=10,
+    )
+
+    assert not attempt.exists()

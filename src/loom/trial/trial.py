@@ -40,6 +40,7 @@ from loom.models.trial import TrialConfig
 from loom.security.redaction import redact_text
 from loom.trajectory.cp_event_sink import CpEventSink
 from loom.trajectory.llm_call_events import llm_call_row_to_event
+from loom.trajectory.object_identity import TrajectoryObjectIdentity
 from loom.trajectory.storage import ObjectStore
 from loom.trajectory.writer import TrajectoryWriter
 from loom.trial.finalize import finalize_trajectory_with_metadata
@@ -76,6 +77,7 @@ class TrialContext:
     verifier: Verifier
     object_store: ObjectStore
     local_trajectory_path: Path
+    attempt_count: int | None = None
     trajectory_bucket: str = "trajectories"
     artifacts_bucket: str = "artifacts"
     # Plan 9/11 amendment A11.1: optional callback the worker uses to
@@ -137,11 +139,20 @@ class TrialContext:
 
     @property
     def trajectory_key(self) -> str:
-        return f"{self.team_id}/{self.trial_id}/events.jsonl"
+        return self.trajectory_identity.events_key
 
     @property
     def trajectory_uri(self) -> str:
-        return f"s3://{self.trajectory_bucket}/{self.trajectory_key}"
+        return self.trajectory_identity.events_uri
+
+    @property
+    def trajectory_identity(self) -> TrajectoryObjectIdentity:
+        return TrajectoryObjectIdentity(
+            bucket=self.trajectory_bucket,
+            team_id=self.team_id,
+            trial_id=self.trial_id,
+            attempt_count=self.attempt_count,
+        )
 
 
 @dataclass
@@ -445,6 +456,7 @@ class Trial:
                             agent_name=self.ctx.agent.name,
                             agent_version=self.ctx.agent.version,
                             bucket=self.ctx.trajectory_bucket,
+                            attempt_count=self.ctx.attempt_count,
                         )
                     ),
                     timeout=_FINALIZE_TIMEOUT_SEC,

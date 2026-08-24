@@ -637,7 +637,9 @@ async def test_patch_trajectory_index_returns_true_when_owner(  # type: ignore[n
 
         assert await cp.patch_trajectory_index(
             trial_id=trial_id, worker_id=wid,
-            trajectory_uri="s3://trajectories/x.jsonl",
+            trajectory_uri=(
+                f"s3://trajectories/{team_id}/{trial_id}/events.jsonl"
+            ),
             trajectory_size_bytes=42,
             trajectory_sha256="1" * 64,
         ) is True

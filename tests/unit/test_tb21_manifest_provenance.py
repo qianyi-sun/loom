@@ -253,6 +253,7 @@ async def test_worker_rejects_tb21_bundle_mutated_after_its_clean_audit(
             "trial_id": str(trial_id),
             "team_id": str(uuid4()),
             "task_id": task_row.id,
+            "attempt_count": 1,
             "config": {"agent_name": "oracle", "agent_model": None},
         },
         vllm_registry=WorkerVLLMRegistry(enabled=False),

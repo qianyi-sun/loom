@@ -445,7 +445,7 @@ class _FakeSettings:
     artifacts_bucket = "artifacts"
 
 
-async def _drive_spawn(runner_target: object) -> Path:
+async def _drive_spawn(runner_target: object, *, attempt_count: object = 1) -> Path:
     """Spawn one fake trial through _spawn_trial; capture the task_dir
     it created (via the patched mkdtemp), return its Path so the caller
     can assert it was cleaned up."""
@@ -463,6 +463,7 @@ async def _drive_spawn(runner_target: object) -> Path:
         "trial_id": str(uuid4()),
         "team_id": str(uuid4()),
         "task_id": "fake",
+        "attempt_count": attempt_count,
         # Plan 23: TrialConfig requires agent_name + agent_model.
         # `agent_model: None` is allowed for agents that don't call an LLM.
         "config": {"agent_name": "oracle", "agent_model": None},
@@ -490,6 +491,8 @@ async def _drive_spawn(runner_target: object) -> Path:
         )
         await pool.wait_all(timeout=2.0)
 
+        assert fake_runner_cls.call_args.kwargs["attempt_count"] == attempt_count
+
     assert captured, "_spawn_trial should have called tempfile.mkdtemp once"
     return captured[0]
 
@@ -505,8 +508,16 @@ class _FailingRunner:
 
 
 async def test_tempdir_cleaned_on_success() -> None:
-    task_dir = await _drive_spawn(_SucceedingRunner())
+    task_dir = await _drive_spawn(_SucceedingRunner(), attempt_count=3)
     assert not task_dir.exists(), f"task_dir {task_dir} leaked after a successful trial"
+
+
+@pytest.mark.parametrize("attempt_count", [0, -1, True, "01", None])
+async def test_spawn_rejects_noncanonical_claim_attempt(
+    attempt_count: object,
+) -> None:
+    with pytest.raises(ValueError, match="attempt_count"):
+        await _drive_spawn(_SucceedingRunner(), attempt_count=attempt_count)
 
 
 async def test_tempdir_cleaned_on_runner_exception() -> None:
@@ -536,6 +547,7 @@ async def test_runner_exception_marks_claimed_trial_failed() -> None:
                 "trial_id": str(trial_id),
                 "team_id": str(uuid4()),
                 "task_id": "fake",
+                "attempt_count": 1,
                 "config": {"agent_name": "oracle", "agent_model": None},
             },
             vllm_registry=WorkerVLLMRegistry(enabled=False),
@@ -582,6 +594,7 @@ async def test_spawn_uses_script_verifier_from_task_config() -> None:
                 "trial_id": str(uuid4()),
                 "team_id": str(uuid4()),
                 "task_id": "fake",
+                "attempt_count": 1,
                 "config": {"agent_name": "oracle", "agent_model": None},
             },
             vllm_registry=WorkerVLLMRegistry(enabled=False),
@@ -632,6 +645,7 @@ async def test_spawn_uses_resolved_task_image_for_dockerfile_task() -> None:
                 "trial_id": str(uuid4()),
                 "team_id": str(uuid4()),
                 "task_id": "fake",
+                "attempt_count": 1,
                 "config": {"agent_name": "oracle", "agent_model": None},
             },
             vllm_registry=WorkerVLLMRegistry(enabled=False),
@@ -677,6 +691,7 @@ async def test_spawn_uses_frozen_materialization_and_exact_registry_digests() ->
         "trial_id": str(uuid4()),
         "team_id": str(uuid4()),
         "task_id": "mutable-current-task",
+        "attempt_count": 1,
         "config": {"agent_name": "oracle", "agent_model": None},
         "task_image_materialization": {
             "schema_version": "loom.task-image-execution-grant.v1",
@@ -779,6 +794,7 @@ async def test_task_image_setup_failure_records_diagnostic_message() -> None:
                 "trial_id": str(trial_id),
                 "team_id": str(uuid4()),
                 "task_id": "fake",
+                "attempt_count": 1,
                 "config": {"agent_name": "oracle", "agent_model": None},
             },
             vllm_registry=WorkerVLLMRegistry(enabled=False),
@@ -836,6 +852,7 @@ async def test_long_setup_failure_writes_redacted_diagnostic_file(
                 "trial_id": str(trial_id),
                 "team_id": str(uuid4()),
                 "task_id": "fake",
+                "attempt_count": 1,
                 "config": {"agent_name": "oracle", "agent_model": None},
             },
             vllm_registry=WorkerVLLMRegistry(enabled=False),
@@ -1055,6 +1072,7 @@ async def test_tempdir_cleaned_on_cancellation() -> None:
                 "trial_id": str(uuid4()),
                 "team_id": str(uuid4()),
                 "task_id": "fake",
+                "attempt_count": 1,
                 "config": {"agent_name": "oracle", "agent_model": None},
             },
             vllm_registry=WorkerVLLMRegistry(enabled=False),
@@ -1087,6 +1105,7 @@ async def test_bundle_lookup_failure_marks_trial_failed_without_spawning() -> No
             "trial_id": str(trial_id),
             "team_id": str(uuid4()),
             "task_id": "humaneval/HumanEval/26",
+            "attempt_count": 1,
             "config": {"agent_name": "oracle", "agent_model": None},
         },
         vllm_registry=WorkerVLLMRegistry(enabled=False),
@@ -1126,6 +1145,7 @@ async def test_claimed_trial_counts_in_flight_before_setup_finishes() -> None:
                     "trial_id": str(uuid4()),
                     "team_id": str(uuid4()),
                     "task_id": "fake",
+                    "attempt_count": 1,
                     "config": {"agent_name": "oracle", "agent_model": None},
                 },
                 vllm_registry=WorkerVLLMRegistry(enabled=False),
@@ -1161,6 +1181,7 @@ async def test_pre_start_heartbeat_runs_while_setup_waits() -> None:
                     "trial_id": str(trial_id),
                     "team_id": str(uuid4()),
                     "task_id": "fake",
+                    "attempt_count": 1,
                     "config": {"agent_name": "oracle", "agent_model": None},
                 },
                 vllm_registry=WorkerVLLMRegistry(enabled=False),
@@ -1198,6 +1219,7 @@ async def test_setup_failure_inside_pool_marks_claimed_trial_failed() -> None:
                 "trial_id": str(trial_id),
                 "team_id": str(uuid4()),
                 "task_id": "humaneval/HumanEval/26",
+                "attempt_count": 1,
                 "config": {"agent_name": "oracle", "agent_model": None},
             },
             vllm_registry=WorkerVLLMRegistry(enabled=False),
@@ -1260,6 +1282,7 @@ async def test_materialize_timeout_marks_claimed_trial_failed() -> None:
                 "trial_id": str(trial_id),
                 "team_id": str(uuid4()),
                 "task_id": "skilllearnbench/private-task",
+                "attempt_count": 1,
                 "config": {"agent_name": "oracle", "agent_model": None},
             },
             vllm_registry=WorkerVLLMRegistry(enabled=False),
@@ -1309,6 +1332,7 @@ async def test_setup_failure_redacts_secret_detail_before_state_patch() -> None:
                 "trial_id": str(trial_id),
                 "team_id": str(uuid4()),
                 "task_id": "skilllearnbench/private-task",
+                "attempt_count": 1,
                 "config": {"agent_name": "oracle", "agent_model": None},
             },
             vllm_registry=WorkerVLLMRegistry(enabled=False),
