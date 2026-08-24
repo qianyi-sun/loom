@@ -19,6 +19,22 @@ global executable-new-capacity ceiling remained zero. This design changes the
 builder Pod contract and its conformance proof. It does not activate personal
 development, change Slurm, submit work, or raise that ceiling.
 
+The subsequent exact `ab55b3241d9419cb2de51d78c95f2decccd28492`
+attempt proved the sidecar startup probe could reach BuildKit, but the sibling
+restricted client failed:
+
+```text
+dial unix /var/run/loom-buildkit/buildkitd.sock: connect: no such file or directory
+```
+
+The client and sidecar log SHA-256 values are respectively
+`6e09bd9e3d4c905cabdabdc41bb705b5f57ed02cf6b533855bf7672d05bc99bd`
+and
+`505a7e0ec2c56d46c9560ad8f4bc9b8b6da0e8a5588bce132318a1a68fb73b88`.
+That attempt also left activation and executable capacity disabled. The
+correction below therefore includes the gVisor socket-volume contract exposed
+by that second protected attempt.
+
 ## Root cause
 
 The failed image uses RootlessKit `3.0.1`. RootlessKit starts its child with
@@ -55,6 +71,29 @@ bounding set. The outer process remains UID/GID 1000 with zero inheritable,
 permitted, effective, and ambient capability sets. gVisor's `allow-suid=false`
 remains compatible: it ignores set-ID bits, while file capabilities are
 independently bounded and `no_new_privs` still suppresses their elevation.
+
+The second failure was a separate gVisor mount-sharing issue. Exact
+`release-20260810.0` probes proved that RootlessKit's nested mount namespace, a
+read-only sibling mount, and the `/var/run` to `/run` symlink each preserve
+socket visibility. In the actual two-container topology, however, gVisor gives
+containers independent volume views unless containerd forwards a mount hint.
+The startup probe succeeded because it ran in the sidecar's view; the sibling
+client could not resolve the socket created there. The identical topology
+reproduced that failure without a hint and passed with these exact Pod
+annotations:
+
+```yaml
+dev.gvisor.spec.mount.buildkit-run.share: pod
+dev.gvisor.spec.mount.buildkit-run.type: tmpfs
+dev.gvisor.spec.mount.buildkit-run.options: rw,rprivate
+```
+
+The K3s handler forwards only
+`dev.gvisor.spec.mount.buildkit-run.*`. The selected hint creates a
+gVisor-internal Pod-shared tmpfs for the socket directory. It does not use
+`force-shared`, which would turn the volume into a host bind and require host
+Unix-socket authority. TCP, abstract sockets, `host-uds`, a writable client
+mount, and a broad `dev.gvisor.*` annotation allowlist remain rejected.
 
 ## Approaches considered
 
@@ -126,7 +165,9 @@ client hooks, extra probes, termination-message path changes, resource claims,
 supplemental groups, and alternate Pod scheduling fields. It also binds the
 Job and Pod-template metadata, couples each platform to the same-lease contract
 and capability volumes, forbids ConfigMap/Secret item remapping or optionality,
-and keeps every `emptyDir` disk-backed with no recursive mount override.
+keeps every Kubernetes `emptyDir.medium` unset with no recursive mount
+override, and requires exactly the three reviewed gVisor hints that expose only
+the `buildkit-run` view as a gVisor-internal tmpfs.
 Quantity comparisons use Kubernetes' `Quantity.compareTo` API so equivalent
 canonical forms are accepted while different resource envelopes are denied.
 The same policy requires immutable, attempt/platform-named ConfigMaps and
@@ -195,7 +236,8 @@ native sidecar on Kubernetes 1.36. It:
   subordinate-ID maps exist;
 - uses the native snapshotter and `--oci-worker-no-process-sandbox`;
 - mounts only private BuildKit state, private temporary storage, and the shared
-  socket directory; and
+  socket directory, which the runtime exposes as the annotation-bound
+  Pod-shared tmpfs; and
 - receives no contract, Secret, source, output, or service-account mount.
 
 The startup probe calls digest-pinned-image `/usr/bin/buildctl debug workers`
@@ -278,8 +320,10 @@ Repository tests must prove:
   alternate scheduling/controller path;
 - Job and Pod-template metadata cannot add finalizers or workload-selecting
   labels, each platform uses its same-lease contract/capability pair, and
-  volume sources cannot become optional, remapped, memory-backed, or
-  recursively remounted;
+  the Pod template carries exactly the three `buildkit-run` gVisor mount hints;
+- the K3s runtime forwards only the matching narrow annotation prefix, and
+  volume sources cannot become optional, remapped, explicitly memory-backed by
+  Kubernetes, or recursively remounted;
 - resource and volume quantities use semantic Kubernetes Quantity comparison,
   admitting equivalent forms such as `1000m` for one CPU but no larger value;
 - the same policy admits only the exact builder default-deny and egress shapes,

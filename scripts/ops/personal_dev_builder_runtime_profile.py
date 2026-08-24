@@ -105,6 +105,7 @@ _EXPECTED_PROFILE: dict[str, object] = {
     "runtime": {
         "flags": _EXPECTED_FLAGS,
         "handler": "runsc-personal-dev",
+        "pod_annotations": ["dev.gvisor.spec.mount.buildkit-run.*"],
         "runtime_type": "io.containerd.runsc.v1",
     },
     "runtime_class": {
@@ -217,6 +218,7 @@ class RuntimeProfile:
     shim_link_path: Path
 
     handler: str
+    pod_annotations: tuple[str, ...]
     runtime_type: str
     runtime_class_name: str
 
@@ -254,6 +256,7 @@ class RuntimeProfile:
             "[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes."
             f"'{self.handler}']\n"
             f'  runtime_type = "{self.runtime_type}"\n'
+            f"  pod_annotations = {json.dumps(list(self.pod_annotations))}\n"
             "[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes."
             f"'{self.handler}'.options]\n"
             '  TypeUrl = "io.containerd.runsc.v1.options"\n'
@@ -334,6 +337,7 @@ def load_runtime_profile(path: Path) -> RuntimeProfile:
         k3s_template_path=Path(str(installation["k3s_template"])),
         shim_link_path=Path(str(installation["shim_link"])),
         handler=str(runtime["handler"]),
+        pod_annotations=tuple(str(item) for item in runtime["pod_annotations"]),
         runtime_type=str(runtime["runtime_type"]),
         runtime_class_name=str(runtime_class["name"]),
     )

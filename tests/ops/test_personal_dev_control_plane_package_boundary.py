@@ -865,15 +865,15 @@ def test_personal_dev_builder_runtime_runbook_is_exact_and_inert() -> None:
     assert "systemctl restart k3s-agent" in normalized
     assert (
         "loom.dev/personal-dev-runtime-profile-a="
-        "880b7c79013e38b016046c732209574d"
+        "6ee2c283e5bf0783e192787522ea9550"
     ) in runbook
     assert (
         "loom.dev/personal-dev-runtime-profile-b="
-        "48d6ae5a008164906f9951ba27765b76"
+        "caadff4131590cc0a26dbf7dd2a6869b"
     ) in runbook
     assert (
         "loom.dev/personal-dev-runtime-profile-sha256="
-        "880b7c79013e38b016046c732209574d48d6ae5a008164906f9951ba27765b76"
+        "6ee2c283e5bf0783e192787522ea9550caadff4131590cc0a26dbf7dd2a6869b"
     ) in runbook
     assert "/proc/gvisor/kernel_is_gvisor" in runbook
     assert "rootless buildkit" in lowered
