@@ -522,6 +522,10 @@ def _orphan_trial_snapshot(trial: _OrphanTrial) -> dict[str, Any]:
         "batch_id": _ORPHAN_BATCH_ID,
         "state": "failed",
         "attempt_count": 3,
+        "failure_reason": "retry_exhausted",
+        "result": None,
+        "trajectory_index": None,
+        "worker_id": None,
         "submitted_at": trial.submitted_at,
         "finished_at": trial.finished_at,
         "lifecycle_authority_id": trial.authority_id,
@@ -609,8 +613,9 @@ def _load_orphan_state(
         sa.text(
             "SELECT jsonb_build_object("
             "'id',id,'team_id',team_id,'batch_id',batch_id,'state',state,"
-            "'attempt_count',attempt_count,'submitted_at',submitted_at,"
-            "'finished_at',finished_at,"
+            "'attempt_count',attempt_count,'failure_reason',failure_reason,"
+            "'result',result,'trajectory_index',trajectory_index,"
+            "'worker_id',worker_id,'submitted_at',submitted_at,'finished_at',finished_at,"
             "'lifecycle_authority_id',lifecycle_authority_id) "
             "FROM trials WHERE id = ANY(CAST(:ids AS uuid[])) ORDER BY id"
         ),

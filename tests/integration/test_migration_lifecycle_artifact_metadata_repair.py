@@ -488,11 +488,11 @@ def _seed_orphan_prerepair_state(engine: Engine) -> None:
                     INSERT INTO trials (
                         id, team_id, task_id, config, requires_caps, state,
                         submit_priority, batch_id, submitted_at, finished_at,
-                        attempt_count
+                        attempt_count, failure_reason
                     ) VALUES (
                         :id, :team_id, :task_id, '{}'::jsonb, '{}'::jsonb,
                         'failed', 100, :batch_id, CAST(:submitted_at AS timestamptz),
-                        CAST(:finished_at AS timestamptz), 3
+                        CAST(:finished_at AS timestamptz), 3, 'retry_exhausted'
                     )
                     """
                 ),
@@ -767,6 +767,26 @@ def test_0109_refuses_partial_failed_smoke_object_registration(
                     "size": item.size_bytes,
                     "created_at": item.created_at,
                 },
+            )
+        before = _orphan_snapshot(engine)
+        with pytest.raises(Exception, match="0109 lifecycle artifact metadata repair refused"):
+            command.upgrade(config, "0109")
+        assert _revision(engine) == "0108"
+        assert _orphan_snapshot(engine) == before
+    finally:
+        engine.dispose()
+
+
+def test_0109_refuses_drifted_failed_smoke_trial_identity(
+    isolated_migration_postgres_url: str,
+) -> None:
+    config, engine = _at_0108(isolated_migration_postgres_url)
+    try:
+        _seed_orphan_prerepair_state(engine)
+        with engine.begin() as connection:
+            connection.execute(
+                text("UPDATE trials SET failure_reason='operator_repaired' WHERE id=:id"),
+                {"id": ORPHAN_TRIALS[0].trial_id},
             )
         before = _orphan_snapshot(engine)
         with pytest.raises(Exception, match="0109 lifecycle artifact metadata repair refused"):
