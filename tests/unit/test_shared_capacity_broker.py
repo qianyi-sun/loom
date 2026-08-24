@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import stat
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -133,6 +134,80 @@ def test_state_authority_is_owner_only_and_sidecars_are_not_world_readable(
     for path in broker._sqlite_sidecar_paths():
         if path.exists():
             assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_disappearing_sqlite_sidecar_is_not_an_authority_violation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broker = _broker(tmp_path, Clock())
+    broker.initialize()
+    wal = broker.state_db.with_name(f"{broker.state_db.name}-wal")
+    real_exists = Path.exists
+    real_lstat = os.lstat
+    advertised = False
+    vanished = False
+
+    def racing_exists(path: Path) -> bool:
+        nonlocal advertised
+        if path == wal and not advertised:
+            advertised = True
+            return True
+        return real_exists(path)
+
+    def racing_lstat(path: os.PathLike[str] | str) -> os.stat_result:
+        nonlocal vanished
+        if Path(path) == wal and not vanished:
+            vanished = True
+            raise FileNotFoundError(path)
+        return real_lstat(path)
+
+    monkeypatch.setattr(Path, "exists", racing_exists)
+    monkeypatch.setattr(os, "lstat", racing_lstat)
+
+    assert broker.status()["requests"] == []
+    assert vanished is True
+
+
+def test_present_unsafe_sqlite_sidecar_remains_an_authority_violation(
+    tmp_path: Path,
+) -> None:
+    broker = _broker(tmp_path, Clock())
+    broker.initialize()
+    wal = broker.state_db.with_name(f"{broker.state_db.name}-wal")
+    wal.write_bytes(b"")
+    wal.chmod(0o644)
+
+    with pytest.raises(BrokerError, match="unsafe"):
+        broker.status()
+
+
+def test_initialize_and_status_close_every_sqlite_connection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TrackingConnection(sqlite3.Connection):
+        closed_by_broker = False
+
+        def close(self) -> None:
+            self.closed_by_broker = True
+            super().close()
+
+    connections: list[TrackingConnection] = []
+    real_connect = sqlite3.connect
+
+    def tracking_connect(*args: object, **kwargs: object) -> sqlite3.Connection:
+        connection = real_connect(*args, factory=TrackingConnection, **kwargs)
+        assert isinstance(connection, TrackingConnection)
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", tracking_connect)
+    broker = _broker(tmp_path, Clock())
+
+    assert broker.status()["requests"] == []
+    assert len(connections) == 2
+    assert all(connection.closed_by_broker for connection in connections)
 
 
 def test_state_authority_rejects_unsafe_parent_and_symlink_db(

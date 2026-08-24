@@ -35,9 +35,9 @@ profile_source=deploy/dev-fleet/personal-dev-builder-runtime-profile.json
 runtime_class_source=deploy/dev-fleet/personal-dev-builder-runtime-class.yaml
 installer_source=scripts/ops/install_personal_dev_builder_runtime.py
 profile_module_source=scripts/ops/personal_dev_builder_runtime_profile.py
-profile_sha256=880b7c79013e38b016046c732209574d48d6ae5a008164906f9951ba27765b76
-profile_label_a=880b7c79013e38b016046c732209574d
-profile_label_b=48d6ae5a008164906f9951ba27765b76
+profile_sha256=6ee2c283e5bf0783e192787522ea9550caadff4131590cc0a26dbf7dd2a6869b
+profile_label_a=6ee2c283e5bf0783e192787522ea9550
+profile_label_b=caadff4131590cc0a26dbf7dd2a6869b
 archive_url=https://storage.googleapis.com/gvisor/releases/release/20260810/x86_64/gvisor.tar.bz2
 archive_sha512=3de91138cda15682c11807387f6ecad9e7c8932262018a2813277e1b4efa03efe33b0a948e148c6b1ccfe7345bfab5d5e0d072519505465751273898bae19c62
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -976,9 +976,9 @@ active verifications and labels pass, review one complete server-side diff.
 The class contains the exact handler, full profile annotation, Linux/amd64
 selector, and both digest halves:
 
-- `loom.dev/personal-dev-runtime-profile-a=880b7c79013e38b016046c732209574d`
-- `loom.dev/personal-dev-runtime-profile-b=48d6ae5a008164906f9951ba27765b76`
-- `loom.dev/personal-dev-runtime-profile-sha256=880b7c79013e38b016046c732209574d48d6ae5a008164906f9951ba27765b76`
+- `loom.dev/personal-dev-runtime-profile-a=6ee2c283e5bf0783e192787522ea9550`
+- `loom.dev/personal-dev-runtime-profile-b=caadff4131590cc0a26dbf7dd2a6869b`
+- `loom.dev/personal-dev-runtime-profile-sha256=6ee2c283e5bf0783e192787522ea9550caadff4131590cc0a26dbf7dd2a6869b`
 
 ```bash
 runtime_class="$evidence_dir/runtime-class.yaml"
@@ -1413,7 +1413,12 @@ jq -n --arg namespace "$smoke_namespace" --arg image "$builder_image" \
       name: "buildkit-conformance",
       namespace: $namespace,
       labels: {"app.kubernetes.io/managed-by": "loom-personal-dev-runtime-smoke"},
-      annotations: {"loom.dev/runtime-rollout-source-sha": $source}
+      annotations: {
+        "dev.gvisor.spec.mount.buildkit-run.options": "rw,rprivate",
+        "dev.gvisor.spec.mount.buildkit-run.share": "pod",
+        "dev.gvisor.spec.mount.buildkit-run.type": "tmpfs",
+        "loom.dev/runtime-rollout-source-sha": $source
+      }
     },
     spec: {
       activeDeadlineSeconds: 1200,
@@ -1547,7 +1552,12 @@ jq -e --arg image "$builder_image" --arg source "$merged_source_sha" \
     .spec.shareProcessNamespace == false and
     (.spec | has("hostUsers") | not) and
     .metadata.labels["app.kubernetes.io/managed-by"] == "loom-personal-dev-runtime-smoke" and
-    .metadata.annotations["loom.dev/runtime-rollout-source-sha"] == $source and
+    .metadata.annotations == {
+      "dev.gvisor.spec.mount.buildkit-run.options": "rw,rprivate",
+      "dev.gvisor.spec.mount.buildkit-run.share": "pod",
+      "dev.gvisor.spec.mount.buildkit-run.type": "tmpfs",
+      "loom.dev/runtime-rollout-source-sha": $source
+    } and
     (.spec.containers | length) == 1 and
     (.spec.initContainers | length) == 1 and
     .spec.containers[0].name == "conformance" and

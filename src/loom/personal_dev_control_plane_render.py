@@ -13,6 +13,7 @@ import yaml  # type: ignore[import-untyped]
 
 from loom.dev_instance import INGRESS_HOST
 from loom.personal_dev_builder_manifest import (
+    BUILDKIT_RUN_GVISOR_POD_ANNOTATIONS,
     PUBLIC_EGRESS_IPV4_EXCEPTIONS,
     PUBLIC_EGRESS_IPV6_CIDR,
     PUBLIC_EGRESS_IPV6_EXCEPTIONS,
@@ -631,6 +632,11 @@ def _builder_job_admission_validations(
     sidecar = f"{pod}.initContainers[0]"
     job_labels = f"{target}.metadata.labels"
     pod_labels = f"{template}.metadata.labels"
+    pod_annotations = f"{template}.metadata.annotations"
+    pod_annotation_contract = " && ".join(
+        f"{pod_annotations}['{key}'] == '{value}'"
+        for key, value in BUILDKIT_RUN_GVISOR_POD_ANNOTATIONS.items()
+    )
 
     def exact_quantity(value: str, expected: str) -> str:
         return (
@@ -694,8 +700,6 @@ def _builder_job_admission_validations(
         f"{pod}.securityContext.seccompProfile.type == 'RuntimeDefault' && "
         f"!has({pod}.securityContext.sysctls) && "
         f"!has({pod}.securityContext.seLinuxOptions) && "
-        f"(!has({template}.metadata.annotations) || "
-        f"{template}.metadata.annotations.size() == 0) && "
         f"{template}.metadata.labels['loom.dev/builder-role'] == 'sandbox' && "
         f"(({target}.metadata.name == 'build-amd64' && "
         f"{template}.metadata.labels['loom.dev/platform'] == 'amd64') || "
@@ -739,6 +743,9 @@ def _builder_job_admission_validations(
         f"!has({target}.metadata.generateName) && "
         f"(!has({target}.metadata.ownerReferences) || "
         f"{target}.metadata.ownerReferences.size() == 0) && "
+        f"has({pod_annotations}) && "
+        f"{pod_annotations}.size() == {len(BUILDKIT_RUN_GVISOR_POD_ANNOTATIONS)} && "
+        f"{pod_annotation_contract} && "
         f"{job_labels}.size() == 10 && "
         f"{job_labels}['app.kubernetes.io/managed-by'] == "
         "'loom-personal-dev-builder-controller' && "

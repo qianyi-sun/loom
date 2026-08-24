@@ -66,16 +66,6 @@ IGNORE_BYTES = (
     b'      - "pkg:deb/debian/linux-libc-dev"\n'
     b"    expired_at: 2026-09-12\n"
     b"    statement: No fixed Debian package was available on 2026-08-12; linux-libc-dev is required by the agent sandbox compiler toolchain.\n"
-    b"  - id: CVE-2026-57433\n"
-    b"    purls:\n"
-    b'      - "pkg:deb/debian/libperl5.36"\n'
-    b'      - "pkg:deb/debian/libperl5.40"\n'
-    b'      - "pkg:deb/debian/perl"\n'
-    b'      - "pkg:deb/debian/perl-base"\n'
-    b'      - "pkg:deb/debian/perl-modules-5.36"\n'
-    b'      - "pkg:deb/debian/perl-modules-5.40"\n'
-    b"    expired_at: 2026-09-12\n"
-    b"    statement: No fixed Debian package was available on 2026-08-12; these Perl packages are required by Debian base runtimes, the agent toolchain, and the staging-compatible PostgreSQL 17.4 rehearsal image.\n"
     b"  - id: CVE-2026-6653\n"
     b"    purls:\n"
     b'      - "pkg:deb/debian/libxml2"\n'
@@ -92,7 +82,7 @@ IGNORE_BYTES = (
     b"    expired_at: 2026-09-12\n"
     b"    statement: No fixed Debian package was available on 2026-08-12; these Perl packages are required by Debian base runtimes, the agent toolchain, and the staging-compatible PostgreSQL 17.4 rehearsal image.\n"
 )
-IGNORE_SHA256 = "b09bd1a38036f5e4274586af64616a306590ec33b1e2ac8a73d67ab88d2e4d5a"
+IGNORE_SHA256 = "11f957c7a63686da04c9f38e39aa2ca1eeef743b36c75810054afc84571ed2f7"
 
 
 def test_temporary_exceptions_cover_only_required_unfixed_packages() -> None:
@@ -109,7 +99,6 @@ def test_temporary_exceptions_cover_only_required_unfixed_packages() -> None:
     for vulnerability_id in (
         "CVE-2026-13221",
         "CVE-2026-42496",
-        "CVE-2026-57433",
         "CVE-2026-8376",
     ):
         assert exceptions[vulnerability_id].purls == expected_perl_purls
@@ -131,7 +120,6 @@ def test_temporary_perl_exceptions_explain_every_required_runtime() -> None:
     for vulnerability_id in (
         "CVE-2026-13221",
         "CVE-2026-42496",
-        "CVE-2026-57433",
         "CVE-2026-8376",
     ):
         assert exceptions[vulnerability_id].statement == expected_statement
