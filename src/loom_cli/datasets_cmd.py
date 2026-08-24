@@ -1139,15 +1139,7 @@ def _cmd_verify(args: argparse.Namespace) -> int:
 
 
 def _cmd_audit(args: argparse.Namespace) -> int:
-    from loom_benchmark_terminal_bench_2.upstream import TB21_TASK_COUNT
-
     from loom.trajectory.storage import MinioObjectStore
-    from loom_benchmark_tool.audit_cmd import (
-        TB21_PROFILE_ID,
-        AuditResult,
-        ProfileActivationError,
-        audit_tb21_profile,
-    )
 
     if not args.db_url:
         print(
@@ -1169,6 +1161,15 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         return 2
 
     if args.tb21_audit_json is not None:
+        from loom_benchmark_terminal_bench_2.upstream import TB21_TASK_COUNT
+
+        from loom_benchmark_tool.audit_cmd import (
+            TB21_PROFILE_ID,
+            AuditResult,
+            ProfileActivationError,
+            audit_tb21_profile,
+        )
+
         if args.all_benchmarks or args.benchmark != TB21_PROFILE_ID:
             print(
                 f"error: --tb21-audit-json requires benchmark {TB21_PROFILE_ID!r}",
