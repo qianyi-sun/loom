@@ -21,6 +21,7 @@ from loom.benchmark_readiness import (
 )
 from loom.db.schema import Benchmark
 from loom.db.schema import Task as TaskRow
+from loom.task_image_materialization import canonical_task_checksum
 from loom.trajectory.storage import ObjectStore
 from loom_benchmark_tool.db_url import normalize_db_url
 
@@ -202,6 +203,17 @@ async def run_bundle_presence_audit(
 
     failures: list[BundleVerificationFailure] = []
     for task_id, checksum, source, _benchmark_id, _task_set_id in task_rows:
+        try:
+            expected_checksum = canonical_task_checksum(str(checksum))
+        except ValueError:
+            failures.append(
+                BundleVerificationFailure(
+                    task_id=str(task_id),
+                    source=str(source),
+                    reason="invalid_checksum",
+                )
+            )
+            continue
         parsed = _parse_s3_source(source)
         if parsed is None:
             failures.append(
@@ -209,7 +221,7 @@ async def run_bundle_presence_audit(
                     task_id=str(task_id),
                     source=str(source),
                     reason="invalid_source",
-                    expected_checksum=str(checksum).removeprefix("sha256:"),
+                    expected_checksum=expected_checksum,
                 )
             )
             continue
@@ -223,22 +235,47 @@ async def run_bundle_presence_audit(
                     out_dir=bundle_dir,
                 )
                 if downloaded == 0:
-                    raise ValueError("bundle prefix is empty")
+                    failures.append(
+                        BundleVerificationFailure(
+                            task_id=str(task_id),
+                            source=str(source),
+                            reason="empty_bundle",
+                            expected_checksum=expected_checksum,
+                        )
+                    )
+                    continue
                 if not (bundle_dir / "task.toml").is_file():
-                    raise ValueError("bundle is missing task.toml")
-                actual_checksum = sha256_of_dir(bundle_dir)
+                    failures.append(
+                        BundleVerificationFailure(
+                            task_id=str(task_id),
+                            source=str(source),
+                            reason="missing_task_toml",
+                            expected_checksum=expected_checksum,
+                        )
+                    )
+                    continue
+                try:
+                    actual_checksum = sha256_of_dir(bundle_dir)
+                except Exception:
+                    failures.append(
+                        BundleVerificationFailure(
+                            task_id=str(task_id),
+                            source=str(source),
+                            reason="hash_error",
+                            expected_checksum=expected_checksum,
+                        )
+                    )
+                    continue
         except Exception:
             failures.append(
                 BundleVerificationFailure(
                     task_id=str(task_id),
                     source=str(source),
-                    reason="verification_error",
-                    expected_checksum=str(checksum).removeprefix("sha256:"),
-                    actual_checksum=None,
+                    reason="download_error",
+                    expected_checksum=expected_checksum,
                 )
             )
             continue
-        expected_checksum = str(checksum).removeprefix("sha256:")
         if actual_checksum != expected_checksum:
             failures.append(
                 BundleVerificationFailure(
