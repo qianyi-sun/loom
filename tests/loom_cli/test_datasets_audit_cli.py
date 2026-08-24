@@ -288,19 +288,39 @@ def test_audit_verify_bundles_prints_summary_and_fails_on_missing(
 
 
 @pytest.mark.asyncio
-async def test_bundle_presence_audit_checks_internal_task_toml(
+async def test_bundle_audit_hashes_complete_bundles_and_includes_tasksets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from loom.trajectory.storage import FakeObjectStore
+
     class FakeEngine:
         async def dispose(self) -> None:
             return None
 
     class FakeResult:
-        def all(self) -> list[tuple[str, str]]:
+        def all(self) -> list[tuple[str, str, str, str | None, str | None]]:
             return [
-                ("fake-bench/present", "s3://loom-benchmarks/fake/present/"),
-                ("fake-bench/missing", "s3://loom-benchmarks/fake/missing/"),
-                ("fake-bench/hf", "hf://PRHW/loom-benchmark-fake@rev/task/"),
+                (
+                    "fake-bench/match",
+                    "052bb32821a047eda3588caba3c91a4448dca7d338f219add0e91d98e71e975d",
+                    "s3://loom-benchmarks/fake/match/",
+                    "fake-bench",
+                    None,
+                ),
+                (
+                    "fake-bench/mismatch",
+                    "052bb32821a047eda3588caba3c91a4448dca7d338f219add0e91d98e71e975d",
+                    "s3://loom-benchmarks/fake/mismatch/",
+                    "fake-bench",
+                    None,
+                ),
+                (
+                    "task-set/task",
+                    "2e6df2a07b91ca4c82475a570ddfe571f97db243859d86f317f67320d204a532",
+                    "s3://loom-benchmarks/task-set/task/",
+                    None,
+                    "task-set",
+                ),
             ]
 
     class FakeSession:
@@ -313,12 +333,6 @@ async def test_bundle_presence_audit_checks_internal_task_toml(
         async def execute(self, _statement: object) -> FakeResult:
             return FakeResult()
 
-    class FakeObjectStore:
-        async def get_object(self, *, bucket: str, key: str) -> bytes:
-            if (bucket, key) == ("loom-benchmarks", "fake/present/task.toml"):
-                return b"task"
-            raise KeyError(f"s3://{bucket}/{key}")
-
     monkeypatch.setattr(
         benchmark_readiness,
         "create_async_engine",
@@ -330,12 +344,35 @@ async def test_bundle_presence_audit_checks_internal_task_toml(
         lambda *_args, **_kwargs: lambda: FakeSession(),
     )
 
+    store = FakeObjectStore(
+        objects={
+            ("loom-benchmarks", "fake/match/instruction.md"): b"alpha\n",
+            ("loom-benchmarks", "fake/match/task.toml"): b"task\n",
+            ("loom-benchmarks", "fake/mismatch/instruction.md"): b"beta\n",
+            ("loom-benchmarks", "fake/mismatch/task.toml"): b"task\n",
+            ("loom-benchmarks", "task-set/task/task.toml"): b"taskset\n",
+        },
+    )
     report = await benchmark_readiness.run_bundle_presence_audit(
         db_url="postgresql://x/y",
-        object_store=FakeObjectStore(),
+        object_store=store,
     )
 
-    assert report.s3_tasks == 2
-    assert report.verified == 1
-    assert report.missing == 1
-    assert report.missing_sources == ["s3://loom-benchmarks/fake/missing/"]
+    assert report.s3_tasks == 3
+    assert report.verified == 2
+    assert report.failed == 1
+    assert report.checksum_mismatches == 1
+    assert report.verification_errors == 0
+    assert [failure.to_dict() for failure in report.failures] == [
+        {
+            "actual_checksum": (
+                "5b1601fabcc6a8facb84b16ae5a6c5fcdd1daa776f49eaaf7638a56bdc79c59c"
+            ),
+            "expected_checksum": (
+                "052bb32821a047eda3588caba3c91a4448dca7d338f219add0e91d98e71e975d"
+            ),
+            "reason": "checksum_mismatch",
+            "source": "s3://loom-benchmarks/fake/mismatch/",
+            "task_id": "fake-bench/mismatch",
+        }
+    ]
