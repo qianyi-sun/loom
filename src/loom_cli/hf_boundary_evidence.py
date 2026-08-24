@@ -197,6 +197,27 @@ def compose_boundary_evidence(
     """
 
     audit_item = _audit_item(audit_report, benchmark_id)
+    bundle_verification = _mapping(audit_report.get("bundle_presence"))
+    bundle_tasks = bundle_verification.get("s3_tasks")
+    bundle_verified = bundle_verification.get("verified")
+    bundle_failed = bundle_verification.get(
+        "failed",
+        bundle_verification.get("missing"),
+    )
+    if (
+        isinstance(bundle_tasks, bool)
+        or not isinstance(bundle_tasks, int)
+        or isinstance(bundle_verified, bool)
+        or not isinstance(bundle_verified, int)
+        or isinstance(bundle_failed, bool)
+        or not isinstance(bundle_failed, int)
+        or bundle_tasks <= 0
+        or bundle_verified != bundle_tasks
+        or bundle_failed != 0
+    ):
+        raise HfBoundaryEvidenceError(
+            "audit bundle verification is incomplete or contains failures",
+        )
     source_counts = _mapping(source_summary.get("source_counts"))
     sample_task = _mapping(source_summary.get("sample_task"))
     tags = _mapping(sample_task.get("tags"))
@@ -827,12 +848,7 @@ def _load_or_collect_audit(
             if not isinstance(data, dict):
                 raise HfBoundaryEvidenceError("audit renderer returned non-object JSON")
             if bundle is not None:
-                data["bundle_presence"] = {
-                    "s3_tasks": bundle.s3_tasks,
-                    "verified": bundle.verified,
-                    "missing": bundle.missing,
-                    "missing_sources": bundle.missing_sources,
-                }
+                data["bundle_presence"] = bundle.to_dict()
             return data
 
         return asyncio.run(_run())

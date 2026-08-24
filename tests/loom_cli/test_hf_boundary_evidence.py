@@ -128,6 +128,26 @@ def test_compose_uses_task_mirror_provenance_not_adapter_origin() -> None:
     assert evidence["catalog"]["runnable_tasks"] == 100
     assert evidence["catalog"]["artifact_contract_classified_tasks"] == 100
     assert evidence["catalog"]["apd5_required_artifact_contract_tasks"] == 1
+    assert evidence["catalog"]["requires_caps"]["cpu_arch"] == "any"
+    assert evidence["runtime_sources"]["total_task_sources"] == 100
+    assert evidence["runtime_sources"]["internal_s3_sources"] == 100
+    assert evidence["runtime_sources"]["non_internal_sources"] == []
+    assert evidence["hf_provenance"] == {
+        "upstream_kind": "huggingface",
+        "upstream_locator": "PRHW/loom-benchmark-skilllearnbench",
+        "upstream_revision": "rev123",
+        "sample_hf_path": "task/",
+        "sample_hf_checksum": "checksum",
+        "source": "task.tags",
+        "benchmark_adapter_origin": _source_summary()["benchmark"],
+    }
+    assert evidence["worker_boundary"]["hf_token_present"] is False
+    assert evidence["worker_boundary"]["direct_hf_egress_required"] is False
+    assert evidence["worker_boundary"]["materialized_from_internal_source"] is True
+    assert evidence["worker_boundary"]["canary_task_provenance"]["worker_ids"] == [
+        "worker-current-1",
+        "worker-current-2",
+    ]
 
 
 def test_compose_rejects_bundle_checksum_mismatch() -> None:
@@ -160,26 +180,6 @@ def test_compose_rejects_bundle_checksum_mismatch() -> None:
             canary_summary=_canary_summary(),
             worker_boundary=_worker_boundary(),
         )
-    assert evidence["catalog"]["requires_caps"]["cpu_arch"] == "any"
-    assert evidence["runtime_sources"]["total_task_sources"] == 100
-    assert evidence["runtime_sources"]["internal_s3_sources"] == 100
-    assert evidence["runtime_sources"]["non_internal_sources"] == []
-    assert evidence["hf_provenance"] == {
-        "upstream_kind": "huggingface",
-        "upstream_locator": "PRHW/loom-benchmark-skilllearnbench",
-        "upstream_revision": "rev123",
-        "sample_hf_path": "task/",
-        "sample_hf_checksum": "checksum",
-        "source": "task.tags",
-        "benchmark_adapter_origin": _source_summary()["benchmark"],
-    }
-    assert evidence["worker_boundary"]["hf_token_present"] is False
-    assert evidence["worker_boundary"]["direct_hf_egress_required"] is False
-    assert evidence["worker_boundary"]["materialized_from_internal_source"] is True
-    assert evidence["worker_boundary"]["canary_task_provenance"]["worker_ids"] == [
-        "worker-current-1",
-        "worker-current-2",
-    ]
 
 
 def test_compose_preserves_explicit_zero_valid_task_count() -> None:
